@@ -1760,17 +1760,12 @@ be able to authenticate as the original node.
 Every ZTLP node MUST have a certificate issued by a ZTLP-NS trust root.
 The certificate lifecycle is:
 
-12. Enrollment --- node generates key pair on hardware; submits public
-    key to ZTLP-NS operator.
-
-13. Issuance --- operator validates identity; issues signed certificate
-    with TTL.
-
-14. Renewal --- certificate renewed before expiry; hardware must sign
-    the renewal request.
-
-15. Revocation --- operator publishes `ZTLP_REVOKE` record; nodes MUST
-    check revocation.
+| Phase | Action |
+|-------|--------|
+| Enrollment | Node generates key pair on hardware; submits public key to ZTLP-NS operator. |
+| Issuance | Operator validates identity; issues signed certificate with TTL. |
+| Renewal | Certificate renewed before expiry; hardware must sign the renewal request. |
+| Revocation | Operator publishes `ZTLP_REVOKE` record; nodes MUST check revocation. |
 
 Certificate TTL SHOULD NOT exceed 90 days. Short-lived session tokens
 (issued per-session) SHOULD NOT exceed 24 hours.
@@ -2277,48 +2272,22 @@ concerns, not afterthoughts.
 
 # 21. Open Issues and Future Work
 
-The following issues are known and will be addressed in subsequent draft
-revisions:
+The following issues are known and will be addressed in subsequent draft revisions:
 
--   Bandwidth reservation model --- formal definition of the
-    `BANDWIDTH_HINT` TLV semantics and interaction with relay QoS
-    policies.
-
--   Congestion control --- specification of a ZTLP-native congestion
-    control algorithm for long-haul relay paths.
-
--   ZTLP-NS governance --- formal governance structure for the public
-    ZTLP-NS root.
-
--   Relay operator incentives --- economic models for relay node
-    operation at scale.
-
--   Lawful intercept considerations --- engagement with regulatory
-    frameworks.
-
--   Hardware identity enrollment UX --- simplifying the YubiKey/TPM
-    enrollment flow for non-technical users.
-
--   ZTLP for IoT --- lightweight profile for constrained devices.
-
--   Formal security proof --- cryptographic analysis of the `Noise_XX`
-    handshake under ZTLP\'s threat model.
-
--   Relay discovery mechanism --- formal specification of DNS SRV record
-    format, ZTLP-NS relay record schema, and authenticated relay
-    advertisement verification procedure (see Section 37.2).
-
--   Path selection algorithm --- formal normative specification of
-    client relay selection logic including direct vs. relay vs.
-    multi-relay decision criteria (see Section 37.1).
-
--   Session expiration and relay state cleanup --- formal normative
-    timeouts, rekeying intervals, and relay session table garbage
-    collection procedures (see Section 35).
-
--   Relay abuse protection parameters --- standardized default values
-    for per-identity rate limits, per-session quotas, and relay
-    admission control thresholds (see Section 37).
+| Issue | Description |
+|-------|-------------|
+| Bandwidth reservation model | Formal definition of `BANDWIDTH_HINT` TLV semantics and interaction with relay QoS policies. |
+| Congestion control | Specification of a ZTLP-native congestion control algorithm for long-haul relay paths. |
+| ZTLP-NS governance | Formal governance structure for the public ZTLP-NS root. |
+| Relay operator incentives | Economic models for relay node operation at scale. |
+| Lawful intercept considerations | Engagement with regulatory frameworks. |
+| Hardware identity enrollment UX | Simplifying the YubiKey/TPM enrollment flow for non-technical users. |
+| ZTLP for IoT | Lightweight profile for constrained devices. |
+| Formal security proof | Cryptographic analysis of the `Noise_XX` handshake under ZTLP's threat model. |
+| Relay discovery mechanism | Formal specification of DNS SRV record format, ZTLP-NS relay record schema, and authenticated relay advertisement verification procedure (see Section 37.2). |
+| Path selection algorithm | Formal normative specification of client relay selection logic including direct vs. relay vs. multi-relay decision criteria (see Section 37.1). |
+| Session expiration and relay state cleanup | Formal normative timeouts, rekeying intervals, and relay session table garbage collection procedures (see Section 35). |
+| Relay abuse protection parameters | Standardized default values for per-identity rate limits, per-session quotas, and relay admission control thresholds (see Section 37). |
 
 # 22. References
 

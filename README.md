@@ -313,60 +313,20 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD
 NOT, RECOMMENDED, MAY, and OPTIONAL in this document are to be
 interpreted as described in RFC 2119.
 
-  -----------------------------------------------------------------------
-  **Term**                            **Definition**
-  ----------------------------------- -----------------------------------
-  ZTLP Node                           Any device running the ZTLP stack
-                                      with a valid Node Identity.
-
-  Node ID                             A stable 128-bit identifier
-                                      assigned to a node at enrollment.
-                                      Permanent --- does not change when
-                                      keys rotate or hardware is
-                                      replaced. The associated public key
-                                      is bound via a signed `ZTLP_KEY`
-                                      record in ZTLP-NS.
-
-  Service ID                          A 128-bit identifier for a named
-                                      service, derived from
-                                      hash(service-name + tenant).
-
-  ZTLP Relay                          A ZTLP Node that forwards traffic
-                                      between other nodes across the
-                                      public Internet.
-
-  ZTLP Gateway                        A ZTLP Node that bridges between
-                                      ZTLP and legacy IPv4/IPv6 networks.
-
-  ZTLP-NS                             The ZTLP Namespace --- a
-                                      distributed DNS-like trust
-                                      namespace for identity and service
-                                      discovery.
-
-  Trust Anchor                        A hardcoded public key embedded in
-                                      ZTLP implementations that
-                                      bootstraps initial trust.
-
-  Session                             An established, mutually
-                                      authenticated, encrypted ZTLP
-                                      communication channel.
-
-  HeaderAuthTag                       A 128-bit authentication tag over
-                                      the ZTLP header allowing fast
-                                      pre-decryption packet rejection.
-
-  Hardware Identity                   A private key bound to a physical
-                                      hardware token (e.g., YubiKey, TPM,
-                                      Secure Enclave).
-
-  Policy Tag                          A 32-bit compact field encoding
-                                      tenant, role, or zone for fast edge
-                                      policy decisions.
-
-  CryptoSuite                         A 16-bit identifier specifying the
-                                      AEAD, hash, and handshake
-                                      algorithms in use.
-  -----------------------------------------------------------------------
+| Term | Definition |
+|------|------------|
+| ZTLP Node | Any device running the ZTLP stack with a valid Node Identity. |
+| Node ID | A stable 128-bit identifier assigned to a node at enrollment. Permanent — does not change when keys rotate or hardware is replaced. The associated public key is bound via a signed `ZTLP_KEY` record in ZTLP-NS. |
+| Service ID | A 128-bit identifier for a named service, derived from hash(service-name + tenant). |
+| ZTLP Relay | A ZTLP Node that forwards traffic between other nodes across the public Internet. |
+| ZTLP Gateway | A ZTLP Node that bridges between ZTLP and legacy IPv4/IPv6 networks. |
+| ZTLP-NS | The ZTLP Namespace — a distributed DNS-like trust namespace for identity and service discovery. |
+| Trust Anchor | A hardcoded public key embedded in ZTLP implementations that bootstraps initial trust. |
+| Session | An established, mutually authenticated, encrypted ZTLP communication channel. |
+| HeaderAuthTag | A 128-bit authentication tag over the ZTLP header allowing fast pre-decryption packet rejection. |
+| Hardware Identity | A private key bound to a physical hardware token (e.g., YubiKey, TPM, Secure Enclave). |
+| Policy Tag | A 32-bit compact field encoding tenant, role, or zone for fast edge policy decisions. |
+| CryptoSuite | A 16-bit identifier specifying the AEAD, hash, and handshake algorithms in use. |
 
 # 4. Goals, Non-Goals, and Design Philosophy
 
@@ -481,53 +441,17 @@ network.
 
 ZTLP is designed to mitigate the following classes of threat:
 
-  ----------------------------------------------------------------------------
-  **Threat**          **Description**        **ZTLP Mitigation**
-  ------------------- ---------------------- ---------------------------------
-  Volumetric DDoS     Flood of packets to    Three-layer pipeline: Magic check
-                      exhaust CPU, memory,   (no crypto), SessionID allowlist
-                      or bandwidth.          (no crypto), HeaderAuthTag AEAD
-                                             verification. Session state is
-                                             not allocated until all three
-                                             pass. The majority of flood
-                                             traffic is rejected at layers 1
-                                             and 2 before any cryptographic
-                                             work is performed.
-
-  Packet Spoofing     Attacker forges source Every packet carries a
-                      address.               HeaderAuthTag tied to session
-                                             keys; forgeries fail immediately.
-
-  Port Scanning       Attacker enumerates    No services are visible; ZTLP
-                      open services.         nodes do not respond to
-                                             unauthenticated probes.
-
-  Replay Attacks      Attacker replays       PacketSeq (64-bit) and Timestamp
-                      captured valid         fields enforce anti-replay
-                      packets.               windows.
-
-  Route Hijacking     BGP prefix hijack      ZTLP traffic is encrypted and
-                      redirects traffic.     authenticated end-to-end;
-                                             hijacked routes carry opaque
-                                             ciphertext.
-
-  Man-in-the-Middle   Attacker intercepts    Mutual authentication during
-                      and modifies traffic.  handshake; session keys are
-                                             ephemeral and hardware-bound.
-
-  Credential Theft    Private key or         Hardware-bound keys (YubiKey/TPM)
-                      certificate stolen.    cannot be extracted; short-lived
-                                             session tokens limit exposure.
-
-  Lateral Movement    Compromised node       Each service requires separate
-                      attacks others         policy authorization; Node ID
-                      internally.            alone does not grant access.
-
-  Identity Cloning    VM clone or config     Hardware-bound keys mean a cloned
-                      copy impersonates a    config without the physical
-                      node.                  hardware token cannot
-                                             authenticate.
-  ----------------------------------------------------------------------------
+| Threat | Description | ZTLP Mitigation |
+|--------|-------------|-----------------|
+| Volumetric DDoS | Flood of packets to exhaust CPU, memory, or bandwidth. | Three-layer pipeline: Magic check (no crypto), SessionID allowlist (no crypto), HeaderAuthTag AEAD verification. Session state is not allocated until all three pass. The majority of flood traffic is rejected at layers 1 and 2 before any cryptographic work is performed. |
+| Packet Spoofing | Attacker forges source address. | Every packet carries a HeaderAuthTag tied to session keys; forgeries fail immediately. |
+| Port Scanning | Attacker enumerates open services. | No services are visible; ZTLP nodes do not respond to unauthenticated probes. |
+| Replay Attacks | Attacker replays captured valid packets. | PacketSeq (64-bit) and Timestamp fields enforce anti-replay windows. |
+| Route Hijacking | BGP prefix hijack redirects traffic. | ZTLP traffic is encrypted and authenticated end-to-end; hijacked routes carry opaque ciphertext. |
+| Man-in-the-Middle | Attacker intercepts and modifies traffic. | Mutual authentication during handshake; session keys are ephemeral and hardware-bound. |
+| Credential Theft | Private key or certificate stolen. | Hardware-bound keys (YubiKey/TPM) cannot be extracted; short-lived session tokens limit exposure. |
+| Lateral Movement | Compromised node attacks others internally. | Each service requires separate policy authorization; Node ID alone does not grant access. |
+| Identity Cloning | VM clone or config copy impersonates a node. | Hardware-bound keys mean a cloned config without the physical hardware token cannot authenticate. |
 
 ZTLP does NOT protect against:
 
@@ -760,100 +684,45 @@ similarly to DNS but with mandatory signing and delegated trust.
 
 ## 8.1 Handshake / Control Header (64 bytes, fixed)
 
-```mermaid
-packet-beta
+```packet
   0-15: "Magic (16)"
   16-19: "Ver (4)"
-  20-27: "HdrLen (8)"
-  28-43: "Flags (16)"
-  44-51: "MsgType (8)"
-  52-67: "CryptoSuite (16)"
-  68-83: "KeyID / TokenID (16)"
-  84-179: "SessionID (96 bits)"
-  180-243: "PacketSeq (64 bits)"
-  244-307: "Timestamp (64 bits)"
-  308-435: "SrcNodeID (128 bits)"
-  436-563: "DstSvcID (128 bits)"
-  564-595: "PolicyTag (32)"
-  596-611: "ExtLen (16)"
-  612-627: "PayloadLen (16)"
-  628-755: "HeaderAuthTag (128 bits)"
+  20-31: "HdrLen (12)"
+  32-47: "Flags (16)"
+  48-55: "MsgType (8)"
+  56-71: "CryptoSuite (16)"
+  72-87: "KeyID/TokenID (16)"
+  88-183: "SessionID (96)"
+  184-247: "PacketSeq (64)"
+  248-311: "Timestamp (64)"
+  312-439: "SrcNodeID (128)"
+  440-567: "DstSvcID (128)"
+  568-599: "PolicyTag (32)"
+  600-615: "ExtLen (16)"
+  616-631: "PayloadLen (16)"
+  632-759: "HeaderAuthTag (128)"
 ```
 
 ## 8.2 Field Definitions
 
-  -------------------------------------------------------------------------
-  **Field**       **Size**   **Description**
-  --------------- ---------- ----------------------------------------------
-  Magic           16 bits    Fixed 16-bit value `0x5A37` (\'Z7\'). Allows
-                             fast rejection of random UDP noise before any
-                             parsing. 16-bit width is required to hold the
-                             full `0x5A37` value.
-
-  Ver             4 bits     Protocol version. Current: 1.
-
-  HdrLen          12 bits    Header length in 4-byte words, including
-                             extensions.
-
-  Flags           16 bits    Bitfield: HAS_EXT, ACK_REQ, REKEY, MIGRATE,
-                             MULTIPATH, RELAY_HOP.
-
-  MsgType         8 bits     DATA, HELLO, `HELLO_ACK`, REKEY, CLOSE, ERROR,
-                             PING, PONG.
-
-  CryptoSuite     16 bits    Identifies AEAD + hash + handshake family
-                             (e.g., ChaCha20-Poly1305 + `Noise_XX`).
-
-  KeyID/TokenID   16 bits    Selects active credential slot; allows edge to
-                             pick correct verification key instantly.
-
-  SessionID       96 bits    Stable per-flow identifier. Assigned during
-                             HELLO with cryptographically strong entropy.
-                             96-bit width provides sufficient keyspace to
-                             make random guessing attacks computationally
-                             infeasible even under large-scale enumeration
-                             attempts. Rotates on REKEY.
-
-  PacketSeq       64 bits    Monotonically increasing per-session counter.
-                             Anti-replay window enforced. In multipath
-                             sessions (MULTIPATH flag set), the anti-replay
-                             window MUST be sized to accommodate
-                             path-induced reordering --- implementations
-                             SHOULD use a minimum window of 1024 packets.
-                             Per-path sequence tracking is RECOMMENDED for
-                             sessions with high reordering variance.
-
-  Timestamp       64 bits    Unix epoch milliseconds. Used as a replay
-                             heuristic --- packets with timestamps
-                             significantly outside the receiver\'s clock
-                             window SHOULD be treated as suspicious and
-                             deprioritized. Implementations MUST NOT
-                             hard-reject packets solely on timestamp
-                             deviation, as clock drift, NTP failure, or
-                             embedded device timekeeping limitations can
-                             produce legitimate out-of-window timestamps.
-                             The HeaderAuthTag provides the authoritative
-                             replay defense; the Timestamp field is
-                             supplementary.
-
-  SrcNodeID       128 bits   Sender\'s Node ID (stable 128-bit enrollment
-                             identifier). Zero during initial HELLO.
-
-  DstSvcID        128 bits   Destination Service ID. No port numbers;
-                             services are resolved by identity.
-
-  PolicyTag       32 bits    Compact policy hint (tenant/role/zone). Edge
-                             uses for fast admission decisions.
-
-  ExtLen          16 bits    Length in bytes of extension TLV area
-                             following the base header.
-
-  PayloadLen      16 bits    Length in bytes of the encrypted payload
-                             following extensions.
-
-  HeaderAuthTag   128 bits   AEAD tag over the base header. Verified BEFORE
-                             decrypting payload. Invalid = silent drop.
-  -------------------------------------------------------------------------
+| Field | Size | Description |
+|-------|------|-------------|
+| Magic | 16 bits | Fixed 16-bit value `0x5A37` ('Z7'). Allows fast rejection of random UDP noise before any parsing. 16-bit width is required to hold the full `0x5A37` value. |
+| Ver | 4 bits | Protocol version. Current: 1. |
+| HdrLen | 12 bits | Header length in 4-byte words, including extensions. |
+| Flags | 16 bits | Bitfield: HAS_EXT, ACK_REQ, REKEY, MIGRATE, MULTIPATH, RELAY_HOP. |
+| MsgType | 8 bits | DATA, HELLO, `HELLO_ACK`, REKEY, CLOSE, ERROR, PING, PONG. |
+| CryptoSuite | 16 bits | Identifies AEAD + hash + handshake family (e.g., ChaCha20-Poly1305 + `Noise_XX`). |
+| KeyID/TokenID | 16 bits | Selects active credential slot; allows edge to pick correct verification key instantly. |
+| SessionID | 96 bits | Stable per-flow identifier. Assigned during HELLO with cryptographically strong entropy. 96-bit width provides sufficient keyspace to make random guessing attacks computationally infeasible even under large-scale enumeration attempts. Rotates on REKEY. |
+| PacketSeq | 64 bits | Monotonically increasing per-session counter. Anti-replay window enforced. In multipath sessions (MULTIPATH flag set), the anti-replay window MUST be sized to accommodate path-induced reordering — implementations SHOULD use a minimum window of 1024 packets. Per-path sequence tracking is RECOMMENDED for sessions with high reordering variance. |
+| Timestamp | 64 bits | Unix epoch milliseconds. Used as a replay heuristic — packets with timestamps significantly outside the receiver's clock window SHOULD be treated as suspicious and deprioritized. Implementations MUST NOT hard-reject packets solely on timestamp deviation, as clock drift, NTP failure, or embedded device timekeeping limitations can produce legitimate out-of-window timestamps. The HeaderAuthTag provides the authoritative replay defense; the Timestamp field is supplementary. |
+| SrcNodeID | 128 bits | Sender's Node ID (stable 128-bit enrollment identifier). Zero during initial HELLO. |
+| DstSvcID | 128 bits | Destination Service ID. No port numbers; services are resolved by identity. |
+| PolicyTag | 32 bits | Compact policy hint (tenant/role/zone). Edge uses for fast admission decisions. |
+| ExtLen | 16 bits | Length in bytes of extension TLV area following the base header. |
+| PayloadLen | 16 bits | Length in bytes of the encrypted payload following extensions. |
+| HeaderAuthTag | 128 bits | AEAD tag over the base header. Verified BEFORE decrypting payload. Invalid = silent drop. |
 
 ## 8.3 Established Data Header (compact, post-handshake)
 
@@ -865,7 +734,7 @@ in established data packets. Relays forward data packets using only the
 SessionID as the routing key (see Section 28).
 
 ```mermaid
-packet-beta
+packet
   0-15: "Magic (16)"
   16-19: "Ver (4)"
   20-31: "HdrLen (12)"
@@ -889,25 +758,14 @@ of the data path (see Section 28 and Section 31.4).
 If HAS_EXT flag is set, a Type-Length-Value extension area follows the
 base header:
 
-  --------------------------------------------------------------------------
-  **Type**   **Name**         **Description**
-  ---------- ---------------- ----------------------------------------------
-  0x01       PATH_HINT        Preferred relay node IDs for this flow.
-
-  0x02       `DEVICE_POSTURE`   Signed attestation blob from TPM/Secure
-                              Enclave.
-
-  0x03       ROUTE_SCOPE      Site or realm identifier for routing policy.
-
-  0x04       TRACE_CTX        Correlation ID for distributed tracing and
-                              diagnostics.
-
-  0x05       `BANDWIDTH_HINT`   Requested bandwidth profile (informational;
-                              not a hard reservation).
-
-  0x06       RELAY_PATH       Ordered list of relay Node IDs traversed (for
-                              diagnostics).
-  --------------------------------------------------------------------------
+| Type | Name | Description |
+|------|------|-------------|
+| 0x01 | PATH_HINT | Preferred relay node IDs for this flow. |
+| 0x02 | `DEVICE_POSTURE` | Signed attestation blob from TPM/Secure Enclave. |
+| 0x03 | ROUTE_SCOPE | Site or realm identifier for routing policy. |
+| 0x04 | TRACE_CTX | Correlation ID for distributed tracing and diagnostics. |
+| 0x05 | `BANDWIDTH_HINT` | Requested bandwidth profile (informational; not a hard reservation). |
+| 0x06 | RELAY_PATH | Ordered list of relay Node IDs traversed (for diagnostics). |
 
 ## 8.5 Payload
 
@@ -947,30 +805,14 @@ for ZTLP\'s identity-first model.
 
 ## 9.3 Record Types
 
-  --------------------------------------------------------------------------
-  **Record Type**  **Description**            **Example**
-  ---------------- -------------------------- ------------------------------
-  `ZTLP_KEY`         Node\'s public key and     node1.office.acmedental.ztlp →
-                   Node ID.                   NodeID + pubkey
-
-  ZTLP_SVC         Service definition:        rdp.acmedental.ztlp →
-                   ServiceID, allowed Node    ServiceID + policy
-                   IDs, policy.               
-
-  ZTLP_RELAY       Relay node: Node ID, IPv6  relay1.apac.ztlp → NodeID +
-                   endpoints, capacity        endpoints
-                   metrics.                   
-
-  `ZTLP_POLICY`      Access policy: which Node  policy.acmedental.ztlp → ACL
-                   IDs can reach which        
-                   Service IDs.               
-
-  `ZTLP_REVOKE`      Revocation notice for a    revoke.acmedental.ztlp →
-                   Node ID or Token ID.       revoked IDs + timestamp
-
-  ZTLP_BOOTSTRAP   Signed list of relay nodes bootstrap.ztlp → signed relay
-                   for initial discovery.     list
-  --------------------------------------------------------------------------
+| Record Type | Description | Example |
+|-------------|-------------|---------|
+| `ZTLP_KEY` | Node's public key and Node ID. | node1.office.acmedental.ztlp → NodeID + pubkey |
+| `ZTLP_SVC` | Service definition: ServiceID, allowed Node IDs, policy. | rdp.acmedental.ztlp → ServiceID + policy |
+| `ZTLP_RELAY` | Relay node: Node ID, IPv6 endpoints, capacity metrics. | relay1.apac.ztlp → NodeID + endpoints |
+| `ZTLP_POLICY` | Access policy: which Node IDs can reach which Service IDs. | policy.acmedental.ztlp → ACL |
+| `ZTLP_REVOKE` | Revocation notice for a Node ID or Token ID. | revoke.acmedental.ztlp → revoked IDs + timestamp |
+| `ZTLP_BOOTSTRAP` | Signed list of relay nodes for initial discovery. | bootstrap.ztlp → signed relay list |
 
 ## 9.4 Federated Trust Roots
 
@@ -1729,23 +1571,12 @@ ZTLP-Native hardware requirements structurally similar in scope.
 
 ## 13.5 Profile Comparison Summary
 
-  --------------------------------------------------------------------------------
-  **Profile**    **Enforcement   **Full        **Available   **Host CPU **HW
-                 Point**         AuthTag?**    Today?**      Used?**    Cost**
-  -------------- --------------- ------------- ------------- ---------- ----------
-  1 --- eBPF/XDP NIC driver      Daemon only   Yes           Minimal    Low (\$0
-                 (software)                                  (XDP)      extra)
-
-  2 ---          DPU (hardware)  Yes (on DPU)  Yes           None (DPU  Medium
-  SmartNIC/DPU                                               handles)   (DPU card)
-
-  3 --- P4       Switch ASIC     Tier 1 only   Yes (P4       Tier 2     High (P4
-  Switch                         (SessionID)   hardware)     only       switch)
-
-  4 --- Native   Switch silicon  Full          Future        None       Standard
-  ASIC                           (optional     (vendor req.)            switch
-                                 AEAD)                                  
-  --------------------------------------------------------------------------------
+| Profile | Enforcement Point | Full AuthTag? | Available Today? | Host CPU Used? | HW Cost |
+|---------|-------------------|---------------|------------------|----------------|---------|
+| 1 — eBPF/XDP | NIC driver (software) | Daemon only | Yes | Minimal (XDP) | Low ($0 extra) |
+| 2 — SmartNIC/DPU | DPU (hardware) | Yes (on DPU) | Yes | None (DPU handles) | Medium (DPU card) |
+| 3 — P4 Switch | Switch ASIC | Tier 1 only (SessionID) | Yes (P4 hardware) | Tier 2 only | High (P4 switch) |
+| 4 — Native ASIC | Switch silicon | Full (optional AEAD) | Future (vendor req.) | None | Standard switch |
 
 # 14. Transport Fallback and NAT Traversal
 
@@ -1754,22 +1585,12 @@ carrier-grade NAT devices block or reshape UDP traffic on non-standard
 ports. Implementations MUST support the following transport fallback
 ladder in order:
 
-  -------------------------------------------------------------------------------
-  **Priority**   **Transport**   **Condition**      **Notes**
-  -------------- --------------- ------------------ -----------------------------
-  1              UDP / ZTLP Port Preferred          Native ZTLP transport. Best
-                                                    performance.
-
-  2              UDP / 443       If port blocked    Harder for ISPs to block
-                                                    without disrupting QUIC.
-
-  3              TCP / 443 (TLS  If UDP blocked     ZTLP framed inside TLS record
-                 framed)                            layer.
-
-  4              WebSocket over  Last resort        Maximum firewall
-                 HTTPS                              compatibility. Higher
-                                                    overhead.
-  -------------------------------------------------------------------------------
+| Priority | Transport | Condition | Notes |
+|----------|-----------|-----------|-------|
+| 1 | UDP / ZTLP Port | Preferred | Native ZTLP transport. Best performance. |
+| 2 | UDP / 443 | If port blocked | Harder for ISPs to block without disrupting QUIC. |
+| 3 | TCP / 443 (TLS framed) | If UDP blocked | ZTLP framed inside TLS record layer. |
+| 4 | WebSocket over HTTPS | Last resort | Maximum firewall compatibility. Higher overhead. |
 
 Relay nodes MUST support all four transport modes defined in this section. Initiating nodes MUST
 attempt them in order and use the first that succeeds. The selected
@@ -2047,30 +1868,12 @@ verification SHOULD omit the `DEVICE_POSTURE` extension entirely.
 ZTLP is designed for incremental deployment. Organizations can adopt
 ZTLP in phases without disrupting existing infrastructure.
 
-  ------------------------------------------------------------------------
-  **Phase**   **Description**                **Legacy Compatibility**
-  ----------- ------------------------------ -----------------------------
-  Phase 1 --- ZTLP nodes communicate with    Full --- ZTLP is additive.
-  Overlay     each other over the overlay.   
-              Legacy IPv4/IPv6 traffic is    
-              unchanged.                     
-
-  Phase 2 --- ZTLP Gateways bridge between   High --- legacy clients need
-  Gateway     ZTLP overlay and legacy        no changes.
-              systems. Legacy clients can    
-              reach ZTLP services via        
-              gateway.                       
-
-  Phase 3 --- ZTLP paths are preferred for   Medium --- legacy clients use
-  Preferred   sensitive services. Critical   gateway.
-              systems require ZTLP           
-              authentication.                
-
-  Phase 4 --- ZTLP is the default for all    Low --- legacy clients
-  Native      inter-node communication.      require gateway or upgrade.
-              Legacy fallback is restricted  
-              or deprecated.                 
-  ------------------------------------------------------------------------
+| Phase | Description | Legacy Compatibility |
+|-------|-------------|---------------------|
+| Phase 1 — Overlay | ZTLP nodes communicate with each other over the overlay. Legacy IPv4/IPv6 traffic is unchanged. | Full — ZTLP is additive. |
+| Phase 2 — Gateway | ZTLP Gateways bridge between ZTLP overlay and legacy systems. Legacy clients can reach ZTLP services via gateway. | High — legacy clients need no changes. |
+| Phase 3 — Preferred | ZTLP paths are preferred for sensitive services. Critical systems require ZTLP authentication. | Medium — legacy clients use gateway. |
+| Phase 4 — Native | ZTLP is the default for all inter-node communication. Legacy fallback is restricted or deprecated. | Low — legacy clients require gateway or upgrade. |
 
 ## 17.1 Gateway Operation
 
@@ -2402,28 +2205,14 @@ anonymity SHOULD use additional layers such as onion routing above ZTLP.
 Network operators MUST have access to diagnostic tools. The following
 tools are defined as part of the ZTLP operational suite:
 
-  ----------------------------------------------------------------------------
-  **Tool**            **Function**               **Equivalent**
-  ------------------- -------------------------- -----------------------------
-  ztlp-ping           Test reachability to a     ping
-                      Node ID or Service ID.     
-
-  ztlp-trace          Display relay path taken   traceroute
-                      to a destination.          
-
-  ztlp-status         Show local node state,     netstat
-                      active sessions, current   
-                      relay.                     
-
-  ztlp-relay-info     Query a relay node\'s      BGP show route
-                      metrics and peer table.    
-
-  ztlp-ns-lookup      Resolve ZTLP-NS records    dig / nslookup
-                      for a name.                
-
-  ztlp-revoke-check   Verify revocation status   OCSP check
-                      of a Node ID.              
-  ----------------------------------------------------------------------------
+| Tool | Function | Equivalent |
+|------|----------|------------|
+| ztlp-ping | Test reachability to a Node ID or Service ID. | ping |
+| ztlp-trace | Display relay path taken to a destination. | traceroute |
+| ztlp-status | Show local node state, active sessions, current relay. | netstat |
+| ztlp-relay-info | Query a relay node's metrics and peer table. | BGP show route |
+| ztlp-ns-lookup | Resolve ZTLP-NS records for a name. | dig / nslookup |
+| ztlp-revoke-check | Verify revocation status of a Node ID. | OCSP check |
 
 ## 20.1 Developer SDKs and Integration Libraries
 
@@ -3108,7 +2897,7 @@ The following ASCII diagram shows the base ZTLP data packet header
 layout after session establishment:
 
 ```mermaid
-packet-beta
+packet
   0-15: "Magic (16)"
   16-19: "Ver (4)"
   20-31: "HdrLen (12)"

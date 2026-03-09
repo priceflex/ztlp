@@ -11,7 +11,7 @@
   <!-- Markdown renderer -->
   <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
   <!-- Mermaid diagrams -->
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 
   <style>
     /* ── Markdown content styling ─────────────────────────── */
@@ -348,8 +348,12 @@
 
       extractMeta(md);
 
-      // Strip the raw Table of Contents section (links list) — we generate our own
-      const stripped = md.replace(/^#{1,2}\s*Table of Contents[\s\S]*?(?=\n---|\n#{1,2}\s)/m, '');
+      // Strip front matter: everything up to and including the first --- separator
+      // (covers title, version badge, author block, abstract)
+      let stripped = md.replace(/^[\s\S]*?^---\s*\n/m, '');
+
+      // Strip the Table of Contents section (we generate our own from headings)
+      stripped = stripped.replace(/^#{1,2}\s*Table of Contents[\s\S]*?(?=\n---|\n#{1,2}\s)/m, '');
 
       body.innerHTML = marked.parse(stripped);
 

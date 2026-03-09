@@ -187,6 +187,24 @@ a:hover { text-decoration: underline; }
 }
 .hero-meta strong { color: var(--text2); }
 .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.hero-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 40px;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+.hero-text { width: 100%; }
+.hero-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  width: 100%;
+  max-width: 640px;
+}
+.stat-item { text-align: center; }
 
 /* ─── BUTTONS ──────────────────────────────────────────── */
 .btn {

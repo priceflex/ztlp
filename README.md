@@ -26,7 +26,7 @@ ZTLP defines a secure, identity-first network overlay that enforces
 cryptographic authentication before any network state is allocated.
 Invalid packets are rejected in a three-layer pipeline - Magic byte
 check, SessionID allowlist lookup, and HeaderAuthTag AEAD verification
---- with each layer progressively more expensive but handling a
+- with each layer progressively more expensive but handling a
 progressively smaller fraction of attack traffic. The vast majority of
 flood traffic is discarded at the first two layers with no cryptographic
 work performed and no session state created. This makes volumetric DDoS
@@ -121,7 +121,7 @@ to it:
     Internet accepts any packet from anyone.
 
 -   **Ransomware attacks on critical infrastructure** - hospitals,
-    water treatment facilities, school districts, manufacturers ---
+    water treatment facilities, school districts, manufacturers -
     succeed primarily because internal networks are flat and
     unauthenticated. Once an attacker is inside, lateral movement is
     trivial. The network has no concept of identity; if you can reach an
@@ -394,13 +394,13 @@ pennies per gigabit while the defender spends dollars. ZTLP inverts this
 entirely.
 
 In ZTLP, invalid packets are rejected through a three-layer pipeline
-ordered by cost. The Magic byte check costs a single comparison ---
+ordered by cost. The Magic byte check costs a single comparison -
 nanoseconds, no crypto, no kernel involvement, handled at the NIC
 driver. The SessionID allowlist lookup costs an O(1) BPF hash map read
---- still no cryptographic work. Only packets that survive both cheaper
+- still no cryptographic work. Only packets that survive both cheaper
 checks reach the HeaderAuthTag AEAD verification, which does involve
 real cryptographic computation. By the time a packet reaches AEAD
-verification, it has already proved it knows a valid SessionID ---
+verification, it has already proved it knows a valid SessionID -
 meaning the attacker is not sending random flood traffic, they are
 sending traffic that at minimum knows the structure of active sessions.
 That is a dramatically harder attack to mount, and the volume of such
@@ -574,20 +574,20 @@ including HIP (Host Identity Protocol), LISP (Locator/Identifier
 Separation Protocol), SCION, and ILNP have attempted to solve this
 problem for decades. They struggled with deployment because all required
 changes to Internet routing infrastructure. ZTLP solves it differently
---- as an overlay.
+- as an overlay.
 
 ZTLP defines three distinct layers:
 
--   **Identifier layer ---** NodeID and ServiceID. Stable, permanent,
+-   **Identifier layer -** NodeID and ServiceID. Stable, permanent,
     hardware-backed. These never change and are what policies, ACLs, and
     logs reference.
 
--   **Locator layer ---** IPv4/IPv6 transport addresses. Transient.
+-   **Locator layer -** IPv4/IPv6 transport addresses. Transient.
     Change freely as nodes move networks, change ISPs, or fail over.
     Sessions are bound to identifiers, not locators, so locator changes
     do not break established sessions.
 
--   **Routing layer ---** The relay mesh. Relay nodes dynamically select
+-   **Routing layer -** The relay mesh. Relay nodes dynamically select
     the best locator path for a given identifier, optimizing for
     latency, packet loss, congestion, and trust score. Path optimization
     is performed at the relay level without any changes to Internet
@@ -1089,21 +1089,21 @@ first-contact handshakes except from trusted ingress relays.
 
 Relay nodes MAY operate in one or more of the following roles:
 
--   **Ingress Relay ---** Handles first-contact traffic from initiating
+-   **Ingress Relay -** Handles first-contact traffic from initiating
     nodes. Responsible for processing HELLO messages, performing
     Stateless Admission Challenge when required, verifying identity and
     policy, and issuing Relay Admission Tokens upon successful
     authentication. Ingress relays act as the initial admission gate to
     the ZTLP overlay.
 
--   **Transit Relay ---** Forwards authenticated ZTLP sessions between
+-   **Transit Relay -** Forwards authenticated ZTLP sessions between
     ingress and service relays. Transit relays SHOULD only accept
     traffic associated with already-authenticated sessions or carrying
     valid Relay Admission Tokens. Transit relays SHOULD NOT process new
     HELLO messages from arbitrary initiators unless explicitly
     configured as ingress nodes.
 
--   **Service Relay ---** Located near destination services or gateway
+-   **Service Relay -** Located near destination services or gateway
     clusters. Handles final-hop forwarding, service-specific policy
     enforcement, and session monitoring. Service relays SHOULD
     prioritize authenticated traffic and SHOULD reject first-contact
@@ -1483,7 +1483,7 @@ enforce ZTLP.
 ### 13.3.1 What P4 Can Enforce at Line Rate
 
 Switch ASICs cannot perform AEAD cryptographic operations at line rate
---- this is a hardware constraint that applies to all current
+- this is a hardware constraint that applies to all current
 programmable switch silicon. The P4 profile therefore splits enforcement
 into two tiers:
 
@@ -2455,7 +2455,7 @@ This overlay model follows the same deployment precedent as WireGuard
 Warp, and Tor. Overlay protocols succeed because they can deploy
 immediately on existing infrastructure, whereas replacing Internet
 routing layers would require changes to global routers, new ISP
-protocols, and operating system updates---a process that has
+protocols, and operating system updates - a process that has
 historically taken decades even for widely-supported technologies such
 as IPv6.
 

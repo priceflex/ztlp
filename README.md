@@ -795,13 +795,17 @@ for ZTLP\'s identity-first model.
 
 ## 9.2 Namespace Structure
 
-> Root Trust Anchors (embedded in ZTLP software)
->
-> └── Operator Zones (e.g., example.ztlp)
->
-> └── Tenant Zones (e.g., acmedental.example.ztlp)
->
-> └── Node / Service Records
+```mermaid
+graph TD
+    A["🔐 Root Trust Anchors\n(embedded in ZTLP software)"]
+    B["🌐 Operator Zones\n(e.g., example.ztlp)"]
+    C["🏢 Tenant Zones\n(e.g., acmedental.example.ztlp)"]
+    D["📋 Node / Service Records\n(e.g., node1.office.acmedental.ztlp)"]
+
+    A --> B
+    B --> C
+    C --> D
+```
 
 ## 9.3 Record Types
 

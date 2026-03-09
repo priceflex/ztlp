@@ -2448,7 +2448,6 @@ block-beta
   C["UDP or TCP"]
   D["IPv4 or IPv6"]
   E["Public Internet (routers see ordinary UDP — no ZTLP awareness required)"]
-  A --> B --> C --> D --> E
 ```
 
 This overlay model follows the same deployment precedent as WireGuard

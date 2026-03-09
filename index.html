@@ -333,18 +333,31 @@ backup.server.example.ztlp  →  ServiceID: c341:0f8a:21bc:...</code></pre>
       </table>
 
       <h3>7.3 Established Data Header (compact, post-handshake)</h3>
-      <p>After session establishment, data-plane packets MUST use the following compact fixed header. SrcNodeID and DstSvcID MUST NOT appear in established data packets.</p>
-      <pre><code>+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|       Magic (16)      |  Ver(4) | HdrLen(12) |    Flags (16)  |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    SessionID (96 bits)                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   PacketSequence (64 bits)                    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   HeaderAuthTag (128 bits)                    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                  Encrypted Payload (variable)                 |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</code></pre>
+      <p>After session establishment, data-plane packets MUST use the following compact fixed header. SrcNodeID and DstSvcID MUST NOT appear in established data packets. All identity fields are stripped; relays forward by SessionID alone.</p>
+      <pre><code> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-------------------------------+----+---------------------------+
+|        Magic (16) 0x5A37      |Ver |        HdrLen (12)        |
++-------------------------------+----+---------------------------+
+|             Flags (16)        |                               |
++-------------------------------+                               |
+|                     SessionID (96 bits)                       |
+|                                               +---------------+
+|                               +---------------+               |
++-------------------------------+                               |
+|               PacketSequence (64 bits)                        |
+|                                                               |
++---------------------------------------------------------------+
+|               HeaderAuthTag (128 bits)                        |
+|                                                               |
+|                                                               |
+|                                                               |
++---------------------------------------------------------------+
+|               Encrypted Payload (variable)                    |
++---------------------------------------------------------------+
+
+Field widths: Magic=16, Ver=4, HdrLen=12, Flags=16,
+              SessionID=96, PacketSequence=64, HeaderAuthTag=128</code></pre>
 
       <h3>7.4 Extension TLVs (Optional)</h3>
       <p>If <code>HAS_EXT</code> flag is set, a Type-Length-Value extension area follows the base header:</p>
@@ -460,6 +473,7 @@ backup.server.example.ztlp  →  ServiceID: c341:0f8a:21bc:...</code></pre>
 
       <h3>11.2 Relay Selection — Two-Step Model</h3>
       <pre><code>PathScore = w1*Latency + w2*PacketLoss + w3*Congestion + w4*TrustScore</code></pre>
+      <p>TrustScore is a relay-operator reputation metric derived from: the relay's published ZTLP_RELAY record (signed by a trusted operator authority), uptime and availability history, and whether the relay participates in an authenticated relay federation (Section 12 — federated relays receive higher baseline TrustScore than unenrolled relays). Implementations MAY extend TrustScore with operator-signed attestations. Lower PathScore is preferred.</p>
       <p>PathScore-based selection alone causes hotspots at scale. ZTLP uses a two-step model:</p>
       <ol>
         <li><strong>Step 1 — Candidate set via consistent hash:</strong> Map the destination ServiceID to the nearest N relay nodes on a consistent hash ring of relay NodeIDs: <code>CandidateSet = Hash(ServiceID) → nearest 3 relays</code>. This provides stable, load-distributed assignment.</li>
@@ -468,7 +482,7 @@ backup.server.example.ztlp  →  ServiceID: c341:0f8a:21bc:...</code></pre>
       <p>Consistent hashing ensures traffic to popular services is automatically distributed; relay churn causes minimal session migration; the mesh scales to thousands of nodes without central coordination.</p>
 
       <h3>11.3 Relay Operator Requirements</h3>
-      <p>Relay nodes MUST: maintain a valid ZTLP_RELAY record; publish latency and capacity metrics at least once per 60 seconds; support all four transport modes; honor CLOSE messages within 30 seconds; and NOT log plaintext payload content.</p>
+      <p>Relay nodes MUST: maintain a valid ZTLP_RELAY record; publish latency and capacity metrics at least once per 60 seconds; support all four transport modes (defined in Section 14); honor CLOSE messages and release session state within 30 seconds; and NOT log plaintext payload content.</p>
 
       <h3>11.4 Ingress Admission Domains and Relay Admission Tokens</h3>
       <p>ZTLP relay deployments SHOULD organize relays into Ingress Admission Domains. Relay roles:</p>
@@ -646,10 +660,9 @@ HELLO_PROOF        -------->  (solution + original HELLO)
       <h2>19. Privacy Considerations</h2>
 
       <h3>18.1 Packet-Level Identity Privacy</h3>
-      <p>NodeID values represent long-lived identities and MUST NOT appear in normal data packets. To prevent cross-session correlation, ZTLP requires ephemeral pseudonymous session identifiers in data packet headers:</p>
-      <pre><code>SrcSessionID = HASH(SrcNodeID || SessionKey)
-DstSessionID = HASH(DstNodeID || SessionKey)</code></pre>
-      <p>Data packets MUST carry SrcSessionID and DstSessionID in place of SrcNodeID and DstSvcID. Because SessionKey is unique per session, these identifiers are also unique per session — a passive observer sees only random-looking identifiers that change with each new session. This is analogous to how QUIC hides connection identifiers and WireGuard hides public keys after the handshake.</p>
+      <p>NodeID values represent long-lived identities and MUST NOT appear in established data packets. After SESSION_OK, the data-plane header contains only the canonical 96-bit SessionID — no SrcNodeID, no DstSvcID. This is the same model used by QUIC (Connection ID), WireGuard (Session Index), and MPLS (Label): identity is verified once at handshake time, then routing proceeds by a compact, opaque session token.</p>
+      <p>The SessionID provides per-session unlinkability because it is assigned with cryptographically strong entropy during the Noise_XX handshake and rotated on every REKEY. A passive observer — an ISP, backbone router, or hostile network operator — observing ZTLP data packets sees only a random-looking 96-bit value that changes every session. No stable handle exists for cross-session correlation. NodeID values are transmitted only during the authenticated handshake phase, which already provides identity hiding via the Noise_XX pattern (identities are encrypted after the first message).</p>
+      <p>Implementations MUST NOT include SrcNodeID or DstSvcID in established data packets. Such packets are non-conforming with respect to this section and expose long-lived identifiers to passive observers.</p>
 
       <h3>18.2 Remaining Privacy Risks</h3>
       <ul>
@@ -682,6 +695,28 @@ DstSessionID = HASH(DstNodeID || SessionKey)</code></pre>
     <!-- ── SECTION 21 ─────────────────────────────────── -->
     <section class="spec-section" id="s21">
       <h2>21. Open Issues and Future Work</h2>
+
+      <h3>Implementation Default Values</h3>
+      <p>The following RECOMMENDED default values apply to conforming ZTLP implementations. Deployments MAY override these values via configuration.</p>
+      <table class="spec-table">
+        <thead><tr><th>Parameter</th><th>Default Value</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Anti-replay window</td><td>1024 packets</td><td>Minimum for MULTIPATH sessions; RECOMMENDED for all sessions.</td></tr>
+          <tr><td>Session idle timeout</td><td>30 minutes</td><td>Session state MAY be released after this period of inactivity.</td></tr>
+          <tr><td>Session maximum lifetime</td><td>24 hours</td><td>Sessions MUST rekey or terminate before this duration.</td></tr>
+          <tr><td>Rekey interval</td><td>60 minutes</td><td>Session keys MUST be rotated at this interval or upon explicit REKEY message.</td></tr>
+          <tr><td>Session cleanup sweep</td><td>5 minutes</td><td>Frequency at which expired session state is purged from session tables.</td></tr>
+          <tr><td>Ingress redundancy factor (N)</td><td>3</td><td>Number of ingress relays assigned per initiator via consistent hash.</td></tr>
+          <tr><td>Relay Admission Token lifetime</td><td>15 minutes</td><td>Recommended range: 5–30 minutes.</td></tr>
+          <tr><td>SAC puzzle difficulty floor</td><td>0 bits</td><td>Zero leading-zero bits required under normal load.</td></tr>
+          <tr><td>SAC puzzle difficulty ceiling</td><td>20 bits</td><td>Maximum leading-zero bits required under sustained HELLO flood.</td></tr>
+          <tr><td>Certificate TTL</td><td>90 days</td><td>MUST NOT exceed 90 days. Short-lived certificates preferred for high-assurance deployments.</td></tr>
+          <tr><td>Bootstrap relay minimum count</td><td>15 relays</td><td>Minimum number of relays in the hardcoded fallback list.</td></tr>
+          <tr><td>HELLO rate limit (per source IP)</td><td>10 per second</td><td>Token bucket enforced in eBPF map before any cryptographic work.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Open Issues</h3>
       <ul>
         <li>Bandwidth reservation model — formal definition of BANDWIDTH_HINT TLV semantics and relay QoS interaction.</li>
         <li>Congestion control — specification of a ZTLP-native algorithm for long-haul relay paths.</li>
@@ -839,6 +874,28 @@ DstSessionID = HASH(DstNodeID || SessionKey)</code></pre>
         <li><strong>Phase 2 (Session Creation)</strong> — the relay or gateway generates a SessionID (96-bit random value) representing the established authenticated connection.</li>
         <li><strong>Phase 3 (Packet Transport)</strong> — all subsequent packets carry only SessionID, sequence number, authentication tag, and payload. Relays read the magic byte, look up the SessionID, and forward. This enables MPLS-like hardware acceleration of the data path.</li>
       </ol>
+
+      <h3>28.2 Canonical Relay Forwarding Procedure</h3>
+      <p>The following is the normative fast-path forwarding procedure for relay nodes handling established data packets:</p>
+      <pre><code>1. Read first 16 bits. If Magic != 0x5A37 → DROP (no state, no log)
+2. Read SessionID (96 bits). Lookup in session table.
+   If not found → DROP (no state, no log)
+3. Validate HeaderAuthTag (AEAD). If invalid → silent DROP
+4. Update anti-replay window for PacketSeq.
+   If replay detected → silent DROP
+5. Lookup next-hop for SessionID → forward packet.</code></pre>
+      <p>NodeID is NOT consulted on the forwarding path. The SessionID is the sole routing key. This is the ZTLP fast path and MUST be the only code executed per packet on established sessions.</p>
+
+      <h3>28.3 Plane Separation</h3>
+      <table class="spec-table">
+        <thead><tr><th>Plane</th><th>Purpose</th><th>Identifiers Used</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Admission Plane</strong></td><td>Handshake, authentication, policy check, session creation</td><td>NodeID, ServiceID, PolicyTag, certificates</td></tr>
+          <tr><td><strong>Forwarding Plane</strong></td><td>Per-packet routing and relay forwarding</td><td>SessionID only</td></tr>
+          <tr><td><strong>Service Plane</strong></td><td>Gateway delivery to application infrastructure</td><td>SessionID → internal service mapping</td></tr>
+        </tbody>
+      </table>
+      <p>Admission plane operations are expensive and occur once per session. Forwarding plane operations are cheap and occur on every packet. This separation is the architectural foundation of ZTLP's DDoS resistance and high-performance routing.</p>
 
       <h3>28.3 Session Migration Using SessionID Stability</h3>
       <p>Because the SessionID is the sole routing key for data packets, path switching does not require session teardown. When a better relay path is available, the SessionID remains constant while the underlying transport path changes. Clients do not need to reconnect. Applications do not observe the migration.</p>

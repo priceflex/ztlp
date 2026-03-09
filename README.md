@@ -1216,7 +1216,7 @@ Relay nodes MUST:
 -   Publish latency and capacity metrics no less than once per 60
     seconds.
 
--   Support all four transport modes defined in Section 12.
+-   Support all four transport modes defined in Section 13 (Transport Fallback and NAT Traversal).
 
 -   Honor CLOSE messages and release session state within 30 seconds.
 
@@ -1771,7 +1771,7 @@ ladder in order:
                                                     overhead.
   -------------------------------------------------------------------------------
 
-Relay nodes MUST support all four transport modes. Initiating nodes MUST
+Relay nodes MUST support all four transport modes defined in this section. Initiating nodes MUST
 attempt them in order and use the first that succeeds. The selected
 transport SHOULD be remembered and used for subsequent connections to
 the same relay.
@@ -2343,39 +2343,36 @@ implementations MUST apply.
 ## 19.1 Packet-Level Identity Privacy
 
 NodeID values represent long-lived identities and MUST NOT appear in
-normal data packets. Although ZTLP payloads are encrypted, packet
-headers are not. A passive observer --- an ISP, backbone router, hostile
-network operator, or nation-state monitor --- observing ZTLP traffic
+established data packets. Although ZTLP payloads are encrypted, packet
+headers are not. A passive observer — an ISP, backbone router, hostile
+network operator, or nation-state monitor — observing ZTLP traffic
 could correlate long-lived NodeIDs across sessions to track device
 behavior, infer organizational relationships, map communication
 patterns, and fingerprint device mobility. This is directly analogous to
 the TLS SNI leakage problem prior to Encrypted Client Hello (ECH), and
 must be addressed at the design level.
 
-To prevent this, ZTLP requires ephemeral pseudonymous session
-identifiers in data packet headers. During the `Noise_XX` handshake, both
-parties MUST derive ephemeral session-scoped identifiers as follows:
+ZTLP addresses this through the canonical data-plane model: after
+`SESSION_OK`, the compact post-handshake header contains only the
+96-bit `SessionID` — no `SrcNodeID`, no `DstSvcID`. This is the same model
+used by QUIC (Connection ID), WireGuard (Session Index), and MPLS
+(Label): identity is verified once at handshake time, then routing
+proceeds by a compact, opaque session token.
 
-```
-SrcSessionID = HASH(SrcNodeID || SessionKey)
-DstSessionID = HASH(DstNodeID || SessionKey)
-```
+The `SessionID` provides per-session unlinkability because it is assigned
+with cryptographically strong entropy during the `Noise_XX` handshake and
+rotated on every `REKEY`. A passive observer sees only a random-looking
+96-bit value that changes every session — no stable handle exists for
+cross-session correlation. `NodeID` values are transmitted only during
+the authenticated handshake phase, which already provides identity
+hiding via the `Noise_XX` pattern (identities are encrypted after the
+first message).
 
-Data packets MUST carry SrcSessionID and DstSessionID in place of
-SrcNodeID and DstSvcID in normal operation. Because SessionKey is unique
-per session, SrcSessionID and DstSessionID are also unique per session.
-A passive observer sees only random-looking identifiers that change with
-each new session, providing no stable handle for cross-session
-correlation. NodeID values are only transmitted during the authenticated
-handshake phase, which already provides identity hiding via the `Noise_XX`
-pattern.
-
-This change requires no header size increase, no additional round trips,
-and no cryptographic algorithm changes. It is analogous to how QUIC
-hides connection identifiers, WireGuard hides public keys after the
-handshake, and TLS hides certificate information after session setup.
-Implementations that include raw NodeID values in data packet headers
-are non-conforming with respect to this section.
+Implementations MUST NOT include `SrcNodeID` or `DstSvcID` in established
+data packets. Such packets are non-conforming with respect to this
+section and expose long-lived identifiers to passive observers. The
+canonical SessionID model defined in Section 29.5.6 is authoritative;
+this section describes the privacy properties that model achieves.
 
 ## 19.2 Remaining Privacy Risks
 

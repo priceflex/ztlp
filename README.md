@@ -24,7 +24,7 @@ afterthought for endpoints and applications to solve individually. ZTLP
 
 ZTLP defines a secure, identity-first network overlay that enforces
 cryptographic authentication before any network state is allocated.
-Invalid packets are rejected in a three-layer pipeline --- Magic byte
+Invalid packets are rejected in a three-layer pipeline - Magic byte
 check, SessionID allowlist lookup, and HeaderAuthTag AEAD verification
 --- with each layer progressively more expensive but handling a
 progressively smaller fraction of attack traffic. The vast majority of
@@ -36,7 +36,7 @@ infrastructure and is invisible and unusable to any node that does not
 possess a valid, hardware-backed cryptographic identity.
 
 The primary design goals of ZTLP are DDoS mitigation and Zero Trust
-network access at the protocol layer --- not at the application,
+network access at the protocol layer - not at the application,
 firewall, or middleware layer where such controls are currently
 implemented. Bandwidth reservation across the public Internet backbone
 is a future target capability of ZTLP, motivated by its application as a
@@ -105,7 +105,7 @@ deployed today over the existing Internet.
 # 1. Problem Statement
 
 The Internet was not designed to be secure. It was designed to be
-resilient and reachable --- to move packets from one place to another
+resilient and reachable - to move packets from one place to another
 regardless of who sent them or why. That was the right decision in 1974.
 It is the source of most of our problems in 2026.
 
@@ -120,7 +120,7 @@ to it:
     Volumetric attacks regularly exceed 1 Tbps. They work because the
     Internet accepts any packet from anyone.
 
--   **Ransomware attacks on critical infrastructure** --- hospitals,
+-   **Ransomware attacks on critical infrastructure** - hospitals,
     water treatment facilities, school districts, manufacturers ---
     succeed primarily because internal networks are flat and
     unauthenticated. Once an attacker is inside, lateral movement is
@@ -243,7 +243,7 @@ from the Internet of today:
     Services do not exist to unenrolled nodes.
 
 -   DDoS floods exhaust bandwidth at the physical link but cannot
-    exhaust CPU or memory --- the three-layer enforcement pipeline
+    exhaust CPU or memory - the three-layer enforcement pipeline
     ensures that flood traffic is rejected before expensive session
     state is allocated, and before cryptographic verification is
     performed on packets that fail the cheaper checks first.
@@ -257,7 +257,7 @@ from the Internet of today:
 
 -   Network connectivity follows identity, not location. A device works
     identically whether it is in the office, at home, or on a cellular
-    connection --- because the network authenticates who you are, not
+    connection - because the network authenticates who you are, not
     where you are.
 
 This is not a utopian vision. Every component described above already
@@ -335,7 +335,7 @@ interpreted as described in RFC 2119.
 -   Enforce cryptographic authentication before allocating any network
     state.
 
--   Eliminate the concept of \'open ports\' --- services are invisible
+-   Eliminate the concept of \'open ports\' - services are invisible
     without authorization.
 
 -   Support hardware-backed identity (YubiKey, TPM, Secure Enclave) as a
@@ -368,7 +368,7 @@ interpreted as described in RFC 2119.
     soft admission control via the `BANDWIDTH_HINT` extension TLV are
     defined in Section 14. Hard per-session bandwidth reservation
     between participating relay operators is a target capability for a
-    future revision --- motivated primarily by its application to
+    future revision - motivated primarily by its application to
     volumetric DDoS mitigation, where pre-allocated authenticated
     capacity lanes prevent attackers from consuming resources reserved
     for legitimate traffic.
@@ -376,20 +376,20 @@ interpreted as described in RFC 2119.
 -   ZTLP is not a VPN product, though it shares architectural concepts
     with secure overlays.
 
--   ZTLP does not provide anonymity --- identity is a core requirement
+-   ZTLP does not provide anonymity - identity is a core requirement
     of the protocol.
 
 ## 4.3 Design Philosophy
 
 Every design decision in ZTLP is evaluated against two governing
-principles. These are not aspirational --- they are the criteria by
+principles. These are not aspirational - they are the criteria by
 which proposed changes to this specification MUST be judged.
 
-**Principle 1 --- DDoS Resistance Must Be Structural, Not Reactive**
+**Principle 1 - DDoS Resistance Must Be Structural, Not Reactive**
 
 The current Internet responds to DDoS after the fact: detect the attack,
 classify the traffic, apply rate limits, absorb or block. This approach
-is expensive, slow, and fundamentally asymmetric --- the attacker spends
+is expensive, slow, and fundamentally asymmetric - the attacker spends
 pennies per gigabit while the defender spends dollars. ZTLP inverts this
 entirely.
 
@@ -409,12 +409,12 @@ is allocated until all three checks pass. The cost asymmetry strongly
 favors the defender across the entire pipeline.
 
 Any feature added to ZTLP that increases the cost of processing
-unauthenticated packets --- or that creates exploitable state before
-authentication --- MUST be rejected. DDoS resistance is a hard
+unauthenticated packets - or that creates exploitable state before
+authentication - MUST be rejected. DDoS resistance is a hard
 architectural constraint, not a feature that can be traded off for
 convenience.
 
-**Principle 2 --- Identity Must Precede Communication**
+**Principle 2 - Identity Must Precede Communication**
 
 The current Internet allows any host to send packets to any reachable
 address. Security is the endpoint\'s problem. Firewalls, intrusion
@@ -427,11 +427,11 @@ node without a cryptographically verified identity cannot initiate
 communication. A service without an enrolled identity cannot receive
 communication. There are no open ports. There is no visible attack
 surface. There is no unauthenticated state. The Zero Trust model is not
-enforced by policy on top of an insecure network --- it is enforced by
+enforced by policy on top of an insecure network - it is enforced by
 the protocol itself, at the packet level, before anything else happens.
 
-These two principles --- structural DDoS resistance and mandatory
-identity --- are not independent. They are the same idea expressed at
+These two principles - structural DDoS resistance and mandatory
+identity - are not independent. They are the same idea expressed at
 different layers. An unauthenticated packet is both a potential DDoS
 vector and a Zero Trust violation. ZTLP treats them as one problem with
 one solution: if you cannot prove who you are, you do not exist on this
@@ -470,7 +470,7 @@ understand the protocol.
 
 A ZTLP packet is an encrypted, authenticated payload carried inside a
 standard UDP or QUIC datagram. To the public Internet, ZTLP traffic
-appears as ordinary encrypted UDP --- indistinguishable from QUIC,
+appears as ordinary encrypted UDP - indistinguishable from QUIC,
 DNS-over-QUIC, or other encrypted UDP traffic.
 
 **Figure 1. ZTLP High-Level Architecture**
@@ -555,7 +555,7 @@ establishment. The phases are:
 ## 6.3 Identity vs. Location
 
 In IPv4/IPv6, an address is a location. In ZTLP, identity is primary. A
-Node ID is a stable identifier for the node --- it is the same
+Node ID is a stable identifier for the node - it is the same
 regardless of what IPv6 address the node currently uses, which keys it
 currently holds, or what hardware it runs on. This enables seamless
 mobility, key rotation, hardware replacement, multihoming, and
@@ -565,7 +565,7 @@ relay-based routing without breaking sessions or invalidating policies.
 
 ZTLP explicitly separates network identity from transport location. This
 is a fundamental architectural principle, not an implementation detail.
-The Internet has historically conflated these two concepts --- an IPv4
+The Internet has historically conflated these two concepts - an IPv4
 or IPv6 address simultaneously identifies a host and describes where it
 lives in the routing topology. This conflation causes mobility failures
 (connections break when a device changes IP), multihoming complexity,
@@ -594,13 +594,13 @@ ZTLP defines three distinct layers:
     routing or BGP.
 
 This separation is what makes ZTLP\'s DDoS resistance structurally
-stronger than IP-layer defenses. DDoS attacks target locators --- IP
+stronger than IP-layer defenses. DDoS attacks target locators - IP
 addresses. ZTLP\'s enforcement is identity-based. An attacker flooding a
 locator accomplishes nothing if the packets cannot prove a valid
 identifier. The attack surface is the identifier space, not the locator
 space, and identifier space is cryptographically controlled.
 
-# 7. ZTLP Addressing --- Node Identity
+# 7. ZTLP Addressing - Node Identity
 
 ## 7.1 Node ID
 
@@ -611,8 +611,8 @@ enrollment. It is NOT derived from the node\'s public key.
 NodeID = RAND_128()  // generated once at enrollment, never changes
 ```
 
-The NodeID represents the node as an entity --- the device, service, or
-principal --- independent of its current cryptographic key material. The
+The NodeID represents the node as an entity - the device, service, or
+principal - independent of its current cryptographic key material. The
 public key is a separate attribute, bound to the NodeID via a signed
 `ZTLP_KEY` record in ZTLP-NS. This separation is a deliberate design
 choice that enables key rotation, hardware replacement, and multi-key
@@ -620,11 +620,11 @@ configurations without changing the node\'s identity.
 
 ### 7.1.1 Why NodeID Is Not Derived From the Public Key
 
-Early protocol designs (including HIP --- Host Identity Protocol)
+Early protocol designs (including HIP - Host Identity Protocol)
 derived node identifiers directly from public keys. This is
 cryptographically elegant but operationally painful. When NodeID =
-HASH(public_key), any key change --- routine rotation, compromise
-response, hardware replacement, lost YubiKey --- changes the node\'s
+HASH(public_key), any key change - routine rotation, compromise
+response, hardware replacement, lost YubiKey - changes the node\'s
 identity. Every policy, ACL, relay allowlist, security log, and service
 binding that referenced the old NodeID must be updated. In practice this
 means key rotation is avoided, which is the opposite of good security
@@ -650,7 +650,7 @@ Key rotation is performed by publishing a new `ZTLP_KEY` record with an
 updated public key and invalidating the previous record. The NodeID does
 not change. Existing sessions negotiate rekeying. Policies, ACLs, and
 logs continue to reference the same NodeID without modification. A node
-MAY have multiple active public keys simultaneously --- useful for
+MAY have multiple active public keys simultaneously - useful for
 hardware HSMs with backup keys, emergency recovery keys, or phased key
 rotation with overlap periods.
 
@@ -677,7 +677,7 @@ backup.server.example.ztlp  →  ServiceID: c341:0f8a:21bc:...
 ## 7.3 Human-Readable Names
 
 The ZTLP-NS namespace (Section 8) maps human-readable names to Node IDs,
-Service IDs, relay addresses, and policy records --- functioning
+Service IDs, relay addresses, and policy records - functioning
 similarly to DNS but with mandatory signing and delegated trust.
 
 # 8. ZTLP Packet Format
@@ -774,7 +774,7 @@ produced by the AEAD cipher is appended to the ciphertext. Decryption
 MUST fail and the packet MUST be silently dropped if authentication
 fails.
 
-# 9. ZTLP-NS --- Distributed Trust Namespace
+# 9. ZTLP-NS - Distributed Trust Namespace
 
 ZTLP-NS is the control-plane identity and discovery layer. It is
 inspired by DNS delegation and DNSSEC chain-of-trust principles, adapted
@@ -782,15 +782,15 @@ for ZTLP\'s identity-first model.
 
 ## 9.1 Design Principles
 
--   Hierarchical delegation --- trust flows from root anchors through
+-   Hierarchical delegation - trust flows from root anchors through
     operator zones to individual nodes.
 
--   All records are signed --- unsigned records MUST be rejected.
+-   All records are signed - unsigned records MUST be rejected.
 
--   Federated roots --- multiple trust roots are supported; no single
+-   Federated roots - multiple trust roots are supported; no single
     global authority.
 
--   ZTLP-NS is a control-plane lookup layer --- it is NOT used for
+-   ZTLP-NS is a control-plane lookup layer - it is NOT used for
     per-packet routing decisions.
 
 ## 9.2 Namespace Structure
@@ -823,13 +823,13 @@ graph TD
 ZTLP-NS supports multiple trust roots for different deployment contexts.
 Implementations SHOULD include at least the following root categories:
 
--   Public ZTLP Root --- maintained by the ZTLP protocol governance
+-   Public ZTLP Root - maintained by the ZTLP protocol governance
     body.
 
--   Enterprise Root --- self-hosted by organizations for private
+-   Enterprise Root - self-hosted by organizations for private
     deployments.
 
--   Industry Roots --- sector-specific (e.g., healthcare, government,
+-   Industry Roots - sector-specific (e.g., healthcare, government,
     finance).
 
 A node MAY trust multiple roots simultaneously. Policy records specify
@@ -855,7 +855,7 @@ The following steps MUST be attempted in order. A node MUST proceed to
 the next step only if the current step fails or returns no usable
 result.
 
-**Step 1 --- HTTPS Discovery (REQUIRED)**
+**Step 1 - HTTPS Discovery (REQUIRED)**
 
 The node MUST attempt an HTTPS GET request to each URL in the hardcoded
 discovery URL list. The response MUST be a signed JSON object
@@ -876,7 +876,7 @@ stated TTL, minimum 24 hours.
 HTTPS is chosen as the primary mechanism because it survives NAT, CGNAT,
 and enterprise firewalls in nearly all deployment environments.
 
-**Step 2 --- DNS-SRV Discovery (RECOMMENDED)**
+**Step 2 - DNS-SRV Discovery (RECOMMENDED)**
 
 The node SHOULD query for SRV records at the well-known bootstrap
 domain:
@@ -887,7 +887,7 @@ If DNSSEC validation is available, the node MUST validate the response
 chain before use. If validation fails, the node MUST treat the response
 as untrusted and proceed to Step 3.
 
-**Step 3 --- Hardcoded Trust Anchors (FALLBACK)**
+**Step 3 - Hardcoded Trust Anchors (FALLBACK)**
 
 If Steps 1 and 2 both fail, the node MUST attempt connection to the
 hardcoded relay node list embedded in the software distribution. This
@@ -927,12 +927,12 @@ organizationally independent.
 ZTLP uses a Noise Protocol Framework pattern (`Noise_XX`) for session
 establishment. This provides:
 
--   Mutual authentication --- both parties prove identity.
+-   Mutual authentication - both parties prove identity.
 
--   Perfect forward secrecy --- compromise of long-term keys does not
+-   Perfect forward secrecy - compromise of long-term keys does not
     expose past sessions.
 
--   Identity hiding --- identities are encrypted after the first
+-   Identity hiding - identities are encrypted after the first
     message.
 
 ## 11.2 Message Flow
@@ -1032,14 +1032,14 @@ oscillation as congestion changes. To prevent this, ZTLP relay selection
 SHOULD use a two-step model combining consistent hashing with PathScore
 optimization:
 
--   **Step 1 --- Candidate set via consistent hash:** Map the
+-   **Step 1 - Candidate set via consistent hash:** Map the
     destination ServiceID to the nearest N relay nodes on a consistent
     hash ring of relay NodeIDs. CandidateSet = Hash(ServiceID) → nearest
     3 relays. This provides stable, load-distributed assignment. Most
     sessions remain on the same relays even as the mesh grows or
     individual nodes leave and rejoin.
 
--   **Step 2 --- Optimize within the candidate set:** Select the relay
+-   **Step 2 - Optimize within the candidate set:** Select the relay
     with the lowest PathScore from the candidate set. This provides
     latency and performance optimization within the bounded set without
     creating global convergence on a single best relay.
@@ -1148,7 +1148,7 @@ per-client state. Verification MAY use relay-issued MAC cookies, signed
 tokens using relay public keys published in ZTLP-NS, or short-lived
 relay federation keys shared among trusted relay operators. Relays MUST
 reject expired or invalid tokens. Token verification MUST be cheaper
-than full `Noise_XX` handshake processing --- the purpose of the token is
+than full `Noise_XX` handshake processing - the purpose of the token is
 to avoid repeating expensive admission work on relays that have not yet
 seen the client.
 
@@ -1162,7 +1162,7 @@ floods. Because ingress assignment is deterministic and distributed
 across multiple relays, attack pressure is partitioned across the mesh
 rather than concentrated on a single relay or geographic region. This
 design ensures that large-scale handshake floods cannot easily degrade
-the entire relay infrastructure --- only the ingress domain under attack
+the entire relay infrastructure - only the ingress domain under attack
 is affected, and the consistent hash assignment naturally distributes
 that pressure across multiple relays.
 
@@ -1341,12 +1341,12 @@ HeaderAuthTag check can discard it.
 
 This section defines four Hardware Enforcement Profiles that push ZTLP
 enforcement progressively closer to the wire. Each profile is
-independently implementable. Profiles are additive --- a deployment MAY
+independently implementable. Profiles are additive - a deployment MAY
 implement multiple profiles simultaneously. All profiles feed
 enforcement decisions from the ZTLP control plane; no profile requires
 the switch or NIC to independently validate full cryptographic identity.
 
-## 13.1 Profile 1 --- Software Enforcement (eBPF/XDP)
+## 13.1 Profile 1 - Software Enforcement (eBPF/XDP)
 
 The software profile is the baseline enforcement model and is
 implementable today on any Linux host using eBPF and XDP (eXpress Data
@@ -1393,7 +1393,7 @@ AEAD verification"]
 The SessionID allowlist is a BPF hash map maintained by the ZTLP daemon.
 When a session is established, the daemon writes the SessionID to the
 map. When a session closes or expires, it is removed. The XDP program
-reads this map without kernel involvement --- lookup time is O(1) at
+reads this map without kernel involvement - lookup time is O(1) at
 nanosecond scale.
 
 ### 13.1.2 What This Achieves
@@ -1420,9 +1420,9 @@ nanosecond scale.
 -   ZTLP daemon responsible for maintaining the SessionID BPF map in
     real time.
 
-## 13.2 Profile 2 --- SmartNIC Offload (DPU)
+## 13.2 Profile 2 - SmartNIC Offload (DPU)
 
-Data Processing Units (DPUs) --- also called SmartNICs --- are network
+Data Processing Units (DPUs) - also called SmartNICs - are network
 interface cards with dedicated ARM or RISC-V processors capable of
 running arbitrary packet processing logic independently of the host CPU.
 Representative hardware includes the Nvidia BlueField-3 DPU and the AMD
@@ -1446,8 +1446,8 @@ maintains:
     any handshake packet reaches the host.
 
 For every inbound packet, the DPU Offload Agent performs the full ZTLP
-verification pipeline --- Magic check, SessionID lookup, HeaderAuthTag
-AEAD verification, PacketSeq anti-replay --- entirely on the DPU. Only
+verification pipeline - Magic check, SessionID lookup, HeaderAuthTag
+AEAD verification, PacketSeq anti-replay - entirely on the DPU. Only
 packets that pass all checks are forwarded to the host PCIe bus. Attack
 traffic never reaches host memory.
 
@@ -1456,24 +1456,24 @@ traffic never reaches host memory.
 -   Full cryptographic HeaderAuthTag verification occurs at line rate
     without host CPU involvement.
 
--   A compromised host OS cannot bypass DPU enforcement --- the DPU is a
+-   A compromised host OS cannot bypass DPU enforcement - the DPU is a
     separate trust boundary.
 
 -   The DPU can store session keys in its own secure memory, isolated
-    from host RAM --- preventing key extraction even under a host kernel
+    from host RAM - preventing key extraction even under a host kernel
     compromise.
 
 -   This profile is RECOMMENDED for ZTLP relay nodes and gateway nodes
     handling high-volume traffic.
 
-## 13.3 Profile 3 --- Programmable Switch Enforcement (P4)
+## 13.3 Profile 3 - Programmable Switch Enforcement (P4)
 
 P4 is a domain-specific language for programming the forwarding behavior
-of network device ASICs --- including switches, routers, and FPGAs.
+of network device ASICs - including switches, routers, and FPGAs.
 P4-capable switch hardware (Intel Tofino, Nvidia Spectrum-3 with P4,
 Barefoot Networks) can be programmed to inspect arbitrary packet fields
-and make forwarding decisions at full line rate --- hundreds of millions
-of packets per second --- with deterministic nanosecond latency.
+and make forwarding decisions at full line rate - hundreds of millions
+of packets per second - with deterministic nanosecond latency.
 
 This profile defines a ZTLP P4 program that enforces packet admission at
 the switch ASIC, before traffic reaches any server. This is the closest
@@ -1487,12 +1487,12 @@ Switch ASICs cannot perform AEAD cryptographic operations at line rate
 programmable switch silicon. The P4 profile therefore splits enforcement
 into two tiers:
 
--   **Tier 1 --- Switch ASIC (P4, line rate):** Magic byte check,
+-   **Tier 1 - Switch ASIC (P4, line rate):** Magic byte check,
     SessionID allowlist lookup, source IP rate limiting, HELLO packet
     metering. Packets failing Tier 1 are dropped at the switch with no
     server involvement whatsoever.
 
--   **Tier 2 --- Server (eBPF or DPU):** Full HeaderAuthTag AEAD
+-   **Tier 2 - Server (eBPF or DPU):** Full HeaderAuthTag AEAD
     verification, anti-replay window enforcement, policy check. Only
     packets that survived Tier 1 reach this layer, so the server
     processes a dramatically reduced volume of packets under attack
@@ -1514,8 +1514,8 @@ table updates:
 
 This integration means the switch's allowlist is always consistent with
 the ZTLP control plane. A revoked identity is removed from the switch
-table within one control plane propagation cycle --- typically under one
-second --- after which the switch drops all traffic from that identity
+table within one control plane propagation cycle - typically under one
+second - after which the switch drops all traffic from that identity
 at the ASIC level, with no server involvement.
 
 ### 13.3.3 Deployment Requirements
@@ -1528,12 +1528,12 @@ at the ASIC level, with no server involvement.
 -   Profile 1 or Profile 2 enforcement at the server for Tier 2
     cryptographic verification.
 
-## 13.4 Profile 4 --- Native Switch ASIC (Future)
+## 13.4 Profile 4 - Native Switch ASIC (Future)
 
 This profile describes the long-term target state: switch ASICs that
 natively understand ZTLP packet structure and enforce admission
 decisions in hardware without programming via P4. This is analogous to
-how modern switches natively implement MACsec (IEEE 802.1AE) --- a Layer
+how modern switches natively implement MACsec (IEEE 802.1AE) - a Layer
 2 encryption and authentication standard that switch silicon enforces
 transparently without external programming.
 
@@ -1684,7 +1684,7 @@ relay.
 ZTLP sessions MUST implement a congestion control algorithm. A ZTLP
 implementation without congestion control risks starving competing TCP
 flows, creating network unfairness, and contributing to congestion
-collapse on shared links --- the same problems that plagued early
+collapse on shared links - the same problems that plagued early
 UDP-based protocols. This is a normative requirement with no exception.
 
 Implementations SHOULD use BBR (Bottleneck Bandwidth and Round-trip
@@ -1791,7 +1791,7 @@ establishment and policy enforcement.
 
 ### 16.3.1 Identity vs. Proof vs. Assurance
 
-ZTLP distinguishes three separate concepts. Identity is the NodeID --- a
+ZTLP distinguishes three separate concepts. Identity is the NodeID - a
 stable 128-bit identifier assigned at enrollment. Proof is cryptographic
 evidence that the node currently controls the private key bound to the
 NodeID. Assurance is composed of verified properties of the device or
@@ -2009,13 +2009,13 @@ ordered by computational cost, ensuring that the cheapest checks run
 first and eliminate the largest fraction of attack traffic before more
 expensive operations are invoked.
 
--   **Layer 1 --- Magic byte check (nanoseconds, no crypto):** A single
+-   **Layer 1 - Magic byte check (nanoseconds, no crypto):** A single
     16-bit comparison at the NIC driver via XDP. Any packet not
     beginning with the ZTLP Magic value `0x5A37` is dropped before the
     kernel sees it. No cryptographic work, no memory allocation, no
     state. This eliminates all random UDP flood traffic immediately.
 
--   **Layer 2 --- SessionID allowlist lookup (microseconds, no
+-   **Layer 2 - SessionID allowlist lookup (microseconds, no
     crypto):** An O(1) BPF hash map lookup against the set of currently
     active SessionIDs maintained by the ZTLP daemon. Packets with
     unknown SessionIDs (including HELLO floods) are rate-limited and
@@ -2023,10 +2023,10 @@ expensive operations are invoked.
     attackers who know the ZTLP packet format but do not know active
     session identifiers.
 
--   **Layer 3 --- HeaderAuthTag AEAD verification (real cryptographic
+-   **Layer 3 - HeaderAuthTag AEAD verification (real cryptographic
     cost):** ChaCha20-Poly1305 or AES-GCM tag verification is performed
     only on packets that passed both Layer 1 and Layer 2. This involves
-    real CPU cost --- implementations MUST NOT claim this verification
+    real CPU cost - implementations MUST NOT claim this verification
     is free. However, a packet that reaches Layer 3 has already
     demonstrated it knows a valid active SessionID, meaning the attacker
     must have compromised session state rather than simply generating
@@ -2034,7 +2034,7 @@ expensive operations are invoked.
     orders of magnitude lower than the raw attack volume. Session state
     is not allocated until Layer 3 passes.
 
-This pipeline does not prevent link-layer saturation --- an attacker
+This pipeline does not prevent link-layer saturation - an attacker
 with sufficient bandwidth can still fill the physical uplink before
 packets reach ZTLP enforcement. That problem is addressed by the
 distributed relay architecture (Section 12) and, in future revisions, by
@@ -2054,7 +2054,7 @@ Specifically: HELLO responses and CHALLENGE messages MUST be padded or
 truncated such that `response_bytes ≤ request_bytes`. Relay nodes that
 forward unauthenticated traffic MUST apply the same constraint. This
 prevents an attacker from sending small spoofed HELLO packets and
-causing ZTLP nodes to send large responses to a victim IP --- the
+causing ZTLP nodes to send large responses to a victim IP - the
 classic UDP amplification pattern used in DNS, NTP, and SSDP reflection
 attacks.
 
@@ -2091,11 +2091,11 @@ The CHALLENGE MUST be stateless on the responder side. The cookie field
 is a MAC computed over (source_ip, timestamp, responder_secret),
 verifiable when `HELLO_PROOF` arrives without any per-client state being
 stored. This is directly analogous to TCP SYN cookies and QUIC retry
-tokens --- a proven technique for stateless flood defense.
+tokens - a proven technique for stateless flood defense.
 
 The puzzle SHOULD require the initiator to find a nonce such that
 HASH(challenge \|\| nonce) has N leading zero bits. Difficulty N SHOULD
-be adaptive --- zero or disabled under normal load, increasing
+be adaptive - zero or disabled under normal load, increasing
 automatically as HELLO rate exceeds configurable thresholds. This
 preserves low-friction operation for legitimate users while dramatically
 increasing the cost of botnet-scale handshake floods.
@@ -2103,7 +2103,7 @@ increasing the cost of botnet-scale handshake floods.
 **SAC MUST NOT be applied to:** established sessions, rekeying
 operations, trusted relay-to-relay handshakes, or nodes presenting valid
 short-lived trust tokens from a prior successful session. SAC is a gate
-for unknown first contact only --- not an ongoing tax on legitimate
+for unknown first contact only - not an ongoing tax on legitimate
 network participants. Implementations MUST provide a mechanism for
 low-power and IoT devices to negotiate reduced puzzle difficulty via
 their enrollment profile.
@@ -3328,8 +3328,8 @@ attack traffic that the application must handle.
 
 Enterprise identity platforms such as Microsoft 365 Conditional Access
 MAY treat successful ZTLP session establishment as an additional
-assurance signal --- including device enrollment, hardware-backed
-identity, and approved network admission path --- before permitting
+assurance signal - including device enrollment, hardware-backed
+identity, and approved network admission path - before permitting
 access to protected resources.
 
 Today, conditional access systems evaluate signals such as user
@@ -3356,9 +3356,9 @@ flowchart TD
     style CA fill:#ebf5fb
 ```
 
-The ZTLP condition --- \"allow account access only if the request
+The ZTLP condition - \"allow account access only if the request
 arrives through an approved ZTLP session from a compliant, enrolled
-device\" --- is stronger than application-layer conditional access alone
+device\" - is stronger than application-layer conditional access alone
 because the request path itself is identity-gated. A stolen credential
 from an unenrolled device cannot traverse the ZTLP lane regardless of
 what the credential contains.
@@ -3394,8 +3394,8 @@ Inter-service & admin connectivity
 ```
 
 This layered adoption model allows organizations to protect the
-highest-risk access paths --- account login, admin interfaces, and API
-access --- without waiting for email transport-layer changes that would
+highest-risk access paths - account login, admin interfaces, and API
+access - without waiting for email transport-layer changes that would
 require broader ecosystem coordination.
 
 ## 33.5 Example Policy Model
@@ -3780,20 +3780,20 @@ identity architecture that underlies all ZTLP protocol operations.
 ZTLP identity is organized into three distinct layers, each answering a
 different trust question.
 
-**Layer 1 --- Root Trust.** Answers: "Who is allowed to vouch for
+**Layer 1 - Root Trust.** Answers: "Who is allowed to vouch for
 identities?" Multiple trust roots MAY coexist: public roots, enterprise
 roots, industry-sector roots, and private roots. No single root SHALL be
-required. This applies equally to ZTLP governance itself --- the
+required. This applies equally to ZTLP governance itself - the
 protocol does not require trust in any single authority, including the
 body that published this specification.
 
-**Layer 2 --- Namespace and Delegation.** Answers: "Who controls names
+**Layer 2 - Namespace and Delegation.** Answers: "Who controls names
 and service identity records?" ZTLP-NS (Section 8) provides hierarchical
 delegation analogous to DNS, with signed records and local control over
 sub-namespaces. Cross-organization trust is established only when
 explicitly delegated. Unsigned records MUST be rejected.
 
-**Layer 3 --- Node Credential.** Answers: "How does a device or service
+**Layer 3 - Node Credential.** Answers: "How does a device or service
 prove it is really that identity?" The NodeID is stable; the key rotates
 independently. Private keys SHOULD be hardware-bound where available
 (TPM 2.0, Secure Enclave, ARM TrustZone). Attestation and assurance
@@ -3866,8 +3866,8 @@ operationally simple but creates a single point of control, a single
 point of failure, and a political and economic bottleneck. A fully
 decentralized model with no authority structure is difficult to trust,
 difficult to revoke, and difficult for normal organizations to onboard
-into. The federated model --- hierarchical delegation with multiple
-independent roots --- provides local autonomy, interoperability across
+into. The federated model - hierarchical delegation with multiple
+independent roots - provides local autonomy, interoperability across
 organizations, clear revocation paths, and enterprise readiness, while
 preserving decentralization at the governance layer. ZTLP's identity
 architecture is intentionally analogous to the combination of DNS and

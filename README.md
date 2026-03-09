@@ -2297,55 +2297,28 @@ The following issues are known and will be addressed in subsequent draft revisio
 
 ## 22.1 Normative References
 
--   RFC 2119 --- Key words for use in RFCs to indicate requirement
-    levels.
-
--   RFC 8446 --- TLS 1.3.
-
--   RFC 7748 --- Elliptic Curves for Diffie-Hellman Key Agreement
-    (X25519, X448).
-
--   Noise Protocol Framework --- Trevor Perrin, 2018.
-
--   RFC 9000 --- QUIC: A UDP-Based Multiplexed and Secure Transport.
+| Reference | Description |
+|---|---|
+| RFC 2119 | Key words for use in RFCs to indicate requirement levels. |
+| RFC 8446 | TLS 1.3. |
+| RFC 7748 | Elliptic Curves for Diffie-Hellman Key Agreement (X25519, X448). |
+| Noise Protocol Framework | Trevor Perrin, 2018. |
+| RFC 9000 | QUIC: A UDP-Based Multiplexed and Secure Transport. |
 
 ## 22.2 Informative References
 
--   RFC 7401 --- Host Identity Protocol Version 2 (HIPv2).
-
--   RFC 6698 --- The DANE Transport Layer Security (TLS) Protocol.
-
--   SCION: A Secure Internet Architecture --- Barrera et al., ETH
-    Zurich.
-
--   BeyondCorp: A New Approach to Enterprise Security --- Ward & Beyer,
-    Google.
-
--   RFC 4960 --- Stream Control Transmission Protocol (SCTP).
-
--   RFC 8555 --- Automatic Certificate Management Environment (ACME).
-
--   Nebula --- A scalable overlay networking tool. Slack Technologies /
-    Defined Networking, 2019. https://github.com/slackhq/nebula.
-    \[Informative: ZTLP\'s relay architecture extends the Nebula
-    lighthouse/relay model to public Internet deployment with
-    identity-first security and structural DDoS resistance as primary
-    design constraints.\]
-
--   WireGuard: Next Generation Kernel Network Tunnel --- Donenfeld, J.,
-    NDSS 2017. \[Informative: demonstrates that a minimal, auditable,
-    high-performance cryptographic protocol can achieve widespread
-    deployment. ZTLP builds on this precedent.\]
-
--   RFC 6830 --- The Locator/ID Separation Protocol (LISP).
-    \[Informative: prior work on identifier/locator separation; ZTLP
-    achieves the same architectural separation as an overlay without
-    requiring router changes.\]
-
--   RFC 9000 Section 8 --- QUIC Address Validation and Retry Tokens.
-    \[Informative: the stateless cookie model used by ZTLP\'s Stateless
-    Admission Challenge (Section 16.3) is directly analogous to QUIC
-    retry token design.\]
+| Reference | Description |
+|---|---|
+| RFC 7401 | Host Identity Protocol Version 2 (HIPv2). |
+| RFC 6698 | The DANE Transport Layer Security (TLS) Protocol. |
+| SCION: A Secure Internet Architecture | Barrera et al., ETH Zurich. |
+| BeyondCorp: A New Approach to Enterprise Security | Ward & Beyer, Google. |
+| RFC 4960 | Stream Control Transmission Protocol (SCTP). |
+| RFC 8555 | Automatic Certificate Management Environment (ACME). |
+| Nebula | A scalable overlay networking tool. Slack Technologies / Defined Networking, 2019. https://github.com/slackhq/nebula. \[Informative: ZTLP's relay architecture extends the Nebula lighthouse/relay model to public Internet deployment with identity-first security and structural DDoS resistance as primary design constraints.\] |
+| WireGuard: Next Generation Kernel Network Tunnel | Donenfeld, J., NDSS 2017. \[Informative: demonstrates that a minimal, auditable, high-performance cryptographic protocol can achieve widespread deployment. ZTLP builds on this precedent.\] |
+| RFC 6830 | The Locator/ID Separation Protocol (LISP). \[Informative: prior work on identifier/locator separation; ZTLP achieves the same architectural separation as an overlay without requiring router changes.\] |
+| RFC 9000 Section 8 | QUIC Address Validation and Retry Tokens. \[Informative: the stateless cookie model used by ZTLP's Stateless Admission Challenge (Section 16.3) is directly analogous to QUIC retry token design.\] |
 
 
 ---
@@ -3832,20 +3805,13 @@ levels are optional but policy-aware, as defined in Section 15.3.
 ZTLP explicitly supports the following identity classes, each
 represented by a NodeID and associated credential in ZTLP-NS:
 
-> **User identities** --- Human principals using browsers, native
-> clients, or administrative tools.
->
-> **Device identities** --- Laptops, mobile devices, servers, and
-> network appliances.
->
-> **Service identities** --- APIs, applications, and microservices
-> published via ZTLP_SVC records.
->
-> **Relay identities** --- Relay nodes and operator infrastructure,
-> published via ZTLP_RELAY records.
->
-> **Gateway identities** --- Service edges and policy enforcement points
-> that terminate ZTLP sessions on behalf of protected services.
+| Identity Class | Description |
+|---|---|
+| **User identities** | Human principals using browsers, native clients, or administrative tools. |
+| **Device identities** | Laptops, mobile devices, servers, and network appliances. |
+| **Service identities** | APIs, applications, and microservices published via ZTLP_SVC records. |
+| **Relay identities** | Relay nodes and operator infrastructure, published via ZTLP_RELAY records. |
+| **Gateway identities** | Service edges and policy enforcement points that terminate ZTLP sessions on behalf of protected services. |
 
 ## 38.3 Granular Trust Evaluation
 
@@ -3853,13 +3819,12 @@ A client or gateway MUST NOT ask "Do I trust the entire ZTLP network?"
 Trust decisions are per-interaction and MUST evaluate the following
 independently:
 
-> Do I trust this root authority?
->
-> Do I trust this namespace delegation chain?
->
-> Do I trust this service's policy and assurance requirements?
->
-> Do I trust this relay operator enough to route this session?
+| Trust Question |
+|---|
+| Do I trust this root authority? |
+| Do I trust this namespace delegation chain? |
+| Do I trust this service's policy and assurance requirements? |
+| Do I trust this relay operator enough to route this session? |
 
 This model enables fine-grained deployment policies. An organization MAY
 state: "We trust our own enterprise root only" for internal services,

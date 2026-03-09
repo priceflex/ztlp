@@ -2779,8 +2779,8 @@ infrastructure access; however, Teleport is an application-layer proxy
 rather than a transport protocol and does not provide general-purpose
 encrypted session routing or DDoS-resistant packet admission. ZTLP
 provides a general-purpose transport-level solution where identity, not
-IP address, determines reachability and where the protocol itself \-\--
-not a centralized proxy service \-\-- enforces admission. The key shift
+IP address, determines reachability and where the protocol itself -
+not a centralized proxy service - enforces admission. The key shift
 is: IP address equals reachable becomes identity equals reachable.
 
 # 29. SessionID as Primary Routing Primitive

@@ -1,0 +1,59 @@
+ZTLP — Zero Trust Layer Protocol
+Copyright 2026 Steven Price / ZTLP.org
+
+This product includes software developed by Steven Price
+and the Tech Rockstar Academy (https://ztlp.org).
+
+Licensed under the Apache License, Version 2.0.
+
+================================================================================
+Third-Party Licenses
+================================================================================
+
+This project and its reference implementations may include or depend on
+third-party software. Each component retains its original license.
+
+ZTLP maintains a strict licensing policy:
+  - Apache 2.0, MIT, and BSD-licensed dependencies are preferred.
+  - LGPL-licensed dependencies are permitted only when dynamically linked.
+  - GPL-licensed code MUST NOT be incorporated into any ZTLP component.
+
+--------------------------------------------------------------------------------
+ztlp-proto (Rust Client)
+--------------------------------------------------------------------------------
+
+Dependency licenses will be audited and listed here upon each release.
+Use `cargo license` in the ztlp-proto directory for a current listing.
+
+Expected license families: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause.
+
+--------------------------------------------------------------------------------
+ztlp-relay (Erlang/Elixir Relay & Gateway) — Planned
+--------------------------------------------------------------------------------
+
+Erlang/OTP is licensed under Apache License 2.0 (since OTP 18).
+Elixir is licensed under Apache License 2.0.
+Hex package licenses will be audited and listed here upon each release.
+
+--------------------------------------------------------------------------------
+ztlp-ebpf (C / eBPF Packet Filter) — Planned
+--------------------------------------------------------------------------------
+
+eBPF programs interact with the Linux kernel via the BPF syscall interface.
+Linux kernel BPF headers are licensed under GPL-2.0 with the Linux syscall
+exception (SPDX: Linux-syscall-note), which permits user-space programs
+(including eBPF programs loaded via bpf()) to use these headers without
+triggering GPL obligations on the user-space code. This interpretation is
+consistent with industry practice (Cilium, Cloudflare, Meta) and the
+kernel's UAPI header licensing.
+
+The ztlp-ebpf user-space loader and eBPF programs themselves are licensed
+under Apache License 2.0.
+
+================================================================================
+Trademark Notice
+================================================================================
+
+ZTLP and Zero Trust Layer Protocol are trademarks of Steven Price.
+Use of the ZTLP name, logo, or branding must not imply endorsement by
+the project or its author without prior written permission.

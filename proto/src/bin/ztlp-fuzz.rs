@@ -158,7 +158,7 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         let aad = hdr.aad_bytes();
         hdr.header_auth_tag = compute_header_auth_tag(&key, &aad);
         let payload_size: usize = rng.gen_range(0..256);
-        let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen()).collect();
+        let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
         let pkt = ZtlpPacket::Data { header: hdr, payload };
         pkt.serialize()
     } else {
@@ -175,7 +175,7 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         let aad = hdr.aad_bytes();
         hdr.header_auth_tag = compute_header_auth_tag(&key, &aad);
         let payload_size: usize = rng.gen_range(0..64);
-        let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen()).collect();
+        let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
         hdr.payload_len = payload.len() as u16;
         let pkt = ZtlpPacket::Handshake { header: hdr, payload };
         pkt.serialize()
@@ -206,7 +206,7 @@ fn mutate_byte(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
     let mutations = rng.gen_range(1..=4);
     for _ in 0..mutations {
         let idx = rng.gen_range(0..out.len());
-        out[idx] = rng.gen();
+        out[idx] = rng.gen::<u8>();
     }
     out
 }
@@ -277,7 +277,7 @@ fn mutate_field_boundary(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
             2 => {
                 // Random
                 for b in &mut out[start..actual_end] {
-                    *b = rng.gen();
+                    *b = rng.gen::<u8>();
                 }
             }
             3 => {
@@ -338,7 +338,7 @@ fn mutate_extend(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
     let mut out = data.to_vec();
     let extra = rng.gen_range(1..256);
     for _ in 0..extra {
-        out.push(rng.gen());
+        out.push(rng.gen::<u8>());
     }
     out
 }
@@ -355,7 +355,7 @@ fn mutate_magic_corrupt(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
         2 => { out[0] ^= 0xFF; }               // Invert first byte
         3 => { out[1] ^= 0xFF; }               // Invert second byte
         4 => { out.swap(0, 1); }                // Swap magic bytes
-        _ => { out[0] = rng.gen(); out[1] = rng.gen(); } // Random magic
+        _ => { out[0] = rng.gen::<u8>(); out[1] = rng.gen::<u8>(); } // Random magic
     }
     out
 }
@@ -395,7 +395,7 @@ fn mutate_session_id(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
         2 => {
             // Random SessionID
             for b in &mut out[sid_start..sid_end] {
-                *b = rng.gen();
+                *b = rng.gen::<u8>();
             }
         }
         3 => {

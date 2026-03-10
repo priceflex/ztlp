@@ -19,6 +19,9 @@ ZTLP_RFC_Draft_v0.5.docx
 /gateway/_build/
 /gateway/deps/
 
+# Mnesia data directories
+Mnesia.*
+
 # Root-level Elixir artifacts (should not exist — each project has its own)
 /_build/
 /deps/

@@ -11,6 +11,12 @@ defmodule ZtlpRelay.NsIntegrationTest do
 
   defp start_ns_server do
     Application.put_env(:ztlp_ns, :port, 0)
+    Application.put_env(:ztlp_ns, :storage_mode, :ram_copies)
+
+    # Ensure Mnesia is started (required by NS Store)
+    :mnesia.stop()
+    :mnesia.start()
+
     {:ok, store_pid} = ZtlpNs.Store.start_link([])
     {:ok, ns_pid} = ZtlpNs.Server.start_link([])
     ns_port = ZtlpNs.Server.port()

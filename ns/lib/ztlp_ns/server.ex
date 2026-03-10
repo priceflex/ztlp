@@ -50,7 +50,7 @@ defmodule ZtlpNs.Server do
 
   use GenServer
 
-  alias ZtlpNs.{Query, Record}
+  alias ZtlpNs.{Query, Record, Store}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -167,6 +167,69 @@ defmodule ZtlpNs.Server do
     end
   end
 
+  # Registration (0x02) — insert/update a record in the store
+  defp process_query(<<0x02, name_len::16, name::binary-size(name_len), type_byte::8,
+                       data_len::16, data_bin::binary-size(data_len),
+                       sig_len::16, _sig::binary-size(sig_len)>>) do
+    type = try do
+      Record.byte_to_type(type_byte)
+    rescue
+      _ -> :unknown
+    end
+
+    if type == :unknown do
+      <<0xFF>>
+    else
+      data = try do
+        :erlang.binary_to_term(data_bin, [:safe])
+      rescue
+        _ -> nil
+      end
+
+      if is_nil(data) do
+        <<0xFF>>
+      else
+        record = %Record{
+          name: name,
+          type: type,
+          data: data,
+          created_at: System.system_time(:second),
+          ttl: 3600,
+          serial: System.system_time(:second),
+          signature: nil,
+          signer_public_key: nil
+        }
+
+        priv = get_registration_key()
+        signed = Record.sign(record, priv)
+
+        case Store.insert(signed) do
+          :ok ->
+            <<0x06>>
+
+          {:error, _} ->
+            bumped = %{signed | serial: signed.serial + 1}
+            bumped2 = Record.sign(bumped, priv)
+            case Store.insert(bumped2) do
+              :ok -> <<0x06>>
+              {:error, _} -> <<0xFF>>
+            end
+        end
+      end
+    end
+  end
+
   # Malformed query → invalid response
   defp process_query(_), do: <<0xFF>>
+
+  defp get_registration_key do
+    case Application.get_env(:ztlp_ns, :registration_private_key) do
+      nil ->
+        {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
+        Application.put_env(:ztlp_ns, :registration_private_key, priv)
+        priv
+      priv ->
+        priv
+    end
+  end
 end

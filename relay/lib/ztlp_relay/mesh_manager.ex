@@ -5,9 +5,11 @@ defmodule ZtlpRelay.MeshManager do
   GenServer that manages the relay's mesh membership:
   - Bootstraps by sending RELAY_HELLO to configured bootstrap relays
   - Builds and maintains a consistent hash ring of known relays
-  - Runs periodic ping sweeps to update PathScores
+  - Runs periodic ping sweeps to update PathScores with real loss detection
   - Handles node joins (RELAY_HELLO) and departures (RELAY_LEAVE / timeout)
   - Provides routing: given a SessionID, returns the best relay
+  - Tracks per-relay probe state with sliding windows for loss/jitter
+  - Skips unreachable relays during routing
 
   Only active when mesh mode is enabled (ZTLP_RELAY_MESH=true).
   """
@@ -16,7 +18,17 @@ defmodule ZtlpRelay.MeshManager do
 
   require Logger
 
-  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay, NsClient}
+  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay}
+
+  # Sliding window size for loss/jitter computation
+  @probe_window_size 20
+
+  @type probe_state :: %{
+    seq: non_neg_integer(),
+    probes: %{non_neg_integer() => map()},
+    rtt_samples: [float()],
+    missed_sweeps: non_neg_integer()
+  }
 
   @type state :: %{
     node_id: binary(),
@@ -26,7 +38,8 @@ defmodule ZtlpRelay.MeshManager do
     mesh_port: non_neg_integer(),
     ping_interval: non_neg_integer(),
     scores: %{binary() => PathScore.metrics()},
-    ping_sent_at: %{binary() => integer()}
+    ping_sent_at: %{binary() => integer()},
+    probe_states: %{binary() => probe_state()}
   }
 
   # Client API
@@ -40,20 +53,26 @@ defmodule ZtlpRelay.MeshManager do
   end
 
   @doc """
-  Route a SessionID — returns the best relay for handling this session.
+  Route a SessionID - returns the best relay for handling this session.
 
-  Returns `{:ok, relay_info}` if a relay is found, or `{:local, :self}`
-  if this relay should handle it, or `:error` if no relays are available.
+  Returns `{:ok, relay_info}` for single-hop, `{:forward, next_hop, full_path}`
+  for multi-hop, `{:local, :self}` if this relay handles it, or `:error`.
+
+  Skips relays with `:unreachable` health state.
   """
-  @spec route(binary()) :: {:ok, map()} | {:local, :self} | :error
+  @spec route(binary()) :: {:ok, map()} | {:forward, map(), [map()]} | {:local, :self} | :error
   def route(session_id) do
     GenServer.call(__MODULE__, {:route, session_id})
   end
 
+  @doc "Forward a packet via multi-hop path with TTL."
+  @spec forward_multihop(binary(), binary(), [map()], non_neg_integer()) :: :ok | {:error, atom()}
+  def forward_multihop(inner_packet, sender_node_id, path, ttl \\ InterRelay.default_ttl()) do
+    GenServer.call(__MODULE__, {:forward_multihop, inner_packet, sender_node_id, path, ttl})
+  end
+
   @doc """
   Get the current mesh status.
-
-  Returns a map with ring info, known relays, scores, etc.
   """
   @spec get_mesh_status() :: map()
   def get_mesh_status do
@@ -85,9 +104,6 @@ defmodule ZtlpRelay.MeshManager do
     mesh_port = Keyword.get(opts, :mesh_listen_port, Config.mesh_listen_port())
     ping_interval = Keyword.get(opts, :ping_interval_ms, Config.ping_interval_ms())
     bootstrap_relays = Keyword.get(opts, :bootstrap_relays, Config.mesh_bootstrap_relays())
-    ns_server = Keyword.get(opts, :ns_server, Config.ns_server())
-    ns_discovery_zone = Keyword.get(opts, :ns_discovery_zone, Config.ns_discovery_zone())
-    ns_refresh_interval = Keyword.get(opts, :ns_refresh_interval_ms, Config.ns_refresh_interval_ms())
 
     # Open mesh UDP socket
     socket = case :gen_udp.open(mesh_port, [:binary, {:active, true}]) do
@@ -118,9 +134,7 @@ defmodule ZtlpRelay.MeshManager do
       ping_interval: ping_interval,
       scores: %{},
       ping_sent_at: %{},
-      ns_server: ns_server,
-      ns_discovery_zone: ns_discovery_zone,
-      ns_refresh_interval: ns_refresh_interval
+      probe_states: %{}
     }
 
     # Bootstrap: send HELLO to known relays
@@ -129,45 +143,57 @@ defmodule ZtlpRelay.MeshManager do
       schedule_ping_sweep(ping_interval)
     end
 
-    # NS-based discovery and self-registration
-    if socket && ns_server do
-      ns_register_self(node_id, ns_discovery_zone, socket)
-      send(self(), :ns_discover)
-      schedule_ns_refresh(ns_refresh_interval)
-    end
-
     {:ok, state}
   end
 
   @impl true
   def handle_call({:route, session_id}, _from, state) do
-    candidates = HashRing.get_nodes(state.ring, session_id, 3)
+    # Check forwarding table cache first
+    cached_path = try do
+      ForwardingTable.get(session_id)
+    catch
+      :error, :badarg -> nil
+    end
 
-    case candidates do
-      [] ->
-        {:reply, :error, state}
+    case cached_path do
+      path when is_list(path) and path != [] ->
+        registry_map = Map.new(RelayRegistry.get_all(), fn r -> {r.node_id, r} end)
+        first_hop_id = hd(path)
+        case Map.get(registry_map, first_hop_id) do
+          nil ->
+            try do ForwardingTable.delete(session_id) catch :error, :badarg -> :ok end
+            {:reply, do_route(session_id, state), state}
+          first_hop ->
+            full_path = Enum.map(path, fn nid -> Map.get(registry_map, nid, %{node_id: nid}) end)
+            {:reply, {:forward, first_hop, full_path}, state}
+        end
 
       _ ->
-        # Check if we're the primary candidate
-        first = hd(candidates)
+        {:reply, do_route(session_id, state), state}
+    end
+  end
 
-        if first.node_id == state.node_id do
-          {:reply, {:local, :self}, state}
-        else
-          # Try PathScore selection among candidates
-          case PathScore.select_best(candidates, state.scores) do
-            {:ok, best} ->
-              if best.node_id == state.node_id do
-                {:reply, {:local, :self}, state}
-              else
-                {:reply, {:ok, best}, state}
-              end
-
-            :error ->
-              # No scores available — use hash ring primary
-              {:reply, {:ok, first}, state}
+  def handle_call({:forward_multihop, inner_packet, sender_node_id, path, ttl}, _from, state) do
+    if state.socket == nil do
+      {:reply, {:error, :no_socket}, state}
+    else
+      path_node_ids = Enum.map(path, fn
+        %{node_id: nid} -> nid
+        nid when is_binary(nid) -> nid
+      end)
+      forward_data = InterRelay.encode_forward(sender_node_id, inner_packet, ttl: ttl, path: path_node_ids)
+      case path do
+        [first | _] ->
+          case first do
+            %{address: {dest_ip, dest_port}} ->
+              :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
+              {:reply, :ok, state}
+            _ ->
+              {:reply, {:error, :no_address}, state}
           end
-        end
+        [] ->
+          {:reply, {:error, :empty_path}, state}
+      end
     end
   end
 
@@ -221,18 +247,6 @@ defmodule ZtlpRelay.MeshManager do
     {:noreply, state}
   end
 
-  def handle_info(:ns_discover, state) do
-    state = do_ns_discovery(state)
-    {:noreply, state}
-  end
-
-  def handle_info(:ns_refresh, state) do
-    state = do_ns_discovery(state)
-    ns_register_self(state.node_id, state.ns_discovery_zone, state.socket)
-    schedule_ns_refresh(state.ns_refresh_interval)
-    {:noreply, state}
-  end
-
   def handle_info(_msg, state) do
     {:noreply, state}
   end
@@ -250,7 +264,6 @@ defmodule ZtlpRelay.MeshManager do
   defp handle_decoded_message({:relay_hello, sender_node_id, _ts, payload}, _sender, state) do
     Logger.debug("Received RELAY_HELLO from #{inspect(sender_node_id)}")
 
-    # Register the new relay
     relay_info = %{
       node_id: sender_node_id,
       address: payload.address,
@@ -258,10 +271,8 @@ defmodule ZtlpRelay.MeshManager do
     }
     RelayRegistry.register(relay_info)
 
-    # Add to hash ring
     ring = HashRing.add_node(state.ring, relay_info)
 
-    # Send HELLO_ACK back
     if state.socket do
       our_info = %{
         node_id: state.node_id,
@@ -291,84 +302,115 @@ defmodule ZtlpRelay.MeshManager do
     %{state | ring: ring}
   end
 
-  defp handle_decoded_message({:relay_ping, sender_node_id, _ts, _payload}, _sender, state) do
-    # Respond with PONG containing our metrics
+  defp handle_decoded_message({:relay_ping, sender_node_id, _ts, payload}, _sender, state) do
+    seq = Map.get(payload, :seq, 0)
+
     if state.socket do
       metrics = %{
         active_sessions: ZtlpRelay.SessionRegistry.count(),
         max_sessions: Config.max_sessions(),
         uptime_seconds: div(System.monotonic_time(:second), 1)
       }
-      pong_data = InterRelay.encode_pong(state.node_id, metrics)
+      pong_data = InterRelay.encode_pong(state.node_id, metrics, seq)
 
-      # Look up the sender's address from registry
       case RelayRegistry.lookup(sender_node_id) do
         {:ok, relay} ->
           {ip, port} = relay.address
           :gen_udp.send(state.socket, ip, port, pong_data)
 
         :error ->
-          Logger.debug("Cannot respond to PING — unknown relay #{inspect(sender_node_id)}")
+          Logger.debug("Cannot respond to PING - unknown relay #{inspect(sender_node_id)}")
       end
     end
 
-    # Touch the sender in registry
     RelayRegistry.touch(sender_node_id)
     state
   end
 
   defp handle_decoded_message({:relay_pong, sender_node_id, _ts, payload}, _sender, state) do
-    # Update PathScore metrics for this relay
     now = System.monotonic_time(:millisecond)
+    echo_seq = Map.get(payload, :echo_seq, 0)
 
-    # Calculate RTT from when we sent the ping
-    rtt = case Map.get(state.ping_sent_at, sender_node_id) do
-      nil -> 100.0  # default if we don't know when we pinged
-      sent_at -> max(now - sent_at, 1) / 1.0
+    probe_state = Map.get(state.probe_states, sender_node_id, new_probe_state())
+
+    {rtt, probe_state} = case Map.get(probe_state.probes, echo_seq) do
+      %{sent_at: sent_at, acked: false} ->
+        rtt = max(now - sent_at, 1) / 1.0
+        probes = Map.put(probe_state.probes, echo_seq, %{sent_at: sent_at, acked: true})
+        {rtt, %{probe_state | probes: probes}}
+
+      _ ->
+        fallback_rtt = case Map.get(state.ping_sent_at, sender_node_id) do
+          nil -> 100.0
+          sent_at -> max(now - sent_at, 1) / 1.0
+        end
+        {fallback_rtt, probe_state}
     end
+
+    probe_state = %{probe_state | missed_sweeps: 0}
+
+    rtt_samples = Enum.take([rtt | probe_state.rtt_samples], @probe_window_size)
+    probe_state = %{probe_state | rtt_samples: rtt_samples}
+
+    loss_rate = compute_loss_rate(probe_state)
+    jitter_ms = PathScore.compute_jitter(rtt_samples)
 
     load_factor = PathScore.compute_load_factor(
       payload.active_sessions,
       payload.max_sessions
     )
 
-    # Update existing metrics with EMA for RTT
-    old_metrics = Map.get(state.scores, sender_node_id, %{rtt_ms: rtt, loss_rate: 0.0, load_factor: 0.0})
-    new_rtt = PathScore.update_rtt(old_metrics.rtt_ms, rtt)
+    old_metrics = Map.get(state.scores, sender_node_id,
+      %{rtt_ms: rtt, loss_rate: 0.0, load_factor: 0.0, jitter_ms: 0.0})
+    old_rtt = Map.get(old_metrics, :rtt_ms, rtt)
+    new_rtt = PathScore.update_rtt(old_rtt, rtt)
 
     metrics = %{
       rtt_ms: new_rtt,
-      loss_rate: 0.0,  # Updated when pongs are missed
-      load_factor: load_factor
+      loss_rate: loss_rate,
+      load_factor: load_factor,
+      jitter_ms: jitter_ms
     }
 
     RelayRegistry.update_metrics(sender_node_id, metrics)
     RelayRegistry.touch(sender_node_id)
 
+    RelayRegistry.update_health(sender_node_id,
+      loss_rate: loss_rate,
+      rtt_ms: new_rtt,
+      missed_sweeps: 0,
+      pong_received: true
+    )
+
     ping_sent_at = Map.delete(state.ping_sent_at, sender_node_id)
-    %{state | scores: Map.put(state.scores, sender_node_id, metrics), ping_sent_at: ping_sent_at}
+    probe_states = Map.put(state.probe_states, sender_node_id, probe_state)
+
+    %{state |
+      scores: Map.put(state.scores, sender_node_id, metrics),
+      ping_sent_at: ping_sent_at,
+      probe_states: probe_states
+    }
   end
 
   defp handle_decoded_message({:relay_leave, sender_node_id, _ts, _payload}, _sender, state) do
     Logger.info("Relay #{inspect(sender_node_id)} leaving mesh")
 
     RelayRegistry.unregister(sender_node_id)
+    RelayRegistry.remove_health(sender_node_id)
     ring = HashRing.remove_node(state.ring, sender_node_id)
     scores = Map.delete(state.scores, sender_node_id)
+    probe_states = Map.delete(state.probe_states, sender_node_id)
 
-    %{state | ring: ring, scores: scores}
+    %{state | ring: ring, scores: scores, probe_states: probe_states}
   end
 
   defp handle_decoded_message({:relay_forward, _sender_node_id, _ts, %{inner_packet: inner}}, _sender, state) do
-    # Forward the inner packet to the UdpListener for processing
-    # This is handled by the caller (UdpListener) not here
     Logger.debug("Received RELAY_FORWARD with #{byte_size(inner)} byte inner packet")
     state
   end
 
   defp handle_decoded_message({:relay_session_sync, _sender_node_id, _ts, payload}, _sender, state) do
     Logger.debug("Received SESSION_SYNC for #{inspect(payload.session_id)}")
-    # Register the session locally for forwarding
     ZtlpRelay.SessionRegistry.register_session(
       payload.session_id,
       payload.peer_a,
@@ -405,30 +447,132 @@ defmodule ZtlpRelay.MeshManager do
     end)
   end
 
-  # Periodic ping sweep
+  # Periodic ping sweep with probe tracking
 
   defp do_ping_sweep(state) do
     relays = RelayRegistry.get_all()
     now = System.monotonic_time(:millisecond)
 
-    ping_data = InterRelay.encode_ping(state.node_id)
+    loss_threshold = now - (state.ping_interval * 2)
+    probe_states = detect_losses(state.probe_states, loss_threshold)
 
-    ping_sent_at =
-      Enum.reduce(relays, state.ping_sent_at, fn relay, acc ->
+    probe_states = Enum.reduce(relays, probe_states, fn relay, ps_acc ->
+      if relay.node_id != state.node_id do
+        probe_st = Map.get(ps_acc, relay.node_id, new_probe_state())
+        last_seq = probe_st.seq
+        last_acked = case Map.get(probe_st.probes, last_seq) do
+          %{acked: true} -> true
+          _ -> last_seq == 0
+        end
+
+        if not last_acked and last_seq > 0 do
+          missed = probe_st.missed_sweeps + 1
+          probe_st = %{probe_st | missed_sweeps: missed}
+          loss_rate = compute_loss_rate(probe_st)
+          old_rtt = case Map.get(state.scores, relay.node_id) do
+            %{rtt_ms: rtt} -> rtt
+            _ -> 0.0
+          end
+
+          RelayRegistry.update_health(relay.node_id,
+            loss_rate: loss_rate,
+            rtt_ms: old_rtt,
+            missed_sweeps: missed,
+            pong_received: false
+          )
+
+          Map.put(ps_acc, relay.node_id, probe_st)
+        else
+          ps_acc
+        end
+      else
+        ps_acc
+      end
+    end)
+
+    {ping_sent_at, probe_states} =
+      Enum.reduce(relays, {state.ping_sent_at, probe_states}, fn relay, {psa, ps} ->
         if relay.node_id != state.node_id and state.socket != nil do
+          probe_st = Map.get(ps, relay.node_id, new_probe_state())
+          new_seq = probe_st.seq + 1
+
+          ping_data = InterRelay.encode_ping(state.node_id, new_seq)
           {ip, port} = relay.address
           :gen_udp.send(state.socket, ip, port, ping_data)
-          Map.put(acc, relay.node_id, now)
+
+          probes = Map.put(probe_st.probes, new_seq, %{sent_at: now, acked: false})
+          probes = trim_probes(probes, new_seq, @probe_window_size)
+          probe_st = %{probe_st | seq: new_seq, probes: probes}
+
+          {Map.put(psa, relay.node_id, now), Map.put(ps, relay.node_id, probe_st)}
         else
-          acc
+          {psa, ps}
         end
       end)
 
-    %{state | ping_sent_at: ping_sent_at}
+    scores = Enum.reduce(probe_states, state.scores, fn {node_id, probe_st}, scores_acc ->
+      loss_rate = compute_loss_rate(probe_st)
+      jitter_ms = PathScore.compute_jitter(probe_st.rtt_samples)
+
+      case Map.get(scores_acc, node_id) do
+        nil -> scores_acc
+        metrics ->
+          updated = Map.merge(metrics, %{loss_rate: loss_rate, jitter_ms: jitter_ms})
+          Map.put(scores_acc, node_id, updated)
+      end
+    end)
+
+    %{state | ping_sent_at: ping_sent_at, probe_states: probe_states, scores: scores}
   end
 
   defp schedule_ping_sweep(interval) do
     Process.send_after(self(), :ping_sweep, interval)
+  end
+
+  # Probe state helpers
+
+  defp new_probe_state do
+    %{
+      seq: 0,
+      probes: %{},
+      rtt_samples: [],
+      missed_sweeps: 0
+    }
+  end
+
+  defp detect_losses(probe_states, loss_threshold) do
+    Enum.into(probe_states, %{}, fn {node_id, probe_st} ->
+      probes = Enum.into(probe_st.probes, %{}, fn {seq, probe} ->
+        if probe.acked == false and probe.sent_at < loss_threshold do
+          {seq, %{probe | acked: :lost}}
+        else
+          {seq, probe}
+        end
+      end)
+      {node_id, %{probe_st | probes: probes}}
+    end)
+  end
+
+  defp trim_probes(probes, current_seq, window_size) do
+    min_seq = max(current_seq - window_size + 1, 1)
+    probes
+    |> Enum.filter(fn {seq, _} -> seq >= min_seq end)
+    |> Enum.into(%{})
+  end
+
+  defp compute_loss_rate(%{probes: probes}) when map_size(probes) == 0, do: 0.0
+
+  defp compute_loss_rate(%{probes: probes}) do
+    total = map_size(probes)
+    lost = Enum.count(probes, fn {_seq, p} -> p.acked == :lost end)
+    pending = Enum.count(probes, fn {_seq, p} -> p.acked == false end)
+    resolved = total - pending
+
+    if resolved > 0 do
+      lost / resolved
+    else
+      0.0
+    end
   end
 
   # Address parsing helpers
@@ -456,59 +600,4 @@ defmodule ZtlpRelay.MeshManager do
         end
     end
   end
-
-  # ── NS Discovery ──────────────────────────────────────────────────
-
-  defp do_ns_discovery(state) do
-    case NsClient.discover_relays(state.ns_discovery_zone) do
-      {:ok, records} ->
-        Enum.each(records, fn record -> process_ns_relay_record(record, state) end)
-        state
-      {:error, _reason} -> state
-    end
-  end
-
-  defp process_ns_relay_record(record, state) do
-    data = record.data
-    node_id_hex = data[:node_id] || data["node_id"]
-    endpoints = data[:endpoints] || data["endpoints"] || []
-    if is_nil(node_id_hex) or endpoints == [], do: :ok, else:
-      case Base.decode16(node_id_hex, case: :mixed) do
-        {:ok, node_id} when node_id != state.node_id ->
-          case parse_first_endpoint(endpoints) do
-            {:ok, {host, port}} ->
-              case resolve_host(host) do
-                {:ok, ip} ->
-                  RelayRegistry.register(%{node_id: node_id, address: {ip, port}, role: :all})
-                  if state.socket do
-                    hello = InterRelay.encode_hello(%{node_id: state.node_id,
-                      address: {Config.listen_address(), Config.listen_port()},
-                      role: state.role, capabilities: 0})
-                    :gen_udp.send(state.socket, ip, port, hello)
-                  end
-                _ -> :ok
-              end
-            _ -> :ok
-          end
-        _ -> :ok
-      end
-  end
-
-  defp parse_first_endpoint([ep | _]) when is_binary(ep), do: parse_relay_address(ep)
-  defp parse_first_endpoint(_), do: {:error, :no_endpoints}
-
-  defp ns_register_self(node_id, zone, socket) do
-    port = case :inet.port(socket) do
-      {:ok, p} -> p
-      _ -> Config.mesh_listen_port()
-    end
-    info = %{node_id: node_id, endpoints: ["127.0.0.1:\#{port}"],
-             capacity: Config.max_sessions(), region: Config.relay_region()}
-    NsClient.register_self(zone, info)
-  end
-
-  defp schedule_ns_refresh(interval) do
-    Process.send_after(self(), :ns_refresh, interval)
-  end
-
 end

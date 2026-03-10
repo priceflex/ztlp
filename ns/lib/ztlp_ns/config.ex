@@ -11,6 +11,8 @@ defmodule ZtlpNs.Config do
     Use 0 for OS-assigned port (useful in tests and dev).
   - `:max_records` — Maximum records in the store (default: 100_000).
   - `:bootstrap_urls` — List of HTTPS URLs for bootstrap discovery.
+  - `:storage_mode` — Mnesia storage mode (`:disc_copies` or `:ram_copies`).
+  - `:mnesia_dir` — Directory for Mnesia data files.
   """
 
   @doc "UDP port for the namespace query server."
@@ -28,6 +30,39 @@ defmodule ZtlpNs.Config do
     case System.get_env("ZTLP_NS_MAX_RECORDS") do
       nil -> Application.get_env(:ztlp_ns, :max_records, 100_000)
       n -> String.to_integer(n)
+    end
+  end
+
+  @doc """
+  Mnesia storage mode for the record store.
+
+  - `:disc_copies` (default) — RAM + disk persistence, survives restarts
+  - `:ram_copies` — RAM only, faster but volatile (used in tests)
+
+  Set via `ZTLP_NS_STORAGE_MODE=ram` or `ZTLP_NS_STORAGE_MODE=disc`,
+  or `config :ztlp_ns, :storage_mode, :ram_copies`.
+  """
+  @spec storage_mode() :: :ram_copies | :disc_copies
+  def storage_mode do
+    case System.get_env("ZTLP_NS_STORAGE_MODE") do
+      "ram" -> :ram_copies
+      "disc" -> :disc_copies
+      nil -> Application.get_env(:ztlp_ns, :storage_mode, :disc_copies)
+      _ -> :disc_copies
+    end
+  end
+
+  @doc """
+  Directory where Mnesia stores its data files.
+
+  Defaults to `Mnesia.nonode@nohost` (or equivalent) in the CWD.
+  Override with `ZTLP_NS_MNESIA_DIR` env var.
+  """
+  @spec mnesia_dir() :: charlist() | nil
+  def mnesia_dir do
+    case System.get_env("ZTLP_NS_MNESIA_DIR") do
+      nil -> Application.get_env(:ztlp_ns, :mnesia_dir, nil)
+      dir -> String.to_charlist(dir)
     end
   end
 

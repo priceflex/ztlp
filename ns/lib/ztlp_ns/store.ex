@@ -1,6 +1,6 @@
 defmodule ZtlpNs.Store do
   @moduledoc """
-  ETS-backed record store for ZTLP-NS.
+  Mnesia-backed record store for ZTLP-NS.
 
   The store enforces ZTLP-NS's core invariants:
 
@@ -12,20 +12,19 @@ defmodule ZtlpNs.Store do
      than an existing record for the same name+type is rejected.
   4. **TTL expiration** — expired records are not returned by lookups.
 
-  ## ETS Table Layout
+  ## Mnesia Table Layout
 
   The main records table uses `{name, type}` as the key:
-  ```
-  :ztlp_ns_records  — {{name, type}, %Record{}}
-  ```
+
+      :ztlp_ns_records  — {key :: {name, type}, record :: %Record{}}
 
   The revocation table uses node_id as the key:
-  ```
-  :ztlp_ns_revoked  — {node_id_hex, %Record{}}
-  ```
 
-  Both tables are `:public` with `read_concurrency: true` so lookups
-  bypass the GenServer for maximum throughput.
+      :ztlp_ns_revoked  — {id :: String.t(), record :: %Record{}}
+
+  Both tables use the configured storage mode (`:disc_copies` for
+  production persistence, `:ram_copies` for fast tests). With
+  `:disc_copies`, records survive process crashes and node restarts.
   """
 
   use GenServer
@@ -67,16 +66,16 @@ defmodule ZtlpNs.Store do
   # Checks serial monotonicity and capacity before inserting.
   defp do_insert(%Record{} = record) do
     # Invariant 3: Serial numbers must be monotonic
-    case :ets.lookup(@records_table, {record.name, record.type}) do
-      [{{_, _}, existing}] when existing.serial >= record.serial ->
+    case :mnesia.dirty_read(@records_table, {record.name, record.type}) do
+      [{@records_table, _key, existing}] when existing.serial >= record.serial ->
         {:error, :stale_serial}
       _ ->
         # Check capacity
-        if :ets.info(@records_table, :size) >= ZtlpNs.Config.max_records() do
+        if :mnesia.table_info(@records_table, :size) >= ZtlpNs.Config.max_records() do
           {:error, :store_full}
         else
           # Insert the record
-          :ets.insert(@records_table, {{record.name, record.type}, record})
+          :mnesia.dirty_write({@records_table, {record.name, record.type}, record})
 
           # If this is a revocation record, update the revocation set
           if record.type == :revoke do
@@ -103,12 +102,12 @@ defmodule ZtlpNs.Store do
     if revoked?(name) do
       {:error, :revoked}
     else
-      case :ets.lookup(@records_table, {name, type}) do
-        [{{_, _}, record}] ->
+      case :mnesia.dirty_read(@records_table, {name, type}) do
+        [{@records_table, _key, record}] ->
           # Invariant 4: Check TTL expiration
           if Record.expired?(record) do
             # Clean up expired record
-            :ets.delete(@records_table, {name, type})
+            :mnesia.dirty_delete(@records_table, {name, type})
             :not_found
           else
             {:ok, record}
@@ -122,13 +121,13 @@ defmodule ZtlpNs.Store do
   @doc """
   Check if a node ID (hex string) has been revoked.
 
-  Scans the revocation table for any ZTLP_REVOKE record that includes
+  Checks the revocation table for any ZTLP_REVOKE record that includes
   this ID in its `revoked_ids` list.
   """
   @spec revoked?(String.t()) :: boolean()
   def revoked?(name_or_id) when is_binary(name_or_id) do
-    case :ets.lookup(@revoked_table, name_or_id) do
-      [{_, _record}] -> true
+    case :mnesia.dirty_read(@revoked_table, name_or_id) do
+      [{@revoked_table, _id, _record}] -> true
       [] -> false
     end
   end
@@ -136,28 +135,28 @@ defmodule ZtlpNs.Store do
   @doc "List all records in the store as `{name, type, record}` tuples."
   @spec list() :: [{String.t(), Record.record_type(), Record.t()}]
   def list do
-    :ets.tab2list(@records_table)
-    |> Enum.map(fn {{name, type}, rec} -> {name, type, rec} end)
+    :mnesia.dirty_match_object({@records_table, :_, :_})
+    |> Enum.map(fn {@records_table, {name, type}, rec} -> {name, type, rec} end)
   end
 
   @doc "List all revoked IDs."
   @spec list_revoked() :: [String.t()]
   def list_revoked do
-    :ets.tab2list(@revoked_table)
-    |> Enum.map(fn {id, _rec} -> id end)
+    :mnesia.dirty_match_object({@revoked_table, :_, :_})
+    |> Enum.map(fn {@revoked_table, id, _rec} -> id end)
   end
 
   @doc "Get the number of records in the store."
   @spec count() :: non_neg_integer()
   def count do
-    :ets.info(@records_table, :size)
+    :mnesia.table_info(@records_table, :size)
   end
 
   @doc "Remove all records and revocations (useful for testing)."
   @spec clear() :: :ok
   def clear do
-    :ets.delete_all_objects(@records_table)
-    :ets.delete_all_objects(@revoked_table)
+    {:atomic, :ok} = :mnesia.clear_table(@records_table)
+    {:atomic, :ok} = :mnesia.clear_table(@revoked_table)
     :ok
   end
 
@@ -165,18 +164,42 @@ defmodule ZtlpNs.Store do
 
   @impl true
   def init(:ok) do
-    :ets.new(@records_table, [:named_table, :set, :public, read_concurrency: true])
-    :ets.new(@revoked_table, [:named_table, :set, :public, read_concurrency: true])
+    ensure_tables()
     {:ok, %{}}
   end
 
   # ── Private helpers ────────────────────────────────────────────────
 
+  # Ensure Mnesia tables exist. If they already exist (e.g., after restart),
+  # this is a no-op — existing data is preserved on disk.
+  defp ensure_tables do
+    storage_mode = ZtlpNs.Config.storage_mode()
+
+    create_table(@records_table,
+      [{:attributes, [:key, :record]}, {:type, :set}, {storage_mode, [node()]}]
+    )
+
+    create_table(@revoked_table,
+      [{:attributes, [:id, :record]}, {:type, :set}, {storage_mode, [node()]}]
+    )
+
+    # Wait for tables to be loaded (important on restart with disc_copies)
+    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table], 10_000)
+  end
+
+  defp create_table(name, opts) do
+    case :mnesia.create_table(name, opts) do
+      {:atomic, :ok} -> :ok
+      {:aborted, {:already_exists, ^name}} -> :ok
+      {:aborted, reason} -> raise "Failed to create Mnesia table #{name}: #{inspect(reason)}"
+    end
+  end
+
   # When a ZTLP_REVOKE record is inserted, extract all revoked IDs
   # and add them to the revocation table for O(1) lookup.
   defp index_revocations(%Record{type: :revoke, data: %{revoked_ids: ids}} = record) do
     Enum.each(ids, fn id ->
-      :ets.insert(@revoked_table, {id, record})
+      :mnesia.dirty_write({@revoked_table, id, record})
     end)
   end
 

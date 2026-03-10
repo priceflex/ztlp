@@ -68,12 +68,9 @@ jobs:
 
       - name: Build release binaries
         working-directory: proto
+        shell: bash
         run: |
-          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} \
-            --bin ztlp \
-            --bin ztlp-inspect \
-            --bin ztlp-load \
-            --bin ztlp-fuzz
+          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --bin ztlp --bin ztlp-inspect --bin ztlp-load --bin ztlp-fuzz
 
       - name: Prepare release directory
         shell: bash

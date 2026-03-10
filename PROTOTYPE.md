@@ -188,7 +188,7 @@ No external Elixir dependencies — uses only OTP and Erlang's `:crypto` module.
 
 ## Phase 1: Rust Client
 
-**Location:** `ztlp-proto/`
+**Location:** `proto/`
 
 ### Build
 
@@ -236,7 +236,7 @@ cargo test test_replay_window        # Tests matching a pattern
 ### Project Structure
 
 ```
-ztlp-proto/
+proto/
 ├── src/
 │   ├── lib.rs           # Crate root — module re-exports
 │   ├── identity.rs      # NodeID generation, X25519/Ed25519 keypair, JSON persistence
@@ -302,7 +302,7 @@ ztlp-proto/
 
 ## Phase 2: Elixir Relay
 
-**Location:** `ztlp-relay/`
+**Location:** `relay/`
 
 ### Build
 
@@ -347,7 +347,7 @@ mix test test/ztlp_relay/integration_test.exs  # Just integration tests
 ### Project Structure
 
 ```
-ztlp-relay/
+relay/
 ├── lib/
 │   ├── ztlp_relay.ex               # Module constants (magic, version)
 │   └── ztlp_relay/

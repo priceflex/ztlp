@@ -1,0 +1,32 @@
+[package]
+name = "ztlp-proto"
+version = "0.1.0"
+edition = "2021"
+description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+snow = "0.9"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+blake2 = "0.10"
+
+[[bin]]
+name = "ztlp-node"
+path = "src/bin/ztlp-node.rs"
+
+[[bin]]
+name = "ztlp-demo"
+path = "src/bin/ztlp-demo.rs"
+
+[[bin]]
+name = "ztlp-relay-demo"
+path = "src/bin/ztlp-relay-demo.rs"

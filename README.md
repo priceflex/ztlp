@@ -5,7 +5,7 @@
 ---
 
 **Author:** Steven Price  
-**Organization:** ZTLP.org  
+**Organization:** Tech Rockstar Academy / ZTLP.org  
 **Location:** Monrovia, CA  
 **Status:** Internet-Draft — This document is intended for public discussion. Distribution is unlimited.  
 **Note:** This document is not an IETF RFC. It is a working concept specification.  
@@ -4328,6 +4328,21 @@ This approach allows ZTLP to provide strong identity verification,
 session admission control, and encrypted routing while preserving
 compatibility with the vast ecosystem of existing Internet applications.
 
+
+---
+
+## Tech Rockstar Academy
+
+Tech Rockstar Academy is a research and development initiative focused on advancing the next generation of infrastructure, networking, and security technologies. ZTLP is the first project released through the academy.
+
+## Contributors / Research Team
+
+- **Steven Price** — Architecture
+- **Contributors** — Implementation, research, testing
+
+## Acknowledgments
+
+> ZTLP is being developed as part of the Tech Rockstar Academy research initiative. This project represents ongoing work in protocol-level security and zero trust networking. We welcome contributions from researchers, engineers, and security professionals interested in advancing these goals.
 
 ---
 

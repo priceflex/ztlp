@@ -19,3 +19,7 @@ By submitting a pull request or other contribution to this project, you agree to
 ## License
 
 All contributions are licensed under the [Apache License 2.0](LICENSE).
+
+## Trademark Notice
+
+ZTLP and Zero Trust Layer Protocol are trademarks of Steven Price. Use of the ZTLP name or logo in any context must not imply endorsement by the author or the project without prior written permission.

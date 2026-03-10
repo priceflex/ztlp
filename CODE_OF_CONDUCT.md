@@ -1,4 +1,9 @@
-# Contributor Covenant Code of Conduct
+# Code of Conduct
+
+ZTLP is an open research project developed through the Tech Rockstar Academy initiative.
+To ensure a welcoming and professional community, this project follows the Contributor Covenant Code of Conduct.
+
+---
 
 ## Our Pledge
 

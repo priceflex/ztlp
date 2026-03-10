@@ -25,8 +25,8 @@ afterthought for endpoints and applications to solve individually. ZTLP
 ZTLP defines a secure, identity-first network overlay that enforces
 cryptographic authentication before any network state is allocated.
 Invalid packets are rejected in a three-layer pipeline - Magic byte
-check, SessionID allowlist lookup, and HeaderAuthTag AEAD verification
-- with each layer progressively more expensive but handling a
+check, SessionID allowlist lookup, and HeaderAuthTag AEAD verification 
+with each layer progressively more expensive but handling a
 progressively smaller fraction of attack traffic. The vast majority of
 flood traffic is discarded at the first two layers with no cryptographic
 work performed and no session state created. This makes volumetric DDoS

@@ -139,31 +139,31 @@ jobs:
       - name: Generate release notes
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          cat > release/RELEASE_NOTES.md << 'EOF'
+          cat > release/RELEASE_NOTES.md << EOF
           ## ZTLP ${VERSION}
 
           ### Included Binaries
 
           | Binary | Description |
           |--------|-------------|
-          | `ztlp` | Unified CLI — keygen, connect, listen, relay, ns, gateway, inspect, ping, status |
-          | `ztlp-inspect` | Packet decoder — hex, file, or stdin input with pretty/JSON/compact output |
-          | `ztlp-load` | Load generator — pipeline benchmarks, relay/gateway/NS stress testing |
-          | `ztlp-fuzz` | Protocol fuzzer — 8 mutation strategies, local and network modes |
+          | \`ztlp\` | Unified CLI — keygen, connect, listen, relay, ns, gateway, inspect, ping, status |
+          | \`ztlp-inspect\` | Packet decoder — hex, file, or stdin input with pretty/JSON/compact output |
+          | \`ztlp-load\` | Load generator — pipeline benchmarks, relay/gateway/NS stress testing |
+          | \`ztlp-fuzz\` | Protocol fuzzer — 8 mutation strategies, local and network modes |
 
           ### Platforms
 
           | Archive | OS | Arch |
           |---------|----|------|
-          | `ztlp-*-x86_64-unknown-linux-gnu.tar.gz` | Linux | x86_64 |
-          | `ztlp-*-aarch64-unknown-linux-gnu.tar.gz` | Linux | ARM64 |
-          | `ztlp-*-x86_64-apple-darwin.tar.gz` | macOS | Intel |
-          | `ztlp-*-aarch64-apple-darwin.tar.gz` | macOS | Apple Silicon |
-          | `ztlp-*-x86_64-pc-windows-msvc.zip` | Windows | x86_64 |
+          | \`ztlp-*-x86_64-unknown-linux-gnu.tar.gz\` | Linux | x86_64 |
+          | \`ztlp-*-aarch64-unknown-linux-gnu.tar.gz\` | Linux | ARM64 |
+          | \`ztlp-*-x86_64-apple-darwin.tar.gz\` | macOS | Intel |
+          | \`ztlp-*-aarch64-apple-darwin.tar.gz\` | macOS | Apple Silicon |
+          | \`ztlp-*-x86_64-pc-windows-msvc.zip\` | Windows | x86_64 |
 
           ### Quick Start
 
-          ```bash
+          \`\`\`bash
           # Download and extract (Linux x86_64 example)
           tar xzf ztlp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
           cd ztlp-${VERSION}-x86_64-unknown-linux-gnu
@@ -173,13 +173,13 @@ jobs:
 
           # Connect to a peer
           ./ztlp connect peer.example.com:23095 --key ~/.ztlp/identity.json
-          ```
+          \`\`\`
 
           ### Verification
 
-          ```bash
+          \`\`\`bash
           sha256sum -c SHA256SUMS.txt
-          ```
+          \`\`\`
           EOF
 
       - name: Create GitHub Release

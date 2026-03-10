@@ -159,11 +159,11 @@ async fn main() {
 
     println!(
         "  Send key (A→B): {}…",
-        &hex::encode(&a_session.send_key)[..16]
+        &hex::encode(a_session.send_key)[..16]
     );
     println!(
         "  Recv key (B→A): {}…",
-        &hex::encode(&b_session.send_key)[..16]
+        &hex::encode(b_session.send_key)[..16]
     );
 
     // Register sessions in both pipelines

@@ -92,7 +92,7 @@ impl TransportNode {
 
         let encrypted = cipher
             .encrypt(nonce, plaintext)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         // Build the data header
         let mut header = DataHeader::new(session_id, seq);

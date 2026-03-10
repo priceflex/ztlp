@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = vec![0u8; 2048];
         match timeout(Duration::from_secs(2), sock_b.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
-                if &buf[..len] == &pkt[..] {
+                if buf[..len] == pkt[..] {
                     eprintln!("[interop]   ✓ B received exact packet from {} ({} bytes)", from, len);
                     passed += 1;
                 } else {
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = vec![0u8; 2048];
         match timeout(Duration::from_secs(2), sock_a.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
-                if &buf[..len] == &pkt[..] {
+                if buf[..len] == pkt[..] {
                     eprintln!("[interop]   ✓ A received exact packet from {} ({} bytes)", from, len);
                     passed += 1;
                 } else {
@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = vec![0u8; 2048];
         match timeout(Duration::from_secs(2), sock_b.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
-                if &buf[..len] == &pkt[..] {
+                if buf[..len] == pkt[..] {
                     eprintln!("[interop]   ✓ B received handshake-format packet from {} ({} bytes)", from, len);
                     passed += 1;
                 } else {
@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut buf = vec![0u8; 2048];
             match timeout(Duration::from_millis(500), sock_b.recv_from(&mut buf)).await {
-                Ok(Ok((len, _))) if &buf[..len] == &pkt[..] => {
+                Ok(Ok((len, _))) if buf[..len] == pkt[..] => {
                     seq_passed += 1;
                 }
                 _ => {}

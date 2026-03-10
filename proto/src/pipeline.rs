@@ -154,6 +154,7 @@ impl Pipeline {
     /// Packet type discrimination uses the HdrLen field (12 bits at offset 2–3):
     /// - Handshake header = 24 words (95 bytes → rounded to 24 × 4-byte words)
     /// - Data header = 11 words (42 bytes → rounded to 11 × 4-byte words)
+    ///
     /// This is reliable because each header type sets HdrLen to a fixed value.
     pub fn layer2_session_check(&self, data: &[u8]) -> AdmissionResult {
         // Need at least 4 bytes to read Magic + VerHdrLen

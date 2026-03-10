@@ -30,3 +30,7 @@ path = "src/bin/ztlp-demo.rs"
 [[bin]]
 name = "ztlp-relay-demo"
 path = "src/bin/ztlp-relay-demo.rs"
+
+[[bin]]
+name = "ztlp-bench"
+path = "src/bin/ztlp-bench.rs"

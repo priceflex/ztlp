@@ -10,7 +10,10 @@ defmodule ZtlpRelay.Config do
   """
   @spec listen_port() :: non_neg_integer()
   def listen_port do
-    Application.get_env(:ztlp_relay, :listen_port, 23095)
+    case System.get_env("ZTLP_RELAY_PORT") do
+      nil -> Application.get_env(:ztlp_relay, :listen_port, 23095)
+      port -> String.to_integer(port)
+    end
   end
 
   @doc """
@@ -26,7 +29,10 @@ defmodule ZtlpRelay.Config do
   """
   @spec session_timeout_ms() :: non_neg_integer()
   def session_timeout_ms do
-    Application.get_env(:ztlp_relay, :session_timeout_ms, 300_000)
+    case System.get_env("ZTLP_RELAY_SESSION_TIMEOUT_MS") do
+      nil -> Application.get_env(:ztlp_relay, :session_timeout_ms, 300_000)
+      ms -> String.to_integer(ms)
+    end
   end
 
   @doc """
@@ -34,6 +40,9 @@ defmodule ZtlpRelay.Config do
   """
   @spec max_sessions() :: non_neg_integer()
   def max_sessions do
-    Application.get_env(:ztlp_relay, :max_sessions, 10_000)
+    case System.get_env("ZTLP_RELAY_MAX_SESSIONS") do
+      nil -> Application.get_env(:ztlp_relay, :max_sessions, 10_000)
+      n -> String.to_integer(n)
+    end
   end
 end

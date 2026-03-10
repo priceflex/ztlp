@@ -16,13 +16,19 @@ defmodule ZtlpNs.Config do
   @doc "UDP port for the namespace query server."
   @spec port() :: non_neg_integer()
   def port do
-    Application.get_env(:ztlp_ns, :port, 23096)
+    case System.get_env("ZTLP_NS_PORT") do
+      nil -> Application.get_env(:ztlp_ns, :port, 23096)
+      port -> String.to_integer(port)
+    end
   end
 
   @doc "Maximum records allowed in the store."
   @spec max_records() :: non_neg_integer()
   def max_records do
-    Application.get_env(:ztlp_ns, :max_records, 100_000)
+    case System.get_env("ZTLP_NS_MAX_RECORDS") do
+      nil -> Application.get_env(:ztlp_ns, :max_records, 100_000)
+      n -> String.to_integer(n)
+    end
   end
 
   @doc "HTTPS URLs for bootstrap relay discovery (Step 1 of NIP)."

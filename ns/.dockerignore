@@ -1,0 +1,8 @@
+_build/
+deps/
+.git
+.gitignore
+*.md
+!README.md
+.dockerignore
+Dockerfile

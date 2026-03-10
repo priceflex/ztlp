@@ -1,0 +1,2162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZTLP Documentation — Zero Trust Layer Protocol</title>
+  <meta name="description" content="Comprehensive documentation for ZTLP — a secure, identity-first network overlay protocol with three-layer DDoS-resistant admission pipeline." />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Mermaid -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+
+  <!-- Prism.js for syntax highlighting -->
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-rust.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-elixir.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-c.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-toml.min.js"></script>
+
+  <style>
+    /* ─── CSS Variables & Theme ─────────────────────────── */
+    :root {
+      --bg: #ffffff;
+      --bg2: #f8fafc;
+      --bg3: #f1f5f9;
+      --surface: #f1f5f9;
+      --surface2: #e2e8f0;
+      --border: #e2e8f0;
+      --border2: #cbd5e1;
+      --text: #0f172a;
+      --text2: #475569;
+      --text3: #94a3b8;
+      --accent: #0284c7;
+      --accent2: #0369a1;
+      --accent-dim: rgba(2,132,199,.08);
+      --accent-hover: rgba(2,132,199,.12);
+      --green: #34d399;
+      --green-dim: rgba(52,211,153,.12);
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --red-dim: rgba(248,113,113,.12);
+      --purple: #a78bfa;
+      --orange: #fb923c;
+      --radius: 8px;
+      --radius-lg: 12px;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', 'Fira Code', 'Fira Mono', monospace;
+      --nav-h: 60px;
+      --sidebar-w: 260px;
+      --content-max: 820px;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,.07), 0 2px 4px -2px rgba(0,0,0,.05);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.08), 0 4px 6px -4px rgba(0,0,0,.04);
+    }
+
+    [data-theme="dark"] {
+      --bg: #0f172a;
+      --bg2: #1e293b;
+      --bg3: #334155;
+      --surface: #1e293b;
+      --surface2: #334155;
+      --border: #334155;
+      --border2: #475569;
+      --text: #f1f5f9;
+      --text2: #94a3b8;
+      --text3: #64748b;
+      --accent: #38bdf8;
+      --accent2: #7dd3fc;
+      --accent-dim: rgba(56,189,248,.1);
+      --accent-hover: rgba(56,189,248,.15);
+      --green: #34d399;
+      --green-dim: rgba(52,211,153,.15);
+      --red: #f87171;
+      --red-dim: rgba(248,113,113,.15);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.2);
+      --shadow-md: 0 4px 6px -1px rgba(0,0,0,.3);
+      --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.35);
+    }
+
+    /* ─── Reset ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; font-size: 16px; scroll-padding-top: calc(var(--nav-h) + 24px); }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow-x: hidden;
+    }
+    a { color: var(--accent); text-decoration: none; transition: color .15s; }
+    a:hover { color: var(--accent2); text-decoration: underline; }
+
+    /* ─── Top Navigation ────────────────────────────────── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      height: var(--nav-h);
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+    }
+    [data-theme="dark"] .topbar { background: rgba(15,23,42,.92); }
+    :root .topbar { background: rgba(255,255,255,.92); }
+
+    .topbar-inner {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 20px;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 16px; }
+    .logo-badge {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-weight: 700;
+      font-size: .8rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      letter-spacing: .5px;
+    }
+    .logo-title {
+      font-weight: 600;
+      font-size: .95rem;
+      color: var(--text);
+    }
+    .logo-title span { color: var(--text3); font-weight: 400; }
+
+    .topbar-right { display: flex; align-items: center; gap: 8px; }
+
+    .topbar-nav-links { display: flex; gap: 4px; }
+    .topbar-nav-links a {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: .85rem;
+      font-weight: 500;
+      color: var(--text2);
+      transition: all .15s;
+    }
+    .topbar-nav-links a:hover {
+      background: var(--accent-dim);
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .btn-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text2);
+      cursor: pointer;
+      transition: all .15s;
+      font-size: 1.1rem;
+    }
+    .btn-icon:hover { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+
+    .btn-sm-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text2);
+      font-size: .82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all .15s;
+      text-decoration: none;
+      font-family: var(--font);
+    }
+    .btn-sm-outline:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); text-decoration: none; }
+
+    /* ─── Mobile menu toggle ────────────────────────────── */
+    .menu-toggle {
+      display: none;
+      background: none;
+      border: none;
+      font-size: 1.4rem;
+      color: var(--text);
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    /* ─── Layout ────────────────────────────────────────── */
+    .layout {
+      display: flex;
+      max-width: 1400px;
+      margin: 0 auto;
+      min-height: calc(100vh - var(--nav-h));
+    }
+
+    /* ─── Sidebar ───────────────────────────────────────── */
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: var(--nav-h);
+      height: calc(100vh - var(--nav-h));
+      overflow-y: auto;
+      padding: 20px 16px 40px;
+      border-right: 1px solid var(--border);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border2) transparent;
+    }
+    .sidebar::-webkit-scrollbar { width: 5px; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    .sidebar-group { margin-bottom: 20px; }
+    .sidebar-label {
+      font-size: .7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text3);
+      padding: 0 8px;
+      margin-bottom: 6px;
+    }
+    .sidebar-link {
+      display: block;
+      padding: 5px 8px;
+      border-radius: 6px;
+      font-size: .84rem;
+      color: var(--text2);
+      transition: all .12s;
+      line-height: 1.5;
+    }
+    .sidebar-link:hover { background: var(--accent-dim); color: var(--accent); text-decoration: none; }
+    .sidebar-link.active { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
+    .sidebar-link.sub { padding-left: 20px; font-size: .8rem; }
+
+    /* ─── Main Content ──────────────────────────────────── */
+    .content {
+      flex: 1;
+      min-width: 0;
+      padding: 32px 40px 80px;
+      max-width: calc(var(--content-max) + 80px);
+    }
+
+    /* ─── Page sections (shown/hidden via JS) ───────────── */
+    .page-section { display: none; }
+    .page-section.active { display: block; }
+
+    /* ─── Typography ────────────────────────────────────── */
+    .content h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      margin: 0 0 8px;
+      color: var(--text);
+      letter-spacing: -.02em;
+    }
+    .content h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin: 2.5rem 0 .75rem;
+      color: var(--text);
+      padding-bottom: .4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .content h2:first-child { margin-top: 0; }
+    .content h3 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 1.75rem 0 .5rem;
+      color: var(--text);
+    }
+    .content h4 {
+      font-size: .95rem;
+      font-weight: 600;
+      margin: 1.25rem 0 .4rem;
+      color: var(--text2);
+    }
+    .content p { margin: .6rem 0; color: var(--text2); line-height: 1.75; }
+    .content > .page-section > p:first-of-type { font-size: 1.05rem; color: var(--text2); }
+    .content ul, .content ol { padding-left: 1.5rem; margin: .5rem 0 1rem; }
+    .content li { color: var(--text2); margin-bottom: .25rem; line-height: 1.7; }
+    .content li code, .content p code {
+      font-family: var(--mono);
+      font-size: .82em;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: .1em .35em;
+      color: var(--accent2);
+    }
+    .content strong { color: var(--text); font-weight: 600; }
+
+    .page-subtitle {
+      font-size: 1rem;
+      color: var(--text3);
+      margin-bottom: 2rem;
+      font-weight: 400;
+    }
+
+    /* ─── Tables ────────────────────────────────────────── */
+    .content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0 1.25rem;
+      font-size: .875rem;
+    }
+    .content th {
+      background: var(--surface);
+      color: var(--text);
+      font-weight: 600;
+      text-align: left;
+      padding: .6rem .85rem;
+      border: 1px solid var(--border);
+      font-size: .82rem;
+    }
+    .content td {
+      padding: .55rem .85rem;
+      border: 1px solid var(--border);
+      color: var(--text2);
+      vertical-align: top;
+    }
+    .content tr:nth-child(even) td { background: var(--bg2); }
+
+    /* ─── Code Blocks ───────────────────────────────────── */
+    .code-block-wrapper {
+      position: relative;
+      margin: 1rem 0;
+    }
+    .code-block-wrapper pre {
+      margin: 0;
+      border-radius: var(--radius);
+      font-family: var(--mono);
+      font-size: .82rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+    .code-block-wrapper pre[class*="language-"] {
+      background: var(--surface) !important;
+    }
+    [data-theme="dark"] .code-block-wrapper pre[class*="language-"] {
+      background: var(--bg2) !important;
+    }
+    .code-block-wrapper .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      padding: 4px 10px;
+      font-size: .72rem;
+      font-family: var(--font);
+      font-weight: 500;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text3);
+      cursor: pointer;
+      opacity: 0;
+      transition: all .15s;
+    }
+    .code-block-wrapper:hover .copy-btn { opacity: 1; }
+    .code-block-wrapper .copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .code-block-wrapper .copy-btn.copied { color: var(--green); border-color: var(--green); }
+
+    /* Inline pre (ASCII diagrams) */
+    pre.ascii-art {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      font-family: var(--mono);
+      font-size: .78rem;
+      line-height: 1.5;
+      overflow-x: auto;
+      color: var(--text2);
+    }
+
+    /* ─── Mermaid ───────────────────────────────────────── */
+    .mermaid-wrapper {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin: 1rem 0;
+      overflow-x: auto;
+      text-align: center;
+    }
+
+    /* ─── Callouts ──────────────────────────────────────── */
+    .callout {
+      border-left: 3px solid var(--accent);
+      padding: .75rem 1.25rem;
+      margin: 1rem 0;
+      background: var(--accent-dim);
+      border-radius: 0 var(--radius) var(--radius) 0;
+    }
+    .callout p { margin: .25rem 0; }
+    .callout-title { font-weight: 600; font-size: .88rem; color: var(--accent); margin-bottom: .25rem; }
+    .callout.warning { border-color: var(--yellow); background: rgba(251,191,36,.08); }
+    .callout.warning .callout-title { color: var(--yellow); }
+    .callout.success { border-color: var(--green); background: var(--green-dim); }
+    .callout.success .callout-title { color: var(--green); }
+    .callout.danger { border-color: var(--red); background: var(--red-dim); }
+    .callout.danger .callout-title { color: var(--red); }
+
+    /* ─── Status badges ─────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      font-size: .72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+    .badge-green { background: var(--green-dim); color: #059669; }
+    [data-theme="dark"] .badge-green { color: var(--green); }
+    .badge-blue { background: var(--accent-dim); color: var(--accent); }
+    .badge-orange { background: rgba(251,146,60,.12); color: var(--orange); }
+
+    /* ─── Cards ─────────────────────────────────────────── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 16px;
+      margin: 1rem 0;
+    }
+    .card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      transition: all .15s;
+    }
+    .card:hover { border-color: var(--accent); box-shadow: var(--shadow-md); }
+    .card-icon { font-size: 1.5rem; margin-bottom: 8px; }
+    .card-title { font-weight: 600; font-size: .95rem; color: var(--text); margin-bottom: 4px; }
+    .card-desc { font-size: .84rem; color: var(--text3); line-height: 1.5; }
+
+    /* ─── Component section header ──────────────────────── */
+    .component-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .component-lang {
+      font-size: .75rem;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 5px;
+      background: var(--accent-dim);
+      color: var(--accent);
+    }
+
+    /* ─── Search ────────────────────────────────────────── */
+    .search-container {
+      position: relative;
+      margin-right: 8px;
+    }
+    .search-input {
+      width: 200px;
+      padding: 6px 12px 6px 32px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: .84rem;
+      outline: none;
+      transition: all .15s;
+    }
+    .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); width: 280px; }
+    .search-icon {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text3);
+      font-size: .85rem;
+      pointer-events: none;
+    }
+    .search-results {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      min-width: 300px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      max-height: 400px;
+      overflow-y: auto;
+      display: none;
+      z-index: 200;
+    }
+    .search-results.visible { display: block; }
+    .search-result-item {
+      padding: 10px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background .1s;
+    }
+    .search-result-item:hover { background: var(--accent-dim); }
+    .search-result-item:last-child { border-bottom: none; }
+    .search-result-title { font-weight: 600; font-size: .85rem; color: var(--text); }
+    .search-result-section { font-size: .75rem; color: var(--text3); }
+    .search-no-results { padding: 16px; text-align: center; color: var(--text3); font-size: .85rem; }
+
+    /* ─── Horizontal rule ───────────────────────────────── */
+    .content hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+    /* ─── Footer ────────────────────────────────────────── */
+    .site-footer {
+      border-top: 1px solid var(--border);
+      padding: 24px 0;
+      text-align: center;
+      font-size: .8rem;
+      color: var(--text3);
+    }
+    .site-footer a { color: var(--text3); }
+    .site-footer a:hover { color: var(--accent); }
+
+    /* ─── Responsive ────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .topbar-nav-links { display: none; }
+      .menu-toggle { display: block; }
+      .search-container { display: none; }
+
+      .sidebar {
+        position: fixed;
+        top: var(--nav-h);
+        left: 0;
+        bottom: 0;
+        width: 280px;
+        transform: translateX(-100%);
+        transition: transform .25s;
+        z-index: 99;
+        background: var(--bg);
+        box-shadow: var(--shadow-lg);
+      }
+      .sidebar.open { transform: translateX(0); }
+
+      .content { padding: 24px 20px 60px; }
+
+      .layout { display: block; }
+
+      .card-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .content h1 { font-size: 1.5rem; }
+      .content h2 { font-size: 1.2rem; }
+      .content table { font-size: .8rem; }
+      .content th, .content td { padding: .4rem .6rem; }
+    }
+
+    /* ─── Overlay for mobile sidebar ────────────────────── */
+    .sidebar-overlay {
+      display: none;
+      position: fixed;
+      top: var(--nav-h);
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,.3);
+      z-index: 98;
+    }
+    .sidebar-overlay.visible { display: block; }
+
+    /* ─── Print ─────────────────────────────────────────── */
+    @media print {
+      .topbar, .sidebar, .sidebar-overlay { display: none !important; }
+      .content { padding: 0; max-width: 100%; }
+      .page-section { display: block !important; }
+    }
+
+    /* ─── Prism overrides for light mode ────────────────── */
+    :root code[class*="language-"],
+    :root pre[class*="language-"] {
+      color: var(--text);
+      text-shadow: none;
+    }
+    [data-theme="dark"] code[class*="language-"],
+    [data-theme="dark"] pre[class*="language-"] {
+      color: #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Top Navigation ─────────────────────────────────── -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="topbar-left">
+      <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">☰</button>
+      <a href="#overview" class="topbar-left" style="text-decoration:none;gap:10px;">
+        <span class="logo-badge">ZTLP</span>
+        <span class="logo-title">Documentation <span>v0.9.2</span></span>
+      </a>
+    </div>
+    <div class="topbar-right">
+      <div class="search-container">
+        <span class="search-icon">🔍</span>
+        <input type="text" class="search-input" id="searchInput" placeholder="Search docs…" autocomplete="off" />
+        <div class="search-results" id="searchResults"></div>
+      </div>
+      <nav class="topbar-nav-links">
+        <a href="../index.html">Spec (RFC)</a>
+        <a href="https://github.com/priceflex/ztlp" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <button class="btn-icon" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
+    </div>
+  </div>
+</header>
+
+<!-- ── Mobile overlay ─────────────────────────────────── -->
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<!-- ── Layout ─────────────────────────────────────────── -->
+<div class="layout">
+
+<!-- ── Sidebar ──────────────────────────────────────── -->
+<aside class="sidebar" id="sidebar">
+
+  <div class="sidebar-group">
+    <div class="sidebar-label">Getting Started</div>
+    <a class="sidebar-link" href="#overview" data-page="overview">Overview</a>
+    <a class="sidebar-link" href="#quick-start" data-page="quick-start">Quick Start</a>
+  </div>
+
+  <div class="sidebar-group">
+    <div class="sidebar-label">Architecture</div>
+    <a class="sidebar-link" href="#architecture" data-page="architecture">Deep Dive</a>
+    <a class="sidebar-link sub" href="#arch-packet-format" data-page="architecture">Packet Format</a>
+    <a class="sidebar-link sub" href="#arch-pipeline" data-page="architecture">Admission Pipeline</a>
+    <a class="sidebar-link sub" href="#arch-handshake" data-page="architecture">Noise_XX Handshake</a>
+    <a class="sidebar-link sub" href="#arch-connection-flows" data-page="architecture">Connection Flows</a>
+    <a class="sidebar-link sub" href="#arch-key-derivation" data-page="architecture">Key Derivation</a>
+  </div>
+
+  <div class="sidebar-group">
+    <div class="sidebar-label">Components</div>
+    <a class="sidebar-link" href="#components" data-page="components">Overview</a>
+    <a class="sidebar-link sub" href="#comp-proto" data-page="components">Rust Client</a>
+    <a class="sidebar-link sub" href="#comp-relay" data-page="components">Elixir Relay</a>
+    <a class="sidebar-link sub" href="#comp-ns" data-page="components">ZTLP-NS Namespace</a>
+    <a class="sidebar-link sub" href="#comp-gateway" data-page="components">Gateway</a>
+    <a class="sidebar-link sub" href="#comp-ebpf" data-page="components">eBPF/XDP Filter</a>
+  </div>
+
+  <div class="sidebar-group">
+    <div class="sidebar-label">Operations</div>
+    <a class="sidebar-link" href="#deployment" data-page="deployment">Deployment</a>
+    <a class="sidebar-link" href="#security" data-page="security">Security Model</a>
+    <a class="sidebar-link" href="#contributing" data-page="contributing">Contributing</a>
+  </div>
+
+  <div style="margin-top:auto; padding-top:20px;">
+    <a href="https://github.com/priceflex/ztlp" target="_blank" rel="noopener" class="btn-sm-outline" style="width:100%;justify-content:center;">
+      ⭐ Star on GitHub
+    </a>
+  </div>
+</aside>
+
+<!-- ── Main Content ─────────────────────────────────── -->
+<main class="content" id="content">
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Overview
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section active" id="overview" data-search-title="Overview — What is ZTLP?">
+  <h1>Zero Trust Layer Protocol</h1>
+  <p class="page-subtitle">A secure, identity-first network overlay that makes DDoS structurally ineffective.</p>
+
+  <div class="callout">
+    <div class="callout-title">🔬 Prototype Status</div>
+    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 366 passing tests across Rust, Elixir, and C.</p>
+  </div>
+
+  <h2>What is ZTLP?</h2>
+  <p>ZTLP (Zero Trust Layer Protocol) is a network overlay protocol that enforces cryptographic authentication <strong>before any network state is allocated</strong>. It sits over existing IPv4/IPv6 infrastructure as a UDP-based overlay, invisible to any node that doesn't possess a valid cryptographic identity.</p>
+  <p>The core insight: instead of accepting all traffic and filtering later (like firewalls, CDNs, and rate limiters), ZTLP rejects unauthenticated traffic at the cheapest possible layer — making volumetric DDoS attacks structurally ineffective.</p>
+
+  <h2>Key Principles</h2>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">🔐</div>
+      <div class="card-title">Identity-First</div>
+      <div class="card-desc">Every node has a 128-bit NodeID backed by X25519 keypairs. You prove identity before you communicate — no exceptions.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛡️</div>
+      <div class="card-title">Zero Trust</div>
+      <div class="card-desc">No implicit trust. Every packet is verified. Relays never see plaintext. The network proves or doesn't exist.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⚡</div>
+      <div class="card-title">Three-Layer Pipeline</div>
+      <div class="card-desc">Magic check (ns) → SessionID lookup (μs) → AEAD verify (crypto). 99%+ of attack traffic dies before crypto.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🌐</div>
+      <div class="card-title">Overlay Architecture</div>
+      <div class="card-desc">Rides over existing IPv4/IPv6 as UDP. No BGP changes, no router upgrades. Deploy today on any infrastructure.</div>
+    </div>
+  </div>
+
+  <h2>Architecture</h2>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+graph TB
+    subgraph "ZTLP Network"
+        A["Node A<br/>(Rust Client)"] -->|"Noise_XX<br/>Handshake"| R["Relay<br/>(Elixir/OTP)"]
+        R -->|"Forward by<br/>SessionID"| B["Node B<br/>(Rust Client)"]
+        A -->|"Direct UDP"| B
+        B -->|"Encrypted"| G["Gateway<br/>(Elixir/OTP)"]
+        G -->|"Plaintext TCP"| S["Legacy<br/>Backend"]
+    end
+    subgraph "Kernel Fast Path"
+        XDP["eBPF/XDP<br/>Filter"] -->|"XDP_PASS"| R
+        XDP -->|"XDP_DROP"| D["Dropped<br/>(line rate)"]
+    end
+    subgraph "Trust Namespace"
+        NS["ZTLP-NS"] -->|"Identity<br/>Lookup"| A
+        NS -->|"Policy<br/>Check"| G
+    end
+    </div>
+  </div>
+
+  <h2>Component Overview</h2>
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Language</th><th>Role</th><th>Tests</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Client</strong> (<code>proto/</code>)</td><td>Rust</td><td>Identity, Noise_XX handshake, encrypted transport</td><td>91</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding (zero-trust)</td><td>73</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>ZTLP-NS</strong> (<code>ns/</code>)</td><td>Elixir/OTP</td><td>Distributed trust namespace, Ed25519-signed records</td><td>105</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge with policy enforcement</td><td>97</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>eBPF/XDP</strong> (<code>ebpf/</code>)</td><td>C</td><td>Kernel-level Layer 1+2 at NIC driver speed</td><td>—</td><td><span class="badge badge-green">Complete</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>How ZTLP Stops DDoS</h2>
+  <p>Traditional DDoS defense is reactive — absorb the flood, then filter. ZTLP inverts this:</p>
+  <ol>
+    <li><strong>Layer 1: Magic byte check</strong> — 2-byte compare at nanosecond cost. All non-ZTLP UDP noise dies here.</li>
+    <li><strong>Layer 2: SessionID lookup</strong> — O(1) hash map / ETS / BPF map lookup. Scanners, stale sessions, probes die here.</li>
+    <li><strong>Layer 3: AEAD verification</strong> — ChaCha20-Poly1305 HeaderAuthTag. Forged packets die here.</li>
+  </ol>
+  <p>Under a 10 Gbps flood, only packets with valid magic, a known SessionID, <em>and</em> a valid cryptographic tag reach your application. With eBPF/XDP, Layers 1+2 run at NIC driver speed — before the kernel network stack.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Quick Start
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="quick-start" data-search-title="Quick Start — Getting Started">
+  <h1>Quick Start</h1>
+  <p class="page-subtitle">From zero to encrypted ZTLP communication in under 5 minutes.</p>
+
+  <h2>Prerequisites</h2>
+  <table>
+    <thead><tr><th>Dependency</th><th>Version</th><th>Used By</th><th>Install</th></tr></thead>
+    <tbody>
+      <tr><td>Rust</td><td>1.70+ (rec. latest stable)</td><td>Client (<code>proto/</code>)</td><td><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh</code></td></tr>
+      <tr><td>Elixir</td><td>1.12+</td><td>Relay, NS, Gateway</td><td><code>brew install elixir</code> or <code>apt install elixir</code></td></tr>
+      <tr><td>Erlang/OTP</td><td>24+</td><td>Relay, NS, Gateway</td><td>Bundled with Elixir install</td></tr>
+      <tr><td>Docker</td><td>20+</td><td>Full stack</td><td><a href="https://docs.docker.com/get-docker/" target="_blank">docs.docker.com</a></td></tr>
+      <tr><td>clang + llvm</td><td>11+</td><td>eBPF filter only</td><td><code>apt install clang llvm libbpf-dev</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Clone and Build</h2>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Clone the repo
+git clone https://github.com/priceflex/ztlp.git
+cd ztlp
+
+# Build the Rust client
+cd proto
+cargo build
+cd ..
+
+# Build the Elixir relay
+cd relay
+mix compile
+cd ..
+
+# Build ZTLP-NS namespace server
+cd ns
+mix compile
+cd ..
+
+# Build the Gateway
+cd gateway
+mix compile
+cd ..</code></pre></div>
+
+  <h2>Run the Demos</h2>
+
+  <h3>Demo 1: Direct Communication</h3>
+  <p>Two Rust nodes on localhost — full Noise_XX handshake, encrypted data, and pipeline rejection:</p>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd proto
+cargo run --bin ztlp-demo</code></pre></div>
+  <p>You'll see identity generation, three-message Noise_XX handshake, encrypted data exchange, and pipeline drops at each layer with counters.</p>
+
+  <h3>Demo 2: Relay Communication</h3>
+  <p>Two Rust nodes communicating through a simulated relay — proving the relay never sees plaintext:</p>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd proto
+cargo run --bin ztlp-relay-demo</code></pre></div>
+
+  <h3>Demo 3: Cross-Language Interop</h3>
+  <p>Rust clients talking through the real Elixir relay over UDP:</p>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># From the repo root
+cd relay && mix compile && cd ..
+bash interop/run_test.sh</code></pre></div>
+
+  <h3>Demo 4: Elixir Relay Interactive</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir"># Start the relay
+cd relay
+iex -S mix
+
+# Register a session
+session_id = ZtlpRelay.Crypto.generate_session_id()
+peer_a = {{127, 0, 0, 1}, 5000}
+peer_b = {{127, 0, 0, 1}, 5001}
+ZtlpRelay.SessionRegistry.register_session(session_id, peer_a, peer_b)
+
+# Check stats
+ZtlpRelay.Stats.get_stats()
+# => %{layer1_drops: 0, layer2_drops: 0, layer3_drops: 0, passed: 0, forwarded: 0}</code></pre></div>
+
+  <h2>Your First ZTLP Connection</h2>
+  <p>Here's what happens step-by-step when two ZTLP nodes connect:</p>
+  <ol>
+    <li><strong>Identity Generation</strong> — Each node generates a 128-bit NodeID and an X25519 keypair</li>
+    <li><strong>Noise_XX Handshake</strong> — Three-message mutual authentication:
+      <ul>
+        <li>Message 1: Initiator sends ephemeral public key (HELLO)</li>
+        <li>Message 2: Responder sends ephemeral key + encrypted static identity (HELLO_ACK)</li>
+        <li>Message 3: Initiator sends encrypted static identity (CONFIRM)</li>
+      </ul>
+    </li>
+    <li><strong>Session Establishment</strong> — A 96-bit SessionID is generated, directional keys derived via BLAKE2s</li>
+    <li><strong>Pipeline Registration</strong> — The SessionID is registered in the admission pipeline (and eBPF map if active)</li>
+    <li><strong>Encrypted Data</strong> — Data flows through 42-byte compact headers with ChaCha20-Poly1305 AEAD</li>
+  </ol>
+
+  <h2>Run All Tests</h2>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Rust client — 91 tests
+cd proto && cargo test && cd ..
+
+# Elixir relay — 73 tests
+cd relay && mix test && cd ..
+
+# ZTLP-NS namespace — 105 tests
+cd ns && mix test && cd ..
+
+# Gateway — 97 tests
+cd gateway && mix test && cd ..
+
+# Cross-language interop — 5 tests
+bash interop/run_test.sh</code></pre></div>
+
+  <div class="callout success">
+    <div class="callout-title">✅ 366 tests, 0 failures</div>
+    <p>The full test suite covers packet serialization, pipeline admission, Noise_XX handshake, edge cases, integration tests, and cross-language interop.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Architecture Deep Dive
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="architecture" data-search-title="Architecture — Deep Dive">
+  <h1>Architecture Deep Dive</h1>
+  <p class="page-subtitle">Packet format, admission pipeline, handshake protocol, and connection flows.</p>
+
+  <h2 id="arch-packet-format">Packet Format</h2>
+  <p>ZTLP uses two header formats — discriminated by the <code>HdrLen</code> field (not packet size):</p>
+
+  <h3>Handshake / Control Header — 95 bytes</h3>
+  <p>Used during connection establishment (HELLO, HELLO_ACK, CONFIRM messages):</p>
+  <pre class="ascii-art"> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Magic (0x5A37)        | Ver |       HdrLen            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Flags              |  MsgType  |   CryptoSuite     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     KeyID/TokenID             |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+       SessionID (96 bits)     |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        PacketSeq (64 bits)                    |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Timestamp (64 bits)                    |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       SrcNodeID (128 bits)                    |
+|                              ...                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       DstSvcID (128 bits)                     |
+|                              ...                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       PolicyTag (32 bits)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           ExtLen              |          PayloadLen           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    HeaderAuthTag (128 bits)                   |
+|                              ...                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+  <h3>Compact Data Header — 42 bytes</h3>
+  <p>Post-handshake fast path for encrypted data — minimal overhead:</p>
+  <pre class="ascii-art"> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Magic (0x5A37)        | Ver |       HdrLen            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Flags              |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+       SessionID (96 bits)     |
+|                                                               |
+|               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|               |           PacketSequence (64 bits)            |
++-+-+-+-+-+-+-+-+                                               |
+|                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+   HeaderAuthTag (128 bits)    |
+|                                                               |
+|               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|               |
++-+-+-+-+-+-+-+-+</pre>
+
+  <h3>HdrLen-Based Discrimination</h3>
+  <div class="callout">
+    <div class="callout-title">💡 Why HdrLen, not packet size?</div>
+    <p>A data packet with a large payload can exceed 95 bytes, which would be misidentified as a handshake header if using size-based heuristics. The HdrLen field is always reliable: <code>HdrLen = 24</code> → handshake, <code>HdrLen = 11</code> → compact data.</p>
+  </div>
+
+  <h2 id="arch-pipeline">Three-Layer Admission Pipeline</h2>
+  <p>The admission pipeline kills traffic at the cheapest layer possible:</p>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+flowchart TD
+    A["Inbound UDP Packet"] --> L1{"Layer 1<br/>Magic == 0x5A37?"}
+    L1 -->|"❌ No"| D1["DROP<br/>Cost: nanoseconds<br/>No state, no crypto"]
+    L1 -->|"✅ Yes"| L2{"Layer 2<br/>SessionID in<br/>allowlist?"}
+    L2 -->|"❌ No"| D2["DROP<br/>Cost: microseconds<br/>Hash lookup only"]
+    L2 -->|"✅ Yes"| L3{"Layer 3<br/>HeaderAuthTag<br/>valid?"}
+    L3 -->|"❌ No"| D3["DROP<br/>Cost: real crypto<br/>ChaCha20-Poly1305"]
+    L3 -->|"✅ Yes"| OK["✅ Decrypt &<br/>deliver payload"]
+
+    style D1 fill:#fecaca,stroke:#ef4444,color:#991b1b
+    style D2 fill:#fed7aa,stroke:#f97316,color:#9a3412
+    style D3 fill:#fef08a,stroke:#eab308,color:#854d0e
+    style OK fill:#bbf7d0,stroke:#22c55e,color:#166534
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>Layer</th><th>Check</th><th>Cost</th><th>Implementation</th><th>Kills</th></tr></thead>
+    <tbody>
+      <tr><td><strong>1</strong></td><td>Magic bytes <code>0x5A37</code></td><td>Nanoseconds</td><td>2-byte compare</td><td>All non-ZTLP UDP noise</td></tr>
+      <tr><td><strong>2</strong></td><td>SessionID in allowlist</td><td>Microseconds</td><td>HashMap (Rust), ETS (Elixir), BPF map (kernel)</td><td>Scanners, stale sessions, probes</td></tr>
+      <tr><td><strong>3</strong></td><td>HeaderAuthTag AEAD</td><td>Real crypto</td><td>ChaCha20-Poly1305</td><td>Forged/tampered packets</td></tr>
+    </tbody>
+  </table>
+
+  <p>Each layer is orders of magnitude cheaper than the next. Under DDoS, the vast majority of attack traffic dies at Layer 1 or 2, never reaching the expensive cryptographic check. With eBPF/XDP, Layers 1+2 run at NIC driver speed — before the kernel network stack even sees the packet.</p>
+
+  <h2 id="arch-handshake">Noise_XX Handshake</h2>
+  <p>ZTLP uses <code>Noise_XX_25519_ChaChaPoly_BLAKE2s</code> for mutual authentication with perfect forward secrecy:</p>
+
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+sequenceDiagram
+    participant A as Node A (Initiator)
+    participant B as Node B (Responder)
+
+    Note over A,B: Both sides have static X25519 keypairs
+
+    A->>B: Message 1: → e (HELLO)
+    Note right of A: Ephemeral key only
+
+    B->>A: Message 2: ← e, ee, s, es (HELLO_ACK)
+    Note left of B: Ephemeral + DH + encrypted static
+
+    A->>B: Message 3: → s, se (CONFIRM)
+    Note right of A: Encrypted static + final DH
+
+    Note over A,B: Both derive directional session keys
+    Note over A,B: i2r_key (A→B) and r2i_key (B→A)
+
+    A->>B: Encrypted data (compact 42-byte header)
+    B->>A: Encrypted data (compact 42-byte header)
+    </div>
+  </div>
+
+  <h3>Cryptographic Primitives</h3>
+  <table>
+    <thead><tr><th>Primitive</th><th>Algorithm</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Key Exchange</td><td>X25519 (Curve25519 ECDH)</td><td>Ephemeral + static Diffie-Hellman</td></tr>
+      <tr><td>AEAD Encryption</td><td>ChaCha20-Poly1305</td><td>Header auth tags + payload encryption</td></tr>
+      <tr><td>Key Derivation</td><td>BLAKE2s-256</td><td>Directional session keys from shared material</td></tr>
+      <tr><td>Signing (NS)</td><td>Ed25519</td><td>Record signatures in trust namespace</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="arch-connection-flows">Connection Flows</h2>
+
+  <h3>Direct Connection</h3>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
+
+    A->>B: HELLO (ephemeral key)
+    B->>A: HELLO_ACK (eph + encrypted identity)
+    A->>B: CONFIRM (encrypted identity)
+
+    Note over A,B: Session established<br/>96-bit SessionID assigned<br/>Directional keys derived (BLAKE2s)<br/>Anti-replay window initialized
+
+    A->>B: Encrypted data (42-byte compact header)
+    B->>A: Encrypted data (42-byte compact header)
+    </div>
+  </div>
+
+  <h3>Relay Connection</h3>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+sequenceDiagram
+    participant A as Node A
+    participant R as Relay
+    participant B as Node B
+
+    A->>R: HELLO
+    R->>B: HELLO (forwarded)
+    B->>R: HELLO_ACK
+    R->>A: HELLO_ACK (forwarded)
+    A->>R: CONFIRM
+    R->>B: CONFIRM (forwarded)
+
+    Note over A,B: Session keys derived end-to-end<br/>Relay has NO keys — just SessionID routing
+
+    A->>R: Encrypted data
+    R->>B: Forward (opaque, by SessionID)
+    B->>R: Encrypted data
+    R->>A: Forward (opaque, by SessionID)
+
+    Note over R: Relay NEVER sees plaintext
+    </div>
+  </div>
+
+  <h3>Gateway Connection</h3>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+sequenceDiagram
+    participant C as ZTLP Client
+    participant G as Gateway
+    participant S as Legacy Backend (TCP)
+
+    C->>G: Noise_XX Handshake
+    Note over G: Verify identity + check policy
+
+    G->>S: TCP connect to backend
+
+    C->>G: Encrypted ZTLP data
+    G->>G: Decrypt (has session keys)
+    G->>S: Forward plaintext over TCP
+
+    S->>G: TCP response
+    G->>G: Encrypt response
+    G->>C: Encrypted ZTLP data
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="callout-title">Gateway vs Relay</div>
+    <p><strong>Relay:</strong> No session keys, forwards opaque packets, zero-trust forwarding.<br/>
+    <strong>Gateway:</strong> Terminates sessions, decrypts data, enforces policy, bridges to legacy TCP.</p>
+  </div>
+
+  <h2 id="arch-key-derivation">Key Derivation</h2>
+  <p>After the Noise_XX handshake completes, directional session keys are derived:</p>
+  <div class="code-block-wrapper"><pre><code class="language-rust">// Sorted public keys ensure both sides derive identical material
+shared_material = sort(public_key_A, public_key_B)
+
+i2r_key = BLAKE2s(shared_material || "ztlp_initiator_to_responder" || session_id)
+r2i_key = BLAKE2s(shared_material || "ztlp_responder_to_initiator" || session_id)
+
+// Initiator: send_key = i2r_key, recv_key = r2i_key
+// Responder: send_key = r2i_key, recv_key = i2r_key</code></pre></div>
+  <p>Public keys are sorted lexicographically before hashing so both sides produce identical material regardless of which side initiated.</p>
+
+  <h3>Session Lifecycle</h3>
+  <ol>
+    <li><strong>Handshake</strong> — Noise_XX three-message exchange (mutual auth + PFS)</li>
+    <li><strong>Key Derivation</strong> — BLAKE2s over sorted static keys + session-specific labels</li>
+    <li><strong>Pipeline Registration</strong> — SessionID added to HashMap/ETS/BPF map</li>
+    <li><strong>Data Transfer</strong> — Compact 42-byte headers, anti-replay window tracking</li>
+    <li><strong>Timeout/Close</strong> — SessionID removed from pipeline, resources cleaned up</li>
+  </ol>
+
+  <h3>Anti-Replay Protection</h3>
+  <p>Each session maintains a bitmap-based anti-replay window (default: 64 packets). Out-of-order packets within the window are accepted; duplicates and packets older than the window are rejected.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Components
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="components" data-search-title="Components — Build, Run, Test">
+  <h1>Components</h1>
+  <p class="page-subtitle">Build, run, test, and understand each component of the ZTLP reference implementation.</p>
+
+  <!-- ─── Rust Client ────────────────────────────────── -->
+  <h2 id="comp-proto">Rust Client <code>proto/</code></h2>
+  <div class="component-header">
+    <span class="component-lang">Rust</span>
+    <span class="badge badge-green">91 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 1 — Identity, handshake, encrypted transport</span>
+  </div>
+
+  <h3>Build</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd proto
+cargo build            # Debug build (~2 min first time, ~1 sec after)
+cargo build --release  # Optimized build</code></pre></div>
+
+  <h3>Run</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Two-node direct demo
+cargo run --bin ztlp-demo
+
+# Relay demo (simulated relay on localhost)
+cargo run --bin ztlp-relay-demo
+
+# Standalone node
+cargo run --bin ztlp-node -- --listen 0.0.0.0:23095</code></pre></div>
+
+  <h3>Test</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cargo test                           # All 91 tests
+cargo test -- --nocapture            # With output visible
+cargo test --test integration_tests  # Just integration
+cargo test --test edge_case_tests    # Boundaries, replay window (10K packets)
+cargo test --test relay_tests        # Relay support</code></pre></div>
+
+  <h3>Dependencies</h3>
+  <table>
+    <thead><tr><th>Crate</th><th>Version</th><th>Purpose</th><th>License</th></tr></thead>
+    <tbody>
+      <tr><td><code>snow</code></td><td>0.9</td><td>Noise_XX handshake framework</td><td>Apache-2.0</td></tr>
+      <tr><td><code>chacha20poly1305</code></td><td>0.10</td><td>AEAD encryption</td><td>Apache-2.0/MIT</td></tr>
+      <tr><td><code>blake2</code></td><td>0.10</td><td>Key derivation (BLAKE2s-256)</td><td>Apache-2.0/MIT</td></tr>
+      <tr><td><code>tokio</code></td><td>1.x</td><td>Async runtime + UDP sockets</td><td>MIT</td></tr>
+      <tr><td><code>rand</code></td><td>0.8</td><td>Cryptographic random generation</td><td>Apache-2.0/MIT</td></tr>
+      <tr><td><code>clap</code></td><td>4.x</td><td>CLI argument parsing</td><td>Apache-2.0/MIT</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Project Structure</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">proto/
+├── src/
+│   ├── lib.rs           # Crate root — module re-exports
+│   ├── identity.rs      # NodeID generation, X25519 keypair, JSON persistence
+│   ├── packet.rs        # Wire format: handshake (95B) + data (42B) headers
+│   ├── pipeline.rs      # Three-layer admission: magic → session → auth tag
+│   ├── session.rs       # Session state: keys, sequence counters, anti-replay
+│   ├── handshake.rs     # Noise_XX mutual authentication (via snow)
+│   ├── transport.rs     # Async UDP send/recv with pipeline integration
+│   ├── relay.rs         # RelayConnection + SimulatedRelay
+│   └── error.rs         # Error types
+├── src/bin/
+│   ├── ztlp-demo.rs         # Two-node direct demo
+│   ├── ztlp-relay-demo.rs   # Two-node relay demo
+│   └── ztlp-node.rs         # Standalone node binary
+└── tests/                    # 91 tests across 6 suites</code></pre></div>
+
+  <h3>Key Design Decisions</h3>
+  <ul>
+    <li><strong><code>#![deny(unsafe_code)]</code></strong> — no unsafe blocks anywhere. All crypto uses audited RustCrypto crates.</li>
+    <li><strong>HdrLen-based discrimination</strong> — not packet size. Reliable for all payload sizes.</li>
+    <li><strong>Separate send/recv keys</strong> — directional isolation prevents reflection attacks.</li>
+    <li><strong>Bitmap anti-replay</strong> — 64-packet sliding window, extensible to 1024.</li>
+  </ul>
+
+  <h3>API Reference</h3>
+  <h4><code>identity.rs</code> — Node Identity</h4>
+  <div class="code-block-wrapper"><pre><code class="language-rust">/// Generate a new ZTLP node identity (128-bit NodeID + X25519 keypair)
+pub fn generate() -> NodeIdentity
+
+/// Save identity to a JSON file
+pub fn save(&self, path: &Path) -> Result<()>
+
+/// Load identity from a JSON file
+pub fn load(path: &Path) -> Result<NodeIdentity></code></pre></div>
+
+  <h4><code>pipeline.rs</code> — Admission Pipeline</h4>
+  <div class="code-block-wrapper"><pre><code class="language-rust">/// Process an inbound packet through the three-layer admission pipeline
+pub fn process(&mut self, data: &[u8]) -> PipelineResult
+
+/// Register a SessionID in the pipeline allowlist
+pub fn register_session(&mut self, session_id: [u8; 12], session_key: [u8; 32])
+
+/// Remove a SessionID from the pipeline
+pub fn unregister_session(&mut self, session_id: &[u8; 12])
+
+/// Get per-layer drop counters
+pub fn stats(&self) -> PipelineStats</code></pre></div>
+
+  <h4><code>handshake.rs</code> — Noise_XX Protocol</h4>
+  <div class="code-block-wrapper"><pre><code class="language-rust">/// Create a Noise_XX initiator (sends Message 1 first)
+pub fn new_initiator(identity: &NodeIdentity) -> Result<NoiseHandshake>
+
+/// Create a Noise_XX responder (waits for Message 1)
+pub fn new_responder(identity: &NodeIdentity) -> Result<NoiseHandshake>
+
+/// Process one handshake message (send or receive)
+pub fn step(&mut self, input: Option<&[u8]>) -> Result<HandshakeStep>
+
+/// Finalize the handshake and extract session keys
+pub fn finalize(self) -> Result<SessionKeys></code></pre></div>
+
+  <h4><code>transport.rs</code> — Encrypted Transport</h4>
+  <div class="code-block-wrapper"><pre><code class="language-rust">/// Send encrypted data with AEAD protection
+pub async fn send_data(socket: &UdpSocket, session: &mut Session,
+                       peer: SocketAddr, data: &[u8]) -> Result<()>
+
+/// Receive and decrypt data through the pipeline
+pub async fn recv_data(socket: &UdpSocket, pipeline: &mut Pipeline,
+                       sessions: &mut SessionMap) -> Result<(Vec<u8>, SocketAddr)>
+
+/// Send encrypted data via relay (same format, relay destination)
+pub async fn send_data_via_relay(socket: &UdpSocket, session: &mut Session,
+                                  relay: SocketAddr, data: &[u8]) -> Result<()></code></pre></div>
+
+  <hr/>
+
+  <!-- ─── Elixir Relay ───────────────────────────────── -->
+  <h2 id="comp-relay">Elixir Relay <code>relay/</code></h2>
+  <div class="component-header">
+    <span class="component-lang">Elixir/OTP</span>
+    <span class="badge badge-green">73 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 2 — SessionID-based packet forwarding</span>
+  </div>
+
+  <p>The relay forwards encrypted ZTLP packets between peers by SessionID. It <strong>never sees plaintext</strong> — the zero-trust relay property.</p>
+
+  <h3>Build & Run</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd relay
+mix compile
+
+# Interactive shell
+iex -S mix
+
+# Background daemon
+mix run --no-halt</code></pre></div>
+
+  <h3>Test</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">mix test   # All 73 tests</code></pre></div>
+
+  <h3>Configuration</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir"># config/config.exs
+config :ztlp_relay,
+  listen_port: 23095,             # UDP port (0x5A37)
+  listen_address: {0, 0, 0, 0},   # Bind all interfaces
+  session_timeout_ms: 300_000,     # 5 min inactivity timeout
+  max_sessions: 10_000             # Maximum concurrent sessions</code></pre></div>
+
+  <h3>Supervision Tree</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">ZtlpRelay.Application (Supervisor)
+├── ZtlpRelay.Stats              — Pipeline counters (Agent)
+├── ZtlpRelay.SessionRegistry    — ETS-backed session routing table
+├── ZtlpRelay.SessionSupervisor  — DynamicSupervisor for sessions
+└── ZtlpRelay.UdpListener        — GenServer wrapping :gen_udp</code></pre></div>
+
+  <h3>API Reference</h3>
+  <h4><code>ZtlpRelay.SessionRegistry</code> — Session Routing</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Register a session mapping SessionID to two peers"
+def register_session(session_id, peer_a, peer_b)
+
+@doc "Look up the other peer for a given SessionID + sender"
+def lookup_peer(session_id, sender) :: {:ok, peer} | :error
+
+@doc "Check if a SessionID is registered"
+def session_exists?(session_id) :: boolean()
+
+@doc "Remove a session"
+def unregister_session(session_id)</code></pre></div>
+
+  <h4><code>ZtlpRelay.Pipeline</code> — Admission Pipeline</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Process a packet through the three-layer admission pipeline"
+def process(packet, session_key \\ nil) :: :pass | {:drop, layer}
+
+@doc """
+Layer 1: Magic check — single 16-bit compare
+Layer 2: SessionID lookup — ETS :member (O(1), lock-free reads)
+Layer 3: HeaderAuthTag verify — ChaCha20-Poly1305 (skipped in relay mode)
+"""</code></pre></div>
+
+  <h4><code>ZtlpRelay.Crypto</code> — Cryptographic Operations</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Generate a random 96-bit SessionID"
+def generate_session_id() :: binary()
+
+@doc "Verify a HeaderAuthTag using ChaCha20-Poly1305 AEAD"
+def verify_header_auth_tag(aad, auth_tag, session_key) :: boolean()
+
+@doc "Compute a HeaderAuthTag for outbound packets"
+def compute_header_auth_tag(aad, session_key) :: binary()</code></pre></div>
+
+  <h3>Key Design Decisions</h3>
+  <ul>
+    <li><strong>ETS with read_concurrency</strong> — Layer 2 calls <code>:ets.member/2</code>, O(1) and lock-free for reads.</li>
+    <li><strong>GenServer per session</strong> — maps ZTLP sessions 1:1 to BEAM processes. Millions of concurrent sessions possible.</li>
+    <li><strong>Layer 3 skipped in relay mode</strong> — pass <code>nil</code> as session key. Zero-trust property: relay has no keys.</li>
+    <li><strong>:gen_udp active mode</strong> — packets arrive as Erlang messages, natural BEAM scheduler integration.</li>
+    <li><strong>Zero external dependencies</strong> — only OTP and Erlang's <code>:crypto</code> module.</li>
+  </ul>
+
+  <hr/>
+
+  <!-- ─── ZTLP-NS ────────────────────────────────────── -->
+  <h2 id="comp-ns">ZTLP-NS Namespace <code>ns/</code></h2>
+  <div class="component-header">
+    <span class="component-lang">Elixir/OTP</span>
+    <span class="badge badge-green">105 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 4 — Distributed trust namespace</span>
+  </div>
+
+  <p>ZTLP-NS is the control-plane identity and discovery layer. Think DNS meets a certificate authority, but purpose-built for ZTLP's identity-first model. Every record is Ed25519-signed. Unsigned records are rejected.</p>
+
+  <h3>Architecture</h3>
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+graph TB
+    ROOT["Root Trust Anchor<br/>(hardcoded pubkey)"] -->|"signs"| OP["Operator Zone<br/>example.ztlp"]
+    OP -->|"signs"| TENANT["Tenant Zone<br/>acme.example.ztlp"]
+    TENANT -->|"signs"| KEY["ZTLP_KEY<br/>node1"]
+    TENANT -->|"signs"| SVC["ZTLP_SVC<br/>rdp"]
+    TENANT -->|"signs"| RELAY["ZTLP_RELAY<br/>relay1"]
+    </div>
+  </div>
+
+  <h3>Record Types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Wire Byte</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>ZTLP_KEY</code></td><td>0x01</td><td>NodeID ↔ public key binding</td></tr>
+      <tr><td><code>ZTLP_SVC</code></td><td>0x02</td><td>Service definition + allowed nodes</td></tr>
+      <tr><td><code>ZTLP_RELAY</code></td><td>0x03</td><td>Relay endpoint, capacity, region</td></tr>
+      <tr><td><code>ZTLP_POLICY</code></td><td>0x04</td><td>Access control rules</td></tr>
+      <tr><td><code>ZTLP_REVOKE</code></td><td>0x05</td><td>Revocation notice (highest priority)</td></tr>
+      <tr><td><code>ZTLP_BOOTSTRAP</code></td><td>0x06</td><td>Signed relay list for node discovery</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Build, Run & Test</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd ns
+mix compile
+
+# Interactive
+iex -S mix
+
+# Run tests — 105 tests, 0 failures
+mix test</code></pre></div>
+
+  <h3>Usage Examples</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">alias ZtlpNs.{Crypto, Record, Store, ZoneAuthority, TrustAnchor}
+
+# Generate a root zone authority
+root = ZoneAuthority.generate("ztlp")
+TrustAnchor.add("ztlp-root", root.public_key)
+
+# Generate an operator zone, root delegates to operator
+operator = ZoneAuthority.generate("example.ztlp")
+delegation = ZoneAuthority.delegate(root, operator)
+Store.insert(delegation)
+
+# Operator signs a node record
+node_id = :crypto.strong_rand_bytes(16)
+{node_pub, _priv} = Crypto.generate_keypair()
+record = Record.new_key("node1.example.ztlp", node_id, node_pub)
+{:ok, signed} = ZoneAuthority.sign_record(operator, record)
+Store.insert(signed)
+
+# Look it up with full trust chain verification
+{:ok, found} = ZtlpNs.Query.lookup_verified("node1.example.ztlp", :key)</code></pre></div>
+
+  <h3>API Reference</h3>
+  <h4><code>ZtlpNs.Query</code> — Query Engine</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Look up a record with trust chain verification"
+def lookup_verified(name, type) :: {:ok, record} | {:error, reason}
+
+@doc "Resolve all records for a name"
+def resolve_all(name) :: [record]</code></pre></div>
+
+  <h4><code>ZtlpNs.ZoneAuthority</code> — Zone Delegation</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Generate a new zone authority with Ed25519 keypair"
+def generate(zone_name) :: ZoneAuthority.t()
+
+@doc "Sign a record within this zone"
+def sign_record(authority, record) :: {:ok, signed_record} | {:error, :out_of_zone}
+
+@doc "Delegate authority to a child zone"
+def delegate(parent, child) :: signed_delegation_record</code></pre></div>
+
+  <h3>Key Design Decisions</h3>
+  <ul>
+    <li><strong>Ed25519 for all signatures</strong> — deterministic canonical binary format for signing.</li>
+    <li><strong>Trust chain verification</strong> — walks delegation chain up to root trust anchor.</li>
+    <li><strong>Revocation priority</strong> — ZTLP_REVOKE records are checked first on every query, O(1) via separate ETS table.</li>
+    <li><strong>Serial numbers</strong> — monotonically increasing; rejects records with serial ≤ existing (anti-replay).</li>
+    <li><strong>Bootstrap discovery</strong> — three-step fallback: HTTPS → DNS-SRV → hardcoded relays.</li>
+  </ul>
+
+  <hr/>
+
+  <!-- ─── Gateway ─────────────────────────────────────── -->
+  <h2 id="comp-gateway">Gateway <code>gateway/</code></h2>
+  <div class="component-header">
+    <span class="component-lang">Elixir/OTP</span>
+    <span class="badge badge-green">97 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 5 — ZTLP ↔ legacy TCP bridge</span>
+  </div>
+
+  <p>The gateway bridges between ZTLP's identity-first overlay and legacy TCP services. It terminates ZTLP sessions, verifies client identity, enforces access policy, and forwards authorized traffic to backend services.</p>
+
+  <h3>Build, Run & Test</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd gateway
+mix compile
+iex -S mix    # Interactive
+mix test      # 97 tests, 0 failures</code></pre></div>
+
+  <h3>Configuration</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir"># config/config.exs
+config :ztlp_gateway, :port, 23097
+
+config :ztlp_gateway, :backends, [
+  %{name: "web", host: {127, 0, 0, 1}, port: 8080},
+  %{name: "ssh", host: {127, 0, 0, 1}, port: 22}
+]
+
+config :ztlp_gateway, :policies, [
+  %{service: "web", allow: :all},                             # Any authenticated node
+  %{service: "ssh", allow: ["admin.example.ztlp"]},           # Specific identity
+  %{service: "monitoring", allow: ["*.ops.ztlp"]}             # Wildcard zone
+]
+
+config :ztlp_gateway, :session_timeout_ms, 300_000
+config :ztlp_gateway, :max_sessions, 10_000</code></pre></div>
+
+  <h3>Supervision Tree</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">ZtlpGateway.Application
+├── ZtlpGateway.Stats              — Lock-free atomic counters
+├── ZtlpGateway.AuditLog           — ETS audit trail
+├── ZtlpGateway.SessionRegistry    — ETS SessionID → pid mapping
+├── ZtlpGateway.PolicyEngine       — ETS policy rules + evaluation
+├── ZtlpGateway.SessionSupervisor  — DynamicSupervisor for sessions
+│   └── ZtlpGateway.Session        — GenServer per active session
+│       └── ZtlpGateway.Backend    — TCP connection to backend service
+└── ZtlpGateway.Listener           — UDP socket, admission pipeline</code></pre></div>
+
+  <h3>Policy Rules</h3>
+  <table>
+    <thead><tr><th>Pattern</th><th>Example</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>allow: :all</code></td><td>Any authenticated node</td><td>All Noise-authenticated clients can access</td></tr>
+      <tr><td><code>allow: ["exact.name"]</code></td><td>Specific identity</td><td>Only nodes with this exact identity name</td></tr>
+      <tr><td><code>allow: ["*.zone.ztlp"]</code></td><td>Wildcard zone</td><td>Any node in the zone</td></tr>
+      <tr><td>(no rule)</td><td>Default deny</td><td>Services without policy deny all access</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Audit Logging</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir"># Query audit events
+ZtlpGateway.AuditLog.events()      # All events (newest first)
+ZtlpGateway.AuditLog.events(10)    # Last 10
+
+# Event types:
+# :session_established — with session_id, remote_static, source, service
+# :session_terminated  — with reason, duration_ms, bytes_in, bytes_out
+# :policy_denied       — with remote_static, source, service, reason</code></pre></div>
+
+  <h3>API Reference</h3>
+  <h4><code>ZtlpGateway.PolicyEngine</code> — Access Control</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Check if an identity is allowed to access a service"
+def authorize(identity_name, service_name) :: :allow | :deny
+
+@doc "Add a policy rule"
+def add_rule(service, allow_pattern)
+
+@doc "Remove a policy rule"
+def remove_rule(service)</code></pre></div>
+
+  <h4><code>ZtlpGateway.Handshake</code> — Noise_XX Implementation</h4>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">@doc "Pure Elixir Noise_XX_25519_ChaChaPoly_BLAKE2s implementation"
+@doc "Initialize a responder handshake state"
+def init_responder(static_keypair) :: handshake_state
+
+@doc "Process one handshake message"
+def process_message(state, message) :: {:ok, new_state, response} | {:error, reason}
+
+@doc "Finalize and extract session keys (i2r_key + r2i_key)"
+def finalize(state) :: {:ok, session_keys}</code></pre></div>
+
+  <hr/>
+
+  <!-- ─── eBPF/XDP ────────────────────────────────────── -->
+  <h2 id="comp-ebpf">eBPF/XDP Filter <code>ebpf/</code></h2>
+  <div class="component-header">
+    <span class="component-lang">C</span>
+    <span class="badge badge-blue">Kernel-level</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 3 — NIC driver-level packet filtering</span>
+  </div>
+
+  <p>The eBPF/XDP program attaches directly to the NIC driver and drops invalid ZTLP traffic <strong>before it reaches the Linux kernel network stack</strong>. It implements Layers 1+2 of the admission pipeline at near line-rate with zero cryptographic cost.</p>
+
+  <h3>Requirements</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Linux kernel 5.4+ with XDP support
+# Install build dependencies (Ubuntu/Debian)
+sudo apt-get install -y clang llvm libbpf-dev \
+  linux-headers-$(uname -r) gcc make libelf-dev zlib1g-dev</code></pre></div>
+
+  <h3>Build</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash">cd ebpf
+make
+# Produces: ztlp_xdp.o (BPF object) + ztlp-xdp-loader (userspace tool)</code></pre></div>
+
+  <h3>Usage</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Attach to an interface
+sudo ./ztlp-xdp-loader eth0
+
+# Attach and pre-load a session
+sudo ./ztlp-xdp-loader eth0 --add-session 5a38864146988e21525315b8
+
+# Manage sessions
+sudo ./ztlp-xdp-loader eth0 --add-session &lt;24-char-hex&gt;
+sudo ./ztlp-xdp-loader eth0 --remove-session &lt;24-char-hex&gt;
+
+# Read pipeline stats
+sudo ./ztlp-xdp-loader eth0 --stats
+# layer1_drops: 142857
+# layer2_drops: 31415
+# hello_rate_drops: 271
+# passed: 98234
+
+# Detach
+sudo ./ztlp-xdp-loader eth0 --detach</code></pre></div>
+
+  <h3>BPF Maps</h3>
+  <table>
+    <thead><tr><th>Map</th><th>Type</th><th>Key</th><th>Value</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>session_map</code></td><td>HASH (1024)</td><td>12-byte SessionID</td><td>u8 active flag</td><td>Layer 2 allowlist</td></tr>
+      <tr><td><code>hello_rate_map</code></td><td>HASH (1024)</td><td>__be32 (src IPv4)</td><td>{tokens, last_refill}</td><td>HELLO flood protection</td></tr>
+      <tr><td><code>stats_map</code></td><td>PERCPU_ARRAY (4)</td><td>u32 index</td><td>u64 count</td><td>Pipeline counters</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Packet Processing Flow</h3>
+  <ol>
+    <li><strong>Non-ZTLP traffic</strong> (not UDP port 23095) → <code>XDP_PASS</code> — untouched</li>
+    <li><strong>Layer 1</strong> — Magic check: 2-byte compare to <code>0x5A37</code>. Nanoseconds. Drops all non-ZTLP UDP.</li>
+    <li><strong>HdrLen discrimination</strong> — Read bytes 2-3 to find SessionID offset (byte 11 for handshake, byte 6 for data)</li>
+    <li><strong>Layer 2</strong> — SessionID lookup in BPF hash map. Microseconds, no crypto.
+      <ul>
+        <li>Found → <code>XDP_PASS</code> to kernel for Layer 3</li>
+        <li>Not found + HELLO → rate-limit per source IP (10 tokens/sec)</li>
+        <li>Not found + not HELLO → <code>XDP_DROP</code></li>
+      </ul>
+    </li>
+  </ol>
+
+  <h3>Integration with ZTLP Daemon</h3>
+  <p>The XDP program and ZTLP daemon share the <code>session_map</code> BPF map:</p>
+  <div class="code-block-wrapper"><pre><code class="language-c">// Daemon writes SessionID on session establish
+// Daemon deletes SessionID on session close/timeout
+// XDP program only reads — never modifies session state
+// Stats are per-CPU, aggregated by the loader</code></pre></div>
+
+  <h3>Files</h3>
+  <table>
+    <thead><tr><th>File</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>ztlp_xdp.h</code></td><td>Shared header — constants, map definitions, stat counters</td></tr>
+      <tr><td><code>ztlp_xdp.c</code></td><td>XDP program — eBPF code running in the kernel</td></tr>
+      <tr><td><code>loader.c</code></td><td>Userspace loader — attach/detach XDP, manage sessions, read stats</td></tr>
+      <tr><td><code>Makefile</code></td><td>Build system — clang for BPF, gcc for loader</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Deployment
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="deployment" data-search-title="Deployment — Docker, Configuration, Production">
+  <h1>Deployment</h1>
+  <p class="page-subtitle">Docker containers, configuration, and production considerations.</p>
+
+  <h2>Docker</h2>
+  <p>Each component has its own Dockerfile for containerized deployment.</p>
+
+  <h3>Build Individual Containers</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Rust client (multi-stage: build in rust:slim, run in debian:slim)
+cd proto
+docker build -t ztlp-proto .
+
+# Elixir relay
+cd relay
+docker build -t ztlp-relay .
+
+# ZTLP-NS namespace server
+cd ns
+docker build -t ztlp-ns .
+
+# Gateway
+cd gateway
+docker build -t ztlp-gateway .</code></pre></div>
+
+  <h3>Run Individual Containers</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Relay — listen on UDP 23095
+docker run -d --name ztlp-relay -p 23095:23095/udp ztlp-relay
+
+# ZTLP-NS — listen on UDP 23096
+docker run -d --name ztlp-ns -p 23096:23096/udp ztlp-ns
+
+# Gateway — listen on UDP 23097, connect to backends
+docker run -d --name ztlp-gateway \
+  -p 23097:23097/udp \
+  -e ZTLP_GATEWAY_NS_HOST=ztlp-ns \
+  ztlp-gateway</code></pre></div>
+
+  <h2>Configuration</h2>
+
+  <h3>Environment Variables</h3>
+  <table>
+    <thead><tr><th>Variable</th><th>Component</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>ZTLP_RELAY_PORT</code></td><td>Relay</td><td>23095</td><td>UDP listen port</td></tr>
+      <tr><td><code>ZTLP_RELAY_MAX_SESSIONS</code></td><td>Relay</td><td>10000</td><td>Max concurrent sessions</td></tr>
+      <tr><td><code>ZTLP_RELAY_SESSION_TIMEOUT_MS</code></td><td>Relay</td><td>300000</td><td>Session inactivity timeout (ms)</td></tr>
+      <tr><td><code>ZTLP_NS_PORT</code></td><td>NS</td><td>23096</td><td>UDP query port</td></tr>
+      <tr><td><code>ZTLP_NS_MAX_RECORDS</code></td><td>NS</td><td>100000</td><td>Maximum records in store</td></tr>
+      <tr><td><code>ZTLP_GATEWAY_PORT</code></td><td>Gateway</td><td>23097</td><td>UDP listen port</td></tr>
+      <tr><td><code>ZTLP_GATEWAY_NS_HOST</code></td><td>Gateway</td><td>ns</td><td>NS server hostname</td></tr>
+      <tr><td><code>ZTLP_GATEWAY_NS_PORT</code></td><td>Gateway</td><td>23096</td><td>NS server port</td></tr>
+      <tr><td><code>ZTLP_GATEWAY_MAX_SESSIONS</code></td><td>Gateway</td><td>10000</td><td>Max concurrent sessions</td></tr>
+      <tr><td><code>RUST_LOG</code></td><td>Client</td><td>ztlp_proto=info</td><td>Log level filter</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Port Allocation</h3>
+  <table>
+    <thead><tr><th>Port</th><th>Protocol</th><th>Component</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>23095</td><td>UDP</td><td>Relay</td><td>0x5A37 — the ZTLP magic bytes as a port number</td></tr>
+      <tr><td>23096</td><td>UDP</td><td>ZTLP-NS</td><td>Namespace query server</td></tr>
+      <tr><td>23097</td><td>UDP</td><td>Gateway</td><td>Gateway ingress</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Production Considerations</h2>
+
+  <div class="callout warning">
+    <div class="callout-title">⚠️ Prototype Status</div>
+    <p>This is a reference implementation. Production deployment should include additional hardening, monitoring, and operational procedures.</p>
+  </div>
+
+  <h3>Scaling</h3>
+  <ul>
+    <li><strong>Relay</strong> — BEAM VM handles millions of lightweight processes. Each session is an independent GenServer. Scale horizontally by running multiple relay instances.</li>
+    <li><strong>ZTLP-NS</strong> — ETS-backed storage is in-memory. For production, consider adding persistent storage (Mnesia or external DB) and replication.</li>
+    <li><strong>Gateway</strong> — One GenServer per session. TCP backend connections are managed per-session. Scale horizontally with multiple gateway instances behind a ZTLP relay.</li>
+    <li><strong>eBPF/XDP</strong> — Runs at NIC driver speed. Performance scales with NIC hardware. Consider native XDP mode for maximum throughput (requires driver support).</li>
+  </ul>
+
+  <h3>Monitoring</h3>
+  <ul>
+    <li><strong>Pipeline stats</strong> — All components expose per-layer drop counters. Monitor <code>layer1_drops</code>, <code>layer2_drops</code>, <code>layer3_drops</code>, and <code>passed</code>.</li>
+    <li><strong>Session counts</strong> — Track active sessions vs. max capacity.</li>
+    <li><strong>Audit logs</strong> — Gateway provides session event audit trail (established, terminated, policy denied).</li>
+    <li><strong>eBPF stats</strong> — Per-CPU counters aggregated by the loader. Monitor HELLO rate limit drops as an early DDoS indicator.</li>
+  </ul>
+
+  <h3>High Availability</h3>
+  <ul>
+    <li>BEAM's supervision tree automatically restarts crashed processes</li>
+    <li>Sessions are isolated — one crash doesn't affect others</li>
+    <li>Run multiple relay instances for failover</li>
+    <li>ZTLP-NS should be replicated for availability</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Security Model
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="security" data-search-title="Security Model — Zero Trust, Threat Model">
+  <h1>Security Model</h1>
+  <p class="page-subtitle">Zero trust principles, DDoS resistance, trust chain, and threat model.</p>
+
+  <h2>Zero Trust Model</h2>
+  <p>ZTLP implements zero trust at the <strong>protocol layer</strong> — not at the application, firewall, or middleware layer where such controls are traditionally implemented:</p>
+
+  <ul>
+    <li><strong>No implicit trust</strong> — Every packet is verified. There is no "trusted network."</li>
+    <li><strong>Identity before connectivity</strong> — You must prove your cryptographic identity before you can communicate. Unauthenticated nodes cannot even see the network.</li>
+    <li><strong>Prove or don't exist</strong> — The network is invisible and unusable to any node without a valid identity. There is no attack surface to probe.</li>
+    <li><strong>Least privilege</strong> — Policy engine enforces per-service access control. Default deny.</li>
+    <li><strong>Relay zero-trust</strong> — Relays forward opaque encrypted packets. They hold no session keys and cannot read data.</li>
+  </ul>
+
+  <h2>DDoS Resistance</h2>
+  <p>ZTLP's three-layer admission pipeline makes volumetric DDoS structurally ineffective:</p>
+
+  <h3>Layer 1: Magic Check (Nanoseconds)</h3>
+  <ul>
+    <li>Single 2-byte comparison: <code>0x5A37</code></li>
+    <li>Zero state, zero allocation, zero crypto</li>
+    <li>Kills: all non-ZTLP UDP noise, random port probes, amplification attacks</li>
+    <li>With XDP: runs at NIC driver speed, before the kernel network stack</li>
+  </ul>
+
+  <h3>Layer 2: SessionID Lookup (Microseconds)</h3>
+  <ul>
+    <li>O(1) hash map lookup (HashMap in Rust, ETS in Elixir, BPF map in kernel)</li>
+    <li>No cryptographic work</li>
+    <li>Kills: scanners, stale sessions, spoofed SessionIDs</li>
+    <li>HELLO rate limiting (eBPF): 10 tokens/sec per source IP for handshake initiation</li>
+  </ul>
+
+  <h3>Layer 3: AEAD Verification (Real Crypto)</h3>
+  <ul>
+    <li>ChaCha20-Poly1305 HeaderAuthTag verification</li>
+    <li>Only reached by packets that passed Layers 1+2</li>
+    <li>Kills: forged packets, tampered headers, replay attempts</li>
+  </ul>
+
+  <div class="callout success">
+    <div class="callout-title">📊 Cost Model Under 10 Gbps Flood</div>
+    <p>With eBPF/XDP, ~99% of attack traffic dies at Layer 1 (magic check) at NIC speed. Of the remaining ~1% that has correct magic, ~99% dies at Layer 2 (SessionID lookup). Only a tiny fraction (packets with valid magic AND a valid SessionID) reaches the expensive Layer 3 crypto check — and those are promptly rejected by AEAD verification.</p>
+  </div>
+
+  <h2>Trust Chain Verification</h2>
+  <p>ZTLP-NS implements a hierarchical trust model with Ed25519 signatures:</p>
+  <ol>
+    <li><strong>Root Trust Anchor</strong> — hardcoded public key, signs operator zones</li>
+    <li><strong>Operator Zone</strong> — signed by root, signs tenant zones and service records</li>
+    <li><strong>Tenant Zone</strong> — signed by operator, signs node keys and services</li>
+    <li><strong>Node Records</strong> — signed by tenant zone, binds NodeID to public key</li>
+  </ol>
+  <p>Every lookup walks the delegation chain back to a root trust anchor. If the chain breaks at any point, the lookup returns <code>{:error, :untrusted_chain}</code>.</p>
+
+  <h2>Revocation</h2>
+  <ul>
+    <li><code>ZTLP_REVOKE</code> records have the <strong>highest priority</strong> — checked before all other queries</li>
+    <li>Revoked IDs are indexed in a separate ETS table for O(1) lookup</li>
+    <li>Serial number enforcement prevents rollback attacks (rejects records with serial ≤ existing)</li>
+    <li>Revocation propagates immediately — no TTL delay</li>
+  </ul>
+
+  <h2>Perfect Forward Secrecy</h2>
+  <p>Each Noise_XX handshake generates fresh ephemeral X25519 keypairs. Compromising a node's static key does <strong>not</strong> reveal past session traffic. Every session has unique, ephemeral-derived keys.</p>
+
+  <h2>Threat Model</h2>
+  <table>
+    <thead><tr><th>Threat</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td>Volumetric DDoS (UDP flood)</td><td>Three-layer pipeline; eBPF/XDP drops at NIC speed</td></tr>
+      <tr><td>Session hijacking</td><td>96-bit random SessionID + AEAD HeaderAuthTag per packet</td></tr>
+      <tr><td>Replay attacks</td><td>Bitmap anti-replay window (64+ packets); serial numbers for NS records</td></tr>
+      <tr><td>Man-in-the-middle</td><td>Noise_XX mutual authentication; ephemeral + static DH</td></tr>
+      <tr><td>Relay eavesdropping</td><td>End-to-end encryption; relay has no session keys</td></tr>
+      <tr><td>Identity spoofing</td><td>Ed25519-signed records; trust chain to root anchor</td></tr>
+      <tr><td>Key compromise</td><td>Revocation records (highest priority); PFS limits exposure</td></tr>
+      <tr><td>Reflection/amplification</td><td>Handshake requires three messages; no unauthenticated responses</td></tr>
+      <tr><td>State exhaustion</td><td>No state allocated before Layer 2; session limits enforced</td></tr>
+      <tr><td>HELLO flood</td><td>eBPF rate limiting: 10 tokens/sec per source IP</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Safety Properties</h2>
+  <ul>
+    <li><strong>Rust client:</strong> <code>#![deny(unsafe_code)]</code> — no unsafe blocks. All crypto via audited RustCrypto crates.</li>
+    <li><strong>Elixir components:</strong> Zero external dependencies. Only OTP and Erlang <code>:crypto</code> (OpenSSL-backed).</li>
+    <li><strong>All dependencies:</strong> MIT or Apache-2.0 licensed. No GPL code in any component.</li>
+    <li><strong>eBPF:</strong> Verified by the kernel BPF verifier before loading. Cannot corrupt kernel state.</li>
+  </ul>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Contributing
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="contributing" data-search-title="Contributing — Code Style, Testing, Development">
+  <h1>Contributing</h1>
+  <p class="page-subtitle">Code style, testing requirements, and development guidelines.</p>
+
+  <h2>Code Style</h2>
+
+  <h3>Rust</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Format code
+cargo fmt
+
+# Lint with Clippy
+cargo clippy
+
+# Check without building
+cargo check
+
+# Build documentation
+cargo doc --open</code></pre></div>
+  <ul>
+    <li><code>#![deny(unsafe_code)]</code> — no unsafe blocks permitted</li>
+    <li>Follow standard Rust conventions (rustfmt, Clippy clean)</li>
+    <li>Use <code>thiserror</code> for error types, <code>tracing</code> for structured logging</li>
+    <li>All public functions must have doc comments</li>
+  </ul>
+
+  <h3>Elixir</h3>
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Format code
+mix format
+
+# Lint (if Credo is added)
+mix credo</code></pre></div>
+  <ul>
+    <li>Follow standard Elixir formatting (<code>mix format</code>)</li>
+    <li>All public functions must have <code>@doc</code> and <code>@spec</code></li>
+    <li>Use pattern matching over conditionals where possible</li>
+    <li>Keep GenServer state minimal and well-documented</li>
+  </ul>
+
+  <h2>Testing Requirements</h2>
+  <p>All changes must maintain the existing test count or add tests for new functionality:</p>
+  <table>
+    <thead><tr><th>Component</th><th>Minimum Tests</th><th>Command</th></tr></thead>
+    <tbody>
+      <tr><td>Rust Client</td><td>91</td><td><code>cargo test</code></td></tr>
+      <tr><td>Elixir Relay</td><td>73</td><td><code>mix test</code></td></tr>
+      <tr><td>ZTLP-NS</td><td>105</td><td><code>mix test</code></td></tr>
+      <tr><td>Gateway</td><td>97</td><td><code>mix test</code></td></tr>
+      <tr><td>Interop</td><td>5</td><td><code>bash interop/run_test.sh</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Test Patterns</h3>
+  <ul>
+    <li><strong>Packet tests:</strong> Serialization round-trips, bit packing, all message types</li>
+    <li><strong>Pipeline tests:</strong> Each layer independently, counter tracking</li>
+    <li><strong>Integration tests:</strong> End-to-end over real UDP sockets</li>
+    <li><strong>Edge case tests:</strong> Boundary values, replay window stress, bulk uniqueness</li>
+  </ul>
+
+  <h2>Architecture Decisions</h2>
+  <p>Key decisions that should be preserved:</p>
+  <ul>
+    <li><strong>HdrLen-based packet discrimination</strong> — never use packet size</li>
+    <li><strong>Separate send/recv keys</strong> — directional isolation prevents reflection</li>
+    <li><strong>BLAKE2s key derivation with sorted keys</strong> — deterministic, role-independent</li>
+    <li><strong>ETS for session lookups</strong> — O(1), lock-free reads, public table</li>
+    <li><strong>GenServer per session</strong> — crash isolation, independent timeouts</li>
+    <li><strong>Layer 3 skippable in relay mode</strong> — zero-trust relay property</li>
+  </ul>
+
+  <h2>Development Workflow</h2>
+  <ol>
+    <li>Fork the repository</li>
+    <li>Create a feature branch: <code>git checkout -b feature/my-change</code></li>
+    <li>Make changes with tests</li>
+    <li>Run the full test suite across all components</li>
+    <li>Submit a pull request with a clear description</li>
+  </ol>
+
+  <h2>Reporting Security Issues</h2>
+  <div class="callout danger">
+    <div class="callout-title">🔒 Security Vulnerabilities</div>
+    <p>Do <strong>not</strong> open a public issue for security vulnerabilities. Email security reports to the maintainer. See <a href="https://github.com/priceflex/ztlp/blob/main/SECURITY.md">SECURITY.md</a> for details.</p>
+  </div>
+
+  <h2>License</h2>
+  <p>Apache License 2.0. All contributions must be compatible with this license.</p>
+  <p>All Rust dependencies are MIT or Apache-2.0. Elixir components have zero external dependencies. No GPL code in any component.</p>
+</section>
+
+</main>
+</div>
+
+<!-- ── Footer ─────────────────────────────────────────── -->
+<footer class="site-footer">
+  <div>
+    <span class="logo-badge" style="font-size:.7rem;padding:2px 7px;">ZTLP</span>
+    &nbsp;Zero Trust Layer Protocol Documentation &nbsp;·&nbsp;
+    <a href="../index.html">Spec (RFC)</a> &nbsp;·&nbsp;
+    <a href="https://github.com/priceflex/ztlp" target="_blank" rel="noopener">GitHub</a> &nbsp;·&nbsp;
+    <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>
+    <br/>
+    <span style="font-size:.75rem;">Author: Steven Price · Tech Rockstar Academy · ZTLP.org</span>
+  </div>
+</footer>
+
+<!-- ═══════════════════════════════════════════════════════
+     JavaScript
+     ═══════════════════════════════════════════════════════ -->
+<script>
+(function() {
+  'use strict';
+
+  // ── Initialize Mermaid ────────────────────────────────
+  const isDark = localStorage.getItem('ztlp-docs-theme') === 'dark';
+  if (isDark) document.documentElement.setAttribute('data-theme', 'dark');
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: isDark ? 'dark' : 'default',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    sequence: { useMaxWidth: true }
+  });
+
+  // ── Page Navigation ───────────────────────────────────
+  const pages = document.querySelectorAll('.page-section');
+  const sidebarLinks = document.querySelectorAll('.sidebar-link');
+  let currentPage = 'overview';
+
+  function showPage(pageId) {
+    pages.forEach(p => p.classList.remove('active'));
+    const target = document.getElementById(pageId);
+    if (target) {
+      target.classList.add('active');
+      currentPage = pageId;
+    }
+
+    sidebarLinks.forEach(l => {
+      l.classList.toggle('active', l.getAttribute('data-page') === pageId
+        || l.getAttribute('href') === '#' + pageId);
+    });
+
+    // Render Mermaid diagrams in the newly visible page
+    const diagrams = target ? target.querySelectorAll('.mermaid:not([data-processed])') : [];
+    if (diagrams.length) {
+      mermaid.run({ nodes: diagrams });
+    }
+
+    // Re-run Prism highlighting
+    if (target) Prism.highlightAllUnder(target);
+
+    // Close mobile sidebar
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebarOverlay').classList.remove('visible');
+  }
+
+  // Handle sidebar link clicks
+  sidebarLinks.forEach(link => {
+    link.addEventListener('click', function(e) {
+      e.preventDefault();
+      const page = this.getAttribute('data-page') || this.getAttribute('href').replace('#', '');
+      const hash = this.getAttribute('href');
+
+      showPage(page);
+      history.pushState(null, '', hash);
+
+      // If it's a sub-link (has a specific anchor within the page), scroll to it
+      const anchor = hash.replace('#', '');
+      if (anchor !== page) {
+        setTimeout(() => {
+          const el = document.getElementById(anchor);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 50);
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+  });
+
+  // Handle initial hash
+  function handleHash() {
+    const hash = window.location.hash.replace('#', '') || 'overview';
+    // Find which page this hash belongs to
+    let page = hash;
+    const link = document.querySelector(`.sidebar-link[href="#${hash}"]`);
+    if (link && link.getAttribute('data-page')) {
+      page = link.getAttribute('data-page');
+    }
+    showPage(page);
+    if (hash !== page) {
+      setTimeout(() => {
+        const el = document.getElementById(hash);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    }
+  }
+  window.addEventListener('hashchange', handleHash);
+
+  // ── Theme Toggle ──────────────────────────────────────
+  const themeBtn = document.getElementById('themeToggle');
+  function setTheme(dark) {
+    if (dark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      themeBtn.textContent = '☀️';
+      localStorage.setItem('ztlp-docs-theme', 'dark');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+      themeBtn.textContent = '🌙';
+      localStorage.setItem('ztlp-docs-theme', 'light');
+    }
+    // Re-init Mermaid with proper theme
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: dark ? 'dark' : 'default',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: true, htmlLabels: true },
+      sequence: { useMaxWidth: true }
+    });
+  }
+  themeBtn.addEventListener('click', () => {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    setTheme(!isDark);
+  });
+  // Set initial icon
+  if (isDark) themeBtn.textContent = '☀️';
+
+  // ── Mobile Menu Toggle ────────────────────────────────
+  const menuToggle = document.getElementById('menuToggle');
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebarOverlay');
+  menuToggle.addEventListener('click', () => {
+    sidebar.classList.toggle('open');
+    overlay.classList.toggle('visible');
+  });
+  overlay.addEventListener('click', () => {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('visible');
+  });
+
+  // ── Copy to Clipboard ─────────────────────────────────
+  document.querySelectorAll('.code-block-wrapper').forEach(wrapper => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', () => {
+      const code = wrapper.querySelector('code');
+      if (code) {
+        navigator.clipboard.writeText(code.textContent).then(() => {
+          btn.textContent = 'Copied!';
+          btn.classList.add('copied');
+          setTimeout(() => {
+            btn.textContent = 'Copy';
+            btn.classList.remove('copied');
+          }, 2000);
+        });
+      }
+    });
+    wrapper.appendChild(btn);
+  });
+
+  // ── Search ────────────────────────────────────────────
+  const searchInput = document.getElementById('searchInput');
+  const searchResults = document.getElementById('searchResults');
+  let searchIndex = [];
+
+  // Build search index from headings
+  pages.forEach(page => {
+    const pageTitle = page.getAttribute('data-search-title') || '';
+    const pageId = page.id;
+    page.querySelectorAll('h1, h2, h3, h4').forEach(h => {
+      searchIndex.push({
+        title: h.textContent,
+        section: pageTitle,
+        page: pageId,
+        anchor: h.id || pageId,
+        level: h.tagName
+      });
+    });
+  });
+
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.toLowerCase().trim();
+    if (q.length < 2) {
+      searchResults.classList.remove('visible');
+      return;
+    }
+
+    const results = searchIndex.filter(item =>
+      item.title.toLowerCase().includes(q) || item.section.toLowerCase().includes(q)
+    ).slice(0, 10);
+
+    if (results.length === 0) {
+      searchResults.innerHTML = '<div class="search-no-results">No results found</div>';
+    } else {
+      searchResults.innerHTML = results.map(r => `
+        <div class="search-result-item" data-page="${r.page}" data-anchor="${r.anchor}">
+          <div class="search-result-title">${r.title}</div>
+          <div class="search-result-section">${r.section}</div>
+        </div>
+      `).join('');
+    }
+    searchResults.classList.add('visible');
+  });
+
+  searchResults.addEventListener('click', (e) => {
+    const item = e.target.closest('.search-result-item');
+    if (item) {
+      const page = item.getAttribute('data-page');
+      const anchor = item.getAttribute('data-anchor');
+      showPage(page);
+      history.pushState(null, '', '#' + anchor);
+      setTimeout(() => {
+        const el = document.getElementById(anchor);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 50);
+      searchInput.value = '';
+      searchResults.classList.remove('visible');
+    }
+  });
+
+  // Close search results on click outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-container')) {
+      searchResults.classList.remove('visible');
+    }
+  });
+
+  // Keyboard shortcut: / to focus search
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && document.activeElement !== searchInput) {
+      e.preventDefault();
+      searchInput.focus();
+    }
+    if (e.key === 'Escape') {
+      searchInput.blur();
+      searchResults.classList.remove('visible');
+    }
+  });
+
+  // ── Initialize ────────────────────────────────────────
+  handleHash();
+  // Render initial Mermaid
+  setTimeout(() => {
+    const activePage = document.querySelector('.page-section.active');
+    if (activePage) {
+      mermaid.run({ nodes: activePage.querySelectorAll('.mermaid') });
+      Prism.highlightAllUnder(activePage);
+    }
+  }, 100);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Docker Compose — Full prototype stack
+# ─────────────────────────────────────────────────────────────
+#
+# Usage:
+#   docker compose up              # Start all services
+#   docker compose up -d           # Start in background
+#   docker compose build           # Rebuild all images
+#   docker compose logs -f ns      # Follow NS logs
+#
+# Architecture:
+#   ns (23096/udp) ← gateway (23097/udp) → echo-backend (8080/tcp)
+#   relay (23095/udp)
+#   proto (client — connects to relay/gateway)
+
+services:
+  # ── Namespace Server ────────────────────────────────────────
+  ns:
+    build: ./ns
+    container_name: ztlp-ns
+    ports:
+      - "23096:23096/udp"
+    environment:
+      - ZTLP_NS_PORT=23096
+      - ZTLP_NS_MAX_RECORDS=100000
+    restart: unless-stopped
+
+  # ── Relay Server ────────────────────────────────────────────
+  relay:
+    build: ./relay
+    container_name: ztlp-relay
+    ports:
+      - "23095:23095/udp"
+    environment:
+      - ZTLP_RELAY_PORT=23095
+      - ZTLP_RELAY_MAX_SESSIONS=10000
+      - ZTLP_RELAY_SESSION_TIMEOUT_MS=300000
+    restart: unless-stopped
+
+  # ── Gateway ─────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: ztlp-gateway
+    ports:
+      - "23097:23097/udp"
+    depends_on:
+      - ns
+    environment:
+      - ZTLP_GATEWAY_PORT=23097
+      - ZTLP_GATEWAY_NS_HOST=ns
+      - ZTLP_GATEWAY_NS_PORT=23096
+      - ZTLP_GATEWAY_MAX_SESSIONS=10000
+    restart: unless-stopped
+
+  # ── Echo Backend (for gateway testing) ──────────────────────
+  echo-backend:
+    image: alpine/socat:latest
+    container_name: ztlp-echo-backend
+    command: TCP-LISTEN:8080,fork,reuseaddr SYSTEM:'cat'
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

@@ -1,0 +1,128 @@
+defmodule ZtlpNs.Server do
+  @moduledoc """
+  UDP query server for ZTLP-NS.
+
+  Listens on a UDP port and responds to namespace queries. This is the
+  network-facing interface to the record store.
+
+  ## Wire Protocol
+
+  All messages are binary. The first byte is the message type:
+
+  ### Query (client → server)
+  ```
+  <<0x01, name_len::16, name::binary-size(name_len), type_byte::8>>
+  ```
+
+  ### Response: Record Found (server → client)
+  ```
+  <<0x02, record_wire_format::binary>>
+  ```
+  The record wire format includes the canonical serialization plus
+  signature and public key (see `Record.encode/1`).
+
+  ### Response: Not Found (server → client)
+  ```
+  <<0x03, name_len::16, name::binary-size(name_len), type_byte::8>>
+  ```
+
+  ### Response: Revoked (server → client)
+  ```
+  <<0x04, name_len::16, name::binary-size(name_len)>>
+  ```
+
+  ### Response: Invalid Query (server → client)
+  ```
+  <<0xFF>>
+  ```
+
+  ## Type Bytes
+  - 1 = KEY, 2 = SVC, 3 = RELAY, 4 = POLICY, 5 = REVOKE, 6 = BOOTSTRAP
+  """
+
+  use GenServer
+
+  alias ZtlpNs.{Query, Record}
+
+  # ── Public API ─────────────────────────────────────────────────────
+
+  @spec start_link(any()) :: GenServer.on_start()
+  def start_link(_args) do
+    GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+  end
+
+  @doc "Get the port this server is listening on (useful when port is 0)."
+  @spec port() :: non_neg_integer()
+  def port do
+    GenServer.call(__MODULE__, :get_port)
+  end
+
+  # ── GenServer callbacks ────────────────────────────────────────────
+
+  @impl true
+  def init(:ok) do
+    # Read port at runtime (not compile time) so config changes take effect
+    listen_port = ZtlpNs.Config.port()
+
+    # Open UDP socket in binary mode with active message delivery.
+    # Active mode means incoming packets arrive as messages to this
+    # GenServer's mailbox — no manual recv() loop needed.
+    {:ok, socket} = :gen_udp.open(listen_port, [:binary, {:active, true}])
+
+    # Get the actual port (important when configured port is 0)
+    {:ok, actual_port} = :inet.port(socket)
+
+    {:ok, %{socket: socket, port: actual_port}}
+  end
+
+  @impl true
+  def handle_call(:get_port, _from, state) do
+    {:reply, state.port, state}
+  end
+
+  @impl true
+  def handle_info({:udp, _socket, ip, port, data}, state) do
+    # Process the query and send the response back to the sender.
+    # We don't spawn a separate process for each query — the GenServer
+    # handles them sequentially. For a production server, you'd want
+    # a worker pool, but for the prototype this is fine.
+    reply = process_query(data)
+    :gen_udp.send(state.socket, ip, port, reply)
+    {:noreply, state}
+  end
+
+  # ── Query Processing ───────────────────────────────────────────────
+
+  # Parse a query packet, look up the record, and build the response.
+  defp process_query(<<0x01, name_len::16, name::binary-size(name_len), type_byte::8>>) do
+    # Convert wire type byte to atom
+    type = try do
+      Record.byte_to_type(type_byte)
+    rescue
+      _ -> :unknown
+    end
+
+    if type == :unknown do
+      <<0xFF>>
+    else
+      case Query.lookup(name, type) do
+        {:ok, record} ->
+          # Encode the full record (including signature) for the wire
+          record_bin = Record.encode(record)
+          <<0x02, record_bin::binary>>
+
+        :not_found ->
+          <<0x03, name_len::16, name::binary, type_byte::8>>
+
+        {:error, :revoked} ->
+          <<0x04, name_len::16, name::binary>>
+
+        {:error, _reason} ->
+          <<0x03, name_len::16, name::binary, type_byte::8>>
+      end
+    end
+  end
+
+  # Malformed query → invalid response
+  defp process_query(_), do: <<0xFF>>
+end

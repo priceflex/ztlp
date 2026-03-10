@@ -7,6 +7,17 @@ ZTLP_RFC_Draft_v0.5.docx
 # Rust build artifacts
 /proto/target/
 
-# Elixir build artifacts
+# Elixir build artifacts (relay)
 /relay/_build/
 /relay/deps/
+
+# Elixir build artifacts (ns)
+/ns/_build/
+/ns/deps/
+
+# Root-level Elixir artifacts (should not exist — each project has its own)
+/_build/
+/deps/
+mix.exs
+_build/
+deps/

@@ -1,8 +1,8 @@
 # ZTLP Prototype — Developer Guide
 
 Complete guide to building, running, and understanding the ZTLP reference
-implementation. This document covers both Phase 1 (Rust client) and Phase 2
-(Elixir relay).
+implementation. This document covers Phase 1 (Rust client), Phase 2
+(Elixir relay), Phase 3 (eBPF/XDP filter), and Phase 4 (ZTLP-NS namespace).
 
 ---
 
@@ -625,7 +625,21 @@ produce identical material regardless of role.
 | udp_listener_test | ~8 | Bind, receive, HELLO handling, garbage rejection |
 | integration_test | ~22 | Bidirectional forwarding, 5 concurrent sessions, crypto roundtrip, handshake roundtrip, unknown peer rejection |
 
-**Combined: 164 tests, 0 failures.**
+### ZTLP-NS Namespace — 105 tests
+
+| Suite | Tests | Description |
+|-------|-------|-------------|
+| crypto_test | 10 | Keypair gen, sign/verify, tampered message/sig, empty/large, pubkey derivation |
+| record_test | 28 | Type mapping, serialize/deserialize all 6 types, signing, wire encode/decode, expiration, constructors |
+| zone_test | 8 | Zone creation, parent_name extraction, contains? membership |
+| zone_authority_test | 9 | Generate, sign records, reject out-of-zone, delegation, verify_record |
+| store_test | 17 | Insert, reject unsigned/stale, lookup, revocation, expiration, clear |
+| trust_anchor_test | 7 | Add/remove/clear anchors, trusted? checks |
+| query_test | 8 | Simple lookup, trust chain verification, revocation blocking, resolve_all |
+| bootstrap_test | 5 | Verify response, hardcoded fallback, discover sequence |
+| integration_test | 13 | Full trust chain (3 levels), revocation blocks valid chain, UDP round-trip, NXDOMAIN, malformed query |
+
+**Combined: 269 tests (91 Rust + 73 Elixir relay + 105 Elixir NS), 0 failures.**
 
 ---
 
@@ -668,8 +682,8 @@ the test file.
 |-------|-----------|----------|--------|
 | **1** | Client prototype | Rust | ✅ **Complete** (91 tests) |
 | **2** | Relay node | Elixir/OTP | ✅ **Complete** (73 tests) |
-| 3 | eBPF/XDP packet filter | C | Planned |
-| 4 | ZTLP-NS trust namespace | TBD | Planned |
+| **3** | eBPF/XDP packet filter | C | ✅ **Complete** |
+| **4** | ZTLP-NS trust namespace | Elixir/OTP | ✅ **Complete** (105 tests) |
 | 5 | Gateway (ZTLP ↔ legacy) | Elixir | Planned |
 
 ---
@@ -677,5 +691,5 @@ the test file.
 ## License
 
 Apache License 2.0. All Rust dependencies are MIT or Apache-2.0.
-Elixir relay has zero external dependencies (OTP only).
+Elixir relay and ZTLP-NS have zero external dependencies (OTP only).
 No GPL code in any component.

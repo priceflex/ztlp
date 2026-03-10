@@ -1,5 +1,11 @@
 # ZTLP — Zero Trust Layer Protocol
 
+[![CI](https://github.com/priceflex/ztlp/actions/workflows/ci.yml/badge.svg)](https://github.com/priceflex/ztlp/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Spec: v1.0](https://img.shields.io/badge/Spec-v1.0-green.svg)](https://ztlp.org)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](proto/)
+[![Elixir](https://img.shields.io/badge/Elixir-1.15%2B-purple.svg)](relay/)
+
 **Version 1.0 | Experimental / Informational**
 
 ---

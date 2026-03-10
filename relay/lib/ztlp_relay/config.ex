@@ -241,4 +241,51 @@ defmodule ZtlpRelay.Config do
   def sac_load_threshold do
     Application.get_env(:ztlp_relay, :sac_load_threshold, 0.7)
   end
+
+  # --- NS Discovery configuration ---
+
+  @doc "NS server address. Returns `{host, port}` or `nil`."
+  @spec ns_server() :: {:inet.ip_address() | String.t(), non_neg_integer()} | nil
+  def ns_server do
+    case System.get_env("ZTLP_RELAY_NS_SERVER") do
+      nil -> Application.get_env(:ztlp_relay, :ns_server)
+      str ->
+        case String.split(str, ":") do
+          [host, port_str] ->
+            case Integer.parse(port_str) do
+              {port, ""} -> {host, port}
+              _ -> nil
+            end
+          _ -> nil
+        end
+    end
+  end
+
+  @doc "NS discovery zone. Default: \"relay.ztlp\"."
+  @spec ns_discovery_zone() :: String.t()
+  def ns_discovery_zone do
+    case System.get_env("ZTLP_RELAY_NS_DISCOVERY_ZONE") do
+      nil -> Application.get_env(:ztlp_relay, :ns_discovery_zone, "relay.ztlp")
+      zone -> zone
+    end
+  end
+
+  @doc "NS refresh interval in ms. Default: 60_000."
+  @spec ns_refresh_interval_ms() :: non_neg_integer()
+  def ns_refresh_interval_ms do
+    case System.get_env("ZTLP_RELAY_NS_REFRESH_INTERVAL_MS") do
+      nil -> Application.get_env(:ztlp_relay, :ns_refresh_interval_ms, 60_000)
+      ms -> String.to_integer(ms)
+    end
+  end
+
+  @doc "Relay region. Default: \"default\"."
+  @spec relay_region() :: String.t()
+  def relay_region do
+    case System.get_env("ZTLP_RELAY_REGION") do
+      nil -> Application.get_env(:ztlp_relay, :relay_region, "default")
+      region -> region
+    end
+  end
+
 end

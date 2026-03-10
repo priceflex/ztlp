@@ -16,7 +16,7 @@ defmodule ZtlpRelay.MeshManager do
 
   require Logger
 
-  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay}
+  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay, NsClient}
 
   @type state :: %{
     node_id: binary(),
@@ -85,6 +85,9 @@ defmodule ZtlpRelay.MeshManager do
     mesh_port = Keyword.get(opts, :mesh_listen_port, Config.mesh_listen_port())
     ping_interval = Keyword.get(opts, :ping_interval_ms, Config.ping_interval_ms())
     bootstrap_relays = Keyword.get(opts, :bootstrap_relays, Config.mesh_bootstrap_relays())
+    ns_server = Keyword.get(opts, :ns_server, Config.ns_server())
+    ns_discovery_zone = Keyword.get(opts, :ns_discovery_zone, Config.ns_discovery_zone())
+    ns_refresh_interval = Keyword.get(opts, :ns_refresh_interval_ms, Config.ns_refresh_interval_ms())
 
     # Open mesh UDP socket
     socket = case :gen_udp.open(mesh_port, [:binary, {:active, true}]) do
@@ -114,13 +117,23 @@ defmodule ZtlpRelay.MeshManager do
       mesh_port: mesh_port,
       ping_interval: ping_interval,
       scores: %{},
-      ping_sent_at: %{}
+      ping_sent_at: %{},
+      ns_server: ns_server,
+      ns_discovery_zone: ns_discovery_zone,
+      ns_refresh_interval: ns_refresh_interval
     }
 
     # Bootstrap: send HELLO to known relays
     if socket do
       bootstrap(socket, node_id, our_info, bootstrap_relays)
       schedule_ping_sweep(ping_interval)
+    end
+
+    # NS-based discovery and self-registration
+    if socket && ns_server do
+      ns_register_self(node_id, ns_discovery_zone, socket)
+      send(self(), :ns_discover)
+      schedule_ns_refresh(ns_refresh_interval)
     end
 
     {:ok, state}
@@ -205,6 +218,18 @@ defmodule ZtlpRelay.MeshManager do
   def handle_info(:ping_sweep, state) do
     state = do_ping_sweep(state)
     schedule_ping_sweep(state.ping_interval)
+    {:noreply, state}
+  end
+
+  def handle_info(:ns_discover, state) do
+    state = do_ns_discovery(state)
+    {:noreply, state}
+  end
+
+  def handle_info(:ns_refresh, state) do
+    state = do_ns_discovery(state)
+    ns_register_self(state.node_id, state.ns_discovery_zone, state.socket)
+    schedule_ns_refresh(state.ns_refresh_interval)
     {:noreply, state}
   end
 
@@ -431,4 +456,59 @@ defmodule ZtlpRelay.MeshManager do
         end
     end
   end
+
+  # ── NS Discovery ──────────────────────────────────────────────────
+
+  defp do_ns_discovery(state) do
+    case NsClient.discover_relays(state.ns_discovery_zone) do
+      {:ok, records} ->
+        Enum.each(records, fn record -> process_ns_relay_record(record, state) end)
+        state
+      {:error, _reason} -> state
+    end
+  end
+
+  defp process_ns_relay_record(record, state) do
+    data = record.data
+    node_id_hex = data[:node_id] || data["node_id"]
+    endpoints = data[:endpoints] || data["endpoints"] || []
+    if is_nil(node_id_hex) or endpoints == [], do: :ok, else:
+      case Base.decode16(node_id_hex, case: :mixed) do
+        {:ok, node_id} when node_id != state.node_id ->
+          case parse_first_endpoint(endpoints) do
+            {:ok, {host, port}} ->
+              case resolve_host(host) do
+                {:ok, ip} ->
+                  RelayRegistry.register(%{node_id: node_id, address: {ip, port}, role: :all})
+                  if state.socket do
+                    hello = InterRelay.encode_hello(%{node_id: state.node_id,
+                      address: {Config.listen_address(), Config.listen_port()},
+                      role: state.role, capabilities: 0})
+                    :gen_udp.send(state.socket, ip, port, hello)
+                  end
+                _ -> :ok
+              end
+            _ -> :ok
+          end
+        _ -> :ok
+      end
+  end
+
+  defp parse_first_endpoint([ep | _]) when is_binary(ep), do: parse_relay_address(ep)
+  defp parse_first_endpoint(_), do: {:error, :no_endpoints}
+
+  defp ns_register_self(node_id, zone, socket) do
+    port = case :inet.port(socket) do
+      {:ok, p} -> p
+      _ -> Config.mesh_listen_port()
+    end
+    info = %{node_id: node_id, endpoints: ["127.0.0.1:\#{port}"],
+             capacity: Config.max_sessions(), region: Config.relay_region()}
+    NsClient.register_self(zone, info)
+  end
+
+  defp schedule_ns_refresh(interval) do
+    Process.send_after(self(), :ns_refresh, interval)
+  end
+
 end

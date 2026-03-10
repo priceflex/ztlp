@@ -28,10 +28,14 @@ defmodule ZtlpRelay.Application do
 
     mesh_children =
       if ZtlpRelay.Config.mesh_enabled?() do
-        [
-          ZtlpRelay.RelayRegistry,
-          ZtlpRelay.MeshManager
-        ]
+        ns_children =
+          if ZtlpRelay.Config.ns_server() do
+            [ZtlpRelay.NsClient]
+          else
+            []
+          end
+
+        [ZtlpRelay.RelayRegistry] ++ ns_children ++ [ZtlpRelay.MeshManager]
       else
         []
       end

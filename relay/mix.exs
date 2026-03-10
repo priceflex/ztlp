@@ -19,6 +19,8 @@ defmodule ZtlpRelay.MixProject do
   end
 
   defp deps do
-    []
+    [
+      {:ztlp_ns, path: "../ns", only: :test, runtime: false}
+    ]
   end
 end

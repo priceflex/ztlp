@@ -38,6 +38,14 @@ defmodule ZtlpNs.Server do
 
   ## Type Bytes
   - 1 = KEY, 2 = SVC, 3 = RELAY, 4 = POLICY, 5 = REVOKE, 6 = BOOTSTRAP
+
+  ### Query by Public Key (client → server)
+  ```
+  <<0x05, pubkey_hex_len::16, pubkey_hex::binary-size(pubkey_hex_len)>>
+  ```
+  Scans the store for any `:key` record whose `data.public_key` matches
+  the given hex string. Returns `0x02` (found), `0x03` (not found), or
+  `0x04` (revoked). This is an O(n) scan, acceptable for the prototype.
   """
 
   use GenServer
@@ -120,6 +128,42 @@ defmodule ZtlpNs.Server do
         {:error, _reason} ->
           <<0x03, name_len::16, name::binary, type_byte::8>>
       end
+    end
+  end
+
+  # Query by public key (0x05) — scans the store for a :key record
+  # whose data.public_key matches the given hex string.
+  defp process_query(<<0x05, pk_hex_len::16, pk_hex::binary-size(pk_hex_len)>>) do
+    pk_hex_lower = String.downcase(pk_hex)
+
+    # O(n) scan of all records — fine for the prototype
+    result =
+      ZtlpNs.Store.list()
+      |> Enum.find(fn {_name, type, record} ->
+        type == :key and Map.get(record.data, :public_key) == pk_hex_lower
+      end)
+
+    case result do
+      {name, _type, record} ->
+        # Check revocation status
+        if ZtlpNs.Store.revoked?(name) do
+          name_bin = name
+          name_len = byte_size(name_bin)
+          <<0x04, name_len::16, name_bin::binary>>
+        else
+          # Verify signature before returning
+          if Record.verify(record) do
+            record_bin = Record.encode(record)
+            <<0x02, record_bin::binary>>
+          else
+            # Record exists but has invalid signature — treat as not found
+            <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
+          end
+        end
+
+      nil ->
+        # Not found — return 0x03 with the pubkey hex as the "name"
+        <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
     end
   end
 

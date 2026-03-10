@@ -12,11 +12,12 @@ defmodule ZtlpGateway.Identity do
   2. `resolve/1` maps the pubkey to a zone name or identity string
   3. `PolicyEngine.authorize?/2` checks if that identity can access the service
 
-  ## Prototype Limitations
+  ## Identity Resolution
 
-  In the prototype, identity resolution uses a local cache (ETS table).
-  In production, this would query ZTLP-NS for the ZTLP_KEY record
-  binding the public key to a NodeID and zone name.
+  Resolution checks the local ETS cache first. On a cache miss, if the
+  `NsClient` GenServer is running, it queries ZTLP-NS for a ZTLP_KEY
+  record whose `data.public_key` matches the hex-encoded X25519 pubkey.
+  Successful NS lookups are cached locally for subsequent requests.
   """
 
   @table :ztlp_gateway_identity_cache
@@ -58,17 +59,21 @@ defmodule ZtlpGateway.Identity do
 
   Returns `{:ok, identity}` if the key is known, `:unknown` otherwise.
 
-  In the prototype, this is a simple ETS lookup. Production would:
-  1. Check local cache first
-  2. Query ZTLP-NS for a ZTLP_KEY record matching this pubkey
-  3. Verify the record's signature chain back to a trust anchor
-  4. Cache the result with TTL
+  Resolution flow:
+  1. Check local ETS cache
+  2. On cache miss, query ZTLP-NS via `NsClient` (if running)
+  3. On NS hit, cache the identity locally and return it
+  4. If NS is unreachable or returns not-found, return `:unknown`
   """
   @spec resolve(binary()) :: {:ok, String.t()} | :unknown
   def resolve(pubkey) when byte_size(pubkey) == 32 do
     case :ets.lookup(@table, pubkey) do
-      [{^pubkey, identity}] -> {:ok, identity}
-      [] -> :unknown
+      [{^pubkey, identity}] ->
+        {:ok, identity}
+
+      [] ->
+        # Cache miss — try NS lookup
+        resolve_via_ns(pubkey)
     end
   end
 
@@ -84,6 +89,31 @@ defmodule ZtlpGateway.Identity do
     case resolve(pubkey) do
       {:ok, identity} -> identity
       :unknown -> "unknown:" <> Base.encode16(pubkey, case: :lower)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private: NS-backed resolution
+  # ---------------------------------------------------------------------------
+
+  defp resolve_via_ns(pubkey) do
+    # Only attempt NS lookup if NsClient is running
+    case Process.whereis(ZtlpGateway.NsClient) do
+      nil ->
+        :unknown
+
+      _pid ->
+        case ZtlpGateway.NsClient.query_key(pubkey) do
+          {:ok, record_map} ->
+            # Extract identity from the record's name field
+            identity = record_map.name
+            # Cache it locally
+            :ets.insert(@table, {pubkey, identity})
+            {:ok, identity}
+
+          {:error, _reason} ->
+            :unknown
+        end
     end
   end
 

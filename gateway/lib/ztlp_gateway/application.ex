@@ -9,6 +9,7 @@ defmodule ZtlpGateway.Application do
       ├── ZtlpGateway.AuditLog           (ETS table — no deps)
       ├── ZtlpGateway.SessionRegistry    (ETS table — no deps)
       ├── ZtlpGateway.PolicyEngine       (loads config — depends on Config module)
+      ├── ZtlpGateway.NsClient           (UDP client for ZTLP-NS queries — optional)
       ├── ZtlpGateway.SessionSupervisor  (DynamicSupervisor for Session GenServers)
       └── ZtlpGateway.Listener           (UDP socket — starts last, depends on everything)
 
@@ -35,6 +36,7 @@ defmodule ZtlpGateway.Application do
       ZtlpGateway.AuditLog,
       ZtlpGateway.SessionRegistry,
       ZtlpGateway.PolicyEngine,
+      ZtlpGateway.NsClient,
       {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
       ZtlpGateway.Listener
     ]

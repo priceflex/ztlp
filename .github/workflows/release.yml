@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build Rust binaries for each platform ─────────────────────
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: ""
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: ""
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: ""
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: ""
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            suffix: ".exe"
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            proto/target/
+          key: release-${{ matrix.target }}-${{ hashFiles('proto/Cargo.lock') }}
+          restore-keys: release-${{ matrix.target }}-
+
+      - name: Build release binaries
+        working-directory: proto
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} \
+            --bin ztlp \
+            --bin ztlp-inspect \
+            --bin ztlp-load \
+            --bin ztlp-fuzz
+
+      - name: Prepare release directory
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DIR="ztlp-${VERSION}-${{ matrix.target }}"
+          mkdir -p "${DIR}"
+
+          # Copy binaries
+          for bin in ztlp ztlp-inspect ztlp-load ztlp-fuzz; do
+            cp "proto/target/${{ matrix.target }}/release/${bin}${{ matrix.suffix }}" "${DIR}/"
+          done
+
+          # Copy docs
+          cp README.md "${DIR}/"
+          cp LICENSE "${DIR}/" 2>/dev/null || cp NOTICE "${DIR}/" 2>/dev/null || true
+          cp CLI.md "${DIR}/"
+
+          echo "${DIR}" > artifact-name.txt
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          DIR=$(cat artifact-name.txt)
+          tar czf "${DIR}.tar.gz" "${DIR}"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          DIR=$(cat artifact-name.txt)
+          7z a "${DIR}.zip" "${DIR}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ztlp-*.${{ matrix.archive }}
+
+  # ── Create GitHub Release ─────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect archives
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} release/ \;
+          ls -lh release/
+
+      - name: Generate checksums
+        working-directory: release
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cat > release/RELEASE_NOTES.md << 'EOF'
+          ## ZTLP ${VERSION}
+
+          ### Included Binaries
+
+          | Binary | Description |
+          |--------|-------------|
+          | `ztlp` | Unified CLI — keygen, connect, listen, relay, ns, gateway, inspect, ping, status |
+          | `ztlp-inspect` | Packet decoder — hex, file, or stdin input with pretty/JSON/compact output |
+          | `ztlp-load` | Load generator — pipeline benchmarks, relay/gateway/NS stress testing |
+          | `ztlp-fuzz` | Protocol fuzzer — 8 mutation strategies, local and network modes |
+
+          ### Platforms
+
+          | Archive | OS | Arch |
+          |---------|----|------|
+          | `ztlp-*-x86_64-unknown-linux-gnu.tar.gz` | Linux | x86_64 |
+          | `ztlp-*-aarch64-unknown-linux-gnu.tar.gz` | Linux | ARM64 |
+          | `ztlp-*-x86_64-apple-darwin.tar.gz` | macOS | Intel |
+          | `ztlp-*-aarch64-apple-darwin.tar.gz` | macOS | Apple Silicon |
+          | `ztlp-*-x86_64-pc-windows-msvc.zip` | Windows | x86_64 |
+
+          ### Quick Start
+
+          ```bash
+          # Download and extract (Linux x86_64 example)
+          tar xzf ztlp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          cd ztlp-${VERSION}-x86_64-unknown-linux-gnu
+
+          # Generate an identity
+          ./ztlp keygen --output ~/.ztlp/identity.json
+
+          # Connect to a peer
+          ./ztlp connect peer.example.com:23095 --key ~/.ztlp/identity.json
+          ```
+
+          ### Verification
+
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release/RELEASE_NOTES.md
+          files: release/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

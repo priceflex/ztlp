@@ -137,35 +137,174 @@ config :ztlp_relay,
   max_sessions: 10_000            # Maximum concurrent sessions
 ```
 
+## Relay Mesh
+
+The relay supports multi-relay mesh networking via consistent hashing and
+inter-relay communication. Multiple relay nodes form a mesh to distribute
+sessions across the cluster for scalability and fault tolerance.
+
+### Architecture
+
+```
+                    ┌──────────────┐
+       ┌──────────►│   Relay A    │◄──────────┐
+       │           │  (Ingress)   │           │
+       │           └──────┬───────┘           │
+       │                  │                    │
+  RELAY_HELLO        RELAY_FORWARD        RELAY_HELLO
+       │                  │                    │
+       │           ┌──────▼───────┐           │
+       ├──────────►│   Relay B    │◄──────────┤
+       │           │  (Transit)   │           │
+       │           └──────┬───────┘           │
+       │                  │                    │
+       │           ┌──────▼───────┐           │
+       └──────────►│   Relay C    │◄──────────┘
+                   │  (Service)   │
+                   └──────────────┘
+```
+
+**Key concepts:**
+
+- **Consistent Hashing (HashRing):** Sessions are assigned to relays using a
+  consistent hash ring with 128 virtual nodes per relay. When a relay joins or
+  leaves, only ~1/N sessions are remapped.
+
+- **PathScore:** Routes are selected based on a composite score:
+  `score = rtt_ms × (1 + loss_rate × 10) × (1 + load_factor × 2)`.
+  Lower is better. RTT is tracked with an exponential moving average.
+
+- **Relay Roles:**
+  - `ingress` — Client-facing, handles HELLO authentication, issues RATs
+  - `transit` — Accepts pre-authenticated traffic via RAT verification
+  - `service` — Backend service endpoint
+  - `all` — Performs all roles (default)
+
+- **Relay Admission Tokens (RAT):** 93-byte HMAC-BLAKE2s signed tokens that
+  prove a node has been authenticated by an ingress relay. Supports session
+  scoping, key rotation, and 5-minute TTL.
+
+### Mesh Protocol Wire Format
+
+All inter-relay messages share a common header:
+```
+<<msg_type::8, sender_node_id::binary-16, timestamp::64, ...payload>>
+```
+
+| Type | Code | Payload | Purpose |
+|------|------|---------|---------|
+| RELAY_HELLO | 0x01 | ip(4), port(2), role(1), capabilities(4) | Mesh discovery |
+| RELAY_HELLO_ACK | 0x02 | ip(4), port(2), role(1), capabilities(4) | Discovery response |
+| RELAY_PING | 0x03 | (none) | Health probe |
+| RELAY_PONG | 0x04 | active_sessions(4), max_sessions(4), uptime(4) | Metrics response |
+| RELAY_FORWARD | 0x05 | length(4), inner_packet(variable) | Packet forwarding |
+| RELAY_SESSION_SYNC | 0x06 | session_id(12), peer_a(6), peer_b(6) | Session migration |
+| RELAY_LEAVE | 0x07 | (none) | Graceful departure |
+
+### Configuration
+
+Additional config for mesh operations:
+
+```elixir
+config :ztlp_relay,
+  # Relay identity
+  relay_node_id: <<...16 bytes...>>,  # Auto-generated if unset
+
+  # RAT signing
+  rat_secret: <<...32 bytes...>>,           # Auto-generated if unset
+  rat_secret_previous: nil,                 # For key rotation
+  rat_ttl_seconds: 300,                     # RAT lifetime (5 min)
+
+  # Ingress rate limits
+  ingress_rate_limit_per_ip: 10,            # Max HELLOs/min per IP
+  ingress_rate_limit_per_node: 5,           # Max HELLOs/min per NodeID
+
+  # Admission challenge
+  sac_load_threshold: 0.7                   # Fraction of max_sessions
+```
+
+Environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ZTLP_RELAY_RAT_SECRET` | Hex-encoded 32-byte RAT signing key | Auto-generated |
+| `ZTLP_RELAY_RAT_SECRET_PREVIOUS` | Previous key for rotation | None |
+| `ZTLP_RELAY_RAT_TTL_SECONDS` | RAT lifetime in seconds | 300 |
+
+### Run the Demo
+
+```bash
+cd relay && mix run mesh_demo.exs
+```
+
+Starts 3 local relay nodes, forms a mesh, demonstrates consistent hash routing,
+simulates a relay failure with rebalancing, and prints forwarding stats.
+
+### Run Mesh Integration Tests
+
+```bash
+cd relay && mix test test/ztlp_relay/mesh_integration_test.exs --trace
+```
+
+Tests cover mesh formation, consistent hash routing, failover, PathScore
+selection, admission token flow, rate limiting, session sync, and graceful
+departure.
+
+### Run Mesh Benchmark
+
+```bash
+cd relay && mix run mesh_bench.exs
+```
+
+Measures ops/sec for hash ring lookup, PathScore computation, inter-relay
+message encode/decode, end-to-end forwarding, and RAT issue/verify.
+
 ## Project Structure
 
 ```
 ztlp_relay/
 ├── mix.exs
+├── mesh_demo.exs             # Interactive mesh demo script
+├── mesh_bench.exs            # Mesh performance benchmark
 ├── config/
-│   ├── config.exs           # Shared configuration
-│   ├── dev.exs              # Dev overrides
-│   ├── test.exs             # Test overrides (port 0 for random)
-│   └── prod.exs             # Production configuration
+│   ├── config.exs            # Shared configuration
+│   ├── dev.exs               # Dev overrides
+│   ├── test.exs              # Test overrides (port 0 for random)
+│   └── prod.exs              # Production configuration
 ├── lib/
-│   ├── ztlp_relay.ex        # Module constants
+│   ├── ztlp_relay.ex         # Module constants
 │   └── ztlp_relay/
-│       ├── application.ex   # OTP Application + supervision tree
-│       ├── config.ex        # Runtime configuration helpers
-│       ├── crypto.ex        # ChaCha20-Poly1305 AEAD (HeaderAuthTag)
-│       ├── packet.ex        # Binary packet parsing/serialization
-│       ├── pipeline.ex      # Three-layer admission pipeline
-│       ├── session.ex       # GenServer per active session
+│       ├── application.ex    # OTP Application + supervision tree
+│       ├── admission_token.ex # RAT signing/verification (HMAC-BLAKE2s)
+│       ├── config.ex         # Runtime configuration helpers
+│       ├── crypto.ex         # ChaCha20-Poly1305 AEAD (HeaderAuthTag)
+│       ├── hash_ring.ex      # Consistent hash ring (128 vnodes/node)
+│       ├── ingress.ex        # Ingress admission handler
+│       ├── inter_relay.ex    # Inter-relay protocol encode/decode
+│       ├── packet.ex         # Binary packet parsing/serialization
+│       ├── path_score.ex     # Composite route scoring
+│       ├── pipeline.ex       # Three-layer admission pipeline
+│       ├── rate_limiter.ex   # ETS-based sliding window rate limiter
+│       ├── relay_registry.ex # ETS-backed known relay registry
+│       ├── session.ex        # GenServer per active session
 │       ├── session_registry.ex    # ETS routing table
 │       ├── session_supervisor.ex  # DynamicSupervisor for sessions
-│       ├── stats.ex         # Pipeline counters
-│       └── udp_listener.ex  # GenServer wrapping :gen_udp
+│       ├── stats.ex          # Pipeline counters
+│       ├── transit.ex        # Transit relay handler
+│       └── udp_listener.ex   # GenServer wrapping :gen_udp
 ├── test/
 │   ├── test_helper.exs
 │   └── ztlp_relay/
+│       ├── admission_token_test.exs
+│       ├── hash_ring_test.exs
+│       ├── ingress_test.exs
 │       ├── integration_test.exs
+│       ├── mesh_integration_test.exs  # Multi-relay mesh tests
 │       ├── packet_test.exs
+│       ├── path_score_test.exs
 │       ├── pipeline_test.exs
+│       ├── rate_limiter_test.exs
+│       ├── relay_registry_test.exs
 │       ├── session_registry_test.exs
 │       ├── session_test.exs
 │       └── udp_listener_test.exs

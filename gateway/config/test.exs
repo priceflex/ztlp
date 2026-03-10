@@ -6,3 +6,6 @@ config :ztlp_gateway, :port, 0
 
 # Short timeout for faster test teardown.
 config :ztlp_gateway, :session_timeout_ms, 5_000
+
+# ZTLP-NS: use ram_copies for Mnesia in tests (disc_copies requires distributed node)
+config :ztlp_ns, :storage_mode, :ram_copies

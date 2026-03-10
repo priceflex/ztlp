@@ -1,9 +1,20 @@
 defmodule ZtlpRelay.SessionSupervisor do
   @moduledoc """
-  DynamicSupervisor for session GenServers.
+  DynamicSupervisor for ZTLP session GenServers.
 
-  Uses `:one_for_one` strategy so crashed sessions don't affect others.
-  Sessions are started on demand when new session registrations occur.
+  Each active relay session gets its own `ZtlpRelay.Session` GenServer,
+  started under this DynamicSupervisor.  The `:one_for_one` strategy
+  ensures that if one session process crashes (e.g., unexpected error
+  during packet forwarding), it is restarted independently without
+  affecting any other active sessions.
+
+  This provides fault isolation — a single misbehaving session cannot
+  bring down the relay.  DynamicSupervisor (rather than a static
+  Supervisor) is used because sessions are created and destroyed at
+  runtime as peers connect and disconnect; we don't know the session
+  list at boot time.
+
+  Started as part of the OTP supervision tree in `ZtlpRelay.Application`.
   """
 
   @doc """

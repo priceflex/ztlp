@@ -99,8 +99,12 @@ defmodule ZtlpRelay.UdpListener do
 
   # Internal packet handling
 
+  # Process a raw UDP packet through the admission pipeline.
+  # The relay passes `nil` for session_key, which means Layer 3
+  # (HeaderAuthTag AEAD verification) is skipped — the relay has
+  # no access to session keys.  This is the core zero-trust property:
+  # the relay can route packets but never read or forge them.
   defp handle_packet(data, sender, state) do
-    # Run through the admission pipeline (Layer 3 skipped in relay mode — no keys)
     case Pipeline.process(data, nil) do
       {:pass, parsed} ->
         handle_admitted_packet(parsed, data, sender, state)
@@ -111,28 +115,39 @@ defmodule ZtlpRelay.UdpListener do
     end
   end
 
+  # HELLO packets — first message of a new handshake.
+  # In production, the relay would begin tracking this as a pending
+  # session and wait for the HELLO_ACK from the responder.  For the
+  # prototype, we just log it — sessions are pre-registered externally.
   defp handle_admitted_packet(%{type: :handshake, msg_type: :hello} = _parsed, _data, sender, _state) do
-    # HELLO: store pending session (simplified for prototype)
     Logger.debug("Received HELLO from #{inspect(sender)}")
     :ok
   end
 
+  # HELLO_ACK packets — second message, completing the relay's view
+  # of the session.  In production, this would pair the two peers
+  # and register the session in the SessionRegistry.
   defp handle_admitted_packet(%{type: :handshake, msg_type: :hello_ack} = _parsed, _data, sender, _state) do
-    # HELLO_ACK: session establishment (simplified for prototype)
     Logger.debug("Received HELLO_ACK from #{inspect(sender)}")
     :ok
   end
 
+  # All other packets (data, rekey, close, ping/pong, non-HELLO handshake).
+  # The relay's core job: look up the SessionID in the registry to find the
+  # OTHER peer's address, then forward the raw packet unchanged.  The relay
+  # never decrypts, modifies, or inspects the payload — it's an opaque
+  # forwarder keyed on SessionID.
   defp handle_admitted_packet(parsed, data, sender, state) do
-    # Data or other control packets — forward to the other peer
     session_id = parsed.session_id
 
     case SessionRegistry.lookup_peer(session_id, sender) do
       {:ok, {dest_ip, dest_port}} ->
+        # Forward the raw packet to the other peer — unchanged, byte-for-byte
         :gen_udp.send(state.socket, dest_ip, dest_port, data)
         Stats.increment(:forwarded)
 
-        # Notify session GenServer of activity
+        # Notify the session GenServer so it can reset its inactivity timer.
+        # If the session has no associated GenServer (pid=nil), skip silently.
         case SessionRegistry.lookup_session(session_id) do
           {:ok, {_a, _b, pid}} when is_pid(pid) ->
             Session.forward(pid)
@@ -142,6 +157,8 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       :error ->
+        # This can happen if a peer's address changed (NAT rebind) or
+        # the sender is an unknown third party.  Drop silently.
         Logger.debug("No peer found for session #{inspect(session_id)} from #{inspect(sender)}")
         :ok
     end

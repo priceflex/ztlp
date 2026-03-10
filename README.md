@@ -573,8 +573,7 @@ inefficient routing, and reactive DDoS mitigation. Research protocols
 including HIP (Host Identity Protocol), LISP (Locator/Identifier
 Separation Protocol), SCION, and ILNP have attempted to solve this
 problem for decades. They struggled with deployment because all required
-changes to Internet routing infrastructure. ZTLP solves it differently
-- as an overlay.
+changes to Internet routing infrastructure. ZTLP solves it differently as an overlay.
 
 ZTLP defines three distinct layers:
 

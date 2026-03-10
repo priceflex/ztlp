@@ -145,7 +145,7 @@ s.bind(('0.0.0.0', 0))
 local_port = s.getsockname()[1]
 
 # ZTLP magic and header construction
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 
 sent = 0

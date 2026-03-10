@@ -88,7 +88,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(5)
 
 # Build a data packet with ZTLP magic
-magic = bytes([0x5A, 0x54])  # 'ZT'
+magic = bytes([0x5A, 0x37])  # 'Z7'
 version = bytes([0x01])
 msg_type = bytes([0x10])  # DATA
 flags = bytes([0x00])
@@ -158,7 +158,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(5)
 
 # Send HELLO-type message and measure round-trip
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 version = bytes([0x01])
 msg_type = bytes([0x01])  # HELLO
 flags = bytes([0x00])

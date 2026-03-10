@@ -30,8 +30,8 @@ target_port = $TARGET_PORT
 count = $COUNT
 payload_size = $PAYLOAD_SIZE
 
-# ZTLP magic bytes: 0x5A, 0x54 ('ZT')
-magic = bytes([0x5A, 0x54])
+# ZTLP magic bytes: 0x5A, 0x37 ('Z7')
+magic = bytes([0x5A, 0x37])
 
 # Build data packets
 # Data header: magic(2) + version(1) + msg_type(1) + flags(1) + session_id(12) + sequence(4) + payload_len(2)

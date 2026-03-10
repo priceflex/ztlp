@@ -33,7 +33,7 @@ relay_port = 23095
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 sent = 0
 
@@ -96,7 +96,7 @@ relay_port = 23095
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 sent = 0
 errors = 0
@@ -145,7 +145,7 @@ import socket, os, struct
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 version = bytes([0x01])
 msg_type = bytes([0x10])
@@ -181,7 +181,7 @@ relay_port = 23095
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 sent = 0
 
@@ -245,7 +245,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
 # Send a new HELLO message to establish a new session
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 version = bytes([0x01])
 msg_type = bytes([0x01])  # HELLO
 flags = bytes([0x00])

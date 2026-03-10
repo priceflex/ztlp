@@ -70,8 +70,8 @@ RELAY_RESULT_A=$(docker exec ztlp-test-client-a python3 -c "
 import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
-# Send a minimal packet with ZTLP magic (0x5A54)
-magic = bytes([0x5A, 0x54])
+# Send a minimal packet with ZTLP magic (0x5A37)
+magic = bytes([0x5A, 0x37])
 packet = magic + os.urandom(33)  # magic + 33 random bytes (min header)
 s.sendto(packet, ('relay', 23095))
 print('sent_ok')
@@ -90,7 +90,7 @@ RELAY_RESULT_B=$(docker exec ztlp-test-client-b python3 -c "
 import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 packet = magic + os.urandom(33)
 s.sendto(packet, ('relay', 23095))
 print('sent_ok')
@@ -110,7 +110,7 @@ GW_RESULT=$(docker exec ztlp-test-client-a python3 -c "
 import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 packet = magic + os.urandom(33)
 s.sendto(packet, ('gateway', 23097))
 print('sent_ok')

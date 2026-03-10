@@ -130,7 +130,7 @@ msgs_per_session = 50
 results = {}
 lock = threading.Lock()
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 
 def relay_worker(session_num):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

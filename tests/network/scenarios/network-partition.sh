@@ -50,7 +50,7 @@ BASELINE_RELAY=$(docker exec "$CLIENT_A" python3 -c "
 import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 packet = magic + os.urandom(33)
 try:
     s.sendto(packet, ('relay', 23095))
@@ -107,7 +107,7 @@ import socket, os, struct
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 sent = 0
 
@@ -183,7 +183,7 @@ import socket, os
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 packet = magic + os.urandom(33)
 
 try:
@@ -258,7 +258,7 @@ import socket, os, struct
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(3)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 sent = 0
 
@@ -309,7 +309,7 @@ s1.close()
 # Test Relay
 s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s2.settimeout(3)
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 try:
     s2.sendto(magic + os.urandom(33), ('relay', 23095))
     results['relay'] = True

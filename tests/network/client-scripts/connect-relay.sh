@@ -25,13 +25,13 @@ import socket, struct, time, sys, os
 relay_host = '$RELAY_HOST'
 relay_port = $RELAY_PORT
 
-# ZTLP magic bytes: 0x5A, 0x54 ('ZT')
+# ZTLP magic bytes: 0x5A, 0x37 ('Z7')
 # Build a minimal HELLO header (handshake packet)
 # Version: 1, MsgType: 0x01 (Hello)
 # Header: magic(2) + version(1) + msg_type(1) + flags(1) + session_id(12) + src_node_id(16) + payload_len(2)
 # Total header: 35 bytes
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 version = bytes([0x01])
 msg_type = bytes([0x01])  # HELLO
 flags = bytes([0x00])

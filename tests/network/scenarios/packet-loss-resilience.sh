@@ -65,7 +65,7 @@ s2.settimeout(3)
 data_sent = 0
 data_delivered = 0
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 
 for seq in range(100):

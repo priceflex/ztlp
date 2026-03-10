@@ -62,7 +62,7 @@ s.close()
 s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s2.settimeout(10)
 
-magic = bytes([0x5A, 0x54])
+magic = bytes([0x5A, 0x37])
 session_id = os.urandom(12)
 relay_sent = 0
 relay_recv = 0

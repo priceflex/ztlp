@@ -67,7 +67,7 @@ defmodule ZtlpRelay.InterRelayTest do
       assert {:ok, {:relay_ping, sender, _ts, payload}} = InterRelay.decode(encoded)
 
       assert sender == @test_node_id
-      assert payload == %{}
+      assert payload == %{seq: 0}
     end
 
     test "includes timestamp" do
@@ -82,7 +82,7 @@ defmodule ZtlpRelay.InterRelayTest do
   end
 
   describe "encode/decode RELAY_PONG" do
-    test "round-trips with metrics" do
+    test "round-trips with metrics and default echo_seq" do
       metrics = %{active_sessions: 150, max_sessions: 10_000, uptime_seconds: 86400}
       encoded = InterRelay.encode_pong(@test_node_id, metrics)
       assert {:ok, {:relay_pong, sender, _ts, payload}} = InterRelay.decode(encoded)
@@ -91,6 +91,29 @@ defmodule ZtlpRelay.InterRelayTest do
       assert payload.active_sessions == 150
       assert payload.max_sessions == 10_000
       assert payload.uptime_seconds == 86400
+      assert payload.echo_seq == 0
+    end
+
+    test "round-trips with explicit echo_seq" do
+      metrics = %{active_sessions: 100, max_sessions: 5_000, uptime_seconds: 3600}
+      encoded = InterRelay.encode_pong(@test_node_id, metrics, 42)
+      assert {:ok, {:relay_pong, sender, _ts, payload}} = InterRelay.decode(encoded)
+
+      assert sender == @test_node_id
+      assert payload.active_sessions == 100
+      assert payload.max_sessions == 5_000
+      assert payload.uptime_seconds == 3600
+      assert payload.echo_seq == 42
+    end
+
+    test "echo_seq matches the ping seq it responds to" do
+      ping_seq = 17
+      _ping_encoded = InterRelay.encode_ping(@test_node_id, ping_seq)
+
+      metrics = %{active_sessions: 50, max_sessions: 10_000, uptime_seconds: 7200}
+      pong_encoded = InterRelay.encode_pong(@test_node_id, metrics, ping_seq)
+      {:ok, {:relay_pong, _, _, payload}} = InterRelay.decode(pong_encoded)
+      assert payload.echo_seq == ping_seq
     end
 
     test "handles zero metrics" do
@@ -98,6 +121,7 @@ defmodule ZtlpRelay.InterRelayTest do
       encoded = InterRelay.encode_pong(@test_node_id, metrics)
       {:ok, {:relay_pong, _, _, payload}} = InterRelay.decode(encoded)
       assert payload.active_sessions == 0
+      assert payload.echo_seq == 0
     end
   end
 

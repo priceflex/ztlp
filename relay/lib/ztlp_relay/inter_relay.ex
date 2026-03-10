@@ -85,34 +85,47 @@ defmodule ZtlpRelay.InterRelay do
   end
 
   @doc """
-  Encode a RELAY_PING message.
+  Encode a RELAY_PING message with an optional sequence number.
   """
-  @spec encode_ping(binary()) :: binary()
-  def encode_ping(sender_node_id) when byte_size(sender_node_id) == 16 do
-    <<@relay_ping::8, sender_node_id::binary-size(16), timestamp()::64>>
+  @spec encode_ping(binary(), non_neg_integer()) :: binary()
+  def encode_ping(sender_node_id, seq \\ 0) when byte_size(sender_node_id) == 16 do
+    <<@relay_ping::8, sender_node_id::binary-size(16), timestamp()::64, seq::32>>
   end
 
   @doc """
-  Encode a RELAY_PONG message with metrics.
+  Encode a RELAY_PONG message with metrics and echo sequence number.
   """
-  @spec encode_pong(binary(), pong_metrics()) :: binary()
-  def encode_pong(sender_node_id, metrics) when byte_size(sender_node_id) == 16 do
+  @spec encode_pong(binary(), pong_metrics(), non_neg_integer()) :: binary()
+  def encode_pong(sender_node_id, metrics, echo_seq \\ 0) when byte_size(sender_node_id) == 16 do
     <<@relay_pong::8, sender_node_id::binary-size(16), timestamp()::64,
       metrics.active_sessions::32, metrics.max_sessions::32,
-      metrics.uptime_seconds::32>>
+      metrics.uptime_seconds::32, echo_seq::32>>
   end
 
-  @doc """
-  Encode a RELAY_FORWARD message wrapping a ZTLP packet.
+  @default_ttl 4
 
-  The inner packet is included as-is after a 4-byte length prefix.
+  @doc """
+  Encode a RELAY_FORWARD message wrapping a ZTLP packet with multi-hop support.
+
+  Wire format:
+      <<0x05, sender::16-bytes, ts::64, ttl::8, path_len::8,
+        path::(path_len*16)-bytes, inner_len::32, inner::binary>>
+
+  ## Options
+  - `:ttl` — hop count (default 4)
+  - `:path` — list of 16-byte NodeID binaries already traversed (default [])
   """
-  @spec encode_forward(binary(), binary()) :: binary()
-  def encode_forward(sender_node_id, inner_packet)
+  @spec encode_forward(binary(), binary(), keyword()) :: binary()
+  def encode_forward(sender_node_id, inner_packet, opts \\ [])
       when byte_size(sender_node_id) == 16 and is_binary(inner_packet) do
+    ttl = Keyword.get(opts, :ttl, @default_ttl)
+    path = Keyword.get(opts, :path, [])
+    path_len = length(path)
+    path_binary = Enum.reduce(path, <<>>, fn nid, acc -> <<acc::binary, nid::binary-size(16)>> end)
     len = byte_size(inner_packet)
 
     <<@relay_forward::8, sender_node_id::binary-size(16), timestamp()::64,
+      ttl::8, path_len::8, path_binary::binary,
       len::32, inner_packet::binary>>
   end
 
@@ -166,25 +179,33 @@ defmodule ZtlpRelay.InterRelay do
     }}}
   end
 
-  def decode(<<@relay_ping::8, sender::binary-size(16), ts::64>>) do
-    {:ok, {:relay_ping, sender, ts, %{}}}
+  def decode(<<@relay_ping::8, sender::binary-size(16), ts::64, seq::32>>) do
+    {:ok, {:relay_ping, sender, ts, %{seq: seq}}}
   end
 
   def decode(<<@relay_pong::8, sender::binary-size(16), ts::64,
-               active::32, max::32, uptime::32>>) do
+               active::32, max::32, uptime::32, echo_seq::32>>) do
     {:ok, {:relay_pong, sender, ts, %{
       active_sessions: active,
       max_sessions: max,
-      uptime_seconds: uptime
+      uptime_seconds: uptime,
+      echo_seq: echo_seq
     }}}
   end
 
   def decode(<<@relay_forward::8, sender::binary-size(16), ts::64,
-               len::32, inner::binary>>) do
-    if byte_size(inner) == len do
-      {:ok, {:relay_forward, sender, ts, %{inner_packet: inner}}}
-    else
-      {:error, :forward_length_mismatch}
+               ttl::8, path_len::8, rest::binary>>) do
+    path_bytes = path_len * 16
+    case rest do
+      <<path_binary::binary-size(path_bytes), len::32, inner::binary>> ->
+        if byte_size(inner) == len do
+          path = for <<nid::binary-size(16) <- path_binary>>, do: nid
+          {:ok, {:relay_forward, sender, ts, %{inner_packet: inner, ttl: ttl, path: path}}}
+        else
+          {:error, :forward_length_mismatch}
+        end
+      _ ->
+        {:error, :forward_length_mismatch}
     end
   end
 
@@ -224,31 +245,42 @@ defmodule ZtlpRelay.InterRelay do
   @doc """
   Wrap a ZTLP packet for forwarding to another relay.
 
-  Returns the encoded RELAY_FORWARD binary.
+  Options: `:ttl`, `:path` (same as encode_forward).
   """
-  @spec forward_packet(binary(), binary()) :: binary()
-  def forward_packet(inner_packet, sender_node_id) do
-    encode_forward(sender_node_id, inner_packet)
+  @spec forward_packet(binary(), binary(), keyword()) :: binary()
+  def forward_packet(inner_packet, sender_node_id, opts \\ []) do
+    encode_forward(sender_node_id, inner_packet, opts)
   end
 
   @doc """
   Unwrap a RELAY_FORWARD message, returning the inner ZTLP packet.
-
-  Returns `{:ok, inner_packet}` or `{:error, reason}`.
   """
-  @spec unwrap_forward(binary()) :: {:ok, binary()} | {:error, atom()}
+  @spec unwrap_forward(binary()) :: {:ok, binary()} | {:error, atom() | tuple()}
   def unwrap_forward(data) do
     case decode(data) do
-      {:ok, {:relay_forward, _sender, _ts, %{inner_packet: inner}}} ->
-        {:ok, inner}
-
-      {:ok, {other_type, _, _, _}} ->
-        {:error, {:not_forward, other_type}}
-
-      {:error, _} = err ->
-        err
+      {:ok, {:relay_forward, _sender, _ts, %{inner_packet: inner}}} -> {:ok, inner}
+      {:ok, {other_type, _, _, _}} -> {:error, {:not_forward, other_type}}
+      {:error, _} = err -> err
     end
   end
+
+  @doc "Unwrap RELAY_FORWARD returning full payload (sender, inner, ttl, path)."
+  @spec unwrap_forward_full(binary()) :: {:ok, {binary(), map()}} | {:error, atom() | tuple()}
+  def unwrap_forward_full(data) do
+    case decode(data) do
+      {:ok, {:relay_forward, sender, _ts, payload}} -> {:ok, {sender, payload}}
+      {:ok, {other_type, _, _, _}} -> {:error, {:not_forward, other_type}}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc "Check if node_id appears in the traversed path (loop detection)."
+  @spec loop_detected?(binary(), [binary()]) :: boolean()
+  def loop_detected?(node_id, path), do: Enum.any?(path, &(&1 == node_id))
+
+  @doc "Returns the default TTL for multi-hop forwarding."
+  @spec default_ttl() :: non_neg_integer()
+  def default_ttl, do: @default_ttl
 
   @doc """
   Check if a raw binary is an inter-relay message (first byte is a known type).

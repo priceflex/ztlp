@@ -11,17 +11,24 @@ defmodule ZtlpRelay.UdpListener do
   3. If handshake (HELLO/HELLO_ACK): handled for future session creation
 
   For relay forwarding: receive from peer A, send to peer B (same socket).
+
+  In mesh mode (ZTLP_RELAY_MESH=true):
+  - Packets for unknown sessions are routed via the hash ring
+  - If this relay owns the session: handle normally
+  - If another relay owns it: forward via InterRelay
+  - RELAY_FORWARD messages are unwrapped and processed as inner packets
   """
 
   use GenServer
 
   require Logger
 
-  alias ZtlpRelay.{Pipeline, SessionRegistry, Stats, Session}
+  alias ZtlpRelay.{Pipeline, SessionRegistry, Stats, Session, Config, InterRelay, MeshManager}
 
   @type state :: %{
     socket: :gen_udp.socket() | nil,
-    port: non_neg_integer()
+    port: non_neg_integer(),
+    mesh_enabled: boolean()
   }
 
   # Client API
@@ -54,14 +61,20 @@ defmodule ZtlpRelay.UdpListener do
 
   @impl true
   def init(_opts) do
-    port = ZtlpRelay.Config.listen_port()
-    address = ZtlpRelay.Config.listen_address()
+    port = Config.listen_port()
+    address = Config.listen_address()
+    mesh_enabled = Config.mesh_enabled?()
 
     case :gen_udp.open(port, [:binary, {:active, true}, {:ip, address}]) do
       {:ok, socket} ->
         {:ok, actual_port} = :inet.port(socket)
         Logger.info("ZTLP Relay listening on #{format_addr(address)}:#{actual_port}")
-        {:ok, %{socket: socket, port: actual_port}}
+
+        if mesh_enabled do
+          Logger.info("ZTLP Relay mesh mode enabled")
+        end
+
+        {:ok, %{socket: socket, port: actual_port, mesh_enabled: mesh_enabled}}
 
       {:error, reason} ->
         Logger.error("Failed to open UDP port #{port}: #{inspect(reason)}")
@@ -110,7 +123,32 @@ defmodule ZtlpRelay.UdpListener do
         handle_admitted_packet(parsed, data, sender, state)
 
       {:drop, layer, reason} ->
-        Logger.debug("Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}")
+        # In mesh mode, check if this is a RELAY_FORWARD message
+        # (which won't pass the ZTLP magic check since it uses inter-relay protocol)
+        if state.mesh_enabled and InterRelay.inter_relay_message?(data) do
+          handle_inter_relay_packet(data, sender, state)
+        else
+          Logger.debug("Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}")
+          :ok
+        end
+    end
+  end
+
+  # Handle inter-relay protocol messages received on the client port.
+  # These are decoded and dispatched — RELAY_FORWARD messages have their
+  # inner packet unwrapped and re-processed through the pipeline.
+  defp handle_inter_relay_packet(data, sender, state) do
+    case InterRelay.handle_message(data, sender) do
+      {:ok, {:relay_forward, _sender_node_id, _ts, %{inner_packet: inner}}} ->
+        # Re-process the inner packet through the normal pipeline
+        handle_packet(inner, sender, state)
+
+      {:ok, _other} ->
+        # Other inter-relay messages go to MeshManager
+        MeshManager.handle_inter_relay(data, sender)
+
+      {:error, reason} ->
+        Logger.debug("Failed to decode inter-relay message from #{inspect(sender)}: #{reason}")
         :ok
     end
   end
@@ -157,9 +195,36 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       :error ->
-        # This can happen if a peer's address changed (NAT rebind) or
-        # the sender is an unknown third party.  Drop silently.
-        Logger.debug("No peer found for session #{inspect(session_id)} from #{inspect(sender)}")
+        # Session not found locally — try mesh routing if enabled
+        if state.mesh_enabled do
+          mesh_route_packet(session_id, data, sender, state)
+        else
+          Logger.debug("No peer found for session #{inspect(session_id)} from #{inspect(sender)}")
+          :ok
+        end
+    end
+  end
+
+  # Mesh routing: hash the SessionID to find which relay owns it,
+  # then forward via InterRelay if it's not us.
+  defp mesh_route_packet(session_id, data, sender, state) do
+    case MeshManager.route(session_id) do
+      {:local, :self} ->
+        # We own this session but don't have it registered — drop
+        Logger.debug("Mesh: session #{inspect(session_id)} maps to us but not found, from #{inspect(sender)}")
+        :ok
+
+      {:ok, relay} ->
+        # Forward to the owning relay
+        node_id = MeshManager.node_id()
+        forward_data = InterRelay.forward_packet(data, node_id)
+        {dest_ip, dest_port} = relay.address
+        :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
+        Logger.debug("Mesh: forwarded packet for session #{inspect(session_id)} to relay #{inspect(relay.node_id)}")
+        :ok
+
+      :error ->
+        Logger.debug("Mesh: no relay found for session #{inspect(session_id)}")
         :ok
     end
   end

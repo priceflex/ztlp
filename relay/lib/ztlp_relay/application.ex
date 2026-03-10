@@ -8,19 +8,35 @@ defmodule ZtlpRelay.Application do
       ├── ZtlpRelay.Stats
       ├── ZtlpRelay.SessionRegistry
       ├── ZtlpRelay.SessionSupervisor (DynamicSupervisor)
+      ├── ZtlpRelay.RelayRegistry        (mesh mode only)
+      ├── ZtlpRelay.MeshManager           (mesh mode only)
       └── ZtlpRelay.UdpListener
+
+  Mesh components are only started when `ZTLP_RELAY_MESH=true` or
+  `config :ztlp_relay, mesh_enabled: true`.
   """
 
   use Application
 
   @impl true
   def start(_type, _args) do
-    children = [
+    base_children = [
       ZtlpRelay.Stats,
       ZtlpRelay.SessionRegistry,
-      {DynamicSupervisor, strategy: :one_for_one, name: ZtlpRelay.SessionSupervisor},
-      ZtlpRelay.UdpListener
+      {DynamicSupervisor, strategy: :one_for_one, name: ZtlpRelay.SessionSupervisor}
     ]
+
+    mesh_children =
+      if ZtlpRelay.Config.mesh_enabled?() do
+        [
+          ZtlpRelay.RelayRegistry,
+          ZtlpRelay.MeshManager
+        ]
+      else
+        []
+      end
+
+    children = base_children ++ mesh_children ++ [ZtlpRelay.UdpListener]
 
     opts = [strategy: :one_for_one, name: ZtlpRelay.Supervisor]
     Supervisor.start_link(children, opts)

@@ -1,13 +1,13 @@
 # ZTLP — Zero Trust Layer Protocol
 
-**Draft RFC — Version 0.9.2 | Experimental / Informational**
+**Version 1.0 | Experimental / Informational**
 
 ---
 
 **Author:** Steven Price  
 **Organization:** Tech Rockstar Academy / ZTLP.org  
 **Location:** Monrovia, CA  
-**Status:** Internet-Draft — This document is intended for public discussion. Distribution is unlimited.  
+**Status:** Experimental / Informational — This document defines the complete ZTLP protocol specification. Distribution is unlimited.  
 **Note:** This document is not an IETF RFC. It is a working concept specification.  
 **Date:** 2026
 
@@ -2279,22 +2279,26 @@ concerns, not afterthoughts.
 
 # 21. Open Issues and Future Work
 
-The following issues are known and will be addressed in subsequent draft revisions:
+The following issues remain open or are identified as future work areas:
 
-| Issue | Description |
-|-------|-------------|
-| Bandwidth reservation model | Formal definition of `BANDWIDTH_HINT` TLV semantics and interaction with relay QoS policies. |
-| Congestion control | Specification of a ZTLP-native congestion control algorithm for long-haul relay paths. |
-| ZTLP-NS governance | Formal governance structure for the public ZTLP-NS root. |
-| Relay operator incentives | Economic models for relay node operation at scale. |
-| Lawful intercept considerations | Engagement with regulatory frameworks. |
-| Hardware identity enrollment UX | Simplifying the YubiKey/TPM enrollment flow for non-technical users. |
-| ZTLP for IoT | Lightweight profile for constrained devices. |
-| Formal security proof | Cryptographic analysis of the `Noise_XX` handshake under ZTLP's threat model. |
-| Relay discovery mechanism | Formal specification of DNS SRV record format, ZTLP-NS relay record schema, and authenticated relay advertisement verification procedure (see Section 37.2). |
-| Path selection algorithm | Formal normative specification of client relay selection logic including direct vs. relay vs. multi-relay decision criteria (see Section 37.1). |
-| Session expiration and relay state cleanup | Formal normative timeouts, rekeying intervals, and relay session table garbage collection procedures (see Section 35). |
-| Relay abuse protection parameters | Standardized default values for per-identity rate limits, per-session quotas, and relay admission control thresholds (see Section 37). |
+| Issue | Status | Description |
+|-------|--------|-------------|
+| Bandwidth reservation model | Open | Formal definition of `BANDWIDTH_HINT` TLV semantics and interaction with relay QoS policies. |
+| Congestion control | Open | Specification of a ZTLP-native congestion control algorithm for long-haul relay paths. |
+| ZTLP-NS governance | Open | Formal governance structure for the public ZTLP-NS root. |
+| Relay operator incentives | Open | Economic models for relay node operation at scale. See also: production relay operator economics and SLA framework (below). |
+| Lawful intercept considerations | Open | Engagement with regulatory frameworks. |
+| Hardware identity enrollment UX | Open | Simplifying the YubiKey/TPM enrollment flow for non-technical users. |
+| ZTLP for IoT | Open | Lightweight profile for constrained devices. |
+| Formal security proof | Open | Cryptographic analysis of the `Noise_XX` handshake under ZTLP's threat model. |
+| Relay discovery mechanism | Addressed | Implemented via Phase 8b NS-based relay discovery. Relay records are published and resolved through ZTLP-NS with authenticated advertisement verification (see Section 37.2). |
+| Path selection algorithm | Addressed | Implemented via PathScore-based selection in Phase 8/8b. Client relay selection logic covers direct, single-relay, and multi-relay decision criteria (see Section 37.1). |
+| Session expiration and relay state cleanup | Addressed | Specified normatively in Section 35: session lifetime limits, mandatory rekeying intervals, and relay session table garbage collection procedures. |
+| Relay abuse protection parameters | Addressed | Specified normatively in Section 37: per-identity rate limits, per-session quotas, and relay admission control thresholds with standardized default values. |
+| Post-quantum cryptographic migration | Open | Migration path to post-quantum primitives (e.g., ML-KEM for key exchange, ML-DSA or SLH-DSA for signatures) to replace X25519 and Ed25519. See Section 41 threat model discussion. |
+| Production relay operator economics | Open | SLA framework, compensation models, and operational requirements for production relay operators serving public ZTLP networks. |
+| Mobile platform SDK | Open | Native iOS and Android SDKs for ZTLP client integration, including hardware key support (Secure Enclave, Android Keystore). |
+| Browser integration | Open | ZTLP-aware `fetch()` and WebSocket support for browser-native zero trust connectivity without VPN or proxy intermediaries. |
 
 # 22. References
 
@@ -4078,7 +4082,286 @@ common threats including large-scale denial-of-service attacks,
 unauthorized service access, identity spoofing, and network
 reconnaissance.
 
-## 41.1 Network Scanning and Reconnaissance
+This section defines ZTLP's attacker models, enumerates specific threat
+classes and their mitigations, describes what ZTLP explicitly does NOT
+defend against, states the protocol's trust assumptions, and summarizes
+the cryptographic security properties provided by the protocol.
+
+## 41.1 Attacker Models
+
+ZTLP's security analysis considers seven distinct attacker classes,
+ranging from passive observation to full endpoint compromise. Each class
+is defined by the attacker's capabilities, position in the network, and
+the protocol mechanisms that constrain the attacker's impact.
+
+```mermaid
+graph TB
+    subgraph "Attacker Classes by Capability"
+        A1[Passive Network Observer]
+        A2[Active Network Attacker]
+        A3[Volumetric Flood Attacker]
+        A4[Compromised Relay Operator]
+        A5[Compromised Endpoint]
+        A6[Malicious Enrollment Authority]
+        A7[Insider Threat — Policy Authority]
+    end
+
+    subgraph "ZTLP Defense Layers"
+        D1[Encryption — ChaCha20-Poly1305 AEAD]
+        D2[Mutual Auth — Noise_XX Handshake]
+        D3[Staged Admission — Magic → SessionID → AuthTag]
+        D4[End-to-End Encryption — Relay-opaque payloads]
+        D5[Revocation — ZTLP-NS credential revocation]
+        D6[Multi-Root Trust — Independent trust anchors]
+        D7[Signed Policy — Auditable policy records]
+    end
+
+    A1 -->|mitigated by| D1
+    A2 -->|mitigated by| D2
+    A3 -->|mitigated by| D3
+    A4 -->|mitigated by| D4
+    A5 -->|mitigated by| D5
+    A6 -->|mitigated by| D6
+    A7 -->|mitigated by| D7
+```
+
+### 41.1.1 Passive Network Observer
+
+A passive network observer can monitor network traffic without modifying
+it. This attacker class includes ISPs, backbone tap operators,
+intelligence agencies performing lawful intercept at network
+interconnection points, and any entity with read access to traffic
+transiting a link.
+
+**What the attacker can observe:**
+
+- Encrypted ZTLP packet payloads (ciphertext only)
+- SessionIDs visible in packet headers (rotate per session; see Section 35)
+- Relay IP addresses (source and destination at each hop)
+- Traffic volume, timing patterns, and session duration
+- Packet sizes and inter-packet timing
+
+**What the attacker CANNOT observe:**
+
+- NodeIDs — NodeIDs are not carried on the data-path wire format;
+  they are established during the Noise_XX handshake and are not
+  visible to network observers
+- Payload content — all session data is encrypted under
+  ChaCha20-Poly1305 AEAD with keys derived from the Noise_XX handshake
+- Service identity — the identity of the protected service behind a
+  gateway relay is not exposed in any packet header or metadata
+  observable on the wire
+- Session keys — ephemeral keys are never transmitted; they are
+  derived via X25519 Diffie-Hellman key agreement
+
+**Mitigation summary:** ZTLP's encryption ensures that a passive
+observer gains no information about payload content, communicating
+identities, or protected service identity. The observer can perform
+traffic analysis (see Section 41.3 for explicit limitations).
+
+### 41.1.2 Active Network Attacker
+
+An active network attacker can inject, modify, reorder, replay, and
+drop packets. This attacker class includes entities in a man-in-the-middle
+(MITM) position such as compromised routers, malicious Wi-Fi access
+points, and BGP hijack operators.
+
+**Capabilities:**
+
+- Inject forged packets into active sessions
+- Modify packet contents in transit
+- Replay previously captured packets
+- Drop or delay legitimate packets
+- Redirect traffic via routing manipulation
+
+**Mitigations:**
+
+- **Mutual authentication:** The Noise_XX handshake provides mutual
+  authentication of both communicating parties. An active attacker
+  cannot complete a handshake without possessing a valid private key
+  bound to a recognized NodeID.
+- **AEAD on every packet:** Every ZTLP data packet is protected by
+  ChaCha20-Poly1305 AEAD. Modified or forged packets fail
+  authentication and are silently discarded.
+- **HeaderAuthTag validation:** The forwarding authenticator
+  (HeaderAuthTag) in each packet header is validated by relay nodes.
+  Packets with invalid HeaderAuthTags are rejected before any
+  forwarding state is consulted.
+- **Anti-replay protection:** 64-bit packet sequence numbers with a
+  sliding anti-replay window (see Section 35) ensure that replayed
+  packets are detected and discarded.
+
+**Residual risk:** An active attacker can perform denial of service by
+dropping packets. ZTLP mitigates this through multi-path relay selection
+(see Section 36) — clients MAY detect path degradation and failover to
+alternative relay paths.
+
+### 41.1.3 Volumetric Flood Attacker
+
+A volumetric flood attacker generates large volumes of traffic to
+exhaust relay resources (bandwidth, CPU, memory, session table
+capacity). This attacker class includes botnets, amplification attacks,
+and state-sponsored DDoS campaigns.
+
+**ZTLP's three-layer admission pipeline** provides staged defense
+against volumetric attacks, with each layer progressively more expensive
+but handling a progressively smaller fraction of attack traffic:
+
+| Layer | Check | Cost | Effect |
+|-------|-------|------|--------|
+| L1 — Magic byte | Single-byte comparison against `0xA7` | ~19 ns (Rust) / ~89 ns (Elixir) | Rejects all non-ZTLP traffic with zero state allocation |
+| L2 — SessionID lookup | Hash table membership test | O(1) lookup | Rejects traffic with unknown SessionIDs; no cryptographic work |
+| L3 — HeaderAuthTag | AEAD verification (ChaCha20-Poly1305) | ~200–500 ns | Rejects forged packets targeting valid SessionIDs |
+
+The vast majority of volumetric flood traffic is random garbage that
+fails L1, consuming negligible CPU. Traffic crafted with the correct
+magic byte but a random SessionID fails L2. Only traffic that guesses
+both the correct magic byte AND a valid SessionID (a 2^-96 probability
+for a random guess against a sparse session table) reaches L3.
+
+**Additional architectural mitigations:**
+
+- **Admission plane separation:** Session establishment (handshake
+  processing) is handled only by ingress relays assigned to the
+  requesting client's admission domain. Flood traffic targeting session
+  creation is confined to specific ingress relays and cannot propagate
+  to the transit or gateway relay tiers (see Section 39).
+- **Ingress relay distribution:** Clients are deterministically assigned
+  to bounded ingress relay sets. An attacker targeting a specific
+  service's admission domain MUST first discover which ingress relays
+  serve that domain — information that is not publicly enumerable.
+- **Proof-of-work puzzles:** Ingress relays MAY require clients to
+  solve computational puzzles during session establishment under load
+  (see Section 27), increasing the cost of session-creation floods.
+- **Stateless admission challenge:** The stateless cookie mechanism
+  (Section 16.3) prevents source-address-spoofed handshake floods from
+  allocating relay state.
+
+### 41.1.4 Compromised Relay Operator
+
+A compromised relay operator has full administrative control over one or
+more relay nodes, including access to the relay's operating system,
+memory, storage, and network interfaces.
+
+**What a compromised relay operator CANNOT do:**
+
+- **Decrypt session payloads.** Session encryption is end-to-end between
+  the communicating nodes. Relay nodes forward opaque ciphertext and
+  never possess session keys. Even with full memory access, the relay
+  does not hold the Noise_XX session keys — these exist only at the
+  endpoints.
+- **Forge sessions.** Session establishment requires a Noise_XX
+  handshake between the communicating nodes. The relay does not
+  participate in key agreement and cannot generate valid session keys or
+  SessionIDs for sessions it is not authorized to relay.
+- **Impersonate nodes.** Node identity is bound to Ed25519 private keys
+  held by the communicating endpoints. A relay operator does not possess
+  these keys and cannot complete a Noise_XX handshake as a different
+  node.
+
+**What a compromised relay operator CAN do:**
+
+- **Observe metadata:** source and destination relay IP addresses,
+  session timing and duration, traffic volume per session, and the set
+  of SessionIDs transiting the relay.
+- **Selectively drop or delay packets.** Mitigated by multi-path relay
+  selection (Section 36): clients that detect path degradation MAY
+  failover to alternative relay paths. Multi-path redundancy limits the
+  impact of a single compromised relay.
+- **Attempt traffic analysis.** The relay can correlate traffic patterns
+  across sessions to infer communication relationships. ZTLP does not
+  claim protection against traffic analysis (see Section 41.3).
+
+**Architectural containment:** The relay role composition model (Section
+40.5) allows deployments to distribute trust across multiple independent
+relay operators. No single relay operator needs to see both the ingress
+and egress sides of a session when multi-hop relay paths are used.
+
+### 41.1.5 Compromised Endpoint
+
+A compromised endpoint is one where the attacker has obtained the
+node's Ed25519 private key, either through malware, physical access,
+or key extraction from software storage.
+
+**ZTLP cannot protect against this attacker class.** If the attacker
+possesses a node's private key, the attacker IS that node from the
+protocol's perspective. ZTLP's security boundary is the cryptographic
+identity: any entity that can prove possession of a valid private key is
+treated as the corresponding NodeID.
+
+**External mitigations (outside ZTLP's protocol boundary):**
+
+- **Hardware-backed keys (TPM, Secure Enclave, YubiKey):** Private keys
+  stored in hardware security modules cannot be extracted, even by
+  malware with root access. ZTLP SHOULD be deployed with hardware key
+  storage in high-assurance environments (see Section 16).
+- **Device posture checks:** Admission policies MAY require device
+  attestation (OS version, patch level, security configuration) before
+  granting session access.
+- **Rapid revocation via ZTLP-NS:** Compromised node credentials can be
+  revoked through ZTLP-NS namespace authorities. Revocation propagates
+  to relays, which MUST reject sessions from revoked NodeIDs.
+- **Session rate limiting:** Anomalous session creation patterns from a
+  compromised node are detectable and rate-limitable at ingress relays.
+
+### 41.1.6 Malicious Enrollment Authority
+
+An Enrollment Authority (Section 23.2) issues identity bindings that
+associate NodeIDs with cryptographic keys. A compromised or malicious
+Enrollment Authority could issue fraudulent identity bindings, granting
+attacker-controlled keys the ability to authenticate as legitimate
+nodes.
+
+**Mitigations:**
+
+- **Multiple independent trust roots:** ZTLP deployments MAY configure
+  multiple independent trust roots (Section 23.1). Cross-root
+  verification allows relying parties to require identity attestation
+  from more than one trust root before granting access.
+- **Transparency and audit logs:** Enrollment operations SHOULD be
+  logged to append-only audit logs, enabling detection of unauthorized
+  identity issuance.
+- **Delegation scope limits:** The delegation model (Section 23)
+  constrains each Enrollment Authority to a defined namespace scope.
+  A compromised authority can only issue identities within its
+  delegated namespace, not across the entire ZTLP network.
+
+**Acknowledged limitation:** If a relying party trusts a single trust
+root and that root's Enrollment Authority is compromised, all identities
+issued under that root are suspect. Deployments with high assurance
+requirements SHOULD configure multiple independent trust roots and
+require cross-root verification for sensitive operations.
+
+### 41.1.7 Insider Threat (Policy Authority)
+
+A Policy Authority (Section 23) issues signed policy records that
+define access control rules — which NodeIDs may communicate with which
+services under what conditions. A malicious or compromised Policy
+Authority could grant unauthorized access by issuing permissive policy
+records.
+
+**Mitigations:**
+
+- **Signed policy records:** All policy records are cryptographically
+  signed by the issuing Policy Authority. Policy changes are auditable
+  and attributable.
+- **Separation of authorities:** ZTLP separates Enrollment Authorities,
+  Policy Authorities, and Revocation Authorities into distinct roles
+  (Section 23). Compromising the Policy Authority does not grant the
+  ability to create new identities or suppress revocation.
+- **Delegation model scope limits:** Policy Authorities operate within
+  delegated scopes. A compromised Policy Authority can only affect
+  policy within its delegated namespace.
+- **Policy record expiration:** Policy records SHOULD include validity
+  periods. Expired policy records MUST be rejected, limiting the
+  duration of impact from compromised policy issuance.
+
+## 41.2 Threat Mitigations by Attack Class
+
+This section enumerates specific threat classes and the ZTLP mechanisms
+that address them.
+
+### 41.2.1 Network Scanning and Reconnaissance
 
 Traditional Internet services are typically reachable via open IP
 addresses and ports, allowing attackers to perform large-scale automated
@@ -4092,7 +4375,7 @@ directly target protected infrastructure. Because identity verification
 occurs prior to service reachability, services effectively remain
 invisible until authorization succeeds.
 
-## 41.2 Distributed Denial-of-Service (DDoS)
+### 41.2.2 Distributed Denial-of-Service (DDoS)
 
 Attackers may attempt to overwhelm network infrastructure by generating
 large volumes of traffic. ZTLP incorporates several architectural
@@ -4107,21 +4390,22 @@ assigned to a bounded ingress relay set, confining attack traffic
 against session creation to specific admission domains. Established
 sessions are forwarded using SessionID label switching, allowing relay
 nodes to perform constant-time packet forwarding without repeated
-identity verification.
+identity verification. See Section 41.1.3 for quantitative analysis of
+the three-layer admission pipeline.
 
-## 41.3 Identity Spoofing
+### 41.2.3 Identity Spoofing
 
 Attackers may attempt to impersonate legitimate users, devices, or
 services using forged credentials, replayed authentication messages, or
 stolen cryptographic keys. ZTLP enforces identity verification during
 session establishment, requiring nodes to prove possession of valid
 cryptographic credentials associated with their NodeID. ZTLP sessions
-are established using mutually authenticated cryptographic handshakes
-providing identity verification, forward secrecy, and replay protection.
-Optional hardware-backed keys such as TPM or hardware security tokens
-may be used to strengthen device identity assurance.
+are established using mutually authenticated Noise_XX cryptographic
+handshakes providing identity verification, forward secrecy, and replay
+protection. Optional hardware-backed keys such as TPM or hardware
+security tokens MAY be used to strengthen device identity assurance.
 
-## 41.4 Credential Abuse
+### 41.2.4 Credential Abuse
 
 ZTLP can protect sensitive service endpoints by requiring ZTLP
 authentication prior to service access, allowing service operators to
@@ -4132,7 +4416,7 @@ are significantly reduced, credential stuffing attempts cannot reach
 protected endpoints, and login infrastructure becomes resistant to
 automated abuse.
 
-## 41.5 Relay Compromise
+### 41.2.5 Relay Compromise
 
 ZTLP protects session confidentiality using end-to-end encryption
 between communicating nodes. Relay nodes forward encrypted session
@@ -4141,9 +4425,11 @@ relay is compromised, the attacker cannot decrypt session payloads
 without the corresponding session keys. Additionally, relay paths may
 include multiple hops, clients may dynamically select alternative relay
 paths, and relay operators are authenticated using cryptographic
-identities. These properties reduce the impact of relay compromise.
+identities. These properties reduce the impact of relay compromise. See
+Section 41.1.4 for detailed analysis of compromised relay operator
+capabilities.
 
-## 41.6 Malware on Trusted Devices
+### 41.2.6 Malware on Trusted Devices
 
 ZTLP assumes that endpoint compromise is possible and incorporates
 mechanisms to limit the resulting damage. Possible mitigations include
@@ -4151,24 +4437,225 @@ device posture validation during admission, session rate limiting,
 policy-based access controls, device revocation through namespace
 authorities, and relay-based traffic anomaly detection. Because ZTLP
 requires authenticated sessions for communication, compromised devices
-can be rapidly isolated by revoking their credentials.
+can be rapidly isolated by revoking their credentials. See Section
+41.1.5 for the explicit scope boundary of endpoint compromise.
 
-## 41.7 Trust Assumptions and Security Goals
+## 41.3 What ZTLP Does NOT Defend Against
 
-ZTLP assumes that cryptographic primitives remain secure, private keys
-are protected by nodes, relay operators follow protocol requirements,
-and identity authorities correctly manage credential issuance and
-revocation. ZTLP does not attempt to protect against attackers with full
-control over a node's private keys or against physical compromise of
-endpoint hardware.
+A complete threat model MUST clearly state what is out of scope.
+The following threats are explicitly beyond ZTLP's defense boundary.
+Deployments MUST NOT rely on ZTLP to mitigate these threats and SHOULD
+implement complementary controls where these risks are relevant.
 
-The primary security goals of ZTLP are: preventing unauthorized service
-discovery; enforcing identity-first access control; reducing attack
-surface for protected services; providing scalable resistance to
-denial-of-service attacks; and maintaining confidentiality and integrity
-of session data. These goals are achieved through a combination of
-identity verification, relay architecture, and protocol-level design
-decisions.
+### 41.3.1 Endpoint Compromise with Key Extraction
+
+If an attacker possesses a node's Ed25519 private key, the attacker is
+indistinguishable from the legitimate node at the protocol level. ZTLP's
+security boundary is the cryptographic identity. The protocol cannot
+differentiate between a legitimate key holder and an attacker who has
+obtained the key through malware, physical access, or side-channel
+attacks.
+
+**Complementary controls:** Hardware-backed key storage (TPM, Secure
+Enclave, YubiKey), device posture attestation, behavioral anomaly
+detection, rapid credential revocation via ZTLP-NS.
+
+### 41.3.2 Traffic Analysis by a Global Passive Adversary
+
+ZTLP is not an anonymity network. ZTLP does not claim to provide
+anonymity, unlinkability, or resistance to traffic analysis.
+
+A global passive adversary observing all network links can determine:
+
+- Which relay IP addresses communicate with each other
+- Session timing, duration, and volume patterns
+- Correlation of session establishment and termination across relay hops
+
+ZTLP relays do not add cover traffic, introduce artificial delays, or
+use mix-network techniques. Relay IP addresses are visible to network
+observers. Deployments requiring anonymity SHOULD layer ZTLP over an
+anonymity network (e.g., Tor) or accept the traffic analysis risk.
+
+### 41.3.3 Application-Layer Vulnerabilities
+
+ZTLP protects the transport path between communicating nodes. It does
+not inspect, validate, or sanitize application-layer payloads. SQL
+injection, cross-site scripting (XSS), business logic vulnerabilities,
+and other application-layer attacks are entirely outside ZTLP's scope.
+ZTLP ensures that only authenticated, authorized nodes can reach
+protected services — what those nodes do with application-layer access
+is an application-layer concern.
+
+### 41.3.4 Denial of Service Against Relay Infrastructure
+
+ZTLP is structurally resistant to DDoS attacks against protected
+services because those services are not directly reachable from the
+public Internet. However, the relay infrastructure itself consists of
+publicly addressable nodes that can be targeted by volumetric attacks.
+
+A sufficiently large volumetric attack against relay nodes can degrade
+or disrupt relay availability. ZTLP's three-layer admission pipeline
+(Section 41.1.3) reduces the amplification factor of such attacks, but
+does not eliminate them.
+
+**Operational mitigations (outside the protocol specification):**
+
+- Geographic distribution of relay nodes across diverse networks
+- Admission domain isolation to contain attack blast radius
+- Capacity planning and elastic scaling of relay infrastructure
+- Upstream DDoS protection for relay node IP addresses
+
+These mitigations are operational, not absolute. A sufficiently
+resourced attacker targeting the relay infrastructure itself can cause
+disruption.
+
+### 41.3.5 Compromise of All Trust Roots
+
+If every configured trust root is compromised, the identity model
+collapses entirely. An attacker controlling all trust roots can issue
+arbitrary identity bindings and policy records, effectively
+impersonating any node and granting any access.
+
+This is structurally equivalent to PKI root compromise in the TLS
+ecosystem. ZTLP mitigates this risk through support for multiple
+independent trust roots and cross-root verification (Section 23.1), but
+cannot defend against simultaneous compromise of all configured roots.
+
+Deployments SHOULD configure trust roots operated by independent
+organizations with diverse operational and jurisdictional boundaries.
+
+### 41.3.6 Quantum Computing
+
+ZTLP's current cryptographic suite — X25519 (key exchange), Ed25519
+(signatures), ChaCha20-Poly1305 (AEAD), and BLAKE2s (hashing/KDF) —
+is not resistant to quantum computation. Specifically:
+
+- **X25519 and Ed25519** are vulnerable to Shor's algorithm on a
+  sufficiently large, fault-tolerant quantum computer.
+- **ChaCha20-Poly1305** retains 128-bit security against Grover's
+  algorithm (reduced from 256-bit), which is considered sufficient.
+- **BLAKE2s** retains adequate collision resistance under quantum models.
+
+ZTLP's forward secrecy property (Section 41.5.1) provides partial
+mitigation: an attacker who records encrypted sessions today and later
+obtains a quantum computer can break long-term identity keys but cannot
+derive past session keys, because the ephemeral X25519 key exchange
+values are not stored.
+
+**Planned evolution:** Future ZTLP versions SHOULD migrate to
+post-quantum key exchange (e.g., ML-KEM / Kyber) and post-quantum
+signatures (e.g., ML-DSA / Dilithium or SLH-DSA / SPHINCS+). This is
+tracked as an open issue in Section 21.
+
+### 41.3.7 Physical Coercion and Legal Compulsion
+
+ZTLP cannot prevent key disclosure under physical duress or legal
+compulsion (e.g., court orders, national security letters). If a node
+operator is compelled to disclose their private key, the attacker gains
+the endpoint compromise capabilities described in Section 41.1.5.
+
+Hardware security modules (TPM, YubiKey) provide some resistance to
+compelled key disclosure — the key cannot be extracted from hardware,
+only used in-place — but do not prevent compelled use of the device
+itself.
+
+## 41.4 Trust Assumptions
+
+ZTLP's security properties depend on the following assumptions. If any
+assumption is violated, the corresponding security properties are
+weakened or lost.
+
+| Assumption | Consequence if Violated |
+|------------|------------------------|
+| Cryptographic primitives (X25519, ChaCha20-Poly1305, BLAKE2s, Ed25519) remain computationally secure | All confidentiality, integrity, and authentication guarantees are void |
+| Hardware security modules (TPM, Secure Enclave, YubiKey) correctly protect private keys when used | Endpoint compromise becomes possible through key extraction |
+| At least one configured trust root is honest and operationally secure | If all trust roots are compromised, the identity model collapses (Section 41.3.5) |
+| Relay operators correctly implement the protocol (but are NOT trusted with payload confidentiality) | Faulty relay implementations may drop, corrupt, or misroute packets; cannot affect confidentiality |
+| ZTLP-NS records are signed and verifiable — unsigned records MUST be rejected | Unsigned or unverifiable records could enable identity spoofing or policy bypass |
+| The Noise Protocol Framework provides the security properties claimed in its specification | Session key agreement, mutual authentication, and forward secrecy depend on Noise_XX correctness |
+| System clocks are approximately synchronized (within allowable skew) | Session lifetime enforcement and certificate validity checking may fail |
+| Random number generators produce cryptographically secure output | Weak randomness compromises ephemeral key generation and nonce uniqueness |
+
+## 41.5 Cryptographic Security Properties
+
+ZTLP's protocol design provides the following cryptographic security
+properties. These properties are inherited from the Noise Protocol
+Framework, the AEAD construction, and ZTLP's session lifecycle design.
+
+### 41.5.1 Forward Secrecy
+
+Every ZTLP session is established using a Noise_XX handshake that
+includes ephemeral X25519 Diffie-Hellman key exchange. Session keys are
+derived from both ephemeral and static key material. Compromise of a
+node's long-term Ed25519 identity key does NOT reveal the session keys
+of previously established sessions, because the ephemeral key exchange
+values are generated per-session and are not stored after key derivation.
+
+### 41.5.2 Mutual Authentication
+
+The Noise_XX handshake pattern provides mutual authentication: both the
+initiator and responder prove possession of their long-term private
+keys. ZTLP does not support anonymous or unauthenticated sessions. Every
+session is cryptographically bound to two specific NodeIDs.
+
+### 41.5.3 Replay Protection
+
+Every ZTLP data packet carries a 64-bit sequence number. Receiving
+nodes maintain an anti-replay window and MUST reject packets with
+sequence numbers that fall outside the window or that duplicate a
+previously received sequence number. This prevents network-level replay
+attacks against established sessions.
+
+### 41.5.4 Key Freshness and Rekeying
+
+ZTLP enforces mandatory session rekeying (see Section 35). The default
+rekeying interval is 1 hour, and the maximum session lifetime is 24
+hours. Sessions that exceed the maximum lifetime MUST be terminated and
+re-established. Rekeying ensures that session key compromise is
+time-bounded and limits the volume of data encrypted under any single
+key.
+
+### 41.5.5 Algorithm Suite
+
+ZTLP specifies the following cryptographic algorithm suite:
+
+| Function | Algorithm | Security Level |
+|----------|-----------|---------------|
+| Key exchange | X25519 (RFC 7748) | ~128-bit classical |
+| Authenticated encryption | ChaCha20-Poly1305 (RFC 8439) | 256-bit key, 128-bit auth tag |
+| Hashing / KDF | BLAKE2s (RFC 7693) | 256-bit output |
+| Signatures | Ed25519 (RFC 8032) | ~128-bit classical |
+| Handshake framework | Noise_XX (Noise Protocol Framework) | Mutual auth, forward secrecy |
+
+The algorithm suite is fixed in this version of the specification.
+Algorithm agility is deferred to future versions to avoid downgrade
+attacks and reduce implementation complexity. See Section 41.3.6 for
+post-quantum migration considerations.
+
+## 41.6 Security Goals Summary
+
+The primary security goals of ZTLP are:
+
+1. **Prevent unauthorized service discovery.** Protected services MUST
+   NOT be reachable or discoverable by unauthenticated nodes.
+2. **Enforce identity-first access control.** Cryptographic identity
+   verification MUST occur before any network state is allocated or any
+   service is reachable.
+3. **Reduce attack surface for protected services.** Services behind
+   ZTLP gateways MUST have no public IP exposure and no open ports
+   reachable from the public Internet.
+4. **Provide scalable resistance to denial-of-service attacks.** The
+   three-layer admission pipeline MUST reject invalid traffic with
+   minimal resource expenditure, scaling defense cost sublinearly with
+   attack volume.
+5. **Maintain confidentiality and integrity of session data.** All
+   session payloads MUST be encrypted and authenticated end-to-end. Relay
+   nodes MUST NOT have access to plaintext session data.
+6. **Provide forward secrecy.** Compromise of long-term keys MUST NOT
+   reveal previously established session data.
+7. **Support rapid credential revocation.** Compromised node credentials
+   MUST be revocable through ZTLP-NS, with revocation propagating to all
+   relays within the configured revocation interval.
 
 # 42. Operational Deployment Model
 
@@ -4350,6 +4837,6 @@ Tech Rockstar Academy is a research and development initiative focused on advanc
 
 ---
 
-*End of ZTLP Draft RFC — Version 0.9.2*
+*End of ZTLP Specification — Version 1.0*
 
 **ZTLP.org — 2026**

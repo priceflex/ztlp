@@ -25,22 +25,11 @@ topbarNav?.querySelectorAll('a').forEach(link => {
   link.addEventListener('click', () => topbarNav.classList.remove('open'));
 });
 
-// ── ACTIVE TOC HIGHLIGHT ─────────────────────────────────
-const tocLinks = document.querySelectorAll('.toc-link');
-const sections = document.querySelectorAll('.spec-section[id]');
-
-const tocObserver = new IntersectionObserver((entries) => {
-  entries.forEach(entry => {
-    if (entry.isIntersecting) {
-      tocLinks.forEach(l => l.classList.remove('active'));
-      const active = document.querySelector(`.toc-link[href="#${entry.target.id}"]`);
-      active?.classList.add('active');
-    }
-  });
-}, {
-  root: null,
-  rootMargin: '-80px 0px -60% 0px',
-  threshold: 0
+// Close nav when clicking outside on mobile
+document.addEventListener('click', (e) => {
+  if (topbarNav?.classList.contains('open') &&
+      !topbarNav.contains(e.target) &&
+      e.target !== menuToggle) {
+    topbarNav.classList.remove('open');
+  }
 });
-
-sections.forEach(s => tocObserver.observe(s));

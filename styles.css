@@ -114,6 +114,29 @@ a:hover { text-decoration: underline; }
   transition: color .2s;
 }
 .topbar-nav a:hover { color: var(--text); text-decoration: none; }
+.topbar-nav a.nav-page-link.active {
+  color: var(--accent);
+  font-weight: 600;
+  position: relative;
+}
+.topbar-nav a.nav-page-link.active::after {
+  content: '';
+  position: absolute;
+  bottom: -20px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+.logo-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none !important;
+  color: inherit;
+}
+.logo-link:hover { text-decoration: none !important; }
 .btn-linkedin {
   display: flex !important;
   align-items: center;

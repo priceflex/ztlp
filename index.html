@@ -149,11 +149,16 @@
 <header class="topbar">
   <div class="topbar-inner">
     <div class="topbar-logo">
-      <span class="logo-badge">ZTLP</span>
-      <span class="logo-subtitle">Zero Trust Layer Protocol</span>
+      <a href="#spec" class="logo-link">
+        <span class="logo-badge">ZTLP</span>
+        <span class="logo-subtitle">Zero Trust Layer Protocol</span>
+      </a>
     </div>
     <nav class="topbar-nav">
-      <a href="#spec">Specification</a>
+      <a href="#get-started" class="nav-page-link" data-page="get-started">Get Started</a>
+      <a href="#architecture" class="nav-page-link" data-page="architecture">Architecture</a>
+      <a href="#threat-model" class="nav-page-link" data-page="threat-model">Threat Model</a>
+      <a href="#spec" class="nav-page-link" data-page="spec">Specification</a>
       <a href="https://github.com/priceflex/ztlp/issues" target="_blank" rel="noopener">Discuss</a>
       <a href="https://www.linkedin.com/in/steven-e-price" target="_blank" rel="noopener" class="btn-linkedin">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
@@ -174,8 +179,9 @@
         A secure, identity-first network overlay that enforces cryptographic authentication before any network state is allocated. Invalid packets are rejected in a three-layer pipeline — making volumetric DDoS attacks structurally ineffective.
       </p>
       <div class="hero-actions">
-        <a href="#spec" class="btn btn-primary">Read the Spec</a>
-        <a href="https://github.com/priceflex/ztlp/issues" target="_blank" rel="noopener" class="btn btn-outline">Discuss on GitHub</a>
+        <a href="#get-started" class="btn btn-primary">Get Started</a>
+        <a href="#architecture" class="btn btn-outline">Architecture Overview</a>
+        <a href="#spec" class="btn btn-outline">Read the Spec</a>
       </div>
     </div>
     <div class="hero-stats">
@@ -188,11 +194,11 @@
 </section>
 
 <!-- ── MAIN LAYOUT ────────────────────────────────────── -->
-<div class="layout" id="spec">
+<div class="layout" id="content-section">
 
   <!-- SIDEBAR TOC (auto-generated from headings) -->
   <aside class="sidebar">
-    <div class="sidebar-label">Table of Contents</div>
+    <div class="sidebar-label" id="sidebar-label">Table of Contents</div>
     <nav class="toc" id="toc">
       <span style="color: var(--text3); font-size:.8rem;">Loading…</span>
     </nav>
@@ -201,7 +207,7 @@
     </div>
   </aside>
 
-  <!-- SPEC CONTENT (rendered from README.md) -->
+  <!-- PAGE CONTENT (rendered from .md files) -->
   <main class="spec-content" id="spec-content">
     <div id="md-loading">Loading specification</div>
     <div id="md-body" class="md-body" style="display:none;"></div>
@@ -229,6 +235,9 @@
       <span id="footer-version" style="font-size:.85rem; color: var(--text2);">Zero Trust Layer Protocol</span>
     </div>
     <div class="footer-links">
+      <a href="#get-started">Get Started</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#threat-model">Threat Model</a>
       <a href="#spec">Specification</a>
       <a href="https://github.com/priceflex/ztlp/issues" target="_blank" rel="noopener">Discuss</a>
       <a href="https://www.linkedin.com/in/steven-e-price" target="_blank" rel="noopener">LinkedIn</a>
@@ -244,6 +253,19 @@
 <script src="script.js"></script>
 <script>
   mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+
+  // ── Page routing configuration ────────────────────────
+  const PAGES = {
+    'get-started':  { file: 'GETTING-STARTED.md', title: 'Get Started', label: 'Getting Started' },
+    'architecture': { file: 'ARCHITECTURE.md',    title: 'Architecture', label: 'Architecture Overview' },
+    'threat-model': { file: 'THREAT-MODEL.md',    title: 'Threat Model', label: 'Threat Model' },
+    'spec':         { file: 'README.md',           title: 'Specification', label: 'Specification' },
+  };
+  const DEFAULT_PAGE = 'spec';
+
+  // Track current page and observer
+  let currentPage = null;
+  let currentObserver = null;
 
   // ── Slugify heading text → anchor ID ──────────────────
   function slugify(text) {
@@ -282,17 +304,25 @@
       }
     });
 
-    // Update section count stat
-    const h2s = container.querySelectorAll('h2');
-    const statEl = document.getElementById('stat-sections');
-    if (statEl) statEl.textContent = h2s.length;
+    // Update section count stat (only for spec page)
+    if (currentPage === 'spec') {
+      const h2s = container.querySelectorAll('h2');
+      const statEl = document.getElementById('stat-sections');
+      if (statEl) statEl.textContent = h2s.length;
+    }
 
     return links;
   }
 
   // ── Active TOC highlight via IntersectionObserver ─────
   function initTOCObserver(links) {
-    const observer = new IntersectionObserver(entries => {
+    // Clean up previous observer
+    if (currentObserver) {
+      currentObserver.disconnect();
+      currentObserver = null;
+    }
+
+    currentObserver = new IntersectionObserver(entries => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           links.forEach(l => l.classList.remove('active'));
@@ -302,10 +332,10 @@
       });
     }, { root: null, rootMargin: '-80px 0px -60% 0px', threshold: 0 });
 
-    document.querySelectorAll('h1[id], h2[id], h3[id]').forEach(h => observer.observe(h));
+    document.querySelectorAll('#md-body h1[id], #md-body h2[id], #md-body h3[id]').forEach(h => currentObserver.observe(h));
   }
 
-  // ── Extract version from first few lines ──────────────
+  // ── Extract version from first few lines of README ────
   function extractMeta(md) {
     const versionMatch = md.match(/Version\s+([\d\.]+)/i);
     const version = versionMatch ? versionMatch[1] : '';
@@ -334,44 +364,133 @@
     breaks: false,
   });
 
-  // ── Fetch and render README.md ─────────────────────────
-  async function loadSpec() {
+  // ── Update active nav link ────────────────────────────
+  function updateActiveNav(pageKey) {
+    document.querySelectorAll('.nav-page-link').forEach(link => {
+      link.classList.toggle('active', link.dataset.page === pageKey);
+    });
+  }
+
+  // ── Update sidebar label ──────────────────────────────
+  function updateSidebarLabel(pageKey) {
+    const label = document.getElementById('sidebar-label');
+    const page = PAGES[pageKey];
+    if (label && page) {
+      label.textContent = page.label || 'Table of Contents';
+    }
+  }
+
+  // ── Generic page loader ───────────────────────────────
+  async function loadPage(pageKey) {
+    if (currentPage === pageKey) return;
+
+    const page = PAGES[pageKey];
+    if (!page) return;
+
+    currentPage = pageKey;
+
     const loading = document.getElementById('md-loading');
     const body    = document.getElementById('md-body');
 
+    // Show loading state
+    loading.textContent = 'Loading ' + page.title.toLowerCase();
+    loading.style.display = 'block';
+    body.style.display = 'none';
+
+    // Update nav and sidebar
+    updateActiveNav(pageKey);
+    updateSidebarLabel(pageKey);
+
+    // Update document title
+    document.title = pageKey === 'spec'
+      ? 'ZTLP — Zero Trust Layer Protocol'
+      : `${page.title} — ZTLP`;
+
     try {
-      const res = await fetch('README.md');
+      const res = await fetch(page.file);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const md = await res.text();
+      let md = await res.text();
 
-      extractMeta(md);
+      // Extract version info from README.md
+      if (pageKey === 'spec') {
+        extractMeta(md);
+        // Strip front matter
+        md = md.replace(/^[\s\S]*?^---\s*\n/m, '');
+        // Strip the Table of Contents section
+        md = md.replace(/^#{1,2}\s*Table of Contents[\s\S]*?(?=\n---|\n#{1,2}\s)/m, '');
+      }
 
-      // Strip front matter: everything up to and including the first --- separator
-      // (covers title, version badge, author block, abstract)
-      let stripped = md.replace(/^[\s\S]*?^---\s*\n/m, '');
-
-      // Strip the Table of Contents section (we generate our own from headings)
-      stripped = stripped.replace(/^#{1,2}\s*Table of Contents[\s\S]*?(?=\n---|\n#{1,2}\s)/m, '');
-
-      body.innerHTML = marked.parse(stripped);
+      body.innerHTML = marked.parse(md);
 
       loading.style.display = 'none';
       body.style.display = 'block';
 
+      // Process internal page links (e.g., #architecture, #threat-model, #spec)
+      body.querySelectorAll('a[href]').forEach(a => {
+        const href = a.getAttribute('href');
+        if (href && PAGES[href.replace('#', '')]) {
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            navigateTo(href.replace('#', ''));
+          });
+        }
+      });
+
       // Render Mermaid diagrams
-      await mermaid.run({ nodes: body.querySelectorAll('.mermaid') });
+      const mermaidNodes = body.querySelectorAll('.mermaid');
+      if (mermaidNodes.length > 0) {
+        // Reset mermaid to handle re-rendering
+        mermaidNodes.forEach((node, i) => {
+          node.removeAttribute('data-processed');
+          node.id = 'mermaid-' + pageKey + '-' + i;
+        });
+        await mermaid.run({ nodes: mermaidNodes });
+      }
 
       // Build TOC and activate observer
       const links = buildTOC(body);
       initTOCObserver(links);
 
+      // Scroll to top of content
+      document.getElementById('content-section').scrollIntoView({ behavior: 'smooth' });
+
     } catch (err) {
-      loading.innerHTML = `<span style="color:var(--red)">Failed to load specification: ${err.message}</span>`;
+      loading.innerHTML = `<span style="color:var(--red)">Failed to load ${page.title.toLowerCase()}: ${err.message}</span>`;
+      loading.style.display = 'block';
+      body.style.display = 'none';
       console.error(err);
     }
   }
 
-  loadSpec();
+  // ── Navigate to a page (updates hash + loads) ─────────
+  function navigateTo(pageKey) {
+    if (!PAGES[pageKey]) pageKey = DEFAULT_PAGE;
+    window.location.hash = '#' + pageKey;
+  }
+
+  // ── Determine page from hash ──────────────────────────
+  function getPageFromHash() {
+    const hash = window.location.hash.replace('#', '');
+    if (PAGES[hash]) return hash;
+    if (!hash || hash === '') return DEFAULT_PAGE;
+    return DEFAULT_PAGE;
+  }
+
+  // ── Hash change handler ───────────────────────────────
+  function onHashChange() {
+    const pageKey = getPageFromHash();
+    loadPage(pageKey);
+  }
+
+  // ── Initialize ────────────────────────────────────────
+  window.addEventListener('hashchange', onHashChange);
+
+  // Also fetch README.md in background for version info if starting on a non-spec page
+  const initialPage = getPageFromHash();
+  if (initialPage !== 'spec') {
+    fetch('README.md').then(r => r.text()).then(md => extractMeta(md)).catch(() => {});
+  }
+  loadPage(initialPage);
 </script>
 </body>
 </html>

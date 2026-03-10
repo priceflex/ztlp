@@ -1,8 +1,8 @@
 # ZTLP Prototype — Developer Guide
 
 Complete guide to building, running, and understanding the ZTLP reference
-implementation. This document covers Phase 1 (Rust client), Phase 2
-(Elixir relay), Phase 3 (eBPF/XDP filter), and Phase 4 (ZTLP-NS namespace).
+implementation. This document covers all five phases: Rust client, Elixir relay,
+eBPF/XDP filter, ZTLP-NS namespace, and the ZTLP Gateway.
 
 ---
 
@@ -639,7 +639,20 @@ produce identical material regardless of role.
 | bootstrap_test | 5 | Verify response, hardcoded fallback, discover sequence |
 | integration_test | 13 | Full trust chain (3 levels), revocation blocks valid chain, UDP round-trip, NXDOMAIN, malformed query |
 
-**Combined: 269 tests (91 Rust + 73 Elixir relay + 105 Elixir NS), 0 failures.**
+### ZTLP Gateway — 97 tests
+
+| Suite | Tests | Description |
+|-------|-------|-------------|
+| crypto_test | 22 | X25519 DH, ChaCha20-Poly1305, BLAKE2s, HMAC, HKDF, Ed25519 |
+| handshake_test | 11 | Full Noise_XX, key agreement, PFS, error handling, tampered messages |
+| packet_test | 21 | Parse/serialize data+handshake, magic, types, round-trips, edge cases |
+| pipeline_test | 5 | Layer 1+2 admission, HELLO, unknown sessions |
+| session_registry_test | 6 | Register, lookup, double-register, auto-cleanup on death |
+| policy_engine_test | 10 | Allow :all, exact match, wildcards, deny, rule management |
+| backend_test | 4 | TCP echo, multi-cycle, close notification, connect failure |
+| integration_test | 18 | Full crypto pipeline, packet wrapping, policy+identity, audit log |
+
+**Combined: 366 tests (91 Rust + 73 Elixir relay + 105 Elixir NS + 97 Gateway), 0 failures.**
 
 ---
 
@@ -684,12 +697,12 @@ the test file.
 | **2** | Relay node | Elixir/OTP | ✅ **Complete** (73 tests) |
 | **3** | eBPF/XDP packet filter | C | ✅ **Complete** |
 | **4** | ZTLP-NS trust namespace | Elixir/OTP | ✅ **Complete** (105 tests) |
-| 5 | Gateway (ZTLP ↔ legacy) | Elixir | Planned |
+| **5** | Gateway (ZTLP ↔ legacy) | Elixir/OTP | ✅ **Complete** (97 tests) |
 
 ---
 
 ## License
 
 Apache License 2.0. All Rust dependencies are MIT or Apache-2.0.
-Elixir relay and ZTLP-NS have zero external dependencies (OTP only).
+Elixir relay, ZTLP-NS, and Gateway have zero external dependencies (OTP only).
 No GPL code in any component.

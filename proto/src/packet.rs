@@ -337,6 +337,32 @@ impl HandshakeHeader {
         self.flags |= flags::RELAY_HOP;
     }
 
+    /// Set a handshake extension on this header.
+    ///
+    /// Updates `ext_len` and sets the `HAS_EXT` flag. The extension bytes
+    /// must be appended after the header and before the payload when
+    /// serializing the full packet.
+    pub fn with_extension(&mut self, ext: &crate::admission::HandshakeExtension) {
+        self.ext_len = ext.wire_len() as u16;
+        self.flags |= flags::HAS_EXT;
+    }
+
+    /// Parse an extension from raw bytes that follow the handshake header.
+    ///
+    /// The caller should provide the `ext_len` bytes that immediately
+    /// follow the 95-byte header. Returns `None` if `ext_len` is 0.
+    pub fn parse_extension(
+        &self,
+        ext_data: &[u8],
+    ) -> Option<Result<crate::admission::HandshakeExtension, crate::admission::AdmissionError>> {
+        if self.ext_len == 0 || ext_data.len() < self.ext_len as usize {
+            return None;
+        }
+        Some(crate::admission::HandshakeExtension::parse(
+            &ext_data[..self.ext_len as usize],
+        ))
+    }
+
     /// Create a default handshake header with reasonable defaults.
     pub fn new(msg_type: MsgType) -> Self {
         Self {

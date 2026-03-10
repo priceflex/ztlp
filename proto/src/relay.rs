@@ -18,6 +18,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::admission::RelayAdmissionToken;
 use crate::packet::{SessionId, MAGIC};
 use crate::transport::MAX_PACKET_SIZE;
 
@@ -28,6 +29,37 @@ pub struct RelayConnection {
     pub relay_addr: SocketAddr,
     /// Our session ID (for the relay to route by).
     pub session_id: SessionId,
+    /// Admission token received from the ingress relay (if any).
+    pub admission_token: Option<RelayAdmissionToken>,
+}
+
+impl RelayConnection {
+    /// Create a new relay connection (without an admission token).
+    pub fn new(relay_addr: SocketAddr, session_id: SessionId) -> Self {
+        Self {
+            relay_addr,
+            session_id,
+            admission_token: None,
+        }
+    }
+
+    /// Set the admission token (received from the ingress relay).
+    pub fn set_token(&mut self, token: RelayAdmissionToken) {
+        self.admission_token = Some(token);
+    }
+
+    /// Get a reference to the current admission token.
+    pub fn get_token(&self) -> Option<&RelayAdmissionToken> {
+        self.admission_token.as_ref()
+    }
+
+    /// Check if we have a valid (non-expired) admission token.
+    pub fn has_valid_token(&self) -> bool {
+        self.admission_token
+            .as_ref()
+            .map(|t| !t.is_expired())
+            .unwrap_or(false)
+    }
 }
 
 /// Peer tracking state for one SessionID at the relay.

@@ -33,6 +33,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod admission;
 pub mod error;
 pub mod handshake;
 pub mod identity;

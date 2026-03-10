@@ -35,6 +35,7 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use ztlp_proto::admission::{RelayAdmissionToken, HandshakeExtension, EXT_TYPE_RAT};
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::packet::{
@@ -275,6 +276,76 @@ enum Commands {
         /// Address of the ZTLP service to query
         #[arg(short, long, default_value = "127.0.0.1:23095")]
         target: String,
+    },
+
+    /// Relay Admission Token (RAT) operations
+    ///
+    /// Inspect, verify, or issue Relay Admission Tokens for testing
+    /// and debugging the admission control system.
+    #[command(subcommand)]
+    Token(TokenCommands),
+}
+
+#[derive(Subcommand)]
+enum TokenCommands {
+    /// Decode and display a RAT from hex
+    ///
+    /// Parses a 93-byte hex-encoded Relay Admission Token and displays
+    /// all fields in a human-readable format.
+    #[command(
+        after_help = "EXAMPLES:\n  \
+            ztlp token inspect 01aaaaaa...  (186 hex chars = 93 bytes)"
+    )]
+    Inspect {
+        /// Hex-encoded RAT (93 bytes = 186 hex chars)
+        hex: String,
+    },
+
+    /// Verify a RAT's MAC with a known secret
+    ///
+    /// Parses the token and checks the HMAC-BLAKE2s MAC against the
+    /// provided secret key.
+    #[command(
+        after_help = "EXAMPLES:\n  \
+            ztlp token verify 01aaaaaa... --secret 0102030405..."
+    )]
+    Verify {
+        /// Hex-encoded RAT (93 bytes = 186 hex chars)
+        hex: String,
+
+        /// Hex-encoded 32-byte secret key
+        #[arg(short, long)]
+        secret: String,
+    },
+
+    /// Issue a new RAT for testing
+    ///
+    /// Generates a new Relay Admission Token with the given parameters.
+    /// Useful for testing token verification and cross-language interop.
+    #[command(
+        after_help = "EXAMPLES:\n  \
+            ztlp token issue --node-id aabbccdd... --secret 0102030405... --ttl 300"
+    )]
+    Issue {
+        /// Hex-encoded 16-byte NodeID
+        #[arg(long)]
+        node_id: String,
+
+        /// Hex-encoded 32-byte secret key
+        #[arg(short, long)]
+        secret: String,
+
+        /// TTL in seconds (default: 300)
+        #[arg(long, default_value = "300")]
+        ttl: u64,
+
+        /// Hex-encoded 16-byte IssuerID (default: all zeros)
+        #[arg(long)]
+        issuer_id: Option<String>,
+
+        /// Hex-encoded 12-byte SessionID scope (default: any session)
+        #[arg(long)]
+        session_scope: Option<String>,
     },
 }
 
@@ -1319,7 +1390,47 @@ fn inspect_handshake_header(data: &[u8]) -> Result<(), Box<dyn std::error::Error
     eprintln!("  {} {} bytes", c_cyan("PayloadLen:"), header.payload_len);
     eprintln!("  {} {}", c_cyan("AuthTag:"), hex::encode(header.header_auth_tag));
 
-    let payload_start = HANDSHAKE_HEADER_SIZE;
+    // Parse extension data if present
+    let ext_start = HANDSHAKE_HEADER_SIZE;
+    let ext_end = ext_start + header.ext_len as usize;
+    if header.ext_len > 0 && data.len() >= ext_end {
+        let ext_data = &data[ext_start..ext_end];
+        eprintln!("  {} {} bytes", c_cyan("Extension:"), header.ext_len);
+
+        if !ext_data.is_empty() {
+            let ext_type = ext_data[0];
+            eprintln!("    {} 0x{:02X} ({})", c_cyan("ExtType:"), ext_type,
+                match ext_type {
+                    EXT_TYPE_RAT => "RAT — Relay Admission Token",
+                    _ => "unknown",
+                });
+
+            if ext_type == EXT_TYPE_RAT {
+                match header.parse_extension(ext_data) {
+                    Some(Ok(HandshakeExtension::AdmissionToken(token))) => {
+                        eprintln!("    {} v{}", c_cyan("RAT Version:"), token.version);
+                        eprintln!("    {} {}", c_cyan("RAT NodeID:"), hex::encode(token.node_id));
+                        eprintln!("    {} {}", c_cyan("RAT IssuerID:"), hex::encode(token.issuer_id));
+                        eprintln!("    {} {}", c_cyan("RAT IssuedAt:"), token.issued_at);
+                        eprintln!("    {} {}", c_cyan("RAT ExpiresAt:"), token.expires_at);
+                        let scope_str = if token.session_scope == [0u8; 12] {
+                            "any".to_string()
+                        } else {
+                            hex::encode(token.session_scope)
+                        };
+                        eprintln!("    {} {}", c_cyan("RAT Scope:"), scope_str);
+                        eprintln!("    {} {}...", c_cyan("RAT MAC:"), hex::encode(&token.mac[..16]));
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("    {} {}", c_red("RAT parse error:"), e);
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    let payload_start = ext_end.max(HANDSHAKE_HEADER_SIZE);
     if data.len() > payload_start {
         let payload = &data[payload_start..];
         eprintln!("  {} {} bytes", c_cyan("Payload:"), payload.len());
@@ -1467,6 +1578,123 @@ async fn cmd_ping(target: &str, count: u32, interval: u64, bind: &str) -> Result
     Ok(())
 }
 
+/// `ztlp token inspect` — Decode and display a RAT
+fn cmd_token_inspect(hex_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_str.trim())
+        .map_err(|e| format!("invalid hex: {}", e))?;
+
+    let token = RelayAdmissionToken::parse(&bytes)
+        .map_err(|e| format!("failed to parse RAT: {}", e))?;
+
+    eprintln!("\n{}", c_bold("═══ Relay Admission Token ═══"));
+    eprintln!("{}", token.display());
+
+    Ok(())
+}
+
+/// `ztlp token verify` — Verify a RAT's MAC
+fn cmd_token_verify(hex_str: &str, secret_hex: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = hex::decode(hex_str.trim())
+        .map_err(|e| format!("invalid token hex: {}", e))?;
+    let secret_bytes = hex::decode(secret_hex.trim())
+        .map_err(|e| format!("invalid secret hex: {}", e))?;
+
+    if secret_bytes.len() != 32 {
+        return Err(format!("secret must be 32 bytes (64 hex chars), got {} bytes", secret_bytes.len()).into());
+    }
+
+    let token = RelayAdmissionToken::parse(&bytes)
+        .map_err(|e| format!("failed to parse RAT: {}", e))?;
+
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_bytes);
+
+    eprintln!("\n{}", c_bold("═══ Relay Admission Token Verification ═══"));
+    eprintln!("{}", token.display());
+
+    if token.verify(&secret) {
+        eprintln!("\n  {} {}", c_cyan("MAC:"), c_green("✓ VALID"));
+    } else {
+        eprintln!("\n  {} {}", c_cyan("MAC:"), c_red("✗ INVALID"));
+    }
+
+    if token.is_expired() {
+        eprintln!("  {} {}", c_cyan("Expiry:"), c_red("EXPIRED"));
+    } else {
+        eprintln!("  {} {} ({}s remaining)", c_cyan("Expiry:"), c_green("valid"), token.ttl_seconds());
+    }
+
+    Ok(())
+}
+
+/// `ztlp token issue` — Issue a new RAT for testing
+fn cmd_token_issue(
+    node_id_hex: &str,
+    secret_hex: &str,
+    ttl: u64,
+    issuer_id_hex: &Option<String>,
+    session_scope_hex: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let node_id_bytes = hex::decode(node_id_hex.trim())
+        .map_err(|e| format!("invalid node-id hex: {}", e))?;
+    if node_id_bytes.len() != 16 {
+        return Err(format!("node-id must be 16 bytes (32 hex chars), got {} bytes", node_id_bytes.len()).into());
+    }
+
+    let secret_bytes = hex::decode(secret_hex.trim())
+        .map_err(|e| format!("invalid secret hex: {}", e))?;
+    if secret_bytes.len() != 32 {
+        return Err(format!("secret must be 32 bytes (64 hex chars), got {} bytes", secret_bytes.len()).into());
+    }
+
+    let issuer_id_bytes = if let Some(hex) = issuer_id_hex {
+        let bytes = hex::decode(hex.trim())
+            .map_err(|e| format!("invalid issuer-id hex: {}", e))?;
+        if bytes.len() != 16 {
+            return Err(format!("issuer-id must be 16 bytes (32 hex chars), got {} bytes", bytes.len()).into());
+        }
+        bytes
+    } else {
+        vec![0u8; 16]
+    };
+
+    let scope_bytes = if let Some(hex) = session_scope_hex {
+        let bytes = hex::decode(hex.trim())
+            .map_err(|e| format!("invalid session-scope hex: {}", e))?;
+        if bytes.len() != 12 {
+            return Err(format!("session-scope must be 12 bytes (24 hex chars), got {} bytes", bytes.len()).into());
+        }
+        bytes
+    } else {
+        vec![0u8; 12]
+    };
+
+    let mut node_id = [0u8; 16];
+    node_id.copy_from_slice(&node_id_bytes);
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_bytes);
+    let mut issuer_id = [0u8; 16];
+    issuer_id.copy_from_slice(&issuer_id_bytes);
+    let mut session_scope = [0u8; 12];
+    session_scope.copy_from_slice(&scope_bytes);
+
+    let token = RelayAdmissionToken::issue(
+        node_id, issuer_id, session_scope, ttl, &secret,
+    );
+
+    let bytes = token.serialize();
+
+    // Print the hex token to stdout for piping
+    println!("{}", hex::encode(&bytes));
+
+    // Print details to stderr
+    eprintln!("\n{}", c_bold("═══ Issued Relay Admission Token ═══"));
+    eprintln!("{}", token.display());
+    eprintln!("  {} {}s", c_cyan("TTL:"), ttl);
+
+    Ok(())
+}
+
 /// `ztlp status` — Query status of a local service
 async fn cmd_status(target: &str) -> Result<(), Box<dyn std::error::Error>> {
     let target_addr: SocketAddr = target.parse()
@@ -1610,6 +1838,18 @@ async fn main() {
         Commands::Status { target } => {
             cmd_status(target).await
         }
+
+        Commands::Token(subcmd) => match subcmd {
+            TokenCommands::Inspect { hex } => {
+                cmd_token_inspect(hex)
+            }
+            TokenCommands::Verify { hex, secret } => {
+                cmd_token_verify(hex, secret)
+            }
+            TokenCommands::Issue { node_id, secret, ttl, issuer_id, session_scope } => {
+                cmd_token_issue(node_id, secret, *ttl, issuer_id, session_scope)
+            }
+        },
     };
 
     match result {

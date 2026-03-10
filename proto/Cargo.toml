@@ -18,6 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 blake2 = "0.10"
+subtle = "2.6"
 toml = "0.8"
 base64 = "0.22"
 dirs = "5"
@@ -77,3 +78,7 @@ path = "src/bin/ztlp-gateway-e2e.rs"
 [[bin]]
 name = "ztlp-edge-cases"
 path = "src/bin/ztlp-edge-cases.rs"
+
+[[bin]]
+name = "ztlp-rat-interop"
+path = "src/bin/ztlp-rat-interop.rs"

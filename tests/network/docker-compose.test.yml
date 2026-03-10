@@ -1,0 +1,184 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Network Test Environment — Docker Compose
+# ─────────────────────────────────────────────────────────────
+#
+# Usage:
+#   docker compose -f tests/network/docker-compose.test.yml up --build
+#   docker compose -f tests/network/docker-compose.test.yml down -v
+#
+# This is SEPARATE from the production docker-compose.yml at project root.
+# It creates isolated networks and test-specific service configurations.
+
+services:
+  # ── Namespace Server ──────────────────────────────────────────
+  ns:
+    build:
+      context: ../../ns
+      dockerfile: Dockerfile
+    container_name: ztlp-test-ns
+    environment:
+      - ZTLP_NS_PORT=23096
+      - ZTLP_NS_MAX_RECORDS=100000
+    networks:
+      ztlp-infra:
+        aliases:
+          - ns
+    healthcheck:
+      test: ["CMD-SHELL", "elixir -e ':gen_udp.open(0, [:binary]) |> elem(1) |> :gen_udp.send({127,0,0,1}, 23096, <<0xFF>>) |> case do :ok -> System.halt(0); _ -> System.halt(1) end'"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── Relay Server ──────────────────────────────────────────────
+  relay:
+    build:
+      context: ../../relay
+      dockerfile: Dockerfile
+    container_name: ztlp-test-relay
+    environment:
+      - ZTLP_RELAY_PORT=23095
+      - ZTLP_RELAY_MAX_SESSIONS=10000
+      - ZTLP_RELAY_SESSION_TIMEOUT_MS=300000
+    depends_on:
+      ns:
+        condition: service_healthy
+    networks:
+      ztlp-frontend:
+        aliases:
+          - relay
+      ztlp-infra:
+        aliases:
+          - relay
+
+  # ── Gateway ───────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ../..
+      dockerfile: gateway/Dockerfile
+    container_name: ztlp-test-gateway
+    environment:
+      - ZTLP_GATEWAY_PORT=23097
+      - ZTLP_GATEWAY_NS_HOST=ns
+      - ZTLP_GATEWAY_NS_PORT=23096
+      - ZTLP_GATEWAY_MAX_SESSIONS=10000
+    depends_on:
+      ns:
+        condition: service_healthy
+    networks:
+      ztlp-frontend:
+        aliases:
+          - gateway
+      ztlp-backend:
+        aliases:
+          - gateway
+      ztlp-infra:
+        aliases:
+          - gateway
+
+  # ── Client A (Rust ZTLP node) ────────────────────────────────
+  client-a:
+    build:
+      context: ../../proto
+      dockerfile: Dockerfile
+    container_name: ztlp-test-client-a
+    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    user: root
+    environment:
+      - CLIENT_NAME=alice
+      - NS_HOST=ns
+      - NS_PORT=23096
+      - RELAY_HOST=relay
+      - RELAY_PORT=23095
+      - GATEWAY_HOST=gateway
+      - GATEWAY_PORT=23097
+    volumes:
+      - ./client-scripts:/scripts:ro
+    depends_on:
+      ns:
+        condition: service_healthy
+    networks:
+      ztlp-frontend:
+        aliases:
+          - client-a
+      ztlp-infra:
+        aliases:
+          - client-a
+
+  # ── Client B (Rust ZTLP node) ────────────────────────────────
+  client-b:
+    build:
+      context: ../../proto
+      dockerfile: Dockerfile
+    container_name: ztlp-test-client-b
+    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    user: root
+    environment:
+      - CLIENT_NAME=bob
+      - NS_HOST=ns
+      - NS_PORT=23096
+      - RELAY_HOST=relay
+      - RELAY_PORT=23095
+      - GATEWAY_HOST=gateway
+      - GATEWAY_PORT=23097
+    volumes:
+      - ./client-scripts:/scripts:ro
+    depends_on:
+      ns:
+        condition: service_healthy
+    networks:
+      ztlp-frontend:
+        aliases:
+          - client-b
+      ztlp-infra:
+        aliases:
+          - client-b
+
+  # ── Echo Server (behind gateway) ──────────────────────────────
+  echo-server:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.echo
+    container_name: ztlp-test-echo
+    networks:
+      ztlp-backend:
+        aliases:
+          - echo-server
+
+  # ── Chaos Container (network impairment) ──────────────────────
+  chaos:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.chaos
+    container_name: ztlp-test-chaos
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/bash", "-c", "sleep infinity"]
+    networks:
+      ztlp-frontend:
+        aliases:
+          - chaos-frontend
+      ztlp-backend:
+        aliases:
+          - chaos-backend
+      ztlp-infra:
+        aliases:
+          - chaos-infra
+
+# ── Networks ──────────────────────────────────────────────────
+networks:
+  ztlp-frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+  ztlp-backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.2.0/24
+  ztlp-infra:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.3.0/24

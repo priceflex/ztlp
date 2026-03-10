@@ -1,0 +1,4 @@
+# Ignore test result files (generated at runtime)
+*.result
+summary.txt
+!.gitignore

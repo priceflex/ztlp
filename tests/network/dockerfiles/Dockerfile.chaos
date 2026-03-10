@@ -1,0 +1,19 @@
+# Network chaos container — uses tc/iptables for traffic shaping and partitioning
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
+    iptables \
+    iputils-ping \
+    net-tools \
+    curl \
+    bash \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy chaos helper scripts
+COPY chaos-entrypoint.sh /usr/local/bin/chaos-entrypoint.sh
+RUN chmod +x /usr/local/bin/chaos-entrypoint.sh
+
+ENTRYPOINT ["/bin/bash"]
+CMD ["-c", "sleep infinity"]

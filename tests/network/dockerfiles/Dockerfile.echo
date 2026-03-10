@@ -1,0 +1,8 @@
+# Simple TCP echo server for gateway backend testing
+FROM python:3.11-slim
+
+COPY echo_server.py /echo_server.py
+
+EXPOSE 8080
+
+CMD ["python3", "/echo_server.py"]

@@ -35,7 +35,7 @@ defmodule ZtlpRelay.Application do
             []
           end
 
-        [ZtlpRelay.RelayRegistry] ++ ns_children ++ [ZtlpRelay.MeshManager]
+        [ZtlpRelay.RelayRegistry, ZtlpRelay.ForwardingTable] ++ ns_children ++ [ZtlpRelay.MeshManager]
       else
         []
       end

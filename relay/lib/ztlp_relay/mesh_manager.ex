@@ -7,7 +7,7 @@ defmodule ZtlpRelay.MeshManager do
   require Logger
 
   alias ZtlpRelay.NsClient
-  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay}
+  alias ZtlpRelay.{Config, HashRing, PathScore, RelayRegistry, InterRelay, RoutePlanner, ForwardingTable}
 
   @probe_window_size 20
 
@@ -34,8 +34,13 @@ defmodule ZtlpRelay.MeshManager do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @spec route(binary()) :: {:ok, map()} | {:local, :self} | :error
+  @spec route(binary()) :: {:ok, map()} | {:forward, map(), [map()]} | {:local, :self} | :error
   def route(session_id), do: GenServer.call(__MODULE__, {:route, session_id})
+
+  @spec forward_multihop(binary(), binary(), [map()], non_neg_integer()) :: :ok | {:error, atom()}
+  def forward_multihop(inner_packet, sender_node_id, path, ttl \\ InterRelay.default_ttl()) do
+    GenServer.call(__MODULE__, {:forward_multihop, inner_packet, sender_node_id, path, ttl})
+  end
 
   @spec get_mesh_status() :: map()
   def get_mesh_status, do: GenServer.call(__MODULE__, :get_mesh_status)
@@ -92,31 +97,46 @@ defmodule ZtlpRelay.MeshManager do
 
   @impl true
   def handle_call({:route, session_id}, _from, state) do
-    candidates = HashRing.get_nodes(state.ring, session_id, 3)
-    case candidates do
-      [] -> {:reply, :error, state}
-      _ ->
-        reachable = Enum.filter(candidates, fn c ->
-          c.node_id == state.node_id or RelayRegistry.get_health(c.node_id) != :unreachable
-        end)
-        case reachable do
-          [] -> {:reply, :error, state}
-          _ ->
-            first = hd(reachable)
-            if first.node_id == state.node_id do
-              {:reply, {:local, :self}, state}
-            else
-              case PathScore.select_best(reachable, state.scores) do
-                {:ok, best} ->
-                  if best.node_id == state.node_id do
-                    {:reply, {:local, :self}, state}
-                  else
-                    {:reply, {:ok, best}, state}
-                  end
-                :error -> {:reply, {:ok, first}, state}
-              end
-            end
+    # Check forwarding table cache first
+    cached_path = try do
+      ForwardingTable.get(session_id)
+    catch
+      :error, :badarg -> nil
+    end
+
+    case cached_path do
+      path when is_list(path) and path != [] ->
+        registry_map = Map.new(RelayRegistry.get_all(), fn r -> {r.node_id, r} end)
+        first_hop_id = hd(path)
+        case Map.get(registry_map, first_hop_id) do
+          nil ->
+            try do ForwardingTable.delete(session_id) catch :error, :badarg -> :ok end
+            {:reply, do_route(session_id, state), state}
+          first_hop ->
+            full_path = Enum.map(path, fn nid -> Map.get(registry_map, nid, %{node_id: nid}) end)
+            {:reply, {:forward, first_hop, full_path}, state}
         end
+      _ ->
+        {:reply, do_route(session_id, state), state}
+    end
+  end
+
+  def handle_call({:forward_multihop, inner_packet, sender_node_id, path, ttl}, _from, state) do
+    if state.socket == nil do
+      {:reply, {:error, :no_socket}, state}
+    else
+      path_node_ids = Enum.map(path, fn
+        %{node_id: nid} -> nid
+        nid when is_binary(nid) -> nid
+      end)
+      forward_data = InterRelay.encode_forward(sender_node_id, inner_packet, ttl: ttl, path: path_node_ids)
+      case path do
+        [%{address: {dest_ip, dest_port}} | _] ->
+          :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
+          {:reply, :ok, state}
+        _ ->
+          {:reply, {:error, :no_address}, state}
+      end
     end
   end
 
@@ -179,6 +199,46 @@ defmodule ZtlpRelay.MeshManager do
     :ok
   end
   def terminate(_reason, _state), do: :ok
+
+  # Route planning (extracted for multi-hop support)
+
+  defp do_route(session_id, state) do
+    candidates = HashRing.get_nodes(state.ring, session_id, 3)
+    case candidates do
+      [] -> :error
+      _ ->
+        reachable = Enum.filter(candidates, fn c ->
+          c.node_id == state.node_id or RelayRegistry.get_health(c.node_id) != :unreachable
+        end)
+        case reachable do
+          [] -> :error
+          _ ->
+            first = hd(reachable)
+            if first.node_id == state.node_id do
+              {:local, :self}
+            else
+              best = case PathScore.select_best(reachable, state.scores) do
+                {:ok, b} -> b
+                :error -> first
+              end
+              if best.node_id == state.node_id do
+                {:local, :self}
+              else
+                registry = RelayRegistry.get_all()
+                case RoutePlanner.plan(state.node_id, best.node_id, registry) do
+                  {:ok, []} -> {:local, :self}
+                  {:ok, path} when length(path) > 1 ->
+                    path_ids = Enum.map(path, & &1.node_id)
+                    try do ForwardingTable.put(session_id, path_ids) catch :error, :badarg -> :ok end
+                    {:forward, hd(path), path}
+                  {:ok, [single]} -> {:ok, single}
+                  {:error, _} -> {:ok, best}
+                end
+              end
+            end
+        end
+    end
+  end
 
   defp handle_decoded_message({:relay_hello, sender_node_id, _ts, payload}, _sender, state) do
     Logger.debug("Received RELAY_HELLO from \#{inspect(sender_node_id)}")

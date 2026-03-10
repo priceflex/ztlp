@@ -23,7 +23,7 @@ defmodule ZtlpRelay.UdpListener do
 
   require Logger
 
-  alias ZtlpRelay.{Pipeline, SessionRegistry, Stats, Session, Config, InterRelay, MeshManager}
+  alias ZtlpRelay.{Pipeline, SessionRegistry, Stats, Session, Config, InterRelay, MeshManager, Packet}
 
   @type state :: %{
     socket: :gen_udp.socket() | nil,
@@ -135,22 +135,78 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   # Handle inter-relay protocol messages received on the client port.
-  # These are decoded and dispatched — RELAY_FORWARD messages have their
-  # inner packet unwrapped and re-processed through the pipeline.
+  # Dispatches RELAY_FORWARD through multi-hop pipeline.
   defp handle_inter_relay_packet(data, sender, state) do
     case InterRelay.handle_message(data, sender) do
-      {:ok, {:relay_forward, _sender_node_id, _ts, %{inner_packet: inner}}} ->
-        # Re-process the inner packet through the normal pipeline
-        handle_packet(inner, sender, state)
-
+      {:ok, {:relay_forward, sender_node_id, _ts, payload}} ->
+        handle_relay_forward(sender_node_id, payload, sender, state)
       {:ok, _other} ->
-        # Other inter-relay messages go to MeshManager
         MeshManager.handle_inter_relay(data, sender)
-
       {:error, reason} ->
         Logger.debug("Failed to decode inter-relay message from #{inspect(sender)}: #{reason}")
         :ok
     end
+  end
+
+  # Multi-hop RELAY_FORWARD: check TTL, loop, then deliver or forward.
+  defp handle_relay_forward(_sender_node_id, %{inner_packet: inner, ttl: ttl, path: path}, _sender, state) do
+    our_node_id = get_our_node_id()
+    cond do
+      ttl <= 0 ->
+        Logger.debug("Multi-hop: dropping packet with TTL=0")
+        :ok
+      InterRelay.loop_detected?(our_node_id, path) ->
+        Logger.debug("Multi-hop: loop detected, dropping")
+        :ok
+      true ->
+        case try_local_delivery(inner, state) do
+          :delivered -> :ok
+          :not_local -> forward_to_next_hop(inner, our_node_id, path, ttl - 1, state)
+        end
+    end
+  end
+
+  # Backward compat: RELAY_FORWARD without TTL/path
+  defp handle_relay_forward(_sender_node_id, %{inner_packet: inner}, sender, state) do
+    handle_packet(inner, sender, state)
+  end
+
+  defp try_local_delivery(inner, state) do
+    case Pipeline.process(inner, nil) do
+      {:pass, parsed} ->
+        case SessionRegistry.lookup_session(parsed.session_id) do
+          {:ok, {peer_a, _peer_b, _pid}} ->
+            :gen_udp.send(state.socket, elem(peer_a, 0), elem(peer_a, 1), inner)
+            Stats.increment(:forwarded)
+            :delivered
+          :error -> :not_local
+        end
+      {:drop, _layer, _reason} -> :not_local
+    end
+  end
+
+  defp forward_to_next_hop(inner, our_node_id, path, ttl, state) do
+    new_path = path ++ [our_node_id]
+    case Packet.extract_session_id(inner) do
+      {:ok, session_id} ->
+        case MeshManager.route(session_id) do
+          {:forward, next_hop, _} -> send_forward_to_relay(inner, our_node_id, new_path, ttl, next_hop, state)
+          {:ok, relay} -> send_forward_to_relay(inner, our_node_id, new_path, ttl, relay, state)
+          _ -> :ok
+        end
+      :error -> :ok
+    end
+  end
+
+  defp send_forward_to_relay(inner, our_node_id, path, ttl, relay, state) do
+    forward_data = InterRelay.encode_forward(our_node_id, inner, ttl: ttl, path: path)
+    {dest_ip, dest_port} = relay.address
+    :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
+    :ok
+  end
+
+  defp get_our_node_id do
+    try do MeshManager.node_id() catch :exit, _ -> <<0::128>> end
   end
 
   # HELLO packets — first message of a new handshake.
@@ -206,23 +262,23 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   # Mesh routing: hash the SessionID to find which relay owns it,
-  # then forward via InterRelay if it's not us.
+  # then forward via InterRelay (single-hop or multi-hop).
   defp mesh_route_packet(session_id, data, sender, state) do
+    node_id = get_our_node_id()
     case MeshManager.route(session_id) do
       {:local, :self} ->
-        # We own this session but don't have it registered — drop
         Logger.debug("Mesh: session #{inspect(session_id)} maps to us but not found, from #{inspect(sender)}")
         :ok
-
+      {:forward, next_hop, _full_path} ->
+        forward_data = InterRelay.forward_packet(data, node_id, ttl: InterRelay.default_ttl(), path: [node_id])
+        {dest_ip, dest_port} = next_hop.address
+        :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
+        :ok
       {:ok, relay} ->
-        # Forward to the owning relay
-        node_id = MeshManager.node_id()
         forward_data = InterRelay.forward_packet(data, node_id)
         {dest_ip, dest_port} = relay.address
         :gen_udp.send(state.socket, dest_ip, dest_port, forward_data)
-        Logger.debug("Mesh: forwarded packet for session #{inspect(session_id)} to relay #{inspect(relay.node_id)}")
         :ok
-
       :error ->
         Logger.debug("Mesh: no relay found for session #{inspect(session_id)}")
         :ok

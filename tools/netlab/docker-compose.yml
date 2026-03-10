@@ -1,0 +1,163 @@
+# ZTLP Network Test Lab — Docker Compose Topology
+#
+# Simulates a real ZTLP deployment with network impairment capabilities.
+#
+# Usage:
+#   cd tools/netlab
+#   ./run.sh [scenario]
+#
+# Topology:
+#   client-a ──┐
+#              ├── relay ── gateway ── echo-backend
+#   client-b ──┘     │
+#                     └── ns
+#
+#   chaos (sidecar) — applies tc network impairments
+
+version: "3.8"
+
+networks:
+  ztlp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  # ───────────────────────────────────────────────
+  # Elixir relay node
+  # ───────────────────────────────────────────────
+  relay:
+    build:
+      context: ../../relay
+      dockerfile: Dockerfile
+    container_name: ztlp-relay
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "4433:4433/udp"
+    environment:
+      - ZTLP_RELAY_PORT=4433
+      - ZTLP_GATEWAY_ADDR=172.28.0.20:4434
+      - ZTLP_NS_ADDR=172.28.0.30:4435
+      - MIX_ENV=prod
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # ───────────────────────────────────────────────
+  # Elixir gateway node
+  # ───────────────────────────────────────────────
+  gateway:
+    build:
+      context: ../../gateway
+      dockerfile: Dockerfile
+    container_name: ztlp-gateway
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "4434:4434/udp"
+    environment:
+      - ZTLP_GATEWAY_PORT=4434
+      - ZTLP_BACKEND_ADDR=172.28.0.50:9000
+      - ZTLP_NS_ADDR=172.28.0.30:4435
+      - MIX_ENV=prod
+    depends_on:
+      - echo-backend
+      - ns
+
+  # ───────────────────────────────────────────────
+  # Elixir name server
+  # ───────────────────────────────────────────────
+  ns:
+    build:
+      context: ../../ns
+      dockerfile: Dockerfile
+    container_name: ztlp-ns
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.30
+    ports:
+      - "4435:4435/udp"
+    environment:
+      - ZTLP_NS_PORT=4435
+      - MIX_ENV=prod
+
+  # ───────────────────────────────────────────────
+  # Rust client A
+  # ───────────────────────────────────────────────
+  client-a:
+    build:
+      context: ../../proto
+      dockerfile: Dockerfile
+    container_name: ztlp-client-a
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.40
+    environment:
+      - ZTLP_RELAY_ADDR=172.28.0.10:4433
+      - ZTLP_GATEWAY_ADDR=172.28.0.20:4434
+      - ZTLP_NS_ADDR=172.28.0.30:4435
+    command: ["sleep", "infinity"]
+    depends_on:
+      - relay
+      - gateway
+      - ns
+
+  # ───────────────────────────────────────────────
+  # Rust client B
+  # ───────────────────────────────────────────────
+  client-b:
+    build:
+      context: ../../proto
+      dockerfile: Dockerfile
+    container_name: ztlp-client-b
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.41
+    environment:
+      - ZTLP_RELAY_ADDR=172.28.0.10:4433
+      - ZTLP_GATEWAY_ADDR=172.28.0.20:4434
+      - ZTLP_NS_ADDR=172.28.0.30:4435
+    command: ["sleep", "infinity"]
+    depends_on:
+      - relay
+      - gateway
+      - ns
+
+  # ───────────────────────────────────────────────
+  # TCP echo server (gateway backend)
+  # ───────────────────────────────────────────────
+  echo-backend:
+    image: alpine:3.19
+    container_name: ztlp-echo-backend
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.50
+    command: >
+      sh -c "apk add --no-cache socat &&
+             socat TCP-LISTEN:9000,fork,reuseaddr EXEC:'cat'"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo test | socat - TCP:127.0.0.1:9000 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # ───────────────────────────────────────────────
+  # Chaos engineering container (tc/netem)
+  # ───────────────────────────────────────────────
+  chaos:
+    image: alpine:3.19
+    container_name: ztlp-chaos
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.100
+    cap_add:
+      - NET_ADMIN
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./scenarios:/scenarios:ro

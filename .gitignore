@@ -3,3 +3,10 @@
 ZTLP_RFC_Draft_v0_8_3.docx
 ZTLP_RFC_Draft_v0.2.docx
 ZTLP_RFC_Draft_v0.5.docx
+
+# Rust build artifacts
+/proto/target/
+
+# Elixir build artifacts
+/relay/_build/
+/relay/deps/

@@ -28,8 +28,9 @@ defmodule ZtlpGateway.Handshake do
   ## Implementation Notes
 
   - Uses BLAKE2s for all hashing (not SHA-256) since OTP 24 supports it.
-  - The protocol name "Noise_XX_25519_ChaChaPoly_BLAKE2s" is 38 bytes,
+  - The protocol name "Noise_XX_25519_ChaChaPoly_BLAKE2s" is 33 bytes,
     which exceeds 32, so we hash it to get the initial `h`.
+  - MixHash(prologue) is applied per Noise spec Section 5.3 (empty by default).
   - Empty encryption key (`k = nil`) means data is sent in the clear
     (only the first message's ephemeral key).
   """
@@ -83,12 +84,14 @@ defmodule ZtlpGateway.Handshake do
   - `static_pub` — gateway's X25519 static public key (32 bytes)
   - `static_priv` — gateway's X25519 static private key (32 bytes)
   """
-  @spec init_responder(binary(), binary()) :: state()
-  def init_responder(static_pub, static_priv)
+  @spec init_responder(binary(), binary(), binary()) :: state()
+  def init_responder(static_pub, static_priv, prologue \\ <<>>)
       when byte_size(static_pub) == 32 and byte_size(static_priv) == 32 do
-    # Protocol name is 38 bytes (> 32), so hash it to get initial h.
+    # Protocol name is 33 bytes (> 32), so hash it to get initial h and ck.
     h = Crypto.hash(@protocol_name)
     ck = h
+    # MixHash(prologue) per Noise spec Section 5.3
+    h = Crypto.hash(h <> prologue)
 
     %{
       h: h,
@@ -115,11 +118,13 @@ defmodule ZtlpGateway.Handshake do
   - `static_pub` — initiator's X25519 static public key (32 bytes)
   - `static_priv` — initiator's X25519 static private key (32 bytes)
   """
-  @spec init_initiator(binary(), binary()) :: state()
-  def init_initiator(static_pub, static_priv)
+  @spec init_initiator(binary(), binary(), binary()) :: state()
+  def init_initiator(static_pub, static_priv, prologue \\ <<>>)
       when byte_size(static_pub) == 32 and byte_size(static_priv) == 32 do
     h = Crypto.hash(@protocol_name)
     ck = h
+    # MixHash(prologue) per Noise spec Section 5.3
+    h = Crypto.hash(h <> prologue)
 
     %{
       h: h,
@@ -156,6 +161,10 @@ defmodule ZtlpGateway.Handshake do
 
     # Mix ephemeral public key into handshake hash
     h = Crypto.hash(state.h <> e_pub)
+
+    # EncryptAndHash(payload): no key yet, so plaintext passthrough + MixHash
+    # Even with empty payload, we must MixHash it per the Noise spec
+    h = Crypto.hash(h <> <<>>)
 
     msg = e_pub
 
@@ -326,6 +335,11 @@ defmodule ZtlpGateway.Handshake do
       <<re::binary-size(32), _rest::binary>> ->
         # Mix remote ephemeral into handshake hash
         h = Crypto.hash(state.h <> re)
+
+        # DecryptAndHash(payload): no key yet, so plaintext passthrough + MixHash
+        # msg1 has no payload after the ephemeral key, but Noise requires
+        # MixHash of the (empty) payload data per the framework spec
+        h = Crypto.hash(h <> <<>>)
 
         {%{state | re: re, h: h, phase: :received_msg1}, <<>>}
 

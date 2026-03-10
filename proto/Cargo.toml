@@ -24,6 +24,7 @@ dirs = "5"
 colored = "2"
 indicatif = "0.17"
 ed25519-dalek = { version = "2", features = ["std"] }
+curve25519-dalek = "4"
 
 [[bin]]
 name = "ztlp-node"

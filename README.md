@@ -3175,15 +3175,18 @@ upgrades, and no kernel changes are required for initial deployment.
 
 ## 32.1 User-Space Deployment Stack
 
-The initial deployment stack is: Application / ZTLP (user-space) / UDP /
-IPv4 or IPv6 / Internet. The four reference implementation components
-are: ztlp-client (runs on Linux, Windows, macOS, and eventually mobile);
-ztlp-relay (accepts handshake requests, validates sessions, forwards
-packets by SessionID); ztlp-gateway (deploys in front of existing
-services, handles identity and session validation, forwards internally);
-and ztlp-service (a protected endpoint with no public ports). Together
-these four components are sufficient to demonstrate a complete ZTLP
-network.
+The initial deployment stack is: Application / ZTLP (user-space) / UDP / IPv4 or IPv6 / Internet.
+
+The four reference implementation components are:
+
+| Component | Description |
+|---|---|
+| ztlp-client | Runs on Linux, Windows, macOS, and eventually mobile |
+| ztlp-relay | Accepts handshake requests, validates sessions, forwards packets by SessionID |
+| ztlp-gateway | Deploys in front of existing services, handles identity and session validation, forwards internally |
+| ztlp-service | A protected endpoint with no public ports |
+
+Together these four components are sufficient to demonstrate a complete ZTLP network.
 
 ## 32.2 Handshake Flow Diagram
 

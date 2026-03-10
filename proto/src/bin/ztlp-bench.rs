@@ -11,7 +11,6 @@
 //!
 //! Run: cargo run --release --bin ztlp-bench
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::{
@@ -22,16 +21,16 @@ use chacha20poly1305::{
 use ztlp_proto::handshake;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::packet::{
-    DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket, MAGIC,
-    DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE,
+    DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket,
 };
-use ztlp_proto::pipeline::{AdmissionResult, Pipeline, compute_header_auth_tag};
+use ztlp_proto::pipeline::{Pipeline, compute_header_auth_tag};
 use ztlp_proto::session::SessionState;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Benchmark harness
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 struct BenchResult {
     name: String,
     iterations: u64,

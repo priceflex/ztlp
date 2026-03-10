@@ -1,6 +1,10 @@
 # Contributing to ZTLP
 
-Thank you for your interest in contributing to the Zero Trust Layer Protocol.
+Thank you for your interest in contributing to the Zero Trust Layer Protocol (ZTLP).
+
+ZTLP is an experimental protocol exploring identity-first networking and zero-trust transport. Contributions, feedback, and discussion are welcome.
+
+ZTLP is being developed as part of the Tech Rockstar Academy research initiative.
 
 ## How to Contribute
 
@@ -12,9 +16,9 @@ Thank you for your interest in contributing to the Zero Trust Layer Protocol.
 
 By submitting a pull request or other contribution to this project, you agree to the following:
 
-1. You certify that your contribution is your original work, or you have the right to submit it under the project's license.
-2. You grant Steven Price and the ZTLP project a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, reproduce, modify, distribute, and sublicense your contribution as part of this project under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
-3. You understand that your contribution will be publicly available and that a record of it (including your name and email) will be maintained indefinitely.
+- You certify that your contribution is your original work, or that you have the right to submit it under the project's license.
+- You agree that your contribution will be licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) as part of this project.
+- You understand that your contribution will be publicly available and that a record of it (including your name and email) may be maintained indefinitely.
 
 ## License
 
@@ -22,4 +26,5 @@ All contributions are licensed under the [Apache License 2.0](LICENSE).
 
 ## Trademark Notice
 
-ZTLP and Zero Trust Layer Protocol are trademarks of Steven Price. Use of the ZTLP name or logo in any context must not imply endorsement by the author or the project without prior written permission.
+ZTLP and Zero Trust Layer Protocol are trademarks of Steven Price.
+Use of the ZTLP name, logo, or branding must not imply endorsement by the project or its author without prior written permission.

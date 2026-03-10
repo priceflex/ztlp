@@ -18,6 +18,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 blake2 = "0.10"
+toml = "0.8"
+base64 = "0.22"
+dirs = "5"
+colored = "2"
+indicatif = "0.17"
+ed25519-dalek = { version = "2", features = ["std"] }
 
 [[bin]]
 name = "ztlp-node"
@@ -34,3 +40,39 @@ path = "src/bin/ztlp-relay-demo.rs"
 [[bin]]
 name = "ztlp-bench"
 path = "src/bin/ztlp-bench.rs"
+
+[[bin]]
+name = "ztlp"
+path = "src/bin/ztlp-cli.rs"
+
+[[bin]]
+name = "ztlp-inspect"
+path = "src/bin/ztlp-inspect.rs"
+
+[[bin]]
+name = "ztlp-load"
+path = "src/bin/ztlp-load.rs"
+
+[[bin]]
+name = "ztlp-fuzz"
+path = "src/bin/ztlp-fuzz.rs"
+
+[[bin]]
+name = "ztlp-handshake-interop"
+path = "src/bin/ztlp-handshake-interop.rs"
+
+[[bin]]
+name = "ztlp-pipeline-interop"
+path = "src/bin/ztlp-pipeline-interop.rs"
+
+[[bin]]
+name = "ztlp-ns-interop"
+path = "src/bin/ztlp-ns-interop.rs"
+
+[[bin]]
+name = "ztlp-gateway-e2e"
+path = "src/bin/ztlp-gateway-e2e.rs"
+
+[[bin]]
+name = "ztlp-edge-cases"
+path = "src/bin/ztlp-edge-cases.rs"

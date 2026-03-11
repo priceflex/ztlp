@@ -141,11 +141,12 @@ defmodule ZtlpRelay.SessionRegistryTest do
     test "counts registered sessions" do
       initial = SessionRegistry.count()
 
-      ids = for _ <- 1..5 do
-        id = :crypto.strong_rand_bytes(12)
-        SessionRegistry.register_session(id, {{127, 0, 0, 1}, 5001}, {{127, 0, 0, 1}, 5002})
-        id
-      end
+      ids =
+        for _ <- 1..5 do
+          id = :crypto.strong_rand_bytes(12)
+          SessionRegistry.register_session(id, {{127, 0, 0, 1}, 5001}, {{127, 0, 0, 1}, 5002})
+          id
+        end
 
       assert SessionRegistry.count() == initial + 5
 
@@ -155,15 +156,16 @@ defmodule ZtlpRelay.SessionRegistryTest do
 
   describe "concurrent access" do
     test "handles concurrent registrations" do
-      tasks = for i <- 1..50 do
-        Task.async(fn ->
-          session_id = :crypto.strong_rand_bytes(12)
-          peer_a = {{127, 0, 0, 1}, 6000 + i}
-          peer_b = {{127, 0, 0, 1}, 7000 + i}
-          SessionRegistry.register_session(session_id, peer_a, peer_b)
-          session_id
-        end)
-      end
+      tasks =
+        for i <- 1..50 do
+          Task.async(fn ->
+            session_id = :crypto.strong_rand_bytes(12)
+            peer_a = {{127, 0, 0, 1}, 6000 + i}
+            peer_b = {{127, 0, 0, 1}, 7000 + i}
+            SessionRegistry.register_session(session_id, peer_a, peer_b)
+            session_id
+          end)
+        end
 
       ids = Enum.map(tasks, &Task.await/1)
 

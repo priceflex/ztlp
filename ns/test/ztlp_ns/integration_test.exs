@@ -30,8 +30,14 @@ defmodule ZtlpNs.IntegrationTest do
       # Tenant signs a node record
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      node_record = Record.new_key("node1.acme.example.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      node_record =
+        Record.new_key("node1.acme.example.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed_node} = ZoneAuthority.sign_record(tenant, node_record)
       Store.insert(signed_node)
 
@@ -47,8 +53,14 @@ defmodule ZtlpNs.IntegrationTest do
       # Create and store a valid record
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      record = Record.new_key("revokable.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      record =
+        Record.new_key("revokable.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, record)
       Store.insert(signed)
 
@@ -56,8 +68,13 @@ defmodule ZtlpNs.IntegrationTest do
       assert {:ok, _} = ZtlpNs.Query.lookup("revokable.ztlp", :key)
 
       # Now revoke it
-      revoke = Record.new_revoke("revocations.ztlp", [], "compromised", "2026-03-10T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("revocations.ztlp", [], "compromised", "2026-03-10T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["revokable.ztlp"])}
       {:ok, signed_revoke} = ZoneAuthority.sign_record(root, revoke)
       Store.insert(signed_revoke)
@@ -73,8 +90,14 @@ defmodule ZtlpNs.IntegrationTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      rec = Record.new_key("udptest.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      rec =
+        Record.new_key("udptest.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       rec = Record.sign(rec, priv)
       Store.insert(rec)
 
@@ -85,7 +108,8 @@ defmodule ZtlpNs.IntegrationTest do
       {:ok, client} = :gen_udp.open(0, [:binary, {:active, false}])
       name = "udptest.ztlp"
       name_len = byte_size(name)
-      query = <<0x01, name_len::16, name::binary, 1::8>>  # type 1 = KEY
+      # type 1 = KEY
+      query = <<0x01, name_len::16, name::binary, 1::8>>
       :gen_udp.send(client, {127, 0, 0, 1}, server_port, query)
 
       # Receive response
@@ -132,14 +156,25 @@ defmodule ZtlpNs.IntegrationTest do
       # Insert a key record
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      rec = Record.new_key("revoked-udp.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      rec =
+        Record.new_key("revoked-udp.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       rec = Record.sign(rec, priv)
       Store.insert(rec)
 
       # Revoke it
-      revoke = Record.new_revoke("rev.ztlp", [], "test", "2026-01-01T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("rev.ztlp", [], "test", "2026-01-01T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["revoked-udp.ztlp"])}
       revoke = Record.sign(revoke, priv)
       Store.insert(revoke)
@@ -167,9 +202,31 @@ defmodule ZtlpNs.IntegrationTest do
       now = System.system_time(:second)
 
       # Insert three different record types for same name
-      key = Record.sign(Record.new_key("multi.ztlp", node_id, node_pub, created_at: now, ttl: 86400, serial: 1), priv)
-      relay = Record.sign(Record.new_relay("multi.ztlp", node_id, ["1.2.3.4:23095"], 1000, "us", created_at: now, ttl: 3600, serial: 1), priv)
-      policy = Record.sign(Record.new_policy("multi.ztlp", [node_id], ["rdp"], [], created_at: now, ttl: 3600, serial: 1), priv)
+      key =
+        Record.sign(
+          Record.new_key("multi.ztlp", node_id, node_pub, created_at: now, ttl: 86400, serial: 1),
+          priv
+        )
+
+      relay =
+        Record.sign(
+          Record.new_relay("multi.ztlp", node_id, ["1.2.3.4:23095"], 1000, "us",
+            created_at: now,
+            ttl: 3600,
+            serial: 1
+          ),
+          priv
+        )
+
+      policy =
+        Record.sign(
+          Record.new_policy("multi.ztlp", [node_id], ["rdp"], [],
+            created_at: now,
+            ttl: 3600,
+            serial: 1
+          ),
+          priv
+        )
 
       Store.insert(key)
       Store.insert(relay)
@@ -190,8 +247,17 @@ defmodule ZtlpNs.IntegrationTest do
       {node_pub2, _} = Crypto.generate_keypair()
       now = System.system_time(:second)
 
-      rec1 = Record.sign(Record.new_key("update.ztlp", node_id, node_pub1, created_at: now, ttl: 86400, serial: 1), priv)
-      rec2 = Record.sign(Record.new_key("update.ztlp", node_id, node_pub2, created_at: now, ttl: 86400, serial: 2), priv)
+      rec1 =
+        Record.sign(
+          Record.new_key("update.ztlp", node_id, node_pub1, created_at: now, ttl: 86400, serial: 1),
+          priv
+        )
+
+      rec2 =
+        Record.sign(
+          Record.new_key("update.ztlp", node_id, node_pub2, created_at: now, ttl: 86400, serial: 2),
+          priv
+        )
 
       Store.insert(rec1)
       assert {:ok, found1} = Store.lookup("update.ztlp", :key)

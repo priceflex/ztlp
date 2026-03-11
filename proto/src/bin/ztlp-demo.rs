@@ -11,9 +11,7 @@ use tracing::error;
 
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::NodeIdentity;
-use ztlp_proto::packet::{
-    DataHeader, HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE,
-};
+use ztlp_proto::packet::{DataHeader, HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use ztlp_proto::session::SessionState;
 use ztlp_proto::transport::TransportNode;
 
@@ -36,20 +34,18 @@ async fn main() {
     println!("━━━ Step 1: Generating node identities ━━━");
     let node_a_identity = NodeIdentity::generate().expect("generate identity A");
     let node_b_identity = NodeIdentity::generate().expect("generate identity B");
-    println!(
-        "  Node A: {}",
-        node_a_identity.node_id
-    );
-    println!(
-        "  Node B: {}",
-        node_b_identity.node_id
-    );
+    println!("  Node A: {}", node_a_identity.node_id);
+    println!("  Node B: {}", node_b_identity.node_id);
     println!();
 
     // ── Step 2: Bind transport nodes ─────────────────────────────────
     println!("━━━ Step 2: Binding UDP sockets ━━━");
-    let node_a = TransportNode::bind("127.0.0.1:0").await.expect("bind node A");
-    let node_b = TransportNode::bind("127.0.0.1:0").await.expect("bind node B");
+    let node_a = TransportNode::bind("127.0.0.1:0")
+        .await
+        .expect("bind node A");
+    let node_b = TransportNode::bind("127.0.0.1:0")
+        .await
+        .expect("bind node B");
     let addr_a = node_a.local_addr;
     let addr_b = node_b.local_addr;
     println!("  Node A listening on {}", addr_a);
@@ -59,10 +55,10 @@ async fn main() {
     // ── Step 3: Noise_XX Handshake ───────────────────────────────────
     println!("━━━ Step 3: Performing Noise_XX handshake ━━━");
 
-    let mut init_ctx = HandshakeContext::new_initiator(&node_a_identity)
-        .expect("create initiator context");
-    let mut resp_ctx = HandshakeContext::new_responder(&node_b_identity)
-        .expect("create responder context");
+    let mut init_ctx =
+        HandshakeContext::new_initiator(&node_a_identity).expect("create initiator context");
+    let mut resp_ctx =
+        HandshakeContext::new_responder(&node_b_identity).expect("create responder context");
 
     // Message 1: A → B (HELLO with ephemeral key)
     println!("  → Message 1: Node A sends HELLO (ephemeral key)");
@@ -72,10 +68,7 @@ async fn main() {
     hello_header.payload_len = msg1.len() as u16;
     let mut pkt1 = hello_header.serialize();
     pkt1.extend_from_slice(&msg1);
-    node_a
-        .send_raw(&pkt1, addr_b)
-        .await
-        .expect("send msg1");
+    node_a.send_raw(&pkt1, addr_b).await.expect("send msg1");
 
     // B receives message 1
     let (recv1, _) = node_b.recv_raw().await.expect("recv msg1");
@@ -91,10 +84,7 @@ async fn main() {
     ack_header.payload_len = msg2.len() as u16;
     let mut pkt2 = ack_header.serialize();
     pkt2.extend_from_slice(&msg2);
-    node_b
-        .send_raw(&pkt2, addr_a)
-        .await
-        .expect("send msg2");
+    node_b.send_raw(&pkt2, addr_a).await.expect("send msg2");
 
     // A receives message 2
     let (recv2, _) = node_a.recv_raw().await.expect("recv msg2");
@@ -110,20 +100,26 @@ async fn main() {
     final_header.payload_len = msg3.len() as u16;
     let mut pkt3 = final_header.serialize();
     pkt3.extend_from_slice(&msg3);
-    node_a
-        .send_raw(&pkt3, addr_b)
-        .await
-        .expect("send msg3");
+    node_a.send_raw(&pkt3, addr_b).await.expect("send msg3");
 
     // B receives message 3
     let (recv3, _) = node_b.recv_raw().await.expect("recv msg3");
     let noise_payload3 = &recv3[HANDSHAKE_HEADER_SIZE..];
     let _p3 = resp_ctx.read_message(noise_payload3).expect("read msg3");
-    println!("  ✓ Node B received final confirmation ({} bytes)", recv3.len());
+    println!(
+        "  ✓ Node B received final confirmation ({} bytes)",
+        recv3.len()
+    );
 
     // Verify handshake completion
-    assert!(init_ctx.is_finished(), "initiator handshake should be finished");
-    assert!(resp_ctx.is_finished(), "responder handshake should be finished");
+    assert!(
+        init_ctx.is_finished(),
+        "initiator handshake should be finished"
+    );
+    assert!(
+        resp_ctx.is_finished(),
+        "responder handshake should be finished"
+    );
     println!("  ✓ Noise_XX handshake complete — mutual authentication successful!");
     println!();
 
@@ -187,7 +183,10 @@ async fn main() {
         .send_data(shared_session_id, message, addr_b)
         .await
         .expect("send data");
-    println!("  → Node A sent encrypted data ({} bytes plaintext)", message.len());
+    println!(
+        "  → Node A sent encrypted data ({} bytes plaintext)",
+        message.len()
+    );
 
     // Small delay to ensure delivery
     sleep(Duration::from_millis(50)).await;
@@ -224,7 +223,10 @@ async fn main() {
     {
         let pipeline_b = node_b.pipeline.lock().await;
         let snap = pipeline_b.counters.snapshot();
-        println!("  ✗ Dropped at Layer 1 (bad magic): {} total L1 drops", snap.layer1_drops);
+        println!(
+            "  ✗ Dropped at Layer 1 (bad magic): {} total L1 drops",
+            snap.layer1_drops
+        );
     }
     println!();
 
@@ -242,7 +244,10 @@ async fn main() {
     {
         let pipeline_b = node_b.pipeline.lock().await;
         let snap = pipeline_b.counters.snapshot();
-        println!("  ✗ Dropped at Layer 2 (unknown session): {} total L2 drops", snap.layer2_drops);
+        println!(
+            "  ✗ Dropped at Layer 2 (unknown session): {} total L2 drops",
+            snap.layer2_drops
+        );
     }
     println!();
 
@@ -262,7 +267,10 @@ async fn main() {
     {
         let pipeline_b = node_b.pipeline.lock().await;
         let snap = pipeline_b.counters.snapshot();
-        println!("  ✗ Dropped at Layer 3 (invalid auth tag): {} total L3 drops", snap.layer3_drops);
+        println!(
+            "  ✗ Dropped at Layer 3 (invalid auth tag): {} total L3 drops",
+            snap.layer3_drops
+        );
     }
     println!();
 
@@ -273,9 +281,18 @@ async fn main() {
         let snap = pipeline_b.counters.snapshot();
         println!("  {}", snap);
         println!();
-        println!("  Layer 1 (Magic check):      {} dropped  — zero crypto cost", snap.layer1_drops);
-        println!("  Layer 2 (SessionID lookup):  {} dropped  — zero crypto cost", snap.layer2_drops);
-        println!("  Layer 3 (AuthTag verify):    {} dropped  — real crypto cost", snap.layer3_drops);
+        println!(
+            "  Layer 1 (Magic check):      {} dropped  — zero crypto cost",
+            snap.layer1_drops
+        );
+        println!(
+            "  Layer 2 (SessionID lookup):  {} dropped  — zero crypto cost",
+            snap.layer2_drops
+        );
+        println!(
+            "  Layer 3 (AuthTag verify):    {} dropped  — real crypto cost",
+            snap.layer3_drops
+        );
         println!("  Passed all layers:           {}", snap.passed);
     }
     println!();

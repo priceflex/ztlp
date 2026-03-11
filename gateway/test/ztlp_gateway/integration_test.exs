@@ -1,8 +1,7 @@
 defmodule ZtlpGateway.IntegrationTest do
   use ExUnit.Case
 
-  alias ZtlpGateway.{Crypto, Handshake, Packet, PolicyEngine,
-                      Identity, AuditLog, Stats}
+  alias ZtlpGateway.{Crypto, Handshake, Packet, PolicyEngine, Identity, AuditLog, Stats}
 
   # Integration tests verify the full crypto pipeline:
   # keypair → handshake → key derivation → encrypt → decrypt
@@ -185,7 +184,8 @@ defmodule ZtlpGateway.IntegrationTest do
       events = AuditLog.events()
       assert length(events) == 2
 
-      [term, est] = events  # newest first
+      # newest first
+      [term, est] = events
       assert est.event == :session_established
       assert est.service == "web"
       assert term.event == :session_terminated
@@ -207,8 +207,10 @@ defmodule ZtlpGateway.IntegrationTest do
     test "events limit" do
       for i <- 1..10 do
         AuditLog.session_established(
-          <<i::128>>, :crypto.strong_rand_bytes(32),
-          {{127, 0, 0, 1}, 1000 + i}, "web"
+          <<i::128>>,
+          :crypto.strong_rand_bytes(32),
+          {{127, 0, 0, 1}, 1000 + i},
+          "web"
         )
       end
 

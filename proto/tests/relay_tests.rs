@@ -318,7 +318,10 @@ async fn test_relay_forwarded_packets_decrypt_correctly() {
     assert_eq!(plaintext, b"secret message via relay");
 
     // Verify the packet came from the relay, not from A directly
-    assert_eq!(from_addr, relay_addr, "packet should come from relay address");
+    assert_eq!(
+        from_addr, relay_addr,
+        "packet should come from relay address"
+    );
 
     // Now test B → A direction
     node_b
@@ -331,5 +334,8 @@ async fn test_relay_forwarded_packets_decrypt_correctly() {
     let reply = node_a.recv_data().await.expect("recv reply");
     let (reply_text, reply_from) = reply.expect("should have reply");
     assert_eq!(reply_text, b"reply through relay");
-    assert_eq!(reply_from, relay_addr, "reply should come from relay address");
+    assert_eq!(
+        reply_from, relay_addr,
+        "reply should come from relay address"
+    );
 }

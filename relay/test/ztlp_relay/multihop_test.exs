@@ -130,7 +130,9 @@ defmodule ZtlpRelay.MultihopTest do
       node_id = :crypto.strong_rand_bytes(16)
       inner = "test"
 
-      encoded = InterRelay.encode_forward(node_id, inner, ttl: 3, path: [:crypto.strong_rand_bytes(16)])
+      encoded =
+        InterRelay.encode_forward(node_id, inner, ttl: 3, path: [:crypto.strong_rand_bytes(16)])
+
       assert {:ok, ^inner} = InterRelay.unwrap_forward(encoded)
     end
 
@@ -215,7 +217,9 @@ defmodule ZtlpRelay.MultihopTest do
       assert payload.ttl == 4
 
       # Simulate forwarding with TTL-1
-      re_encoded = InterRelay.encode_forward(node_id, inner, ttl: payload.ttl - 1, path: [node_id])
+      re_encoded =
+        InterRelay.encode_forward(node_id, inner, ttl: payload.ttl - 1, path: [node_id])
+
       {:ok, {:relay_forward, _, _, payload2}} = InterRelay.decode(re_encoded)
       assert payload2.ttl == 3
       assert payload2.path == [node_id]
@@ -237,11 +241,14 @@ defmodule ZtlpRelay.MultihopTest do
       inner_raw = Packet.serialize(inner_pkt)
 
       # Step 1: Ingress receives packet from client, wraps it with TTL=4 and sends to transit
-      forward_to_transit = InterRelay.encode_forward(
-        ingress.node_id, inner_raw,
-        ttl: 4,
-        path: [ingress.node_id]
-      )
+      forward_to_transit =
+        InterRelay.encode_forward(
+          ingress.node_id,
+          inner_raw,
+          ttl: 4,
+          path: [ingress.node_id]
+        )
+
       {t_ip, t_port} = transit.address
       :gen_udp.send(ingress.socket, t_ip, t_port, forward_to_transit)
 
@@ -258,11 +265,14 @@ defmodule ZtlpRelay.MultihopTest do
       new_ttl = payload_1.ttl - 1
       new_path = payload_1.path ++ [transit.node_id]
 
-      forward_to_service = InterRelay.encode_forward(
-        transit.node_id, payload_1.inner_packet,
-        ttl: new_ttl,
-        path: new_path
-      )
+      forward_to_service =
+        InterRelay.encode_forward(
+          transit.node_id,
+          payload_1.inner_packet,
+          ttl: new_ttl,
+          path: new_path
+        )
+
       {s_ip, s_port} = service.address
       :gen_udp.send(transit.socket, s_ip, s_port, forward_to_service)
 
@@ -295,8 +305,9 @@ defmodule ZtlpRelay.MultihopTest do
       inner_raw = Packet.serialize(Packet.build_data(session_id, 1, payload: "4-hop test"))
 
       # Hop 1: Ingress → Transit1
-      fwd_1 = InterRelay.encode_forward(ingress.node_id, inner_raw,
-        ttl: 4, path: [ingress.node_id])
+      fwd_1 =
+        InterRelay.encode_forward(ingress.node_id, inner_raw, ttl: 4, path: [ingress.node_id])
+
       :gen_udp.send(ingress.socket, elem(transit_1.address, 0), elem(transit_1.address, 1), fwd_1)
 
       assert {:ok, data_1} = receive_packet(transit_1.socket, 1_000)
@@ -304,9 +315,18 @@ defmodule ZtlpRelay.MultihopTest do
       assert p1.ttl == 4
 
       # Hop 2: Transit1 → Transit2
-      fwd_2 = InterRelay.encode_forward(transit_1.node_id, p1.inner_packet,
-        ttl: p1.ttl - 1, path: p1.path ++ [transit_1.node_id])
-      :gen_udp.send(transit_1.socket, elem(transit_2.address, 0), elem(transit_2.address, 1), fwd_2)
+      fwd_2 =
+        InterRelay.encode_forward(transit_1.node_id, p1.inner_packet,
+          ttl: p1.ttl - 1,
+          path: p1.path ++ [transit_1.node_id]
+        )
+
+      :gen_udp.send(
+        transit_1.socket,
+        elem(transit_2.address, 0),
+        elem(transit_2.address, 1),
+        fwd_2
+      )
 
       assert {:ok, data_2} = receive_packet(transit_2.socket, 1_000)
       {:ok, {:relay_forward, _, _, p2}} = InterRelay.decode(data_2)
@@ -314,8 +334,12 @@ defmodule ZtlpRelay.MultihopTest do
       assert length(p2.path) == 2
 
       # Hop 3: Transit2 → Service
-      fwd_3 = InterRelay.encode_forward(transit_2.node_id, p2.inner_packet,
-        ttl: p2.ttl - 1, path: p2.path ++ [transit_2.node_id])
+      fwd_3 =
+        InterRelay.encode_forward(transit_2.node_id, p2.inner_packet,
+          ttl: p2.ttl - 1,
+          path: p2.path ++ [transit_2.node_id]
+        )
+
       :gen_udp.send(transit_2.socket, elem(service.address, 0), elem(service.address, 1), fwd_3)
 
       assert {:ok, data_3} = receive_packet(service.socket, 1_000)
@@ -362,8 +386,12 @@ defmodule ZtlpRelay.MultihopTest do
       inner_raw = Packet.serialize(Packet.build_data(session_id, 1, payload: "loop"))
 
       # Path already contains relay_b's node_id
-      fwd = InterRelay.encode_forward(relay_a.node_id, inner_raw,
-        ttl: 3, path: [relay_a.node_id, relay_b.node_id])
+      fwd =
+        InterRelay.encode_forward(relay_a.node_id, inner_raw,
+          ttl: 3,
+          path: [relay_a.node_id, relay_b.node_id]
+        )
+
       :gen_udp.send(relay_a.socket, elem(relay_b.address, 0), elem(relay_b.address, 1), fwd)
 
       assert {:ok, data} = receive_packet(relay_b.socket, 1_000)
@@ -407,14 +435,18 @@ defmodule ZtlpRelay.MultihopTest do
     setup do
       table_name = :"ztlp_fwd_cache_test_#{:erlang.unique_integer([:positive])}"
       name = :"fwd_cache_test_#{:erlang.unique_integer([:positive])}"
-      {:ok, pid} = ForwardingTable.start_link(
-        name: name,
-        table_name: table_name,
-        sweep_interval_ms: 600_000
-      )
+
+      {:ok, pid} =
+        ForwardingTable.start_link(
+          name: name,
+          table_name: table_name,
+          sweep_interval_ms: 600_000
+        )
+
       on_exit(fn ->
         if Process.alive?(pid), do: GenServer.stop(pid)
       end)
+
       %{table: table_name}
     end
 
@@ -450,9 +482,24 @@ defmodule ZtlpRelay.MultihopTest do
 
   describe "role-based routing" do
     test "ingress → transit → service path planning" do
-      ingress = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 1}, 9001}, role: :ingress}
-      transit = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 2}, 9002}, role: :transit}
-      service = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 3}, 9003}, role: :service}
+      ingress = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 1}, 9001},
+        role: :ingress
+      }
+
+      transit = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 2}, 9002},
+        role: :transit
+      }
+
+      service = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 3}, 9003},
+        role: :service
+      }
+
       registry = [ingress, transit, service]
 
       {:ok, path} = RoutePlanner.plan(ingress.node_id, service.node_id, registry)
@@ -464,8 +511,18 @@ defmodule ZtlpRelay.MultihopTest do
     end
 
     test "transit → service is direct" do
-      transit = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 2}, 9002}, role: :transit}
-      service = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 3}, 9003}, role: :service}
+      transit = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 2}, 9002},
+        role: :transit
+      }
+
+      service = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 3}, 9003},
+        role: :service
+      }
+
       registry = [transit, service]
 
       {:ok, path} = RoutePlanner.plan(transit.node_id, service.node_id, registry)
@@ -474,9 +531,24 @@ defmodule ZtlpRelay.MultihopTest do
     end
 
     test "service → ingress goes through transit" do
-      ingress = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 1}, 9001}, role: :ingress}
-      transit = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 2}, 9002}, role: :transit}
-      service = %{node_id: :crypto.strong_rand_bytes(16), address: {{10, 0, 0, 3}, 9003}, role: :service}
+      ingress = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 1}, 9001},
+        role: :ingress
+      }
+
+      transit = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 2}, 9002},
+        role: :transit
+      }
+
+      service = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{10, 0, 0, 3}, 9003},
+        role: :service
+      }
+
       registry = [ingress, transit, service]
 
       {:ok, path} = RoutePlanner.plan(service.node_id, ingress.node_id, registry)

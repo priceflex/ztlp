@@ -79,10 +79,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match timeout(Duration::from_secs(2), sock_b.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
                 if buf[..len] == pkt[..] {
-                    eprintln!("[interop]   ✓ B received exact packet from {} ({} bytes)", from, len);
+                    eprintln!(
+                        "[interop]   ✓ B received exact packet from {} ({} bytes)",
+                        from, len
+                    );
                     passed += 1;
                 } else {
-                    eprintln!("[interop]   ✗ B received different data ({} bytes, expected {})", len, pkt.len());
+                    eprintln!(
+                        "[interop]   ✗ B received different data ({} bytes, expected {})",
+                        len,
+                        pkt.len()
+                    );
                     failed += 1;
                 }
             }
@@ -111,10 +118,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match timeout(Duration::from_secs(2), sock_a.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
                 if buf[..len] == pkt[..] {
-                    eprintln!("[interop]   ✓ A received exact packet from {} ({} bytes)", from, len);
+                    eprintln!(
+                        "[interop]   ✓ A received exact packet from {} ({} bytes)",
+                        from, len
+                    );
                     passed += 1;
                 } else {
-                    eprintln!("[interop]   ✗ A received different data ({} bytes, expected {})", len, pkt.len());
+                    eprintln!(
+                        "[interop]   ✗ A received different data ({} bytes, expected {})",
+                        len,
+                        pkt.len()
+                    );
                     failed += 1;
                 }
             }
@@ -148,10 +162,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match timeout(Duration::from_secs(2), sock_b.recv_from(&mut buf)).await {
             Ok(Ok((len, from))) => {
                 if buf[..len] == pkt[..] {
-                    eprintln!("[interop]   ✓ B received handshake-format packet from {} ({} bytes)", from, len);
+                    eprintln!(
+                        "[interop]   ✓ B received handshake-format packet from {} ({} bytes)",
+                        from, len
+                    );
                     passed += 1;
                 } else {
-                    eprintln!("[interop]   ✗ B received different data ({} bytes, expected {})", len, pkt.len());
+                    eprintln!(
+                        "[interop]   ✗ B received different data ({} bytes, expected {})",
+                        len,
+                        pkt.len()
+                    );
                     failed += 1;
                 }
             }
@@ -207,7 +228,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = vec![0u8; 2048];
         match timeout(Duration::from_millis(300), sock_b.recv_from(&mut buf)).await {
             Ok(Ok((len, _))) => {
-                eprintln!("[interop]   ✗ B received packet with wrong SessionID ({} bytes)", len);
+                eprintln!(
+                    "[interop]   ✗ B received packet with wrong SessionID ({} bytes)",
+                    len
+                );
                 failed += 1;
             }
             _ => {

@@ -25,7 +25,8 @@ defmodule ZtlpRelay.TransitTest do
 
       pkt = Packet.build_data(session_id, 1)
 
-      assert {:accept, :existing_session} = Transit.accept_packet?(pkt, peer_a, secret_key: @secret)
+      assert {:accept, :existing_session} =
+               Transit.accept_packet?(pkt, peer_a, secret_key: @secret)
 
       SessionRegistry.unregister_session(session_id)
     end
@@ -39,7 +40,8 @@ defmodule ZtlpRelay.TransitTest do
 
       pkt = Packet.build_handshake(:rekey, session_id)
 
-      assert {:accept, :existing_session} = Transit.accept_packet?(pkt, peer_a, secret_key: @secret)
+      assert {:accept, :existing_session} =
+               Transit.accept_packet?(pkt, peer_a, secret_key: @secret)
 
       SessionRegistry.unregister_session(session_id)
     end
@@ -51,20 +53,22 @@ defmodule ZtlpRelay.TransitTest do
       node_id = :crypto.strong_rand_bytes(16)
       sender = {{127, 0, 0, 1}, 5001}
 
-      rat = AdmissionToken.issue(node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      rat =
+        AdmissionToken.issue(node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert byte_size(rat) == 93
 
       {ext_len, ext_payload} = build_ext_payload(rat)
 
-      pkt = Packet.build_handshake(:hello, session_id,
-        src_node_id: node_id,
-        ext_len: ext_len,
-        payload: ext_payload
-      )
+      pkt =
+        Packet.build_handshake(:hello, session_id,
+          src_node_id: node_id,
+          ext_len: ext_len,
+          payload: ext_payload
+        )
 
       result = Transit.accept_packet?(pkt, sender, secret_key: @secret)
       assert {:accept, :new_session, ^rat} = result
@@ -81,18 +85,20 @@ defmodule ZtlpRelay.TransitTest do
 
       wrong_key = AdmissionToken.generate_secret()
 
-      rat = AdmissionToken.issue(node_id, session_id,
-        secret_key: wrong_key,
-        issuer_id: @issuer_id
-      )
+      rat =
+        AdmissionToken.issue(node_id, session_id,
+          secret_key: wrong_key,
+          issuer_id: @issuer_id
+        )
 
       {ext_len, ext_payload} = build_ext_payload(rat)
 
-      pkt = Packet.build_handshake(:hello, session_id,
-        src_node_id: node_id,
-        ext_len: ext_len,
-        payload: ext_payload
-      )
+      pkt =
+        Packet.build_handshake(:hello, session_id,
+          src_node_id: node_id,
+          ext_len: ext_len,
+          payload: ext_payload
+        )
 
       assert :drop = Transit.accept_packet?(pkt, sender, secret_key: @secret)
     end
@@ -102,21 +108,23 @@ defmodule ZtlpRelay.TransitTest do
       node_id = :crypto.strong_rand_bytes(16)
       sender = {{127, 0, 0, 1}, 5001}
 
-      rat = AdmissionToken.issue(node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: 0
-      )
+      rat =
+        AdmissionToken.issue(node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: 0
+        )
 
       Process.sleep(10)
 
       {ext_len, ext_payload} = build_ext_payload(rat)
 
-      pkt = Packet.build_handshake(:hello, session_id,
-        src_node_id: node_id,
-        ext_len: ext_len,
-        payload: ext_payload
-      )
+      pkt =
+        Packet.build_handshake(:hello, session_id,
+          src_node_id: node_id,
+          ext_len: ext_len,
+          payload: ext_payload
+        )
 
       assert :drop = Transit.accept_packet?(pkt, sender, secret_key: @secret)
     end
@@ -148,10 +156,11 @@ defmodule ZtlpRelay.TransitTest do
 
       {ext_len, ext_payload} = build_ext_payload(rat_data)
 
-      pkt = Packet.build_handshake(:hello, :crypto.strong_rand_bytes(12),
-        ext_len: ext_len,
-        payload: ext_payload
-      )
+      pkt =
+        Packet.build_handshake(:hello, :crypto.strong_rand_bytes(12),
+          ext_len: ext_len,
+          payload: ext_payload
+        )
 
       assert {:ok, extracted} = Transit.extract_rat(pkt)
       assert extracted == rat_data
@@ -168,10 +177,11 @@ defmodule ZtlpRelay.TransitTest do
     end
 
     test "returns :no_rat when ext area is too small for RAT" do
-      pkt = Packet.build_handshake(:hello, :crypto.strong_rand_bytes(12),
-        ext_len: 5,
-        payload: :crypto.strong_rand_bytes(20)
-      )
+      pkt =
+        Packet.build_handshake(:hello, :crypto.strong_rand_bytes(12),
+          ext_len: 5,
+          payload: :crypto.strong_rand_bytes(20)
+        )
 
       assert :no_rat = Transit.extract_rat(pkt)
     end
@@ -186,23 +196,26 @@ defmodule ZtlpRelay.TransitTest do
       current_key = AdmissionToken.generate_secret()
       previous_key = AdmissionToken.generate_secret()
 
-      rat = AdmissionToken.issue(node_id, session_id,
-        secret_key: previous_key,
-        issuer_id: @issuer_id
-      )
+      rat =
+        AdmissionToken.issue(node_id, session_id,
+          secret_key: previous_key,
+          issuer_id: @issuer_id
+        )
 
       {ext_len, ext_payload} = build_ext_payload(rat)
 
-      pkt = Packet.build_handshake(:hello, session_id,
-        src_node_id: node_id,
-        ext_len: ext_len,
-        payload: ext_payload
-      )
+      pkt =
+        Packet.build_handshake(:hello, session_id,
+          src_node_id: node_id,
+          ext_len: ext_len,
+          payload: ext_payload
+        )
 
-      result = Transit.accept_packet?(pkt, sender,
-        secret_key: current_key,
-        secret_key_previous: previous_key
-      )
+      result =
+        Transit.accept_packet?(pkt, sender,
+          secret_key: current_key,
+          secret_key_previous: previous_key
+        )
 
       assert {:accept, :new_session, ^rat} = result
 

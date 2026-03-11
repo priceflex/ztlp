@@ -61,8 +61,13 @@ defmodule ZtlpGateway.NsIntegrationTest do
       {x25519_pub, _x25519_priv} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
 
-      key_record = Record.new_key("node1.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+      key_record =
+        Record.new_key("node1.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
@@ -104,8 +109,14 @@ defmodule ZtlpGateway.NsIntegrationTest do
       # Create and store a signed record
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("untrusted-node.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("untrusted-node.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(untrusted, key_record)
       :ok = Store.insert(signed)
 
@@ -121,14 +132,25 @@ defmodule ZtlpGateway.NsIntegrationTest do
       # Create and store a key record
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("revoked-node.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("revoked-node.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
       # Revoke the node
-      revoke = Record.new_revoke("revocations.ztlp", [], "compromised", "2026-03-10",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("revocations.ztlp", [], "compromised", "2026-03-10",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["revoked-node.ztlp"])}
       {:ok, signed_revoke} = ZoneAuthority.sign_record(root, revoke)
       :ok = Store.insert(signed_revoke)
@@ -149,14 +171,25 @@ defmodule ZtlpGateway.NsIntegrationTest do
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("revoked2.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("revoked2.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
       # Revoke
-      revoke = Record.new_revoke("rev2.ztlp", [], "test", "2026-03-10",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("rev2.ztlp", [], "test", "2026-03-10",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["revoked2.ztlp"])}
       {:ok, signed_revoke} = ZoneAuthority.sign_record(root, revoke)
       :ok = Store.insert(signed_revoke)
@@ -171,8 +204,14 @@ defmodule ZtlpGateway.NsIntegrationTest do
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("cached-node.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("cached-node.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
@@ -197,8 +236,13 @@ defmodule ZtlpGateway.NsIntegrationTest do
       node_id = :crypto.strong_rand_bytes(16)
 
       # Use a very short TTL (1 second)
-      key_record = Record.new_key("ttl-node.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 1, serial: 1)
+      key_record =
+        Record.new_key("ttl-node.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 1,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
@@ -260,8 +304,14 @@ defmodule ZtlpGateway.NsIntegrationTest do
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("permissive.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("permissive.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
@@ -277,8 +327,14 @@ defmodule ZtlpGateway.NsIntegrationTest do
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("proto-test.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("proto-test.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
@@ -302,7 +358,8 @@ defmodule ZtlpGateway.NsIntegrationTest do
     test "raw UDP 0x05 query returns not-found for unknown key" do
       ns_port = Server.port()
       {:ok, sock} = :gen_udp.open(0, [:binary, {:active, false}])
-      pk_hex = String.duplicate("ab", 32)  # 64-char fake hex
+      # 64-char fake hex
+      pk_hex = String.duplicate("ab", 32)
       pk_len = byte_size(pk_hex)
       query = <<0x05, pk_len::16, pk_hex::binary>>
       :gen_udp.send(sock, {127, 0, 0, 1}, ns_port, query)
@@ -318,14 +375,25 @@ defmodule ZtlpGateway.NsIntegrationTest do
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
       node_id = :crypto.strong_rand_bytes(16)
-      key_record = Record.new_key("rev-proto.ztlp", node_id, x25519_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      key_record =
+        Record.new_key("rev-proto.ztlp", node_id, x25519_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
       # Revoke
-      revoke = Record.new_revoke("rev-proto-r.ztlp", [], "test", "2026-03-10",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("rev-proto-r.ztlp", [], "test", "2026-03-10",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["rev-proto.ztlp"])}
       {:ok, signed_revoke} = ZoneAuthority.sign_record(root, revoke)
       :ok = Store.insert(signed_revoke)

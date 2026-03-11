@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 
 use crate::admission::RelayAdmissionToken;
 use crate::nat::{
-    decode_rv_message, encode_rv_peer_info, is_rendezvous_packet,
-    RendezvousEntry, RendezvousMessage,
+    decode_rv_message, encode_rv_peer_info, is_rendezvous_packet, RendezvousEntry,
+    RendezvousMessage,
 };
 use crate::packet::{SessionId, MAGIC};
 use crate::transport::MAX_PACKET_SIZE;
@@ -164,7 +164,10 @@ impl SimulatedRelay {
         let session_id = match Self::extract_session_id(data) {
             Some(sid) => sid,
             None => {
-                warn!("relay: could not extract SessionID from packet from {}", from);
+                warn!(
+                    "relay: could not extract SessionID from packet from {}",
+                    from
+                );
                 return Ok(false);
             }
         };
@@ -174,10 +177,7 @@ impl SimulatedRelay {
         match peers.get(&session_id).cloned() {
             None => {
                 // First packet on this SessionID — store sender as pending.
-                debug!(
-                    "relay: new session {} — first peer is {}",
-                    session_id, from
-                );
+                debug!("relay: new session {} — first peer is {}", session_id, from);
                 peers.insert(session_id, PeerState::Pending { first_addr: from });
                 Ok(false)
             }
@@ -218,12 +218,7 @@ impl SimulatedRelay {
                 // Forward to the other peer.
                 let dest = if from == addr_a { addr_b } else { addr_a };
                 self.socket.send_to(data, dest).await?;
-                debug!(
-                    "relay: forwarded {} bytes {} -> {}",
-                    data.len(),
-                    from,
-                    dest
-                );
+                debug!("relay: forwarded {} bytes {} -> {}", data.len(), from, dest);
                 Ok(true)
             }
         }
@@ -234,7 +229,11 @@ impl SimulatedRelay {
     /// When the first peer registers, we store their info. When the second
     /// peer registers with the same rendezvous ID, we send each peer the
     /// other's mapped endpoint information.
-    async fn process_rendezvous(&self, data: &[u8], from: SocketAddr) -> Result<bool, std::io::Error> {
+    async fn process_rendezvous(
+        &self,
+        data: &[u8],
+        from: SocketAddr,
+    ) -> Result<bool, std::io::Error> {
         let msg = match decode_rv_message(data) {
             Ok(m) => m,
             Err(e) => {
@@ -274,13 +273,11 @@ impl SimulatedRelay {
                     );
 
                     // Send first peer the second peer's info
-                    let info_for_first =
-                        encode_rv_peer_info(&rendezvous_id, mapped_addr);
+                    let info_for_first = encode_rv_peer_info(&rendezvous_id, mapped_addr);
                     self.socket.send_to(&info_for_first, existing.addr).await?;
 
                     // Send second peer the first peer's info
-                    let info_for_second =
-                        encode_rv_peer_info(&rendezvous_id, existing.mapped_addr);
+                    let info_for_second = encode_rv_peer_info(&rendezvous_id, existing.mapped_addr);
                     self.socket.send_to(&info_for_second, from).await?;
 
                     info!(
@@ -308,7 +305,10 @@ impl SimulatedRelay {
                 }
             }
             _ => {
-                debug!("relay: ignoring non-register rendezvous message from {}", from);
+                debug!(
+                    "relay: ignoring non-register rendezvous message from {}",
+                    from
+                );
                 Ok(false)
             }
         }

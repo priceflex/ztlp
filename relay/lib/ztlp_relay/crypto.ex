@@ -34,15 +34,17 @@ defmodule ZtlpRelay.Crypto do
 
     # Encrypt empty plaintext with header as AAD
     # Returns {ciphertext, tag} where ciphertext is empty
-    {_ciphertext, tag} = :crypto.crypto_one_time_aead(
-      @chacha_cipher,
-      key,
-      nonce,
-      _plaintext = <<>>,
-      aad,
-      _tag_length = 16,
-      true  # encrypt
-    )
+    {_ciphertext, tag} =
+      :crypto.crypto_one_time_aead(
+        @chacha_cipher,
+        key,
+        nonce,
+        _plaintext = <<>>,
+        aad,
+        _tag_length = 16,
+        # encrypt
+        true
+      )
 
     tag
   end
@@ -68,14 +70,15 @@ defmodule ZtlpRelay.Crypto do
     # Decrypt empty ciphertext with the tag to verify
     # If tag is invalid, :crypto.crypto_one_time_aead/7 returns :error
     case :crypto.crypto_one_time_aead(
-      @chacha_cipher,
-      key,
-      nonce,
-      _ciphertext = <<>>,
-      aad,
-      tag,
-      false  # decrypt/verify
-    ) do
+           @chacha_cipher,
+           key,
+           nonce,
+           _ciphertext = <<>>,
+           aad,
+           tag,
+           # decrypt/verify
+           false
+         ) do
       :error -> false
       _plaintext -> true
     end

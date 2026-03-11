@@ -75,8 +75,7 @@ defmodule ZtlpGateway.SessionRegistry do
 
   @impl true
   def init(_opts) do
-    :ets.new(@table, [:named_table, :set, :public,
-                       read_concurrency: true])
+    :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
     {:ok, %{monitors: %{}}}
   end
 

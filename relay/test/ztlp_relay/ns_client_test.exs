@@ -18,16 +18,22 @@ defmodule ZtlpRelay.NsClientTest do
     receive do
       {:udp, ^socket, ip, port, data} ->
         send(parent, {:mock_ns_received, data})
-        response = case data do
-          <<0x01, _name_len::16, _name::binary-size(_name_len), _type::8>> ->
-            handle_mock_query(opts)
-          <<0x02, _rest::binary>> ->
-            handle_mock_registration(opts)
-          _ ->
-            <<0xFF>>
-        end
+
+        response =
+          case data do
+            <<0x01, _name_len::16, _name::binary-size(_name_len), _type::8>> ->
+              handle_mock_query(opts)
+
+            <<0x02, _rest::binary>> ->
+              handle_mock_registration(opts)
+
+            _ ->
+              <<0xFF>>
+          end
+
         :gen_udp.send(socket, ip, port, response)
         mock_ns_loop(socket, parent, opts)
+
       :stop ->
         :gen_udp.close(socket)
     end
@@ -52,27 +58,34 @@ defmodule ZtlpRelay.NsClientTest do
   defp build_mock_relay_record do
     node_id = :crypto.strong_rand_bytes(16)
     name = "test.relay.ztlp"
+
     data = %{
       node_id: Base.encode16(node_id, case: :lower),
       endpoints: ["127.0.0.1:9999"],
       capacity: 100,
       region: "test"
     }
+
     type_byte = 3
     data_bin = :erlang.term_to_binary(data, [:deterministic])
     created_at = System.system_time(:second)
     ttl = 3600
     serial = 1
     {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
-    signable = <<type_byte::8, byte_size(name)::16, name::binary,
-                 byte_size(data_bin)::32, data_bin::binary,
-                 created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64>>
+
+    signable =
+      <<type_byte::8, byte_size(name)::16, name::binary, byte_size(data_bin)::32,
+        data_bin::binary, created_at::unsigned-big-64, ttl::unsigned-big-32,
+        serial::unsigned-big-64>>
+
     sig = :crypto.sign(:eddsa, :none, signable, [priv, :ed25519])
-    record_wire = <<type_byte::8, byte_size(name)::16, name::binary,
-                    byte_size(data_bin)::32, data_bin::binary,
-                    created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64,
-                    byte_size(sig)::16, sig::binary,
-                    byte_size(pub)::16, pub::binary>>
+
+    record_wire =
+      <<type_byte::8, byte_size(name)::16, name::binary, byte_size(data_bin)::32,
+        data_bin::binary, created_at::unsigned-big-64, ttl::unsigned-big-32,
+        serial::unsigned-big-64, byte_size(sig)::16, sig::binary, byte_size(pub)::16,
+        pub::binary>>
+
     <<0x02>> <> record_wire
   end
 
@@ -80,6 +93,7 @@ defmodule ZtlpRelay.NsClientTest do
     if :ets.whereis(:ztlp_relay_ns_cache) != :undefined do
       :ets.delete_all_objects(:ztlp_relay_ns_cache)
     end
+
     :ok
   end
 
@@ -115,12 +129,14 @@ defmodule ZtlpRelay.NsClientTest do
     test "registers successfully" do
       {_pid, port, _socket} = start_mock_ns_server()
       {:ok, _} = NsClient.start_link(ns_server: {{127, 0, 0, 1}, port})
+
       our_info = %{
         node_id: :crypto.strong_rand_bytes(16),
         endpoints: ["127.0.0.1:5555"],
         capacity: 50,
         region: "test"
       }
+
       assert :ok = NsClient.register_self("relay.ztlp", our_info)
       assert_receive {:mock_ns_received, <<0x02, _rest::binary>>}
       GenServer.stop(NsClient)
@@ -129,12 +145,14 @@ defmodule ZtlpRelay.NsClientTest do
     test "returns error on rejection" do
       {_pid, port, _socket} = start_mock_ns_server(register_response: :reject)
       {:ok, _} = NsClient.start_link(ns_server: {{127, 0, 0, 1}, port})
+
       our_info = %{
         node_id: :crypto.strong_rand_bytes(16),
         endpoints: ["127.0.0.1:5555"],
         capacity: 50,
         region: "test"
       }
+
       assert {:error, _reason} = NsClient.register_self("relay.ztlp", our_info)
       GenServer.stop(NsClient)
     end

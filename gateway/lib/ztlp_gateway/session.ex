@@ -31,8 +31,17 @@ defmodule ZtlpGateway.Session do
 
   require Logger
 
-  alias ZtlpGateway.{Crypto, Handshake, Packet, SessionRegistry,
-                      Backend, PolicyEngine, Identity, AuditLog, Stats}
+  alias ZtlpGateway.{
+    Crypto,
+    Handshake,
+    Packet,
+    SessionRegistry,
+    Backend,
+    PolicyEngine,
+    Identity,
+    AuditLog,
+    Stats
+  }
 
   # ---------------------------------------------------------------------------
   # Types
@@ -101,8 +110,10 @@ defmodule ZtlpGateway.Session do
       handshake: hs,
       phase: :awaiting_msg1,
       # Transport keys (set after handshake)
-      i2r_key: nil,     # client→gateway decrypt key
-      r2i_key: nil,     # gateway→client encrypt key
+      # client→gateway decrypt key
+      i2r_key: nil,
+      # gateway→client encrypt key
+      r2i_key: nil,
       # Sequence numbers for replay protection
       recv_seq: 0,
       send_seq: 0,
@@ -183,8 +194,13 @@ defmodule ZtlpGateway.Session do
     end
 
     duration = System.monotonic_time(:millisecond) - state.started_at
+
     AuditLog.session_terminated(
-      state.session_id, :normal, duration, state.bytes_in, state.bytes_out
+      state.session_id,
+      :normal,
+      duration,
+      state.bytes_in,
+      state.bytes_out
     )
 
     :ok
@@ -200,7 +216,7 @@ defmodule ZtlpGateway.Session do
       {:ok, %{type: :handshake, payload: payload}} ->
         case Handshake.handle_msg1(state.handshake, payload) do
           {:error, reason} ->
-            Logger.warn("[Session] Handshake msg1 failed: #{inspect(reason)}")
+            Logger.warning("[Session] Handshake msg1 failed: #{inspect(reason)}")
             Stats.handshake_fail()
             {:stop, :normal, state}
 
@@ -229,7 +245,7 @@ defmodule ZtlpGateway.Session do
       {:ok, %{type: :handshake, payload: payload}} ->
         case Handshake.handle_msg3(state.handshake, payload) do
           {:error, reason} ->
-            Logger.warn("[Session] Handshake msg3 failed: #{inspect(reason)}")
+            Logger.warning("[Session] Handshake msg3 failed: #{inspect(reason)}")
             Stats.handshake_fail()
             {:stop, :normal, state}
 
@@ -251,27 +267,32 @@ defmodule ZtlpGateway.Session do
                   case Backend.start_link({host, port, self()}) do
                     {:ok, backend_pid} ->
                       Stats.handshake_ok()
+
                       AuditLog.session_established(
-                        state.session_id, remote_static,
-                        state.client_addr, state.service
+                        state.session_id,
+                        remote_static,
+                        state.client_addr,
+                        state.service
                       )
 
-                      {:noreply, %{state |
-                        handshake: hs,
-                        phase: :established,
-                        i2r_key: keys.i2r_key,
-                        r2i_key: keys.r2i_key,
-                        backend_pid: backend_pid
-                      }}
+                      {:noreply,
+                       %{
+                         state
+                         | handshake: hs,
+                           phase: :established,
+                           i2r_key: keys.i2r_key,
+                           r2i_key: keys.r2i_key,
+                           backend_pid: backend_pid
+                       }}
 
                     {:error, reason} ->
-                      Logger.warn("[Session] Backend connect failed: #{inspect(reason)}")
+                      Logger.warning("[Session] Backend connect failed: #{inspect(reason)}")
                       Stats.backend_error()
                       {:stop, :normal, state}
                   end
 
                 :error ->
-                  Logger.warn("[Session] No backend configured for service: #{state.service}")
+                  Logger.warning("[Session] No backend configured for service: #{state.service}")
                   Stats.backend_error()
                   {:stop, :normal, state}
               end
@@ -279,9 +300,14 @@ defmodule ZtlpGateway.Session do
               # Policy denied
               Logger.info("[Session] Policy denied: #{identity} → #{state.service}")
               Stats.policy_denied()
+
               AuditLog.policy_denied(
-                remote_static, state.client_addr, state.service, :not_authorized
+                remote_static,
+                state.client_addr,
+                state.service,
+                :not_authorized
               )
+
               {:stop, :normal, state}
             end
         end
@@ -312,7 +338,7 @@ defmodule ZtlpGateway.Session do
 
             case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
               :error ->
-                Logger.warn("[Session] Decrypt failed for seq #{seq}")
+                Logger.warning("[Session] Decrypt failed for seq #{seq}")
                 {:noreply, state}
 
               plaintext ->
@@ -321,9 +347,10 @@ defmodule ZtlpGateway.Session do
                   Backend.send_data(state.backend_pid, plaintext)
                 end
 
-                new_state = %{state |
-                  recv_seq: seq,
-                  bytes_in: state.bytes_in + byte_size(packet_data)
+                new_state = %{
+                  state
+                  | recv_seq: seq,
+                    bytes_in: state.bytes_in + byte_size(packet_data)
                 }
 
                 {:noreply, new_state}
@@ -389,9 +416,15 @@ defmodule ZtlpGateway.Session do
 
   defp terminate_session(state, reason) do
     duration = System.monotonic_time(:millisecond) - state.started_at
+
     AuditLog.session_terminated(
-      state.session_id, reason, duration, state.bytes_in, state.bytes_out
+      state.session_id,
+      reason,
+      duration,
+      state.bytes_in,
+      state.bytes_out
     )
+
     {:stop, :normal, state}
   end
 end

@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 /// The policy engine — holds rules for all services.
 #[derive(Debug, Clone)]
@@ -136,9 +136,14 @@ impl PolicyEngine {
             default_allow,
         };
 
-        info!("loaded {} policy rules (default: {})",
+        info!(
+            "loaded {} policy rules (default: {})",
             engine.rules.len(),
-            if engine.default_allow { "allow" } else { "deny" }
+            if engine.default_allow {
+                "allow"
+            } else {
+                "deny"
+            }
         );
 
         Ok(engine)
@@ -155,7 +160,10 @@ impl PolicyEngine {
                 if allowed {
                     debug!("policy ALLOW: {} → {}", identity, service);
                 } else {
-                    warn!("policy DENY: {} → {} (not in allow list)", identity, service);
+                    warn!(
+                        "policy DENY: {} → {} (not in allow list)",
+                        identity, service
+                    );
                 }
                 allowed
             }
@@ -213,8 +221,7 @@ fn matches_pattern(identity: &str, pattern: &str) -> bool {
         return true;
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        return identity.ends_with(&format!(".{}", suffix))
-            || identity == suffix;
+        return identity.ends_with(&format!(".{}", suffix)) || identity == suffix;
     }
     identity == pattern
 }
@@ -238,7 +245,8 @@ fn extract_string_array(line: &str) -> Option<Vec<String>> {
         return None;
     }
     let inner = &val[1..val.len() - 1];
-    let items: Vec<String> = inner.split(',')
+    let items: Vec<String> = inner
+        .split(',')
         .map(|s| s.trim().trim_matches('"').to_string())
         .filter(|s| !s.is_empty())
         .collect();
@@ -378,8 +386,14 @@ allow = ["a1b2c3d4e5f6"]
 
     #[test]
     fn test_extract_string_value() {
-        assert_eq!(extract_string_value(r#"name = "ssh""#), Some("ssh".to_string()));
-        assert_eq!(extract_string_value(r#"default = "deny""#), Some("deny".to_string()));
+        assert_eq!(
+            extract_string_value(r#"name = "ssh""#),
+            Some("ssh".to_string())
+        );
+        assert_eq!(
+            extract_string_value(r#"default = "deny""#),
+            Some("deny".to_string())
+        );
     }
 
     #[test]

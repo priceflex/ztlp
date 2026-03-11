@@ -74,6 +74,7 @@ defmodule ZtlpGateway.Stats do
   @spec snapshot() :: map()
   def snapshot do
     ref = get_ref()
+
     %{
       active_sessions: :counters.get(ref, @active_sessions),
       bytes_in: :counters.get(ref, @bytes_in),

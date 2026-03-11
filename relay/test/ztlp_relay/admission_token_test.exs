@@ -22,11 +22,12 @@ defmodule ZtlpRelay.AdmissionTokenTest do
 
   describe "issue/3 and verify/3 round-trip" do
     test "issue and verify succeeds for unscoped token" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: 300
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: 300
+        )
 
       assert byte_size(token) == 93
 
@@ -42,10 +43,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     test "issue and verify succeeds for session-scoped token" do
       session_id = :crypto.strong_rand_bytes(12)
 
-      token = AdmissionToken.issue(@node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert {:ok, fields} = AdmissionToken.verify(token, @secret)
       assert fields.session_scope == session_id
@@ -54,10 +56,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     test "verify with session_scope check succeeds for matching scope" do
       session_id = :crypto.strong_rand_bytes(12)
 
-      token = AdmissionToken.issue(@node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert {:ok, _fields} = AdmissionToken.verify(token, @secret, session_scope: session_id)
     end
@@ -65,10 +68,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     test "verify with session_scope check succeeds for unscoped token (any session)" do
       session_id = :crypto.strong_rand_bytes(12)
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       # Unscoped token (all-zeros) should pass any session scope check
       assert {:ok, _fields} = AdmissionToken.verify(token, @secret, session_scope: session_id)
@@ -78,24 +82,26 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       session_id = :crypto.strong_rand_bytes(12)
       other_session = :crypto.strong_rand_bytes(12)
 
-      token = AdmissionToken.issue(@node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert {:error, :session_scope_mismatch} =
-        AdmissionToken.verify(token, @secret, session_scope: other_session)
+               AdmissionToken.verify(token, @secret, session_scope: other_session)
     end
   end
 
   describe "expired token rejection" do
     test "rejects expired token" do
       # Issue with 0 TTL (already expired)
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: 0
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: 0
+        )
 
       # Wait a moment to ensure the timestamp crosses the boundary
       Process.sleep(10)
@@ -104,11 +110,12 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "expired?/1 returns true for expired token" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: 0
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: 0
+        )
 
       Process.sleep(10)
 
@@ -116,11 +123,12 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "expired?/1 returns false for valid token" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: 300
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: 300
+        )
 
       assert AdmissionToken.expired?(token) == false
     end
@@ -133,10 +141,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
 
   describe "tampered token rejection" do
     test "rejects token with tampered version byte" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<_version::8, rest::binary>> = token
       tampered = <<0x02::8, rest::binary>>
@@ -145,10 +154,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "rejects token with tampered NodeID" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<version::8, node_id::binary-size(16), rest::binary>> = token
       flipped = :crypto.exor(node_id, <<1, 0::120>>)
@@ -158,10 +168,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "rejects token with tampered IssuerID" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<version::8, node_id::binary-size(16), issuer::binary-size(16), rest::binary>> = token
       flipped = :crypto.exor(issuer, <<1, 0::120>>)
@@ -171,25 +182,27 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "rejects token with tampered IssuedAt" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<pre::binary-size(33), issued_at::big-unsigned-64, rest::binary>> = token
-      tampered = <<pre::binary, (issued_at + 1)::big-unsigned-64, rest::binary>>
+      tampered = <<pre::binary, issued_at + 1::big-unsigned-64, rest::binary>>
 
       assert {:error, :invalid_mac} = AdmissionToken.verify(tampered, @secret)
     end
 
     test "rejects token with tampered ExpiresAt" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<pre::binary-size(41), expires_at::big-unsigned-64, rest::binary>> = token
-      tampered = <<pre::binary, (expires_at + 3600)::big-unsigned-64, rest::binary>>
+      tampered = <<pre::binary, expires_at + 3600::big-unsigned-64, rest::binary>>
 
       assert {:error, :invalid_mac} = AdmissionToken.verify(tampered, @secret)
     end
@@ -197,10 +210,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     test "rejects token with tampered SessionScope" do
       session_id = :crypto.strong_rand_bytes(12)
 
-      token = AdmissionToken.issue(@node_id, session_id,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, session_id,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<pre::binary-size(49), scope::binary-size(12), mac::binary-size(32)>> = token
       flipped = :crypto.exor(scope, <<1, 0::88>>)
@@ -210,10 +224,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "rejects token with tampered MAC" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       <<data::binary-size(61), mac::binary-size(32)>> = token
       flipped = :crypto.exor(mac, <<1, 0::248>>)
@@ -228,10 +243,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       secret_a = AdmissionToken.generate_secret()
       secret_b = AdmissionToken.generate_secret()
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: secret_a,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: secret_a,
+          issuer_id: @issuer_id
+        )
 
       assert {:error, :invalid_mac} = AdmissionToken.verify(token, secret_b)
     end
@@ -242,12 +258,14 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       current_key = AdmissionToken.generate_secret()
       previous_key = AdmissionToken.generate_secret()
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: current_key,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: current_key,
+          issuer_id: @issuer_id
+        )
 
-      assert {:ok, _fields} = AdmissionToken.verify_with_rotation(token, current_key, previous_key)
+      assert {:ok, _fields} =
+               AdmissionToken.verify_with_rotation(token, current_key, previous_key)
     end
 
     test "verify_with_rotation accepts token signed with previous key" do
@@ -255,12 +273,14 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       previous_key = AdmissionToken.generate_secret()
 
       # Token signed with the OLD key
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: previous_key,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: previous_key,
+          issuer_id: @issuer_id
+        )
 
-      assert {:ok, _fields} = AdmissionToken.verify_with_rotation(token, current_key, previous_key)
+      assert {:ok, _fields} =
+               AdmissionToken.verify_with_rotation(token, current_key, previous_key)
     end
 
     test "verify_with_rotation rejects token signed with unknown key" do
@@ -268,21 +288,24 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       previous_key = AdmissionToken.generate_secret()
       unknown_key = AdmissionToken.generate_secret()
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: unknown_key,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: unknown_key,
+          issuer_id: @issuer_id
+        )
 
-      assert {:error, :invalid_mac} = AdmissionToken.verify_with_rotation(token, current_key, previous_key)
+      assert {:error, :invalid_mac} =
+               AdmissionToken.verify_with_rotation(token, current_key, previous_key)
     end
 
     test "verify_with_rotation works when previous key is nil" do
       current_key = AdmissionToken.generate_secret()
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: current_key,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: current_key,
+          issuer_id: @issuer_id
+        )
 
       assert {:ok, _fields} = AdmissionToken.verify_with_rotation(token, current_key, nil)
     end
@@ -291,10 +314,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       current_key = AdmissionToken.generate_secret()
       other_key = AdmissionToken.generate_secret()
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: other_key,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: other_key,
+          issuer_id: @issuer_id
+        )
 
       assert {:error, :invalid_mac} = AdmissionToken.verify_with_rotation(token, current_key, nil)
     end
@@ -304,10 +328,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     test "zero NodeID" do
       zero_node = <<0::128>>
 
-      token = AdmissionToken.issue(zero_node, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(zero_node, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert {:ok, fields} = AdmissionToken.verify(token, @secret)
       assert fields.node_id == zero_node
@@ -317,11 +342,12 @@ defmodule ZtlpRelay.AdmissionTokenTest do
       # 30 days
       max_ttl = 30 * 24 * 3600
 
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id,
-        ttl_seconds: max_ttl
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id,
+          ttl_seconds: max_ttl
+        )
 
       assert {:ok, fields} = AdmissionToken.verify(token, @secret)
       assert fields.expires_at - fields.issued_at == max_ttl
@@ -333,10 +359,11 @@ defmodule ZtlpRelay.AdmissionTokenTest do
     end
 
     test "parse without verification" do
-      token = AdmissionToken.issue(@node_id, nil,
-        secret_key: @secret,
-        issuer_id: @issuer_id
-      )
+      token =
+        AdmissionToken.issue(@node_id, nil,
+          secret_key: @secret,
+          issuer_id: @issuer_id
+        )
 
       assert {:ok, fields} = AdmissionToken.parse(token)
       assert fields.node_id == @node_id

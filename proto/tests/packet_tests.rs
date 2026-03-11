@@ -22,7 +22,11 @@ fn test_handshake_header_roundtrip() {
     header.header_auth_tag = [0xCC; 16];
 
     let bytes = header.serialize();
-    assert_eq!(bytes.len(), HANDSHAKE_HEADER_SIZE, "header should be exactly 95 bytes");
+    assert_eq!(
+        bytes.len(),
+        HANDSHAKE_HEADER_SIZE,
+        "header should be exactly 95 bytes"
+    );
 
     let restored = HandshakeHeader::deserialize(&bytes).expect("deserialize should succeed");
 
@@ -32,7 +36,10 @@ fn test_handshake_header_roundtrip() {
     assert_eq!(restored.msg_type, MsgType::Hello);
     assert_eq!(restored.crypto_suite, 0x0001);
     assert_eq!(restored.key_id, 0x1234);
-    assert_eq!(restored.session_id, SessionId([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]));
+    assert_eq!(
+        restored.session_id,
+        SessionId([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    );
     assert_eq!(restored.packet_seq, 0xDEADBEEFCAFE);
     assert_eq!(restored.timestamp, 1700000000000);
     assert_eq!(restored.src_node_id, [0xAA; 16]);
@@ -50,7 +57,11 @@ fn test_data_header_roundtrip() {
     header.header_auth_tag = [0xDD; 16];
 
     let bytes = header.serialize();
-    assert_eq!(bytes.len(), DATA_HEADER_SIZE, "data header should be exactly 42 bytes");
+    assert_eq!(
+        bytes.len(),
+        DATA_HEADER_SIZE,
+        "data header should be exactly 42 bytes"
+    );
 
     let restored = DataHeader::deserialize(&bytes).expect("deserialize should succeed");
 
@@ -66,8 +77,8 @@ fn test_data_header_roundtrip() {
 fn test_ver_hdrlen_bit_packing() {
     // Verify the 4-bit version and 12-bit hdr_len share a u16 correctly
     let mut header = HandshakeHeader::new(MsgType::Data);
-    header.version = 1;       // 4 bits: 0001
-    header.hdr_len = 0x0ABC;  // 12 bits: 1010 1011 1100
+    header.version = 1; // 4 bits: 0001
+    header.hdr_len = 0x0ABC; // 12 bits: 1010 1011 1100
 
     let bytes = header.serialize();
 
@@ -135,7 +146,11 @@ fn test_all_msg_types_roundtrip() {
         let header = HandshakeHeader::new(msg_type);
         let bytes = header.serialize();
         let restored = HandshakeHeader::deserialize(&bytes).expect("deserialize");
-        assert_eq!(restored.msg_type, msg_type, "msg type roundtrip failed for {:?}", msg_type);
+        assert_eq!(
+            restored.msg_type, msg_type,
+            "msg type roundtrip failed for {:?}",
+            msg_type
+        );
     }
 }
 
@@ -152,11 +167,19 @@ fn test_session_id_generation() {
 fn test_aad_bytes_exclude_auth_tag() {
     let header = HandshakeHeader::new(MsgType::Data);
     let aad = header.aad_bytes();
-    assert_eq!(aad.len(), HANDSHAKE_HEADER_SIZE - 16, "AAD should be header minus auth tag");
+    assert_eq!(
+        aad.len(),
+        HANDSHAKE_HEADER_SIZE - 16,
+        "AAD should be header minus auth tag"
+    );
 
     let data_header = DataHeader::new(SessionId::generate(), 1);
     let data_aad = data_header.aad_bytes();
-    assert_eq!(data_aad.len(), DATA_HEADER_SIZE - 16, "data AAD should be header minus auth tag");
+    assert_eq!(
+        data_aad.len(),
+        DATA_HEADER_SIZE - 16,
+        "data AAD should be header minus auth tag"
+    );
 }
 
 #[test]

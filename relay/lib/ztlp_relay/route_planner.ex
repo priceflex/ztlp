@@ -29,10 +29,10 @@ defmodule ZtlpRelay.RoutePlanner do
   @default_max_hops 4
 
   @type relay_entry :: %{
-    node_id: binary(),
-    address: {:inet.ip_address(), :inet.port_number()},
-    role: atom()
-  }
+          node_id: binary(),
+          address: {:inet.ip_address(), :inet.port_number()},
+          role: atom()
+        }
 
   @type plan_result :: {:ok, [relay_entry()]} | {:error, :no_route | :max_hops_exceeded}
 
@@ -128,39 +128,40 @@ defmodule ZtlpRelay.RoutePlanner do
     source_role = normalize_role(source.role)
     dest_role = normalize_role(dest.role)
 
-    path = case {source_role, dest_role} do
-      # Ingress → Service: look for transit relays
-      {:ingress, :service} ->
-        find_transit_path(source, dest, registry)
+    path =
+      case {source_role, dest_role} do
+        # Ingress → Service: look for transit relays
+        {:ingress, :service} ->
+          find_transit_path(source, dest, registry)
 
-      # Service → Ingress: reverse path, look for transit
-      {:service, :ingress} ->
-        find_transit_path(source, dest, registry)
+        # Service → Ingress: reverse path, look for transit
+        {:service, :ingress} ->
+          find_transit_path(source, dest, registry)
 
-      # Ingress → Transit: direct
-      {:ingress, :transit} ->
-        [dest]
+        # Ingress → Transit: direct
+        {:ingress, :transit} ->
+          [dest]
 
-      # Transit → Service: direct
-      {:transit, :service} ->
-        [dest]
+        # Transit → Service: direct
+        {:transit, :service} ->
+          [dest]
 
-      # Transit → Ingress: direct
-      {:transit, :ingress} ->
-        [dest]
+        # Transit → Ingress: direct
+        {:transit, :ingress} ->
+          [dest]
 
-      # Service → Transit: direct
-      {:service, :transit} ->
-        [dest]
+        # Service → Transit: direct
+        {:service, :transit} ->
+          [dest]
 
-      # Transit → Transit: direct (peer transit)
-      {:transit, :transit} ->
-        [dest]
+        # Transit → Transit: direct (peer transit)
+        {:transit, :transit} ->
+          [dest]
 
-      # Same role or :all — direct
-      _ ->
-        [dest]
-    end
+        # Same role or :all — direct
+        _ ->
+          [dest]
+      end
 
     if length(path) > max_hops do
       {:error, :max_hops_exceeded}
@@ -171,11 +172,12 @@ defmodule ZtlpRelay.RoutePlanner do
 
   defp find_transit_path(source, dest, registry) do
     # Look for transit relays (or :all relays) that could bridge
-    transit_relays = Enum.filter(registry, fn r ->
-      r.node_id != source.node_id and
-      r.node_id != dest.node_id and
-      r.role in [:transit, :all]
-    end)
+    transit_relays =
+      Enum.filter(registry, fn r ->
+        r.node_id != source.node_id and
+          r.node_id != dest.node_id and
+          r.role in [:transit, :all]
+      end)
 
     case transit_relays do
       [] ->

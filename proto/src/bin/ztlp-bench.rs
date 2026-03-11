@@ -20,10 +20,8 @@ use chacha20poly1305::{
 
 use ztlp_proto::handshake;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
-use ztlp_proto::packet::{
-    DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket,
-};
-use ztlp_proto::pipeline::{Pipeline, compute_header_auth_tag};
+use ztlp_proto::packet::{DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket};
+use ztlp_proto::pipeline::{compute_header_auth_tag, Pipeline};
 use ztlp_proto::session::SessionState;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,8 +182,11 @@ fn main() {
         let dr2 = data_raw.clone();
         bench(
             &format!("layer2_session_check — known ({} sessions)", count),
-            50_000, 500,
-            || { std::hint::black_box(pipe.layer2_session_check(&dr2)); },
+            50_000,
+            500,
+            || {
+                std::hint::black_box(pipe.layer2_session_check(&dr2));
+            },
         );
 
         // Unknown session packet
@@ -200,15 +201,23 @@ fn main() {
 
         bench(
             &format!("layer2_session_check — unknown ({} sessions)", count),
-            50_000, 500,
-            || { std::hint::black_box(pipe.layer2_session_check(&unk_raw)); },
+            50_000,
+            500,
+            || {
+                std::hint::black_box(pipe.layer2_session_check(&unk_raw));
+            },
         );
     }
 
     let hr = hello_raw.clone();
-    bench("layer2_session_check — HELLO (pass-through)", 50_000, 500, || {
-        std::hint::black_box(pipeline.layer2_session_check(&hr));
-    });
+    bench(
+        "layer2_session_check — HELLO (pass-through)",
+        50_000,
+        500,
+        || {
+            std::hint::black_box(pipeline.layer2_session_check(&hr));
+        },
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // Layer 3: HeaderAuthTag Verification
@@ -238,9 +247,14 @@ fn main() {
     println!("\n--- Full Pipeline ---");
 
     let dr4 = data_raw.clone();
-    bench("pipeline.process — valid data packet (full 3 layers)", 20_000, 500, || {
-        std::hint::black_box(auth_pipe.process(&dr4));
-    });
+    bench(
+        "pipeline.process — valid data packet (full 3 layers)",
+        20_000,
+        500,
+        || {
+            std::hint::black_box(auth_pipe.process(&dr4));
+        },
+    );
 
     let hr2 = hello_raw.clone();
     bench("pipeline.process — HELLO", 50_000, 500, || {
@@ -248,9 +262,14 @@ fn main() {
     });
 
     let bm2 = bad_magic.clone();
-    bench("pipeline.process — bad magic (L1 reject)", 100_000, 1_000, || {
-        std::hint::black_box(auth_pipe.process(&bm2));
-    });
+    bench(
+        "pipeline.process — bad magic (L1 reject)",
+        100_000,
+        1_000,
+        || {
+            std::hint::black_box(auth_pipe.process(&bm2));
+        },
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // Noise_XX Handshake
@@ -261,11 +280,16 @@ fn main() {
     let init_id = NodeIdentity::generate().expect("gen identity");
     let resp_id = NodeIdentity::generate().expect("gen identity");
 
-    bench("Full Noise_XX handshake (3 messages + finalize)", 1_000, 100, || {
-        let result = handshake::perform_handshake(&init_id, &resp_id)
-            .expect("handshake should succeed");
-        std::hint::black_box(result);
-    });
+    bench(
+        "Full Noise_XX handshake (3 messages + finalize)",
+        1_000,
+        100,
+        || {
+            let result =
+                handshake::perform_handshake(&init_id, &resp_id).expect("handshake should succeed");
+            std::hint::black_box(result);
+        },
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // ChaCha20-Poly1305 Encrypt/Decrypt
@@ -278,7 +302,12 @@ fn main() {
     let nonce = Nonce::default();
     let aead_aad = b"ztlp-bench-aad";
 
-    for (label, size) in &[("64B", 64usize), ("1KB", 1024), ("8KB", 8192), ("64KB", 65536)] {
+    for (label, size) in &[
+        ("64B", 64usize),
+        ("1KB", 1024),
+        ("8KB", 8192),
+        ("64KB", 65536),
+    ] {
         let plaintext: Vec<u8> = (0..*size).map(|i| (i % 256) as u8).collect();
 
         let pt = plaintext.clone();
@@ -330,9 +359,14 @@ fn main() {
         std::hint::black_box(NodeId::generate());
     });
 
-    bench("NodeIdentity::generate() (NodeID + X25519 keypair)", 5_000, 100, || {
-        std::hint::black_box(NodeIdentity::generate().unwrap());
-    });
+    bench(
+        "NodeIdentity::generate() (NodeID + X25519 keypair)",
+        5_000,
+        100,
+        || {
+            std::hint::black_box(NodeIdentity::generate().unwrap());
+        },
+    );
 
     bench("SessionId::generate()", 50_000, 1_000, || {
         std::hint::black_box(SessionId::generate());
@@ -364,12 +398,17 @@ fn main() {
     });
 
     // Round-trip
-    bench("Data packet serialize + deserialize round-trip", 50_000, 1_000, || {
-        let hdr = DataHeader::new(session_id, 99);
-        let serialized = hdr.serialize();
-        let parsed = DataHeader::deserialize(&serialized).unwrap();
-        std::hint::black_box(parsed);
-    });
+    bench(
+        "Data packet serialize + deserialize round-trip",
+        50_000,
+        1_000,
+        || {
+            let hdr = DataHeader::new(session_id, 99);
+            let serialized = hdr.serialize();
+            let parsed = DataHeader::deserialize(&serialized).unwrap();
+            std::hint::black_box(parsed);
+        },
+    );
 
     println!("\n{}", "=".repeat(61));
     println!("  Rust benchmarks complete.");

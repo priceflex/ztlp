@@ -26,13 +26,13 @@ defmodule ZtlpRelay.Ingress do
   @type sender :: {:inet.ip_address(), :inet.port_number()}
 
   @type hello_result ::
-    {:ok, :admitted, binary()}
-    | {:challenge, binary()}
-    | {:error, atom()}
+          {:ok, :admitted, binary()}
+          | {:challenge, binary()}
+          | {:error, atom()}
 
   @type state :: %{
-    rate_limiter_table: atom()
-  }
+          rate_limiter_table: atom()
+        }
 
   @doc """
   Create a default ingress state.
@@ -180,13 +180,14 @@ defmodule ZtlpRelay.Ingress do
 
     session_scope = packet.session_id
 
-    rat = AdmissionToken.issue(
-      packet.src_node_id,
-      session_scope,
-      secret_key: secret_key,
-      issuer_id: issuer_id,
-      ttl_seconds: ttl
-    )
+    rat =
+      AdmissionToken.issue(
+        packet.src_node_id,
+        session_scope,
+        secret_key: secret_key,
+        issuer_id: issuer_id,
+        ttl_seconds: ttl
+      )
 
     {:ok, :admitted, rat}
   end
@@ -206,5 +207,7 @@ defmodule ZtlpRelay.Ingress do
   end
 
   defp encode_ip({a, b, c, d}), do: <<a, b, c, d>>
-  defp encode_ip({a, b, c, d, e, f, g, h}), do: <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+
+  defp encode_ip({a, b, c, d, e, f, g, h}),
+    do: <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
 end

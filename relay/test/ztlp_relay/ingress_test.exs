@@ -10,11 +10,13 @@ defmodule ZtlpRelay.IngressTest do
   setup do
     # Start a dedicated rate limiter for ingress tests
     name = :"ingress_rl_#{:erlang.unique_integer([:positive])}"
-    {:ok, pid} = RateLimiter.start_link(
-      name: name,
-      table: @table,
-      cleanup_interval_ms: 60_000
-    )
+
+    {:ok, pid} =
+      RateLimiter.start_link(
+        name: name,
+        table: @table,
+        cleanup_interval_ms: 60_000
+      )
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid)
@@ -28,9 +30,7 @@ defmodule ZtlpRelay.IngressTest do
     src_node_id = Keyword.get(opts, :src_node_id, :crypto.strong_rand_bytes(16))
     session_id = Keyword.get(opts, :session_id, :crypto.strong_rand_bytes(12))
 
-    Packet.build_handshake(:hello, session_id,
-      src_node_id: src_node_id
-    )
+    Packet.build_handshake(:hello, session_id, src_node_id: src_node_id)
   end
 
   defp default_opts do
@@ -153,16 +153,20 @@ defmodule ZtlpRelay.IngressTest do
       # Second: respond with the challenge
       opts_with_response = Keyword.put(opts, :challenge_response, challenge)
       hello2 = make_hello()
-      assert {:ok, :admitted, _rat} = Ingress.handle_hello(hello2, sender, state, opts_with_response)
+
+      assert {:ok, :admitted, _rat} =
+               Ingress.handle_hello(hello2, sender, state, opts_with_response)
     end
 
     test "rejects with invalid challenge response", %{state: state} do
       sender = {{127, 0, 0, 1}, 5000}
-      opts = Keyword.merge(default_opts(),
-        session_count: 8000,
-        max_sessions: 10_000,
-        challenge_response: :crypto.strong_rand_bytes(32)
-      )
+
+      opts =
+        Keyword.merge(default_opts(),
+          session_count: 8000,
+          max_sessions: 10_000,
+          challenge_response: :crypto.strong_rand_bytes(32)
+        )
 
       hello = make_hello()
       assert {:error, :invalid_challenge} = Ingress.handle_hello(hello, sender, state, opts)

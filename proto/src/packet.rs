@@ -162,8 +162,7 @@ impl HandshakeHeader {
         buf.extend_from_slice(&MAGIC.to_be_bytes());
 
         // Ver (4 bits) | HdrLen (12 bits) — packed into u16
-        let ver_hdrlen: u16 = ((self.version as u16 & 0x0F) << 12)
-            | (self.hdr_len & 0x0FFF);
+        let ver_hdrlen: u16 = ((self.version as u16 & 0x0F) << 12) | (self.hdr_len & 0x0FFF);
         buf.extend_from_slice(&ver_hdrlen.to_be_bytes());
 
         // Flags (16 bits)
@@ -260,15 +259,27 @@ impl HandshakeHeader {
 
         // PacketSeq
         let packet_seq = u64::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
         ]);
         pos += 8;
 
         // Timestamp
         let timestamp = u64::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
         ]);
         pos += 8;
 
@@ -283,9 +294,8 @@ impl HandshakeHeader {
         pos += 16;
 
         // PolicyTag
-        let policy_tag = u32::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-        ]);
+        let policy_tag =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         // ExtLen
@@ -354,7 +364,8 @@ impl HandshakeHeader {
     pub fn parse_extension(
         &self,
         ext_data: &[u8],
-    ) -> Option<Result<crate::admission::HandshakeExtension, crate::admission::AdmissionError>> {
+    ) -> Option<Result<crate::admission::HandshakeExtension, crate::admission::AdmissionError>>
+    {
         if self.ext_len == 0 || ext_data.len() < self.ext_len as usize {
             return None;
         }
@@ -418,8 +429,7 @@ impl DataHeader {
         buf.extend_from_slice(&MAGIC.to_be_bytes());
 
         // Ver (4) | HdrLen (12)
-        let ver_hdrlen: u16 = ((self.version as u16 & 0x0F) << 12)
-            | (self.hdr_len & 0x0FFF);
+        let ver_hdrlen: u16 = ((self.version as u16 & 0x0F) << 12) | (self.hdr_len & 0x0FFF);
         buf.extend_from_slice(&ver_hdrlen.to_be_bytes());
 
         // Flags (16 bits)
@@ -477,8 +487,14 @@ impl DataHeader {
 
         // PacketSequence
         let packet_seq = u64::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-            data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
         ]);
         pos += 8;
 

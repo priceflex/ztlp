@@ -25,7 +25,9 @@ fn main() {
     let server_addr = &args[1];
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -40,14 +42,21 @@ fn main() {
     // Send HANDSHAKE_START with our static public key
     let mut ready_msg = b"HANDSHAKE_START".to_vec();
     ready_msg.extend_from_slice(&our_keypair.public);
-    socket.send_to(&ready_msg, server_addr).expect("send HANDSHAKE_START failed");
+    socket
+        .send_to(&ready_msg, server_addr)
+        .expect("send HANDSHAKE_START failed");
 
     // Receive server's static public key
-    let (len, _) = socket.recv_from(&mut buf).expect("recv server pubkey failed");
+    let (len, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv server pubkey failed");
     let server_static_pub = buf[..len].to_vec();
 
     if server_static_pub.len() < 32 {
-        println!("✗ Server response too short: {} bytes", server_static_pub.len());
+        println!(
+            "✗ Server response too short: {} bytes",
+            server_static_pub.len()
+        );
         std::process::exit(1);
     }
 
@@ -59,7 +68,9 @@ fn main() {
 
     // Message 1: → e
     let mut msg1 = vec![0u8; 65535];
-    let len1 = initiator.write_message(&[], &mut msg1).expect("write msg1 failed");
+    let len1 = initiator
+        .write_message(&[], &mut msg1)
+        .expect("write msg1 failed");
     msg1.truncate(len1);
 
     let mut cmd = b"NOISE_MSG1".to_vec();
@@ -71,11 +82,15 @@ fn main() {
     let msg2_data = buf[..len2].to_vec();
 
     let mut payload2 = vec![0u8; 65535];
-    let _p2_len = initiator.read_message(&msg2_data, &mut payload2).expect("read msg2 failed");
+    let _p2_len = initiator
+        .read_message(&msg2_data, &mut payload2)
+        .expect("read msg2 failed");
 
     // Message 3: → s, se
     let mut msg3 = vec![0u8; 65535];
-    let len3 = initiator.write_message(&[], &mut msg3).expect("write msg3 failed");
+    let len3 = initiator
+        .write_message(&[], &mut msg3)
+        .expect("write msg3 failed");
     msg3.truncate(len3);
 
     let mut cmd = b"NOISE_MSG3".to_vec();
@@ -83,7 +98,9 @@ fn main() {
     socket.send_to(&cmd, server_addr).expect("send msg3 failed");
 
     // Read the HANDSHAKE_COMPLETE confirmation
-    let (clen, _) = socket.recv_from(&mut buf).expect("recv handshake complete failed");
+    let (clen, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv handshake complete failed");
     let confirm = &buf[..clen];
 
     if !initiator.is_handshake_finished() {
@@ -91,7 +108,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    let transport = initiator.into_transport_mode().expect("transport mode failed");
+    let transport = initiator
+        .into_transport_mode()
+        .expect("transport mode failed");
     let remote_static = transport.get_remote_static().expect("no remote static");
 
     if remote_static == &server_static_pub[..32] {
@@ -105,17 +124,27 @@ fn main() {
     // ── Test 2: Transport key derivation ─────────────────────────────
     print!("  Test 2: Transport key derivation (i2r_key, r2i_key match)... ");
 
-    socket.send_to(b"GET_TRANSPORT_KEYS", server_addr).expect("send GET_TRANSPORT_KEYS failed");
-    let (klen, _) = socket.recv_from(&mut buf).expect("recv transport keys failed");
+    socket
+        .send_to(b"GET_TRANSPORT_KEYS", server_addr)
+        .expect("send GET_TRANSPORT_KEYS failed");
+    let (klen, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv transport keys failed");
     let key_data = buf[..klen].to_vec();
 
     if key_data.len() == 64 {
-        println!("✓ Elixir sent transport keys (i2r: {}..., r2i: {}...)",
-            hex::encode(&key_data[..4]), hex::encode(&key_data[32..36]));
+        println!(
+            "✓ Elixir sent transport keys (i2r: {}..., r2i: {}...)",
+            hex::encode(&key_data[..4]),
+            hex::encode(&key_data[32..36])
+        );
         passed += 1;
     } else {
-        println!("✗ Invalid transport key response: {} bytes (expected 64): {}",
-            key_data.len(), String::from_utf8_lossy(&key_data));
+        println!(
+            "✗ Invalid transport key response: {} bytes (expected 64): {}",
+            key_data.len(),
+            String::from_utf8_lossy(&key_data)
+        );
         failed += 1;
     }
 
@@ -123,15 +152,22 @@ fn main() {
     print!("  Test 3: Encrypted data Elixir → Rust (r2i direction)... ");
 
     if key_data.len() == 64 {
-        socket.send_to(b"SEND_ENCRYPTED_R2I", server_addr).expect("send request failed");
-        let (elen, _) = socket.recv_from(&mut buf).expect("recv encrypted data failed");
+        socket
+            .send_to(b"SEND_ENCRYPTED_R2I", server_addr)
+            .expect("send request failed");
+        let (elen, _) = socket
+            .recv_from(&mut buf)
+            .expect("recv encrypted data failed");
         let encrypted_data = buf[..elen].to_vec();
 
         if encrypted_data.len() > 28 {
             let nonce_bytes = &encrypted_data[..12];
             let ct_and_tag = &encrypted_data[12..];
 
-            use chacha20poly1305::{ChaCha20Poly1305, aead::{Aead, KeyInit}, Nonce};
+            use chacha20poly1305::{
+                aead::{Aead, KeyInit},
+                ChaCha20Poly1305, Nonce,
+            };
             let r2i_key = &key_data[32..64];
             let cipher = ChaCha20Poly1305::new(r2i_key.into());
             let nonce = Nonce::from_slice(nonce_bytes);
@@ -152,7 +188,10 @@ fn main() {
                 }
             }
         } else {
-            println!("✗ Encrypted message too short: {} bytes", encrypted_data.len());
+            println!(
+                "✗ Encrypted message too short: {} bytes",
+                encrypted_data.len()
+            );
             failed += 1;
         }
     } else {
@@ -164,20 +203,29 @@ fn main() {
     print!("  Test 4: Encrypted data Rust → Elixir (i2r direction)... ");
 
     if key_data.len() == 64 {
-        use chacha20poly1305::{ChaCha20Poly1305, aead::{Aead, KeyInit}, Nonce};
+        use chacha20poly1305::{
+            aead::{Aead, KeyInit},
+            ChaCha20Poly1305, Nonce,
+        };
         let i2r_key = &key_data[..32];
         let cipher = ChaCha20Poly1305::new(i2r_key.into());
         let nonce_bytes = [0u8; 12];
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext = b"hello from rust client";
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_slice()).expect("encrypt failed");
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_slice())
+            .expect("encrypt failed");
 
         let mut msg = b"ENCRYPTED_I2R".to_vec();
         msg.extend_from_slice(&nonce_bytes);
         msg.extend_from_slice(&ciphertext);
-        socket.send_to(&msg, server_addr).expect("send encrypted failed");
+        socket
+            .send_to(&msg, server_addr)
+            .expect("send encrypted failed");
 
-        let (rlen, _) = socket.recv_from(&mut buf).expect("recv verify response failed");
+        let (rlen, _) = socket
+            .recv_from(&mut buf)
+            .expect("recv verify response failed");
         let response = &buf[..rlen];
         if response == b"DECRYPT_OK" {
             println!("✓ Elixir successfully decrypted our message");
@@ -195,11 +243,14 @@ fn main() {
     print!("  Test 5: Handshake with wrong key (should fail gracefully)... ");
 
     let wrong_kp = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
-        .generate_keypair().unwrap();
+        .generate_keypair()
+        .unwrap();
 
     let mut ready2 = b"HANDSHAKE_WRONG_KEY".to_vec();
     ready2.extend_from_slice(&wrong_kp.public);
-    socket.send_to(&ready2, server_addr).expect("send wrong key start failed");
+    socket
+        .send_to(&ready2, server_addr)
+        .expect("send wrong key start failed");
 
     let (len, _) = socket.recv_from(&mut buf).expect("recv failed");
 
@@ -238,11 +289,14 @@ fn main() {
     print!("  Test 6: Handshake replay (reuse msg1 — should be rejected)... ");
 
     let replay_kp = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
-        .generate_keypair().unwrap();
+        .generate_keypair()
+        .unwrap();
 
     let mut ready3 = b"HANDSHAKE_REPLAY".to_vec();
     ready3.extend_from_slice(&replay_kp.public);
-    socket.send_to(&ready3, server_addr).expect("send replay start failed");
+    socket
+        .send_to(&ready3, server_addr)
+        .expect("send replay start failed");
 
     let (len, _) = socket.recv_from(&mut buf).expect("recv failed");
 
@@ -267,9 +321,13 @@ fn main() {
     // Now send msg1 AGAIN (replay) instead of msg3
     let mut cmd_replay = b"NOISE_REPLAY_MSG1".to_vec();
     cmd_replay.extend_from_slice(&saved_msg1);
-    socket.send_to(&cmd_replay, server_addr).expect("send replay msg1 failed");
+    socket
+        .send_to(&cmd_replay, server_addr)
+        .expect("send replay msg1 failed");
 
-    let (rlen, _) = socket.recv_from(&mut buf).expect("recv replay response failed");
+    let (rlen, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv replay response failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REPLAY_REJECTED") || resp.starts_with(b"ERROR") {
         println!("✓ Replay correctly rejected");

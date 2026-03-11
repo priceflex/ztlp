@@ -69,7 +69,10 @@ async fn main() {
     let addr_b = node_b.local_addr;
     println!("  Node A on {}", addr_a);
     println!("  Node B on {}", addr_b);
-    println!("  Both nodes send to relay at {} (not to each other)", relay_addr);
+    println!(
+        "  Both nodes send to relay at {} (not to each other)",
+        relay_addr
+    );
     println!();
 
     // ── Step 4: Noise_XX Handshake through the relay ─────────────────
@@ -80,10 +83,10 @@ async fn main() {
     let shared_session_id = SessionId::generate();
     println!("  Pre-agreed Session ID: {}", shared_session_id);
 
-    let mut init_ctx = HandshakeContext::new_initiator(&node_a_identity)
-        .expect("create initiator context");
-    let mut resp_ctx = HandshakeContext::new_responder(&node_b_identity)
-        .expect("create responder context");
+    let mut init_ctx =
+        HandshakeContext::new_initiator(&node_a_identity).expect("create initiator context");
+    let mut resp_ctx =
+        HandshakeContext::new_responder(&node_b_identity).expect("create responder context");
 
     // Message 1: A → Relay → B (HELLO with ephemeral key)
     println!("  → Message 1: Node A sends HELLO through relay");
@@ -163,7 +166,8 @@ async fn main() {
     let (recv1, from1) = node_b.recv_raw().await.expect("recv msg1 from relay");
     println!(
         "  ✓ Node B received HELLO from {} (relay) — {} bytes",
-        from1, recv1.len()
+        from1,
+        recv1.len()
     );
     let noise_payload1 = &recv1[HANDSHAKE_HEADER_SIZE..];
     let _p1 = resp_ctx.read_message(noise_payload1).expect("read msg1");
@@ -186,7 +190,8 @@ async fn main() {
     let (recv2, from2) = node_a.recv_raw().await.expect("recv msg2 from relay");
     println!(
         "  ✓ Node A received HELLO_ACK from {} (relay) — {} bytes",
-        from2, recv2.len()
+        from2,
+        recv2.len()
     );
     let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
     let _p2 = init_ctx.read_message(noise_payload2).expect("read msg2");

@@ -6,12 +6,19 @@ defmodule ZtlpNs.BootstrapTest do
   describe "verify_response/1" do
     test "accepts valid signed bootstrap record" do
       {_pub, priv} = Crypto.generate_keypair()
+
       relays = [
         %{node_id: "aabbccdd", endpoints: ["1.2.3.4:23095"], public_key: "deadbeef"},
         %{node_id: "11223344", endpoints: ["5.6.7.8:23095"], public_key: "cafebabe"}
       ]
-      record = Record.new_bootstrap("bootstrap.ztlp", relays,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      record =
+        Record.new_bootstrap("bootstrap.ztlp", relays,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       signed = Record.sign(record, priv)
 
       assert {:ok, returned_relays} = Bootstrap.verify_response(signed)
@@ -40,7 +47,10 @@ defmodule ZtlpNs.BootstrapTest do
 
     test "returns relays when set" do
       {_pub, priv} = Crypto.generate_keypair()
-      relay = Record.new_relay("r.ztlp", :crypto.strong_rand_bytes(16), ["1.2.3.4:23095"], 100, "us")
+
+      relay =
+        Record.new_relay("r.ztlp", :crypto.strong_rand_bytes(16), ["1.2.3.4:23095"], 100, "us")
+
       relay = Record.sign(relay, priv)
       Bootstrap.set_hardcoded_relays([relay])
       assert {:ok, [returned]} = Bootstrap.discover_hardcoded()
@@ -57,7 +67,10 @@ defmodule ZtlpNs.BootstrapTest do
   describe "discover/0" do
     test "falls through to hardcoded when available" do
       {_pub, priv} = Crypto.generate_keypair()
-      relay = Record.new_relay("r.ztlp", :crypto.strong_rand_bytes(16), ["1.2.3.4:23095"], 100, "us")
+
+      relay =
+        Record.new_relay("r.ztlp", :crypto.strong_rand_bytes(16), ["1.2.3.4:23095"], 100, "us")
+
       relay = Record.sign(relay, priv)
       Bootstrap.set_hardcoded_relays([relay])
 

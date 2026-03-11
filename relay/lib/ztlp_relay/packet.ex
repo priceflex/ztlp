@@ -44,37 +44,37 @@ defmodule ZtlpRelay.Packet do
   @type msg_type :: :data | :hello | :hello_ack | :rekey | :close | :error | :ping | :pong
 
   @type handshake_packet :: %{
-    type: :handshake,
-    magic: non_neg_integer(),
-    version: non_neg_integer(),
-    hdr_len: non_neg_integer(),
-    flags: non_neg_integer(),
-    msg_type: msg_type(),
-    crypto_suite: non_neg_integer(),
-    key_id: non_neg_integer(),
-    session_id: session_id(),
-    packet_seq: non_neg_integer(),
-    timestamp: non_neg_integer(),
-    src_node_id: binary(),
-    dst_svc_id: binary(),
-    policy_tag: non_neg_integer(),
-    ext_len: non_neg_integer(),
-    payload_len: non_neg_integer(),
-    header_auth_tag: binary(),
-    payload: binary()
-  }
+          type: :handshake,
+          magic: non_neg_integer(),
+          version: non_neg_integer(),
+          hdr_len: non_neg_integer(),
+          flags: non_neg_integer(),
+          msg_type: msg_type(),
+          crypto_suite: non_neg_integer(),
+          key_id: non_neg_integer(),
+          session_id: session_id(),
+          packet_seq: non_neg_integer(),
+          timestamp: non_neg_integer(),
+          src_node_id: binary(),
+          dst_svc_id: binary(),
+          policy_tag: non_neg_integer(),
+          ext_len: non_neg_integer(),
+          payload_len: non_neg_integer(),
+          header_auth_tag: binary(),
+          payload: binary()
+        }
 
   @type data_packet :: %{
-    type: :data_compact,
-    magic: non_neg_integer(),
-    version: non_neg_integer(),
-    hdr_len: non_neg_integer(),
-    flags: non_neg_integer(),
-    session_id: session_id(),
-    packet_seq: non_neg_integer(),
-    header_auth_tag: binary(),
-    payload: binary()
-  }
+          type: :data_compact,
+          magic: non_neg_integer(),
+          version: non_neg_integer(),
+          hdr_len: non_neg_integer(),
+          flags: non_neg_integer(),
+          session_id: session_id(),
+          packet_seq: non_neg_integer(),
+          header_auth_tag: binary(),
+          payload: binary()
+        }
 
   @type parsed_packet :: handshake_packet() | data_packet()
 
@@ -106,54 +106,58 @@ defmodule ZtlpRelay.Packet do
   Returns `{:ok, parsed_packet}` or `{:error, reason}`.
   """
   @spec parse(binary()) :: {:ok, parsed_packet()} | {:error, atom() | String.t()}
-  def parse(<<@magic::16, @version::4, @handshake_hdr_len::12, flags::16, msg_type_byte::8,
-              crypto_suite::16, key_id::16, session_id::binary-size(12),
-              packet_seq::64, timestamp::64, src_node_id::binary-size(16),
-              dst_svc_id::binary-size(16), policy_tag::32, ext_len::16,
-              payload_len::16, header_auth_tag::binary-size(16),
-              payload::binary>>) do
+  def parse(
+        <<@magic::16, @version::4, @handshake_hdr_len::12, flags::16, msg_type_byte::8,
+          crypto_suite::16, key_id::16, session_id::binary-size(12), packet_seq::64,
+          timestamp::64, src_node_id::binary-size(16), dst_svc_id::binary-size(16),
+          policy_tag::32, ext_len::16, payload_len::16, header_auth_tag::binary-size(16),
+          payload::binary>>
+      ) do
     case decode_msg_type(msg_type_byte) do
       {:ok, msg_type} ->
-        {:ok, %{
-          type: :handshake,
-          magic: @magic,
-          version: @version,
-          hdr_len: @handshake_hdr_len,
-          flags: flags,
-          msg_type: msg_type,
-          crypto_suite: crypto_suite,
-          key_id: key_id,
-          session_id: session_id,
-          packet_seq: packet_seq,
-          timestamp: timestamp,
-          src_node_id: src_node_id,
-          dst_svc_id: dst_svc_id,
-          policy_tag: policy_tag,
-          ext_len: ext_len,
-          payload_len: payload_len,
-          header_auth_tag: header_auth_tag,
-          payload: payload
-        }}
+        {:ok,
+         %{
+           type: :handshake,
+           magic: @magic,
+           version: @version,
+           hdr_len: @handshake_hdr_len,
+           flags: flags,
+           msg_type: msg_type,
+           crypto_suite: crypto_suite,
+           key_id: key_id,
+           session_id: session_id,
+           packet_seq: packet_seq,
+           timestamp: timestamp,
+           src_node_id: src_node_id,
+           dst_svc_id: dst_svc_id,
+           policy_tag: policy_tag,
+           ext_len: ext_len,
+           payload_len: payload_len,
+           header_auth_tag: header_auth_tag,
+           payload: payload
+         }}
 
       {:error, _} = err ->
         err
     end
   end
 
-  def parse(<<@magic::16, @version::4, @data_hdr_len::12, flags::16,
-              session_id::binary-size(12), packet_seq::64,
-              header_auth_tag::binary-size(16), payload::binary>>) do
-    {:ok, %{
-      type: :data_compact,
-      magic: @magic,
-      version: @version,
-      hdr_len: @data_hdr_len,
-      flags: flags,
-      session_id: session_id,
-      packet_seq: packet_seq,
-      header_auth_tag: header_auth_tag,
-      payload: payload
-    }}
+  def parse(
+        <<@magic::16, @version::4, @data_hdr_len::12, flags::16, session_id::binary-size(12),
+          packet_seq::64, header_auth_tag::binary-size(16), payload::binary>>
+      ) do
+    {:ok,
+     %{
+       type: :data_compact,
+       magic: @magic,
+       version: @version,
+       hdr_len: @data_hdr_len,
+       flags: flags,
+       session_id: session_id,
+       packet_seq: packet_seq,
+       header_auth_tag: header_auth_tag,
+       payload: payload
+     }}
   end
 
   # Bad magic
@@ -185,12 +189,21 @@ defmodule ZtlpRelay.Packet do
     msg_type_byte = encode_msg_type(pkt.msg_type)
 
     header = <<
-      @magic::16, @version::4, @handshake_hdr_len::12, pkt.flags::16,
-      msg_type_byte::8, pkt.crypto_suite::16, pkt.key_id::16,
-      pkt.session_id::binary-size(12), pkt.packet_seq::64,
-      pkt.timestamp::64, pkt.src_node_id::binary-size(16),
-      pkt.dst_svc_id::binary-size(16), pkt.policy_tag::32,
-      pkt.ext_len::16, pkt.payload_len::16,
+      @magic::16,
+      @version::4,
+      @handshake_hdr_len::12,
+      pkt.flags::16,
+      msg_type_byte::8,
+      pkt.crypto_suite::16,
+      pkt.key_id::16,
+      pkt.session_id::binary-size(12),
+      pkt.packet_seq::64,
+      pkt.timestamp::64,
+      pkt.src_node_id::binary-size(16),
+      pkt.dst_svc_id::binary-size(16),
+      pkt.policy_tag::32,
+      pkt.ext_len::16,
+      pkt.payload_len::16,
       pkt.header_auth_tag::binary-size(16)
     >>
 
@@ -203,8 +216,12 @@ defmodule ZtlpRelay.Packet do
   @spec serialize_data(data_packet()) :: binary()
   def serialize_data(pkt) do
     header = <<
-      @magic::16, @version::4, @data_hdr_len::12, pkt.flags::16,
-      pkt.session_id::binary-size(12), pkt.packet_seq::64,
+      @magic::16,
+      @version::4,
+      @data_hdr_len::12,
+      pkt.flags::16,
+      pkt.session_id::binary-size(12),
+      pkt.packet_seq::64,
       pkt.header_auth_tag::binary-size(16)
     >>
 
@@ -258,14 +275,17 @@ defmodule ZtlpRelay.Packet do
   Fast path for pipeline Layer 2.
   """
   @spec extract_session_id(binary()) :: {:ok, binary()} | {:error, atom()}
-  def extract_session_id(<<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16,
-                           _msg_type::8, _crypto_suite::16, _key_id::16,
-                           session_id::binary-size(12), _::binary>>) do
+  def extract_session_id(
+        <<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16, _msg_type::8,
+          _crypto_suite::16, _key_id::16, session_id::binary-size(12), _::binary>>
+      ) do
     {:ok, session_id}
   end
 
-  def extract_session_id(<<@magic::16, @version::4, @data_hdr_len::12, _flags::16,
-                           session_id::binary-size(12), _::binary>>) do
+  def extract_session_id(
+        <<@magic::16, @version::4, @data_hdr_len::12, _flags::16, session_id::binary-size(12),
+          _::binary>>
+      ) do
     {:ok, session_id}
   end
 
@@ -282,16 +302,23 @@ defmodule ZtlpRelay.Packet do
   Check if a raw packet is a handshake HELLO message.
   """
   @spec hello?(binary()) :: boolean()
-  def hello?(<<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16,
-               @msg_hello::8, _::binary>>), do: true
+  def hello?(
+        <<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16, @msg_hello::8, _::binary>>
+      ),
+      do: true
+
   def hello?(_), do: false
 
   @doc """
   Check if a raw packet is a HELLO_ACK message.
   """
   @spec hello_ack?(binary()) :: boolean()
-  def hello_ack?(<<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16,
-                   @msg_hello_ack::8, _::binary>>), do: true
+  def hello_ack?(
+        <<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16, @msg_hello_ack::8,
+          _::binary>>
+      ),
+      do: true
+
   def hello_ack?(_), do: false
 
   @doc """

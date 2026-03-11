@@ -11,11 +11,13 @@ defmodule ZtlpGateway.BackendTest do
 
     # Accept one connection in a spawned process
     parent = self()
-    pid = spawn_link(fn ->
-      {:ok, client} = :gen_tcp.accept(listen, 5_000)
-      send(parent, {:echo_server_ready, self()})
-      echo_loop(client)
-    end)
+
+    pid =
+      spawn_link(fn ->
+        {:ok, client} = :gen_tcp.accept(listen, 5_000)
+        send(parent, {:echo_server_ready, self()})
+        echo_loop(client)
+      end)
 
     {listen, port, pid}
   end
@@ -25,8 +27,10 @@ defmodule ZtlpGateway.BackendTest do
       {:ok, data} ->
         :gen_tcp.send(socket, "ECHO:" <> data)
         echo_loop(socket)
+
       {:error, :closed} ->
         :ok
+
       {:error, _} ->
         :ok
     end

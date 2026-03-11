@@ -15,8 +15,8 @@ defmodule ZtlpRelay.Pipeline do
   alias ZtlpRelay.{Packet, Crypto, SessionRegistry, Stats}
 
   @type admission_result ::
-    {:pass, Packet.parsed_packet()} |
-    {:drop, 1 | 2 | 3, atom()}
+          {:pass, Packet.parsed_packet()}
+          | {:drop, 1 | 2 | 3, atom()}
 
   @doc """
   Run the full three-layer admission pipeline on a raw packet.

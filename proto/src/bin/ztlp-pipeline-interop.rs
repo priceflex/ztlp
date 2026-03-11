@@ -23,14 +23,18 @@ fn main() {
     let server_addr = &args[1];
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let mut buf = [0u8; 65535];
     let mut passed = 0u32;
     let mut failed = 0u32;
 
     // ── Setup: Get shared session key from Elixir ─────────────────
-    socket.send_to(b"PIPELINE_SETUP", server_addr).expect("send setup failed");
+    socket
+        .send_to(b"PIPELINE_SETUP", server_addr)
+        .expect("send setup failed");
     let (len, _) = socket.recv_from(&mut buf).expect("recv setup failed");
     let setup = &buf[..len];
 
@@ -47,8 +51,11 @@ fn main() {
     let mut auth_key = [0u8; 32];
     auth_key.copy_from_slice(&setup[12..44]);
 
-    println!("  Setup: session_id={}, auth_key={}...",
-        hex::encode(&session_id_bytes), hex::encode(&auth_key[..4]));
+    println!(
+        "  Setup: session_id={}, auth_key={}...",
+        hex::encode(&session_id_bytes),
+        hex::encode(&auth_key[..4])
+    );
 
     // ── Test 1: Valid data packet header with auth tag ────────────
     print!("  Test 1: Rust data header validated by Elixir... ");
@@ -63,7 +70,9 @@ fn main() {
     packet.extend_from_slice(&serialized);
     packet.extend_from_slice(payload);
 
-    socket.send_to(&packet, server_addr).expect("send data packet failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send data packet failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv validation failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
@@ -91,8 +100,12 @@ fn main() {
     // Add a dummy payload
     hs_packet.extend_from_slice(&[0u8; 32]);
 
-    socket.send_to(&hs_packet, server_addr).expect("send hs packet failed");
-    let (rlen, _) = socket.recv_from(&mut buf).expect("recv hs validation failed");
+    socket
+        .send_to(&hs_packet, server_addr)
+        .expect("send hs packet failed");
+    let (rlen, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv hs validation failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
         println!("✓ Elixir validated Rust-generated handshake header + auth tag");
@@ -114,14 +127,19 @@ fn main() {
     cmd.extend_from_slice(&bad_magic_packet);
     cmd.extend_from_slice(payload);
 
-    socket.send_to(&cmd, server_addr).expect("send bad magic failed");
+    socket
+        .send_to(&cmd, server_addr)
+        .expect("send bad magic failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv bad magic response");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REJECTED_MAGIC") || resp.starts_with(b"REJECTED") {
         println!("✓ Bad magic bytes correctly rejected");
         passed += 1;
     } else {
-        println!("✗ Expected rejection, got: {}", String::from_utf8_lossy(resp));
+        println!(
+            "✗ Expected rejection, got: {}",
+            String::from_utf8_lossy(resp)
+        );
         failed += 1;
     }
 
@@ -137,14 +155,19 @@ fn main() {
     cmd.extend_from_slice(&wrong_sid_header.serialize());
     cmd.extend_from_slice(payload);
 
-    socket.send_to(&cmd, server_addr).expect("send wrong sid failed");
+    socket
+        .send_to(&cmd, server_addr)
+        .expect("send wrong sid failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv wrong sid response");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REJECTED_SESSION") || resp.starts_with(b"REJECTED") {
         println!("✓ Unknown SessionID correctly rejected");
         passed += 1;
     } else {
-        println!("✗ Expected rejection, got: {}", String::from_utf8_lossy(resp));
+        println!(
+            "✗ Expected rejection, got: {}",
+            String::from_utf8_lossy(resp)
+        );
         failed += 1;
     }
 
@@ -158,21 +181,28 @@ fn main() {
     cmd.extend_from_slice(&bad_auth_header.serialize());
     cmd.extend_from_slice(payload);
 
-    socket.send_to(&cmd, server_addr).expect("send bad auth failed");
+    socket
+        .send_to(&cmd, server_addr)
+        .expect("send bad auth failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv bad auth response");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REJECTED_AUTH") || resp.starts_with(b"REJECTED") {
         println!("✓ Invalid HeaderAuthTag correctly rejected");
         passed += 1;
     } else {
-        println!("✗ Expected rejection, got: {}", String::from_utf8_lossy(resp));
+        println!(
+            "✗ Expected rejection, got: {}",
+            String::from_utf8_lossy(resp)
+        );
         failed += 1;
     }
 
     // ── Test 6: Elixir-generated auth tag validated by Rust ─────
     print!("  Test 6: Elixir-generated data header validated by Rust... ");
 
-    socket.send_to(b"GENERATE_DATA_PACKET", server_addr).expect("send generate request");
+    socket
+        .send_to(b"GENERATE_DATA_PACKET", server_addr)
+        .expect("send generate request");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv generated packet");
     let elixir_packet = &buf[..rlen];
 
@@ -213,8 +243,12 @@ fn main() {
     // ── Test 7: Elixir-generated handshake header validated by Rust ──
     print!("  Test 7: Elixir-generated handshake header validated by Rust... ");
 
-    socket.send_to(b"GENERATE_HS_PACKET", server_addr).expect("send generate hs request");
-    let (rlen, _) = socket.recv_from(&mut buf).expect("recv generated hs packet");
+    socket
+        .send_to(b"GENERATE_HS_PACKET", server_addr)
+        .expect("send generate hs request");
+    let (rlen, _) = socket
+        .recv_from(&mut buf)
+        .expect("recv generated hs packet");
     let elixir_hs_packet = &buf[..rlen];
 
     if elixir_hs_packet.len() >= 95 {
@@ -237,7 +271,10 @@ fn main() {
             }
         }
     } else {
-        println!("✗ Elixir handshake packet too short: {} bytes", elixir_hs_packet.len());
+        println!(
+            "✗ Elixir handshake packet too short: {} bytes",
+            elixir_hs_packet.len()
+        );
         failed += 1;
     }
 
@@ -247,14 +284,19 @@ fn main() {
     let mut cmd = b"VALIDATE_DATA_PACKET".to_vec();
     cmd.extend_from_slice(&[0x5A, 0x37, 0x10]); // magic + partial header (3 bytes only)
 
-    socket.send_to(&cmd, server_addr).expect("send truncated failed");
+    socket
+        .send_to(&cmd, server_addr)
+        .expect("send truncated failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv truncated response");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REJECTED") {
         println!("✓ Truncated packet correctly rejected");
         passed += 1;
     } else {
-        println!("✗ Expected rejection, got: {}", String::from_utf8_lossy(resp));
+        println!(
+            "✗ Expected rejection, got: {}",
+            String::from_utf8_lossy(resp)
+        );
         failed += 1;
     }
 

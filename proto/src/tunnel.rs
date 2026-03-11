@@ -233,7 +233,10 @@ impl ReassemblyBuffer {
     pub fn insert(&mut self, seq: u64, data: Vec<u8>) -> Option<Vec<(u64, Vec<u8>)>> {
         // Duplicate or already-delivered packet — drop silently
         if seq < self.expected_seq {
-            debug!("reassembly: dropping duplicate/stale seq {} (expected {})", seq, self.expected_seq);
+            debug!(
+                "reassembly: dropping duplicate/stale seq {} (expected {})",
+                seq, self.expected_seq
+            );
             return None;
         }
 
@@ -246,7 +249,11 @@ impl ReassemblyBuffer {
             }
             // Check buffer capacity
             if self.buffer.len() >= self.max_buffered {
-                warn!("reassembly: buffer full ({} packets), dropping seq {}", self.buffer.len(), seq);
+                warn!(
+                    "reassembly: buffer full ({} packets), dropping seq {}",
+                    self.buffer.len(),
+                    seq
+                );
                 return None;
             }
             self.buffer.insert(seq, data);
@@ -254,8 +261,12 @@ impl ReassemblyBuffer {
             if self.gap_detected_at.is_none() {
                 self.gap_detected_at = Some(Instant::now());
             }
-            debug!("reassembly: buffered seq {} (expected {}, buffered {})",
-                seq, self.expected_seq, self.buffer.len());
+            debug!(
+                "reassembly: buffered seq {} (expected {}, buffered {})",
+                seq,
+                self.expected_seq,
+                self.buffer.len()
+            );
             return Some(vec![]);
         }
 
@@ -280,8 +291,12 @@ impl ReassemblyBuffer {
             self.gap_detected_at = Some(Instant::now());
         }
 
-        debug!("reassembly: delivered {} packets, expected_seq now {}, buffered {}",
-            deliverable.len(), self.expected_seq, self.buffer.len());
+        debug!(
+            "reassembly: delivered {} packets, expected_seq now {}, buffered {}",
+            deliverable.len(),
+            self.expected_seq,
+            self.buffer.len()
+        );
 
         Some(deliverable)
     }
@@ -397,9 +412,7 @@ fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
     let mut seqs = Vec::with_capacity(count);
     for i in 0..count {
         let offset = 2 + i * 8;
-        let seq = u64::from_be_bytes(
-            payload[offset..offset + 8].try_into().unwrap()
-        );
+        let seq = u64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap());
         seqs.push(seq);
     }
     Some(seqs)
@@ -439,23 +452,44 @@ impl RetransmitBuffer {
     /// `data_seq` is the data-layer sequence number (used as key for NACK lookup).
     /// `packet_seq` is the pipeline sequence number (used as encryption nonce).
     /// If the buffer is full, the insert is silently dropped.
-    fn insert(&mut self, data_seq: u64, packet_seq: u64, framed_plaintext: Vec<u8>, send_time: Instant) {
+    fn insert(
+        &mut self,
+        data_seq: u64,
+        packet_seq: u64,
+        framed_plaintext: Vec<u8>,
+        send_time: Instant,
+    ) {
         if self.entries.len() >= self.max_entries {
-            debug!("retransmit buffer full ({} entries), skipping data_seq {}", self.entries.len(), data_seq);
+            debug!(
+                "retransmit buffer full ({} entries), skipping data_seq {}",
+                self.entries.len(),
+                data_seq
+            );
             return;
         }
-        self.entries.insert(data_seq, RetransmitEntry { framed_plaintext, packet_seq, send_time });
+        self.entries.insert(
+            data_seq,
+            RetransmitEntry {
+                framed_plaintext,
+                packet_seq,
+                send_time,
+            },
+        );
     }
 
     /// Get the framed plaintext for a data_seq (for retransmission).
     fn get(&self, data_seq: u64) -> Option<&[u8]> {
-        self.entries.get(&data_seq).map(|e| e.framed_plaintext.as_slice())
+        self.entries
+            .get(&data_seq)
+            .map(|e| e.framed_plaintext.as_slice())
     }
 
     /// Get the framed plaintext and original packet_seq for a data_seq.
     /// Returns (plaintext_copy, packet_seq) for retransmission.
     fn get_with_packet_seq(&self, data_seq: u64) -> Option<(Vec<u8>, u64)> {
-        self.entries.get(&data_seq).map(|e| (e.framed_plaintext.clone(), e.packet_seq))
+        self.entries
+            .get(&data_seq)
+            .map(|e| (e.framed_plaintext.clone(), e.packet_seq))
     }
 
     /// Get the send timestamp for a data_seq (for RTT measurement).
@@ -532,8 +566,10 @@ impl CongestionController {
                 self.cwnd += newly_acked as f64;
                 if self.cwnd >= self.ssthresh {
                     self.state = CongestionState::CongestionAvoidance;
-                    debug!("congestion: entering congestion avoidance (cwnd={:.1}, ssthresh={:.1})",
-                        self.cwnd, self.ssthresh);
+                    debug!(
+                        "congestion: entering congestion avoidance (cwnd={:.1}, ssthresh={:.1})",
+                        self.cwnd, self.ssthresh
+                    );
                 }
             }
             CongestionState::CongestionAvoidance => {
@@ -549,7 +585,10 @@ impl CongestionController {
         self.ssthresh = (self.cwnd / 2.0).max(2.0);
         self.cwnd = self.ssthresh;
         self.state = CongestionState::CongestionAvoidance;
-        debug!("congestion: loss detected, ssthresh={:.1}, cwnd={:.1}", self.ssthresh, self.cwnd);
+        debug!(
+            "congestion: loss detected, ssthresh={:.1}, cwnd={:.1}",
+            self.ssthresh, self.cwnd
+        );
     }
 
     /// Update RTT estimate from a measured sample.
@@ -619,12 +658,14 @@ pub async fn run_bridge(
     let last_acked_seq_reader = last_acked_seq;
 
     // Congestion controller shared between sender and receiver.
-    let congestion: Arc<Mutex<CongestionController>> = Arc::new(Mutex::new(CongestionController::new()));
+    let congestion: Arc<Mutex<CongestionController>> =
+        Arc::new(Mutex::new(CongestionController::new()));
     let congestion_sender = congestion.clone();
     let congestion_receiver = congestion;
 
     // Retransmit buffer: sender stores sent packets for retransmission on NACK.
-    let retransmit_buf: Arc<Mutex<RetransmitBuffer>> = Arc::new(Mutex::new(RetransmitBuffer::new(RETRANSMIT_BUF_MAX)));
+    let retransmit_buf: Arc<Mutex<RetransmitBuffer>> =
+        Arc::new(Mutex::new(RetransmitBuffer::new(RETRANSMIT_BUF_MAX)));
     let retransmit_buf_sender = retransmit_buf.clone();
     let retransmit_buf_ack = retransmit_buf;
 
@@ -643,8 +684,7 @@ pub async fn run_bridge(
         // The send key is established during the handshake and doesn't change.
         let send_key = {
             let pl = pipeline_send.lock().await;
-            let session = pl.get_session(&sid_send)
-                .ok_or("session not found")?;
+            let session = pl.get_session(&sid_send).ok_or("session not found")?;
             session.send_key
         };
 
@@ -682,7 +722,10 @@ pub async fn run_bridge(
                         let encrypted = match cipher.encrypt(nonce, plaintext.as_slice()) {
                             Ok(enc) => enc,
                             Err(e) => {
-                                warn!("retransmit encryption error for data_seq {}: {}", nack_data_seq, e);
+                                warn!(
+                                    "retransmit encryption error for data_seq {}: {}",
+                                    nack_data_seq, e
+                                );
                                 continue;
                             }
                         };
@@ -694,12 +737,23 @@ pub async fn run_bridge(
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
                         if let Err(e) = udp_send.send_to(&packet, peer_addr).await {
-                            warn!("retransmit send error for data_seq {}: {}", nack_data_seq, e);
+                            warn!(
+                                "retransmit send error for data_seq {}: {}",
+                                nack_data_seq, e
+                            );
                         } else {
-                            debug!("retransmitted data_seq {} (packet_seq {}, {} bytes)", nack_data_seq, orig_packet_seq, packet.len());
+                            debug!(
+                                "retransmitted data_seq {} (packet_seq {}, {} bytes)",
+                                nack_data_seq,
+                                orig_packet_seq,
+                                packet.len()
+                            );
                         }
                     } else {
-                        debug!("retransmit requested for data_seq {} but not in buffer", nack_data_seq);
+                        debug!(
+                            "retransmit requested for data_seq {} but not in buffer",
+                            nack_data_seq
+                        );
                     }
                 }
             }
@@ -716,14 +770,14 @@ pub async fn run_bridge(
                     fin_frame.extend_from_slice(&fin_data_seq.to_be_bytes());
                     let packet_seq = {
                         let mut pl = pipeline_send.lock().await;
-                        let session = pl.get_session_mut(&sid_send)
-                            .ok_or("session not found")?;
+                        let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
                         session.next_send_seq()
                     };
                     let mut nonce_bytes = [0u8; 12];
                     nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
                     let nonce = Nonce::from_slice(&nonce_bytes);
-                    let encrypted = cipher.encrypt(nonce, fin_frame.as_slice())
+                    let encrypted = cipher
+                        .encrypt(nonce, fin_frame.as_slice())
                         .map_err(|e| format!("FIN encryption error: {}", e))?;
                     let mut header = DataHeader::new(sid_send, packet_seq);
                     let aad = header.aad_bytes();
@@ -731,7 +785,10 @@ pub async fn run_bridge(
                     let mut packet = header.serialize();
                     packet.extend_from_slice(&encrypted);
                     udp_send.send_to(&packet, peer_addr).await?;
-                    debug!("sent FIN frame (data_seq {}, packet_seq {})", fin_data_seq, packet_seq);
+                    debug!(
+                        "sent FIN frame (data_seq {}, packet_seq {})",
+                        fin_data_seq, packet_seq
+                    );
                     return Ok::<_, Box<dyn std::error::Error>>(());
                 }
                 Ok(n) => n,
@@ -775,7 +832,10 @@ pub async fn run_bridge(
 
                     // Window exhausted — check for timeout
                     if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
-                        warn!("sender ACK timeout ({:?} with no window progress)", SENDER_ACK_TIMEOUT);
+                        warn!(
+                            "sender ACK timeout ({:?} with no window progress)",
+                            SENDER_ACK_TIMEOUT
+                        );
                         return Err("sender ACK timeout".into());
                     }
 
@@ -800,11 +860,15 @@ pub async fn run_bridge(
                                 if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
                                     let mut header = DataHeader::new(sid_send, orig_pkt_seq);
                                     let aad = header.aad_bytes();
-                                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                                    header.header_auth_tag =
+                                        compute_header_auth_tag(&send_key, &aad);
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ = udp_send.send_to(&packet, peer_addr).await;
-                                    debug!("retransmitted data_seq {} (while waiting for window)", nack_data_seq);
+                                    debug!(
+                                        "retransmitted data_seq {} (while waiting for window)",
+                                        nack_data_seq
+                                    );
                                 }
                             }
                         }
@@ -817,8 +881,7 @@ pub async fn run_bridge(
                 // Get next packet_seq from the session (for nonce uniqueness)
                 let packet_seq = {
                     let mut pl = pipeline_send.lock().await;
-                    let session = pl.get_session_mut(&sid_send)
-                        .ok_or("session not found")?;
+                    let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
                     session.next_send_seq()
                 };
 
@@ -840,7 +903,8 @@ pub async fn run_bridge(
                 let mut nonce_bytes = [0u8; 12];
                 nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
                 let nonce = Nonce::from_slice(&nonce_bytes);
-                let encrypted = cipher.encrypt(nonce, framed.as_slice())
+                let encrypted = cipher
+                    .encrypt(nonce, framed.as_slice())
                     .map_err(|e| format!("encryption error: {}", e))?;
 
                 // Build data header with packet_seq and auth tag
@@ -852,7 +916,12 @@ pub async fn run_bridge(
                 let mut packet = header.serialize();
                 packet.extend_from_slice(&encrypted);
                 udp_send.send_to(&packet, peer_addr).await?;
-                debug!("ZTLP sent: {} bytes (data_seq {}, packet_seq {})", packet.len(), current_data_seq, packet_seq);
+                debug!(
+                    "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
+                    packet.len(),
+                    current_data_seq,
+                    packet_seq
+                );
             }
         }
     };
@@ -865,7 +934,8 @@ pub async fn run_bridge(
         // Extract recv key upfront — it doesn't change after handshake
         let (recv_key, send_key_for_acks) = {
             let pl = pipeline_recv.lock().await;
-            let session = pl.get_session(&sid_recv)
+            let session = pl
+                .get_session(&sid_recv)
                 .ok_or("session not found for recv key extraction")?;
             (session.recv_key, session.send_key)
         };
@@ -895,10 +965,8 @@ pub async fn run_bridge(
         loop {
             // Use a timeout on UDP recv so we can periodically send ACKs
             // and check for stalls even when no packets are arriving.
-            let recv_result = tokio::time::timeout(
-                ACK_INTERVAL,
-                udp_recv.recv_from(&mut udp_buf),
-            ).await;
+            let recv_result =
+                tokio::time::timeout(ACK_INTERVAL, udp_recv.recv_from(&mut udp_buf)).await;
 
             match recv_result {
                 Ok(Ok((n, _addr))) => {
@@ -963,9 +1031,8 @@ pub async fn run_bridge(
                                 debug!("DATA frame too short for data_seq");
                                 continue;
                             }
-                            let data_seq = u64::from_be_bytes(
-                                frame_payload[..8].try_into().unwrap()
-                            );
+                            let data_seq =
+                                u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
                             let tcp_payload = &frame_payload[8..];
 
                             // Initialize reassembly buffer on first data packet.
@@ -975,7 +1042,8 @@ pub async fn run_bridge(
                             });
 
                             // Insert into reassembly buffer keyed by data_seq
-                            if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec()) {
+                            if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec())
+                            {
                                 // Write all deliverable packets to TCP in order
                                 for (_seq, payload) in &deliverable {
                                     if let Err(e) = tcp_writer.write_all(payload).await {
@@ -999,9 +1067,8 @@ pub async fn run_bridge(
                             // ACK frame from the remote sender's receiver side.
                             // Contains the highest contiguous seq delivered to TCP.
                             if frame_payload.len() >= 8 {
-                                let acked_seq = u64::from_be_bytes(
-                                    frame_payload[..8].try_into().unwrap()
-                                );
+                                let acked_seq =
+                                    u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
                                 debug!("received ACK for data_seq {}", acked_seq);
 
                                 // Compute newly acked count for congestion control
@@ -1055,8 +1122,11 @@ pub async fn run_bridge(
                             // NACK frame from the remote receiver: they're missing packets.
                             // Decode and forward to the sender for retransmission.
                             if let Some(missing_seqs) = decode_nack_payload(frame_payload) {
-                                debug!("received NACK for {} missing seqs: {:?}",
-                                    missing_seqs.len(), &missing_seqs[..missing_seqs.len().min(5)]);
+                                debug!(
+                                    "received NACK for {} missing seqs: {:?}",
+                                    missing_seqs.len(),
+                                    &missing_seqs[..missing_seqs.len().min(5)]
+                                );
                                 if let Err(e) = retransmit_tx.send(missing_seqs) {
                                     warn!("failed to forward NACK to sender: {}", e);
                                 }
@@ -1069,10 +1139,12 @@ pub async fn run_bridge(
                             // FIN frame: [0x02] [data_seq: 8B BE]
                             // Remote side signaled TCP EOF.
                             if frame_payload.len() >= 8 {
-                                let _fin_data_seq = u64::from_be_bytes(
-                                    frame_payload[..8].try_into().unwrap()
+                                let _fin_data_seq =
+                                    u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
+                                info!(
+                                    "received FIN frame (data_seq {}) — remote TCP stream ended",
+                                    _fin_data_seq
                                 );
-                                info!("received FIN frame (data_seq {}) — remote TCP stream ended", _fin_data_seq);
                             } else {
                                 info!("received FIN frame — remote TCP stream ended");
                             }
@@ -1081,8 +1153,10 @@ pub async fn run_bridge(
                             // If there are buffered packets, give them time to arrive
                             if let Some(ref reasm) = reassembly {
                                 if reasm.buffered_count() > 0 {
-                                    debug!("FIN received with {} buffered packets, draining",
-                                        reasm.buffered_count());
+                                    debug!(
+                                        "FIN received with {} buffered packets, draining",
+                                        reasm.buffered_count()
+                                    );
                                     // Continue the loop to drain, but with FIN_DRAIN_TIMEOUT
                                     continue;
                                 }
@@ -1106,15 +1180,23 @@ pub async fn run_bridge(
                     // ── Periodic ACK sending ──
                     // Send an ACK when we've delivered enough packets or enough
                     // time has passed. This lets the sender's flow control advance.
-                    if packets_since_ack >= ACK_EVERY_PACKETS || last_ack_time.elapsed() >= ACK_INTERVAL {
+                    if packets_since_ack >= ACK_EVERY_PACKETS
+                        || last_ack_time.elapsed() >= ACK_INTERVAL
+                    {
                         if let Some(ref reasm) = reassembly {
                             if let Some(delivered_seq) = reasm.last_delivered_seq() {
                                 // Only send if we have new progress to report
                                 if last_acked_value.map_or(true, |prev| delivered_seq > prev) {
                                     send_ack(
-                                        &pipeline_recv, &ack_cipher, &send_key_for_acks,
-                                        sid_recv, &udp_recv, peer_addr, delivered_seq,
-                                    ).await?;
+                                        &pipeline_recv,
+                                        &ack_cipher,
+                                        &send_key_for_acks,
+                                        sid_recv,
+                                        &udp_recv,
+                                        peer_addr,
+                                        delivered_seq,
+                                    )
+                                    .await?;
                                     last_acked_value = Some(delivered_seq);
                                     packets_since_ack = 0;
                                     last_ack_time = Instant::now();
@@ -1144,9 +1226,15 @@ pub async fn run_bridge(
                     if let Some(delivered_seq) = reasm.last_delivered_seq() {
                         if last_acked_value.map_or(true, |prev| delivered_seq > prev) {
                             send_ack(
-                                &pipeline_recv, &ack_cipher, &send_key_for_acks,
-                                sid_recv, &udp_recv, peer_addr, delivered_seq,
-                            ).await?;
+                                &pipeline_recv,
+                                &ack_cipher,
+                                &send_key_for_acks,
+                                sid_recv,
+                                &udp_recv,
+                                peer_addr,
+                                delivered_seq,
+                            )
+                            .await?;
                             last_acked_value = Some(delivered_seq);
                             packets_since_ack = 0;
                             last_ack_time = Instant::now();
@@ -1163,27 +1251,31 @@ pub async fn run_bridge(
                     let cc = congestion_receiver.lock().await;
                     cc.nack_threshold()
                 };
-                if reasm.should_nack(nack_threshold)
-                    && reasm.can_send_nack(nack_threshold)
-                {
+                if reasm.should_nack(nack_threshold) && reasm.can_send_nack(nack_threshold) {
                     let missing = reasm.missing_seqs(MAX_NACK_SEQS);
                     if !missing.is_empty() {
-                        debug!("sending NACK for {} missing seqs (expected={}): {:?}",
-                            missing.len(), reasm.expected_seq(), &missing[..missing.len().min(5)]);
+                        debug!(
+                            "sending NACK for {} missing seqs (expected={}): {:?}",
+                            missing.len(),
+                            reasm.expected_seq(),
+                            &missing[..missing.len().min(5)]
+                        );
 
                         let nack_frame = encode_nack_frame(&missing);
 
                         // Send NACK using the send key (like ACKs)
                         let seq = {
                             let mut pl = pipeline_recv.lock().await;
-                            let session = pl.get_session_mut(&sid_recv)
+                            let session = pl
+                                .get_session_mut(&sid_recv)
                                 .ok_or("session not found for NACK send")?;
                             session.next_send_seq()
                         };
                         let mut nonce_bytes = [0u8; 12];
                         nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
-                        let encrypted = ack_cipher.encrypt(nonce, nack_frame.as_slice())
+                        let encrypted = ack_cipher
+                            .encrypt(nonce, nack_frame.as_slice())
                             .map_err(|e| format!("NACK encryption error: {}", e))?;
 
                         let mut header = DataHeader::new(sid_recv, seq);
@@ -1268,7 +1360,8 @@ async fn send_ack(
     // Get next send sequence number
     let seq = {
         let mut pl = pipeline.lock().await;
-        let session = pl.get_session_mut(&session_id)
+        let session = pl
+            .get_session_mut(&session_id)
             .ok_or("session not found for ACK send")?;
         session.next_send_seq()
     };
@@ -1277,7 +1370,8 @@ async fn send_ack(
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let encrypted = cipher.encrypt(nonce, ack_frame.as_slice())
+    let encrypted = cipher
+        .encrypt(nonce, ack_frame.as_slice())
         .map_err(|e| format!("ACK encryption error: {}", e))?;
 
     // Build header
@@ -1289,7 +1383,10 @@ async fn send_ack(
     let mut packet = header.serialize();
     packet.extend_from_slice(&encrypted);
     udp.send_to(&packet, peer_addr).await?;
-    debug!("sent ACK for delivered_seq {} (packet seq {})", delivered_seq, seq);
+    debug!(
+        "sent ACK for delivered_seq {} (packet seq {})",
+        delivered_seq, seq
+    );
 
     Ok(())
 }
@@ -1336,7 +1433,9 @@ impl ServiceRegistry {
             DEFAULT_SERVICE.to_string()
         } else {
             // Trim trailing null bytes to get the service name
-            let end = dst_svc_id.iter().rposition(|&b| b != 0)
+            let end = dst_svc_id
+                .iter()
+                .rposition(|&b| b != 0)
                 .map(|i| i + 1)
                 .unwrap_or(0);
             String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
@@ -1368,7 +1467,9 @@ pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
     if bytes.len() > MAX_SERVICE_NAME_LEN {
         return Err(format!(
             "service name '{}' too long ({} bytes, max {})",
-            name, bytes.len(), MAX_SERVICE_NAME_LEN
+            name,
+            bytes.len(),
+            MAX_SERVICE_NAME_LEN
         ));
     }
     let mut buf = [0u8; 16];
@@ -1388,8 +1489,12 @@ fn parse_forward_arg(s: &str) -> Result<(String, SocketAddr), String> {
     }
 
     // Try NAME:HOST:PORT — split on first ':'
-    let first_colon = s.find(':')
-        .ok_or_else(|| format!("invalid --forward argument '{}'. Expected NAME:HOST:PORT or HOST:PORT", s))?;
+    let first_colon = s.find(':').ok_or_else(|| {
+        format!(
+            "invalid --forward argument '{}'. Expected NAME:HOST:PORT or HOST:PORT",
+            s
+        )
+    })?;
 
     let name = &s[..first_colon];
     let addr_str = &s[first_colon + 1..];
@@ -1401,17 +1506,23 @@ fn parse_forward_arg(s: &str) -> Result<(String, SocketAddr), String> {
     if name.len() > MAX_SERVICE_NAME_LEN {
         return Err(format!(
             "service name '{}' too long ({} bytes, max {})",
-            name, name.len(), MAX_SERVICE_NAME_LEN
+            name,
+            name.len(),
+            MAX_SERVICE_NAME_LEN
         ));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(format!(
             "service name '{}' contains invalid characters (use a-z, 0-9, -, _)",
             name
         ));
     }
 
-    let addr: SocketAddr = addr_str.parse()
+    let addr: SocketAddr = addr_str
+        .parse()
         .map_err(|e| format!("invalid address '{}' in '{}': {}", addr_str, s, e))?;
 
     Ok((name.to_string(), addr))
@@ -1434,7 +1545,8 @@ pub fn parse_local_forward(s: &str) -> Result<(u16, String), String> {
         ));
     }
 
-    let local_port: u16 = parts[0].parse()
+    let local_port: u16 = parts[0]
+        .parse()
         .map_err(|_| format!("invalid local port '{}' in '{}'", parts[0], s))?;
 
     let remote = parts[1].to_string();
@@ -1720,9 +1832,7 @@ mod tests {
 
     #[test]
     fn test_service_registry_single_default() {
-        let reg = ServiceRegistry::from_forward_args(&[
-            "127.0.0.1:22".to_string(),
-        ]).unwrap();
+        let reg = ServiceRegistry::from_forward_args(&["127.0.0.1:22".to_string()]).unwrap();
         assert_eq!(reg.len(), 1);
         assert!(reg.services.contains_key(DEFAULT_SERVICE));
     }
@@ -1733,7 +1843,8 @@ mod tests {
             "ssh:127.0.0.1:22".to_string(),
             "rdp:127.0.0.1:3389".to_string(),
             "db:127.0.0.1:5432".to_string(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(reg.len(), 3);
         assert_eq!(reg.services["ssh"].port(), 22);
         assert_eq!(reg.services["rdp"].port(), 3389);
@@ -1753,7 +1864,8 @@ mod tests {
     fn test_resolve_zero_dst_svc_id() {
         let reg = ServiceRegistry::from_forward_args(&[
             "127.0.0.1:22".to_string(), // default
-        ]).unwrap();
+        ])
+        .unwrap();
         let zeros = [0u8; 16];
         let (name, addr) = reg.resolve(&zeros).unwrap();
         assert_eq!(name, DEFAULT_SERVICE);
@@ -1765,7 +1877,8 @@ mod tests {
         let reg = ServiceRegistry::from_forward_args(&[
             "ssh:127.0.0.1:22".to_string(),
             "rdp:127.0.0.1:3389".to_string(),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let mut svc_id = [0u8; 16];
         svc_id[..3].copy_from_slice(b"ssh");
@@ -1782,9 +1895,7 @@ mod tests {
 
     #[test]
     fn test_resolve_unknown_service() {
-        let reg = ServiceRegistry::from_forward_args(&[
-            "ssh:127.0.0.1:22".to_string(),
-        ]).unwrap();
+        let reg = ServiceRegistry::from_forward_args(&["ssh:127.0.0.1:22".to_string()]).unwrap();
 
         let mut svc_id = [0u8; 16];
         svc_id[..5].copy_from_slice(b"mysql");
@@ -2026,7 +2137,10 @@ mod tests {
         cc.srtt_ms = 10.0; // Very low RTT
         let threshold = cc.nack_threshold();
         // max(3*10, 100) = 100ms (minimum)
-        assert_eq!(threshold, std::time::Duration::from_millis(NACK_MIN_THRESHOLD_MS));
+        assert_eq!(
+            threshold,
+            std::time::Duration::from_millis(NACK_MIN_THRESHOLD_MS)
+        );
     }
 
     // ── Gap detection tests ─────────────────────────────────────────────

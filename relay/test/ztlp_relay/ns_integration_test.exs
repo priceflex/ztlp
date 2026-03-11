@@ -95,25 +95,30 @@ defmodule ZtlpRelay.NsIntegrationTest do
       {ns_pid, _store_pid, ns_port} = start_ns_server()
       {:ok, _} = NsClient.start_link(ns_server: {{127, 0, 0, 1}, ns_port})
       our_node_id = :crypto.strong_rand_bytes(16)
+
       our_info = %{
         node_id: our_node_id,
         endpoints: ["127.0.0.1:4444"],
         capacity: 200,
         region: "eu-west"
       }
+
       assert :ok = NsClient.register_self("relay.ztlp", our_info)
       node_id_hex = Base.encode16(our_node_id, case: :lower)
       expected_name = "#{node_id_hex}.relay.ztlp"
       Process.sleep(50)
+
       case ZtlpNs.Store.lookup(expected_name, :relay) do
         {:ok, record} ->
           assert record.data.node_id == node_id_hex
           assert record.data.endpoints == ["127.0.0.1:4444"]
           assert record.data.capacity == 200
           assert record.data.region == "eu-west"
+
         :not_found ->
           flunk("Expected relay record '#{expected_name}' to exist in NS store")
       end
+
       GenServer.stop(ns_pid)
     end
   end
@@ -139,12 +144,15 @@ defmodule ZtlpRelay.NsIntegrationTest do
   describe "static bootstrap fallback" do
     test "mesh manager works without NS server configured" do
       our_node_id = :crypto.strong_rand_bytes(16)
-      {:ok, pid} = MeshManager.start_link(
-        node_id: our_node_id,
-        mesh_listen_port: 0,
-        bootstrap_relays: [],
-        ns_server: nil
-      )
+
+      {:ok, pid} =
+        MeshManager.start_link(
+          node_id: our_node_id,
+          mesh_listen_port: 0,
+          bootstrap_relays: [],
+          ns_server: nil
+        )
+
       status = MeshManager.get_mesh_status()
       assert status.node_id == our_node_id
       assert status.socket_open == true

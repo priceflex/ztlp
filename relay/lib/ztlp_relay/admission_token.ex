@@ -27,18 +27,19 @@ defmodule ZtlpRelay.AdmissionToken do
   @version 1
   @token_size 93
   @mac_size 32
-  @data_size 61  # 93 - 32
+  # 93 - 32
+  @data_size 61
   @blake2s_block_size 64
   @default_ttl_seconds 300
 
   @type token_fields :: %{
-    version: non_neg_integer(),
-    node_id: binary(),
-    issuer_id: binary(),
-    issued_at: non_neg_integer(),
-    expires_at: non_neg_integer(),
-    session_scope: binary()
-  }
+          version: non_neg_integer(),
+          node_id: binary(),
+          issuer_id: binary(),
+          issued_at: non_neg_integer(),
+          expires_at: non_neg_integer(),
+          session_scope: binary()
+        }
 
   @doc """
   Generate a new 32-byte random secret key for RAT signing.
@@ -151,7 +152,7 @@ defmodule ZtlpRelay.AdmissionToken do
   Used during key rotation to accept tokens signed with either key.
   """
   @spec verify_with_rotation(binary(), binary(), binary() | nil, keyword()) ::
-    {:ok, token_fields()} | {:error, atom()}
+          {:ok, token_fields()} | {:error, atom()}
   def verify_with_rotation(token, current_key, previous_key, opts \\ []) do
     case verify(token, current_key, opts) do
       {:ok, _} = result ->
@@ -184,9 +185,11 @@ defmodule ZtlpRelay.AdmissionToken do
   Quick expiry check without full MAC verification.
   """
   @spec expired?(binary()) :: boolean()
-  def expired?(<<_version::8, _node_id::binary-size(16), _issuer_id::binary-size(16),
-                 _issued_at::big-unsigned-64, expires_at::big-unsigned-64,
-                 _session_scope::binary-size(12), _mac::binary-size(32)>>) do
+  def expired?(
+        <<_version::8, _node_id::binary-size(16), _issuer_id::binary-size(16),
+          _issued_at::big-unsigned-64, expires_at::big-unsigned-64,
+          _session_scope::binary-size(12), _mac::binary-size(32)>>
+      ) do
     System.system_time(:second) >= expires_at
   end
 
@@ -195,17 +198,20 @@ defmodule ZtlpRelay.AdmissionToken do
   # Internal functions
 
   @doc false
-  defp parse_data(<<version::8, node_id::binary-size(16), issuer_id::binary-size(16),
-                    issued_at::big-unsigned-64, expires_at::big-unsigned-64,
-                    session_scope::binary-size(12)>>) do
-    {:ok, %{
-      version: version,
-      node_id: node_id,
-      issuer_id: issuer_id,
-      issued_at: issued_at,
-      expires_at: expires_at,
-      session_scope: session_scope
-    }}
+  defp parse_data(
+         <<version::8, node_id::binary-size(16), issuer_id::binary-size(16),
+           issued_at::big-unsigned-64, expires_at::big-unsigned-64,
+           session_scope::binary-size(12)>>
+       ) do
+    {:ok,
+     %{
+       version: version,
+       node_id: node_id,
+       issuer_id: issuer_id,
+       issued_at: issued_at,
+       expires_at: expires_at,
+       session_scope: session_scope
+     }}
   end
 
   defp parse_data(_), do: {:error, :malformed_token}

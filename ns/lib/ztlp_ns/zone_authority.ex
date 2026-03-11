@@ -38,10 +38,10 @@ defmodule ZtlpNs.ZoneAuthority do
   alias ZtlpNs.{Crypto, Record, Zone}
 
   @type t :: %__MODULE__{
-    zone: Zone.t(),
-    public_key: Crypto.public_key(),
-    private_key: Crypto.private_key()
-  }
+          zone: Zone.t(),
+          public_key: Crypto.public_key(),
+          private_key: Crypto.private_key()
+        }
 
   defstruct [:zone, :public_key, :private_key]
 
@@ -88,7 +88,10 @@ defmodule ZtlpNs.ZoneAuthority do
   Returns the signed delegation record.
   """
   @spec delegate(t(), t()) :: Record.t()
-  def delegate(%__MODULE__{private_key: parent_priv}, %__MODULE__{zone: child_zone, public_key: child_pub}) do
+  def delegate(%__MODULE__{private_key: parent_priv}, %__MODULE__{
+        zone: child_zone,
+        public_key: child_pub
+      }) do
     # A delegation is a ZTLP_KEY record for the child zone's authority.
     # The name is the child zone's name, and the "node_id" field contains
     # a special marker indicating this is a zone delegation, not a node key.
@@ -102,7 +105,8 @@ defmodule ZtlpNs.ZoneAuthority do
         delegation: true
       },
       created_at: System.system_time(:second),
-      ttl: 86400 * 365,  # Zone delegations are long-lived (1 year)
+      # Zone delegations are long-lived (1 year)
+      ttl: 86400 * 365,
       serial: 1
     }
 

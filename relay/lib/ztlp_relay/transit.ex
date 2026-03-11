@@ -26,9 +26,9 @@ defmodule ZtlpRelay.Transit do
   @type sender :: {:inet.ip_address(), :inet.port_number()}
 
   @type accept_result ::
-    {:accept, :existing_session}
-    | {:accept, :new_session, binary()}
-    | :drop
+          {:accept, :existing_session}
+          | {:accept, :new_session, binary()}
+          | :drop
 
   @doc """
   Check if a packet should be accepted by the transit relay.

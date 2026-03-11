@@ -23,7 +23,10 @@ defmodule ZtlpRelay.RateLimiter do
     name = Keyword.get(opts, :name, __MODULE__)
     table = Keyword.get(opts, :table, @table_name)
     cleanup_interval = Keyword.get(opts, :cleanup_interval_ms, @cleanup_interval_ms)
-    GenServer.start_link(__MODULE__, %{table: table, cleanup_interval: cleanup_interval}, name: name)
+
+    GenServer.start_link(__MODULE__, %{table: table, cleanup_interval: cleanup_interval},
+      name: name
+    )
   end
 
   @doc """
@@ -94,13 +97,15 @@ defmodule ZtlpRelay.RateLimiter do
 
   @impl true
   def init(%{table: table, cleanup_interval: cleanup_interval}) do
-    ets = :ets.new(table, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
+    ets =
+      :ets.new(table, [
+        :named_table,
+        :set,
+        :public,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+
     schedule_cleanup(cleanup_interval)
     {:ok, %{table: ets, cleanup_interval: cleanup_interval}}
   end

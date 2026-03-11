@@ -248,7 +248,9 @@ defmodule ZtlpRelay.Config do
   @spec ns_server() :: {:inet.ip_address() | String.t(), non_neg_integer()} | nil
   def ns_server do
     case System.get_env("ZTLP_RELAY_NS_SERVER") do
-      nil -> Application.get_env(:ztlp_relay, :ns_server)
+      nil ->
+        Application.get_env(:ztlp_relay, :ns_server)
+
       str ->
         case String.split(str, ":") do
           [host, port_str] ->
@@ -256,7 +258,9 @@ defmodule ZtlpRelay.Config do
               {port, ""} -> {host, port}
               _ -> nil
             end
-          _ -> nil
+
+          _ ->
+            nil
         end
     end
   end
@@ -287,5 +291,4 @@ defmodule ZtlpRelay.Config do
       region -> region
     end
   end
-
 end

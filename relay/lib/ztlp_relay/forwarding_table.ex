@@ -20,14 +20,16 @@ defmodule ZtlpRelay.ForwardingTable do
   require Logger
 
   @table_name :ztlp_forwarding_table
-  @default_ttl_ms 300_000       # 5 minutes, same as session timeout
-  @sweep_interval_ms 60_000     # sweep expired entries every 60s
+  # 5 minutes, same as session timeout
+  @default_ttl_ms 300_000
+  # sweep expired entries every 60s
+  @sweep_interval_ms 60_000
 
   @type path_entry :: %{
-    path: [binary()],
-    inserted_at: integer(),
-    ttl_ms: non_neg_integer()
-  }
+          path: [binary()],
+          inserted_at: integer(),
+          ttl_ms: non_neg_integer()
+        }
 
   # Client API
 
@@ -116,10 +118,11 @@ defmodule ZtlpRelay.ForwardingTable do
 
     schedule_sweep(sweep_interval)
 
-    {:ok, %{
-      table_name: table_name,
-      sweep_interval: sweep_interval
-    }}
+    {:ok,
+     %{
+       table_name: table_name,
+       sweep_interval: sweep_interval
+     }}
   end
 
   @impl true

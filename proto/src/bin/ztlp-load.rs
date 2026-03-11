@@ -181,16 +181,45 @@ fn print_summary(stats: &LoadStats, elapsed: Duration) {
     let errs = stats.errors.load(Ordering::Relaxed);
     let secs = elapsed.as_secs_f64();
 
-    println!("\n{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
     println!("  {}", "Load Test Summary".white().bold());
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
     println!("  {:<24} {:.2}s", "Duration:".bright_blue(), secs);
-    println!("  {:<24} {}", "Packets sent:".bright_blue(), format_number(pkts));
-    println!("  {:<24} {}", "Bytes sent:".bright_blue(), format_bytes(bytes));
-    println!("  {:<24} {}", "Errors:".bright_blue(),
-        if errs > 0 { format!("{}", errs).red().to_string() } else { "0".green().to_string() });
-    println!("  {:<24} {:.0} pps", "Throughput:".bright_blue(), pkts as f64 / secs);
-    println!("  {:<24} {}/s", "Bandwidth:".bright_blue(), format_bytes((bytes as f64 / secs) as u64));
+    println!(
+        "  {:<24} {}",
+        "Packets sent:".bright_blue(),
+        format_number(pkts)
+    );
+    println!(
+        "  {:<24} {}",
+        "Bytes sent:".bright_blue(),
+        format_bytes(bytes)
+    );
+    println!(
+        "  {:<24} {}",
+        "Errors:".bright_blue(),
+        if errs > 0 {
+            format!("{}", errs).red().to_string()
+        } else {
+            "0".green().to_string()
+        }
+    );
+    println!(
+        "  {:<24} {:.0} pps",
+        "Throughput:".bright_blue(),
+        pkts as f64 / secs
+    );
+    println!(
+        "  {:<24} {}/s",
+        "Bandwidth:".bright_blue(),
+        format_bytes((bytes as f64 / secs) as u64)
+    );
 
     // Latency percentiles
     if let Ok(mut lats) = stats.latencies_ns.lock() {
@@ -225,12 +254,21 @@ fn print_summary(stats: &LoadStats, elapsed: Duration) {
                 let pct = count as f64 / total * 100.0;
                 let bar_len = (pct / 2.0) as usize;
                 let bar: String = "█".repeat(bar_len);
-                println!("    {:<14} {:>6} ({:>5.1}%) {}", label, count, pct, bar.bright_green());
+                println!(
+                    "    {:<14} {:>6} ({:>5.1}%) {}",
+                    label,
+                    count,
+                    pct,
+                    bar.bright_green()
+                );
             }
         }
     }
 
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
 }
 
 fn format_number(n: u64) -> String {
@@ -271,18 +309,29 @@ fn format_duration_ns(ns: u64) -> String {
 // Packet generation helpers
 // ─────────────────────────────────────────────────────────────────────────
 
-fn build_data_packet(session_id: SessionId, seq: u64, key: &[u8; 32], payload_size: usize) -> Vec<u8> {
+fn build_data_packet(
+    session_id: SessionId,
+    seq: u64,
+    key: &[u8; 32],
+    payload_size: usize,
+) -> Vec<u8> {
     let mut hdr = DataHeader::new(session_id, seq);
     let aad = hdr.aad_bytes();
     hdr.header_auth_tag = compute_header_auth_tag(key, &aad);
     let payload: Vec<u8> = (0..payload_size).map(|i| (i % 256) as u8).collect();
-    let pkt = ZtlpPacket::Data { header: hdr, payload };
+    let pkt = ZtlpPacket::Data {
+        header: hdr,
+        payload,
+    };
     pkt.serialize()
 }
 
 fn build_hello_packet() -> Vec<u8> {
     let hdr = HandshakeHeader::new(MsgType::Hello);
-    let pkt = ZtlpPacket::Handshake { header: hdr, payload: vec![] };
+    let pkt = ZtlpPacket::Handshake {
+        header: hdr,
+        payload: vec![],
+    };
     pkt.serialize()
 }
 
@@ -296,7 +345,10 @@ fn build_ns_query_packet(session_id: SessionId, seq: u64, key: &[u8; 32]) -> Vec
     // Include a minimal query payload (service name)
     let payload = b"lookup:test-service.ztlp.local".to_vec();
     hdr.payload_len = payload.len() as u16;
-    let pkt = ZtlpPacket::Handshake { header: hdr, payload };
+    let pkt = ZtlpPacket::Handshake {
+        header: hdr,
+        payload,
+    };
     pkt.serialize()
 }
 
@@ -313,13 +365,21 @@ async fn run_udp_load(
     warmup: bool,
     build_packet: impl Fn(SessionId, u64, &[u8; 32], usize) -> Vec<u8> + Send + Sync + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let target_addr: SocketAddr = target.parse().map_err(|e| {
-        format!("Invalid target address '{}': {}", target, e)
-    })?;
+    let target_addr: SocketAddr = target
+        .parse()
+        .map_err(|e| format!("Invalid target address '{}': {}", target, e))?;
 
     println!("  {:<24} {}", "Target:".bright_blue(), target_addr);
     println!("  {:<24} {}", "Sessions:".bright_blue(), sessions_count);
-    println!("  {:<24} {} pps", "Rate:".bright_blue(), if rate == 0 { "unlimited".to_string() } else { rate.to_string() });
+    println!(
+        "  {:<24} {} pps",
+        "Rate:".bright_blue(),
+        if rate == 0 {
+            "unlimited".to_string()
+        } else {
+            rate.to_string()
+        }
+    );
     println!("  {:<24} {}s", "Duration:".bright_blue(), duration_secs);
     println!("  {:<24} {}B", "Packet size:".bright_blue(), packet_size);
 
@@ -333,7 +393,10 @@ async fn run_udp_load(
 
     // Warmup: send HELLO packets
     if warmup {
-        println!("\n  {} Sending warm-up HELLO packets...", "⏳".bright_yellow());
+        println!(
+            "\n  {} Sending warm-up HELLO packets...",
+            "⏳".bright_yellow()
+        );
         let sock = UdpSocket::bind("0.0.0.0:0").await?;
         for _ in 0..sessions_count {
             let hello = build_hello_packet();
@@ -350,9 +413,13 @@ async fn run_udp_load(
 
     // Create progress bar
     let pb = ProgressBar::new(duration_secs);
-    pb.set_style(ProgressStyle::with_template(
-        "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len}s | {msg}"
-    ).unwrap().progress_chars("█▓░"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len}s | {msg}",
+        )
+        .unwrap()
+        .progress_chars("█▓░"),
+    );
 
     // Spawn progress updater
     let stats_clone = stats.clone();
@@ -446,10 +513,21 @@ async fn run_udp_load(
 // ─────────────────────────────────────────────────────────────────────────
 
 fn run_pipeline_benchmark(total_packets: u64, session_count: usize, full_auth: bool) {
-    println!("  {:<24} {}", "Packets:".bright_blue(), format_number(total_packets));
+    println!(
+        "  {:<24} {}",
+        "Packets:".bright_blue(),
+        format_number(total_packets)
+    );
     println!("  {:<24} {}", "Sessions:".bright_blue(), session_count);
-    println!("  {:<24} {}", "Full auth:".bright_blue(),
-        if full_auth { "yes (L1+L2+L3)" } else { "no (L1+L2 only)" });
+    println!(
+        "  {:<24} {}",
+        "Full auth:".bright_blue(),
+        if full_auth {
+            "yes (L1+L2+L3)"
+        } else {
+            "no (L1+L2 only)"
+        }
+    );
 
     // Build pipeline with sessions
     let mut pipeline = Pipeline::new();
@@ -466,18 +544,27 @@ fn run_pipeline_benchmark(total_packets: u64, session_count: usize, full_auth: b
     }
 
     // Pre-build test packets for each session
-    let packets: Vec<Vec<u8>> = test_sessions.iter().enumerate().map(|(i, (sid, key))| {
-        build_data_packet(*sid, i as u64, key, 64)
-    }).collect();
+    let packets: Vec<Vec<u8>> = test_sessions
+        .iter()
+        .enumerate()
+        .map(|(i, (sid, key))| build_data_packet(*sid, i as u64, key, 64))
+        .collect();
 
     let stats = Arc::new(LoadStats::new());
 
-    println!("\n  {} Running pipeline benchmark...\n", "⏳".bright_yellow());
+    println!(
+        "\n  {} Running pipeline benchmark...\n",
+        "⏳".bright_yellow()
+    );
 
     let pb = ProgressBar::new(total_packets);
-    pb.set_style(ProgressStyle::with_template(
-        "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | {per_sec}"
-    ).unwrap().progress_chars("█▓░"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | {per_sec}",
+        )
+        .unwrap()
+        .progress_chars("█▓░"),
+    );
 
     let start = Instant::now();
     let num_packets = packets.len();
@@ -513,8 +600,10 @@ fn run_pipeline_benchmark(total_packets: u64, session_count: usize, full_auth: b
     // Also show pipeline counters
     let snap = pipeline.counters.snapshot();
     println!("\n  {}", "Pipeline counters:".bright_blue());
-    println!("    L1 drops: {}, L2 drops: {}, L3 drops: {}, passed: {}",
-        snap.layer1_drops, snap.layer2_drops, snap.layer3_drops, snap.passed);
+    println!(
+        "    L1 drops: {}, L2 drops: {}, L3 drops: {}, passed: {}",
+        snap.layer1_drops, snap.layer2_drops, snap.layer3_drops, snap.passed
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -525,25 +614,65 @@ fn run_pipeline_benchmark(total_packets: u64, session_count: usize, full_auth: b
 async fn main() {
     let cli = Cli::parse();
 
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
     println!("  {}", "ZTLP Load Generator".white().bold());
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
 
     match cli.command {
-        Command::Relay { target, sessions, rate, duration, packet_size, warmup } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Relay flood (UDP data packets)".bright_magenta());
+        Command::Relay {
+            target,
+            sessions,
+            rate,
+            duration,
+            packet_size,
+            warmup,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Relay flood (UDP data packets)".bright_magenta()
+            );
             if let Err(e) = run_udp_load(
-                &target, sessions, rate, duration, packet_size, warmup,
+                &target,
+                sessions,
+                rate,
+                duration,
+                packet_size,
+                warmup,
                 |sid, seq, key, psize| build_data_packet(sid, seq, key, psize),
-            ).await {
+            )
+            .await
+            {
                 eprintln!("\n  {} {}", "✗".red(), e);
                 std::process::exit(1);
             }
         }
-        Command::Gateway { target, sessions, rate, duration, packet_size, warmup } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Gateway test (handshake + data)".bright_magenta());
+        Command::Gateway {
+            target,
+            sessions,
+            rate,
+            duration,
+            packet_size,
+            warmup,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Gateway test (handshake + data)".bright_magenta()
+            );
             if let Err(e) = run_udp_load(
-                &target, sessions, rate, duration, packet_size, warmup,
+                &target,
+                sessions,
+                rate,
+                duration,
+                packet_size,
+                warmup,
                 |sid, seq, key, psize| {
                     // Alternate between hello and data packets
                     if seq == 0 {
@@ -552,23 +681,48 @@ async fn main() {
                         build_data_packet(sid, seq, key, psize)
                     }
                 },
-            ).await {
+            )
+            .await
+            {
                 eprintln!("\n  {} {}", "✗".red(), e);
                 std::process::exit(1);
             }
         }
-        Command::Ns { target, rate, duration } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "NS query flood".bright_magenta());
+        Command::Ns {
+            target,
+            rate,
+            duration,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "NS query flood".bright_magenta()
+            );
             if let Err(e) = run_udp_load(
-                &target, 1, rate, duration, 0, false,
+                &target,
+                1,
+                rate,
+                duration,
+                0,
+                false,
                 |sid, seq, key, _psize| build_ns_query_packet(sid, seq, key),
-            ).await {
+            )
+            .await
+            {
                 eprintln!("\n  {} {}", "✗".red(), e);
                 std::process::exit(1);
             }
         }
-        Command::Pipeline { packets, sessions, full } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Local pipeline benchmark".bright_magenta());
+        Command::Pipeline {
+            packets,
+            sessions,
+            full,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Local pipeline benchmark".bright_magenta()
+            );
             run_pipeline_benchmark(packets, sessions, full);
         }
     }

@@ -8,13 +8,7 @@ use ztlp_proto::session::SessionState;
 fn make_test_session(session_id: SessionId) -> SessionState {
     let send_key = [0xAA; 32];
     let recv_key = [0xBB; 32];
-    SessionState::new(
-        session_id,
-        NodeId::generate(),
-        send_key,
-        recv_key,
-        false,
-    )
+    SessionState::new(session_id, NodeId::generate(), send_key, recv_key, false)
 }
 
 #[test]
@@ -134,13 +128,7 @@ fn test_layer3_passes_valid_auth_tag() {
     let mut pipeline = Pipeline::new();
     let sid = SessionId::generate();
     let recv_key = [0xBB; 32];
-    let session = SessionState::new(
-        sid,
-        NodeId::generate(),
-        [0xAA; 32],
-        recv_key,
-        false,
-    );
+    let session = SessionState::new(sid, NodeId::generate(), [0xAA; 32], recv_key, false);
     pipeline.register_session(session);
 
     // Create a data header and compute the correct auth tag
@@ -162,13 +150,7 @@ fn test_full_pipeline_pass() {
     let mut pipeline = Pipeline::new();
     let sid = SessionId::generate();
     let recv_key = [0xBB; 32];
-    let session = SessionState::new(
-        sid,
-        NodeId::generate(),
-        [0xAA; 32],
-        recv_key,
-        false,
-    );
+    let session = SessionState::new(sid, NodeId::generate(), [0xAA; 32], recv_key, false);
     pipeline.register_session(session);
 
     // Build a valid data packet
@@ -195,13 +177,7 @@ fn test_full_pipeline_drop_counters() {
     let mut pipeline = Pipeline::new();
     let sid = SessionId::generate();
     let recv_key = [0xBB; 32];
-    let session = SessionState::new(
-        sid,
-        NodeId::generate(),
-        [0xAA; 32],
-        recv_key,
-        false,
-    );
+    let session = SessionState::new(sid, NodeId::generate(), [0xAA; 32], recv_key, false);
     pipeline.register_session(session);
 
     // Layer 1 drop: bad magic
@@ -240,8 +216,5 @@ fn test_pipeline_session_removal() {
     // Now layer 2 should reject it
     let header = DataHeader::new(sid, 0);
     let bytes = header.serialize();
-    assert_eq!(
-        pipeline.layer2_session_check(&bytes),
-        AdmissionResult::Drop,
-    );
+    assert_eq!(pipeline.layer2_session_check(&bytes), AdmissionResult::Drop,);
 }

@@ -97,11 +97,8 @@ defmodule ZtlpNs.Record do
     data_bin = :erlang.term_to_binary(record.data, [:deterministic])
     data_len = byte_size(data_bin)
 
-    <<type_byte::8,
-      name_len::16, name_bin::binary,
-      data_len::32, data_bin::binary,
-      record.created_at::unsigned-big-64,
-      record.ttl::unsigned-big-32,
+    <<type_byte::8, name_len::16, name_bin::binary, data_len::32, data_bin::binary,
+      record.created_at::unsigned-big-64, record.ttl::unsigned-big-32,
       record.serial::unsigned-big-64>>
   end
 
@@ -113,25 +110,27 @@ defmodule ZtlpNs.Record do
   those must be attached separately.
   """
   @spec deserialize(binary()) :: {:ok, t()} | {:error, atom()}
-  def deserialize(<<type_byte::8, name_len::16, name::binary-size(name_len),
-                    data_len::32, data_bin::binary-size(data_len),
-                    created_at::unsigned-big-64, ttl::unsigned-big-32,
-                    serial::unsigned-big-64>>) do
+  def deserialize(
+        <<type_byte::8, name_len::16, name::binary-size(name_len), data_len::32,
+          data_bin::binary-size(data_len), created_at::unsigned-big-64, ttl::unsigned-big-32,
+          serial::unsigned-big-64>>
+      ) do
     type = byte_to_type(type_byte)
     # :safe prevents atoms from being created during deserialization,
     # protecting against atom table exhaustion attacks
     data = :erlang.binary_to_term(data_bin, [:safe])
 
-    {:ok, %__MODULE__{
-      name: name,
-      type: type,
-      data: data,
-      signature: nil,
-      signer_public_key: nil,
-      created_at: created_at,
-      ttl: ttl,
-      serial: serial
-    }}
+    {:ok,
+     %__MODULE__{
+       name: name,
+       type: type,
+       data: data,
+       signature: nil,
+       signer_public_key: nil,
+       created_at: created_at,
+       ttl: ttl,
+       serial: serial
+     }}
   rescue
     _ -> {:error, :invalid_binary}
   end
@@ -173,6 +172,7 @@ defmodule ZtlpNs.Record do
   @spec verify(t()) :: boolean()
   def verify(%__MODULE__{signature: nil}), do: false
   def verify(%__MODULE__{signer_public_key: nil}), do: false
+
   def verify(%__MODULE__{signature: sig, signer_public_key: pub} = record) do
     canonical = serialize(record)
     ZtlpNs.Crypto.verify(canonical, sig, pub)
@@ -198,9 +198,7 @@ defmodule ZtlpNs.Record do
     sig_len = byte_size(sig)
     pub_len = byte_size(pub)
 
-    <<canonical::binary,
-      sig_len::16, sig::binary,
-      pub_len::16, pub::binary>>
+    <<canonical::binary, sig_len::16, sig::binary, pub_len::16, pub::binary>>
   end
 
   @doc """
@@ -215,7 +213,9 @@ defmodule ZtlpNs.Record do
     <<name::binary-size(name_len), rest2::binary>> = rest
     <<data_len::32, rest3::binary>> = rest2
     <<data_bin::binary-size(data_len), rest4::binary>> = rest3
-    <<created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64, rest5::binary>> = rest4
+
+    <<created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64, rest5::binary>> =
+      rest4
 
     # Now parse signature and public key
     <<sig_len::16, sig::binary-size(sig_len), pub_len::16, pub::binary-size(pub_len)>> = rest5
@@ -223,16 +223,17 @@ defmodule ZtlpNs.Record do
     type = byte_to_type(type_byte)
     record_data = :erlang.binary_to_term(data_bin, [:safe])
 
-    {:ok, %__MODULE__{
-      name: name,
-      type: type,
-      data: record_data,
-      signature: sig,
-      signer_public_key: pub,
-      created_at: created_at,
-      ttl: ttl,
-      serial: serial
-    }}
+    {:ok,
+     %__MODULE__{
+       name: name,
+       type: type,
+       data: record_data,
+       signature: sig,
+       signer_public_key: pub,
+       created_at: created_at,
+       ttl: ttl,
+       serial: serial
+     }}
   rescue
     _ -> {:error, :invalid_wire_format}
   end
@@ -275,7 +276,8 @@ defmodule ZtlpNs.Record do
   end
 
   @doc "Create a ZTLP_RELAY record (relay node endpoint info)."
-  @spec new_relay(String.t(), binary(), [String.t()], non_neg_integer(), String.t(), keyword()) :: t()
+  @spec new_relay(String.t(), binary(), [String.t()], non_neg_integer(), String.t(), keyword()) ::
+          t()
   def new_relay(name, node_id, endpoints, capacity, region, opts \\ []) do
     %__MODULE__{
       name: name,
@@ -321,7 +323,8 @@ defmodule ZtlpNs.Record do
         effective_at: effective_at
       },
       created_at: opts[:created_at] || System.system_time(:second),
-      ttl: opts[:ttl] || 0,  # Revocations don't expire
+      # Revocations don't expire
+      ttl: opts[:ttl] || 0,
       serial: opts[:serial] || 1
     }
   end
@@ -346,6 +349,7 @@ defmodule ZtlpNs.Record do
   """
   @spec expired?(t()) :: boolean()
   def expired?(%__MODULE__{ttl: 0}), do: false
+
   def expired?(%__MODULE__{created_at: ca, ttl: ttl}) do
     System.system_time(:second) > ca + ttl
   end

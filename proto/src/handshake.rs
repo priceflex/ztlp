@@ -144,8 +144,7 @@ impl HandshakeContext {
         // Build a shared key derivation base from BOTH static public keys.
         // Sort the keys lexicographically so both sides produce identical material
         // regardless of which side calls finalize().
-        let remote_static = transport.get_remote_static()
-            .unwrap_or(&[0u8; 32]);
+        let remote_static = transport.get_remote_static().unwrap_or(&[0u8; 32]);
 
         let mut shared_material = Vec::with_capacity(64);
         if our_public.as_slice() <= remote_static {
@@ -173,8 +172,16 @@ impl HandshakeContext {
 
         // i2r = Initiator→Responder direction key
         // r2i = Responder→Initiator direction key
-        let i2r_key = derive_key(b"ztlp_initiator_to_responder", session_id.as_bytes(), &shared_material);
-        let r2i_key = derive_key(b"ztlp_responder_to_initiator", session_id.as_bytes(), &shared_material);
+        let i2r_key = derive_key(
+            b"ztlp_initiator_to_responder",
+            session_id.as_bytes(),
+            &shared_material,
+        );
+        let r2i_key = derive_key(
+            b"ztlp_responder_to_initiator",
+            session_id.as_bytes(),
+            &shared_material,
+        );
 
         // Assign send/recv keys based on role:
         // Initiator sends with i2r, receives with r2i

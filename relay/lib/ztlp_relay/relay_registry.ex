@@ -32,13 +32,13 @@ defmodule ZtlpRelay.RelayRegistry do
   @degraded_rtt_max 2000.0
 
   @type relay_info :: %{
-    node_id: binary(),
-    address: {:inet.ip_address(), :inet.port_number()},
-    role: relay_role(),
-    metrics: map(),
-    last_seen: integer(),
-    status: relay_status()
-  }
+          node_id: binary(),
+          address: {:inet.ip_address(), :inet.port_number()},
+          role: relay_role(),
+          metrics: map(),
+          last_seen: integer(),
+          status: relay_status()
+        }
 
   # Client API
 
@@ -92,14 +92,15 @@ defmodule ZtlpRelay.RelayRegistry do
   def lookup(node_id) do
     case :ets.lookup(@table_name, node_id) do
       [{^node_id, address, role, metrics, last_seen, status}] ->
-        {:ok, %{
-          node_id: node_id,
-          address: address,
-          role: role,
-          metrics: metrics,
-          last_seen: last_seen,
-          status: status
-        }}
+        {:ok,
+         %{
+           node_id: node_id,
+           address: address,
+           role: role,
+           metrics: metrics,
+           last_seen: last_seen,
+           status: status
+         }}
 
       [] ->
         :error
@@ -206,15 +207,22 @@ defmodule ZtlpRelay.RelayRegistry do
     current = get_health(node_id)
     current_good_streak = get_good_streak(node_id)
 
-    new_health = compute_health_transition(
-      current, loss_rate, rtt_ms, missed_sweeps, pong_received, current_good_streak
-    )
+    new_health =
+      compute_health_transition(
+        current,
+        loss_rate,
+        rtt_ms,
+        missed_sweeps,
+        pong_received,
+        current_good_streak
+      )
 
-    new_good_streak = if pong_received and is_good_probe?(loss_rate, rtt_ms) do
-      current_good_streak + 1
-    else
-      if pong_received, do: 0, else: current_good_streak
-    end
+    new_good_streak =
+      if pong_received and is_good_probe?(loss_rate, rtt_ms) do
+        current_good_streak + 1
+      else
+        if pong_received, do: 0, else: current_good_streak
+      end
 
     try do
       :ets.insert(:ztlp_relay_health, {node_id, new_health, new_good_streak})
@@ -235,6 +243,7 @@ defmodule ZtlpRelay.RelayRegistry do
     rescue
       ArgumentError -> :ok
     end
+
     :ok
   end
 
@@ -244,11 +253,17 @@ defmodule ZtlpRelay.RelayRegistry do
   @spec classify_health(float(), float(), non_neg_integer()) :: health_state()
   def classify_health(loss_rate, rtt_ms, missed_sweeps) do
     cond do
-      missed_sweeps >= 3 -> :unreachable
-      loss_rate > @degraded_loss_max -> :unreachable
+      missed_sweeps >= 3 ->
+        :unreachable
+
+      loss_rate > @degraded_loss_max ->
+        :unreachable
+
       loss_rate > @healthy_loss_max or rtt_ms > @healthy_rtt_max ->
         if rtt_ms > @degraded_rtt_max, do: :unreachable, else: :degraded
-      true -> :healthy
+
+      true ->
+        :healthy
     end
   end
 
@@ -258,13 +273,14 @@ defmodule ZtlpRelay.RelayRegistry do
   def init(opts) do
     table_name = Keyword.get(opts, :table_name, @table_name)
 
-    table = :ets.new(table_name, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
+    table =
+      :ets.new(table_name, [
+        :named_table,
+        :set,
+        :public,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
 
     # Create health tracking table if it doesn't exist
     try do
@@ -276,18 +292,20 @@ defmodule ZtlpRelay.RelayRegistry do
         write_concurrency: true
       ])
     rescue
-      ArgumentError -> :ok  # Table already exists
+      # Table already exists
+      ArgumentError -> :ok
     end
 
     sweep_interval = Keyword.get(opts, :sweep_interval_ms, @sweep_interval_ms)
     schedule_sweep(sweep_interval)
 
-    {:ok, %{
-      table: table,
-      sweep_interval: sweep_interval,
-      stale_threshold: Keyword.get(opts, :stale_threshold_ms, @stale_threshold_ms),
-      remove_threshold: Keyword.get(opts, :remove_threshold_ms, @remove_threshold_ms)
-    }}
+    {:ok,
+     %{
+       table: table,
+       sweep_interval: sweep_interval,
+       stale_threshold: Keyword.get(opts, :stale_threshold_ms, @stale_threshold_ms),
+       remove_threshold: Keyword.get(opts, :remove_threshold_ms, @remove_threshold_ms)
+     }}
   end
 
   @impl true
@@ -316,19 +334,34 @@ defmodule ZtlpRelay.RelayRegistry do
     loss_rate < @healthy_loss_max and rtt_ms < @healthy_rtt_max
   end
 
-  defp compute_health_transition(current, loss_rate, rtt_ms, missed_sweeps, pong_received, good_streak) do
+  defp compute_health_transition(
+         current,
+         loss_rate,
+         rtt_ms,
+         missed_sweeps,
+         pong_received,
+         good_streak
+       ) do
     raw_health = classify_health(loss_rate, rtt_ms, missed_sweeps)
 
     case {current, raw_health} do
-      {:healthy, new} -> new
+      {:healthy, new} ->
+        new
+
       {:degraded, :healthy} ->
         if pong_received and good_streak + 1 >= 3, do: :healthy, else: :degraded
-      {:degraded, new} -> new
+
+      {:degraded, new} ->
+        new
+
       {:unreachable, :healthy} ->
         if pong_received and good_streak + 1 >= 3, do: :healthy, else: :degraded
+
       {:unreachable, :degraded} ->
         if pong_received, do: :degraded, else: :unreachable
-      {:unreachable, :unreachable} -> :unreachable
+
+      {:unreachable, :unreachable} ->
+        :unreachable
     end
   end
 

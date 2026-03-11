@@ -69,6 +69,7 @@ defmodule ZtlpNs.Store do
     case :mnesia.dirty_read(@records_table, {record.name, record.type}) do
       [{@records_table, _key, existing}] when existing.serial >= record.serial ->
         {:error, :stale_serial}
+
       _ ->
         # Check capacity
         if :mnesia.table_info(@records_table, :size) >= ZtlpNs.Config.max_records() do
@@ -96,7 +97,8 @@ defmodule ZtlpNs.Store do
   a revoked node ID, the lookup is blocked even if the record exists.
   Expired records (TTL exceeded) are treated as not found.
   """
-  @spec lookup(String.t(), Record.record_type()) :: {:ok, Record.t()} | :not_found | {:error, :revoked}
+  @spec lookup(String.t(), Record.record_type()) ::
+          {:ok, Record.t()} | :not_found | {:error, :revoked}
   def lookup(name, type) when is_binary(name) and is_atom(type) do
     # Invariant 2: Revocation takes priority
     if revoked?(name) do
@@ -112,6 +114,7 @@ defmodule ZtlpNs.Store do
           else
             {:ok, record}
           end
+
         [] ->
           :not_found
       end
@@ -175,11 +178,13 @@ defmodule ZtlpNs.Store do
   defp ensure_tables do
     storage_mode = ZtlpNs.Config.storage_mode()
 
-    create_table(@records_table,
+    create_table(
+      @records_table,
       [{:attributes, [:key, :record]}, {:type, :set}, {storage_mode, [node()]}]
     )
 
-    create_table(@revoked_table,
+    create_table(
+      @revoked_table,
       [{:attributes, [:id, :record]}, {:type, :set}, {storage_mode, [node()]}]
     )
 

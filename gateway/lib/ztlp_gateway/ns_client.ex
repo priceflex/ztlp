@@ -125,7 +125,7 @@ defmodule ZtlpGateway.NsClient do
       {:error, reason} ->
         # Don't crash the supervision tree — start without a socket
         require Logger
-        Logger.warn("NsClient: failed to open UDP socket: #{inspect(reason)}")
+        Logger.warning("NsClient: failed to open UDP socket: #{inspect(reason)}")
         {:ok, %{socket: nil, trust_anchors: %{}}}
     end
   end
@@ -261,31 +261,32 @@ defmodule ZtlpGateway.NsClient do
     <<name::binary-size(name_len), rest2::binary>> = rest
     <<data_len::32, rest3::binary>> = rest2
     <<data_bin::binary-size(data_len), rest4::binary>> = rest3
-    <<created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64, rest5::binary>> = rest4
+
+    <<created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64, rest5::binary>> =
+      rest4
+
     <<sig_len::16, sig::binary-size(sig_len), pub_len::16, pub::binary-size(pub_len)>> = rest5
 
     type = Map.get(@type_map, type_byte, :unknown)
     record_data = :erlang.binary_to_term(data_bin, [:safe])
 
     # Reconstruct the canonical bytes (everything before the signature)
-    canonical = <<type_byte::8,
-      name_len::16, name::binary,
-      data_len::32, data_bin::binary,
-      created_at::unsigned-big-64,
-      ttl::unsigned-big-32,
-      serial::unsigned-big-64>>
+    canonical =
+      <<type_byte::8, name_len::16, name::binary, data_len::32, data_bin::binary,
+        created_at::unsigned-big-64, ttl::unsigned-big-32, serial::unsigned-big-64>>
 
-    {:ok, %{
-      name: name,
-      type: type,
-      data: record_data,
-      signature: sig,
-      signer_public_key: pub,
-      created_at: created_at,
-      ttl: ttl,
-      serial: serial,
-      canonical: canonical
-    }}
+    {:ok,
+     %{
+       name: name,
+       type: type,
+       data: record_data,
+       signature: sig,
+       signer_public_key: pub,
+       created_at: created_at,
+       ttl: ttl,
+       serial: serial,
+       canonical: canonical
+     }}
   rescue
     _ -> {:error, :invalid_wire_format}
   end
@@ -301,7 +302,8 @@ defmodule ZtlpGateway.NsClient do
 
   # ── Private: Trust Anchor Verification ─────────────────────────────
 
-  defp verify_trust(%{signer_public_key: _pub}, trust_anchors) when map_size(trust_anchors) == 0 do
+  defp verify_trust(%{signer_public_key: _pub}, trust_anchors)
+       when map_size(trust_anchors) == 0 do
     # No trust anchors configured — accept all signed records
     # (prototype convenience; production would require at least one anchor)
     :ok

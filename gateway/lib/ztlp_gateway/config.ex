@@ -48,9 +48,13 @@ defmodule ZtlpGateway.Config do
     end
   end
 
-  def get(:ns_server_host), do: Application.get_env(:ztlp_gateway, :ns_server_host, {127, 0, 0, 1})
+  def get(:ns_server_host),
+    do: Application.get_env(:ztlp_gateway, :ns_server_host, {127, 0, 0, 1})
+
   def get(:ns_server_port), do: Application.get_env(:ztlp_gateway, :ns_server_port, 23096)
-  def get(:ns_query_timeout_ms), do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
+
+  def get(:ns_query_timeout_ms),
+    do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
 
   @doc "NS host for service discovery. Only used in Docker/production."
   @spec ns_host() :: String.t() | nil

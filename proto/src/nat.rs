@@ -305,9 +305,7 @@ impl StunClient {
 
         // Validate transaction ID
         if txn_id != transaction_id {
-            return Err(NatError::Stun(
-                "transaction ID mismatch".to_string()
-            ));
+            return Err(NatError::Stun("transaction ID mismatch".to_string()));
         }
 
         // Validate we have enough data for the declared message length
@@ -354,11 +352,9 @@ impl StunClient {
             pos += padded_len;
         }
 
-        let address = xor_mapped
-            .or(mapped)
-            .ok_or_else(|| NatError::Stun(
-                "no MAPPED-ADDRESS or XOR-MAPPED-ADDRESS in response".to_string()
-            ))?;
+        let address = xor_mapped.or(mapped).ok_or_else(|| {
+            NatError::Stun("no MAPPED-ADDRESS or XOR-MAPPED-ADDRESS in response".to_string())
+        })?;
 
         Ok(MappedEndpoint {
             address,
@@ -393,10 +389,7 @@ impl StunClient {
                 }
                 let x_addr = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 let addr = x_addr ^ STUN_MAGIC_COOKIE;
-                Ok(SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::from(addr)),
-                    port,
-                ))
+                Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr)), port))
             }
             STUN_ADDR_FAMILY_IPV6 => {
                 if data.len() < 20 {
@@ -439,18 +432,14 @@ impl StunClient {
         match family {
             STUN_ADDR_FAMILY_IPV4 => {
                 if data.len() < 8 {
-                    return Err(NatError::Stun(
-                        "MAPPED-ADDRESS IPv4 too short".to_string(),
-                    ));
+                    return Err(NatError::Stun("MAPPED-ADDRESS IPv4 too short".to_string()));
                 }
                 let addr = Ipv4Addr::new(data[4], data[5], data[6], data[7]);
                 Ok(SocketAddr::new(IpAddr::V4(addr), port))
             }
             STUN_ADDR_FAMILY_IPV6 => {
                 if data.len() < 20 {
-                    return Err(NatError::Stun(
-                        "MAPPED-ADDRESS IPv6 too short".to_string(),
-                    ));
+                    return Err(NatError::Stun("MAPPED-ADDRESS IPv6 too short".to_string()));
                 }
                 let mut addr_bytes = [0u8; 16];
                 addr_bytes.copy_from_slice(&data[4..20]);
@@ -575,9 +564,7 @@ pub enum RendezvousMessage {
         peer_addr: SocketAddr,
     },
     /// NotFound: the peer hasn't registered yet.
-    NotFound {
-        rendezvous_id: [u8; 32],
-    },
+    NotFound { rendezvous_id: [u8; 32] },
 }
 
 /// Check if a packet starts with the rendezvous magic.
@@ -674,14 +661,13 @@ pub fn decode_rv_message(data: &[u8]) -> Result<RendezvousMessage, NatError> {
 /// 3. Wait for peer's mapped endpoint from relay
 /// 4. Attempt hole punch (send probes simultaneously)
 /// 5. If no response within timeout, fall back to relay
-pub async fn establish_connection(
-    config: HolePunchConfig,
-) -> Result<ConnectionResult, NatError> {
+pub async fn establish_connection(config: HolePunchConfig) -> Result<ConnectionResult, NatError> {
     let stun_timeout = Duration::from_secs(3);
 
     // Step 1: Discover our mapped endpoint via STUN
     info!("NAT traversal: discovering mapped endpoint via STUN...");
-    let mapped = discover_with_fallback(&config.local_socket, &config.stun_servers, stun_timeout).await?;
+    let mapped =
+        discover_with_fallback(&config.local_socket, &config.stun_servers, stun_timeout).await?;
     info!("NAT traversal: mapped endpoint = {}", mapped.address);
 
     // Step 2: Compute rendezvous ID and register with relay
@@ -699,12 +685,7 @@ pub async fn establish_connection(
     info!("NAT traversal: registered with relay for rendezvous");
 
     // Step 3: Wait for peer's endpoint from relay
-    let peer_addr = wait_for_peer_info(
-        &config.local_socket,
-        &rv_id,
-        config.timeout,
-    )
-    .await?;
+    let peer_addr = wait_for_peer_info(&config.local_socket, &rv_id, config.timeout).await?;
     info!("NAT traversal: peer endpoint = {}", peer_addr);
 
     // Step 4: Attempt hole punch
@@ -718,11 +699,17 @@ pub async fn establish_connection(
     .await
     {
         Ok(()) => {
-            info!("NAT traversal: hole punch succeeded — direct connection to {}", peer_addr);
+            info!(
+                "NAT traversal: hole punch succeeded — direct connection to {}",
+                peer_addr
+            );
             Ok(ConnectionResult::Direct { peer_addr })
         }
         Err(e) => {
-            warn!("NAT traversal: hole punch failed: {} — falling back to relay", e);
+            warn!(
+                "NAT traversal: hole punch failed: {} — falling back to relay",
+                e
+            );
             Ok(ConnectionResult::Relayed {
                 relay_addr: config.relay_addr,
             })
@@ -846,7 +833,11 @@ async fn attempt_hole_punch(
                 if len >= HANDSHAKE_HEADER_SIZE {
                     if let Ok(hdr) = HandshakeHeader::deserialize(&buf[..len]) {
                         if hdr.msg_type == MsgType::Pong {
-                            info!("hole punch: received Pong from {} on probe #{}", from, i + 1);
+                            info!(
+                                "hole punch: received Pong from {} on probe #{}",
+                                from,
+                                i + 1
+                            );
                             return Ok(());
                         }
                     }
@@ -888,10 +879,7 @@ impl RendezvousEntry {
 ///
 /// This creates a valid response with a XOR-MAPPED-ADDRESS attribute.
 #[cfg(test)]
-pub fn build_stun_response(
-    transaction_id: &[u8; 12],
-    mapped_addr: SocketAddr,
-) -> Vec<u8> {
+pub fn build_stun_response(transaction_id: &[u8; 12], mapped_addr: SocketAddr) -> Vec<u8> {
     build_stun_response_with_attr(transaction_id, mapped_addr, true)
 }
 
@@ -1024,7 +1012,9 @@ mod tests {
 
     #[test]
     fn test_parse_xor_mapped_address_ipv4() {
-        let txn_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C];
+        let txn_id = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+        ];
         let addr: SocketAddr = "203.0.113.42:3478".parse().unwrap();
 
         let response = build_stun_response(&txn_id, addr);
@@ -1035,7 +1025,9 @@ mod tests {
 
     #[test]
     fn test_parse_xor_mapped_address_ipv6() {
-        let txn_id = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let txn_id = [
+            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        ];
         let addr: SocketAddr = "[2001:db8::1]:19302".parse().unwrap();
 
         let response = build_stun_response(&txn_id, addr);
@@ -1046,7 +1038,9 @@ mod tests {
 
     #[test]
     fn test_parse_mapped_address_ipv4() {
-        let txn_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let txn_id = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ];
         let addr: SocketAddr = "192.168.1.100:5060".parse().unwrap();
 
         let response = build_stun_response_with_attr(&txn_id, addr, false);
@@ -1057,7 +1051,9 @@ mod tests {
 
     #[test]
     fn test_parse_mapped_address_ipv6() {
-        let txn_id = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0];
+        let txn_id = [
+            0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0,
+        ];
         let addr: SocketAddr = "[::1]:8080".parse().unwrap();
 
         let response = build_stun_response_with_attr(&txn_id, addr, false);
@@ -1436,12 +1432,8 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let fake_stun: SocketAddr = "127.0.0.1:1".parse().unwrap(); // port 1 won't respond
 
-        let result = StunClient::discover_endpoint(
-            &socket,
-            fake_stun,
-            Duration::from_millis(100),
-        )
-        .await;
+        let result =
+            StunClient::discover_endpoint(&socket, fake_stun, Duration::from_millis(100)).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1478,13 +1470,10 @@ mod tests {
             stun_server.send_to(&response, from).await.unwrap();
         });
 
-        let result = StunClient::discover_endpoint(
-            &client_socket,
-            stun_addr,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
+        let result =
+            StunClient::discover_endpoint(&client_socket, stun_addr, Duration::from_secs(2))
+                .await
+                .unwrap();
 
         assert_eq!(result.address, mapped_addr);
         assert_eq!(result.nat_type, NatType::Detected); // different from local addr

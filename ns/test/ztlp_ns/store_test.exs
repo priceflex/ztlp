@@ -16,10 +16,14 @@ defmodule ZtlpNs.StoreTest do
     node_id = :crypto.strong_rand_bytes(16)
     {node_pub, _} = Crypto.generate_keypair()
     serial = opts[:serial] || 1
-    record = Record.new_key(name, node_id, node_pub,
-      created_at: System.system_time(:second),
-      ttl: opts[:ttl] || 86400,
-      serial: serial)
+
+    record =
+      Record.new_key(name, node_id, node_pub,
+        created_at: System.system_time(:second),
+        ttl: opts[:ttl] || 86400,
+        serial: serial
+      )
+
     Record.sign(record, priv)
   end
 
@@ -56,8 +60,14 @@ defmodule ZtlpNs.StoreTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      rec2 = Record.new_key("node.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 2)
+
+      rec2 =
+        Record.new_key("node.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 2
+        )
+
       rec2 = Record.sign(rec2, priv)
       assert :ok = Store.insert(rec2)
     end
@@ -88,8 +98,14 @@ defmodule ZtlpNs.StoreTest do
 
       # Insert a revocation for the same name
       {_pub, priv} = Crypto.generate_keypair()
-      revoke = Record.new_revoke("revoke.ztlp", [], "compromised", "2026-03-10T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+
+      revoke =
+        Record.new_revoke("revoke.ztlp", [], "compromised", "2026-03-10T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["victim.ztlp"])}
       revoke = Record.sign(revoke, priv)
       Store.insert(revoke)
@@ -105,8 +121,10 @@ defmodule ZtlpNs.StoreTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      expired = Record.new_key("expired.ztlp", node_id, node_pub,
-        created_at: 0, ttl: 1, serial: 1)
+
+      expired =
+        Record.new_key("expired.ztlp", node_id, node_pub, created_at: 0, ttl: 1, serial: 1)
+
       expired = Record.sign(expired, priv)
       Store.insert(expired)
       assert :not_found = Store.lookup("expired.ztlp", :key)
@@ -136,8 +154,14 @@ defmodule ZtlpNs.StoreTest do
 
     test "revoked? returns true after inserting ZTLP_REVOKE" do
       {_pub, priv} = Crypto.generate_keypair()
-      revoke = Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+
+      revoke =
+        Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["bad-node-1234"])}
       revoke = Record.sign(revoke, priv)
       Store.insert(revoke)
@@ -146,8 +170,14 @@ defmodule ZtlpNs.StoreTest do
 
     test "list_revoked returns revoked IDs" do
       {_pub, priv} = Crypto.generate_keypair()
-      revoke = Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+
+      revoke =
+        Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["id-a", "id-b"])}
       revoke = Record.sign(revoke, priv)
       Store.insert(revoke)

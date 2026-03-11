@@ -28,8 +28,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
 use ztlp_proto::packet::{
-    DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket,
-    HANDSHAKE_HEADER_SIZE,
+    DataHeader, HandshakeHeader, MsgType, SessionId, ZtlpPacket, HANDSHAKE_HEADER_SIZE,
 };
 use ztlp_proto::pipeline::compute_header_auth_tag;
 
@@ -159,13 +158,20 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         hdr.header_auth_tag = compute_header_auth_tag(&key, &aad);
         let payload_size: usize = rng.gen_range(0..256);
         let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
-        let pkt = ZtlpPacket::Data { header: hdr, payload };
+        let pkt = ZtlpPacket::Data {
+            header: hdr,
+            payload,
+        };
         pkt.serialize()
     } else {
         // Handshake packet
         let msg_types = [
-            MsgType::Hello, MsgType::HelloAck, MsgType::Rekey,
-            MsgType::Close, MsgType::Ping, MsgType::Pong,
+            MsgType::Hello,
+            MsgType::HelloAck,
+            MsgType::Rekey,
+            MsgType::Close,
+            MsgType::Ping,
+            MsgType::Pong,
         ];
         let mt = msg_types[rng.gen_range(0..msg_types.len())];
         let mut hdr = HandshakeHeader::new(mt);
@@ -177,7 +183,10 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         let payload_size: usize = rng.gen_range(0..64);
         let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
         hdr.payload_len = payload.len() as u16;
-        let pkt = ZtlpPacket::Handshake { header: hdr, payload };
+        let pkt = ZtlpPacket::Handshake {
+            header: hdr,
+            payload,
+        };
         pkt.serialize()
     }
 }
@@ -256,8 +265,13 @@ fn mutate_field_boundary(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
     };
 
     // Pick a random field to mutate
-    let valid_offsets: Vec<_> = offsets.iter().filter(|(_, end, _)| *end <= out.len()).collect();
-    if let Some(&&(start, end, _name)) = valid_offsets.get(rng.gen_range(0..valid_offsets.len().max(1))) {
+    let valid_offsets: Vec<_> = offsets
+        .iter()
+        .filter(|(_, end, _)| *end <= out.len())
+        .collect();
+    if let Some(&&(start, end, _name)) =
+        valid_offsets.get(rng.gen_range(0..valid_offsets.len().max(1)))
+    {
         // Fill field with interesting values
         let actual_end = end.min(out.len());
         let strategy = rng.gen_range(0..5);
@@ -350,12 +364,27 @@ fn mutate_magic_corrupt(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
     }
     // Various magic corruptions
     match rng.gen_range(0..6) {
-        0 => { out[0] = 0x00; out[1] = 0x00; } // Zero magic
-        1 => { out[0] = 0xFF; out[1] = 0xFF; } // All-ones magic
-        2 => { out[0] ^= 0xFF; }               // Invert first byte
-        3 => { out[1] ^= 0xFF; }               // Invert second byte
-        4 => { out.swap(0, 1); }                // Swap magic bytes
-        _ => { out[0] = rng.gen::<u8>(); out[1] = rng.gen::<u8>(); } // Random magic
+        0 => {
+            out[0] = 0x00;
+            out[1] = 0x00;
+        } // Zero magic
+        1 => {
+            out[0] = 0xFF;
+            out[1] = 0xFF;
+        } // All-ones magic
+        2 => {
+            out[0] ^= 0xFF;
+        } // Invert first byte
+        3 => {
+            out[1] ^= 0xFF;
+        } // Invert second byte
+        4 => {
+            out.swap(0, 1);
+        } // Swap magic bytes
+        _ => {
+            out[0] = rng.gen::<u8>();
+            out[1] = rng.gen::<u8>();
+        } // Random magic
     }
     out
 }
@@ -431,17 +460,21 @@ fn mutate_sequence_attack(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
     }
 
     let attack_seq: u64 = match rng.gen_range(0..6) {
-        0 => 0,                          // Zero sequence
-        1 => u64::MAX,                   // Maximum sequence (overflow)
-        2 => u64::MAX - 1,              // Near-overflow
-        3 => rng.gen(),                  // Random sequence
+        0 => 0,            // Zero sequence
+        1 => u64::MAX,     // Maximum sequence (overflow)
+        2 => u64::MAX - 1, // Near-overflow
+        3 => rng.gen(),    // Random sequence
         4 => {
             // Duplicate: keep same (replay attack)
             return out;
         }
         _ => {
             // Out-of-order: set to very high then very low
-            if rng.gen_bool(0.5) { u64::MAX / 2 } else { 1 }
+            if rng.gen_bool(0.5) {
+                u64::MAX / 2
+            } else {
+                1
+            }
         }
     };
 
@@ -510,24 +543,75 @@ impl FuzzStats {
 }
 
 fn print_fuzz_summary(stats: &FuzzStats, elapsed: Duration, strategy: Strategy) {
-    println!("\n{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "\n{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
     println!("  {}", "Fuzz Test Summary".white().bold());
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
-    println!("  {:<24} {:.2}s", "Duration:".bright_blue(), elapsed.as_secs_f64());
-    println!("  {:<24} {}", "Strategy:".bright_blue(), strategy.to_string().bright_magenta());
-    println!("  {:<24} {}", "Packets generated:".bright_blue(), stats.packets_sent);
-    println!("  {:<24} {}", "Parse OK:".bright_blue(), stats.parse_ok.to_string().green());
-    println!("  {:<24} {}", "Parse errors:".bright_blue(), stats.parse_errors.to_string().yellow());
-    println!("  {:<24} {}", "Panics caught:".bright_blue(),
-        if stats.panics > 0 { stats.panics.to_string().red().to_string() } else { "0".green().to_string() });
-    println!("  {:<24} {}", "Crash signals:".bright_blue(),
-        if stats.crashes > 0 { stats.crashes.to_string().red().bold().to_string() } else { "0".green().to_string() });
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
+    println!(
+        "  {:<24} {:.2}s",
+        "Duration:".bright_blue(),
+        elapsed.as_secs_f64()
+    );
+    println!(
+        "  {:<24} {}",
+        "Strategy:".bright_blue(),
+        strategy.to_string().bright_magenta()
+    );
+    println!(
+        "  {:<24} {}",
+        "Packets generated:".bright_blue(),
+        stats.packets_sent
+    );
+    println!(
+        "  {:<24} {}",
+        "Parse OK:".bright_blue(),
+        stats.parse_ok.to_string().green()
+    );
+    println!(
+        "  {:<24} {}",
+        "Parse errors:".bright_blue(),
+        stats.parse_errors.to_string().yellow()
+    );
+    println!(
+        "  {:<24} {}",
+        "Panics caught:".bright_blue(),
+        if stats.panics > 0 {
+            stats.panics.to_string().red().to_string()
+        } else {
+            "0".green().to_string()
+        }
+    );
+    println!(
+        "  {:<24} {}",
+        "Crash signals:".bright_blue(),
+        if stats.crashes > 0 {
+            stats.crashes.to_string().red().bold().to_string()
+        } else {
+            "0".green().to_string()
+        }
+    );
     if stats.network_errors > 0 {
-        println!("  {:<24} {}", "Network errors:".bright_blue(), stats.network_errors.to_string().yellow());
+        println!(
+            "  {:<24} {}",
+            "Network errors:".bright_blue(),
+            stats.network_errors.to_string().yellow()
+        );
     }
-    println!("  {:<24} {}", "Unique error types:".bright_blue(), stats.error_types.len());
-    println!("  {:<24} {:.0} pkts/sec", "Throughput:".bright_blue(),
-        stats.packets_sent as f64 / elapsed.as_secs_f64());
+    println!(
+        "  {:<24} {}",
+        "Unique error types:".bright_blue(),
+        stats.error_types.len()
+    );
+    println!(
+        "  {:<24} {:.0} pkts/sec",
+        "Throughput:".bright_blue(),
+        stats.packets_sent as f64 / elapsed.as_secs_f64()
+    );
 
     if !stats.error_types.is_empty() {
         println!("\n  {}", "Error type breakdown:".bright_blue());
@@ -542,7 +626,10 @@ fn print_fuzz_summary(stats: &FuzzStats, elapsed: Duration, strategy: Strategy) 
         }
     }
 
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -553,16 +640,24 @@ fn fuzz_local(iterations: u64, strategy: Strategy, seed: Option<u64>) {
     use rand::SeedableRng;
 
     let actual_seed = seed.unwrap_or_else(rand::random);
-    println!("  {:<24} {}{}", "Seed:".bright_blue(), actual_seed,
-        if seed.is_some() { "" } else { " (auto)" });
+    println!(
+        "  {:<24} {}{}",
+        "Seed:".bright_blue(),
+        actual_seed,
+        if seed.is_some() { "" } else { " (auto)" }
+    );
     let mut rng = rand::rngs::StdRng::seed_from_u64(actual_seed);
 
     let mut stats = FuzzStats::default();
 
     let pb = ProgressBar::new(iterations);
-    pb.set_style(ProgressStyle::with_template(
-        "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | errs: {msg}"
-    ).unwrap().progress_chars("█▓░"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | errs: {msg}",
+        )
+        .unwrap()
+        .progress_chars("█▓░"),
+    );
 
     let start = Instant::now();
 
@@ -636,33 +731,49 @@ async fn fuzz_network(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rand::SeedableRng;
 
-    let target_addr: SocketAddr = target.parse().map_err(|e| {
-        format!("Invalid target address '{}': {}", target, e)
-    })?;
+    let target_addr: SocketAddr = target
+        .parse()
+        .map_err(|e| format!("Invalid target address '{}': {}", target, e))?;
 
     let actual_seed = seed.unwrap_or_else(rand::random);
     println!("  {:<24} {}", "Target:".bright_blue(), target_addr);
-    println!("  {:<24} {}{}", "Seed:".bright_blue(), actual_seed,
-        if seed.is_some() { "" } else { " (auto)" });
+    println!(
+        "  {:<24} {}{}",
+        "Seed:".bright_blue(),
+        actual_seed,
+        if seed.is_some() { "" } else { " (auto)" }
+    );
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(actual_seed);
 
     // Check if target is reachable first
-    println!("\n  {} Checking target reachability...", "⏳".bright_yellow());
+    println!(
+        "\n  {} Checking target reachability...",
+        "⏳".bright_yellow()
+    );
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
 
     // Send a HELLO packet as a connectivity test
     let hello = {
         let hdr = HandshakeHeader::new(MsgType::Hello);
-        let pkt = ZtlpPacket::Handshake { header: hdr, payload: vec![] };
+        let pkt = ZtlpPacket::Handshake {
+            header: hdr,
+            payload: vec![],
+        };
         pkt.serialize()
     };
 
     match sock.send_to(&hello, target_addr).await {
-        Ok(_) => println!("  {} Target appears reachable (UDP send succeeded).", "✓".green()),
+        Ok(_) => println!(
+            "  {} Target appears reachable (UDP send succeeded).",
+            "✓".green()
+        ),
         Err(e) => {
             eprintln!("  {} Cannot reach target: {}", "✗".red(), e);
-            eprintln!("  {} Continuing anyway (UDP is connectionless)...", "⚠".yellow());
+            eprintln!(
+                "  {} Continuing anyway (UDP is connectionless)...",
+                "⚠".yellow()
+            );
         }
     }
 
@@ -670,9 +781,13 @@ async fn fuzz_network(
     let health_check_interval = 1000u64; // Check every N packets
 
     let pb = ProgressBar::new(iterations);
-    pb.set_style(ProgressStyle::with_template(
-        "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | errs: {msg}"
-    ).unwrap().progress_chars("█▓░"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} | errs: {msg}",
+        )
+        .unwrap()
+        .progress_chars("█▓░"),
+    );
 
     let start = Instant::now();
 
@@ -697,21 +812,29 @@ async fn fuzz_network(
         if i > 0 && i % health_check_interval == 0 {
             let hello = {
                 let hdr = HandshakeHeader::new(MsgType::Ping);
-                let pkt = ZtlpPacket::Handshake { header: hdr, payload: vec![] };
+                let pkt = ZtlpPacket::Handshake {
+                    header: hdr,
+                    payload: vec![],
+                };
                 pkt.serialize()
             };
 
             if let Err(_) = sock.send_to(&hello, target_addr).await {
                 stats.crashes += 1;
-                pb.set_message(format!("{} errs | {} crashes", stats.parse_errors, stats.crashes));
+                pb.set_message(format!(
+                    "{} errs | {} crashes",
+                    stats.parse_errors, stats.crashes
+                ));
             }
 
             // Try to receive any response (non-blocking with timeout)
             let mut buf = [0u8; 1500];
             match tokio::time::timeout(
                 Duration::from_millis(timeout_ms.min(100)),
-                sock.recv_from(&mut buf)
-            ).await {
+                sock.recv_from(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {
                     // Got a response — target is alive
                 }
@@ -723,8 +846,10 @@ async fn fuzz_network(
 
         if i % 500 == 0 {
             pb.set_position(i);
-            pb.set_message(format!("{} errs | {} net_errs",
-                stats.parse_errors, stats.network_errors));
+            pb.set_message(format!(
+                "{} errs | {} net_errs",
+                stats.parse_errors, stats.network_errors
+            ));
         }
 
         // Small yield to prevent starving the runtime
@@ -748,32 +873,78 @@ async fn fuzz_network(
 async fn main() {
     let cli = Cli::parse();
 
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
     println!("  {}", "ZTLP Protocol Fuzzer".white().bold());
-    println!("{}", "═══════════════════════════════════════════════════".bright_cyan());
+    println!(
+        "{}",
+        "═══════════════════════════════════════════════════".bright_cyan()
+    );
 
     match cli.command {
-        Command::Local { iterations, strategy, seed } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Local parser fuzzing".bright_magenta());
+        Command::Local {
+            iterations,
+            strategy,
+            seed,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Local parser fuzzing".bright_magenta()
+            );
             println!("  {:<24} {}", "Iterations:".bright_blue(), iterations);
-            println!("  {:<24} {}", "Strategy:".bright_blue(), strategy.to_string().bright_yellow());
+            println!(
+                "  {:<24} {}",
+                "Strategy:".bright_blue(),
+                strategy.to_string().bright_yellow()
+            );
             println!();
             fuzz_local(iterations, strategy, seed);
         }
-        Command::Relay { target, iterations, strategy, seed, timeout_ms } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Relay fuzzing (network)".bright_magenta());
+        Command::Relay {
+            target,
+            iterations,
+            strategy,
+            seed,
+            timeout_ms,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Relay fuzzing (network)".bright_magenta()
+            );
             println!("  {:<24} {}", "Iterations:".bright_blue(), iterations);
-            println!("  {:<24} {}", "Strategy:".bright_blue(), strategy.to_string().bright_yellow());
+            println!(
+                "  {:<24} {}",
+                "Strategy:".bright_blue(),
+                strategy.to_string().bright_yellow()
+            );
             println!();
             if let Err(e) = fuzz_network(&target, iterations, strategy, seed, timeout_ms).await {
                 eprintln!("\n  {} {}", "✗".red(), e);
                 std::process::exit(1);
             }
         }
-        Command::Gateway { target, iterations, strategy, seed, timeout_ms } => {
-            println!("  {:<24} {}", "Mode:".bright_blue(), "Gateway fuzzing (network)".bright_magenta());
+        Command::Gateway {
+            target,
+            iterations,
+            strategy,
+            seed,
+            timeout_ms,
+        } => {
+            println!(
+                "  {:<24} {}",
+                "Mode:".bright_blue(),
+                "Gateway fuzzing (network)".bright_magenta()
+            );
             println!("  {:<24} {}", "Iterations:".bright_blue(), iterations);
-            println!("  {:<24} {}", "Strategy:".bright_blue(), strategy.to_string().bright_yellow());
+            println!(
+                "  {:<24} {}",
+                "Strategy:".bright_blue(),
+                strategy.to_string().bright_yellow()
+            );
             println!();
             if let Err(e) = fuzz_network(&target, iterations, strategy, seed, timeout_ms).await {
                 eprintln!("\n  {} {}", "✗".red(), e);

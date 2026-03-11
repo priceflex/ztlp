@@ -12,12 +12,13 @@ defmodule ZtlpRelay.SessionTest do
       # Register in the registry first
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-      {:ok, pid} = Session.start_link(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 5_000
-      )
+      {:ok, pid} =
+        Session.start_link(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          timeout_ms: 5_000
+        )
 
       state = Session.get_state(pid)
       assert state.session_id == session_id
@@ -37,12 +38,13 @@ defmodule ZtlpRelay.SessionTest do
 
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-      {:ok, pid} = Session.start_link(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 5_000
-      )
+      {:ok, pid} =
+        Session.start_link(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          timeout_ms: 5_000
+        )
 
       Session.forward(pid)
       Session.forward(pid)
@@ -64,12 +66,13 @@ defmodule ZtlpRelay.SessionTest do
 
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-      {:ok, pid} = Session.start_link(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 5_000
-      )
+      {:ok, pid} =
+        Session.start_link(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          timeout_ms: 5_000
+        )
 
       ref = Process.monitor(pid)
       Session.close(pid)
@@ -89,12 +92,14 @@ defmodule ZtlpRelay.SessionTest do
 
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-      {:ok, pid} = Session.start_link(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 100  # 100ms timeout for testing
-      )
+      {:ok, pid} =
+        Session.start_link(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          # 100ms timeout for testing
+          timeout_ms: 100
+        )
 
       ref = Process.monitor(pid)
 
@@ -112,12 +117,13 @@ defmodule ZtlpRelay.SessionTest do
 
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-      {:ok, pid} = Session.start_link(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 200
-      )
+      {:ok, pid} =
+        Session.start_link(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          timeout_ms: 200
+        )
 
       ref = Process.monitor(pid)
 

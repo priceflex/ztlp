@@ -13,16 +13,16 @@ defmodule ZtlpRelay.HashRing do
   @default_vnodes 128
 
   @type node_info :: %{
-    required(:node_id) => binary(),
-    required(:address) => {:inet.ip_address(), :inet.port_number()},
-    optional(:meta) => term()
-  }
+          required(:node_id) => binary(),
+          required(:address) => {:inet.ip_address(), :inet.port_number()},
+          optional(:meta) => term()
+        }
 
   @type ring :: %{
-    vnodes: [{binary(), binary()}],
-    nodes: %{binary() => node_info()},
-    vnode_count: pos_integer()
-  }
+          vnodes: [{binary(), binary()}],
+          nodes: %{binary() => node_info()},
+          vnode_count: pos_integer()
+        }
 
   @doc """
   Build a new hash ring from a list of relay node info maps.
@@ -168,7 +168,8 @@ defmodule ZtlpRelay.HashRing do
     Enum.reverse(acc)
   end
 
-  defp collect_unique_nodes(_vnodes, _nodes, _idx, total, _remaining, _seen, acc) when total == 0 do
+  defp collect_unique_nodes(_vnodes, _nodes, _idx, total, _remaining, _seen, acc)
+       when total == 0 do
     Enum.reverse(acc)
   end
 
@@ -186,9 +187,15 @@ defmodule ZtlpRelay.HashRing do
       end
     else
       node_info = Map.fetch!(nodes, node_id)
+
       collect_unique_nodes(
-        vnodes, nodes, idx + 1, total, remaining - 1,
-        MapSet.put(seen, node_id), [node_info | acc]
+        vnodes,
+        nodes,
+        idx + 1,
+        total,
+        remaining - 1,
+        MapSet.put(seen, node_id),
+        [node_info | acc]
       )
     end
   end

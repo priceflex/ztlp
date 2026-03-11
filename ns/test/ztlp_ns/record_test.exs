@@ -14,6 +14,7 @@ defmodule ZtlpNs.RecordTest do
   describe "type_to_byte/1 and byte_to_type/1" do
     test "round-trips all 6 types" do
       types = [:key, :svc, :relay, :policy, :revoke, :bootstrap]
+
       for type <- types do
         byte = Record.type_to_byte(type)
         assert Record.byte_to_type(byte) == type
@@ -34,7 +35,9 @@ defmodule ZtlpNs.RecordTest do
     test "round-trips a KEY record" do
       node_id = :crypto.strong_rand_bytes(16)
       {pub, _} = Crypto.generate_keypair()
-      record = Record.new_key("node1.acme.ztlp", node_id, pub, created_at: 1000, ttl: 3600, serial: 1)
+
+      record =
+        Record.new_key("node1.acme.ztlp", node_id, pub, created_at: 1000, ttl: 3600, serial: 1)
 
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
@@ -49,8 +52,14 @@ defmodule ZtlpNs.RecordTest do
     test "round-trips a SVC record" do
       svc_id = :crypto.strong_rand_bytes(16)
       nid = :crypto.strong_rand_bytes(16)
-      record = Record.new_svc("rdp.acme.ztlp", svc_id, [nid], "policy.acme.ztlp",
-        created_at: 2000, ttl: 7200, serial: 5)
+
+      record =
+        Record.new_svc("rdp.acme.ztlp", svc_id, [nid], "policy.acme.ztlp",
+          created_at: 2000,
+          ttl: 7200,
+          serial: 5
+        )
+
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :svc
@@ -59,8 +68,19 @@ defmodule ZtlpNs.RecordTest do
 
     test "round-trips a RELAY record" do
       nid = :crypto.strong_rand_bytes(16)
-      record = Record.new_relay("relay1.apac.ztlp", nid, ["192.168.1.1:23095", "[::1]:23095"], 5000, "apac",
-        created_at: 3000, ttl: 3600, serial: 1)
+
+      record =
+        Record.new_relay(
+          "relay1.apac.ztlp",
+          nid,
+          ["192.168.1.1:23095", "[::1]:23095"],
+          5000,
+          "apac",
+          created_at: 3000,
+          ttl: 3600,
+          serial: 1
+        )
+
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :relay
@@ -69,8 +89,14 @@ defmodule ZtlpNs.RecordTest do
 
     test "round-trips a POLICY record" do
       nid = :crypto.strong_rand_bytes(16)
-      record = Record.new_policy("policy.acme.ztlp", [nid], ["rdp", "ssh"], [],
-        created_at: 4000, ttl: 3600, serial: 1)
+
+      record =
+        Record.new_policy("policy.acme.ztlp", [nid], ["rdp", "ssh"], [],
+          created_at: 4000,
+          ttl: 3600,
+          serial: 1
+        )
+
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :policy
@@ -78,8 +104,14 @@ defmodule ZtlpNs.RecordTest do
 
     test "round-trips a REVOKE record" do
       nid = :crypto.strong_rand_bytes(16)
-      record = Record.new_revoke("revoke.acme.ztlp", [nid], "compromised", "2026-03-10T00:00:00Z",
-        created_at: 5000, ttl: 0, serial: 1)
+
+      record =
+        Record.new_revoke("revoke.acme.ztlp", [nid], "compromised", "2026-03-10T00:00:00Z",
+          created_at: 5000,
+          ttl: 0,
+          serial: 1
+        )
+
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :revoke
@@ -88,8 +120,10 @@ defmodule ZtlpNs.RecordTest do
 
     test "round-trips a BOOTSTRAP record" do
       relays = [%{node_id: "aabbccdd", endpoints: ["1.2.3.4:23095"], public_key: "deadbeef"}]
-      record = Record.new_bootstrap("bootstrap.ztlp", relays,
-        created_at: 6000, ttl: 86400, serial: 1)
+
+      record =
+        Record.new_bootstrap("bootstrap.ztlp", relays, created_at: 6000, ttl: 86400, serial: 1)
+
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :bootstrap
@@ -180,8 +214,13 @@ defmodule ZtlpNs.RecordTest do
 
   describe "expired?/1" do
     test "record with TTL 0 never expires" do
-      record = Record.new_revoke("test.ztlp", [], "test", "2026-01-01T00:00:00Z",
-        created_at: 0, ttl: 0, serial: 1)
+      record =
+        Record.new_revoke("test.ztlp", [], "test", "2026-01-01T00:00:00Z",
+          created_at: 0,
+          ttl: 0,
+          serial: 1
+        )
+
       refute Record.expired?(record)
     end
 

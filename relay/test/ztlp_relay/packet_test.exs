@@ -43,19 +43,20 @@ defmodule ZtlpRelay.PacketTest do
       dst_svc_id = :crypto.strong_rand_bytes(16)
       auth_tag = :crypto.strong_rand_bytes(16)
 
-      pkt = Packet.build_handshake(:rekey, session_id,
-        flags: 0x0003,
-        crypto_suite: 0x0002,
-        key_id: 42,
-        packet_seq: 9999,
-        timestamp: 123_456_789,
-        src_node_id: src_node_id,
-        dst_svc_id: dst_svc_id,
-        policy_tag: 0xDEADBEEF,
-        ext_len: 0,
-        payload_len: 0,
-        header_auth_tag: auth_tag
-      )
+      pkt =
+        Packet.build_handshake(:rekey, session_id,
+          flags: 0x0003,
+          crypto_suite: 0x0002,
+          key_id: 42,
+          packet_seq: 9999,
+          timestamp: 123_456_789,
+          src_node_id: src_node_id,
+          dst_svc_id: dst_svc_id,
+          policy_tag: 0xDEADBEEF,
+          ext_len: 0,
+          payload_len: 0,
+          header_auth_tag: auth_tag
+        )
 
       raw = Packet.serialize(pkt)
       assert {:ok, parsed} = Packet.parse(raw)
@@ -80,7 +81,13 @@ defmodule ZtlpRelay.PacketTest do
     test "preserves payload through roundtrip" do
       session_id = :crypto.strong_rand_bytes(12)
       payload = "hello world"
-      pkt = Packet.build_handshake(:data, session_id, payload: payload, payload_len: byte_size(payload))
+
+      pkt =
+        Packet.build_handshake(:data, session_id,
+          payload: payload,
+          payload_len: byte_size(payload)
+        )
+
       raw = Packet.serialize(pkt)
       assert {:ok, parsed} = Packet.parse(raw)
       assert parsed.payload == payload
@@ -112,10 +119,11 @@ defmodule ZtlpRelay.PacketTest do
       session_id = :crypto.strong_rand_bytes(12)
       auth_tag = :crypto.strong_rand_bytes(16)
 
-      pkt = Packet.build_data(session_id, 12345,
-        flags: 0x0010,
-        header_auth_tag: auth_tag
-      )
+      pkt =
+        Packet.build_data(session_id, 12345,
+          flags: 0x0010,
+          header_auth_tag: auth_tag
+        )
 
       raw = Packet.serialize(pkt)
       assert {:ok, parsed} = Packet.parse(raw)
@@ -150,28 +158,28 @@ defmodule ZtlpRelay.PacketTest do
 
     test "rejects unsupported version" do
       # Version 2, handshake hdr_len
-      ver_hdrlen = (2 <<< 12) ||| @handshake_hdr_len
+      ver_hdrlen = 2 <<< 12 ||| @handshake_hdr_len
       raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 91)
       assert {:error, :unsupported_version} = Packet.parse(raw)
     end
 
     test "rejects unknown header type" do
       # Valid magic and version, but hdr_len = 99 (unknown)
-      ver_hdrlen = (@version <<< 12) ||| 99
+      ver_hdrlen = @version <<< 12 ||| 99
       raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 91)
       assert {:error, :unknown_header_type} = Packet.parse(raw)
     end
 
     test "rejects truncated handshake header" do
       # Valid magic, version, handshake hdr_len, but only 50 bytes total
-      ver_hdrlen = (@version <<< 12) ||| @handshake_hdr_len
+      ver_hdrlen = @version <<< 12 ||| @handshake_hdr_len
       raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 46)
       assert {:error, :buffer_too_short} = Packet.parse(raw)
     end
 
     test "rejects truncated data header" do
       # Valid magic, version, data hdr_len, but only 20 bytes total
-      ver_hdrlen = (@version <<< 12) ||| @data_hdr_len
+      ver_hdrlen = @version <<< 12 ||| @data_hdr_len
       raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 16)
       assert {:error, :buffer_too_short} = Packet.parse(raw)
     end

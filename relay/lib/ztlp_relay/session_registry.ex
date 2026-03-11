@@ -121,13 +121,15 @@ defmodule ZtlpRelay.SessionRegistry do
 
   @impl true
   def init([]) do
-    table = :ets.new(@table_name, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
+    table =
+      :ets.new(@table_name, [
+        :named_table,
+        :set,
+        :public,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+
     {:ok, %{table: table}}
   end
 end

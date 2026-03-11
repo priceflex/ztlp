@@ -13,12 +13,12 @@ defmodule ZtlpRelay.Stats do
   use Agent
 
   @type stats :: %{
-    layer1_drops: non_neg_integer(),
-    layer2_drops: non_neg_integer(),
-    layer3_drops: non_neg_integer(),
-    passed: non_neg_integer(),
-    forwarded: non_neg_integer()
-  }
+          layer1_drops: non_neg_integer(),
+          layer2_drops: non_neg_integer(),
+          layer3_drops: non_neg_integer(),
+          passed: non_neg_integer(),
+          forwarded: non_neg_integer()
+        }
 
   @doc """
   Start the stats agent.
@@ -40,7 +40,8 @@ defmodule ZtlpRelay.Stats do
   Increment a counter by 1.
   """
   @spec increment(atom()) :: :ok
-  def increment(counter) when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
+  def increment(counter)
+      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
     Agent.update(__MODULE__, fn stats ->
       Map.update!(stats, counter, &(&1 + 1))
     end)
@@ -50,7 +51,8 @@ defmodule ZtlpRelay.Stats do
   Increment a counter by a specific amount.
   """
   @spec increment(atom(), non_neg_integer()) :: :ok
-  def increment(counter, amount) when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
+  def increment(counter, amount)
+      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
     Agent.update(__MODULE__, fn stats ->
       Map.update!(stats, counter, &(&1 + amount))
     end)

@@ -29,9 +29,10 @@ impl<'de> serde::Deserialize<'de> for NodeId {
         let s = String::deserialize(deserializer)?;
         let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
         if bytes.len() != 16 {
-            return Err(serde::de::Error::custom(
-                format!("expected 16 bytes for NodeId, got {}", bytes.len())
-            ));
+            return Err(serde::de::Error::custom(format!(
+                "expected 16 bytes for NodeId, got {}",
+                bytes.len()
+            )));
         }
         let mut arr = [0u8; 16];
         arr.copy_from_slice(&bytes);
@@ -97,9 +98,13 @@ impl NodeIdentity {
         let node_id = NodeId::generate();
 
         // Use snow's key generation for X25519 to ensure compatibility
-        let builder = snow::Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse()
-            .map_err(|e: snow::Error| IdentityError::InvalidKey(e.to_string()))?);
-        let keypair = builder.generate_keypair()
+        let builder = snow::Builder::new(
+            "Noise_XX_25519_ChaChaPoly_BLAKE2s"
+                .parse()
+                .map_err(|e: snow::Error| IdentityError::InvalidKey(e.to_string()))?,
+        );
+        let keypair = builder
+            .generate_keypair()
             .map_err(|e| IdentityError::InvalidKey(e.to_string()))?;
 
         Ok(Self {

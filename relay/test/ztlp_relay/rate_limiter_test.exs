@@ -7,11 +7,12 @@ defmodule ZtlpRelay.RateLimiterTest do
 
   setup do
     # Start a dedicated rate limiter for tests
-    {:ok, pid} = RateLimiter.start_link(
-      name: :"rate_limiter_test_#{:erlang.unique_integer([:positive])}",
-      table: @table,
-      cleanup_interval_ms: 60_000
-    )
+    {:ok, pid} =
+      RateLimiter.start_link(
+        name: :"rate_limiter_test_#{:erlang.unique_integer([:positive])}",
+        table: @table,
+        cleanup_interval_ms: 60_000
+      )
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid)
@@ -81,11 +82,12 @@ defmodule ZtlpRelay.RateLimiterTest do
       key = {:test, :concurrent}
       limit = 100
 
-      tasks = for _ <- 1..200 do
-        Task.async(fn ->
-          RateLimiter.check(key, limit, 60_000, table: @table)
-        end)
-      end
+      tasks =
+        for _ <- 1..200 do
+          Task.async(fn ->
+            RateLimiter.check(key, limit, 60_000, table: @table)
+          end)
+        end
 
       results = Task.await_many(tasks)
       ok_count = Enum.count(results, &(&1 == :ok))

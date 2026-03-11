@@ -21,15 +21,15 @@ defmodule ZtlpRelay.Session do
   @type peer_addr :: {:inet.ip_address(), :inet.port_number()}
 
   @type state :: %{
-    session_id: binary(),
-    peer_a: peer_addr(),
-    peer_b: peer_addr(),
-    created_at: integer(),
-    packet_count: non_neg_integer(),
-    last_activity: integer(),
-    timeout_ms: non_neg_integer(),
-    timer_ref: reference() | nil
-  }
+          session_id: binary(),
+          peer_a: peer_addr(),
+          peer_b: peer_addr(),
+          created_at: integer(),
+          packet_count: non_neg_integer(),
+          last_activity: integer(),
+          timeout_ms: non_neg_integer(),
+          timer_ref: reference() | nil
+        }
 
   # Client API
 
@@ -107,11 +107,8 @@ defmodule ZtlpRelay.Session do
     cancel_timer(state.timer_ref)
     timer_ref = schedule_timeout(state.timeout_ms)
 
-    {:noreply, %{state |
-      packet_count: state.packet_count + 1,
-      last_activity: now,
-      timer_ref: timer_ref
-    }}
+    {:noreply,
+     %{state | packet_count: state.packet_count + 1, last_activity: now, timer_ref: timer_ref}}
   end
 
   def handle_cast(:close, state) do

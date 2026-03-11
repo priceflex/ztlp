@@ -5,6 +5,7 @@ defmodule ZtlpRelay.RoutePlannerTest do
 
   defp make_relay(role) do
     node_id = :crypto.strong_rand_bytes(16)
+
     %{
       node_id: node_id,
       address: {{127, 0, 0, 1}, Enum.random(10000..60000)},
@@ -93,7 +94,7 @@ defmodule ZtlpRelay.RoutePlannerTest do
 
       # With max_hops = 1, the 2-hop ingress → transit → service path should fail
       assert {:error, :max_hops_exceeded} =
-        RoutePlanner.plan(ingress.node_id, service.node_id, registry, max_hops: 1)
+               RoutePlanner.plan(ingress.node_id, service.node_id, registry, max_hops: 1)
     end
 
     test "handles :all role relays (direct route)" do

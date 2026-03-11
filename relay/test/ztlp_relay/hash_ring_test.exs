@@ -172,21 +172,26 @@ defmodule ZtlpRelay.HashRingTest do
       ring_before = HashRing.new(relays)
 
       keys = for i <- 1..1000, do: "key-#{i}"
-      assignments_before = Map.new(keys, fn key ->
-        [primary | _] = HashRing.get_nodes(ring_before, key, 1)
-        {key, primary.node_id}
-      end)
+
+      assignments_before =
+        Map.new(keys, fn key ->
+          [primary | _] = HashRing.get_nodes(ring_before, key, 1)
+          {key, primary.node_id}
+        end)
 
       ring_after = HashRing.add_node(ring_before, make_relay(6))
-      assignments_after = Map.new(keys, fn key ->
-        [primary | _] = HashRing.get_nodes(ring_after, key, 1)
-        {key, primary.node_id}
-      end)
+
+      assignments_after =
+        Map.new(keys, fn key ->
+          [primary | _] = HashRing.get_nodes(ring_after, key, 1)
+          {key, primary.node_id}
+        end)
 
       # Count how many keys changed primary
-      changed = Enum.count(keys, fn key ->
-        assignments_before[key] != assignments_after[key]
-      end)
+      changed =
+        Enum.count(keys, fn key ->
+          assignments_before[key] != assignments_after[key]
+        end)
 
       # With consistent hashing, roughly 1/6 of keys should move (≈16.7%)
       # Allow generous tolerance: < 40%
@@ -232,9 +237,10 @@ defmodule ZtlpRelay.HashRingTest do
       relays = make_relays(3)
       ring = HashRing.new(relays)
 
-      ring = Enum.reduce(relays, ring, fn r, acc ->
-        HashRing.remove_node(acc, r.node_id)
-      end)
+      ring =
+        Enum.reduce(relays, ring, fn r, acc ->
+          HashRing.remove_node(acc, r.node_id)
+        end)
 
       assert HashRing.node_count(ring) == 0
       assert HashRing.get_nodes(ring, "any-key", 1) == []

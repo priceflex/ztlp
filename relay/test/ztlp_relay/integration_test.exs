@@ -7,7 +7,15 @@ defmodule ZtlpRelay.IntegrationTest do
   """
   use ExUnit.Case
 
-  alias ZtlpRelay.{Packet, Crypto, SessionRegistry, SessionSupervisor, Stats, UdpListener, Session}
+  alias ZtlpRelay.{
+    Packet,
+    Crypto,
+    SessionRegistry,
+    SessionSupervisor,
+    Stats,
+    UdpListener,
+    Session
+  }
 
   setup do
     Stats.reset()
@@ -33,12 +41,14 @@ defmodule ZtlpRelay.IntegrationTest do
       SessionRegistry.register_session(session_id, peer_a, peer_b)
 
       # Start a session GenServer
-      {:ok, session_pid} = SessionSupervisor.start_session(
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b,
-        timeout_ms: 5_000
-      )
+      {:ok, session_pid} =
+        SessionSupervisor.start_session(
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b,
+          timeout_ms: 5_000
+        )
+
       SessionRegistry.update_session_pid(session_id, session_pid)
 
       # --- A → B ---
@@ -80,33 +90,37 @@ defmodule ZtlpRelay.IntegrationTest do
       relay_port = UdpListener.get_port()
 
       # Create 5 session pairs
-      sessions = for i <- 1..5 do
-        {:ok, ca} = :gen_udp.open(0, [:binary, {:active, true}])
-        {:ok, cb} = :gen_udp.open(0, [:binary, {:active, true}])
-        {:ok, pa} = :inet.port(ca)
-        {:ok, pb} = :inet.port(cb)
+      sessions =
+        for i <- 1..5 do
+          {:ok, ca} = :gen_udp.open(0, [:binary, {:active, true}])
+          {:ok, cb} = :gen_udp.open(0, [:binary, {:active, true}])
+          {:ok, pa} = :inet.port(ca)
+          {:ok, pb} = :inet.port(cb)
 
-        peer_a = {{127, 0, 0, 1}, pa}
-        peer_b = {{127, 0, 0, 1}, pb}
-        session_id = Crypto.generate_session_id()
+          peer_a = {{127, 0, 0, 1}, pa}
+          peer_b = {{127, 0, 0, 1}, pb}
+          session_id = Crypto.generate_session_id()
 
-        SessionRegistry.register_session(session_id, peer_a, peer_b)
-        {:ok, spid} = SessionSupervisor.start_session(
-          session_id: session_id,
-          peer_a: peer_a,
-          peer_b: peer_b,
-          timeout_ms: 5_000
-        )
-        SessionRegistry.update_session_pid(session_id, spid)
+          SessionRegistry.register_session(session_id, peer_a, peer_b)
 
-        %{
-          index: i,
-          session_id: session_id,
-          client_a: ca,
-          client_b: cb,
-          session_pid: spid
-        }
-      end
+          {:ok, spid} =
+            SessionSupervisor.start_session(
+              session_id: session_id,
+              peer_a: peer_a,
+              peer_b: peer_b,
+              timeout_ms: 5_000
+            )
+
+          SessionRegistry.update_session_pid(session_id, spid)
+
+          %{
+            index: i,
+            session_id: session_id,
+            client_a: ca,
+            client_b: cb,
+            session_pid: spid
+          }
+        end
 
       # Send from A → B for each session
       for %{session_id: sid, client_a: ca, client_b: cb} <- sessions do
@@ -166,17 +180,19 @@ defmodule ZtlpRelay.IntegrationTest do
       src_node_id = :crypto.strong_rand_bytes(16)
       dst_svc_id = :crypto.strong_rand_bytes(16)
 
-      pkt = Packet.build_handshake(:hello, session_id,
-        crypto_suite: 0x0001,
-        key_id: 7,
-        packet_seq: 0,
-        src_node_id: src_node_id,
-        dst_svc_id: dst_svc_id,
-        policy_tag: 0x00010002
-      )
+      pkt =
+        Packet.build_handshake(:hello, session_id,
+          crypto_suite: 0x0001,
+          key_id: 7,
+          packet_seq: 0,
+          src_node_id: src_node_id,
+          dst_svc_id: dst_svc_id,
+          policy_tag: 0x00010002
+        )
 
       raw = Packet.serialize(pkt)
-      assert byte_size(raw) == 95  # No payload
+      # No payload
+      assert byte_size(raw) == 95
 
       {:ok, parsed} = Packet.parse(raw)
       assert parsed.msg_type == :hello
@@ -193,7 +209,7 @@ defmodule ZtlpRelay.IntegrationTest do
 
       {:ok, client_a} = :gen_udp.open(0, [:binary, {:active, true}])
       {:ok, client_b} = :gen_udp.open(0, [:binary, {:active, true}])
-      {:ok, unknown}  = :gen_udp.open(0, [:binary, {:active, true}])
+      {:ok, unknown} = :gen_udp.open(0, [:binary, {:active, true}])
 
       {:ok, port_a} = :inet.port(client_a)
       {:ok, port_b} = :inet.port(client_b)

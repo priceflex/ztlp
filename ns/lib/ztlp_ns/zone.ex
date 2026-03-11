@@ -30,10 +30,10 @@ defmodule ZtlpNs.Zone do
   """
 
   @type t :: %__MODULE__{
-    name: String.t(),
-    public_key: binary() | nil,
-    parent_name: String.t() | nil
-  }
+          name: String.t(),
+          public_key: binary() | nil,
+          parent_name: String.t() | nil
+        }
 
   defstruct [:name, :public_key, :parent_name]
 

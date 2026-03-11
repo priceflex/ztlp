@@ -64,8 +64,13 @@ defmodule ZtlpGateway.AuditLog do
   - `bytes_in` — total bytes received from client
   - `bytes_out` — total bytes sent to client
   """
-  @spec session_terminated(binary(), atom(), non_neg_integer(),
-                           non_neg_integer(), non_neg_integer()) :: :ok
+  @spec session_terminated(
+          binary(),
+          atom(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
   def session_terminated(session_id, reason, duration_ms, bytes_in, bytes_out) do
     log(%{
       event: :session_terminated,
@@ -128,8 +133,7 @@ defmodule ZtlpGateway.AuditLog do
 
   @impl true
   def init(_opts) do
-    :ets.new(@table, [:named_table, :ordered_set, :public,
-                       read_concurrency: true])
+    :ets.new(@table, [:named_table, :ordered_set, :public, read_concurrency: true])
     {:ok, %{}}
   end
 

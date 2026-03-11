@@ -30,18 +30,20 @@ defmodule ZtlpNs.Store.Migration do
   """
   @spec v1_to_mnesia([Record.t()]) :: {:ok, non_neg_integer()} | {:error, term()}
   def v1_to_mnesia(records) when is_list(records) do
-    result = :mnesia.transaction(fn ->
-      Enum.each(records, fn %Record{} = record ->
-        :mnesia.write({@records_table, {record.name, record.type}, record})
+    result =
+      :mnesia.transaction(fn ->
+        Enum.each(records, fn %Record{} = record ->
+          :mnesia.write({@records_table, {record.name, record.type}, record})
 
-        if record.type == :revoke do
-          revoked_ids = Map.get(record.data, :revoked_ids, [])
-          Enum.each(revoked_ids, fn id ->
-            :mnesia.write({@revoked_table, id, record})
-          end)
-        end
+          if record.type == :revoke do
+            revoked_ids = Map.get(record.data, :revoked_ids, [])
+
+            Enum.each(revoked_ids, fn id ->
+              :mnesia.write({@revoked_table, id, record})
+            end)
+          end
+        end)
       end)
-    end)
 
     case result do
       {:atomic, :ok} -> {:ok, length(records)}

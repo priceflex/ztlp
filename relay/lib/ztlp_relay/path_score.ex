@@ -12,11 +12,11 @@ defmodule ZtlpRelay.PathScore do
   """
 
   @type metrics :: %{
-    rtt_ms: number(),
-    loss_rate: float(),
-    load_factor: float(),
-    jitter_ms: float()
-  }
+          rtt_ms: number(),
+          loss_rate: float(),
+          load_factor: float(),
+          jitter_ms: float()
+        }
 
   @type scored_relay :: {binary(), number()}
 

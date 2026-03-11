@@ -75,10 +75,9 @@ impl TransportNode {
         dest: SocketAddr,
     ) -> Result<(), TransportError> {
         let mut pipeline = self.pipeline.lock().await;
-        let session = pipeline.get_session_mut(&session_id)
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
-            })?;
+        let session = pipeline.get_session_mut(&session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+        })?;
 
         let seq = session.next_send_seq();
         let send_key = session.send_key;

@@ -84,12 +84,10 @@ impl RelayAdmissionToken {
         let mut issuer_id = [0u8; 16];
         issuer_id.copy_from_slice(&data[17..33]);
         let issued_at = u64::from_be_bytes([
-            data[33], data[34], data[35], data[36],
-            data[37], data[38], data[39], data[40],
+            data[33], data[34], data[35], data[36], data[37], data[38], data[39], data[40],
         ]);
         let expires_at = u64::from_be_bytes([
-            data[41], data[42], data[43], data[44],
-            data[45], data[46], data[47], data[48],
+            data[41], data[42], data[43], data[44], data[45], data[46], data[47], data[48],
         ]);
         let mut session_scope = [0u8; 12];
         session_scope.copy_from_slice(&data[49..61]);
@@ -315,7 +313,11 @@ impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidTokenSize { expected, actual } => {
-                write!(f, "invalid token size: expected {} bytes, got {}", expected, actual)
+                write!(
+                    f,
+                    "invalid token size: expected {} bytes, got {}",
+                    expected, actual
+                )
             }
             Self::UnsupportedVersion(v) => {
                 write!(f, "unsupported token version: 0x{:02x}", v)
@@ -342,7 +344,10 @@ fn format_timestamp(unix_secs: u64) -> String {
     let seconds = time_of_day % 60;
 
     let (year, month, day) = days_to_ymd(days_since_epoch);
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -480,10 +485,9 @@ mod tests {
     fn test_cross_language_known_vector() {
         // Known secret key
         let secret: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
 
         // Known fields
@@ -494,8 +498,12 @@ mod tests {
         let session_scope = [0u8; 12]; // any session
 
         let token = RelayAdmissionToken::issue_at(
-            node_id, issuer_id, session_scope,
-            issued_at, expires_at, &secret,
+            node_id,
+            issuer_id,
+            session_scope,
+            issued_at,
+            expires_at,
+            &secret,
         );
 
         // Verify the token roundtrips correctly
@@ -536,9 +544,7 @@ mod tests {
         let issuer_id = [0x22; 16];
         let session_scope = [0u8; 12];
 
-        let token = RelayAdmissionToken::issue(
-            node_id, issuer_id, session_scope, 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue(node_id, issuer_id, session_scope, 300, &secret);
 
         let bytes = token.serialize();
         assert_eq!(bytes.len(), RAT_SIZE);
@@ -561,14 +567,16 @@ mod tests {
 
         // Issue a token that expired in the past
         let token = RelayAdmissionToken::issue_at(
-            node_id, issuer_id, session_scope,
+            node_id,
+            issuer_id,
+            session_scope,
             1000000, // issued long ago
             1000010, // expired long ago
             &secret,
         );
 
         assert!(token.verify(&secret)); // MAC is still valid
-        assert!(token.is_expired());    // but it's expired
+        assert!(token.is_expired()); // but it's expired
     }
 
     /// Session scope validation.
@@ -579,17 +587,14 @@ mod tests {
         let issuer_id = [0x22; 16];
 
         // Token scoped to any session
-        let any_token = RelayAdmissionToken::issue(
-            node_id, issuer_id, [0u8; 12], 300, &secret,
-        );
+        let any_token = RelayAdmissionToken::issue(node_id, issuer_id, [0u8; 12], 300, &secret);
         assert!(any_token.valid_for_session(&[0xFF; 12]));
         assert!(any_token.valid_for_session(&[0x00; 12]));
 
         // Token scoped to a specific session
         let specific_scope = [0xAA; 12];
-        let scoped_token = RelayAdmissionToken::issue(
-            node_id, issuer_id, specific_scope, 300, &secret,
-        );
+        let scoped_token =
+            RelayAdmissionToken::issue(node_id, issuer_id, specific_scope, 300, &secret);
         assert!(scoped_token.valid_for_session(&specific_scope));
         assert!(!scoped_token.valid_for_session(&[0xBB; 12]));
         assert!(!scoped_token.valid_for_session(&[0x00; 12]));
@@ -602,9 +607,7 @@ mod tests {
         let node_id = [0x11; 16];
         let issuer_id = [0x22; 16];
 
-        let token = RelayAdmissionToken::issue(
-            node_id, issuer_id, [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue(node_id, issuer_id, [0u8; 12], 300, &secret);
 
         // Tamper with the node_id
         let mut bytes = token.serialize();
@@ -631,9 +634,7 @@ mod tests {
         let secret = [0x42u8; 32];
         let wrong_secret = [0x99u8; 32];
 
-        let token = RelayAdmissionToken::issue(
-            [0x11; 16], [0x22; 16], [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
 
         assert!(token.verify(&secret));
         assert!(!token.verify(&wrong_secret));
@@ -652,9 +653,7 @@ mod tests {
     #[test]
     fn test_display() {
         let secret = [0x42u8; 32];
-        let token = RelayAdmissionToken::issue(
-            [0x11; 16], [0x22; 16], [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
         let display = token.display();
         assert!(display.contains("RAT v1"));
         assert!(display.contains("1111111111111111")); // node_id hex
@@ -668,17 +667,14 @@ mod tests {
         let secret = [0x42u8; 32];
 
         // Token with 300s TTL
-        let token = RelayAdmissionToken::issue(
-            [0x11; 16], [0x22; 16], [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
         let ttl = token.ttl_seconds();
         assert!(ttl <= 300);
         assert!(ttl >= 298); // allow a couple seconds for test runtime
 
         // Expired token should have 0 TTL
         let expired = RelayAdmissionToken::issue_at(
-            [0x11; 16], [0x22; 16], [0u8; 12],
-            1000000, 1000010, &secret,
+            [0x11; 16], [0x22; 16], [0u8; 12], 1000000, 1000010, &secret,
         );
         assert_eq!(expired.ttl_seconds(), 0);
     }
@@ -687,9 +683,7 @@ mod tests {
     #[test]
     fn test_extension_roundtrip() {
         let secret = [0x42u8; 32];
-        let token = RelayAdmissionToken::issue(
-            [0x11; 16], [0x22; 16], [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
 
         let ext = HandshakeExtension::AdmissionToken(token.clone());
         let bytes = ext.serialize();
@@ -710,9 +704,7 @@ mod tests {
     #[test]
     fn test_extension_wire_len() {
         let secret = [0x42u8; 32];
-        let token = RelayAdmissionToken::issue(
-            [0x11; 16], [0x22; 16], [0u8; 12], 300, &secret,
-        );
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
         let ext = HandshakeExtension::AdmissionToken(token);
         assert_eq!(ext.wire_len(), 94);
     }

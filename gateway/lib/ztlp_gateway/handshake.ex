@@ -45,30 +45,42 @@ defmodule ZtlpGateway.Handshake do
   # ---------------------------------------------------------------------------
 
   @type state :: %{
-    # Noise framework state
-    h: binary(),            # handshake hash (32 bytes)
-    ck: binary(),           # chaining key (32 bytes)
-    k: binary() | nil,      # current encryption key (32 bytes or nil)
-    n: non_neg_integer(),   # nonce counter
+          # Noise framework state
+          # handshake hash (32 bytes)
+          h: binary(),
+          # chaining key (32 bytes)
+          ck: binary(),
+          # current encryption key (32 bytes or nil)
+          k: binary() | nil,
+          # nonce counter
+          n: non_neg_integer(),
 
-    # Our keys
-    s_pub: binary(),        # our static public key (X25519)
-    s_priv: binary(),       # our static private key (X25519)
-    e_pub: binary() | nil,  # our ephemeral public key
-    e_priv: binary() | nil, # our ephemeral private key
+          # Our keys
+          # our static public key (X25519)
+          s_pub: binary(),
+          # our static private key (X25519)
+          s_priv: binary(),
+          # our ephemeral public key
+          e_pub: binary() | nil,
+          # our ephemeral private key
+          e_priv: binary() | nil,
 
-    # Their keys (learned during handshake)
-    re: binary() | nil,     # remote ephemeral public key
-    rs: binary() | nil,     # remote static public key
+          # Their keys (learned during handshake)
+          # remote ephemeral public key
+          re: binary() | nil,
+          # remote static public key
+          rs: binary() | nil,
 
-    # Phase tracking
-    phase: :initialized | :received_msg1 | :sent_msg2 | :complete
-  }
+          # Phase tracking
+          phase: :initialized | :received_msg1 | :sent_msg2 | :complete
+        }
 
   @type transport_keys :: %{
-    i2r_key: binary(),  # initiator-to-responder key
-    r2i_key: binary()   # responder-to-initiator key
-  }
+          # initiator-to-responder key
+          i2r_key: binary(),
+          # responder-to-initiator key
+          r2i_key: binary()
+        }
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -218,8 +230,12 @@ defmodule ZtlpGateway.Handshake do
 
                 # Decrypt payload
                 if byte_size(encrypted_payload) >= 16 do
-                  payload_ct = binary_part(encrypted_payload, 0, byte_size(encrypted_payload) - 16)
-                  payload_tag = binary_part(encrypted_payload, byte_size(encrypted_payload) - 16, 16)
+                  payload_ct =
+                    binary_part(encrypted_payload, 0, byte_size(encrypted_payload) - 16)
+
+                  payload_tag =
+                    binary_part(encrypted_payload, byte_size(encrypted_payload) - 16, 16)
+
                   nonce_p = nonce_from_counter(n2)
 
                   case Crypto.decrypt(k, nonce_p, payload_ct, h, payload_tag) do
@@ -229,14 +245,15 @@ defmodule ZtlpGateway.Handshake do
                     payload ->
                       h = Crypto.hash(h <> encrypted_payload)
 
-                      new_state = %{state |
-                        h: h,
-                        ck: ck,
-                        k: k,
-                        n: n2 + 1,
-                        re: re,
-                        rs: rs,
-                        phase: :sent_msg2
+                      new_state = %{
+                        state
+                        | h: h,
+                          ck: ck,
+                          k: k,
+                          n: n2 + 1,
+                          re: re,
+                          rs: rs,
+                          phase: :sent_msg2
                       }
 
                       {new_state, payload}
@@ -244,20 +261,23 @@ defmodule ZtlpGateway.Handshake do
                 else
                   # Empty payload — just the tag
                   nonce_p = nonce_from_counter(n2)
+
                   case Crypto.decrypt(k, nonce_p, <<>>, h, encrypted_payload) do
                     :error ->
                       {:error, :decrypt_payload_failed}
 
                     payload ->
                       h = Crypto.hash(h <> encrypted_payload)
-                      new_state = %{state |
-                        h: h,
-                        ck: ck,
-                        k: k,
-                        n: n2 + 1,
-                        re: re,
-                        rs: rs,
-                        phase: :sent_msg2
+
+                      new_state = %{
+                        state
+                        | h: h,
+                          ck: ck,
+                          k: k,
+                          n: n2 + 1,
+                          re: re,
+                          rs: rs,
+                          phase: :sent_msg2
                       }
 
                       {new_state, payload}
@@ -306,13 +326,7 @@ defmodule ZtlpGateway.Handshake do
 
     msg = encrypted_s <> encrypted_payload
 
-    new_state = %{state |
-      h: h,
-      ck: ck,
-      k: k,
-      n: 1,
-      phase: :complete
-    }
+    new_state = %{state | h: h, ck: ck, k: k, n: 1, phase: :complete}
 
     {new_state, msg}
   end
@@ -392,14 +406,15 @@ defmodule ZtlpGateway.Handshake do
 
     msg = e_pub <> encrypted_s <> encrypted_payload
 
-    new_state = %{state |
-      e_pub: e_pub,
-      e_priv: e_priv,
-      h: h,
-      ck: ck,
-      k: k,
-      n: 1,
-      phase: :sent_msg2
+    new_state = %{
+      state
+      | e_pub: e_pub,
+        e_priv: e_priv,
+        h: h,
+        ck: ck,
+        k: k,
+        n: 1,
+        phase: :sent_msg2
     }
 
     {new_state, msg}
@@ -451,34 +466,21 @@ defmodule ZtlpGateway.Handshake do
                 payload ->
                   h = Crypto.hash(h <> encrypted_payload)
 
-                  new_state = %{state |
-                    h: h,
-                    ck: ck,
-                    k: k,
-                    n: 1,
-                    rs: rs,
-                    phase: :complete
-                  }
+                  new_state = %{state | h: h, ck: ck, k: k, n: 1, rs: rs, phase: :complete}
 
                   {new_state, payload}
               end
             else
               # Empty payload — just tag bytes
               nonce_p = nonce_from_counter(0)
+
               case Crypto.decrypt(k, nonce_p, <<>>, h, encrypted_payload) do
                 :error ->
                   {:error, :decrypt_payload_failed}
 
                 payload ->
                   h = Crypto.hash(h <> encrypted_payload)
-                  new_state = %{state |
-                    h: h,
-                    ck: ck,
-                    k: k,
-                    n: 1,
-                    rs: rs,
-                    phase: :complete
-                  }
+                  new_state = %{state | h: h, ck: ck, k: k, n: 1, rs: rs, phase: :complete}
 
                   {new_state, payload}
               end

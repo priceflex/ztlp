@@ -31,7 +31,10 @@ fn test_version_field_max_4_bits() {
     h.hdr_len = 0x0FFF; // max 12-bit value
     let bytes = h.serialize();
     let packed = u16::from_be_bytes([bytes[2], bytes[3]]);
-    assert_eq!(packed, 0xFFFF, "Ver(0xF)|HdrLen(0xFFF) should pack to 0xFFFF");
+    assert_eq!(
+        packed, 0xFFFF,
+        "Ver(0xF)|HdrLen(0xFFF) should pack to 0xFFFF"
+    );
 
     // Deserialization should reject version != 1
     let result = HandshakeHeader::deserialize(&bytes);
@@ -69,13 +72,19 @@ fn test_all_flags_roundtrip() {
     h.flags = all_flags;
     let bytes = h.serialize();
     let restored = HandshakeHeader::deserialize(&bytes).unwrap();
-    assert_eq!(restored.flags, all_flags, "all flags should survive roundtrip");
+    assert_eq!(
+        restored.flags, all_flags,
+        "all flags should survive roundtrip"
+    );
 
     let mut dh = DataHeader::new(SessionId::generate(), 0);
     dh.flags = all_flags;
     let bytes = dh.serialize();
     let restored = DataHeader::deserialize(&bytes).unwrap();
-    assert_eq!(restored.flags, all_flags, "all data flags should survive roundtrip");
+    assert_eq!(
+        restored.flags, all_flags,
+        "all data flags should survive roundtrip"
+    );
 }
 
 #[test]
@@ -169,7 +178,10 @@ fn test_replay_window_one_past_boundary() {
     // Advance to position 64
     assert!(w.check_and_record(64));
     // Position 0 is now 64 behind — exactly at window edge
-    assert!(!w.check_and_record(0), "seq 0 should be outside 64-packet window when highest is 64");
+    assert!(
+        !w.check_and_record(0),
+        "seq 0 should be outside 64-packet window when highest is 64"
+    );
 }
 
 #[test]
@@ -196,7 +208,11 @@ fn test_replay_window_interleaved_order() {
     }
     // All should be marked as seen now
     for seq in &order {
-        assert!(!w.check_and_record(*seq), "seq {} should be rejected as replay", seq);
+        assert!(
+            !w.check_and_record(*seq),
+            "seq {} should be rejected as replay",
+            seq
+        );
     }
 }
 
@@ -224,20 +240,17 @@ fn test_key_direction_correctness() {
 
     // Initiator send == Responder recv
     assert_eq!(
-        result.initiator_session.send_key,
-        result.responder_session.recv_key,
+        result.initiator_session.send_key, result.responder_session.recv_key,
         "I.send must equal R.recv"
     );
     // Initiator recv == Responder send
     assert_eq!(
-        result.initiator_session.recv_key,
-        result.responder_session.send_key,
+        result.initiator_session.recv_key, result.responder_session.send_key,
         "I.recv must equal R.send"
     );
     // Send and recv keys must be DIFFERENT (directional isolation)
     assert_ne!(
-        result.initiator_session.send_key,
-        result.initiator_session.recv_key,
+        result.initiator_session.send_key, result.initiator_session.recv_key,
         "send and recv keys must differ"
     );
 }
@@ -253,8 +266,7 @@ fn test_different_identity_pairs_produce_different_keys() {
     let r2 = perform_handshake(&id_a2, &id_b2).unwrap();
 
     assert_ne!(
-        r1.initiator_session.send_key,
-        r2.initiator_session.send_key,
+        r1.initiator_session.send_key, r2.initiator_session.send_key,
         "different identity pairs should produce different keys"
     );
 }
@@ -269,8 +281,7 @@ fn test_same_identities_different_sessions_different_keys() {
     let r2 = perform_handshake(&id_a, &id_b).unwrap();
 
     assert_ne!(
-        r1.initiator_session.send_key,
-        r2.initiator_session.send_key,
+        r1.initiator_session.send_key, r2.initiator_session.send_key,
         "same identities should still produce different session keys (PFS)"
     );
 }
@@ -284,13 +295,7 @@ fn test_pipeline_hdrlen_discrimination() {
     let mut pipeline = Pipeline::new();
     let sid = SessionId::generate();
     let recv_key = [0xBB; 32];
-    let session = SessionState::new(
-        sid,
-        NodeId::generate(),
-        [0xAA; 32],
-        recv_key,
-        false,
-    );
+    let session = SessionState::new(sid, NodeId::generate(), [0xAA; 32], recv_key, false);
     pipeline.register_session(session);
 
     // Data packet with payload (total size > 95 bytes, but HdrLen = 11)
@@ -317,13 +322,7 @@ fn test_pipeline_many_sessions() {
     for _ in 0..1000 {
         let sid = SessionId::generate();
         let recv_key = [0xBB; 32];
-        let session = SessionState::new(
-            sid,
-            NodeId::generate(),
-            [0xAA; 32],
-            recv_key,
-            false,
-        );
+        let session = SessionState::new(sid, NodeId::generate(), [0xAA; 32], recv_key, false);
         pipeline.register_session(session);
         session_ids.push((sid, recv_key));
     }
@@ -348,13 +347,7 @@ fn test_pipeline_correct_key_for_auth() {
     let sid = SessionId::generate();
     let send_key = [0xAA; 32];
     let recv_key = [0xBB; 32];
-    let session = SessionState::new(
-        sid,
-        NodeId::generate(),
-        send_key,
-        recv_key,
-        false,
-    );
+    let session = SessionState::new(sid, NodeId::generate(), send_key, recv_key, false);
     pipeline.register_session(session);
 
     // Sign with recv_key (what the remote's send_key would be) → should pass
@@ -466,7 +459,10 @@ fn test_session_replay_check_integration() {
     );
 
     assert!(session.check_replay(0), "first packet should be accepted");
-    assert!(session.check_replay(1), "sequential packet should be accepted");
+    assert!(
+        session.check_replay(1),
+        "sequential packet should be accepted"
+    );
     assert!(!session.check_replay(0), "replay should be rejected");
     assert!(session.check_replay(5), "skip should be accepted");
     assert!(session.check_replay(3), "fill gap should be accepted");
@@ -497,8 +493,16 @@ fn test_session_id_uniqueness_bulk() {
 #[test]
 fn test_identity_keys_are_32_bytes() {
     let ident = NodeIdentity::generate().unwrap();
-    assert_eq!(ident.static_private_key.len(), 32, "private key must be 32 bytes");
-    assert_eq!(ident.static_public_key.len(), 32, "public key must be 32 bytes");
+    assert_eq!(
+        ident.static_private_key.len(),
+        32,
+        "private key must be 32 bytes"
+    );
+    assert_eq!(
+        ident.static_public_key.len(),
+        32,
+        "public key must be 32 bytes"
+    );
 }
 
 #[test]

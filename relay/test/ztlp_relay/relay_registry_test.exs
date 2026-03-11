@@ -7,13 +7,14 @@ defmodule ZtlpRelay.RelayRegistryTest do
   # We start a fresh RelayRegistry GenServer for each test.
   setup do
     # Start a registry with a very long sweep interval (we'll trigger manually)
-    {:ok, pid} = RelayRegistry.start_link(
-      name: :"relay_registry_#{:erlang.unique_integer([:positive])}",
-      table_name: :ztlp_relay_registry,
-      sweep_interval_ms: 60_000_000,
-      stale_threshold_ms: 120_000,
-      remove_threshold_ms: 300_000
-    )
+    {:ok, pid} =
+      RelayRegistry.start_link(
+        name: :"relay_registry_#{:erlang.unique_integer([:positive])}",
+        table_name: :ztlp_relay_registry,
+        sweep_interval_ms: 60_000_000,
+        stale_threshold_ms: 120_000,
+        remove_threshold_ms: 300_000
+      )
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid)
@@ -30,6 +31,7 @@ defmodule ZtlpRelay.RelayRegistryTest do
 
   defp make_relay(n) do
     node_id = :crypto.hash(:blake2s, "relay-#{n}") |> binary_part(0, 16)
+
     %{
       node_id: node_id,
       address: {{10, 0, 0, n}, 23095 + n},
@@ -174,8 +176,12 @@ defmodule ZtlpRelay.RelayRegistryTest do
       stale_ts = now - 150_000
 
       :ets.insert(:ztlp_relay_registry, {
-        relay.node_id, relay.address, relay.role,
-        relay.metrics, stale_ts, :active
+        relay.node_id,
+        relay.address,
+        relay.role,
+        relay.metrics,
+        stale_ts,
+        :active
       })
 
       # Verify it's in the registry

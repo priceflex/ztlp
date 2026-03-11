@@ -142,7 +142,8 @@ defmodule ZtlpRelay.InterRelayTest do
     end
 
     test "handles large inner packet" do
-      inner = :crypto.strong_rand_bytes(1400)  # near MTU size
+      # near MTU size
+      inner = :crypto.strong_rand_bytes(1400)
       encoded = InterRelay.encode_forward(@test_node_id, inner)
       {:ok, {:relay_forward, _, _, payload}} = InterRelay.decode(encoded)
       assert payload.inner_packet == inner
@@ -161,6 +162,7 @@ defmodule ZtlpRelay.InterRelayTest do
   describe "encode/decode RELAY_SESSION_SYNC" do
     test "round-trips with session info" do
       session_id = :crypto.strong_rand_bytes(12)
+
       sync = %{
         session_id: session_id,
         peer_a: {{10, 0, 0, 1}, 5000},
@@ -238,13 +240,22 @@ defmodule ZtlpRelay.InterRelayTest do
       assert InterRelay.inter_relay_message?(InterRelay.encode_hello(our_info()))
       assert InterRelay.inter_relay_message?(InterRelay.encode_hello_ack(our_info()))
       assert InterRelay.inter_relay_message?(InterRelay.encode_ping(@test_node_id))
-      assert InterRelay.inter_relay_message?(InterRelay.encode_pong(@test_node_id, %{active_sessions: 0, max_sessions: 0, uptime_seconds: 0}))
+
+      assert InterRelay.inter_relay_message?(
+               InterRelay.encode_pong(@test_node_id, %{
+                 active_sessions: 0,
+                 max_sessions: 0,
+                 uptime_seconds: 0
+               })
+             )
+
       assert InterRelay.inter_relay_message?(InterRelay.encode_forward(@test_node_id, <<>>))
       assert InterRelay.inter_relay_message?(InterRelay.encode_leave(@test_node_id))
     end
 
     test "rejects non-inter-relay messages" do
-      refute InterRelay.inter_relay_message?(<<0x5A, 0x37, 0::8>>)  # ZTLP magic
+      # ZTLP magic
+      refute InterRelay.inter_relay_message?(<<0x5A, 0x37, 0::8>>)
       refute InterRelay.inter_relay_message?(<<0xAA::8, 0::128>>)
       refute InterRelay.inter_relay_message?(<<>>)
     end

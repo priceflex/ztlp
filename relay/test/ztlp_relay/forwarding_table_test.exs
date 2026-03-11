@@ -7,14 +7,18 @@ defmodule ZtlpRelay.ForwardingTableTest do
     # Start a dedicated ForwardingTable for these tests
     table_name = :"ztlp_fwd_test_#{:erlang.unique_integer([:positive])}"
     name = :"fwd_table_test_#{:erlang.unique_integer([:positive])}"
-    {:ok, pid} = ForwardingTable.start_link(
-      name: name,
-      table_name: table_name,
-      sweep_interval_ms: 600_000
-    )
+
+    {:ok, pid} =
+      ForwardingTable.start_link(
+        name: name,
+        table_name: table_name,
+        sweep_interval_ms: 600_000
+      )
+
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid)
     end)
+
     %{table: table_name}
   end
 
@@ -83,7 +87,9 @@ defmodule ZtlpRelay.ForwardingTableTest do
       initial_count = ForwardingTable.count(table)
 
       for _ <- 1..5 do
-        ForwardingTable.put(:crypto.strong_rand_bytes(12), [:crypto.strong_rand_bytes(16)], table: table)
+        ForwardingTable.put(:crypto.strong_rand_bytes(12), [:crypto.strong_rand_bytes(16)],
+          table: table
+        )
       end
 
       assert ForwardingTable.count(table) == initial_count + 5

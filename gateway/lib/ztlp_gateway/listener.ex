@@ -71,12 +71,13 @@ defmodule ZtlpGateway.Listener do
         {:ok, actual_port} = :inet.port(socket)
         Logger.info("[Listener] ZTLP Gateway listening on UDP port #{actual_port}")
 
-        {:ok, %{
-          socket: socket,
-          port: actual_port,
-          static_pub: static_pub,
-          static_priv: static_priv
-        }}
+        {:ok,
+         %{
+           socket: socket,
+           port: actual_port,
+           static_pub: static_pub,
+           static_priv: static_priv
+         }}
 
       {:error, reason} ->
         {:stop, {:listen_failed, reason}}
@@ -145,10 +146,10 @@ defmodule ZtlpGateway.Listener do
           Session.handle_packet(pid, packet_data, client_addr)
 
         {:error, reason} ->
-          Logger.warn("[Listener] Failed to start session: #{inspect(reason)}")
+          Logger.warning("[Listener] Failed to start session: #{inspect(reason)}")
       end
     else
-      Logger.warn("[Listener] Max sessions (#{max}) reached, rejecting HELLO")
+      Logger.warning("[Listener] Max sessions (#{max}) reached, rejecting HELLO")
     end
   end
 end

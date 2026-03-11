@@ -57,8 +57,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::identity::{NodeId, NodeIdentity};
 use crate::mobile::{
-    ConnectionState, HardwareIdentityProvider, IdentityProvider, MobileConfig,
-    PlatformIdentity, SoftwareIdentityProvider,
+    ConnectionState, HardwareIdentityProvider, IdentityProvider, MobileConfig, PlatformIdentity,
+    SoftwareIdentityProvider,
 };
 use crate::packet::SessionId;
 
@@ -238,8 +238,7 @@ pub struct ZtlpConfig {
 // ── Global lifecycle ────────────────────────────────────────────────────
 
 /// Global initialization flag.
-static INITIALIZED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Initialize the ZTLP library. Must be called before any other function.
 ///
@@ -462,10 +461,7 @@ pub extern "C" fn ztlp_identity_public_key(identity: *const ZtlpIdentity) -> *co
 ///
 /// `0` on success, negative [`ZtlpResult`] on failure.
 #[no_mangle]
-pub extern "C" fn ztlp_identity_save(
-    identity: *const ZtlpIdentity,
-    path: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_identity_save(identity: *const ZtlpIdentity, path: *const c_char) -> i32 {
     if identity.is_null() || path.is_null() {
         set_last_error("identity or path is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -484,15 +480,13 @@ pub extern "C" fn ztlp_identity_save(
     };
 
     match identity.provider.as_node_identity() {
-        Some(node_identity) => {
-            match node_identity.save(Path::new(path_str)) {
-                Ok(()) => ZtlpResult::Ok as i32,
-                Err(e) => {
-                    set_last_error(&format!("failed to save identity: {e}"));
-                    ZtlpResult::IdentityError as i32
-                }
+        Some(node_identity) => match node_identity.save(Path::new(path_str)) {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!("failed to save identity: {e}"));
+                ZtlpResult::IdentityError as i32
             }
-        }
+        },
         None => {
             set_last_error("hardware identities cannot be exported to file");
             ZtlpResult::IdentityError as i32
@@ -632,10 +626,7 @@ pub extern "C" fn ztlp_config_new() -> *mut ZtlpConfig {
 ///
 /// `0` on success, negative on failure.
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_relay(
-    config: *mut ZtlpConfig,
-    addr: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_relay(config: *mut ZtlpConfig, addr: *const c_char) -> i32 {
     if config.is_null() || addr.is_null() {
         set_last_error("config or addr is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -668,10 +659,7 @@ pub extern "C" fn ztlp_config_set_relay(
 ///
 /// `0` on success, negative on failure.
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_stun_server(
-    config: *mut ZtlpConfig,
-    addr: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_stun_server(config: *mut ZtlpConfig, addr: *const c_char) -> i32 {
     if config.is_null() || addr.is_null() {
         set_last_error("config or addr is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -707,10 +695,7 @@ pub extern "C" fn ztlp_config_set_stun_server(
 ///
 /// `0` on success, negative on failure.
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_nat_assist(
-    config: *mut ZtlpConfig,
-    enabled: bool,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_nat_assist(config: *mut ZtlpConfig, enabled: bool) -> i32 {
     if config.is_null() {
         set_last_error("config is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -732,10 +717,7 @@ pub extern "C" fn ztlp_config_set_nat_assist(
 ///
 /// `0` on success, negative on failure.
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_timeout_ms(
-    config: *mut ZtlpConfig,
-    ms: u64,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_timeout_ms(config: *mut ZtlpConfig, ms: u64) -> i32 {
     if config.is_null() {
         set_last_error("config is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -910,11 +892,7 @@ pub extern "C" fn ztlp_listen(
 ///
 /// Safe to call from any thread. The data is copied internally.
 #[no_mangle]
-pub extern "C" fn ztlp_send(
-    client: *mut ZtlpClient,
-    data: *const u8,
-    len: usize,
-) -> i32 {
+pub extern "C" fn ztlp_send(client: *mut ZtlpClient, data: *const u8, len: usize) -> i32 {
     if client.is_null() || data.is_null() {
         set_last_error("client or data is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -1204,11 +1182,9 @@ pub extern "C" fn ztlp_version() -> *const c_char {
 /// The string is valid until the next FFI call on this thread.
 #[no_mangle]
 pub extern "C" fn ztlp_last_error() -> *const c_char {
-    LAST_ERROR.with(|cell| {
-        match cell.borrow().as_ref() {
-            Some(cstr) => cstr.as_ptr(),
-            None => std::ptr::null(),
-        }
+    LAST_ERROR.with(|cell| match cell.borrow().as_ref() {
+        Some(cstr) => cstr.as_ptr(),
+        None => std::ptr::null(),
     })
 }
 
@@ -1410,7 +1386,10 @@ mod tests {
         let loaded_node_id = unsafe { CStr::from_ptr(loaded_node_id_ptr) }
             .to_str()
             .unwrap();
-        assert_eq!(loaded_node_id, original_node_id, "node ID should match after roundtrip");
+        assert_eq!(
+            loaded_node_id, original_node_id,
+            "node ID should match after roundtrip"
+        );
 
         ztlp_identity_free(loaded);
 
@@ -1777,11 +1756,8 @@ mod tests {
     fn test_set_disconnect_callback() {
         let identity = ztlp_identity_generate();
         let client = ztlp_client_new(identity);
-        let result = ztlp_set_disconnect_callback(
-            client,
-            dummy_disconnect_callback,
-            std::ptr::null_mut(),
-        );
+        let result =
+            ztlp_set_disconnect_callback(client, dummy_disconnect_callback, std::ptr::null_mut());
         assert_eq!(result, 0);
         ztlp_client_free(client);
     }

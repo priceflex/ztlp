@@ -32,7 +32,8 @@ defmodule ZtlpNs.Query do
   Does NOT verify the full trust chain. Use `lookup_verified/2` for
   production-grade lookups.
   """
-  @spec lookup(String.t(), Record.record_type()) :: {:ok, Record.t()} | :not_found | {:error, atom()}
+  @spec lookup(String.t(), Record.record_type()) ::
+          {:ok, Record.t()} | :not_found | {:error, atom()}
   def lookup(name, type) do
     case Store.lookup(name, type) do
       {:ok, record} ->
@@ -41,6 +42,7 @@ defmodule ZtlpNs.Query do
         else
           {:error, :invalid_signature}
         end
+
       other ->
         other
     end
@@ -60,7 +62,8 @@ defmodule ZtlpNs.Query do
   Returns `{:error, :untrusted_chain}` if the chain doesn't terminate
   at a known root anchor.
   """
-  @spec lookup_verified(String.t(), Record.record_type()) :: {:ok, Record.t()} | :not_found | {:error, atom()}
+  @spec lookup_verified(String.t(), Record.record_type()) ::
+          {:ok, Record.t()} | :not_found | {:error, atom()}
   def lookup_verified(name, type) do
     case Store.lookup(name, type) do
       {:ok, record} ->
@@ -73,6 +76,7 @@ defmodule ZtlpNs.Query do
         else
           {:error, :invalid_signature}
         end
+
       other ->
         other
     end
@@ -134,14 +138,15 @@ defmodule ZtlpNs.Query do
     Store.list()
     |> Enum.find(fn {_name, type, record} ->
       type == :key and
-      Map.get(record.data, :public_key) == pub_hex and
-      Map.get(record.data, :delegation) == true and
-      Record.verify(record)
+        Map.get(record.data, :public_key) == pub_hex and
+        Map.get(record.data, :delegation) == true and
+        Record.verify(record)
     end)
     |> case do
       {_name, _type, delegation} ->
         # Found a valid delegation — continue up the chain
         verify_chain(delegation.signer_public_key, delegation.name, 1)
+
       nil ->
         {:error, :untrusted_chain}
     end

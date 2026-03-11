@@ -47,8 +47,10 @@ defmodule ZtlpGateway.Packet do
   @magic <<0x5A, 0x37>>
 
   # HdrLen values (in 4-byte words)
-  @hdr_len_data 11       # 11 words → data header
-  @hdr_len_handshake 24  # 24 words → handshake header
+  # 11 words → data header
+  @hdr_len_data 11
+  # 24 words → handshake header
+  @hdr_len_handshake 24
 
   # Current protocol version
   @version 1
@@ -75,23 +77,23 @@ defmodule ZtlpGateway.Packet do
   @type flags :: non_neg_integer()
 
   @type data_packet :: %{
-    type: :data,
-    session_id: session_id(),
-    sequence: non_neg_integer(),
-    flags: flags(),
-    payload_type: non_neg_integer(),
-    header_auth_tag: binary(),
-    payload: binary()
-  }
+          type: :data,
+          session_id: session_id(),
+          sequence: non_neg_integer(),
+          flags: flags(),
+          payload_type: non_neg_integer(),
+          header_auth_tag: binary(),
+          payload: binary()
+        }
 
   @type handshake_packet :: %{
-    type: :handshake,
-    session_id: session_id(),
-    msg_type: msg_type(),
-    payload_length: non_neg_integer(),
-    auth_tag: binary(),
-    payload: binary()
-  }
+          type: :handshake,
+          session_id: session_id(),
+          msg_type: msg_type(),
+          payload_length: non_neg_integer(),
+          auth_tag: binary(),
+          payload: binary()
+        }
 
   @type packet :: data_packet() | handshake_packet()
 
@@ -117,8 +119,10 @@ defmodule ZtlpGateway.Packet do
   same offset in both header types.
   """
   @spec extract_session_id(binary()) :: {:ok, session_id()} | :error
-  def extract_session_id(<<_magic::binary-size(2), _vh::binary-size(2),
-                           session_id::binary-size(16), _rest::binary>>) do
+  def extract_session_id(
+        <<_magic::binary-size(2), _vh::binary-size(2), session_id::binary-size(16),
+          _rest::binary>>
+      ) do
     {:ok, session_id}
   end
 
@@ -146,8 +150,9 @@ defmodule ZtlpGateway.Packet do
   the SessionID check in Layer 2.
   """
   @spec hello?(binary()) :: boolean()
-  def hello?(<<0x5A, 0x37, _v::4, @hdr_len_handshake::12,
-               0::128, @msg_hello, _rest::binary>>), do: true
+  def hello?(<<0x5A, 0x37, _v::4, @hdr_len_handshake::12, 0::128, @msg_hello, _rest::binary>>),
+    do: true
+
   def hello?(_), do: false
 
   # ---------------------------------------------------------------------------
@@ -187,18 +192,18 @@ defmodule ZtlpGateway.Packet do
   - `header_auth_tag` — 12-byte header authentication tag
   - `payload` — encrypted payload bytes
   """
-  @spec serialize_data(session_id(), non_neg_integer(), flags(),
-                        non_neg_integer(), binary(), binary()) :: binary()
+  @spec serialize_data(
+          session_id(),
+          non_neg_integer(),
+          flags(),
+          non_neg_integer(),
+          binary(),
+          binary()
+        ) :: binary()
   def serialize_data(session_id, sequence, flags, payload_type, header_auth_tag, payload)
       when byte_size(session_id) == 16 and byte_size(header_auth_tag) == 12 do
-    <<@magic::binary,
-      @version::4, @hdr_len_data::12,
-      session_id::binary-size(16),
-      sequence::64,
-      flags::8,
-      payload_type::8,
-      header_auth_tag::binary-size(12),
-      payload::binary>>
+    <<@magic::binary, @version::4, @hdr_len_data::12, session_id::binary-size(16), sequence::64,
+      flags::8, payload_type::8, header_auth_tag::binary-size(12), payload::binary>>
   end
 
   @doc """
@@ -216,14 +221,8 @@ defmodule ZtlpGateway.Packet do
     mt = msg_type_to_byte(msg_type)
     payload_len = byte_size(payload)
 
-    <<@magic::binary,
-      @version::4, @hdr_len_handshake::12,
-      session_id::binary-size(16),
-      mt::8,
-      payload_len::16,
-      0::64,
-      auth_tag::binary-size(64),
-      payload::binary>>
+    <<@magic::binary, @version::4, @hdr_len_handshake::12, session_id::binary-size(16), mt::8,
+      payload_len::16, 0::64, auth_tag::binary-size(64), payload::binary>>
   end
 
   @doc """
@@ -274,37 +273,39 @@ defmodule ZtlpGateway.Packet do
   # Internal parsing
   # ---------------------------------------------------------------------------
 
-  defp parse_data(<<session_id::binary-size(16), sequence::64,
-                    flags::8, payload_type::8,
-                    header_auth_tag::binary-size(12),
-                    payload::binary>>) do
-    {:ok, %{
-      type: :data,
-      session_id: session_id,
-      sequence: sequence,
-      flags: flags,
-      payload_type: payload_type,
-      header_auth_tag: header_auth_tag,
-      payload: payload
-    }}
+  defp parse_data(
+         <<session_id::binary-size(16), sequence::64, flags::8, payload_type::8,
+           header_auth_tag::binary-size(12), payload::binary>>
+       ) do
+    {:ok,
+     %{
+       type: :data,
+       session_id: session_id,
+       sequence: sequence,
+       flags: flags,
+       payload_type: payload_type,
+       header_auth_tag: header_auth_tag,
+       payload: payload
+     }}
   end
 
   defp parse_data(_), do: {:error, :truncated_data}
 
-  defp parse_handshake(<<session_id::binary-size(16), msg_type_byte::8,
-                         payload_length::16, _reserved::64,
-                         auth_tag::binary-size(64),
-                         payload::binary>>) do
+  defp parse_handshake(
+         <<session_id::binary-size(16), msg_type_byte::8, payload_length::16, _reserved::64,
+           auth_tag::binary-size(64), payload::binary>>
+       ) do
     mt = byte_to_msg_type(msg_type_byte)
 
-    {:ok, %{
-      type: :handshake,
-      session_id: session_id,
-      msg_type: mt,
-      payload_length: payload_length,
-      auth_tag: auth_tag,
-      payload: payload
-    }}
+    {:ok,
+     %{
+       type: :handshake,
+       session_id: session_id,
+       msg_type: mt,
+       payload_length: payload_length,
+       auth_tag: auth_tag,
+       payload: payload
+     }}
   end
 
   defp parse_handshake(_), do: {:error, :truncated_handshake}

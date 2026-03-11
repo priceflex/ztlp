@@ -41,9 +41,7 @@ use tracing::{error, info, warn};
 
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::NodeIdentity;
-use ztlp_proto::packet::{
-    HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE,
-};
+use ztlp_proto::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use ztlp_proto::session::SessionState;
 use ztlp_proto::transport::TransportNode;
 
@@ -86,7 +84,9 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// If `path` is Some and the file exists, loads from it.
 /// If `path` is Some and the file doesn't exist, generates and saves.
 /// If `path` is None, generates an ephemeral identity.
-fn load_or_generate_identity(path: &Option<PathBuf>) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
+fn load_or_generate_identity(
+    path: &Option<PathBuf>,
+) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
     match path {
         Some(p) if p.exists() => {
             info!("loading identity from {}", p.display());
@@ -95,16 +95,26 @@ fn load_or_generate_identity(path: &Option<PathBuf>) -> Result<NodeIdentity, Box
             Ok(ident)
         }
         Some(p) => {
-            info!("no identity file at {} — generating new identity", p.display());
+            info!(
+                "no identity file at {} — generating new identity",
+                p.display()
+            );
             let ident = NodeIdentity::generate()?;
             ident.save(p)?;
-            info!("saved new identity to {} — node ID: {}", p.display(), ident.node_id);
+            info!(
+                "saved new identity to {} — node ID: {}",
+                p.display(),
+                ident.node_id
+            );
             Ok(ident)
         }
         None => {
             info!("no identity file specified — generating ephemeral identity");
             let ident = NodeIdentity::generate()?;
-            info!("ephemeral node ID: {} (will be lost on exit)", ident.node_id);
+            info!(
+                "ephemeral node ID: {} (will be lost on exit)",
+                ident.node_id
+            );
             Ok(ident)
         }
     }
@@ -117,7 +127,7 @@ async fn run_initiator(
     node: &TransportNode,
     identity: &NodeIdentity,
     peer_addr: SocketAddr,
-    send_addr: SocketAddr,  // May differ from peer_addr if using relay
+    send_addr: SocketAddr, // May differ from peer_addr if using relay
     handshake_timeout: Duration,
 ) -> Result<(SessionState, SocketAddr), Box<dyn std::error::Error>> {
     info!("initiator mode — connecting to {}", peer_addr);
@@ -145,7 +155,8 @@ async fn run_initiator(
     // ── Receive Message 2: HELLO_ACK ─────────────────────────────
     // The responder sends back: its ephemeral key + encrypted static key + identity.
     info!("waiting for HELLO_ACK (message 2 of 3)...");
-    let (recv2, from2) = timeout(handshake_timeout, node.recv_raw()).await
+    let (recv2, from2) = timeout(handshake_timeout, node.recv_raw())
+        .await
         .map_err(|_| "handshake timeout waiting for HELLO_ACK")??;
 
     // Verify it's a handshake packet for our session
@@ -154,9 +165,7 @@ async fn run_initiator(
     }
     let recv2_header = HandshakeHeader::deserialize(&recv2)?;
     if recv2_header.msg_type != MsgType::HelloAck {
-        return Err(format!(
-            "expected HELLO_ACK, got {:?}", recv2_header.msg_type
-        ).into());
+        return Err(format!("expected HELLO_ACK, got {:?}", recv2_header.msg_type).into());
     }
     if recv2_header.session_id != session_id {
         return Err("HELLO_ACK has wrong SessionID".into());
@@ -222,7 +231,9 @@ async fn run_responder(
             // Not a HELLO — discard and keep waiting
             warn!("received non-HELLO packet from {} — ignoring", addr);
         }
-    }).await.map_err(|_| "handshake timeout waiting for HELLO")??;
+    })
+    .await
+    .map_err(|_| "handshake timeout waiting for HELLO")??;
 
     let recv1_header = HandshakeHeader::deserialize(&recv1)?;
     let session_id = recv1_header.session_id;
@@ -244,7 +255,8 @@ async fn run_responder(
 
     // ── Receive Message 3: Final confirmation ────────────────────
     info!("waiting for final confirmation (message 3 of 3)...");
-    let (recv3, from3) = timeout(RECV_TIMEOUT, node.recv_raw()).await
+    let (recv3, from3) = timeout(RECV_TIMEOUT, node.recv_raw())
+        .await
         .map_err(|_| "handshake timeout waiting for message 3")??;
 
     if recv3.len() < HANDSHAKE_HEADER_SIZE {
@@ -285,7 +297,10 @@ async fn data_loop(
     send_dest: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("entering data loop — type a message and press Enter to send");
-    info!("encrypted traffic flows to {} (session {})", send_dest, session_id);
+    info!(
+        "encrypted traffic flows to {} (session {})",
+        send_dest, session_id
+    );
     println!();
     println!("--- ZTLP encrypted session active ---");
     println!("Type a message and press Enter to send. Ctrl+C to exit.");
@@ -367,20 +382,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(peer_addr_str) = &args.connect {
         // ── Initiator mode ──────────────────────────────────────
-        let peer_addr: SocketAddr = peer_addr_str.parse()
+        let peer_addr: SocketAddr = peer_addr_str
+            .parse()
             .map_err(|e| format!("invalid peer address '{}': {}", peer_addr_str, e))?;
 
         // If --relay is specified, route through the relay
         let send_addr = if let Some(relay_str) = &args.relay {
-            relay_str.parse()
+            relay_str
+                .parse()
                 .map_err(|e| format!("invalid relay address '{}': {}", relay_str, e))?
         } else {
             peer_addr
         };
 
-        let (session, _peer_from) = run_initiator(
-            &node, &identity, peer_addr, send_addr, handshake_timeout,
-        ).await?;
+        let (session, _peer_from) =
+            run_initiator(&node, &identity, peer_addr, send_addr, handshake_timeout).await?;
 
         // Register session in the pipeline
         let session_id = session.session_id;
@@ -393,9 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_loop(&node, session_id, send_addr).await?;
     } else {
         // ── Responder mode ──────────────────────────────────────
-        let (session, peer_addr, _) = run_responder(
-            &node, &identity, handshake_timeout,
-        ).await?;
+        let (session, peer_addr, _) = run_responder(&node, &identity, handshake_timeout).await?;
 
         // Register session in the pipeline
         let session_id = session.session_id;

@@ -67,9 +67,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
 
   # Build a hash ring from relay node maps.
   defp build_ring(relays) do
-    ring_nodes = Enum.map(relays, fn r ->
-      %{node_id: r.node_id, address: r.address}
-    end)
+    ring_nodes =
+      Enum.map(relays, fn r ->
+        %{node_id: r.node_id, address: r.address}
+      end)
+
     HashRing.new(ring_nodes)
   end
 
@@ -97,11 +99,13 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       relay_c = start_relay()
 
       # A → B HELLO
-      hello_ab = InterRelay.encode_hello(%{
-        node_id: relay_a.node_id,
-        address: relay_a.address,
-        role: :all
-      })
+      hello_ab =
+        InterRelay.encode_hello(%{
+          node_id: relay_a.node_id,
+          address: relay_a.address,
+          role: :all
+        })
+
       :gen_udp.send(relay_a.socket, elem(relay_b.address, 0), elem(relay_b.address, 1), hello_ab)
 
       # B receives and decodes HELLO from A
@@ -111,11 +115,13 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       assert payload_ab.address == relay_a.address
 
       # B → A HELLO_ACK
-      ack_ba = InterRelay.encode_hello_ack(%{
-        node_id: relay_b.node_id,
-        address: relay_b.address,
-        role: :all
-      })
+      ack_ba =
+        InterRelay.encode_hello_ack(%{
+          node_id: relay_b.node_id,
+          address: relay_b.address,
+          role: :all
+        })
+
       :gen_udp.send(relay_b.socket, elem(relay_a.address, 0), elem(relay_a.address, 1), ack_ba)
 
       assert {:ok, data_ack} = receive_packet(relay_a.socket, 1_000)
@@ -123,22 +129,26 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       assert sender_ack == relay_b.node_id
 
       # A → C HELLO
-      hello_ac = InterRelay.encode_hello(%{
-        node_id: relay_a.node_id,
-        address: relay_a.address,
-        role: :all
-      })
+      hello_ac =
+        InterRelay.encode_hello(%{
+          node_id: relay_a.node_id,
+          address: relay_a.address,
+          role: :all
+        })
+
       :gen_udp.send(relay_a.socket, elem(relay_c.address, 0), elem(relay_c.address, 1), hello_ac)
 
       assert {:ok, data_ac} = receive_packet(relay_c.socket, 1_000)
       assert {:ok, {:relay_hello, _sender, _ts, _payload}} = InterRelay.decode(data_ac)
 
       # B → C HELLO
-      hello_bc = InterRelay.encode_hello(%{
-        node_id: relay_b.node_id,
-        address: relay_b.address,
-        role: :all
-      })
+      hello_bc =
+        InterRelay.encode_hello(%{
+          node_id: relay_b.node_id,
+          address: relay_b.address,
+          role: :all
+        })
+
       :gen_udp.send(relay_b.socket, elem(relay_c.address, 0), elem(relay_c.address, 1), hello_bc)
 
       assert {:ok, data_bc} = receive_packet(relay_c.socket, 1_000)
@@ -173,14 +183,17 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       # Generate a session ID and find which relay owns it
       session_id = Crypto.generate_session_id()
       [owner | _] = HashRing.get_nodes(ring, session_id, 1)
-      owner_relay = Enum.find([relay_a, relay_b, relay_c], fn r ->
-        r.node_id == owner.node_id
-      end)
+
+      owner_relay =
+        Enum.find([relay_a, relay_b, relay_c], fn r ->
+          r.node_id == owner.node_id
+        end)
 
       # Pick a non-owner relay to "receive" the packet initially
-      ingress_relay = Enum.find([relay_a, relay_b, relay_c], fn r ->
-        r.node_id != owner.node_id
-      end)
+      ingress_relay =
+        Enum.find([relay_a, relay_b, relay_c], fn r ->
+          r.node_id != owner.node_id
+        end)
 
       # Simulate: ingress relay wraps the ZTLP packet in a RELAY_FORWARD
       inner_pkt = Packet.build_data(session_id, 1, payload: "routed payload")
@@ -193,7 +206,10 @@ defmodule ZtlpRelay.MeshIntegrationTest do
 
       # Owner relay receives and unwraps it
       assert {:ok, fwd_data} = receive_packet(owner_relay.socket, 1_000)
-      assert {:ok, {:relay_forward, sender, _ts, %{inner_packet: inner}}} = InterRelay.decode(fwd_data)
+
+      assert {:ok, {:relay_forward, sender, _ts, %{inner_packet: inner}}} =
+               InterRelay.decode(fwd_data)
+
       assert sender == ingress_relay.node_id
       assert inner == inner_raw
 
@@ -216,10 +232,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       session_id = Crypto.generate_session_id()
 
       # Query 100 times — always same owner
-      results = for _ <- 1..100 do
-        [owner | _] = HashRing.get_nodes(ring, session_id, 1)
-        owner.node_id
-      end
+      results =
+        for _ <- 1..100 do
+          [owner | _] = HashRing.get_nodes(ring, session_id, 1)
+          owner.node_id
+        end
 
       assert length(Enum.uniq(results)) == 1
 
@@ -242,10 +259,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       # Generate 50 session IDs and record which relay owns each
       session_ids = for _ <- 1..50, do: Crypto.generate_session_id()
 
-      original_owners = Map.new(session_ids, fn sid ->
-        [owner | _] = HashRing.get_nodes(ring, sid, 1)
-        {sid, owner.node_id}
-      end)
+      original_owners =
+        Map.new(session_ids, fn sid ->
+          [owner | _] = HashRing.get_nodes(ring, sid, 1)
+          {sid, owner.node_id}
+        end)
 
       # Count sessions per relay before (verify distribution)
       _counts_before = Enum.frequencies(Map.values(original_owners))
@@ -256,29 +274,32 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       refute HashRing.member?(ring_after, relay_b.node_id)
 
       # Sessions that were on B should move to A or C
-      new_owners = Map.new(session_ids, fn sid ->
-        [owner | _] = HashRing.get_nodes(ring_after, sid, 1)
-        {sid, owner.node_id}
-      end)
+      new_owners =
+        Map.new(session_ids, fn sid ->
+          [owner | _] = HashRing.get_nodes(ring_after, sid, 1)
+          {sid, owner.node_id}
+        end)
 
       # All sessions previously on B should now be on A or C
-      relay_b_sessions = Enum.filter(session_ids, fn sid ->
-        original_owners[sid] == relay_b.node_id
-      end)
+      relay_b_sessions =
+        Enum.filter(session_ids, fn sid ->
+          original_owners[sid] == relay_b.node_id
+        end)
 
       for sid <- relay_b_sessions do
         assert new_owners[sid] in [relay_a.node_id, relay_c.node_id],
-          "Session previously on B should be reassigned to A or C"
+               "Session previously on B should be reassigned to A or C"
       end
 
       # Sessions NOT on B should still be on their original relay
-      non_b_sessions = Enum.filter(session_ids, fn sid ->
-        original_owners[sid] != relay_b.node_id
-      end)
+      non_b_sessions =
+        Enum.filter(session_ids, fn sid ->
+          original_owners[sid] != relay_b.node_id
+        end)
 
       for sid <- non_b_sessions do
         assert new_owners[sid] == original_owners[sid],
-          "Sessions not on failed relay should remain stable"
+               "Sessions not on failed relay should remain stable"
       end
 
       stop_relay(relay_a)
@@ -368,26 +389,26 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       session_id = Crypto.generate_session_id()
 
       # Ingress issues a RAT scoped to a session
-      token = AdmissionToken.issue(node_id, session_id,
-        secret_key: secret,
-        issuer_id: issuer_id,
-        ttl_seconds: 60
-      )
+      token =
+        AdmissionToken.issue(node_id, session_id,
+          secret_key: secret,
+          issuer_id: issuer_id,
+          ttl_seconds: 60
+        )
 
       assert byte_size(token) == 93
 
       # Transit verifies the token
-      assert {:ok, fields} = AdmissionToken.verify(token, secret,
-        session_scope: session_id
-      )
+      assert {:ok, fields} = AdmissionToken.verify(token, secret, session_scope: session_id)
       assert fields.node_id == node_id
       assert fields.issuer_id == issuer_id
       assert fields.session_scope == session_id
 
       # Wrong session scope is rejected
       wrong_session = Crypto.generate_session_id()
+
       assert {:error, :session_scope_mismatch} =
-        AdmissionToken.verify(token, secret, session_scope: wrong_session)
+               AdmissionToken.verify(token, secret, session_scope: wrong_session)
 
       # Wrong secret is rejected
       wrong_secret = AdmissionToken.generate_secret()
@@ -400,11 +421,12 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       issuer_id = :crypto.strong_rand_bytes(16)
 
       # Issue a token that already expired
-      token = AdmissionToken.issue(node_id, nil,
-        secret_key: secret,
-        issuer_id: issuer_id,
-        ttl_seconds: 0
-      )
+      token =
+        AdmissionToken.issue(node_id, nil,
+          secret_key: secret,
+          issuer_id: issuer_id,
+          ttl_seconds: 0
+        )
 
       Process.sleep(50)
 
@@ -417,17 +439,16 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       issuer_id = :crypto.strong_rand_bytes(16)
 
       # Issue with nil scope (wildcard)
-      token = AdmissionToken.issue(node_id, nil,
-        secret_key: secret,
-        issuer_id: issuer_id,
-        ttl_seconds: 60
-      )
+      token =
+        AdmissionToken.issue(node_id, nil,
+          secret_key: secret,
+          issuer_id: issuer_id,
+          ttl_seconds: 60
+        )
 
       # Should accept any session scope
       any_session = Crypto.generate_session_id()
-      assert {:ok, _fields} = AdmissionToken.verify(token, secret,
-        session_scope: any_session
-      )
+      assert {:ok, _fields} = AdmissionToken.verify(token, secret, session_scope: any_session)
     end
 
     test "key rotation accepts both current and previous secret" do
@@ -437,18 +458,20 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       issuer_id = :crypto.strong_rand_bytes(16)
 
       # Token signed with old key
-      old_token = AdmissionToken.issue(node_id, nil,
-        secret_key: old_secret,
-        issuer_id: issuer_id,
-        ttl_seconds: 60
-      )
+      old_token =
+        AdmissionToken.issue(node_id, nil,
+          secret_key: old_secret,
+          issuer_id: issuer_id,
+          ttl_seconds: 60
+        )
 
       # Token signed with new key
-      new_token = AdmissionToken.issue(node_id, nil,
-        secret_key: new_secret,
-        issuer_id: issuer_id,
-        ttl_seconds: 60
-      )
+      new_token =
+        AdmissionToken.issue(node_id, nil,
+          secret_key: new_secret,
+          issuer_id: issuer_id,
+          ttl_seconds: 60
+        )
 
       # Both should verify with rotation
       assert {:ok, _} = AdmissionToken.verify_with_rotation(old_token, new_secret, old_secret)
@@ -462,13 +485,17 @@ defmodule ZtlpRelay.MeshIntegrationTest do
     setup do
       # Start a dedicated rate limiter for this test
       table_name = :"ztlp_rate_test_#{:erlang.unique_integer([:positive])}"
-      {:ok, pid} = RateLimiter.start_link(
-        name: :"rate_limiter_test_#{:erlang.unique_integer([:positive])}",
-        table: table_name
-      )
+
+      {:ok, pid} =
+        RateLimiter.start_link(
+          name: :"rate_limiter_test_#{:erlang.unique_integer([:positive])}",
+          table: table_name
+        )
+
       on_exit(fn ->
         if Process.alive?(pid), do: GenServer.stop(pid)
       end)
+
       %{table: table_name}
     end
 
@@ -500,6 +527,7 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       for _ <- 1..10 do
         RateLimiter.check(ip_a, 10, 60_000, table: table)
       end
+
       assert {:error, :rate_limited} == RateLimiter.check(ip_a, 10, 60_000, table: table)
 
       # IP B should still be fine
@@ -513,6 +541,7 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       for _ <- 1..5 do
         assert :ok == RateLimiter.check(ip, 5, 50, table: table)
       end
+
       assert {:error, :rate_limited} == RateLimiter.check(ip, 5, 50, table: table)
 
       # Wait for window to expire
@@ -527,9 +556,10 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       limit = 10
       window_ms = 60_000
 
-      results = for _i <- 1..15 do
-        RateLimiter.check(ip, limit, window_ms, table: table)
-      end
+      results =
+        for _i <- 1..15 do
+          RateLimiter.check(ip, limit, window_ms, table: table)
+        end
 
       allowed = Enum.count(results, &(&1 == :ok))
       blocked = Enum.count(results, &(&1 == {:error, :rate_limited}))
@@ -551,11 +581,12 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       peer_b = {{192, 168, 1, 20}, 6000}
 
       # Relay A encodes a session sync message
-      sync_msg = InterRelay.encode_session_sync(relay_a.node_id, %{
-        session_id: session_id,
-        peer_a: peer_a,
-        peer_b: peer_b
-      })
+      sync_msg =
+        InterRelay.encode_session_sync(relay_a.node_id, %{
+          session_id: session_id,
+          peer_a: peer_a,
+          peer_b: peer_b
+        })
 
       # Send to Relay B
       {b_ip, b_port} = relay_b.address
@@ -583,12 +614,13 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       relay_a = start_relay()
       relay_b = start_relay()
 
-      sessions = for _ <- 1..5 do
-        sid = Crypto.generate_session_id()
-        pa = {{10, 0, 0, Enum.random(1..254)}, Enum.random(1024..65535)}
-        pb = {{10, 0, 0, Enum.random(1..254)}, Enum.random(1024..65535)}
-        %{session_id: sid, peer_a: pa, peer_b: pb}
-      end
+      sessions =
+        for _ <- 1..5 do
+          sid = Crypto.generate_session_id()
+          pa = {{10, 0, 0, Enum.random(1..254)}, Enum.random(1024..65535)}
+          pb = {{10, 0, 0, Enum.random(1..254)}, Enum.random(1024..65535)}
+          %{session_id: sid, peer_a: pa, peer_b: pb}
+        end
 
       for sess <- sessions do
         sync_msg = InterRelay.encode_session_sync(relay_a.node_id, sess)
@@ -694,8 +726,9 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       inner = Packet.serialize(Packet.build_data(session_id, 1, payload: "test payload"))
 
       forward = InterRelay.encode_forward(node_id, inner)
+
       assert {:ok, {:relay_forward, ^node_id, _ts, %{inner_packet: ^inner}}} =
-        InterRelay.decode(forward)
+               InterRelay.decode(forward)
 
       # Also test unwrap helper
       assert {:ok, ^inner} = InterRelay.unwrap_forward(forward)
@@ -705,11 +738,12 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       node_id = :crypto.strong_rand_bytes(16)
       session_id = Crypto.generate_session_id()
 
-      sync = InterRelay.encode_session_sync(node_id, %{
-        session_id: session_id,
-        peer_a: {{192, 168, 1, 10}, 5000},
-        peer_b: {{192, 168, 1, 20}, 6000}
-      })
+      sync =
+        InterRelay.encode_session_sync(node_id, %{
+          session_id: session_id,
+          peer_a: {{192, 168, 1, 10}, 5000},
+          peer_b: {{192, 168, 1, 20}, 6000}
+        })
 
       assert {:ok, {:relay_session_sync, ^node_id, _ts, payload}} = InterRelay.decode(sync)
       assert payload.session_id == session_id
@@ -732,11 +766,14 @@ defmodule ZtlpRelay.MeshIntegrationTest do
 
     test "inter_relay_message?/1 detects inter-relay messages" do
       node_id = :crypto.strong_rand_bytes(16)
-      hello = InterRelay.encode_hello(%{
-        node_id: node_id,
-        address: {{127, 0, 0, 1}, 23101},
-        role: :all
-      })
+
+      hello =
+        InterRelay.encode_hello(%{
+          node_id: node_id,
+          address: {{127, 0, 0, 1}, 23101},
+          role: :all
+        })
+
       assert InterRelay.inter_relay_message?(hello)
 
       # A ZTLP packet should NOT match
@@ -749,18 +786,24 @@ defmodule ZtlpRelay.MeshIntegrationTest do
 
   describe "hash ring distribution" do
     test "sessions distribute roughly evenly across 3 relays" do
-      relays = for _ <- 1..3 do
-        %{node_id: :crypto.strong_rand_bytes(16), address: {{127, 0, 0, 1}, Enum.random(10000..60000)}}
-      end
+      relays =
+        for _ <- 1..3 do
+          %{
+            node_id: :crypto.strong_rand_bytes(16),
+            address: {{127, 0, 0, 1}, Enum.random(10000..60000)}
+          }
+        end
+
       ring = HashRing.new(relays)
 
       # Generate 3000 session IDs and count distribution
-      counts = for _ <- 1..3000, reduce: %{} do
-        acc ->
-          sid = Crypto.generate_session_id()
-          [owner | _] = HashRing.get_nodes(ring, sid, 1)
-          Map.update(acc, owner.node_id, 1, &(&1 + 1))
-      end
+      counts =
+        for _ <- 1..3000, reduce: %{} do
+          acc ->
+            sid = Crypto.generate_session_id()
+            [owner | _] = HashRing.get_nodes(ring, sid, 1)
+            Map.update(acc, owner.node_id, 1, &(&1 + 1))
+        end
 
       # Each relay should get roughly 1000 (±300 is generous)
       for {_nid, count} <- counts do
@@ -770,21 +813,31 @@ defmodule ZtlpRelay.MeshIntegrationTest do
     end
 
     test "adding a relay only moves ~1/N sessions" do
-      relays_3 = for _ <- 1..3 do
-        %{node_id: :crypto.strong_rand_bytes(16), address: {{127, 0, 0, 1}, Enum.random(10000..60000)}}
-      end
+      relays_3 =
+        for _ <- 1..3 do
+          %{
+            node_id: :crypto.strong_rand_bytes(16),
+            address: {{127, 0, 0, 1}, Enum.random(10000..60000)}
+          }
+        end
+
       ring_3 = HashRing.new(relays_3)
 
-      new_relay = %{node_id: :crypto.strong_rand_bytes(16), address: {{127, 0, 0, 1}, Enum.random(10000..60000)}}
+      new_relay = %{
+        node_id: :crypto.strong_rand_bytes(16),
+        address: {{127, 0, 0, 1}, Enum.random(10000..60000)}
+      }
+
       ring_4 = HashRing.add_node(ring_3, new_relay)
 
       session_ids = for _ <- 1..1000, do: Crypto.generate_session_id()
 
-      moved = Enum.count(session_ids, fn sid ->
-        [old | _] = HashRing.get_nodes(ring_3, sid, 1)
-        [new | _] = HashRing.get_nodes(ring_4, sid, 1)
-        old.node_id != new.node_id
-      end)
+      moved =
+        Enum.count(session_ids, fn sid ->
+          [old | _] = HashRing.get_nodes(ring_3, sid, 1)
+          [new | _] = HashRing.get_nodes(ring_4, sid, 1)
+          old.node_id != new.node_id
+        end)
 
       # With consistent hashing, ~25% of keys should move (1/4 for 3→4 relays)
       # Allow generous margin: 10-50%
@@ -866,9 +919,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       # Use a unique name/table to avoid conflicts with the app's registry.
       name = :"relay_reg_test_#{:erlang.unique_integer([:positive])}"
       {:ok, pid} = RelayRegistry.start_link(name: name, sweep_interval_ms: 600_000)
+
       on_exit(fn ->
         if Process.alive?(pid), do: GenServer.stop(pid)
       end)
+
       :ok
     end
 
@@ -914,7 +969,8 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       ingress_relays = RelayRegistry.get_by_role(:ingress)
       ingress_ids = Enum.map(ingress_relays, & &1.node_id)
       assert node_i in ingress_ids
-      assert node_a in ingress_ids  # :all matches any role
+      # :all matches any role
+      assert node_a in ingress_ids
       refute node_t in ingress_ids
 
       # Cleanup

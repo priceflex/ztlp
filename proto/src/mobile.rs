@@ -240,11 +240,7 @@ impl HardwareIdentityProvider {
     ///
     /// The sign and DH callbacks must be set before the provider is used for
     /// any cryptographic operations.
-    pub fn new(
-        provider_type: IdentityProvider,
-        node_id: NodeId,
-        public_key: [u8; 32],
-    ) -> Self {
+    pub fn new(provider_type: IdentityProvider, node_id: NodeId, public_key: [u8; 32]) -> Self {
         Self {
             provider_type,
             node_id,
@@ -434,8 +430,7 @@ mod tests {
 
     #[test]
     fn test_software_provider_generate() {
-        let provider = SoftwareIdentityProvider::generate()
-            .expect("should generate identity");
+        let provider = SoftwareIdentityProvider::generate().expect("should generate identity");
         assert_eq!(provider.provider(), IdentityProvider::Software);
         assert!(provider.as_node_identity().is_some());
     }
@@ -481,10 +476,8 @@ mod tests {
         let alice = SoftwareIdentityProvider::generate().unwrap();
         let bob = SoftwareIdentityProvider::generate().unwrap();
 
-        let alice_shared = alice.dh(bob.public_key())
-            .expect("alice DH should succeed");
-        let bob_shared = bob.dh(alice.public_key())
-            .expect("bob DH should succeed");
+        let alice_shared = alice.dh(bob.public_key()).expect("alice DH should succeed");
+        let bob_shared = bob.dh(alice.public_key()).expect("bob DH should succeed");
 
         // Shared secrets should match (X25519 is commutative)
         assert_eq!(alice_shared, bob_shared);
@@ -506,11 +499,8 @@ mod tests {
     fn test_hardware_provider_construction() {
         let node_id = NodeId::generate();
         let public_key = [42u8; 32];
-        let provider = HardwareIdentityProvider::new(
-            IdentityProvider::SecureEnclave,
-            node_id,
-            public_key,
-        );
+        let provider =
+            HardwareIdentityProvider::new(IdentityProvider::SecureEnclave, node_id, public_key);
         assert_eq!(provider.provider(), IdentityProvider::SecureEnclave);
         assert_eq!(*provider.node_id(), node_id);
         assert_eq!(*provider.public_key(), public_key);
@@ -533,11 +523,8 @@ mod tests {
     #[test]
     fn test_hardware_provider_with_callbacks() {
         let node_id = NodeId::generate();
-        let mut provider = HardwareIdentityProvider::new(
-            IdentityProvider::SecureEnclave,
-            node_id,
-            [1u8; 32],
-        );
+        let mut provider =
+            HardwareIdentityProvider::new(IdentityProvider::SecureEnclave, node_id, [1u8; 32]);
 
         provider.set_sign_fn(|data| {
             // Mock: return first 32 bytes of data padded with zeros
@@ -581,10 +568,22 @@ mod tests {
 
     #[test]
     fn test_identity_provider_from_i32() {
-        assert_eq!(IdentityProvider::from_i32(0), Some(IdentityProvider::Software));
-        assert_eq!(IdentityProvider::from_i32(1), Some(IdentityProvider::SecureEnclave));
-        assert_eq!(IdentityProvider::from_i32(2), Some(IdentityProvider::AndroidKeystore));
-        assert_eq!(IdentityProvider::from_i32(3), Some(IdentityProvider::HardwareToken));
+        assert_eq!(
+            IdentityProvider::from_i32(0),
+            Some(IdentityProvider::Software)
+        );
+        assert_eq!(
+            IdentityProvider::from_i32(1),
+            Some(IdentityProvider::SecureEnclave)
+        );
+        assert_eq!(
+            IdentityProvider::from_i32(2),
+            Some(IdentityProvider::AndroidKeystore)
+        );
+        assert_eq!(
+            IdentityProvider::from_i32(3),
+            Some(IdentityProvider::HardwareToken)
+        );
         assert_eq!(IdentityProvider::from_i32(4), None);
         assert_eq!(IdentityProvider::from_i32(-1), None);
     }
@@ -617,7 +616,10 @@ mod tests {
             keepalive_interval_ms: 60000,
         };
         assert_eq!(config.identity_provider, IdentityProvider::SecureEnclave);
-        assert_eq!(config.relay_address.as_deref(), Some("relay.example.com:4433"));
+        assert_eq!(
+            config.relay_address.as_deref(),
+            Some("relay.example.com:4433")
+        );
         assert_eq!(config.stun_servers.len(), 1);
         assert!(!config.nat_assist);
         assert!(!config.auto_reconnect);
@@ -655,7 +657,11 @@ mod tests {
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
-                assert_ne!(states[i], states[j], "states at index {} and {} have same value", i, j);
+                assert_ne!(
+                    states[i], states[j],
+                    "states at index {} and {} have same value",
+                    i, j
+                );
             }
         }
     }
@@ -678,7 +684,11 @@ mod tests {
         }
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
-                assert_ne!(events[i], events[j], "events at index {} and {} have same value", i, j);
+                assert_ne!(
+                    events[i], events[j],
+                    "events at index {} and {} have same value",
+                    i, j
+                );
             }
         }
     }

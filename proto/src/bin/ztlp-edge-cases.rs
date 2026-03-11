@@ -22,14 +22,18 @@ fn main() {
     let server_addr = &args[1];
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let mut buf = [0u8; 65535];
     let mut passed = 0u32;
     let mut failed = 0u32;
 
     // Setup: get session credentials
-    socket.send_to(b"EDGE_SETUP", server_addr).expect("send setup failed");
+    socket
+        .send_to(b"EDGE_SETUP", server_addr)
+        .expect("send setup failed");
     let (len, _) = socket.recv_from(&mut buf).expect("recv setup failed");
     let setup = &buf[..len];
 
@@ -81,7 +85,9 @@ fn main() {
     packet.extend_from_slice(&header.serialize());
     packet.extend_from_slice(&vec![0xAB; payload_len]);
 
-    socket.send_to(&packet, server_addr).expect("send MTU packet failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send MTU packet failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
@@ -103,7 +109,9 @@ fn main() {
     packet.extend_from_slice(&header.serialize());
     packet.extend_from_slice(&vec![0xCD; 8000 - 42]); // Large payload
 
-    socket.send_to(&packet, server_addr).expect("send large packet failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send large packet failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
@@ -122,12 +130,18 @@ fn main() {
     header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
 
     let serialized = header.serialize();
-    assert_eq!(serialized.len(), 42, "data header should be exactly 42 bytes");
+    assert_eq!(
+        serialized.len(),
+        42,
+        "data header should be exactly 42 bytes"
+    );
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&serialized);
 
-    socket.send_to(&packet, server_addr).expect("send min packet failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send min packet failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
@@ -154,7 +168,9 @@ fn main() {
         packet.extend_from_slice(&header.serialize());
         packet.extend_from_slice(&[i as u8; 10]);
 
-        socket.send_to(&packet, server_addr).expect("send burst failed");
+        socket
+            .send_to(&packet, server_addr)
+            .expect("send burst failed");
         let (rlen, _) = socket.recv_from(&mut buf).expect("recv burst failed");
         if !buf[..rlen].starts_with(b"VALID") {
             all_ok = false;
@@ -183,14 +199,19 @@ fn main() {
     packet.extend_from_slice(&zero_header.serialize());
     packet.extend_from_slice(b"test");
 
-    socket.send_to(&packet, server_addr).expect("send zero sid failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send zero sid failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"REJECTED") {
         println!("✓ Zero SessionID correctly rejected");
         passed += 1;
     } else {
-        println!("✗ Expected rejection, got: {}", String::from_utf8_lossy(resp));
+        println!(
+            "✗ Expected rejection, got: {}",
+            String::from_utf8_lossy(resp)
+        );
         failed += 1;
     }
 
@@ -207,17 +228,25 @@ fn main() {
         let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
         packet.extend_from_slice(truncated);
 
-        socket.send_to(&packet, server_addr).expect("send truncated failed");
+        socket
+            .send_to(&packet, server_addr)
+            .expect("send truncated failed");
         let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
         if !buf[..rlen].starts_with(b"REJECTED") {
             all_rejected = false;
-            eprintln!("    Truncation at {} bytes NOT rejected: {}",
-                tlen, String::from_utf8_lossy(&buf[..rlen]));
+            eprintln!(
+                "    Truncation at {} bytes NOT rejected: {}",
+                tlen,
+                String::from_utf8_lossy(&buf[..rlen])
+            );
         }
     }
 
     if all_rejected {
-        println!("✓ All {} truncation lengths correctly rejected", truncation_lengths.len());
+        println!(
+            "✓ All {} truncation lengths correctly rejected",
+            truncation_lengths.len()
+        );
         passed += 1;
     } else {
         println!("✗ Some truncated packets not rejected");
@@ -235,7 +264,9 @@ fn main() {
     packet.extend_from_slice(&header.serialize());
     packet.extend_from_slice(b"max_seq");
 
-    socket.send_to(&packet, server_addr).expect("send max seq failed");
+    socket
+        .send_to(&packet, server_addr)
+        .expect("send max seq failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {

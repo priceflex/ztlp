@@ -18,7 +18,9 @@ fn main() {
     let ns_addr = &args[1];
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind failed");
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     let mut buf = [0u8; 65535];
     let mut passed = 0u32;
@@ -53,7 +55,10 @@ fn main() {
                 let rec_name_str = String::from_utf8_lossy(rec_name);
 
                 if rec_type == 1 && rec_name_str == "node1.test.ztlp" {
-                    println!("✓ Found KEY record for '{}' (type={})", rec_name_str, rec_type);
+                    println!(
+                        "✓ Found KEY record for '{}' (type={})",
+                        rec_name_str, rec_type
+                    );
                     passed += 1;
                 } else {
                     println!("✗ Wrong record: type={}, name='{}'", rec_type, rec_name_str);
@@ -130,7 +135,9 @@ fn main() {
 
     // We need the pubkey that was used for the seeded record.
     // Ask the setup server for it.
-    socket.send_to(b"GET_SEEDED_PUBKEY", ns_addr).expect("send failed");
+    socket
+        .send_to(b"GET_SEEDED_PUBKEY", ns_addr)
+        .expect("send failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let pubkey_hex = &buf[..rlen];
     let pubkey_hex_str = String::from_utf8_lossy(pubkey_hex);
@@ -141,7 +148,9 @@ fn main() {
         query4.extend_from_slice(&pk_len.to_be_bytes());
         query4.extend_from_slice(pubkey_hex);
 
-        socket.send_to(&query4, ns_addr).expect("send pubkey query failed");
+        socket
+            .send_to(&query4, ns_addr)
+            .expect("send pubkey query failed");
         let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
         let resp = &buf[..rlen];
 
@@ -166,12 +175,15 @@ fn main() {
     print!("  Test 5: Verify Elixir Ed25519 signature in Rust... ");
 
     // Ask the helper server for a signed message
-    socket.send_to(b"GET_SIGNED_MESSAGE", ns_addr).expect("send failed");
+    socket
+        .send_to(b"GET_SIGNED_MESSAGE", ns_addr)
+        .expect("send failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let signed_data = &buf[..rlen];
 
     // Format: message_len(2) + message + signature(64) + public_key(32)
-    if signed_data.len() > 98 { // min: 2 + 0 + 64 + 32 = 98
+    if signed_data.len() > 98 {
+        // min: 2 + 0 + 64 + 32 = 98
         let msg_len = u16::from_be_bytes([signed_data[0], signed_data[1]]) as usize;
         if signed_data.len() >= 2 + msg_len + 64 + 32 {
             let message = &signed_data[2..2 + msg_len];
@@ -179,13 +191,11 @@ fn main() {
             let public_key = &signed_data[2 + msg_len + 64..2 + msg_len + 64 + 32];
 
             // Verify using ed25519-dalek
-            use ed25519_dalek::{Signature, VerifyingKey, Verifier};
-            let verifying_key = VerifyingKey::from_bytes(
-                public_key.try_into().expect("pubkey wrong size")
-            ).expect("invalid pubkey");
-            let sig = Signature::from_bytes(
-                signature.try_into().expect("sig wrong size")
-            );
+            use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+            let verifying_key =
+                VerifyingKey::from_bytes(public_key.try_into().expect("pubkey wrong size"))
+                    .expect("invalid pubkey");
+            let sig = Signature::from_bytes(signature.try_into().expect("sig wrong size"));
 
             match verifying_key.verify(message, &sig) {
                 Ok(()) => {
@@ -198,7 +208,11 @@ fn main() {
                 }
             }
         } else {
-            println!("✗ Signed data too short (expected {} + 96 = {})", msg_len, 2 + msg_len + 96);
+            println!(
+                "✗ Signed data too short (expected {} + 96 = {})",
+                msg_len,
+                2 + msg_len + 96
+            );
             failed += 1;
         }
     } else {
@@ -206,7 +220,10 @@ fn main() {
             println!("⊘ Skipped (control command not supported)");
             passed += 1;
         } else {
-            println!("✗ Signed data response too short: {} bytes", signed_data.len());
+            println!(
+                "✗ Signed data response too short: {} bytes",
+                signed_data.len()
+            );
             failed += 1;
         }
     }
@@ -241,7 +258,9 @@ fn main() {
     // ── Test 7: Malformed query returns INVALID ─────────────────
     print!("  Test 7: Malformed query returns INVALID... ");
 
-    socket.send_to(&[0xFE, 0x01, 0x02], ns_addr).expect("send malformed query failed");
+    socket
+        .send_to(&[0xFE, 0x01, 0x02], ns_addr)
+        .expect("send malformed query failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
 

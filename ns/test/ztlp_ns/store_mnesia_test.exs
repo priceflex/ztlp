@@ -17,17 +17,27 @@ defmodule ZtlpNs.StoreMnesiaTest do
     node_id = :crypto.strong_rand_bytes(16)
     {node_pub, _} = Crypto.generate_keypair()
     serial = opts[:serial] || 1
-    record = Record.new_key(name, node_id, node_pub,
-      created_at: opts[:created_at] || System.system_time(:second),
-      ttl: opts[:ttl] || 86400,
-      serial: serial)
+
+    record =
+      Record.new_key(name, node_id, node_pub,
+        created_at: opts[:created_at] || System.system_time(:second),
+        ttl: opts[:ttl] || 86400,
+        serial: serial
+      )
+
     Record.sign(record, priv)
   end
 
   defp make_signed_revoke(name, revoked_ids) do
     {_pub, priv} = Crypto.generate_keypair()
-    revoke = Record.new_revoke(name, [], "test", "2026-01-01T00:00:00Z",
-      created_at: System.system_time(:second), ttl: 0, serial: 1)
+
+    revoke =
+      Record.new_revoke(name, [], "test", "2026-01-01T00:00:00Z",
+        created_at: System.system_time(:second),
+        ttl: 0,
+        serial: 1
+      )
+
     revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, revoked_ids)}
     Record.sign(revoke, priv)
   end
@@ -74,6 +84,7 @@ defmodule ZtlpNs.StoreMnesiaTest do
         rec = make_signed_key("count-#{i}.ztlp")
         :ok = Store.insert(rec)
       end)
+
       assert Store.count() == 5
 
       restart_store()
@@ -84,12 +95,13 @@ defmodule ZtlpNs.StoreMnesiaTest do
 
   describe "concurrent access" do
     test "100 concurrent writers produce no crashes or data corruption" do
-      tasks = Enum.map(1..100, fn i ->
-        Task.async(fn ->
-          rec = make_signed_key("concurrent-#{i}.ztlp")
-          Store.insert(rec)
+      tasks =
+        Enum.map(1..100, fn i ->
+          Task.async(fn ->
+            rec = make_signed_key("concurrent-#{i}.ztlp")
+            Store.insert(rec)
+          end)
         end)
-      end)
 
       results = Task.await_many(tasks, 10_000)
       assert Enum.all?(results, &(&1 == :ok))
@@ -104,29 +116,32 @@ defmodule ZtlpNs.StoreMnesiaTest do
       end)
 
       # Spawn readers and writers concurrently
-      writers = Enum.map(21..70, fn i ->
-        Task.async(fn ->
-          rec = make_signed_key("rw-#{i}.ztlp")
-          Store.insert(rec)
+      writers =
+        Enum.map(21..70, fn i ->
+          Task.async(fn ->
+            rec = make_signed_key("rw-#{i}.ztlp")
+            Store.insert(rec)
+          end)
         end)
-      end)
 
-      readers = Enum.map(1..50, fn i ->
-        Task.async(fn ->
-          name = "preload-#{rem(i, 20) + 1}.ztlp"
-          Store.lookup(name, :key)
+      readers =
+        Enum.map(1..50, fn i ->
+          Task.async(fn ->
+            name = "preload-#{rem(i, 20) + 1}.ztlp"
+            Store.lookup(name, :key)
+          end)
         end)
-      end)
 
       writer_results = Task.await_many(writers, 10_000)
       reader_results = Task.await_many(readers, 10_000)
 
       assert Enum.all?(writer_results, &(&1 == :ok))
+
       assert Enum.all?(reader_results, fn
-        {:ok, _} -> true
-        :not_found -> true
-        _ -> false
-      end)
+               {:ok, _} -> true
+               :not_found -> true
+               _ -> false
+             end)
     end
   end
 
@@ -201,9 +216,10 @@ defmodule ZtlpNs.StoreMnesiaTest do
 
   describe "migration helper" do
     test "v1_to_mnesia bulk-inserts records" do
-      records = Enum.map(1..10, fn i ->
-        make_signed_key("migrate-#{i}.ztlp")
-      end)
+      records =
+        Enum.map(1..10, fn i ->
+          make_signed_key("migrate-#{i}.ztlp")
+        end)
 
       assert {:ok, 10} = ZtlpNs.Store.Migration.v1_to_mnesia(records)
       assert Store.count() >= 10

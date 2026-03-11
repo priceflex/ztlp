@@ -132,7 +132,9 @@ defmodule ZtlpRelay.PipelineTest do
 
   describe "process/2 full pipeline" do
     test "drops non-ZTLP traffic at layer 1 and increments counter" do
-      assert {:drop, 1, :invalid_magic} = Pipeline.process(<<0xDE, 0xAD>> <> :binary.copy(<<0>>, 40))
+      assert {:drop, 1, :invalid_magic} =
+               Pipeline.process(<<0xDE, 0xAD>> <> :binary.copy(<<0>>, 40))
+
       stats = Stats.get_stats()
       assert stats.layer1_drops == 1
     end

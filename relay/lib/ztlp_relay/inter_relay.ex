@@ -23,35 +23,41 @@ defmodule ZtlpRelay.InterRelay do
   require Logger
 
   # Message type constants
-  @relay_hello       0x01
-  @relay_hello_ack   0x02
-  @relay_ping        0x03
-  @relay_pong        0x04
-  @relay_forward     0x05
+  @relay_hello 0x01
+  @relay_hello_ack 0x02
+  @relay_ping 0x03
+  @relay_pong 0x04
+  @relay_forward 0x05
   @relay_session_sync 0x06
-  @relay_leave       0x07
+  @relay_leave 0x07
 
-  @type msg_type :: :relay_hello | :relay_hello_ack | :relay_ping | :relay_pong |
-                    :relay_forward | :relay_session_sync | :relay_leave
+  @type msg_type ::
+          :relay_hello
+          | :relay_hello_ack
+          | :relay_ping
+          | :relay_pong
+          | :relay_forward
+          | :relay_session_sync
+          | :relay_leave
 
   @type relay_info :: %{
-    node_id: binary(),
-    address: {:inet.ip_address(), :inet.port_number()},
-    role: atom(),
-    capabilities: non_neg_integer()
-  }
+          node_id: binary(),
+          address: {:inet.ip_address(), :inet.port_number()},
+          role: atom(),
+          capabilities: non_neg_integer()
+        }
 
   @type pong_metrics :: %{
-    active_sessions: non_neg_integer(),
-    max_sessions: non_neg_integer(),
-    uptime_seconds: non_neg_integer()
-  }
+          active_sessions: non_neg_integer(),
+          max_sessions: non_neg_integer(),
+          uptime_seconds: non_neg_integer()
+        }
 
   @type session_sync :: %{
-    session_id: binary(),
-    peer_a: {:inet.ip_address(), :inet.port_number()},
-    peer_b: {:inet.ip_address(), :inet.port_number()}
-  }
+          session_id: binary(),
+          peer_a: {:inet.ip_address(), :inet.port_number()},
+          peer_b: {:inet.ip_address(), :inet.port_number()}
+        }
 
   # Encoding
 
@@ -67,8 +73,8 @@ defmodule ZtlpRelay.InterRelay do
     role_byte = encode_role(info[:role] || :all)
     capabilities = info[:capabilities] || 0
 
-    <<@relay_hello::8, info.node_id::binary-size(16), timestamp()::64,
-      encode_ip(ip)::binary, port::16, role_byte::8, capabilities::32>>
+    <<@relay_hello::8, info.node_id::binary-size(16), timestamp()::64, encode_ip(ip)::binary,
+      port::16, role_byte::8, capabilities::32>>
   end
 
   @doc """
@@ -80,8 +86,8 @@ defmodule ZtlpRelay.InterRelay do
     role_byte = encode_role(info[:role] || :all)
     capabilities = info[:capabilities] || 0
 
-    <<@relay_hello_ack::8, info.node_id::binary-size(16), timestamp()::64,
-      encode_ip(ip)::binary, port::16, role_byte::8, capabilities::32>>
+    <<@relay_hello_ack::8, info.node_id::binary-size(16), timestamp()::64, encode_ip(ip)::binary,
+      port::16, role_byte::8, capabilities::32>>
   end
 
   @doc """
@@ -98,8 +104,8 @@ defmodule ZtlpRelay.InterRelay do
   @spec encode_pong(binary(), pong_metrics(), non_neg_integer()) :: binary()
   def encode_pong(sender_node_id, metrics, echo_seq \\ 0) when byte_size(sender_node_id) == 16 do
     <<@relay_pong::8, sender_node_id::binary-size(16), timestamp()::64,
-      metrics.active_sessions::32, metrics.max_sessions::32,
-      metrics.uptime_seconds::32, echo_seq::32>>
+      metrics.active_sessions::32, metrics.max_sessions::32, metrics.uptime_seconds::32,
+      echo_seq::32>>
   end
 
   @default_ttl 4
@@ -121,12 +127,14 @@ defmodule ZtlpRelay.InterRelay do
     ttl = Keyword.get(opts, :ttl, @default_ttl)
     path = Keyword.get(opts, :path, [])
     path_len = length(path)
-    path_binary = Enum.reduce(path, <<>>, fn nid, acc -> <<acc::binary, nid::binary-size(16)>> end)
+
+    path_binary =
+      Enum.reduce(path, <<>>, fn nid, acc -> <<acc::binary, nid::binary-size(16)>> end)
+
     len = byte_size(inner_packet)
 
-    <<@relay_forward::8, sender_node_id::binary-size(16), timestamp()::64,
-      ttl::8, path_len::8, path_binary::binary,
-      len::32, inner_packet::binary>>
+    <<@relay_forward::8, sender_node_id::binary-size(16), timestamp()::64, ttl::8, path_len::8,
+      path_binary::binary, len::32, inner_packet::binary>>
   end
 
   @doc """
@@ -138,8 +146,7 @@ defmodule ZtlpRelay.InterRelay do
     {ip_b, port_b} = sync.peer_b
 
     <<@relay_session_sync::8, sender_node_id::binary-size(16), timestamp()::64,
-      sync.session_id::binary-size(12),
-      encode_ip(ip_a)::binary, port_a::16,
+      sync.session_id::binary-size(12), encode_ip(ip_a)::binary, port_a::16,
       encode_ip(ip_b)::binary, port_b::16>>
   end
 
@@ -159,43 +166,58 @@ defmodule ZtlpRelay.InterRelay do
   Returns `{:ok, {msg_type, sender_node_id, timestamp, payload_map}}`
   or `{:error, reason}`.
   """
-  @spec decode(binary()) :: {:ok, {msg_type(), binary(), non_neg_integer(), map()}} | {:error, atom()}
+  @spec decode(binary()) ::
+          {:ok, {msg_type(), binary(), non_neg_integer(), map()}} | {:error, atom()}
 
-  def decode(<<@relay_hello::8, sender::binary-size(16), ts::64,
-               ip_bytes::binary-size(4), port::16, role_byte::8, capabilities::32>>) do
-    {:ok, {:relay_hello, sender, ts, %{
-      address: {decode_ip(ip_bytes), port},
-      role: decode_role(role_byte),
-      capabilities: capabilities
-    }}}
+  def decode(
+        <<@relay_hello::8, sender::binary-size(16), ts::64, ip_bytes::binary-size(4), port::16,
+          role_byte::8, capabilities::32>>
+      ) do
+    {:ok,
+     {:relay_hello, sender, ts,
+      %{
+        address: {decode_ip(ip_bytes), port},
+        role: decode_role(role_byte),
+        capabilities: capabilities
+      }}}
   end
 
-  def decode(<<@relay_hello_ack::8, sender::binary-size(16), ts::64,
-               ip_bytes::binary-size(4), port::16, role_byte::8, capabilities::32>>) do
-    {:ok, {:relay_hello_ack, sender, ts, %{
-      address: {decode_ip(ip_bytes), port},
-      role: decode_role(role_byte),
-      capabilities: capabilities
-    }}}
+  def decode(
+        <<@relay_hello_ack::8, sender::binary-size(16), ts::64, ip_bytes::binary-size(4),
+          port::16, role_byte::8, capabilities::32>>
+      ) do
+    {:ok,
+     {:relay_hello_ack, sender, ts,
+      %{
+        address: {decode_ip(ip_bytes), port},
+        role: decode_role(role_byte),
+        capabilities: capabilities
+      }}}
   end
 
   def decode(<<@relay_ping::8, sender::binary-size(16), ts::64, seq::32>>) do
     {:ok, {:relay_ping, sender, ts, %{seq: seq}}}
   end
 
-  def decode(<<@relay_pong::8, sender::binary-size(16), ts::64,
-               active::32, max::32, uptime::32, echo_seq::32>>) do
-    {:ok, {:relay_pong, sender, ts, %{
-      active_sessions: active,
-      max_sessions: max,
-      uptime_seconds: uptime,
-      echo_seq: echo_seq
-    }}}
+  def decode(
+        <<@relay_pong::8, sender::binary-size(16), ts::64, active::32, max::32, uptime::32,
+          echo_seq::32>>
+      ) do
+    {:ok,
+     {:relay_pong, sender, ts,
+      %{
+        active_sessions: active,
+        max_sessions: max,
+        uptime_seconds: uptime,
+        echo_seq: echo_seq
+      }}}
   end
 
-  def decode(<<@relay_forward::8, sender::binary-size(16), ts::64,
-               ttl::8, path_len::8, rest::binary>>) do
+  def decode(
+        <<@relay_forward::8, sender::binary-size(16), ts::64, ttl::8, path_len::8, rest::binary>>
+      ) do
     path_bytes = path_len * 16
+
     case rest do
       <<path_binary::binary-size(path_bytes), len::32, inner::binary>> ->
         if byte_size(inner) == len do
@@ -204,28 +226,39 @@ defmodule ZtlpRelay.InterRelay do
         else
           {:error, :forward_length_mismatch}
         end
+
       _ ->
         {:error, :forward_length_mismatch}
     end
   end
 
-  def decode(<<@relay_session_sync::8, sender::binary-size(16), ts::64,
-               session_id::binary-size(12),
-               ip_a_bytes::binary-size(4), port_a::16,
-               ip_b_bytes::binary-size(4), port_b::16>>) do
-    {:ok, {:relay_session_sync, sender, ts, %{
-      session_id: session_id,
-      peer_a: {decode_ip(ip_a_bytes), port_a},
-      peer_b: {decode_ip(ip_b_bytes), port_b}
-    }}}
+  def decode(
+        <<@relay_session_sync::8, sender::binary-size(16), ts::64, session_id::binary-size(12),
+          ip_a_bytes::binary-size(4), port_a::16, ip_b_bytes::binary-size(4), port_b::16>>
+      ) do
+    {:ok,
+     {:relay_session_sync, sender, ts,
+      %{
+        session_id: session_id,
+        peer_a: {decode_ip(ip_a_bytes), port_a},
+        peer_b: {decode_ip(ip_b_bytes), port_b}
+      }}}
   end
 
   def decode(<<@relay_leave::8, sender::binary-size(16), ts::64>>) do
     {:ok, {:relay_leave, sender, ts, %{}}}
   end
 
-  def decode(<<type::8, _::binary>>) when type not in [@relay_hello, @relay_hello_ack,
-    @relay_ping, @relay_pong, @relay_forward, @relay_session_sync, @relay_leave] do
+  def decode(<<type::8, _::binary>>)
+      when type not in [
+             @relay_hello,
+             @relay_hello_ack,
+             @relay_ping,
+             @relay_pong,
+             @relay_forward,
+             @relay_session_sync,
+             @relay_leave
+           ] do
     {:error, :unknown_message_type}
   end
 
@@ -237,7 +270,7 @@ defmodule ZtlpRelay.InterRelay do
   Returns `{:ok, decoded}` for processing by the caller.
   """
   @spec handle_message(binary(), {:inet.ip_address(), :inet.port_number()}) ::
-    {:ok, {msg_type(), binary(), non_neg_integer(), map()}} | {:error, atom()}
+          {:ok, {msg_type(), binary(), non_neg_integer(), map()}} | {:error, atom()}
   def handle_message(data, _sender) do
     decode(data)
   end
@@ -287,9 +320,17 @@ defmodule ZtlpRelay.InterRelay do
   """
   @spec inter_relay_message?(binary()) :: boolean()
   def inter_relay_message?(<<type::8, _::binary>>)
-      when type in [@relay_hello, @relay_hello_ack, @relay_ping, @relay_pong,
-                    @relay_forward, @relay_session_sync, @relay_leave],
+      when type in [
+             @relay_hello,
+             @relay_hello_ack,
+             @relay_ping,
+             @relay_pong,
+             @relay_forward,
+             @relay_session_sync,
+             @relay_leave
+           ],
       do: true
+
   def inter_relay_message?(_), do: false
 
   # Helpers
@@ -305,12 +346,12 @@ defmodule ZtlpRelay.InterRelay do
   defp encode_role(:ingress), do: 0x01
   defp encode_role(:transit), do: 0x02
   defp encode_role(:service), do: 0x03
-  defp encode_role(:all),     do: 0xFF
-  defp encode_role(_),        do: 0xFF
+  defp encode_role(:all), do: 0xFF
+  defp encode_role(_), do: 0xFF
 
   defp decode_role(0x01), do: :ingress
   defp decode_role(0x02), do: :transit
   defp decode_role(0x03), do: :service
   defp decode_role(0xFF), do: :all
-  defp decode_role(_),    do: :all
+  defp decode_role(_), do: :all
 end

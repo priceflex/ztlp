@@ -114,7 +114,10 @@ async fn test_encrypted_data_a_to_b() {
     let addr_b = node_b.local_addr;
 
     let plaintext = b"Hello from Node A!";
-    node_a.send_data(session_id, plaintext, addr_b).await.unwrap();
+    node_a
+        .send_data(session_id, plaintext, addr_b)
+        .await
+        .unwrap();
 
     let result = timeout(Duration::from_secs(2), node_b.recv_data()).await;
     let received = result.expect("timeout").expect("recv error");
@@ -129,7 +132,10 @@ async fn test_encrypted_data_b_to_a() {
     let addr_a = node_a.local_addr;
 
     let plaintext = b"Hello from Node B!";
-    node_b.send_data(session_id, plaintext, addr_a).await.unwrap();
+    node_b
+        .send_data(session_id, plaintext, addr_a)
+        .await
+        .unwrap();
 
     let result = timeout(Duration::from_secs(2), node_a.recv_data()).await;
     let received = result.expect("timeout").expect("recv error");
@@ -148,14 +154,18 @@ async fn test_bidirectional_data_exchange() {
     node_a.send_data(session_id, b"ping", addr_b).await.unwrap();
     sleep(Duration::from_millis(20)).await;
     let recv = timeout(Duration::from_secs(2), node_b.recv_data())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(recv.unwrap().0, b"ping");
 
     // B → A
     node_b.send_data(session_id, b"pong", addr_a).await.unwrap();
     sleep(Duration::from_millis(20)).await;
     let recv = timeout(Duration::from_secs(2), node_a.recv_data())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(recv.unwrap().0, b"pong");
 }
 
@@ -166,11 +176,16 @@ async fn test_multiple_messages_sequential() {
 
     for i in 0..10u32 {
         let msg = format!("message {}", i);
-        node_a.send_data(session_id, msg.as_bytes(), addr_b).await.unwrap();
+        node_a
+            .send_data(session_id, msg.as_bytes(), addr_b)
+            .await
+            .unwrap();
         sleep(Duration::from_millis(10)).await;
 
         let recv = timeout(Duration::from_secs(2), node_b.recv_data())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let (data, _) = recv.unwrap();
         assert_eq!(
             String::from_utf8_lossy(&data),
@@ -190,7 +205,9 @@ async fn test_empty_payload() {
     sleep(Duration::from_millis(20)).await;
 
     let recv = timeout(Duration::from_secs(2), node_b.recv_data())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     let (data, _) = recv.unwrap();
     assert_eq!(data.len(), 0, "empty payload should decrypt to empty");
 }
@@ -202,13 +219,21 @@ async fn test_large_payload() {
 
     // 8KB payload (well within UDP limits)
     let payload: Vec<u8> = (0..8192).map(|i| (i % 256) as u8).collect();
-    node_a.send_data(session_id, &payload, addr_b).await.unwrap();
+    node_a
+        .send_data(session_id, &payload, addr_b)
+        .await
+        .unwrap();
     sleep(Duration::from_millis(50)).await;
 
     let recv = timeout(Duration::from_secs(2), node_b.recv_data())
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     let (data, _) = recv.unwrap();
-    assert_eq!(data, payload, "large payload should survive encrypt/decrypt");
+    assert_eq!(
+        data, payload,
+        "large payload should survive encrypt/decrypt"
+    );
 }
 
 // ─── Pipeline Rejection Tests (over real UDP) ────────────────────────

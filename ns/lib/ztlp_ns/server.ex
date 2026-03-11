@@ -104,11 +104,12 @@ defmodule ZtlpNs.Server do
   # Parse a query packet, look up the record, and build the response.
   defp process_query(<<0x01, name_len::16, name::binary-size(name_len), type_byte::8>>) do
     # Convert wire type byte to atom
-    type = try do
-      Record.byte_to_type(type_byte)
-    rescue
-      _ -> :unknown
-    end
+    type =
+      try do
+        Record.byte_to_type(type_byte)
+      rescue
+        _ -> :unknown
+      end
 
     if type == :unknown do
       <<0xFF>>
@@ -168,23 +169,26 @@ defmodule ZtlpNs.Server do
   end
 
   # Registration (0x02) — insert/update a record in the store
-  defp process_query(<<0x02, name_len::16, name::binary-size(name_len), type_byte::8,
-                       data_len::16, data_bin::binary-size(data_len),
-                       sig_len::16, _sig::binary-size(sig_len)>>) do
-    type = try do
-      Record.byte_to_type(type_byte)
-    rescue
-      _ -> :unknown
-    end
+  defp process_query(
+         <<0x02, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
+           data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
+       ) do
+    type =
+      try do
+        Record.byte_to_type(type_byte)
+      rescue
+        _ -> :unknown
+      end
 
     if type == :unknown do
       <<0xFF>>
     else
-      data = try do
-        :erlang.binary_to_term(data_bin, [:safe])
-      rescue
-        _ -> nil
-      end
+      data =
+        try do
+          :erlang.binary_to_term(data_bin, [:safe])
+        rescue
+          _ -> nil
+        end
 
       if is_nil(data) do
         <<0xFF>>
@@ -210,6 +214,7 @@ defmodule ZtlpNs.Server do
           {:error, _} ->
             bumped = %{signed | serial: signed.serial + 1}
             bumped2 = Record.sign(bumped, priv)
+
             case Store.insert(bumped2) do
               :ok -> <<0x06>>
               {:error, _} -> <<0xFF>>
@@ -228,6 +233,7 @@ defmodule ZtlpNs.Server do
         {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
         Application.put_env(:ztlp_ns, :registration_private_key, priv)
         priv
+
       priv ->
         priv
     end

@@ -241,7 +241,8 @@ impl Pipeline {
 
             if let Some(session) = self.sessions.get(&session_id) {
                 let aad = &data[..packet::HANDSHAKE_HEADER_SIZE - 16];
-                let auth_tag = &data[packet::HANDSHAKE_HEADER_SIZE - 16..packet::HANDSHAKE_HEADER_SIZE];
+                let auth_tag =
+                    &data[packet::HANDSHAKE_HEADER_SIZE - 16..packet::HANDSHAKE_HEADER_SIZE];
 
                 if verify_header_auth_tag(&session.recv_key, aad, auth_tag) {
                     AdmissionResult::Pass
@@ -340,9 +341,6 @@ fn verify_header_auth_tag(key: &[u8; 32], aad: &[u8], tag: &[u8]) -> bool {
     let nonce = Nonce::default();
 
     cipher
-        .decrypt(
-            &nonce,
-            chacha20poly1305::aead::Payload { msg: tag, aad },
-        )
+        .decrypt(&nonce, chacha20poly1305::aead::Payload { msg: tag, aad })
         .is_ok()
 }

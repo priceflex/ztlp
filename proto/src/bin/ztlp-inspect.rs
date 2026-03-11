@@ -23,8 +23,7 @@ use colored::Colorize;
 use std::io::{self, BufRead};
 
 use ztlp_proto::packet::{
-    DataHeader, HandshakeHeader, MsgType, MAGIC,
-    DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, VERSION,
+    DataHeader, HandshakeHeader, MsgType, DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
 
 /// ZTLP Packet Decoder/Inspector — decode and pretty-print ZTLP packets.
@@ -183,7 +182,10 @@ fn decode_packet(data: &[u8]) -> DecodedPacket {
     let mut warnings = Vec::new();
 
     if version != VERSION {
-        warnings.push(format!("Unsupported version: {} (expected {})", version, VERSION));
+        warnings.push(format!(
+            "Unsupported version: {} (expected {})",
+            version, VERSION
+        ));
     }
 
     // Discriminate by HdrLen: 24 = handshake, 11 = data
@@ -193,14 +195,21 @@ fn decode_packet(data: &[u8]) -> DecodedPacket {
         decode_data(data, version, hdr_len, warnings)
     } else {
         // Unknown header length — try to decode as much as possible
-        warnings.push(format!("Unknown HdrLen: {} (expected 24 for handshake or 11 for data)", hdr_len));
+        warnings.push(format!(
+            "Unknown HdrLen: {} (expected 24 for handshake or 11 for data)",
+            hdr_len
+        ));
         if data.len() >= HANDSHAKE_HEADER_SIZE {
             decode_handshake(data, version, hdr_len, warnings)
         } else if data.len() >= DATA_HEADER_SIZE {
             decode_data(data, version, hdr_len, warnings)
         } else {
             DecodedPacket::Error {
-                error: format!("Unknown HdrLen {} and packet too short to decode ({}B)", hdr_len, data.len()),
+                error: format!(
+                    "Unknown HdrLen {} and packet too short to decode ({}B)",
+                    hdr_len,
+                    data.len()
+                ),
                 raw_hex: hex::encode(data),
                 raw_len: data.len(),
             }
@@ -208,10 +217,19 @@ fn decode_packet(data: &[u8]) -> DecodedPacket {
     }
 }
 
-fn decode_handshake(data: &[u8], version: u8, hdr_len: u16, mut warnings: Vec<String>) -> DecodedPacket {
+fn decode_handshake(
+    data: &[u8],
+    version: u8,
+    hdr_len: u16,
+    mut warnings: Vec<String>,
+) -> DecodedPacket {
     if data.len() < HANDSHAKE_HEADER_SIZE {
         return DecodedPacket::Error {
-            error: format!("Handshake header too short: {} bytes (need {})", data.len(), HANDSHAKE_HEADER_SIZE),
+            error: format!(
+                "Handshake header too short: {} bytes (need {})",
+                data.len(),
+                HANDSHAKE_HEADER_SIZE
+            ),
             raw_hex: hex::encode(data),
             raw_len: data.len(),
         };
@@ -260,7 +278,11 @@ fn decode_handshake(data: &[u8], version: u8, hdr_len: u16, mut warnings: Vec<St
 fn decode_data(data: &[u8], version: u8, hdr_len: u16, warnings: Vec<String>) -> DecodedPacket {
     if data.len() < DATA_HEADER_SIZE {
         return DecodedPacket::Error {
-            error: format!("Data header too short: {} bytes (need {})", data.len(), DATA_HEADER_SIZE),
+            error: format!(
+                "Data header too short: {} bytes (need {})",
+                data.len(),
+                DATA_HEADER_SIZE
+            ),
             raw_hex: hex::encode(data),
             raw_len: data.len(),
         };
@@ -329,129 +351,333 @@ fn hex_dump(data: &[u8], max_bytes: usize) -> String {
 fn display_pretty(pkt: &DecodedPacket, raw: &[u8]) {
     match pkt {
         DecodedPacket::Handshake {
-            valid, magic, version, hdr_len, flags, msg_type, msg_type_raw,
-            crypto_suite, key_id, session_id, packet_seq, timestamp,
-            src_node_id, dst_svc_id, policy_tag, ext_len, payload_len,
-            header_auth_tag, total_bytes, warnings,
+            valid,
+            magic,
+            version,
+            hdr_len,
+            flags,
+            msg_type,
+            msg_type_raw,
+            crypto_suite,
+            key_id,
+            session_id,
+            packet_seq,
+            timestamp,
+            src_node_id,
+            dst_svc_id,
+            policy_tag,
+            ext_len,
+            payload_len,
+            header_auth_tag,
+            total_bytes,
+            warnings,
         } => {
             let status = if *valid {
                 "✓ VALID".green().bold()
             } else {
                 "⚠ WARNINGS".yellow().bold()
             };
-            println!("{}", "╔══════════════════════════════════════════════════════╗".cyan());
-            println!("{} {} {} {} {}",
+            println!(
+                "{}",
+                "╔══════════════════════════════════════════════════════╗".cyan()
+            );
+            println!(
+                "{} {} {} {} {}",
                 "║".cyan(),
                 "ZTLP Handshake Packet".white().bold(),
                 format!("({msg_type})").bright_magenta(),
                 status,
                 "║".cyan()
             );
-            println!("{}", "╠══════════════════════════════════════════════════════╣".cyan());
+            println!(
+                "{}",
+                "╠══════════════════════════════════════════════════════╣".cyan()
+            );
             println!("{}  {:<20} {}", "║".cyan(), "Magic:".bright_blue(), magic);
-            println!("{}  {:<20} {} (HdrLen: {} words = {} bytes)",
-                "║".cyan(), "Version:".bright_blue(), version, hdr_len, hdr_len * 4);
-            println!("{}  {:<20} {} (raw: {})",
-                "║".cyan(), "MsgType:".bright_blue(), msg_type.bright_magenta(), msg_type_raw);
-            println!("{}  {:<20} {}", "║".cyan(), "CryptoSuite:".bright_blue(), crypto_suite);
+            println!(
+                "{}  {:<20} {} (HdrLen: {} words = {} bytes)",
+                "║".cyan(),
+                "Version:".bright_blue(),
+                version,
+                hdr_len,
+                hdr_len * 4
+            );
+            println!(
+                "{}  {:<20} {} (raw: {})",
+                "║".cyan(),
+                "MsgType:".bright_blue(),
+                msg_type.bright_magenta(),
+                msg_type_raw
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "CryptoSuite:".bright_blue(),
+                crypto_suite
+            );
             println!("{}  {:<20} {}", "║".cyan(), "KeyID:".bright_blue(), key_id);
-            println!("{}  {:<20} {}", "║".cyan(), "SessionID:".bright_blue(), session_id.bright_yellow());
-            println!("{}  {:<20} {}", "║".cyan(), "PacketSeq:".bright_blue(), packet_seq);
-            println!("{}  {:<20} {} ms", "║".cyan(), "Timestamp:".bright_blue(), timestamp);
-            println!("{}  {:<20} {}", "║".cyan(), "SrcNodeID:".bright_blue(), src_node_id);
-            println!("{}  {:<20} {}", "║".cyan(), "DstSvcID:".bright_blue(), dst_svc_id);
-            println!("{}  {:<20} {}", "║".cyan(), "PolicyTag:".bright_blue(), policy_tag);
-            println!("{}  {:<20} {}", "║".cyan(), "ExtLen:".bright_blue(), ext_len);
-            println!("{}  {:<20} {}", "║".cyan(), "PayloadLen:".bright_blue(), payload_len);
-            println!("{}  {:<20} {}", "║".cyan(), "AuthTag:".bright_blue(), header_auth_tag.bright_red());
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "SessionID:".bright_blue(),
+                session_id.bright_yellow()
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "PacketSeq:".bright_blue(),
+                packet_seq
+            );
+            println!(
+                "{}  {:<20} {} ms",
+                "║".cyan(),
+                "Timestamp:".bright_blue(),
+                timestamp
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "SrcNodeID:".bright_blue(),
+                src_node_id
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "DstSvcID:".bright_blue(),
+                dst_svc_id
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "PolicyTag:".bright_blue(),
+                policy_tag
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "ExtLen:".bright_blue(),
+                ext_len
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "PayloadLen:".bright_blue(),
+                payload_len
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "AuthTag:".bright_blue(),
+                header_auth_tag.bright_red()
+            );
 
             // Flags
-            println!("{}  {:<20} {}", "║".cyan(), "Flags:".bright_blue(), flags.raw);
+            println!(
+                "{}  {:<20} {}",
+                "║".cyan(),
+                "Flags:".bright_blue(),
+                flags.raw
+            );
             let mut flag_strs = Vec::new();
-            if flags.has_ext { flag_strs.push("HAS_EXT"); }
-            if flags.ack_req { flag_strs.push("ACK_REQ"); }
-            if flags.rekey { flag_strs.push("REKEY"); }
-            if flags.migrate { flag_strs.push("MIGRATE"); }
-            if flags.multipath { flag_strs.push("MULTIPATH"); }
-            if flags.relay_hop { flag_strs.push("RELAY_HOP"); }
+            if flags.has_ext {
+                flag_strs.push("HAS_EXT");
+            }
+            if flags.ack_req {
+                flag_strs.push("ACK_REQ");
+            }
+            if flags.rekey {
+                flag_strs.push("REKEY");
+            }
+            if flags.migrate {
+                flag_strs.push("MIGRATE");
+            }
+            if flags.multipath {
+                flag_strs.push("MULTIPATH");
+            }
+            if flags.relay_hop {
+                flag_strs.push("RELAY_HOP");
+            }
             if !flag_strs.is_empty() {
-                println!("{}  {:<20} [{}]", "║".cyan(), "".bright_blue(), flag_strs.join(", ").bright_green());
+                println!(
+                    "{}  {:<20} [{}]",
+                    "║".cyan(),
+                    "".bright_blue(),
+                    flag_strs.join(", ").bright_green()
+                );
             }
 
-            println!("{}  {:<20} {} bytes", "║".cyan(), "Total size:".bright_blue(), total_bytes);
+            println!(
+                "{}  {:<20} {} bytes",
+                "║".cyan(),
+                "Total size:".bright_blue(),
+                total_bytes
+            );
 
             if !warnings.is_empty() {
-                println!("{}", "╠══════════════════════════════════════════════════════╣".yellow());
+                println!(
+                    "{}",
+                    "╠══════════════════════════════════════════════════════╣".yellow()
+                );
                 for w in warnings {
                     println!("{}  {} {}", "║".yellow(), "⚠".yellow(), w.yellow());
                 }
             }
 
-            println!("{}", "╠══════════════════════════════════════════════════════╣".cyan());
+            println!(
+                "{}",
+                "╠══════════════════════════════════════════════════════╣".cyan()
+            );
             println!("{}  {}", "║".cyan(), "Raw hex dump:".dimmed());
             print!("{}", hex_dump(raw, 128));
-            println!("{}", "╚══════════════════════════════════════════════════════╝".cyan());
+            println!(
+                "{}",
+                "╚══════════════════════════════════════════════════════╝".cyan()
+            );
         }
         DecodedPacket::Data {
-            valid, magic, version, hdr_len, flags, session_id, packet_seq,
-            header_auth_tag, total_bytes, warnings,
+            valid,
+            magic,
+            version,
+            hdr_len,
+            flags,
+            session_id,
+            packet_seq,
+            header_auth_tag,
+            total_bytes,
+            warnings,
         } => {
             let status = if *valid {
                 "✓ VALID".green().bold()
             } else {
                 "⚠ WARNINGS".yellow().bold()
             };
-            println!("{}", "╔══════════════════════════════════════════════════════╗".green());
-            println!("{} {} {}",
+            println!(
+                "{}",
+                "╔══════════════════════════════════════════════════════╗".green()
+            );
+            println!(
+                "{} {} {}",
                 "║".green(),
                 "ZTLP Data Packet".white().bold(),
                 status
             );
-            println!("{}", "╠══════════════════════════════════════════════════════╣".green());
+            println!(
+                "{}",
+                "╠══════════════════════════════════════════════════════╣".green()
+            );
             println!("{}  {:<20} {}", "║".green(), "Magic:".bright_blue(), magic);
-            println!("{}  {:<20} {} (HdrLen: {} words = {} bytes)",
-                "║".green(), "Version:".bright_blue(), version, hdr_len, hdr_len * 4);
-            println!("{}  {:<20} {}", "║".green(), "SessionID:".bright_blue(), session_id.bright_yellow());
-            println!("{}  {:<20} {}", "║".green(), "PacketSeq:".bright_blue(), packet_seq);
-            println!("{}  {:<20} {}", "║".green(), "AuthTag:".bright_blue(), header_auth_tag.bright_red());
+            println!(
+                "{}  {:<20} {} (HdrLen: {} words = {} bytes)",
+                "║".green(),
+                "Version:".bright_blue(),
+                version,
+                hdr_len,
+                hdr_len * 4
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".green(),
+                "SessionID:".bright_blue(),
+                session_id.bright_yellow()
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".green(),
+                "PacketSeq:".bright_blue(),
+                packet_seq
+            );
+            println!(
+                "{}  {:<20} {}",
+                "║".green(),
+                "AuthTag:".bright_blue(),
+                header_auth_tag.bright_red()
+            );
 
             // Flags
-            println!("{}  {:<20} {}", "║".green(), "Flags:".bright_blue(), flags.raw);
+            println!(
+                "{}  {:<20} {}",
+                "║".green(),
+                "Flags:".bright_blue(),
+                flags.raw
+            );
             let mut flag_strs = Vec::new();
-            if flags.has_ext { flag_strs.push("HAS_EXT"); }
-            if flags.ack_req { flag_strs.push("ACK_REQ"); }
-            if flags.rekey { flag_strs.push("REKEY"); }
-            if flags.migrate { flag_strs.push("MIGRATE"); }
-            if flags.multipath { flag_strs.push("MULTIPATH"); }
-            if flags.relay_hop { flag_strs.push("RELAY_HOP"); }
+            if flags.has_ext {
+                flag_strs.push("HAS_EXT");
+            }
+            if flags.ack_req {
+                flag_strs.push("ACK_REQ");
+            }
+            if flags.rekey {
+                flag_strs.push("REKEY");
+            }
+            if flags.migrate {
+                flag_strs.push("MIGRATE");
+            }
+            if flags.multipath {
+                flag_strs.push("MULTIPATH");
+            }
+            if flags.relay_hop {
+                flag_strs.push("RELAY_HOP");
+            }
             if !flag_strs.is_empty() {
-                println!("{}  {:<20} [{}]", "║".green(), "".bright_blue(), flag_strs.join(", ").bright_green());
+                println!(
+                    "{}  {:<20} [{}]",
+                    "║".green(),
+                    "".bright_blue(),
+                    flag_strs.join(", ").bright_green()
+                );
             }
 
-            println!("{}  {:<20} {} bytes (payload: {} bytes)",
-                "║".green(), "Total size:".bright_blue(), total_bytes,
-                total_bytes.saturating_sub(DATA_HEADER_SIZE));
+            println!(
+                "{}  {:<20} {} bytes (payload: {} bytes)",
+                "║".green(),
+                "Total size:".bright_blue(),
+                total_bytes,
+                total_bytes.saturating_sub(DATA_HEADER_SIZE)
+            );
 
             if !warnings.is_empty() {
-                println!("{}", "╠══════════════════════════════════════════════════════╣".yellow());
+                println!(
+                    "{}",
+                    "╠══════════════════════════════════════════════════════╣".yellow()
+                );
                 for w in warnings {
                     println!("{}  {} {}", "║".yellow(), "⚠".yellow(), w.yellow());
                 }
             }
 
-            println!("{}", "╠══════════════════════════════════════════════════════╣".green());
+            println!(
+                "{}",
+                "╠══════════════════════════════════════════════════════╣".green()
+            );
             println!("{}  {}", "║".green(), "Raw hex dump:".dimmed());
             print!("{}", hex_dump(raw, 128));
-            println!("{}", "╚══════════════════════════════════════════════════════╝".green());
+            println!(
+                "{}",
+                "╚══════════════════════════════════════════════════════╝".green()
+            );
         }
-        DecodedPacket::Error { error, raw_hex, raw_len } => {
-            println!("{}", "╔══════════════════════════════════════════════════════╗".red());
+        DecodedPacket::Error {
+            error,
+            raw_hex,
+            raw_len,
+        } => {
+            println!(
+                "{}",
+                "╔══════════════════════════════════════════════════════╗".red()
+            );
             println!("{} {}", "║".red(), "✗ DECODE ERROR".red().bold());
-            println!("{}", "╠══════════════════════════════════════════════════════╣".red());
+            println!(
+                "{}",
+                "╠══════════════════════════════════════════════════════╣".red()
+            );
             println!("{}  {}", "║".red(), error.red());
             println!("{}  Size: {} bytes", "║".red(), raw_len);
             println!("{}  Hex:  {}", "║".red(), &raw_hex[..raw_hex.len().min(64)]);
-            println!("{}", "╚══════════════════════════════════════════════════════╝".red());
+            println!(
+                "{}",
+                "╚══════════════════════════════════════════════════════╝".red()
+            );
         }
     }
 }
@@ -459,16 +685,32 @@ fn display_pretty(pkt: &DecodedPacket, raw: &[u8]) {
 fn display_compact(pkt: &DecodedPacket) {
     match pkt {
         DecodedPacket::Handshake {
-            msg_type, session_id, packet_seq, total_bytes, ..
+            msg_type,
+            session_id,
+            packet_seq,
+            total_bytes,
+            ..
         } => {
-            println!("[HANDSHAKE] type={} session={} seq={} size={}B",
-                msg_type, &session_id[..16.min(session_id.len())], packet_seq, total_bytes);
+            println!(
+                "[HANDSHAKE] type={} session={} seq={} size={}B",
+                msg_type,
+                &session_id[..16.min(session_id.len())],
+                packet_seq,
+                total_bytes
+            );
         }
         DecodedPacket::Data {
-            session_id, packet_seq, total_bytes, ..
+            session_id,
+            packet_seq,
+            total_bytes,
+            ..
         } => {
-            println!("[DATA] session={} seq={} size={}B",
-                &session_id[..16.min(session_id.len())], packet_seq, total_bytes);
+            println!(
+                "[DATA] session={} seq={} size={}B",
+                &session_id[..16.min(session_id.len())],
+                packet_seq,
+                total_bytes
+            );
         }
         DecodedPacket::Error { error, raw_len, .. } => {
             println!("[ERROR] {} ({}B)", error, raw_len);
@@ -525,8 +767,13 @@ fn scan_binary_file(data: &[u8], format: OutputFormat) -> usize {
 
             if remaining.len() >= header_size {
                 count += 1;
-                println!("\n{} Packet #{} at offset 0x{:04X} ({}):",
-                    "►".bright_cyan(), count, pos, pos);
+                println!(
+                    "\n{} Packet #{} at offset 0x{:04X} ({}):",
+                    "►".bright_cyan(),
+                    count,
+                    pos,
+                    pos
+                );
                 let pkt = decode_packet(remaining);
                 display_packet(&pkt, remaining, format);
                 pos += header_size;
@@ -558,8 +805,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        println!("{} Scanning {} ({} bytes) for ZTLP packets...",
-            "▶".bright_cyan(), path, data.len());
+        println!(
+            "{} Scanning {} ({} bytes) for ZTLP packets...",
+            "▶".bright_cyan(),
+            path,
+            data.len()
+        );
         let count = scan_binary_file(&data, cli.format);
         println!("\n{} Found {} packet(s).", "✓".green(), count);
     } else if cli.stdin {

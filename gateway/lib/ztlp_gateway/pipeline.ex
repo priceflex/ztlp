@@ -40,11 +40,11 @@ defmodule ZtlpGateway.Pipeline do
   # ---------------------------------------------------------------------------
 
   @type admission_result ::
-    {:ok, :new_session}
-    | {:ok, :known_session, pid()}
-    | {:reject, :bad_magic}
-    | {:reject, :unknown_session}
-    | {:reject, :truncated}
+          {:ok, :new_session}
+          | {:ok, :known_session, pid()}
+          | {:reject, :bad_magic}
+          | {:reject, :unknown_session}
+          | {:reject, :truncated}
 
   # ---------------------------------------------------------------------------
   # Public API

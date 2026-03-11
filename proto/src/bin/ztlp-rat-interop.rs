@@ -25,10 +25,8 @@ use ztlp_proto::admission::{self, RelayAdmissionToken, RAT_SIZE, RAT_VERSION};
 
 /// Known test parameters for cross-language verification.
 const TEST_SECRET: [u8; 32] = [
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 ];
 
 const TEST_NODE_ID: [u8; 16] = [0xAA; 16];
@@ -53,7 +51,9 @@ fn main() {
             eprintln!("  generate   — Generate a deterministic RAT and print hex to stdout");
             eprintln!("  verify     — Read a hex RAT from stdin and verify with known secret");
             eprintln!("  selftest   — Round-trip self-test (no external tools needed)");
-            eprintln!("  hmac-test  — Print HMAC-BLAKE2s test vectors for cross-language comparison");
+            eprintln!(
+                "  hmac-test  — Print HMAC-BLAKE2s test vectors for cross-language comparison"
+            );
             std::process::exit(1);
         }
     }
@@ -154,11 +154,17 @@ fn cmd_verify() {
         all_ok = false;
     }
     if token.issued_at != TEST_ISSUED_AT {
-        eprintln!("FAIL: IssuedAt mismatch (got {}, expected {})", token.issued_at, TEST_ISSUED_AT);
+        eprintln!(
+            "FAIL: IssuedAt mismatch (got {}, expected {})",
+            token.issued_at, TEST_ISSUED_AT
+        );
         all_ok = false;
     }
     if token.expires_at != TEST_EXPIRES_AT {
-        eprintln!("FAIL: ExpiresAt mismatch (got {}, expected {})", token.expires_at, TEST_EXPIRES_AT);
+        eprintln!(
+            "FAIL: ExpiresAt mismatch (got {}, expected {})",
+            token.expires_at, TEST_EXPIRES_AT
+        );
         all_ok = false;
     }
 
@@ -184,11 +190,19 @@ fn cmd_selftest() {
     );
 
     let bytes = token.serialize();
-    eprintln!("1. Generated RAT: {} ({} bytes)", hex::encode(&bytes), bytes.len());
+    eprintln!(
+        "1. Generated RAT: {} ({} bytes)",
+        hex::encode(&bytes),
+        bytes.len()
+    );
 
     // 2. Parse
     let parsed = RelayAdmissionToken::parse(&bytes).expect("parse should succeed");
-    eprintln!("2. Parsed: version={}, node_id={}", parsed.version, hex::encode(parsed.node_id));
+    eprintln!(
+        "2. Parsed: version={}, node_id={}",
+        parsed.version,
+        hex::encode(parsed.node_id)
+    );
 
     // 3. Verify MAC
     assert!(parsed.verify(&TEST_SECRET), "MAC verification failed");
@@ -207,22 +221,41 @@ fn cmd_selftest() {
     let mut tampered = bytes;
     tampered[5] ^= 0xFF;
     let tampered_token = RelayAdmissionToken::parse(&tampered).expect("parse should succeed");
-    assert!(!tampered_token.verify(&TEST_SECRET), "tampered token should fail verification");
+    assert!(
+        !tampered_token.verify(&TEST_SECRET),
+        "tampered token should fail verification"
+    );
     eprintln!("5. Tamper detection: PASS");
 
     // 6. Wrong key detection
     let wrong_key = [0xFFu8; 32];
-    assert!(!parsed.verify(&wrong_key), "wrong key should fail verification");
+    assert!(
+        !parsed.verify(&wrong_key),
+        "wrong key should fail verification"
+    );
     eprintln!("6. Wrong key rejection: PASS");
 
     // 7. Session scope
-    assert!(parsed.valid_for_session(&[0xFF; 12]), "any-scope token should match any session");
-    let scoped = RelayAdmissionToken::issue_at(
-        TEST_NODE_ID, TEST_ISSUER_ID, [0xCC; 12],
-        TEST_ISSUED_AT, TEST_EXPIRES_AT, &TEST_SECRET,
+    assert!(
+        parsed.valid_for_session(&[0xFF; 12]),
+        "any-scope token should match any session"
     );
-    assert!(scoped.valid_for_session(&[0xCC; 12]), "scoped token should match its session");
-    assert!(!scoped.valid_for_session(&[0xDD; 12]), "scoped token should not match other sessions");
+    let scoped = RelayAdmissionToken::issue_at(
+        TEST_NODE_ID,
+        TEST_ISSUER_ID,
+        [0xCC; 12],
+        TEST_ISSUED_AT,
+        TEST_EXPIRES_AT,
+        &TEST_SECRET,
+    );
+    assert!(
+        scoped.valid_for_session(&[0xCC; 12]),
+        "scoped token should match its session"
+    );
+    assert!(
+        !scoped.valid_for_session(&[0xDD; 12]),
+        "scoped token should not match other sessions"
+    );
     eprintln!("7. Session scope: PASS");
 
     eprintln!("\n=== ALL TESTS PASSED ===");

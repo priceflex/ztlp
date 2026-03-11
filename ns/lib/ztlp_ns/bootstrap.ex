@@ -120,6 +120,7 @@ defmodule ZtlpNs.Bootstrap do
       case record.data do
         %{relays: relays} when is_list(relays) ->
           {:ok, relays}
+
         _ ->
           {:error, :invalid_bootstrap_data}
       end

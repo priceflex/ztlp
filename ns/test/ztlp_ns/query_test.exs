@@ -15,8 +15,14 @@ defmodule ZtlpNs.QueryTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      rec = Record.new_key("node.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      rec =
+        Record.new_key("node.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       rec = Record.sign(rec, priv)
       Store.insert(rec)
 
@@ -33,14 +39,25 @@ defmodule ZtlpNs.QueryTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      rec = Record.new_key("victim.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      rec =
+        Record.new_key("victim.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       rec = Record.sign(rec, priv)
       Store.insert(rec)
 
       # Revoke it
-      revoke = Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
-        created_at: System.system_time(:second), ttl: 0, serial: 1)
+      revoke =
+        Record.new_revoke("revoke.ztlp", [], "test", "2026-01-01T00:00:00Z",
+          created_at: System.system_time(:second),
+          ttl: 0,
+          serial: 1
+        )
+
       revoke = %{revoke | data: Map.put(revoke.data, :revoked_ids, ["victim.ztlp"])}
       revoke = Record.sign(revoke, priv)
       Store.insert(revoke)
@@ -65,8 +82,14 @@ defmodule ZtlpNs.QueryTest do
       # Operator signs a node record
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      record = Record.new_key("node1.example.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      record =
+        Record.new_key("node1.example.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(operator, record)
       Store.insert(signed)
 
@@ -80,8 +103,14 @@ defmodule ZtlpNs.QueryTest do
       {_pub, priv} = Crypto.generate_keypair()
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      record = Record.new_key("unverified.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      record =
+        Record.new_key("unverified.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       record = Record.sign(record, priv)
       Store.insert(record)
 
@@ -94,8 +123,14 @@ defmodule ZtlpNs.QueryTest do
 
       node_id = :crypto.strong_rand_bytes(16)
       {node_pub, _} = Crypto.generate_keypair()
-      record = Record.new_key("direct.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+
+      record =
+        Record.new_key("direct.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       {:ok, signed} = ZoneAuthority.sign_record(root, record)
       Store.insert(signed)
 
@@ -110,13 +145,23 @@ defmodule ZtlpNs.QueryTest do
       {node_pub, _} = Crypto.generate_keypair()
 
       # Insert KEY and RELAY records for same name
-      key_rec = Record.new_key("multi.ztlp", node_id, node_pub,
-        created_at: System.system_time(:second), ttl: 86400, serial: 1)
+      key_rec =
+        Record.new_key("multi.ztlp", node_id, node_pub,
+          created_at: System.system_time(:second),
+          ttl: 86400,
+          serial: 1
+        )
+
       key_rec = Record.sign(key_rec, priv)
       Store.insert(key_rec)
 
-      relay_rec = Record.new_relay("multi.ztlp", node_id, ["1.2.3.4:23095"], 1000, "us-east",
-        created_at: System.system_time(:second), ttl: 3600, serial: 1)
+      relay_rec =
+        Record.new_relay("multi.ztlp", node_id, ["1.2.3.4:23095"], 1000, "us-east",
+          created_at: System.system_time(:second),
+          ttl: 3600,
+          serial: 1
+        )
+
       relay_rec = Record.sign(relay_rec, priv)
       Store.insert(relay_rec)
 

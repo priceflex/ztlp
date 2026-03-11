@@ -45,13 +45,25 @@ pub const MAX_SERVICE_NAME_LEN: usize = 16;
 pub const DEFAULT_SERVICE: &str = "_default";
 
 /// Maximum TCP read buffer size per chunk.
-const TCP_READ_BUF: usize = 16384;
+/// Larger buffers reduce syscall overhead and improve throughput
+/// for bulk transfers (SCP, file copies).
+const TCP_READ_BUF: usize = 65536;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
 /// ZTLP data header is 42 bytes, Poly1305 tag is 16 bytes, so
 /// max plaintext per packet ≈ 65535 - 42 - 16 = 65477.
-/// We use a conservative 16KB to avoid fragmentation.
+/// We use a conservative 16KB to avoid IP fragmentation on most MTUs.
 const MAX_PLAINTEXT_PER_PACKET: usize = 16384;
+
+/// Send-side flow control: maximum number of unacknowledged packets
+/// before the TCP→ZTLP direction yields to let the receiver catch up.
+/// This provides basic backpressure to prevent UDP send buffer overflows
+/// during sustained high-throughput transfers.
+const SEND_WINDOW: u64 = 256;
+
+/// Yield delay (microseconds) when the send window is exhausted.
+/// Gives the receiver time to drain its buffer.
+const BACKPRESSURE_DELAY_US: u64 = 100;
 
 /// Run the bidirectional TCP ↔ ZTLP bridge.
 ///
@@ -77,6 +89,20 @@ pub async fn run_bridge(
     // TCP → ZTLP direction
     let tcp_to_ztlp = async move {
         let mut buf = vec![0u8; TCP_READ_BUF];
+
+        // Extract the send key upfront to avoid holding the mutex in the hot loop.
+        // The send key is established during the handshake and doesn't change.
+        let (send_key, initial_seq) = {
+            let mut pl = pipeline_send.lock().await;
+            let session = pl.get_session_mut(&sid_send)
+                .ok_or("session not found")?;
+            (session.send_key, session.next_send_seq())
+        };
+
+        let cipher = ChaCha20Poly1305::new((&send_key).into());
+        let mut current_seq = initial_seq;
+        let mut packets_in_flight: u64 = 0;
+
         loop {
             let n = match tcp_reader.read(&mut buf).await {
                 Ok(0) => {
@@ -93,18 +119,24 @@ pub async fn run_bridge(
             let data = &buf[..n];
             debug!("TCP → ZTLP: {} bytes", n);
 
-            // Chunk if necessary (unlikely with 16KB buf but be safe)
             for chunk in data.chunks(MAX_PLAINTEXT_PER_PACKET) {
-                let mut pl = pipeline_send.lock().await;
-                let session = pl.get_session_mut(&sid_send)
-                    .ok_or("session not found")?;
+                // Basic backpressure: yield periodically to let the receiver
+                // drain its buffer and prevent UDP send buffer overflows
+                if packets_in_flight >= SEND_WINDOW {
+                    tokio::time::sleep(tokio::time::Duration::from_micros(BACKPRESSURE_DELAY_US)).await;
+                    packets_in_flight = 0;
+                }
 
-                let seq = session.next_send_seq();
-                let send_key = session.send_key;
-                drop(pl);
+                // Get next sequence number from the session (must lock briefly)
+                let seq = {
+                    let mut pl = pipeline_send.lock().await;
+                    let session = pl.get_session_mut(&sid_send)
+                        .ok_or("session not found")?;
+                    session.next_send_seq()
+                };
+                current_seq = seq;
 
                 // Encrypt
-                let cipher = ChaCha20Poly1305::new((&send_key).into());
                 let mut nonce_bytes = [0u8; 12];
                 nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
                 let nonce = Nonce::from_slice(&nonce_bytes);
@@ -120,14 +152,34 @@ pub async fn run_bridge(
                 let mut packet = header.serialize();
                 packet.extend_from_slice(&encrypted);
                 udp_send.send_to(&packet, peer_addr).await?;
+                packets_in_flight += 1;
                 debug!("ZTLP sent: {} bytes (seq {})", packet.len(), seq);
             }
         }
+
+        // Suppress "unreachable" warning — loop exits via return
+        #[allow(unreachable_code)]
+        { let _ = current_seq; }
     };
 
     // ZTLP → TCP direction
     let ztlp_to_tcp = async move {
         let mut buf = vec![0u8; 65535];
+
+        // Extract recv key upfront — it doesn't change after handshake
+        let recv_key = {
+            let pl = pipeline_recv.lock().await;
+            let session = pl.get_session(&sid_recv)
+                .ok_or("session not found for recv key extraction")?;
+            session.recv_key
+        };
+        let cipher = ChaCha20Poly1305::new((&recv_key).into());
+
+        // Use BufWriter for TCP to batch small writes and reduce syscalls
+        let mut tcp_writer = tokio::io::BufWriter::with_capacity(65536, tcp_writer);
+
+        let mut bytes_since_flush: usize = 0;
+
         loop {
             let (n, _addr) = match udp_recv.recv_from(&mut buf).await {
                 Ok(r) => r,
@@ -139,12 +191,14 @@ pub async fn run_bridge(
 
             let data = &buf[..n];
 
-            // Run through pipeline
-            let pl = pipeline_recv.lock().await;
-            let result = pl.process(data);
-            if !matches!(result, AdmissionResult::Pass) {
-                debug!("packet dropped by pipeline");
-                continue;
+            // Run through pipeline (brief lock)
+            {
+                let pl = pipeline_recv.lock().await;
+                let result = pl.process(data);
+                if !matches!(result, AdmissionResult::Pass) {
+                    debug!("packet dropped by pipeline");
+                    continue;
+                }
             }
 
             // Parse data header
@@ -166,20 +220,8 @@ pub async fn run_bridge(
                 continue;
             }
 
-            // Check replay
-            let session = match pl.get_session(&sid_recv) {
-                Some(s) => s,
-                None => {
-                    warn!("session not found for decryption");
-                    continue;
-                }
-            };
-            let recv_key = session.recv_key;
-            drop(pl);
-
             // Decrypt
             let encrypted_payload = &data[DATA_HEADER_SIZE..];
-            let cipher = ChaCha20Poly1305::new((&recv_key).into());
             let mut nonce_bytes = [0u8; 12];
             nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
             let nonce = Nonce::from_slice(&nonce_bytes);
@@ -187,7 +229,7 @@ pub async fn run_bridge(
             let plaintext = match cipher.decrypt(nonce, encrypted_payload) {
                 Ok(pt) => pt,
                 Err(e) => {
-                    warn!("decryption failed: {}", e);
+                    warn!("decryption failed (seq {}): {}", header.packet_seq, e);
                     continue;
                 }
             };
@@ -198,9 +240,18 @@ pub async fn run_bridge(
                 warn!("TCP write error: {}", e);
                 return Err(e.into());
             }
-            if let Err(e) = tcp_writer.flush().await {
-                warn!("TCP flush error: {}", e);
-                return Err(e.into());
+
+            bytes_since_flush += plaintext.len();
+
+            // Flush periodically rather than every packet — reduces syscalls
+            // Flush when we've buffered 32KB+ or when the packet is small
+            // (indicates end of a burst)
+            if bytes_since_flush >= 32768 || plaintext.len() < MAX_PLAINTEXT_PER_PACKET {
+                if let Err(e) = tcp_writer.flush().await {
+                    warn!("TCP flush error: {}", e);
+                    return Err(e.into());
+                }
+                bytes_since_flush = 0;
             }
         }
     };

@@ -4,6 +4,9 @@ defmodule ZtlpGateway.CircuitBreakerTest do
   alias ZtlpGateway.CircuitBreaker
 
   setup do
+    # Trap exits so linked GenServer crashes don't kill the test process
+    Process.flag(:trap_exit, true)
+
     # Start the CircuitBreaker GenServer for each test
     case GenServer.whereis(CircuitBreaker) do
       nil -> :ok
@@ -20,10 +23,14 @@ defmodule ZtlpGateway.CircuitBreakerTest do
     {:ok, _pid} = CircuitBreaker.start_link()
 
     on_exit(fn ->
-      case GenServer.whereis(CircuitBreaker) do
-        nil -> :ok
-        p when is_pid(p) -> if Process.alive?(p), do: GenServer.stop(p)
-        _ -> :ok
+      try do
+        case GenServer.whereis(CircuitBreaker) do
+          nil -> :ok
+          p when is_pid(p) -> GenServer.stop(p)
+          _ -> :ok
+        end
+      catch
+        :exit, _ -> :ok
       end
       Application.delete_env(:ztlp_gateway, :circuit_breaker_enabled)
       Application.delete_env(:ztlp_gateway, :circuit_breaker_failure_threshold)

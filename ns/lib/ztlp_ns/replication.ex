@@ -37,12 +37,12 @@ defmodule ZtlpNs.Replication do
             {s + 1, f}
 
           {:error, reason} ->
-            Logger.warn("[ztlp-ns] Replication to #{peer} rejected: #{inspect(reason)}")
+            Logger.warning("[ztlp-ns] Replication to #{peer} rejected: #{inspect(reason)}")
             increment_metric(:push_failures)
             {s, f + 1}
 
           {:badrpc, reason} ->
-            Logger.warn("[ztlp-ns] Replication RPC to #{peer} failed: #{inspect(reason)}")
+            Logger.warning("[ztlp-ns] Replication RPC to #{peer} failed: #{inspect(reason)}")
             increment_metric(:push_failures)
             {s, f + 1}
         end

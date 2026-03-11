@@ -301,7 +301,7 @@ defmodule ZtlpNs.Cluster do
   # ── Private: seed node joining ─────────────────────────────────────
 
   defp try_join_seeds([]) do
-    Logger.warn("[ztlp-ns] No seed nodes reachable, operating standalone")
+    Logger.warning("[ztlp-ns] No seed nodes reachable, operating standalone")
     :ok
   end
 
@@ -315,7 +315,7 @@ defmodule ZtlpNs.Cluster do
         :ok
 
       {:error, reason} ->
-        Logger.warn("[ztlp-ns] Failed to join #{seed_atom}: #{inspect(reason)}, trying next seed")
+        Logger.warning("[ztlp-ns] Failed to join #{seed_atom}: #{inspect(reason)}, trying next seed")
         try_join_seeds(rest)
     end
   end

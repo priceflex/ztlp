@@ -270,16 +270,17 @@ defmodule ZtlpNs.Bench do
 
     result = measure("AntiEntropy merge decision logic", fn ->
       # Simulate the checks done in merge_one:
-      # 1. Signature check (simulated as a comparison)
-      sig_valid = true
+      # Use :rand to avoid compile-time constant folding warnings
+      # 1. Signature check (simulated — always valid in bench)
+      sig_valid = :rand.uniform() < 2.0
       # 2. TTL check
       now = System.system_time(:second)
       created_at = now - 100
       ttl = 86400
       expired = ttl != 0 and now > created_at + ttl
-      # 3. Serial comparison
+      # 3. Serial comparison (remote wins most of the time)
       local_serial = 5
-      remote_serial = 7
+      remote_serial = 5 + :rand.uniform(5)
       stale = remote_serial <= local_serial
 
       cond do

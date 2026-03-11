@@ -93,7 +93,7 @@ defmodule ZtlpGateway.YamlParser do
   end
 
   defp parse_mapping_entries([], _base_indent, acc), do: {acc, []}
-  defp parse_mapping_entries([{line, num} | rest] = lines, base_indent, acc) do
+  defp parse_mapping_entries([{line, _num} | rest] = lines, base_indent, acc) do
     indent = indent_level(line)
 
     cond do

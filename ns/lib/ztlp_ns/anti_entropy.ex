@@ -283,15 +283,15 @@ defmodule ZtlpNs.AntiEntropy do
                 )
 
               {:badrpc, reason} ->
-                Logger.warn("[ztlp-ns] Anti-entropy RPC failed for #{peer}: #{inspect(reason)}")
+                Logger.warning("[ztlp-ns] Anti-entropy RPC failed for #{peer}: #{inspect(reason)}")
             end
 
           {:badrpc, reason} ->
-            Logger.warn("[ztlp-ns] Anti-entropy diff failed for #{peer}: #{inspect(reason)}")
+            Logger.warning("[ztlp-ns] Anti-entropy diff failed for #{peer}: #{inspect(reason)}")
         end
       rescue
         e ->
-          Logger.warn("[ztlp-ns] Anti-entropy error with #{peer}: #{inspect(e)}")
+          Logger.warning("[ztlp-ns] Anti-entropy error with #{peer}: #{inspect(e)}")
       end
     end)
 

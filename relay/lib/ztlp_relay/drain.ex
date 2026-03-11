@@ -180,7 +180,7 @@ defmodule ZtlpRelay.Drain do
   @impl true
   def handle_info(:drain_timeout, %{state: :draining} = state) do
     remaining = active_session_count()
-    Logger.warn("[drain] Drain timeout reached, #{remaining} sessions still active — force closing")
+    Logger.warning("[drain] Drain timeout reached, #{remaining} sessions still active — force closing")
 
     :persistent_term.put(@persistent_key, false)
 

@@ -37,6 +37,10 @@ defmodule ZtlpRelay.YamlConfig do
     path = config_path()
 
     case read_config(path) do
+      {:ok, :empty} ->
+        Logger.info("[ztlp-relay] Config file empty or not found, using defaults")
+        :ok
+
       {:ok, raw_map} ->
         case validate(raw_map) do
           {:ok, config} ->
@@ -49,10 +53,6 @@ defmodule ZtlpRelay.YamlConfig do
               Enum.map_join(errors, "\n", &("  - " <> &1)))
             {:error, errors}
         end
-
-      {:ok, :empty} ->
-        Logger.info("[ztlp-relay] Config file empty or not found, using defaults")
-        :ok
 
       {:error, :not_found} ->
         Logger.info("[ztlp-relay] No config file found (checked #{path}), using defaults")
@@ -70,8 +70,8 @@ defmodule ZtlpRelay.YamlConfig do
   @spec load(String.t()) :: {:ok, map()} | {:error, [String.t()]}
   def load(path) do
     case read_config(path) do
-      {:ok, raw_map} -> validate(raw_map)
       {:ok, :empty} -> {:ok, %{}}
+      {:ok, raw_map} -> validate(raw_map)
       {:error, reason} -> {:error, ["Failed to read config: #{inspect(reason)}"]}
     end
   end

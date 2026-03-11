@@ -46,7 +46,7 @@ defmodule ZtlpNs.StructuredLog do
   @doc "Log a warning with structured metadata."
   @spec warn(atom(), keyword()) :: :ok
   def warn(event, metadata \\ []) do
-    Logger.warn(fn -> event_message(event) end, [event: event] ++ metadata)
+    Logger.warning(fn -> event_message(event) end, [event: event] ++ metadata)
   end
 
   @doc "Log an error with structured metadata."

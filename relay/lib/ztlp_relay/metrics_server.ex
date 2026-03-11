@@ -302,9 +302,9 @@ defmodule ZtlpRelay.MetricsServer do
   defp get_mesh_info do
     if ZtlpRelay.Config.mesh_enabled?() do
       try do
-        relays = ZtlpRelay.RelayRegistry.all_relays()
-        healthy = Enum.count(relays, fn {_, info} -> info.health == :healthy end)
-        %{peers: map_size(relays), healthy: healthy}
+        relays = ZtlpRelay.RelayRegistry.get_all()
+        healthy = Enum.count(relays, fn info -> Map.get(info, :health) == :healthy end)
+        %{peers: length(relays), healthy: healthy}
       rescue
         _ -> %{peers: 0, healthy: 0}
       catch

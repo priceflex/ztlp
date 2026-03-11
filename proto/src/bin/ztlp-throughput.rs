@@ -33,7 +33,7 @@ use ztlp_proto::tunnel;
 #[derive(Parser)]
 #[command(name = "ztlp-throughput", about = "ZTLP throughput benchmark")]
 struct Args {
-    /// Benchmark mode: raw, ztlp, ztlp-gso, ztlp-nogso, all
+    /// Benchmark mode: raw, ztlp, ztlp-gso, ztlp-nogso, ztlp-gro, ztlp-gso-gro, all
     #[arg(long, default_value = "all")]
     mode: String,
 
@@ -48,6 +48,10 @@ struct Args {
     /// Number of iterations for statistical significance
     #[arg(long, default_value_t = 3)]
     repeat: u32,
+
+    /// Enable GRO on the receive side (overrides per-mode defaults)
+    #[arg(long)]
+    gro: bool,
 }
 
 // ─── Results ────────────────────────────────────────────────────────────────
@@ -372,11 +376,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Detect GSO capability
+    // Detect GSO and GRO capabilities
     let probe_socket = UdpSocket::bind("127.0.0.1:0").await?;
     let gso_cap = gso::detect_gso(&probe_socket);
-    drop(probe_socket);
     let gso_available = gso_cap.is_available();
+    drop(probe_socket);
+
+    let gro_probe_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let gro_cap = gso::detect_gro(&gro_probe_socket);
+    let gro_available = gro_cap.is_available();
+    drop(gro_probe_socket);
 
     println!();
     println!("ZTLP Throughput Benchmark");
@@ -386,9 +395,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format_size(args.size)
     );
     println!(
-        "System: {} (GSO: {})",
+        "System: {} (GSO: {}, GRO: {})",
         system_info(),
-        if gso_available { "available" } else { "unavailable" }
+        if gso_available { "available" } else { "unavailable" },
+        if gro_available { "available" } else { "unavailable" },
     );
     println!("Iterations: {}", args.repeat);
     println!();
@@ -398,6 +408,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut m = vec!["raw", "ztlp-nogso"];
             if gso_available {
                 m.push("ztlp-gso");
+            }
+            if gro_available {
+                m.push("ztlp-gro");
+            }
+            if gso_available && gro_available {
+                m.push("ztlp-gso-gro");
             }
             m.push("ztlp");
             m
@@ -436,9 +452,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (no GSO)")
                         .await?
                 }
+                "ztlp-gro" => {
+                    if !gro_available {
+                        eprintln!("Warning: GRO not available, falling back");
+                    }
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (GRO only)")
+                        .await?
+                }
+                "ztlp-gso-gro" => {
+                    if !gso_available {
+                        eprintln!("Warning: GSO not available, falling back");
+                    }
+                    if !gro_available {
+                        eprintln!("Warning: GRO not available, falling back");
+                    }
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO+GRO)")
+                        .await?
+                }
                 other => {
                     return Err(format!(
-                        "unknown mode '{}'. Use: raw, ztlp, ztlp-gso, ztlp-nogso, all",
+                        "unknown mode '{}'. Use: raw, ztlp, ztlp-gso, ztlp-nogso, ztlp-gro, ztlp-gso-gro, all",
                         other
                     )
                     .into());

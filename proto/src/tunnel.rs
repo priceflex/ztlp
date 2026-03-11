@@ -953,8 +953,6 @@ pub async fn run_bridge(
     // ── ZTLP → TCP direction (receiver) ────────────────────────────────
 
     let ztlp_to_tcp = async move {
-        let mut udp_buf = vec![0u8; 65535];
-
         // Extract recv key upfront — it doesn't change after handshake
         let (recv_key, send_key_for_acks) = {
             let pl = pipeline_recv.lock().await;
@@ -968,6 +966,13 @@ pub async fn run_bridge(
 
         // Use BufWriter for TCP to batch small writes and reduce syscalls
         let mut tcp_writer = tokio::io::BufWriter::with_capacity(65536, tcp_writer);
+
+        // GRO-aware receiver: transparently uses GRO when available.
+        // A single recv() may yield multiple coalesced datagrams.
+        let mut gro_receiver = crate::gso::GroReceiver::new(
+            udp_recv.clone(),
+            crate::gso::GsoMode::Auto,
+        );
 
         // Reassembly buffer: reorders packets for in-order TCP delivery.
         // Initial expected_seq = 0 (first data packet the sender will send).
@@ -989,12 +994,17 @@ pub async fn run_bridge(
         loop {
             // Use a timeout on UDP recv so we can periodically send ACKs
             // and check for stalls even when no packets are arriving.
+            // With GRO, a single recv may return multiple coalesced datagrams.
             let recv_result =
-                tokio::time::timeout(ACK_INTERVAL, udp_recv.recv_from(&mut udp_buf)).await;
+                tokio::time::timeout(ACK_INTERVAL, gro_receiver.recv()).await;
 
             match recv_result {
-                Ok(Ok((n, _addr))) => {
-                    let data = &udp_buf[..n];
+                Ok(Ok(batch)) => {
+                  // Process each segment in the GRO batch. When GRO coalesces
+                  // packets, we get multiple segments from one recv call.
+                  for segment in batch.segments() {
+                    let data = &batch.buffer()[segment.offset..segment.offset + segment.len];
+                    let n = segment.len;
 
                     // Run through pipeline admission (magic, session, header auth)
                     {
@@ -1201,7 +1211,9 @@ pub async fn run_bridge(
                         }
                     }
 
-                    // ── Periodic ACK sending ──
+                  } // end for segment in batch.segments()
+
+                    // ── Periodic ACK sending (once per recv call, after all segments) ──
                     // Send an ACK when we've delivered enough packets or enough
                     // time has passed. This lets the sender's flow control advance.
                     if packets_since_ack >= ACK_EVERY_PACKETS
@@ -2490,5 +2502,57 @@ mod tests {
         assert_eq!(result.len(), 63);
         assert_eq!(rb.expected_seq(), 128);
         assert_eq!(rb.buffered_count(), 0);
+    }
+
+    #[test]
+    fn test_reassembly_with_gro_coalesced_recv() {
+        // Simulate processing a coalesced GRO buffer containing multiple
+        // ZTLP packets by verifying that split_gro_segments produces
+        // the correct offsets and the reassembly buffer handles the
+        // resulting packets correctly.
+        use crate::gso::split_gro_segments;
+
+        let addr: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
+
+        // Simulate 5 coalesced ZTLP packets of 1400 bytes each
+        let segment_size: u16 = 1400;
+        let num_packets = 5;
+        let total_len = segment_size as usize * num_packets;
+
+        // Create a fake coalesced buffer
+        let mut buffer = vec![0u8; total_len];
+        for i in 0..num_packets {
+            let start = i * segment_size as usize;
+            let end = start + segment_size as usize;
+            // Fill each segment with a different byte
+            for b in &mut buffer[start..end] {
+                *b = i as u8;
+            }
+        }
+
+        // Split using GRO segment logic
+        let segments = split_gro_segments(total_len, Some(segment_size), addr);
+        assert_eq!(segments.len(), num_packets);
+
+        // Feed into a reassembly buffer as if they were sequential ZTLP data packets
+        let mut rb = ReassemblyBuffer::new(0, 64);
+        for (i, seg) in segments.iter().enumerate() {
+            let data = &buffer[seg.offset..seg.offset + seg.len];
+            assert_eq!(data.len(), segment_size as usize);
+            assert!(data.iter().all(|&b| b == i as u8));
+
+            let deliverable = rb.insert(i as u64, data.to_vec());
+            assert!(deliverable.is_some());
+        }
+
+        // All 5 packets should have been delivered in order
+        assert_eq!(rb.expected_seq(), 5);
+        assert_eq!(rb.buffered_count(), 0);
+
+        // Test with non-uniform last segment (like real GRO)
+        let total_with_short = segment_size as usize * 4 + 800;
+        let segments = split_gro_segments(total_with_short, Some(segment_size), addr);
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[4].len, 800); // last segment is shorter
     }
 }

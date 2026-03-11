@@ -40,6 +40,7 @@ pub mod batch;
 pub mod error;
 #[allow(unsafe_code)]
 pub mod ffi;
+pub mod gro_batch;
 #[allow(unsafe_code)]
 pub mod gso;
 pub mod handshake;

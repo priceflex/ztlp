@@ -1,16 +1,22 @@
-//! UDP GSO (Generic Segmentation Offload) support for Linux.
+//! UDP GSO (Generic Segmentation Offload) and GRO (Generic Receive Offload) support for Linux.
 //!
-//! When available, GSO lets us hand the kernel one large buffer containing
-//! multiple logical UDP datagrams and a segment size. The kernel (or NIC)
-//! splits them, eliminating per-packet syscall overhead.
+//! **GSO (send-side):** When available, GSO lets us hand the kernel one large
+//! buffer containing multiple logical UDP datagrams and a segment size. The
+//! kernel (or NIC) splits them, eliminating per-packet syscall overhead.
 //!
-//! Fallback: on systems without GSO support, we fall back to standard
-//! per-packet send_to() calls.
+//! **GRO (receive-side):** When enabled, the kernel coalesces multiple incoming
+//! UDP datagrams of the same size into a single large buffer. The application
+//! reads this with one `recvmsg()` call and splits by the segment size reported
+//! via the `UDP_GRO` cmsg.
+//!
+//! Fallback: on systems without GSO/GRO support, we fall back to standard
+//! per-packet send_to() / recv_from() calls.
 
 #![allow(unsafe_code)]
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, trace, warn};
 
@@ -27,6 +33,14 @@ const SOL_UDP: libc::c_int = 17;
 /// Maximum number of segments in a single GSO send on Linux.
 /// The kernel enforces a limit; 64 is the typical maximum.
 pub const MAX_GSO_SEGMENTS: usize = 64;
+
+/// Linux UDP_GRO socket option.
+#[cfg(target_os = "linux")]
+const UDP_GRO: libc::c_int = 104;
+
+/// Receive buffer size for GRO. With ZTLP tunnel packets at ~16KB and
+/// up to 64 coalesced segments, 1MB is sufficient.
+pub const GRO_RECV_BUF_SIZE: usize = 1_048_576;
 
 // ─── GSO capability detection ───────────────────────────────────────────────
 
@@ -96,6 +110,415 @@ pub fn detect_gso(socket: &UdpSocket) -> GsoCapability {
 pub fn detect_gso(_socket: &UdpSocket) -> GsoCapability {
     debug!("GSO not available (non-Linux platform)");
     GsoCapability::Unavailable
+}
+
+// ─── GRO capability detection ───────────────────────────────────────────────
+
+/// Whether GRO is available on this system/socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroCapability {
+    /// GRO is available and has been enabled on the socket.
+    Available,
+    /// GRO is not available (non-Linux, old kernel, or socket error).
+    Unavailable,
+}
+
+impl GroCapability {
+    /// Returns true if GRO is available.
+    pub fn is_available(&self) -> bool {
+        matches!(self, GroCapability::Available)
+    }
+}
+
+/// Probe whether the given UDP socket supports GRO and enable it.
+///
+/// Unlike GSO detection which sets-and-clears, GRO is **left enabled** on
+/// the socket because it's a socket-level option that affects all subsequent
+/// receives.
+#[cfg(target_os = "linux")]
+pub fn detect_gro(socket: &UdpSocket) -> GroCapability {
+    match enable_gro(socket) {
+        Ok(()) => {
+            debug!("GRO detected: available (enabled on socket)");
+            GroCapability::Available
+        }
+        Err(e) => {
+            debug!("GRO not available: {}", e);
+            GroCapability::Unavailable
+        }
+    }
+}
+
+/// Non-Linux: GRO is always unavailable.
+#[cfg(not(target_os = "linux"))]
+pub fn detect_gro(_socket: &UdpSocket) -> GroCapability {
+    debug!("GRO not available (non-Linux platform)");
+    GroCapability::Unavailable
+}
+
+/// Enable GRO on the given UDP socket via `setsockopt(SOL_UDP, UDP_GRO, 1)`.
+///
+/// Returns an error if the kernel doesn't support UDP_GRO.
+#[cfg(target_os = "linux")]
+pub fn enable_gro(socket: &UdpSocket) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    let val: libc::c_int = 1;
+
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            SOL_UDP,
+            UDP_GRO,
+            &val as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Non-Linux: GRO enable always fails.
+#[cfg(not(target_os = "linux"))]
+pub fn enable_gro(_socket: &UdpSocket) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "GRO is only available on Linux",
+    ))
+}
+
+// ─── GRO segment + receive ─────────────────────────────────────────────────
+
+/// A single segment extracted from a (possibly coalesced) GRO receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroSegment {
+    /// Start offset in the receive buffer.
+    pub offset: usize,
+    /// Length of this segment.
+    pub len: usize,
+    /// Source address.
+    pub addr: SocketAddr,
+}
+
+/// Split a received buffer into segments based on the GRO segment size.
+///
+/// If `gso_size` is `Some(size)`, the buffer is split into chunks of `size`
+/// bytes, with the last chunk possibly shorter. If `None`, the entire buffer
+/// is treated as a single segment.
+pub fn split_gro_segments(
+    total_len: usize,
+    gso_size: Option<u16>,
+    addr: SocketAddr,
+) -> Vec<GroSegment> {
+    match gso_size {
+        Some(seg_size) if seg_size > 0 => {
+            let seg = seg_size as usize;
+            let mut segments = Vec::with_capacity((total_len + seg - 1) / seg);
+            let mut offset = 0;
+            while offset < total_len {
+                let remaining = total_len - offset;
+                let len = remaining.min(seg);
+                segments.push(GroSegment { offset, len, addr });
+                offset += len;
+            }
+            segments
+        }
+        _ => {
+            // No GRO cmsg or zero size → single segment
+            vec![GroSegment {
+                offset: 0,
+                len: total_len,
+                addr,
+            }]
+        }
+    }
+}
+
+/// Receive using `recvmsg()` with GRO cmsg parsing.
+///
+/// If GRO is enabled and the kernel coalesced datagrams, the `UDP_GRO` cmsg
+/// will contain the segment size. The returned segments describe how to split
+/// the buffer.
+///
+/// The caller provides the buffer; on return, `buf[..total_len]` contains the
+/// received data and the returned segments describe individual datagrams.
+#[cfg(target_os = "linux")]
+pub fn recv_gro_sync(
+    fd: std::os::unix::io::RawFd,
+    buf: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u16>)> {
+    let mut sockaddr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+
+    // cmsg buffer: enough for UDP_GRO (u16) plus alignment
+    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) } as usize;
+    let mut cmsg_buf = vec![0u8; cmsg_space.max(256)];
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = &mut sockaddr as *mut _ as *mut libc::c_void;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = cmsg_buf.len();
+
+    let ret = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let total_len = ret as usize;
+
+    // Parse source address
+    let addr = raw_to_socket_addr(&sockaddr, msg.msg_namelen)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to parse source address"))?;
+
+    // Parse cmsg for UDP_GRO segment size
+    let mut gso_size: Option<u16> = None;
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == SOL_UDP && (*cmsg).cmsg_type == UDP_GRO {
+                let data_ptr = libc::CMSG_DATA(cmsg) as *const u16;
+                gso_size = Some(std::ptr::read_unaligned(data_ptr));
+                break;
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+    }
+
+    Ok((total_len, addr, gso_size))
+}
+
+/// Non-Linux: GRO recv falls back to regular recv_from.
+#[cfg(not(target_os = "linux"))]
+pub fn recv_gro_sync(
+    _fd: i32,
+    _buf: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u16>)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "GRO recvmsg is only available on Linux",
+    ))
+}
+
+// ─── Socket address conversion (reverse) ────────────────────────────────────
+
+/// Convert a raw `sockaddr_storage` back to a `SocketAddr`.
+///
+/// This is the reverse of `socket_addr_to_raw()`.
+#[cfg(target_os = "linux")]
+pub fn raw_to_socket_addr(
+    storage: &libc::sockaddr_storage,
+    _len: libc::socklen_t,
+) -> Option<SocketAddr> {
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET => {
+            let sin = unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            let port = u16::from_be(sin.sin_port);
+            Some(SocketAddr::new(ip.into(), port))
+        }
+        libc::AF_INET6 => {
+            let sin6 = unsafe { &*(storage as *const _ as *const libc::sockaddr_in6) };
+            let ip = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+            let port = u16::from_be(sin6.sin6_port);
+            Some(SocketAddr::new(ip.into(), port))
+        }
+        _ => None,
+    }
+}
+
+/// Non-Linux stub.
+#[cfg(not(target_os = "linux"))]
+pub fn raw_to_socket_addr(
+    _storage: &libc::sockaddr_storage,
+    _len: libc::socklen_t,
+) -> Option<SocketAddr> {
+    None
+}
+
+// ─── RecvBatch ──────────────────────────────────────────────────────────────
+
+/// A batch of received segments from a single `recvmsg()` call.
+///
+/// The buffer is owned by `RecvBatch`. Individual segments are described
+/// by offset + length into this buffer.
+pub struct RecvBatch {
+    /// The raw receive buffer data.
+    buf: Vec<u8>,
+    /// Total bytes actually received (valid data in `buf[..total_len]`).
+    total_len: usize,
+    /// Individual segments.
+    segments: Vec<GroSegment>,
+}
+
+impl RecvBatch {
+    /// Get the raw buffer.
+    pub fn buffer(&self) -> &[u8] {
+        &self.buf[..self.total_len]
+    }
+
+    /// Get the segments.
+    pub fn segments(&self) -> &[GroSegment] {
+        &self.segments
+    }
+
+    /// Number of segments in this batch.
+    pub fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Whether this batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// Total bytes received.
+    pub fn total_bytes(&self) -> usize {
+        self.total_len
+    }
+}
+
+// ─── GroReceiver — high-level wrapper ───────────────────────────────────────
+
+/// A high-level wrapper around a UDP socket that transparently uses GRO
+/// for efficient batch receiving.
+///
+/// Similar to `UdpSender` on the send side, `GroReceiver` probes for GRO
+/// support and enables it on the socket. When GRO is active, a single
+/// `recv()` call may return multiple coalesced datagrams.
+pub struct GroReceiver {
+    socket: Arc<UdpSocket>,
+    gro_enabled: bool,
+    buf: Vec<u8>,
+}
+
+impl GroReceiver {
+    /// Create a new `GroReceiver` wrapping the given socket.
+    ///
+    /// Probes GRO capability and enables it unless `mode` is `Disabled`.
+    pub fn new(socket: Arc<UdpSocket>, mode: GsoMode) -> Self {
+        let gro_enabled = match mode {
+            GsoMode::Disabled => false,
+            _ => detect_gro(&socket).is_available(),
+        };
+
+        let buf_size = if gro_enabled {
+            GRO_RECV_BUF_SIZE
+        } else {
+            65535
+        };
+
+        debug!(
+            "GroReceiver created: mode={}, gro_enabled={}",
+            mode, gro_enabled
+        );
+
+        Self {
+            socket,
+            gro_enabled,
+            buf: vec![0u8; buf_size],
+        }
+    }
+
+    /// Whether GRO is enabled on this receiver.
+    pub fn is_gro_enabled(&self) -> bool {
+        self.gro_enabled
+    }
+
+    /// Receive one batch of (possibly coalesced) UDP datagrams.
+    ///
+    /// When GRO is enabled, the kernel may coalesce multiple datagrams into
+    /// a single buffer. The returned `RecvBatch` contains the raw data and
+    /// segment descriptors.
+    ///
+    /// When GRO is not enabled, each call returns exactly one segment.
+    pub async fn recv(&mut self) -> io::Result<RecvBatch> {
+        if self.gro_enabled {
+            self.recv_gro().await
+        } else {
+            self.recv_plain().await
+        }
+    }
+
+    /// GRO-enabled receive path using raw recvmsg().
+    #[cfg(target_os = "linux")]
+    async fn recv_gro(&mut self) -> io::Result<RecvBatch> {
+        use std::os::unix::io::AsRawFd;
+
+        loop {
+            self.socket.readable().await?;
+
+            let fd = self.socket.as_raw_fd();
+            match recv_gro_sync(fd, &mut self.buf) {
+                Ok((total_len, addr, gso_size)) => {
+                    let segments = split_gro_segments(total_len, gso_size, addr);
+                    trace!(
+                        "GRO recv: {} bytes, {} segments (gso_size={:?}) from {}",
+                        total_len,
+                        segments.len(),
+                        gso_size,
+                        addr
+                    );
+
+                    // Copy the received data into the RecvBatch's own buffer
+                    let mut batch_buf = vec![0u8; total_len];
+                    batch_buf.copy_from_slice(&self.buf[..total_len]);
+
+                    return Ok(RecvBatch {
+                        buf: batch_buf,
+                        total_len,
+                        segments,
+                    });
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // Spurious readiness — retry
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Non-Linux: GRO is not available, fall back to plain recv.
+    #[cfg(not(target_os = "linux"))]
+    async fn recv_gro(&mut self) -> io::Result<RecvBatch> {
+        self.recv_plain().await
+    }
+
+    /// Plain receive path (no GRO). Always returns exactly one segment.
+    async fn recv_plain(&mut self) -> io::Result<RecvBatch> {
+        let (n, addr) = self.socket.recv_from(&mut self.buf).await?;
+        let mut batch_buf = vec![0u8; n];
+        batch_buf.copy_from_slice(&self.buf[..n]);
+        Ok(RecvBatch {
+            buf: batch_buf,
+            total_len: n,
+            segments: vec![GroSegment {
+                offset: 0,
+                len: n,
+                addr,
+            }],
+        })
+    }
+
+    /// Get a reference to the underlying socket.
+    pub fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    /// Get a clone of the underlying socket Arc.
+    pub fn socket_arc(&self) -> Arc<UdpSocket> {
+        self.socket.clone()
+    }
 }
 
 // ─── Buffer assembly ────────────────────────────────────────────────────────
@@ -987,5 +1410,234 @@ mod tests {
         let mut buf = [0u8; 100];
         let (n, _) = receiver.recv_from(&mut buf).await.unwrap();
         assert_eq!(n, 50);
+    }
+
+    // ── GRO tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gro_detection() {
+        // On Linux, GRO should be detected as available on modern kernels.
+        // On other platforms it should be unavailable.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let cap = detect_gro(&socket);
+            // We don't assert a specific value because it depends on the kernel,
+            // but the function should not panic.
+            println!("GRO capability: {:?}", cap);
+        });
+    }
+
+    #[test]
+    fn test_gro_enable_disable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let result = enable_gro(&socket);
+            // On Linux with kernel >= 5.x, this should succeed.
+            // On older kernels or non-Linux, it may fail. Either way, no panic.
+            println!("enable_gro result: {:?}", result);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_gro_recv_single_packet() {
+        // Receive a single packet with GRO receiver — should work normally.
+        let recv_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dest = recv_sock.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let mut gro_recv = GroReceiver::new(recv_sock, GsoMode::Auto);
+
+        // Send one packet
+        sender.send_to(&[0xDE, 0xAD, 0xBE, 0xEF], dest).await.unwrap();
+
+        // Receive it
+        let batch = gro_recv.recv().await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.total_bytes(), 4);
+        let seg = &batch.segments()[0];
+        assert_eq!(seg.offset, 0);
+        assert_eq!(seg.len, 4);
+        assert_eq!(&batch.buffer()[seg.offset..seg.offset + seg.len], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[tokio::test]
+    async fn test_gro_recv_coalesced() {
+        // Send multiple same-size packets rapidly; receive with GRO.
+        // The kernel may or may not coalesce depending on timing,
+        // but the receiver should handle both cases correctly.
+        let recv_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dest = recv_sock.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let mut gro_recv = GroReceiver::new(recv_sock, GsoMode::Auto);
+
+        // Send 10 packets of 100 bytes each
+        for i in 0u8..10 {
+            let data = vec![i; 100];
+            sender.send_to(&data, dest).await.unwrap();
+        }
+
+        // Receive all packets (may come as one or more batches)
+        let mut total_segments = 0;
+        let mut total_bytes = 0;
+
+        for _ in 0..10 {
+            if total_segments >= 10 {
+                break;
+            }
+            let batch = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                gro_recv.recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            total_segments += batch.len();
+            total_bytes += batch.total_bytes();
+        }
+
+        assert_eq!(total_segments, 10);
+        assert_eq!(total_bytes, 1000);
+    }
+
+    #[test]
+    fn test_gro_recv_buffer_splitting() {
+        // Unit test the buffer splitting logic with known gso_size.
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        // 1000 bytes with gso_size = 200 → 5 segments
+        let segments = split_gro_segments(1000, Some(200), addr);
+        assert_eq!(segments.len(), 5);
+        for (i, seg) in segments.iter().enumerate() {
+            assert_eq!(seg.offset, i * 200);
+            assert_eq!(seg.len, 200);
+            assert_eq!(seg.addr, addr);
+        }
+
+        // 950 bytes with gso_size = 200 → 5 segments, last is 150
+        let segments = split_gro_segments(950, Some(200), addr);
+        assert_eq!(segments.len(), 5);
+        assert_eq!(segments[4].offset, 800);
+        assert_eq!(segments[4].len, 150);
+
+        // 200 bytes with gso_size = 200 → 1 segment
+        let segments = split_gro_segments(200, Some(200), addr);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].offset, 0);
+        assert_eq!(segments[0].len, 200);
+    }
+
+    #[test]
+    fn test_gro_segment_iteration() {
+        // Verify GroSegment offsets and lengths match expected values.
+        let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+
+        // Simulate a 4800-byte coalesced buffer with 1200-byte segments
+        let segments = split_gro_segments(4800, Some(1200), addr);
+        assert_eq!(segments.len(), 4);
+
+        let expected: Vec<(usize, usize)> = vec![
+            (0, 1200),
+            (1200, 1200),
+            (2400, 1200),
+            (3600, 1200),
+        ];
+
+        for (seg, (exp_off, exp_len)) in segments.iter().zip(expected.iter()) {
+            assert_eq!(seg.offset, *exp_off);
+            assert_eq!(seg.len, *exp_len);
+            assert_eq!(seg.addr, addr);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gro_receiver_wrapper() {
+        // Test GroReceiver high-level API: create, check state, recv.
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dest = sock.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let mut gro_recv = GroReceiver::new(sock.clone(), GsoMode::Auto);
+        // gro_enabled depends on platform, but the API should work regardless
+        println!("GRO enabled: {}", gro_recv.is_gro_enabled());
+
+        // Send and receive
+        sender.send_to(b"hello-gro", dest).await.unwrap();
+        let batch = gro_recv.recv().await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.buffer(), b"hello-gro");
+    }
+
+    #[test]
+    fn test_gro_fallback_no_cmsg() {
+        // When no GRO cmsg is present (gso_size = None), return single segment.
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+
+        let segments = split_gro_segments(512, None, addr);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].offset, 0);
+        assert_eq!(segments[0].len, 512);
+        assert_eq!(segments[0].addr, addr);
+    }
+
+    #[tokio::test]
+    async fn test_gro_recv_with_timeout() {
+        // GRO recv should respect tokio timeouts.
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mut gro_recv = GroReceiver::new(sock, GsoMode::Auto);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            gro_recv.recv(),
+        )
+        .await;
+
+        // Should timeout since nobody sends anything
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gro_large_coalesced_buffer() {
+        // Test with buffers close to the max size.
+        let addr: SocketAddr = "192.168.1.1:443".parse().unwrap();
+
+        // Simulate 64 segments of ~16KB each (close to max GRO buffer)
+        let seg_size: u16 = 16384;
+        let num_segments = 64;
+        let total_len = seg_size as usize * num_segments;
+
+        let segments = split_gro_segments(total_len, Some(seg_size), addr);
+        assert_eq!(segments.len(), num_segments);
+
+        // Verify all segments are correct
+        for (i, seg) in segments.iter().enumerate() {
+            assert_eq!(seg.offset, i * seg_size as usize);
+            assert_eq!(seg.len, seg_size as usize);
+        }
+
+        // Test with non-aligned total (last segment shorter)
+        let total_len = seg_size as usize * 63 + 8000;
+        let segments = split_gro_segments(total_len, Some(seg_size), addr);
+        assert_eq!(segments.len(), 64);
+        assert_eq!(segments[63].len, 8000);
+    }
+
+    #[tokio::test]
+    async fn test_gro_receiver_disabled_mode() {
+        // When mode is Disabled, GRO should not be enabled.
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dest = sock.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let mut gro_recv = GroReceiver::new(sock, GsoMode::Disabled);
+        assert!(!gro_recv.is_gro_enabled());
+
+        sender.send_to(b"plain-recv", dest).await.unwrap();
+        let batch = gro_recv.recv().await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.buffer(), b"plain-recv");
     }
 }

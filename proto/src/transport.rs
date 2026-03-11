@@ -64,6 +64,25 @@ impl TransportNode {
         Ok((buf, addr))
     }
 
+    /// Receive a batch of raw packets using GRO when available.
+    ///
+    /// Returns multiple `(data, sender_address)` pairs from a single receive
+    /// call. When GRO is not available, this returns a single-element vector
+    /// (same as `recv_raw()`).
+    pub async fn recv_batch(
+        &self,
+        gro_receiver: &mut crate::gso::GroReceiver,
+    ) -> Result<Vec<(Vec<u8>, SocketAddr)>, TransportError> {
+        let batch = gro_receiver.recv().await?;
+        let mut results = Vec::with_capacity(batch.len());
+        for segment in batch.segments() {
+            let data = batch.buffer()[segment.offset..segment.offset + segment.len].to_vec();
+            debug!("received {} bytes from {} (batch)", segment.len, segment.addr);
+            results.push((data, segment.addr));
+        }
+        Ok(results)
+    }
+
     /// Send an encrypted data packet through an established session.
     ///
     /// Builds a compact data header, computes the HeaderAuthTag,

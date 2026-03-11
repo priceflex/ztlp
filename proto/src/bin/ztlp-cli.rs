@@ -43,6 +43,7 @@ use ztlp_proto::packet::{
     DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
 use ztlp_proto::relay::SimulatedRelay;
+use ztlp_proto::policy::PolicyEngine;
 use ztlp_proto::transport::TransportNode;
 use ztlp_proto::tunnel;
 
@@ -221,6 +222,10 @@ enum Commands {
         /// Repeatable: --forward ssh:127.0.0.1:22 --forward rdp:127.0.0.1:3389
         #[arg(short, long)]
         forward: Vec<String>,
+
+        /// Path to policy file for access control (default: ~/.ztlp/policy.toml)
+        #[arg(short, long)]
+        policy: Option<PathBuf>,
     },
 
     /// Manage ZTLP relay nodes
@@ -831,6 +836,7 @@ async fn cmd_listen(
     key: &Option<PathBuf>,
     _gateway_mode: bool,
     forward: &[String],
+    policy_path: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -899,10 +905,34 @@ async fn cmd_listen(
         pipeline.register_session(session);
     }
 
+    // Client identity for policy evaluation: NodeID hex string
+    let client_identity = format!("{}", peer_node_id);
+
     eprintln!("\n{}", c_green("✓ Handshake complete!"));
     eprintln!("  {} {}", c_cyan("Remote NodeID:"), peer_node_id);
     eprintln!("  {} {}", c_cyan("Session ID:"), session_id);
     eprintln!();
+
+    // Load policy engine
+    let policy = if let Some(path) = policy_path {
+        eprintln!("  {} {}", c_cyan("Policy:"), path.display());
+        PolicyEngine::from_file(path)?
+    } else {
+        // Check default location ~/.ztlp/policy.toml
+        let default_path = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("policy.toml"));
+        if let Some(ref p) = default_path {
+            if p.exists() {
+                eprintln!("  {} {} (auto-detected)", c_cyan("Policy:"), p.display());
+                PolicyEngine::from_file(p)?
+            } else {
+                // No policy file — allow all (backward compatible)
+                PolicyEngine::allow_all()
+            }
+        } else {
+            PolicyEngine::allow_all()
+        }
+    };
 
     // Branch: tunnel mode or interactive mode
     if !forward.is_empty() {
@@ -922,6 +952,17 @@ async fn cmd_listen(
                         requested, registry.services.keys().collect::<Vec<_>>())
                 }
             })?;
+
+        // Policy check
+        if !policy.authorize(&client_identity, svc_name) {
+            eprintln!("{} {} denied access to service '{}'",
+                c_red("✗ POLICY DENIED:"), client_identity, svc_name);
+            return Err(format!(
+                "policy denied: {} is not authorized for service '{}'",
+                client_identity, svc_name
+            ).into());
+        }
+        eprintln!("  {} {} → {}", c_green("✓ Policy:"), client_identity, svc_name);
 
         eprintln!("--- {} ---", c_bold("ZTLP tunnel active"));
         if registry.len() > 1 {
@@ -1894,8 +1935,8 @@ async fn main() {
             cmd_connect(target, key, relay, gateway, session_id, bind, local_forward, service).await
         }
 
-        Commands::Listen { bind, key, gateway, forward } => {
-            cmd_listen(bind, key, *gateway, forward).await
+        Commands::Listen { bind, key, gateway, forward, policy } => {
+            cmd_listen(bind, key, *gateway, forward, policy).await
         }
 
         Commands::Relay(subcmd) => match subcmd {

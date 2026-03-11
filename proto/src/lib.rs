@@ -39,6 +39,7 @@ pub mod handshake;
 pub mod identity;
 pub mod packet;
 pub mod pipeline;
+pub mod policy;
 pub mod relay;
 pub mod session;
 pub mod transport;

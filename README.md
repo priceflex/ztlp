@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](proto/)
 [![Elixir](https://img.shields.io/badge/Elixir-1.15%2B-purple.svg)](relay/)
 
-**Version 1.0 | Experimental / Informational**
+**Version 0.5.1 | Experimental / Informational**
 
 > 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
 

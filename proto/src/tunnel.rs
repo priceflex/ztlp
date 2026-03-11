@@ -404,7 +404,7 @@ fn encode_nack_frame(missing_seqs: &[u64]) -> Vec<u8> {
 
 /// Decode a NACK frame payload (without the FRAME_NACK prefix byte).
 /// Returns the list of missing sequence numbers, or None if malformed.
-fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
+pub fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
     if payload.len() < 2 {
         return None;
     }

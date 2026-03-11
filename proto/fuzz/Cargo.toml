@@ -1,0 +1,52 @@
+[package]
+name = "ztlp-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.ztlp-proto]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_packet_parsing"
+path = "fuzz_targets/fuzz_packet_parsing.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pipeline_admission"
+path = "fuzz_targets/fuzz_pipeline_admission.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_handshake"
+path = "fuzz_targets/fuzz_handshake.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_nack_ack_decoding"
+path = "fuzz_targets/fuzz_nack_ack_decoding.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_rat_parsing"
+path = "fuzz_targets/fuzz_rat_parsing.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_reassembly"
+path = "fuzz_targets/fuzz_reassembly.rs"
+doc = false

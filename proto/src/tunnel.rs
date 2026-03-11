@@ -157,9 +157,7 @@ pub async fn run_bridge(
             }
         }
 
-        // Suppress "unreachable" warning — loop exits via return
-        #[allow(unreachable_code)]
-        { let _ = current_seq; }
+
     };
 
     // ZTLP → TCP direction

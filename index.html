@@ -159,6 +159,9 @@
       <a href="#architecture" class="nav-page-link" data-page="architecture">Architecture</a>
       <a href="#threat-model" class="nav-page-link" data-page="threat-model">Threat Model</a>
       <a href="#spec" class="nav-page-link" data-page="spec">Specification</a>
+      <a href="#go-sdk" class="nav-page-link" data-page="go-sdk">Go SDK</a>
+      <a href="#cli" class="nav-page-link" data-page="cli">CLI</a>
+      <a href="#deployment" class="nav-page-link" data-page="deployment">Deploy</a>
       <a href="https://github.com/priceflex/ztlp" target="_blank" rel="noopener" class="btn-linkedin" style="background: #24292e; color: #fff;">
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
         GitHub
@@ -179,7 +182,7 @@
       <div id="hero-version" class="version-badge">Loading…</div>
       <h1 class="hero-title">Zero Trust Layer Protocol</h1>
       <p class="hero-abstract" id="hero-abstract">
-        A secure, identity-first network overlay that enforces cryptographic authentication before any network state is allocated. Invalid packets are rejected in a three-layer pipeline — making volumetric DDoS attacks structurally ineffective.
+        A secure, identity-first network overlay that enforces cryptographic authentication before any network state is allocated. Invalid packets are rejected in a three-layer pipeline — making volumetric DDoS attacks structurally ineffective. Now with a <a href="#go-sdk" style="color:var(--accent)">Go SDK</a>, <a href="#deployment" style="color:var(--accent)">Docker deployment</a>, and production-ready infrastructure.
       </p>
       <div class="hero-actions">
         <a href="#get-started" class="btn btn-primary">Get Started</a>
@@ -188,10 +191,10 @@
       </div>
     </div>
     <div class="hero-stats">
-      <div class="stat-item"><span class="stat-num" id="stat-sections">—</span><span class="stat-label">Sections</span></div>
+      <div class="stat-item"><span class="stat-num">1,149+</span><span class="stat-label">Tests</span></div>
       <div class="stat-item"><span class="stat-num">3-Layer</span><span class="stat-label">DDoS Pipeline</span></div>
-      <div class="stat-item"><span class="stat-num">96-bit</span><span class="stat-label">SessionID</span></div>
-      <div class="stat-item"><span class="stat-num">A0–A3</span><span class="stat-label">Assurance Levels</span></div>
+      <div class="stat-item"><span class="stat-num">5</span><span class="stat-label">Languages</span></div>
+      <div class="stat-item"><span class="stat-num">19ns</span><span class="stat-label">L1 Reject</span></div>
     </div>
   </div>
 </section>
@@ -242,6 +245,9 @@
       <a href="#architecture">Architecture</a>
       <a href="#threat-model">Threat Model</a>
       <a href="#spec">Specification</a>
+      <a href="#go-sdk">Go SDK</a>
+      <a href="#cli">CLI</a>
+      <a href="#deployment">Deploy</a>
       <a href="https://github.com/priceflex/ztlp/issues" target="_blank" rel="noopener">Discuss</a>
       <a href="https://www.linkedin.com/in/steven-e-price" target="_blank" rel="noopener">LinkedIn</a>
       <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0 License</a>
@@ -259,10 +265,13 @@
 
   // ── Page routing configuration ────────────────────────
   const PAGES = {
-    'get-started':  { file: 'GETTING-STARTED.md', title: 'Get Started', label: 'Getting Started' },
-    'architecture': { file: 'ARCHITECTURE.md',    title: 'Architecture', label: 'Architecture Overview' },
-    'threat-model': { file: 'THREAT-MODEL.md',    title: 'Threat Model', label: 'Threat Model' },
+    'get-started':  { file: 'GETTING-STARTED.md', title: 'Get Started',    label: 'Getting Started' },
+    'architecture': { file: 'ARCHITECTURE.md',    title: 'Architecture',   label: 'Architecture Overview' },
+    'threat-model': { file: 'THREAT-MODEL.md',    title: 'Threat Model',   label: 'Threat Model' },
     'spec':         { file: 'README.md',           title: 'Specification', label: 'Specification' },
+    'go-sdk':       { file: 'GO-SDK.md',           title: 'Go SDK',       label: 'Go Client SDK' },
+    'cli':          { file: 'CLI-REF.md',          title: 'CLI Reference', label: 'CLI Reference' },
+    'deployment':   { file: 'DEPLOYMENT.md',       title: 'Deployment',   label: 'Docker & Deployment' },
   };
   const DEFAULT_PAGE = 'spec';
 

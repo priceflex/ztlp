@@ -6,13 +6,22 @@
  * network stack.  This is "Profile 1 — Software Enforcement" from the
  * ZTLP spec §13.1.
  *
- * Decision flow:
+ * Decision flow for client-facing port (ZTLP_PORT = 23095):
  *   1. Non-UDP / non-ZTLP-port traffic → XDP_PASS (not our concern)
  *   2. Layer 1: Magic 0x5A37 check → XDP_DROP on failure
  *   3. Layer 2: HdrLen-based SessionID extraction → BPF hash map lookup
  *      - Known SessionID → XDP_PASS
- *      - HELLO message → rate-limit check → XDP_PASS or XDP_DROP
+ *      - HELLO message → RAT detection + rate-limit check → XDP_PASS or XDP_DROP
  *      - Unknown SessionID, not HELLO → XDP_DROP
+ *
+ * Decision flow for mesh port (ZTLP_MESH_PORT = 23096):
+ *   1. Extract sender NodeID (bytes 1–16 of payload)
+ *   2. Peer allowlist check — NodeID must be in mesh_peer_map
+ *      - Unknown peer → XDP_DROP
+ *   3. For FORWARD messages: TTL check + inner ZTLP magic check
+ *      - TTL == 0 → XDP_DROP (prevents infinite forwarding loops)
+ *      - Inner packet bad magic → XDP_DROP
+ *   4. All other mesh messages from authorized peers → XDP_PASS
  *
  * Layer 3 (HeaderAuthTag AEAD verification) is NOT done here — it requires
  * session keys and ChaCha20-Poly1305, which is too expensive for XDP and
@@ -29,6 +38,130 @@
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
+
+/* ── Mesh packet handler ──────────────────────────────────────────
+ *
+ * Handles inter-relay mesh traffic arriving on ZTLP_MESH_PORT (23096).
+ * Mesh messages have a common header:
+ *   <<msg_type::8, sender_node_id::binary-16, timestamp::64, ...>>
+ *
+ * The admission check is a peer allowlist: the sender's NodeID must be
+ * present in mesh_peer_map (populated by userspace).  This prevents
+ * unauthorized nodes from injecting mesh traffic.
+ *
+ * For FORWARD messages, we additionally:
+ *   - Check TTL > 0 (prevents infinite forwarding loops at the kernel level)
+ *   - Validate the inner ZTLP packet's magic bytes (Layer 1 on the inner)
+ *
+ * Returns XDP_PASS or XDP_DROP.
+ * ──────────────────────────────────────────────────────────────── */
+static __always_inline int handle_mesh_packet(unsigned char *payload,
+                                               void *data_end)
+{
+    /* Need at least the mesh common header: type(1) + node_id(16) + ts(8) = 25 */
+    if (payload + MESH_COMMON_HEADER_SIZE > data_end) {
+        increment_stat(STAT_MESH_PEER_DROPS);
+        return XDP_DROP;  /* Too short to be a valid mesh message */
+    }
+
+    /* Read message type (first byte) */
+    __u8 msg_type = payload[0];
+
+    /* Extract sender NodeID (bytes 1–16) and look up in peer allowlist */
+    struct mesh_peer_id peer = {};
+    __builtin_memcpy(peer.id, payload + 1, 16);
+
+    __u8 *authorized = bpf_map_lookup_elem(&mesh_peer_map, &peer);
+    if (!authorized) {
+        /* Unknown peer — drop before it reaches the relay daemon */
+        increment_stat(STAT_MESH_PEER_DROPS);
+        return XDP_DROP;
+    }
+
+    /* Authorized peer — handle by message type */
+    if (msg_type == MESH_MSG_FORWARD) {
+        /* FORWARD messages carry a wrapped ZTLP packet.
+         * Wire format after common header:
+         *   ttl(1) + path_len(1) + path(path_len*16) + inner_len(4) + inner(...)
+         *
+         * We check:
+         *   1. TTL > 0 (prevent infinite forwarding loops)
+         *   2. Inner ZTLP packet has valid magic (Layer 1 on the inner) */
+
+        /* Read TTL — byte 25 (right after the common header) */
+        if (payload + MESH_FORWARD_FIXED_SIZE > data_end) {
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;  /* Truncated FORWARD header */
+        }
+
+        __u8 ttl = payload[MESH_COMMON_HEADER_SIZE];       /* byte 25 */
+        __u8 path_len = payload[MESH_COMMON_HEADER_SIZE + 1]; /* byte 26 */
+
+        if (ttl == 0) {
+            /* TTL exhausted — drop to prevent infinite forwarding loops.
+             * This is a kernel-level safety net; the relay daemon also
+             * checks TTL and path loops in userspace. */
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;
+        }
+
+        /* Bound path_len to prevent unbounded memory access.
+         * Maximum 16 hops is already generous for a relay mesh. */
+        if (path_len > 16) {
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;
+        }
+
+        /* Calculate offset to inner_len field:
+         * MESH_FORWARD_FIXED_SIZE (27) + path_len * 16 */
+        __u32 inner_len_offset = MESH_FORWARD_FIXED_SIZE + (__u32)path_len * 16;
+
+        /* Read the 4-byte inner_len field */
+        if (payload + inner_len_offset + 4 > data_end) {
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;  /* Can't read inner_len */
+        }
+
+        __u32 inner_len = *(__u32 *)(payload + inner_len_offset);
+        inner_len = bpf_ntohl(inner_len);
+
+        /* Sanity check inner_len — prevent reading past data_end.
+         * Max UDP payload is ~65507 bytes; inner ZTLP packets are small. */
+        if (inner_len < 2 || inner_len > 65000) {
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;
+        }
+
+        /* Inner ZTLP packet starts right after inner_len */
+        __u32 inner_offset = inner_len_offset + 4;
+        unsigned char *inner = payload + inner_offset;
+
+        /* Layer 1 magic check on the inner ZTLP packet */
+        if (inner + 2 > data_end) {
+            increment_stat(STAT_MESH_PEER_DROPS);
+            return XDP_DROP;
+        }
+
+        __u16 inner_magic = *(__u16 *)inner;
+        inner_magic = bpf_ntohs(inner_magic);
+        if (inner_magic != ZTLP_MAGIC) {
+            /* Inner packet has bad magic — corrupted or spoofed forward */
+            increment_stat(STAT_LAYER1_DROPS);
+            return XDP_DROP;
+        }
+
+        /* Inner ZTLP packet has valid magic — pass to userspace for
+         * full Layer 2 (SessionID) and Layer 3 (AEAD) processing. */
+        increment_stat(STAT_MESH_FORWARD_PASSED);
+        return XDP_PASS;
+    }
+
+    /* All other mesh message types (JOIN, SYNC, PING, PONG, SESSION,
+     * LEAVE, DRAIN, DRAIN_CANCEL) from authorized peers: pass through.
+     * The relay daemon handles the actual protocol logic. */
+    increment_stat(STAT_MESH_PASSED);
+    return XDP_PASS;
+}
 
 /*
  * ztlp_xdp_prog — main XDP entry point.
@@ -73,7 +206,21 @@ int ztlp_xdp_prog(struct xdp_md *ctx)
     struct udphdr *udp = (void *)ip + ihl;
     if ((void*)(udp + 1) > data_end)
         return XDP_PASS;
-    if (bpf_ntohs(udp->dest) != ZTLP_PORT)
+
+    /* ── Port-based dispatch ──────────────────────────────────────
+     * Client traffic goes to ZTLP_PORT (23095) — Layer 1+2 pipeline.
+     * Mesh traffic goes to ZTLP_MESH_PORT (23096) — peer allowlist.
+     * Everything else passes through untouched.
+     * ──────────────────────────────────────────────────────────── */
+    __u16 dst_port = bpf_ntohs(udp->dest);
+
+    if (dst_port == ZTLP_MESH_PORT) {
+        /* Inter-relay mesh traffic — peer allowlist check */
+        unsigned char *payload = (unsigned char *)(udp + 1);
+        return handle_mesh_packet(payload, data_end);
+    }
+
+    if (dst_port != ZTLP_PORT)
         return XDP_PASS;  // Not destined for ZTLP port — let it through
 
     /* ── ZTLP payload starts here ─────────────────────────────── */
@@ -157,6 +304,46 @@ int ztlp_xdp_prog(struct xdp_md *ctx)
         /* Not a HELLO and SessionID unknown → drop */
         increment_stat(STAT_LAYER2_DROPS);
         return XDP_DROP;
+    }
+
+    /* ── RAT detection in HELLO packets ───────────────────────────
+     * Check if this HELLO packet is large enough to carry a Relay
+     * Admission Token (RAT) in its extension area.  RATs are 93 bytes.
+     *
+     * Handshake header is hdrlen*4 = 96 bytes.  After the header,
+     * the extension area begins.  If the remaining payload after the
+     * header is >= RAT_SIZE (93), we count this as a RAT HELLO.
+     *
+     * Actual RAT verification (HMAC-BLAKE2s) is too expensive for XDP.
+     * The userspace daemon does full verification.  Here we only detect
+     * RAT presence for:
+     *   1. Stats tracking (STAT_RAT_HELLO_PASSED)
+     *   2. Optional rate limiter bypass (configurable via rat_bypass_map)
+     * ──────────────────────────────────────────────────────────── */
+    __u32 hdr_bytes = (__u32)hdrlen * 4;  /* Handshake header size in bytes */
+    int has_rat = 0;
+
+    if (payload + hdr_bytes + RAT_SIZE <= data_end) {
+        /* Packet is large enough to contain a RAT after the header.
+         * We can optionally do a version byte sniff (byte 0 of the RAT
+         * should be 0x01), but for now presence + size is sufficient. */
+        has_rat = 1;
+        increment_stat(STAT_RAT_HELLO_PASSED);
+    }
+
+    /* ── Check RAT bypass configuration ──────────────────────────
+     * If rat_bypass_map[0] == 1 and this HELLO has a RAT, skip the
+     * rate limiter.  This allows pre-authenticated nodes (with RATs
+     * from an ingress relay) to reconnect without being throttled.
+     * ──────────────────────────────────────────────────────────── */
+    if (has_rat) {
+        __u32 bypass_key = 0;
+        __u8 *bypass_flag = bpf_map_lookup_elem(&rat_bypass_map, &bypass_key);
+        if (bypass_flag && *bypass_flag == 1) {
+            /* RAT HELLO + bypass enabled → skip rate limiter */
+            increment_stat(STAT_PASSED);
+            return XDP_PASS;
+        }
     }
 
     /* ── HELLO rate limiting (token bucket) ───────────────────────

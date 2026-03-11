@@ -26,11 +26,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
-use crate::session::SessionState;
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

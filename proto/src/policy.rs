@@ -37,15 +37,6 @@ use std::fs;
 use std::path::Path;
 use tracing::{info, warn, debug};
 
-/// A service policy rule.
-#[derive(Debug, Clone)]
-pub struct ServicePolicy {
-    /// Service name (matches DstSvcID or `_default`).
-    pub name: String,
-    /// Allowed identity patterns.
-    pub allow: Vec<String>,
-}
-
 /// The policy engine — holds rules for all services.
 #[derive(Debug, Clone)]
 pub struct PolicyEngine {

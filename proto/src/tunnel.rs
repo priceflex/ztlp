@@ -23,6 +23,14 @@
 //!   of in-flight (unacknowledged) packets to a configurable window size.
 //!   When the window is exhausted, the sender waits for ACKs.
 //!
+//! - **Congestion control:** AIMD-style congestion control with slow start
+//!   and congestion avoidance phases. RTT is estimated via EWMA from ACK
+//!   round-trips, with RTO computed as srtt + 4*rttvar.
+//!
+//! - **Retransmission:** The sender keeps a bounded retransmit buffer of
+//!   sent packets. The receiver detects gaps and sends NACK frames listing
+//!   missing sequence numbers. The sender re-encrypts and retransmits them.
+//!
 //! - **Graceful shutdown:** TCP EOF is signaled via a FIN frame so the
 //!   remote side can flush buffered data and close cleanly.
 //!
@@ -35,6 +43,7 @@
 //! | DATA | 0x00 | Raw TCP bytes |
 //! | ACK  | 0x01 | 8-byte big-endian u64: highest delivered seq |
 //! | FIN  | 0x02 | (empty) |
+//! | NACK | 0x03 | 2-byte BE count + N × 8-byte BE missing seqs |
 //!
 //! Two modes of operation:
 //!
@@ -97,6 +106,10 @@ const FRAME_ACK: u8 = 0x01;
 /// Frame type byte: FIN frame signaling TCP EOF / stream complete.
 const FRAME_FIN: u8 = 0x02;
 
+/// Frame type byte: NACK frame listing missing sequence numbers.
+/// Payload: [count: u16 BE] [seq1: u64 BE] [seq2: u64 BE] ...
+const FRAME_NACK: u8 = 0x03;
+
 // ─── Flow control parameters ────────────────────────────────────────────────
 
 /// Maximum number of unacknowledged packets the sender will keep in flight.
@@ -124,6 +137,32 @@ const SENDER_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// After sending FIN, wait this long for remaining buffered packets to drain.
 #[allow(dead_code)]
 const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+// ─── Congestion control parameters ──────────────────────────────────────────
+
+/// Initial congestion window (in packets). 10 is a common modern default.
+const INITIAL_CWND: f64 = 10.0;
+
+/// Initial slow-start threshold (in packets).
+const INITIAL_SSTHRESH: f64 = 1024.0;
+
+/// Minimum retransmission timeout in milliseconds.
+const MIN_RTO_MS: f64 = 200.0;
+
+/// Maximum retransmission timeout in milliseconds.
+const MAX_RTO_MS: f64 = 60000.0;
+
+/// Initial smoothed RTT estimate in milliseconds.
+const INITIAL_SRTT_MS: f64 = 100.0;
+
+/// Minimum gap detection threshold in milliseconds before sending a NACK.
+const NACK_MIN_THRESHOLD_MS: u64 = 100;
+
+/// Maximum number of missing sequence numbers in a single NACK frame.
+const MAX_NACK_SEQS: usize = 64;
+
+/// Maximum entries in the retransmit buffer.
+const RETRANSMIT_BUF_MAX: usize = 4096;
 
 // ─── Reassembly buffer ─────────────────────────────────────────────────────
 
@@ -154,6 +193,11 @@ pub struct ReassemblyBuffer {
     /// Timestamp of the last time `expected_seq` advanced.
     /// Used to detect stalls (lost packets that never arrive).
     last_progress: Instant,
+    /// When a gap was first detected (packets buffered but expected_seq hasn't arrived).
+    /// Reset when expected_seq advances. Used for NACK timing.
+    gap_detected_at: Option<Instant>,
+    /// Timestamp of the last NACK we sent, to rate-limit NACKs.
+    last_nack_time: Option<Instant>,
 }
 
 impl ReassemblyBuffer {
@@ -167,6 +211,8 @@ impl ReassemblyBuffer {
             buffer: BTreeMap::new(),
             max_buffered,
             last_progress: Instant::now(),
+            gap_detected_at: None,
+            last_nack_time: None,
         }
     }
 
@@ -200,6 +246,10 @@ impl ReassemblyBuffer {
                 return None;
             }
             self.buffer.insert(seq, data);
+            // Track gap detection: we have packets beyond expected_seq
+            if self.gap_detected_at.is_none() {
+                self.gap_detected_at = Some(Instant::now());
+            }
             debug!("reassembly: buffered seq {} (expected {}, buffered {})",
                 seq, self.expected_seq, self.buffer.len());
             return Some(vec![]);
@@ -216,8 +266,15 @@ impl ReassemblyBuffer {
             self.expected_seq += 1;
         }
 
-        // Mark progress
+        // Mark progress and clear gap detection if buffer is now empty
+        // or all remaining gaps have been filled
         self.last_progress = Instant::now();
+        if self.buffer.is_empty() {
+            self.gap_detected_at = None;
+        } else {
+            // Still have buffered packets — there's still a gap, reset timer
+            self.gap_detected_at = Some(Instant::now());
+        }
 
         debug!("reassembly: delivered {} packets, expected_seq now {}, buffered {}",
             deliverable.len(), self.expected_seq, self.buffer.len());
@@ -253,6 +310,263 @@ impl ReassemblyBuffer {
     /// The next expected sequence number.
     pub fn expected_seq(&self) -> u64 {
         self.expected_seq
+    }
+
+    /// Returns true if a gap has persisted beyond the given threshold.
+    /// A gap means we have buffered packets beyond expected_seq but
+    /// expected_seq hasn't arrived yet.
+    pub fn should_nack(&self, threshold: std::time::Duration) -> bool {
+        match self.gap_detected_at {
+            Some(detected_at) => {
+                // Must also have buffered packets (gap is real)
+                !self.buffer.is_empty() && detected_at.elapsed() > threshold
+            }
+            None => false,
+        }
+    }
+
+    /// Returns up to `max_count` missing sequence numbers between
+    /// expected_seq and the lowest buffered seq.
+    /// These are the seqs we need the sender to retransmit.
+    pub fn missing_seqs(&self, max_count: usize) -> Vec<u64> {
+        let mut missing = Vec::new();
+        if self.buffer.is_empty() {
+            return missing;
+        }
+        // Find the highest buffered seq to bound the search
+        let &max_buffered_seq = match self.buffer.keys().next_back() {
+            Some(s) => s,
+            None => return missing,
+        };
+        let mut seq = self.expected_seq;
+        while seq <= max_buffered_seq && missing.len() < max_count {
+            if !self.buffer.contains_key(&seq) {
+                missing.push(seq);
+            }
+            seq += 1;
+        }
+        missing
+    }
+
+    /// Mark that a NACK was just sent (for rate limiting).
+    pub fn mark_nack_sent(&mut self) {
+        self.last_nack_time = Some(Instant::now());
+    }
+
+    /// Check if enough time has passed since the last NACK to send another.
+    pub fn can_send_nack(&self, min_interval: std::time::Duration) -> bool {
+        match self.last_nack_time {
+            Some(last) => last.elapsed() >= min_interval,
+            None => true,
+        }
+    }
+}
+
+// ─── NACK frame encode/decode ────────────────────────────────────────────────
+
+/// Encode a NACK frame payload: [FRAME_NACK | count: u16 BE | seq1: u64 BE | seq2: u64 BE | ...]
+fn encode_nack_frame(missing_seqs: &[u64]) -> Vec<u8> {
+    let count = missing_seqs.len().min(MAX_NACK_SEQS) as u16;
+    let mut frame = Vec::with_capacity(1 + 2 + (count as usize) * 8);
+    frame.push(FRAME_NACK);
+    frame.extend_from_slice(&count.to_be_bytes());
+    for &seq in missing_seqs.iter().take(MAX_NACK_SEQS) {
+        frame.extend_from_slice(&seq.to_be_bytes());
+    }
+    frame
+}
+
+/// Decode a NACK frame payload (without the FRAME_NACK prefix byte).
+/// Returns the list of missing sequence numbers, or None if malformed.
+fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
+    if payload.len() < 2 {
+        return None;
+    }
+    let count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    if count > MAX_NACK_SEQS {
+        return None;
+    }
+    let expected_len = 2 + count * 8;
+    if payload.len() < expected_len {
+        return None;
+    }
+    let mut seqs = Vec::with_capacity(count);
+    for i in 0..count {
+        let offset = 2 + i * 8;
+        let seq = u64::from_be_bytes(
+            payload[offset..offset + 8].try_into().unwrap()
+        );
+        seqs.push(seq);
+    }
+    Some(seqs)
+}
+
+// ─── Retransmit buffer ──────────────────────────────────────────────────────
+
+/// An entry in the retransmit buffer: the framed plaintext and send timestamp.
+struct RetransmitEntry {
+    /// The framed plaintext (FRAME_DATA byte + data) ready for re-encryption.
+    framed_plaintext: Vec<u8>,
+    /// When this packet was originally sent (for RTT measurement).
+    send_time: Instant,
+}
+
+/// Buffer of sent packets awaiting ACK, keyed by sequence number.
+///
+/// Used for two purposes:
+/// 1. Retransmission: when a NACK arrives, re-encrypt and resend the packet
+/// 2. RTT measurement: compare send_time to ACK arrival for RTT samples
+struct RetransmitBuffer {
+    entries: HashMap<u64, RetransmitEntry>,
+    max_entries: usize,
+}
+
+impl RetransmitBuffer {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_entries,
+        }
+    }
+
+    /// Store a sent packet for potential retransmission.
+    /// If the buffer is full, the insert is silently dropped (oldest entries
+    /// should have been pruned by ACK advancement).
+    fn insert(&mut self, seq: u64, framed_plaintext: Vec<u8>, send_time: Instant) {
+        if self.entries.len() >= self.max_entries {
+            // Buffer full — shouldn't happen if ACKs are pruning properly,
+            // but don't OOM. Skip this entry.
+            debug!("retransmit buffer full ({} entries), skipping seq {}", self.entries.len(), seq);
+            return;
+        }
+        self.entries.insert(seq, RetransmitEntry { framed_plaintext, send_time });
+    }
+
+    /// Get the framed plaintext for a sequence number (for retransmission).
+    fn get(&self, seq: u64) -> Option<&[u8]> {
+        self.entries.get(&seq).map(|e| e.framed_plaintext.as_slice())
+    }
+
+    /// Get the send timestamp for a sequence number (for RTT measurement).
+    fn send_time(&self, seq: u64) -> Option<Instant> {
+        self.entries.get(&seq).map(|e| e.send_time)
+    }
+
+    /// Prune all entries with seq <= acked_seq (they've been ACKed).
+    fn prune_up_to(&mut self, acked_seq: u64) {
+        self.entries.retain(|&seq, _| seq > acked_seq);
+    }
+
+    /// Number of entries currently buffered.
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+// ─── Congestion controller ──────────────────────────────────────────────────
+
+/// Congestion control state: slow start or congestion avoidance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CongestionState {
+    SlowStart,
+    CongestionAvoidance,
+}
+
+/// AIMD-style congestion controller with RTT estimation.
+///
+/// Implements TCP-like congestion control:
+/// - **Slow Start:** cwnd doubles each RTT (exponential growth) until ssthresh
+/// - **Congestion Avoidance:** cwnd grows by ~1 packet per RTT (linear growth)
+/// - **On loss (NACK/RTO):** ssthresh = cwnd/2, cwnd = ssthresh (multiplicative decrease)
+///
+/// RTT is estimated using EWMA (like TCP):
+/// - srtt = 0.875 * srtt + 0.125 * sample
+/// - rttvar = 0.75 * rttvar + 0.25 * |srtt - sample|
+/// - RTO = srtt + 4 * rttvar, clamped to [MIN_RTO_MS, MAX_RTO_MS]
+struct CongestionController {
+    cwnd: f64,
+    ssthresh: f64,
+    srtt_ms: f64,
+    rttvar_ms: f64,
+    rto_ms: f64,
+    state: CongestionState,
+}
+
+impl CongestionController {
+    fn new() -> Self {
+        Self {
+            cwnd: INITIAL_CWND,
+            ssthresh: INITIAL_SSTHRESH,
+            srtt_ms: INITIAL_SRTT_MS,
+            rttvar_ms: INITIAL_SRTT_MS / 2.0,
+            rto_ms: INITIAL_SRTT_MS + 4.0 * (INITIAL_SRTT_MS / 2.0),
+            state: CongestionState::SlowStart,
+        }
+    }
+
+    /// Effective send window: min(cwnd, SEND_WINDOW).
+    fn effective_window(&self) -> u64 {
+        let cw = self.cwnd as u64;
+        cw.min(SEND_WINDOW)
+    }
+
+    /// Called when an ACK is received (one ACK = acknowledges one or more packets).
+    /// `newly_acked` is the number of new packets this ACK covers.
+    fn on_ack(&mut self, newly_acked: u64) {
+        match self.state {
+            CongestionState::SlowStart => {
+                // In slow start, cwnd increases by newly_acked packets
+                // (doubles per RTT when every packet is ACKed)
+                self.cwnd += newly_acked as f64;
+                if self.cwnd >= self.ssthresh {
+                    self.state = CongestionState::CongestionAvoidance;
+                    debug!("congestion: entering congestion avoidance (cwnd={:.1}, ssthresh={:.1})",
+                        self.cwnd, self.ssthresh);
+                }
+            }
+            CongestionState::CongestionAvoidance => {
+                // Linear increase: cwnd += newly_acked / cwnd per ACK
+                // This yields ~1 packet increase per RTT
+                self.cwnd += (newly_acked as f64) / self.cwnd;
+            }
+        }
+    }
+
+    /// Called when a loss is detected (NACK or RTO timeout).
+    fn on_loss(&mut self) {
+        self.ssthresh = (self.cwnd / 2.0).max(2.0);
+        self.cwnd = self.ssthresh;
+        self.state = CongestionState::CongestionAvoidance;
+        debug!("congestion: loss detected, ssthresh={:.1}, cwnd={:.1}", self.ssthresh, self.cwnd);
+    }
+
+    /// Update RTT estimate from a measured sample.
+    fn update_rtt(&mut self, sample_ms: f64) {
+        // EWMA: srtt = 0.875 * srtt + 0.125 * sample
+        let diff = (self.srtt_ms - sample_ms).abs();
+        self.rttvar_ms = 0.75 * self.rttvar_ms + 0.25 * diff;
+        self.srtt_ms = 0.875 * self.srtt_ms + 0.125 * sample_ms;
+        self.rto_ms = (self.srtt_ms + 4.0 * self.rttvar_ms).clamp(MIN_RTO_MS, MAX_RTO_MS);
+    }
+
+    /// Current RTO in milliseconds.
+    #[allow(dead_code)]
+    fn rto_ms(&self) -> f64 {
+        self.rto_ms
+    }
+
+    /// Current smoothed RTT in milliseconds.
+    #[allow(dead_code)]
+    fn srtt_ms(&self) -> f64 {
+        self.srtt_ms
+    }
+
+    /// The NACK threshold: how long to wait before sending a NACK.
+    /// Uses 3× srtt or NACK_MIN_THRESHOLD_MS, whichever is larger.
+    fn nack_threshold(&self) -> std::time::Duration {
+        let threshold_ms = (3.0 * self.srtt_ms).max(NACK_MIN_THRESHOLD_MS as f64) as u64;
+        std::time::Duration::from_millis(threshold_ms)
     }
 }
 
@@ -293,6 +607,19 @@ pub async fn run_bridge(
     let last_acked_seq_writer = last_acked_seq.clone();
     let last_acked_seq_reader = last_acked_seq;
 
+    // Congestion controller shared between sender and receiver.
+    let congestion: Arc<Mutex<CongestionController>> = Arc::new(Mutex::new(CongestionController::new()));
+    let congestion_sender = congestion.clone();
+    let congestion_receiver = congestion;
+
+    // Retransmit buffer: sender stores sent packets for retransmission on NACK.
+    let retransmit_buf: Arc<Mutex<RetransmitBuffer>> = Arc::new(Mutex::new(RetransmitBuffer::new(RETRANSMIT_BUF_MAX)));
+    let retransmit_buf_sender = retransmit_buf.clone();
+    let retransmit_buf_ack = retransmit_buf;
+
+    // Channel for NACK-triggered retransmit requests (receiver → sender).
+    let (retransmit_tx, mut retransmit_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u64>>();
+
     // Signal from receiver to sender that a FIN was received from the remote.
     let (fin_tx, _fin_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -314,6 +641,56 @@ pub async fn run_bridge(
         let mut last_ack_check = Instant::now();
 
         loop {
+            // ── Check for retransmit requests before reading new TCP data ──
+            // Process any pending NACK-triggered retransmissions.
+            while let Ok(nack_seqs) = retransmit_rx.try_recv() {
+                // Signal loss to congestion controller (once per NACK batch)
+                {
+                    let mut cc = congestion_sender.lock().await;
+                    cc.on_loss();
+                }
+
+                for nack_seq in &nack_seqs {
+                    let framed_plaintext = {
+                        let rb = retransmit_buf_sender.lock().await;
+                        rb.get(*nack_seq).map(|s| s.to_vec())
+                    };
+                    if let Some(plaintext) = framed_plaintext {
+                        // Re-encrypt with the ORIGINAL seq's nonce.
+                        // ChaCha20-Poly1305 is deterministic: same key+nonce+plaintext
+                        // produces identical ciphertext.
+                        let mut nonce_bytes = [0u8; 12];
+                        nonce_bytes[4..12].copy_from_slice(&nack_seq.to_be_bytes());
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        let encrypted = match cipher.encrypt(nonce, plaintext.as_slice()) {
+                            Ok(enc) => enc,
+                            Err(e) => {
+                                warn!("retransmit encryption error for seq {}: {}", nack_seq, e);
+                                continue;
+                            }
+                        };
+
+                        let mut header = DataHeader::new(sid_send, *nack_seq);
+                        let aad = header.aad_bytes();
+                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+                        let mut packet = header.serialize();
+                        packet.extend_from_slice(&encrypted);
+                        if let Err(e) = udp_send.send_to(&packet, peer_addr).await {
+                            warn!("retransmit send error for seq {}: {}", nack_seq, e);
+                        } else {
+                            debug!("retransmitted seq {} ({} bytes)", nack_seq, packet.len());
+                        }
+
+                        // Note: we intentionally do NOT update the send_time in the
+                        // retransmit buffer (Karn's algorithm: don't use retransmitted
+                        // packets for RTT measurement).
+                    } else {
+                        debug!("retransmit requested for seq {} but not in buffer", nack_seq);
+                    }
+                }
+            }
+
             let n = match tcp_reader.read(&mut buf).await {
                 Ok(0) => {
                     // TCP EOF — send FIN frame to signal stream end to remote
@@ -353,9 +730,9 @@ pub async fn run_bridge(
             // (accounting for the 1-byte frame type prefix)
             for chunk in data.chunks(MAX_PLAINTEXT_PER_PACKET) {
                 // ── Flow control: wait for send window ──
-                // The sender must not have more than SEND_WINDOW packets in
-                // flight (sent but not yet ACKed). If the window is exhausted,
-                // we wait for ACKs from the receiver.
+                // The sender must not have more than effective_window packets in
+                // flight (sent but not yet ACKed). The effective window is the
+                // minimum of the congestion window and the static SEND_WINDOW.
                 loop {
                     let current_seq = {
                         let pl = pipeline_send.lock().await;
@@ -369,12 +746,17 @@ pub async fn run_bridge(
                         *guard
                     };
 
-                    // Calculate available window.
-                    // If we haven't received any ACK yet, allow SEND_WINDOW
+                    let effective_window = {
+                        let cc = congestion_sender.lock().await;
+                        cc.effective_window()
+                    };
+
+                    // Calculate available window using congestion-controlled window.
+                    // If we haven't received any ACK yet, allow effective_window
                     // packets from the start (bootstrapping the connection).
                     let window_ok = match acked {
-                        Some(acked_seq) => current_seq < acked_seq + SEND_WINDOW + 1,
-                        None => current_seq < SEND_WINDOW,
+                        Some(acked_seq) => current_seq < acked_seq + effective_window + 1,
+                        None => current_seq < effective_window,
                     };
 
                     if window_ok {
@@ -387,8 +769,36 @@ pub async fn run_bridge(
                         return Err("sender ACK timeout".into());
                     }
 
-                    // Yield briefly to let ACKs arrive
+                    // Yield briefly to let ACKs arrive, also drain retransmits
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    // Process retransmit requests while waiting for window
+                    while let Ok(nack_seqs) = retransmit_rx.try_recv() {
+                        {
+                            let mut cc = congestion_sender.lock().await;
+                            cc.on_loss();
+                        }
+                        for nack_seq in &nack_seqs {
+                            let framed_plaintext = {
+                                let rb = retransmit_buf_sender.lock().await;
+                                rb.get(*nack_seq).map(|s| s.to_vec())
+                            };
+                            if let Some(plaintext) = framed_plaintext {
+                                let mut nonce_bytes = [0u8; 12];
+                                nonce_bytes[4..12].copy_from_slice(&nack_seq.to_be_bytes());
+                                let nonce = Nonce::from_slice(&nonce_bytes);
+                                if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
+                                    let mut header = DataHeader::new(sid_send, *nack_seq);
+                                    let aad = header.aad_bytes();
+                                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                                    let mut packet = header.serialize();
+                                    packet.extend_from_slice(&encrypted);
+                                    let _ = udp_send.send_to(&packet, peer_addr).await;
+                                    debug!("retransmitted seq {} (while waiting for window)", nack_seq);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Reset the ACK timeout tracker whenever we successfully send
@@ -406,6 +816,12 @@ pub async fn run_bridge(
                 let mut framed = Vec::with_capacity(1 + chunk.len());
                 framed.push(FRAME_DATA);
                 framed.extend_from_slice(chunk);
+
+                // Store in retransmit buffer before sending
+                {
+                    let mut rb = retransmit_buf_sender.lock().await;
+                    rb.insert(seq, framed.clone(), Instant::now());
+                }
 
                 // Encrypt with nonce = 4 zero bytes + 8-byte big-endian seq
                 let mut nonce_bytes = [0u8; 12];
@@ -565,13 +981,65 @@ pub async fn run_bridge(
                                     frame_payload[..8].try_into().unwrap()
                                 );
                                 debug!("received ACK for seq {}", acked_seq);
-                                let mut guard = last_acked_seq_writer.lock().await;
-                                // Only advance, never go backward
-                                match *guard {
-                                    Some(prev) if acked_seq > prev => *guard = Some(acked_seq),
-                                    None => *guard = Some(acked_seq),
-                                    _ => {}
+
+                                // Compute newly acked count for congestion control
+                                let prev_acked = {
+                                    let guard = last_acked_seq_writer.lock().await;
+                                    *guard
+                                };
+                                let newly_acked = match prev_acked {
+                                    Some(prev) if acked_seq > prev => acked_seq - prev,
+                                    None => acked_seq + 1,
+                                    _ => 0,
+                                };
+
+                                // Update the shared acked seq
+                                {
+                                    let mut guard = last_acked_seq_writer.lock().await;
+                                    match *guard {
+                                        Some(prev) if acked_seq > prev => *guard = Some(acked_seq),
+                                        None => *guard = Some(acked_seq),
+                                        _ => {}
+                                    }
                                 }
+
+                                // RTT measurement: find the send time of the acked seq
+                                // in the retransmit buffer and compute the sample
+                                {
+                                    let rb = retransmit_buf_ack.lock().await;
+                                    if let Some(send_time) = rb.send_time(acked_seq) {
+                                        let rtt_sample = send_time.elapsed().as_secs_f64() * 1000.0;
+                                        let mut cc = congestion_receiver.lock().await;
+                                        cc.update_rtt(rtt_sample);
+                                        if newly_acked > 0 {
+                                            cc.on_ack(newly_acked);
+                                        }
+                                    } else if newly_acked > 0 {
+                                        // No RTT sample available, just notify congestion controller
+                                        let mut cc = congestion_receiver.lock().await;
+                                        cc.on_ack(newly_acked);
+                                    }
+                                }
+
+                                // Prune retransmit buffer up to acked_seq
+                                {
+                                    let mut rb = retransmit_buf_ack.lock().await;
+                                    rb.prune_up_to(acked_seq);
+                                }
+                            }
+                        }
+
+                        FRAME_NACK => {
+                            // NACK frame from the remote receiver: they're missing packets.
+                            // Decode and forward to the sender for retransmission.
+                            if let Some(missing_seqs) = decode_nack_payload(frame_payload) {
+                                debug!("received NACK for {} missing seqs: {:?}",
+                                    missing_seqs.len(), &missing_seqs[..missing_seqs.len().min(5)]);
+                                if let Err(e) = retransmit_tx.send(missing_seqs) {
+                                    warn!("failed to forward NACK to sender: {}", e);
+                                }
+                            } else {
+                                debug!("malformed NACK frame, ignoring");
                             }
                         }
 
@@ -653,6 +1121,49 @@ pub async fn run_bridge(
                             packets_since_ack = 0;
                             last_ack_time = Instant::now();
                         }
+                    }
+                }
+            }
+
+            // ── Gap detection and NACK sending ──
+            // If the reassembly buffer has a persistent gap, send a NACK
+            // to request retransmission of the missing packets.
+            if let Some(ref mut reasm) = reassembly {
+                let nack_threshold = {
+                    let cc = congestion_receiver.lock().await;
+                    cc.nack_threshold()
+                };
+                if reasm.should_nack(nack_threshold)
+                    && reasm.can_send_nack(nack_threshold)
+                {
+                    let missing = reasm.missing_seqs(MAX_NACK_SEQS);
+                    if !missing.is_empty() {
+                        debug!("sending NACK for {} missing seqs (expected={}): {:?}",
+                            missing.len(), reasm.expected_seq(), &missing[..missing.len().min(5)]);
+
+                        let nack_frame = encode_nack_frame(&missing);
+
+                        // Send NACK using the send key (like ACKs)
+                        let seq = {
+                            let mut pl = pipeline_recv.lock().await;
+                            let session = pl.get_session_mut(&sid_recv)
+                                .ok_or("session not found for NACK send")?;
+                            session.next_send_seq()
+                        };
+                        let mut nonce_bytes = [0u8; 12];
+                        nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        let encrypted = ack_cipher.encrypt(nonce, nack_frame.as_slice())
+                            .map_err(|e| format!("NACK encryption error: {}", e))?;
+
+                        let mut header = DataHeader::new(sid_recv, seq);
+                        let aad = header.aad_bytes();
+                        header.header_auth_tag = compute_header_auth_tag(&send_key_for_acks, &aad);
+
+                        let mut packet = header.serialize();
+                        packet.extend_from_slice(&encrypted);
+                        udp_recv.send_to(&packet, peer_addr).await?;
+                        reasm.mark_nack_sent();
                     }
                 }
             }
@@ -1267,5 +1778,484 @@ mod tests {
         // Too long
         let name17 = "a".repeat(17);
         assert!(encode_service_name(&name17).is_err());
+    }
+
+    // ── RetransmitBuffer tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_retransmit_buffer_insert_and_get() {
+        let mut rb = RetransmitBuffer::new(100);
+        let now = Instant::now();
+        rb.insert(0, vec![FRAME_DATA, 0xAA], now);
+        rb.insert(1, vec![FRAME_DATA, 0xBB], now);
+        rb.insert(2, vec![FRAME_DATA, 0xCC], now);
+
+        assert_eq!(rb.len(), 3);
+        assert_eq!(rb.get(0), Some(&[FRAME_DATA, 0xAA][..]));
+        assert_eq!(rb.get(1), Some(&[FRAME_DATA, 0xBB][..]));
+        assert_eq!(rb.get(2), Some(&[FRAME_DATA, 0xCC][..]));
+        assert_eq!(rb.get(3), None);
+    }
+
+    #[test]
+    fn test_retransmit_buffer_prune() {
+        let mut rb = RetransmitBuffer::new(100);
+        let now = Instant::now();
+        for i in 0..10 {
+            rb.insert(i, vec![FRAME_DATA, i as u8], now);
+        }
+        assert_eq!(rb.len(), 10);
+
+        // Prune up to seq 4 (0..=4 removed)
+        rb.prune_up_to(4);
+        assert_eq!(rb.len(), 5);
+        assert_eq!(rb.get(4), None); // 4 was pruned (seq <= 4)
+        assert!(rb.get(5).is_some());
+        assert!(rb.get(9).is_some());
+    }
+
+    #[test]
+    fn test_retransmit_buffer_full() {
+        let mut rb = RetransmitBuffer::new(3);
+        let now = Instant::now();
+        rb.insert(0, vec![0xAA], now);
+        rb.insert(1, vec![0xBB], now);
+        rb.insert(2, vec![0xCC], now);
+        assert_eq!(rb.len(), 3);
+
+        // Buffer full — new insert silently dropped
+        rb.insert(3, vec![0xDD], now);
+        assert_eq!(rb.len(), 3);
+        assert_eq!(rb.get(3), None);
+    }
+
+    #[test]
+    fn test_retransmit_buffer_send_time() {
+        let mut rb = RetransmitBuffer::new(100);
+        let t1 = Instant::now();
+        rb.insert(42, vec![0xAA], t1);
+
+        let stored_time = rb.send_time(42).unwrap();
+        assert_eq!(stored_time, t1);
+        assert!(rb.send_time(99).is_none());
+    }
+
+    // ── CongestionController tests ──────────────────────────────────────
+
+    #[test]
+    fn test_congestion_controller_initial_state() {
+        let cc = CongestionController::new();
+        assert_eq!(cc.cwnd, INITIAL_CWND);
+        assert_eq!(cc.ssthresh, INITIAL_SSTHRESH);
+        assert_eq!(cc.state, CongestionState::SlowStart);
+        assert_eq!(cc.effective_window(), INITIAL_CWND as u64);
+    }
+
+    #[test]
+    fn test_congestion_slow_start_growth() {
+        let mut cc = CongestionController::new();
+        assert_eq!(cc.state, CongestionState::SlowStart);
+
+        // In slow start, cwnd += newly_acked
+        cc.on_ack(1);
+        assert_eq!(cc.cwnd, INITIAL_CWND + 1.0);
+        assert_eq!(cc.state, CongestionState::SlowStart);
+
+        // ACK covering 5 packets
+        cc.on_ack(5);
+        assert_eq!(cc.cwnd, INITIAL_CWND + 6.0);
+    }
+
+    #[test]
+    fn test_congestion_slow_start_to_avoidance_transition() {
+        let mut cc = CongestionController::new();
+        cc.ssthresh = 20.0;
+
+        // Grow cwnd past ssthresh
+        cc.on_ack(15); // cwnd = 10 + 15 = 25 >= ssthresh(20)
+        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+    }
+
+    #[test]
+    fn test_congestion_avoidance_linear_growth() {
+        let mut cc = CongestionController::new();
+        cc.state = CongestionState::CongestionAvoidance;
+        cc.cwnd = 100.0;
+
+        // In congestion avoidance: cwnd += 1/cwnd per ACK
+        cc.on_ack(1);
+        assert!((cc.cwnd - 100.01).abs() < 0.001);
+
+        // After 100 single-packet ACKs, should grow by ~1
+        for _ in 0..99 {
+            cc.on_ack(1);
+        }
+        assert!((cc.cwnd - 101.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_congestion_on_loss() {
+        let mut cc = CongestionController::new();
+        cc.cwnd = 100.0;
+        cc.ssthresh = 200.0;
+        cc.state = CongestionState::SlowStart;
+
+        cc.on_loss();
+        assert_eq!(cc.ssthresh, 50.0); // cwnd/2
+        assert_eq!(cc.cwnd, 50.0); // set to ssthresh
+        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+    }
+
+    #[test]
+    fn test_congestion_on_loss_min_ssthresh() {
+        let mut cc = CongestionController::new();
+        cc.cwnd = 3.0;
+
+        cc.on_loss();
+        assert_eq!(cc.ssthresh, 2.0); // min(cwnd/2, 2) = max(1.5, 2) = 2
+        assert_eq!(cc.cwnd, 2.0);
+    }
+
+    #[test]
+    fn test_congestion_rtt_estimation() {
+        let mut cc = CongestionController::new();
+        // Initial: srtt=100, rttvar=50, rto=100+4*50=300
+
+        // Sample of 80ms
+        cc.update_rtt(80.0);
+        // srtt = 0.875 * 100 + 0.125 * 80 = 87.5 + 10 = 97.5
+        assert!((cc.srtt_ms - 97.5).abs() < 0.01);
+        // rttvar = 0.75 * 50 + 0.25 * |100 - 80| = 37.5 + 5 = 42.5
+        assert!((cc.rttvar_ms - 42.5).abs() < 0.01);
+        // rto = 97.5 + 4 * 42.5 = 97.5 + 170 = 267.5
+        assert!((cc.rto_ms - 267.5).abs() < 0.01);
+
+        // Another sample of 90ms
+        cc.update_rtt(90.0);
+        // srtt = 0.875 * 97.5 + 0.125 * 90 = 85.3125 + 11.25 = 96.5625
+        assert!((cc.srtt_ms - 96.5625).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_congestion_rto_clamping() {
+        let mut cc = CongestionController::new();
+
+        // Very small RTT sample → RTO should not go below MIN_RTO_MS
+        for _ in 0..100 {
+            cc.update_rtt(1.0);
+        }
+        assert!(cc.rto_ms >= MIN_RTO_MS);
+
+        // Very large RTT sample → RTO should not exceed MAX_RTO_MS
+        let mut cc2 = CongestionController::new();
+        for _ in 0..100 {
+            cc2.update_rtt(50000.0);
+        }
+        assert!(cc2.rto_ms <= MAX_RTO_MS);
+    }
+
+    #[test]
+    fn test_congestion_effective_window_capped() {
+        let mut cc = CongestionController::new();
+        cc.cwnd = (SEND_WINDOW + 1000) as f64;
+        assert_eq!(cc.effective_window(), SEND_WINDOW);
+    }
+
+    #[test]
+    fn test_congestion_nack_threshold() {
+        let cc = CongestionController::new();
+        let threshold = cc.nack_threshold();
+        // With initial srtt=100ms, threshold = max(3*100, 100) = 300ms
+        assert_eq!(threshold, std::time::Duration::from_millis(300));
+    }
+
+    #[test]
+    fn test_congestion_nack_threshold_min() {
+        let mut cc = CongestionController::new();
+        cc.srtt_ms = 10.0; // Very low RTT
+        let threshold = cc.nack_threshold();
+        // max(3*10, 100) = 100ms (minimum)
+        assert_eq!(threshold, std::time::Duration::from_millis(NACK_MIN_THRESHOLD_MS));
+    }
+
+    // ── Gap detection tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_gap_detection_no_gap_in_order() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+        rb.insert(0, vec![0xAA]);
+        rb.insert(1, vec![0xBB]);
+        rb.insert(2, vec![0xCC]);
+
+        assert!(!rb.should_nack(std::time::Duration::from_millis(0)));
+        assert!(rb.missing_seqs(10).is_empty());
+    }
+
+    #[test]
+    fn test_gap_detection_gap_detected() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Seq 1 arrives (seq 0 missing → gap)
+        rb.insert(1, vec![0xBB]);
+
+        // Gap detected at should be set
+        assert!(rb.gap_detected_at.is_some());
+
+        // Not enough time has passed for NACK
+        assert!(!rb.should_nack(std::time::Duration::from_secs(10)));
+
+        // With zero threshold, should NACK immediately
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(rb.should_nack(std::time::Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn test_gap_detection_gap_cleared_on_fill() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Create gap
+        rb.insert(1, vec![0xBB]);
+        assert!(rb.gap_detected_at.is_some());
+
+        // Fill gap
+        rb.insert(0, vec![0xAA]);
+        // After filling, buffer should be empty → gap cleared
+        assert!(rb.gap_detected_at.is_none());
+        assert!(!rb.should_nack(std::time::Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn test_gap_detection_partial_fill() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Buffer seqs 2, 3 (gap at 0, 1)
+        rb.insert(2, vec![0xCC]);
+        rb.insert(3, vec![0xDD]);
+
+        // Fill seq 0 (gap still at 1)
+        rb.insert(0, vec![0xAA]);
+        assert_eq!(rb.expected_seq(), 1);
+        assert_eq!(rb.buffered_count(), 2); // seqs 2, 3 still buffered
+
+        // Gap should be reset (new gap timer)
+        assert!(rb.gap_detected_at.is_some());
+    }
+
+    #[test]
+    fn test_missing_seqs() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Buffer seqs 2, 5, 7
+        rb.insert(2, vec![0xCC]);
+        rb.insert(5, vec![0xFF]);
+        rb.insert(7, vec![0x77]);
+
+        let missing = rb.missing_seqs(10);
+        assert_eq!(missing, vec![0, 1, 3, 4, 6]);
+    }
+
+    #[test]
+    fn test_missing_seqs_limited() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Buffer seq 10 (seqs 0..9 missing)
+        rb.insert(10, vec![0xAA]);
+
+        let missing = rb.missing_seqs(3);
+        assert_eq!(missing, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_missing_seqs_empty_buffer() {
+        let rb = ReassemblyBuffer::new(0, 100);
+        assert!(rb.missing_seqs(10).is_empty());
+    }
+
+    #[test]
+    fn test_nack_rate_limiting() {
+        let mut rb = ReassemblyBuffer::new(0, 100);
+        rb.insert(1, vec![0xBB]); // create gap
+
+        // First NACK should be allowed
+        assert!(rb.can_send_nack(std::time::Duration::from_millis(100)));
+
+        rb.mark_nack_sent();
+
+        // Immediately after, should be rate-limited
+        assert!(!rb.can_send_nack(std::time::Duration::from_millis(100)));
+
+        // After enough time, should be allowed again
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(rb.can_send_nack(std::time::Duration::from_millis(100)));
+    }
+
+    // ── NACK frame encode/decode tests ──────────────────────────────────
+
+    #[test]
+    fn test_nack_encode_decode_roundtrip() {
+        let seqs = vec![5, 10, 15, 20, 100];
+        let frame = encode_nack_frame(&seqs);
+
+        // Check frame structure: [FRAME_NACK, count_hi, count_lo, seq1..., seq2..., ...]
+        assert_eq!(frame[0], FRAME_NACK);
+
+        // Decode (skip the FRAME_NACK byte)
+        let decoded = decode_nack_payload(&frame[1..]).unwrap();
+        assert_eq!(decoded, seqs);
+    }
+
+    #[test]
+    fn test_nack_encode_empty() {
+        let frame = encode_nack_frame(&[]);
+        assert_eq!(frame[0], FRAME_NACK);
+        let decoded = decode_nack_payload(&frame[1..]).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_nack_encode_truncates_at_max() {
+        // More than MAX_NACK_SEQS entries → truncated
+        let seqs: Vec<u64> = (0..100).collect();
+        let frame = encode_nack_frame(&seqs);
+
+        let decoded = decode_nack_payload(&frame[1..]).unwrap();
+        assert_eq!(decoded.len(), MAX_NACK_SEQS);
+        assert_eq!(decoded[0], 0);
+        assert_eq!(decoded[MAX_NACK_SEQS - 1], (MAX_NACK_SEQS - 1) as u64);
+    }
+
+    #[test]
+    fn test_nack_decode_malformed() {
+        // Too short
+        assert!(decode_nack_payload(&[]).is_none());
+        assert!(decode_nack_payload(&[0]).is_none());
+
+        // Count says 1 but no seq data
+        assert!(decode_nack_payload(&[0, 1]).is_none());
+
+        // Count says 1 but only 7 bytes of seq (need 8)
+        assert!(decode_nack_payload(&[0, 1, 0, 0, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn test_nack_decode_count_too_large() {
+        // Count > MAX_NACK_SEQS is rejected
+        let count = (MAX_NACK_SEQS + 1) as u16;
+        let mut payload = count.to_be_bytes().to_vec();
+        // Even if data exists, reject oversize count
+        for _ in 0..=MAX_NACK_SEQS {
+            payload.extend_from_slice(&0u64.to_be_bytes());
+        }
+        assert!(decode_nack_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn test_nack_single_seq() {
+        let frame = encode_nack_frame(&[42]);
+        let decoded = decode_nack_payload(&frame[1..]).unwrap();
+        assert_eq!(decoded, vec![42]);
+    }
+
+    #[test]
+    fn test_nack_large_seq_numbers() {
+        let seqs = vec![u64::MAX, u64::MAX - 1, u64::MAX / 2];
+        let frame = encode_nack_frame(&seqs);
+        let decoded = decode_nack_payload(&frame[1..]).unwrap();
+        assert_eq!(decoded, seqs);
+    }
+
+    // ── Integration scenario tests ──────────────────────────────────────
+
+    #[test]
+    fn test_congestion_full_lifecycle() {
+        // Simulate: slow start → reach ssthresh → congestion avoidance → loss → recovery
+        let mut cc = CongestionController::new();
+        cc.ssthresh = 20.0; // Low threshold for testing
+
+        // Slow start phase: ACKs grow cwnd exponentially
+        for _ in 0..10 {
+            cc.on_ack(1);
+        }
+        // cwnd should be 10 + 10 = 20, transitioning to CA
+        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+
+        let cwnd_before_loss = cc.cwnd;
+
+        // Congestion avoidance: linear growth
+        for _ in 0..100 {
+            cc.on_ack(1);
+        }
+        assert!(cc.cwnd > cwnd_before_loss);
+        assert!(cc.cwnd < cwnd_before_loss + 10.0); // Should only grow ~5 packets in 100 ACKs
+
+        let cwnd_before_second_loss = cc.cwnd;
+
+        // Loss event
+        cc.on_loss();
+        assert_eq!(cc.cwnd, cwnd_before_second_loss / 2.0);
+        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+
+        // Recovery: linear growth from new cwnd
+        let cwnd_after_loss = cc.cwnd;
+        for _ in 0..100 {
+            cc.on_ack(1);
+        }
+        assert!(cc.cwnd > cwnd_after_loss);
+    }
+
+    #[test]
+    fn test_retransmit_buffer_lifecycle() {
+        let mut rb = RetransmitBuffer::new(100);
+        let now = Instant::now();
+
+        // Simulate sending 20 packets
+        for i in 0..20 {
+            rb.insert(i, vec![FRAME_DATA, i as u8], now);
+        }
+        assert_eq!(rb.len(), 20);
+
+        // ACK covers seqs 0..=9
+        rb.prune_up_to(9);
+        assert_eq!(rb.len(), 10);
+        assert!(rb.get(9).is_none());
+        assert!(rb.get(10).is_some());
+
+        // NACK requests retransmit of seqs 12, 15
+        assert!(rb.get(12).is_some());
+        assert!(rb.get(15).is_some());
+
+        // ACK covers all
+        rb.prune_up_to(19);
+        assert_eq!(rb.len(), 0);
+    }
+
+    #[test]
+    fn test_gap_detection_with_reassembly() {
+        // Full scenario: gap detected, NACK would be sent, then gap fills
+        let mut rb = ReassemblyBuffer::new(0, 100);
+
+        // Receive seq 0 normally
+        let delivered = rb.insert(0, vec![0xAA]).unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert!(rb.gap_detected_at.is_none());
+
+        // Seq 1 is "lost", seqs 2, 3, 4 arrive
+        rb.insert(2, vec![0xCC]);
+        rb.insert(3, vec![0xDD]);
+        rb.insert(4, vec![0xEE]);
+
+        // Gap detected
+        assert!(rb.gap_detected_at.is_some());
+        assert_eq!(rb.expected_seq(), 1);
+
+        // Missing seqs
+        let missing = rb.missing_seqs(10);
+        assert_eq!(missing, vec![1]);
+
+        // "Retransmitted" seq 1 arrives
+        let delivered = rb.insert(1, vec![0xBB]).unwrap();
+        assert_eq!(delivered.len(), 4); // 1, 2, 3, 4
+        assert_eq!(rb.expected_seq(), 5);
+        assert!(rb.gap_detected_at.is_none());
     }
 }

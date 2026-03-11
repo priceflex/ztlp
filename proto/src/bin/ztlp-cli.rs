@@ -157,10 +157,12 @@ enum Commands {
         after_help = "EXAMPLES:\n  \
             ztlp connect 192.168.1.10:23095\n  \
             ztlp connect 10.0.0.1:23095 --key ~/.ztlp/identity.json\n  \
-            ztlp connect peer.example.com:23095 --relay relay.example.com:23095"
+            ztlp connect peer.example.com:23095 --relay relay.example.com:23095\n  \
+            ztlp connect myserver.clients.techrockstars.ztlp\n  \
+            ztlp connect myserver.clients.techrockstars.ztlp --ns-server 10.0.0.1:5353"
     )]
     Connect {
-        /// Target address (host:port)
+        /// Target address (host:port or ZTLP name, e.g. myserver.clients.techrockstars.ztlp)
         target: String,
 
         /// Path to identity key file
@@ -174,6 +176,10 @@ enum Commands {
         /// Gateway address (host:port)
         #[arg(short, long)]
         gateway: Option<String>,
+
+        /// NS server address for name resolution (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
 
         /// Specific session ID to use (hex)
         #[arg(short, long)]
@@ -266,11 +272,16 @@ enum Commands {
     #[command(
         after_help = "EXAMPLES:\n  \
             ztlp ping 192.168.1.10:23095\n  \
-            ztlp ping 10.0.0.1:23095 --count 10 --interval 500"
+            ztlp ping 10.0.0.1:23095 --count 10 --interval 500\n  \
+            ztlp ping myserver.clients.techrockstars.ztlp"
     )]
     Ping {
         /// Target address (host:port)
         target: String,
+
+        /// NS server address for name resolution (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
 
         /// Number of pings to send
         #[arg(short, long, default_value = "4")]
@@ -677,20 +688,186 @@ fn cmd_keygen(output: &Option<PathBuf>, format: &KeygenFormat) -> Result<(), Box
     Ok(())
 }
 
-/// `ztlp connect` — Connect to a ZTLP peer
+/// Resolve a target string to a SocketAddr, optionally via ZTLP-NS.
+///
+/// Accepts:
+/// - Raw `ip:port` (e.g., `192.168.1.10:23095`) — returned directly
+/// - ZTLP name (e.g., `myserver.clients.techrockstars.ztlp`) — resolved via NS
+/// - ZTLP name with port (e.g., `myserver.clients.techrockstars.ztlp:23095`)
+///
+/// Returns the resolved SocketAddr and optionally the peer's NodeID from NS.
+async fn resolve_target(target: &str, ns_server_opt: &Option<String>) -> Result<(SocketAddr, Option<NodeId>), Box<dyn std::error::Error>> {
+    // Try direct IP:port parsing first (backward compatible fast path)
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Ok((addr, None));
+    }
+
+    // Not a raw address — attempt ZTLP-NS resolution
+    eprintln!("{} {} via ZTLP-NS...", c_dim("Resolving"), c_bold(target));
+
+    // Determine NS server address: flag > config > default
+    let ns_server = if let Some(s) = ns_server_opt {
+        s.clone()
+    } else {
+        let cfg = load_config();
+        cfg.ns_server.unwrap_or_else(|| "127.0.0.1:5353".to_string())
+    };
+    eprintln!("  {} {}", c_dim("NS server:"), ns_server);
+
+    // Strip optional port from name (e.g., "name.ztlp:23095")
+    let (name_part, explicit_port) = if let Some(idx) = target.rfind(':') {
+        let after_colon = &target[idx + 1..];
+        if let Ok(port) = after_colon.parse::<u16>() {
+            (&target[..idx], Some(port))
+        } else {
+            (target, None)
+        }
+    } else {
+        (target, None)
+    };
+
+    // Query SVC record (type 2) for endpoint address
+    let mut resolved_addr: Option<SocketAddr> = None;
+    if let Ok(Some(svc_data)) = ns_query(name_part, &ns_server, 2).await {
+        // SVC record data should contain an address string (e.g., "10.42.42.50:23095")
+        if let Ok(addr) = svc_data.parse::<SocketAddr>() {
+            eprintln!("  {} SVC record → {}", c_green("✓"), addr);
+            resolved_addr = Some(addr);
+        } else {
+            debug!("SVC record data '{}' is not a valid address", svc_data);
+        }
+    }
+
+    // Query KEY record (type 1) for NodeID (identity verification)
+    let mut resolved_node_id: Option<NodeId> = None;
+    if let Ok(Some(key_data)) = ns_query(name_part, &ns_server, 1).await {
+        // KEY record data contains the node's public key (hex).
+        // If the data is 32 bytes hex (64 chars), it's a public key.
+        // If it contains address info, we can use that as fallback.
+        // For now, try to parse as "node_id_hex" or "node_id_hex@address"
+        if key_data.contains('@') {
+            // Format: "node_id_hex@address:port" or "pubkey_hex@address:port"
+            let parts: Vec<&str> = key_data.splitn(2, '@').collect();
+            if parts.len() == 2 {
+                if let Ok(addr) = parts[1].parse::<SocketAddr>() {
+                    if resolved_addr.is_none() {
+                        eprintln!("  {} KEY record → {}", c_green("✓"), addr);
+                        resolved_addr = Some(addr);
+                    }
+                }
+            }
+        }
+        // Try to extract NodeID from first 32 hex chars of key data
+        let hex_str = key_data.split('@').next().unwrap_or(&key_data);
+        if hex_str.len() >= 32 {
+            if let Ok(bytes) = hex::decode(&hex_str[..32]) {
+                if bytes.len() == 16 {
+                    let mut nid = [0u8; 16];
+                    nid.copy_from_slice(&bytes);
+                    resolved_node_id = Some(NodeId::from_bytes(nid));
+                    eprintln!("  {} NodeID: {}", c_cyan("ℹ"), hex::encode(nid));
+                }
+            }
+        }
+        eprintln!("  {} KEY record found", c_green("✓"));
+    }
+
+    // Build final address
+    let final_addr = if let Some(addr) = resolved_addr {
+        // If explicit port was given, override the NS-provided port
+        if let Some(port) = explicit_port {
+            SocketAddr::new(addr.ip(), port)
+        } else {
+            addr
+        }
+    } else {
+        // No address from NS — if this looks like a hostname, try DNS resolution
+        let port = explicit_port.unwrap_or(23095);
+        // Try tokio DNS resolution
+        let lookup_target = format!("{}:{}", name_part, port);
+        match tokio::net::lookup_host(&lookup_target).await {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    eprintln!("  {} DNS fallback → {}", c_yellow("⚠"), addr);
+                    addr
+                } else {
+                    return Err(format!(
+                        "could not resolve '{}': no SVC record in ZTLP-NS and DNS returned no results\n  \
+                         Try: ztlp connect {} --ns-server <addr:port>\n  \
+                         Or use a raw address: ztlp connect <ip>:23095",
+                        target, name_part
+                    ).into());
+                }
+            }
+            Err(_) => {
+                return Err(format!(
+                    "could not resolve '{}': no SVC record in ZTLP-NS and DNS lookup failed\n  \
+                     Hint: ensure your NS server is running, or specify --ns-server <addr:port>\n  \
+                     Or use a raw address: ztlp connect <ip>:23095",
+                    target
+                ).into());
+            }
+        }
+    };
+
+    eprintln!("  {} {}\n", c_green("Resolved:"), c_bold(&final_addr.to_string()));
+    Ok((final_addr, resolved_node_id))
+}
+
+// Helper to perform an NS query for a given record type. Returns the data field as a string if found.
+async fn ns_query(name: &str, ns_server: &str, record_type: u8) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let ns_addr: SocketAddr = ns_server.parse().map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let mut query = Vec::with_capacity(4 + name_bytes.len());
+    query.push(0x01);
+    query.extend_from_slice(&name_len.to_be_bytes());
+    query.extend_from_slice(name_bytes);
+    query.push(record_type);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    sock.send_to(&query, ns_addr).await?;
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let data = &buf[..len];
+            if data.is_empty() { return Ok(None); }
+            if data[0] != 0x02 { return Ok(None); }
+            let record = &data[1..];
+            // Wire format: <<type_byte, name_len::16, name, data_len::32, data, ...>>
+            // Skip type_byte (1 byte), then parse name_len (2 bytes) and name
+            if record.len() < 4 { return Ok(None); }
+            let _type_byte = record[0];
+            let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+            if record.len() < 3 + name_len + 4 { return Ok(None); }
+            let offset = 3 + name_len;
+            let data_len = u32::from_be_bytes([record[offset], record[offset+1], record[offset+2], record[offset+3]]) as usize;
+            if record.len() < offset + 4 + data_len { return Ok(None); }
+            let data_start = offset + 4;
+            let data_bytes = &record[data_start..data_start+data_len];
+            let s = std::str::from_utf8(data_bytes).ok().map(|s| s.to_string());
+            Ok(s)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 async fn cmd_connect(
     target: &str,
     key: &Option<PathBuf>,
     relay: &Option<String>,
     _gateway: &Option<String>,
+    ns_server: &Option<String>,
     session_id_hex: &Option<String>,
     bind: &str,
     local_forward: &Option<String>,
     service: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
-    let peer_addr: SocketAddr = target.parse()
-        .map_err(|e| format!("invalid target address '{}': {}", target, e))?;
+
+    // Resolve target: raw ip:port or ZTLP-NS name
+    let (peer_addr, _resolved_node_id) = resolve_target(target, ns_server).await?;
 
     let send_addr = if let Some(relay_str) = relay {
         relay_str.parse()
@@ -1615,9 +1792,8 @@ fn inspect_data_header(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `ztlp ping` — Send ZTLP ping packets and measure RTT
-async fn cmd_ping(target: &str, count: u32, interval: u64, bind: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let target_addr: SocketAddr = target.parse()
-        .map_err(|e| format!("invalid target address '{}': {}", target, e))?;
+async fn cmd_ping(target: &str, ns_server: &Option<String>, count: u32, interval: u64, bind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (target_addr, _) = resolve_target(target, ns_server).await?;
 
     let sock = UdpSocket::bind(bind).await?;
     let local_addr = sock.local_addr()?;
@@ -1931,8 +2107,8 @@ async fn main() {
             cmd_keygen(output, format)
         }
 
-        Commands::Connect { target, key, relay, gateway, session_id, bind, local_forward, service } => {
-            cmd_connect(target, key, relay, gateway, session_id, bind, local_forward, service).await
+        Commands::Connect { target, key, relay, gateway, ns_server, session_id, bind, local_forward, service } => {
+            cmd_connect(target, key, relay, gateway, ns_server, session_id, bind, local_forward, service).await
         }
 
         Commands::Listen { bind, key, gateway, forward, policy } => {
@@ -1970,8 +2146,8 @@ async fn main() {
             cmd_inspect(hex_bytes, file)
         }
 
-        Commands::Ping { target, count, interval, bind } => {
-            cmd_ping(target, *count, *interval, bind).await
+        Commands::Ping { target, ns_server, count, interval, bind } => {
+            cmd_ping(target, ns_server, *count, *interval, bind).await
         }
 
         Commands::Status { target } => {

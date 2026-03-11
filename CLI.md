@@ -91,27 +91,41 @@ ztlp keygen --format hex --output ~/.ztlp/identity.hex
 
 Connect to a ZTLP peer or gateway, perform a Noise_XX handshake, and enter interactive encrypted messaging mode. With `--local-forward`, opens a local TCP listener and tunnels connections through the ZTLP session.
 
+The target can be a raw `ip:port` address or a **ZTLP namespace name** (e.g., `myserver.clients.techrockstars.ztlp`). When a ZTLP name is provided, the CLI automatically queries ZTLP-NS to resolve the endpoint address before connecting.
+
 ```
 ztlp connect <TARGET> [OPTIONS]
 
 Arguments:
-  <TARGET>  Peer address (host:port)
+  <TARGET>  Peer address — either ip:port or a ZTLP name
+            Examples: 192.168.1.10:23095, myserver.clients.techrockstars.ztlp
 
 Options:
   -k, --key <FILE>          Path to identity key file
   -r, --relay <ADDR:PORT>   Route through a relay
   -g, --gateway <ADDR:PORT> Connect via gateway
+      --ns-server <ADDR:PORT>  NS server for name resolution [default: config or 127.0.0.1:5353]
   -s, --session-id <HEX>    Use a specific session ID (24 hex chars)
   -b, --bind <ADDR:PORT>    Local bind address [default: 0.0.0.0:0]
   -L, --local-forward <LOCAL_PORT:REMOTE_HOST:REMOTE_PORT>
                             Forward a local TCP port through the tunnel
+      --service <NAME>      Service name to request from the remote listener
 ```
 
 **Examples:**
 
 ```bash
-# Connect with an ephemeral identity
+# Connect by raw address
 ztlp connect 192.168.1.10:23095
+
+# Connect by ZTLP name (auto-resolves via NS)
+ztlp connect myserver.clients.techrockstars.ztlp
+
+# Connect by ZTLP name with explicit port
+ztlp connect myserver.clients.techrockstars.ztlp:23095
+
+# Connect by name using a specific NS server
+ztlp connect myserver.clients.techrockstars.ztlp --ns-server 10.0.0.1:5353
 
 # Connect with a saved identity
 ztlp connect 10.0.0.1:23095 --key ~/.ztlp/identity.json
@@ -126,6 +140,30 @@ ztlp connect server:23095 --key ~/.ztlp/identity.json -L 2222:127.0.0.1:22
 # Tunnel RDP: local port 3389 → remote 127.0.0.1:3389
 ztlp connect server:23095 --key ~/.ztlp/identity.json -L 3389:127.0.0.1:3389
 # Then: mstsc /v:127.0.0.1
+```
+
+**Name Resolution:**
+
+When a ZTLP name is provided (any target that isn't a valid `ip:port`), the CLI:
+
+1. Queries ZTLP-NS for a **SVC record** (type 2) to get the endpoint address
+2. Queries for a **KEY record** (type 1) to get the peer's NodeID and public key
+3. If no SVC record is found, falls back to DNS resolution
+4. If no port is specified, defaults to **23095** (the standard ZTLP port)
+
+The NS server is determined in priority order:
+1. `--ns-server` flag
+2. `ns_server` in `~/.ztlp/config.toml`
+3. Default: `127.0.0.1:5353`
+
+Example output when resolving a name:
+```
+Resolving myserver.clients.techrockstars.ztlp via ZTLP-NS...
+  NS server: 127.0.0.1:5353
+  ✓ SVC record → 10.42.42.50:23095
+  ✓ KEY record found
+  ℹ NodeID: a1b2c3d4e5f6a7b8...
+  Resolved: 10.42.42.50:23095
 ```
 
 After the handshake completes, the CLI shows:
@@ -424,25 +462,29 @@ File format: one hex-encoded packet per line. Lines starting with `#` or empty l
 
 ### `ztlp ping <target>`
 
-Send ZTLP Ping packets to measure round-trip time.
+Send ZTLP Ping packets to measure round-trip time. Supports ZTLP-NS name resolution (same as `connect`).
 
 ```
 ztlp ping <TARGET> [OPTIONS]
 
 Arguments:
-  <TARGET>  Target address (host:port)
+  <TARGET>  Target address (ip:port or ZTLP name)
 
 Options:
-  -c, --count <N>         Number of pings [default: 4]
-  -i, --interval <MS>     Interval between pings in ms [default: 1000]
-  -b, --bind <ADDR:PORT>  Local bind address [default: 0.0.0.0:0]
+      --ns-server <ADDR:PORT>  NS server for name resolution [default: config or 127.0.0.1:5353]
+  -c, --count <N>              Number of pings [default: 4]
+  -i, --interval <MS>          Interval between pings in ms [default: 1000]
+  -b, --bind <ADDR:PORT>       Local bind address [default: 0.0.0.0:0]
 ```
 
 **Examples:**
 
 ```bash
-# Default: 4 pings, 1s interval
+# Ping by raw address
 ztlp ping 192.168.1.10:23095
+
+# Ping by ZTLP name (auto-resolves via NS)
+ztlp ping myserver.clients.techrockstars.ztlp
 
 # 10 pings, 500ms interval
 ztlp ping 10.0.0.1:23095 --count 10 --interval 500

@@ -37,6 +37,14 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 
+use std::collections::HashMap;
+
+/// Maximum service name length (must fit in 16-byte DstSvcID field).
+pub const MAX_SERVICE_NAME_LEN: usize = 16;
+
+/// The default service name used when no name is specified.
+pub const DEFAULT_SERVICE: &str = "_default";
+
 /// Maximum TCP read buffer size per chunk.
 const TCP_READ_BUF: usize = 16384;
 
@@ -218,6 +226,127 @@ pub async fn run_bridge(
     Ok(())
 }
 
+/// A registry of named services mapped to backend TCP addresses.
+///
+/// Built from `--forward` flags on the listener:
+/// - `--forward ssh:127.0.0.1:22` → named service "ssh"
+/// - `--forward 127.0.0.1:22` → unnamed default service
+/// - Multiple `--forward` flags → multi-service listener
+#[derive(Debug, Clone)]
+pub struct ServiceRegistry {
+    pub services: HashMap<String, SocketAddr>,
+}
+
+impl ServiceRegistry {
+    /// Build a service registry from a list of `--forward` arguments.
+    ///
+    /// Each argument is either:
+    /// - `NAME:HOST:PORT` — a named service
+    /// - `HOST:PORT` — the default (unnamed) service
+    pub fn from_forward_args(args: &[String]) -> Result<Self, String> {
+        let mut services = HashMap::new();
+
+        for arg in args {
+            let (name, addr) = parse_forward_arg(arg)?;
+            if services.contains_key(&name) {
+                return Err(format!("duplicate service name '{}'", name));
+            }
+            services.insert(name, addr);
+        }
+
+        Ok(Self { services })
+    }
+
+    /// Look up a service by the DstSvcID bytes from the handshake header.
+    ///
+    /// If the DstSvcID is all zeros, returns the default service.
+    /// Otherwise, trims trailing zeros and looks up by name.
+    pub fn resolve(&self, dst_svc_id: &[u8; 16]) -> Option<(&str, SocketAddr)> {
+        let name = if dst_svc_id == &[0u8; 16] {
+            DEFAULT_SERVICE.to_string()
+        } else {
+            // Trim trailing null bytes to get the service name
+            let end = dst_svc_id.iter().rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
+        };
+
+        self.services.get(&name).map(|addr| {
+            let key = self.services.keys().find(|k| *k == &name).unwrap();
+            (key.as_str(), *addr)
+        })
+    }
+
+    /// Check if this registry has any services.
+    pub fn is_empty(&self) -> bool {
+        self.services.is_empty()
+    }
+
+    /// Number of registered services.
+    pub fn len(&self) -> usize {
+        self.services.len()
+    }
+}
+
+/// Encode a service name into a 16-byte DstSvcID field.
+///
+/// Pads with zeros if shorter than 16 bytes.
+/// Returns an error if the name is too long.
+pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
+    let bytes = name.as_bytes();
+    if bytes.len() > MAX_SERVICE_NAME_LEN {
+        return Err(format!(
+            "service name '{}' too long ({} bytes, max {})",
+            name, bytes.len(), MAX_SERVICE_NAME_LEN
+        ));
+    }
+    let mut buf = [0u8; 16];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(buf)
+}
+
+/// Parse a single `--forward` argument.
+///
+/// Formats:
+/// - `NAME:HOST:PORT` → (name, address)
+/// - `HOST:PORT` → (DEFAULT_SERVICE, address)
+fn parse_forward_arg(s: &str) -> Result<(String, SocketAddr), String> {
+    // Try to parse as a plain address first (HOST:PORT)
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Ok((DEFAULT_SERVICE.to_string(), addr));
+    }
+
+    // Try NAME:HOST:PORT — split on first ':'
+    let first_colon = s.find(':')
+        .ok_or_else(|| format!("invalid --forward argument '{}'. Expected NAME:HOST:PORT or HOST:PORT", s))?;
+
+    let name = &s[..first_colon];
+    let addr_str = &s[first_colon + 1..];
+
+    // Validate the name
+    if name.is_empty() {
+        return Err(format!("empty service name in '{}'", s));
+    }
+    if name.len() > MAX_SERVICE_NAME_LEN {
+        return Err(format!(
+            "service name '{}' too long ({} bytes, max {})",
+            name, name.len(), MAX_SERVICE_NAME_LEN
+        ));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!(
+            "service name '{}' contains invalid characters (use a-z, 0-9, -, _)",
+            name
+        ));
+    }
+
+    let addr: SocketAddr = addr_str.parse()
+        .map_err(|e| format!("invalid address '{}' in '{}': {}", addr_str, s, e))?;
+
+    Ok((name.to_string(), addr))
+}
+
 /// Parse a forward target string like "127.0.0.1:22" into a SocketAddr.
 pub fn parse_forward_target(s: &str) -> Result<SocketAddr, String> {
     s.parse::<SocketAddr>()
@@ -285,9 +414,140 @@ mod tests {
 
     #[test]
     fn test_parse_local_forward_ipv6() {
-        // IPv6 with brackets
         let (port, remote) = parse_local_forward("8080:[::1]:443").unwrap();
         assert_eq!(port, 8080);
         assert_eq!(remote, "[::1]:443");
+    }
+
+    // --- Service registry tests ---
+
+    #[test]
+    fn test_parse_forward_arg_unnamed() {
+        let (name, addr) = parse_forward_arg("127.0.0.1:22").unwrap();
+        assert_eq!(name, DEFAULT_SERVICE);
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_parse_forward_arg_named() {
+        let (name, addr) = parse_forward_arg("ssh:127.0.0.1:22").unwrap();
+        assert_eq!(name, "ssh");
+        assert_eq!(addr.port(), 22);
+
+        let (name, addr) = parse_forward_arg("rdp:10.0.0.1:3389").unwrap();
+        assert_eq!(name, "rdp");
+        assert_eq!(addr.port(), 3389);
+    }
+
+    #[test]
+    fn test_parse_forward_arg_invalid() {
+        assert!(parse_forward_arg("").is_err());
+        assert!(parse_forward_arg("noport").is_err());
+        assert!(parse_forward_arg(":127.0.0.1:22").is_err()); // empty name
+    }
+
+    #[test]
+    fn test_parse_forward_arg_name_too_long() {
+        let long_name = "a".repeat(17);
+        let arg = format!("{}:127.0.0.1:22", long_name);
+        assert!(parse_forward_arg(&arg).is_err());
+    }
+
+    #[test]
+    fn test_parse_forward_arg_name_invalid_chars() {
+        assert!(parse_forward_arg("my service:127.0.0.1:22").is_err()); // space
+        assert!(parse_forward_arg("my.svc:127.0.0.1:22").is_err()); // dot
+    }
+
+    #[test]
+    fn test_service_registry_single_default() {
+        let reg = ServiceRegistry::from_forward_args(&[
+            "127.0.0.1:22".to_string(),
+        ]).unwrap();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.services.contains_key(DEFAULT_SERVICE));
+    }
+
+    #[test]
+    fn test_service_registry_multi() {
+        let reg = ServiceRegistry::from_forward_args(&[
+            "ssh:127.0.0.1:22".to_string(),
+            "rdp:127.0.0.1:3389".to_string(),
+            "db:127.0.0.1:5432".to_string(),
+        ]).unwrap();
+        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.services["ssh"].port(), 22);
+        assert_eq!(reg.services["rdp"].port(), 3389);
+        assert_eq!(reg.services["db"].port(), 5432);
+    }
+
+    #[test]
+    fn test_service_registry_duplicate_rejected() {
+        let result = ServiceRegistry::from_forward_args(&[
+            "ssh:127.0.0.1:22".to_string(),
+            "ssh:127.0.0.1:2222".to_string(),
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_zero_dst_svc_id() {
+        let reg = ServiceRegistry::from_forward_args(&[
+            "127.0.0.1:22".to_string(), // default
+        ]).unwrap();
+        let zeros = [0u8; 16];
+        let (name, addr) = reg.resolve(&zeros).unwrap();
+        assert_eq!(name, DEFAULT_SERVICE);
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_resolve_named_service() {
+        let reg = ServiceRegistry::from_forward_args(&[
+            "ssh:127.0.0.1:22".to_string(),
+            "rdp:127.0.0.1:3389".to_string(),
+        ]).unwrap();
+
+        let mut svc_id = [0u8; 16];
+        svc_id[..3].copy_from_slice(b"ssh");
+        let (name, addr) = reg.resolve(&svc_id).unwrap();
+        assert_eq!(name, "ssh");
+        assert_eq!(addr.port(), 22);
+
+        let mut svc_id2 = [0u8; 16];
+        svc_id2[..3].copy_from_slice(b"rdp");
+        let (name, addr) = reg.resolve(&svc_id2).unwrap();
+        assert_eq!(name, "rdp");
+        assert_eq!(addr.port(), 3389);
+    }
+
+    #[test]
+    fn test_resolve_unknown_service() {
+        let reg = ServiceRegistry::from_forward_args(&[
+            "ssh:127.0.0.1:22".to_string(),
+        ]).unwrap();
+
+        let mut svc_id = [0u8; 16];
+        svc_id[..5].copy_from_slice(b"mysql");
+        assert!(reg.resolve(&svc_id).is_none());
+    }
+
+    #[test]
+    fn test_encode_service_name() {
+        let buf = encode_service_name("ssh").unwrap();
+        assert_eq!(&buf[..3], b"ssh");
+        assert_eq!(&buf[3..], &[0u8; 13]);
+
+        let buf = encode_service_name("rdp").unwrap();
+        assert_eq!(&buf[..3], b"rdp");
+
+        // Exactly 16 bytes
+        let name16 = "a".repeat(16);
+        let buf = encode_service_name(&name16).unwrap();
+        assert_eq!(&buf, name16.as_bytes());
+
+        // Too long
+        let name17 = "a".repeat(17);
+        assert!(encode_service_name(&name17).is_err());
     }
 }

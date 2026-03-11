@@ -186,6 +186,11 @@ enum Commands {
         /// (LOCAL_PORT:REMOTE_HOST:REMOTE_PORT, e.g. 2222:127.0.0.1:22)
         #[arg(short = 'L', long)]
         local_forward: Option<String>,
+
+        /// Service name to request from the remote listener
+        /// (matches a --forward NAME:HOST:PORT on the server)
+        #[arg(long)]
+        service: Option<String>,
     },
 
     /// Listen for incoming ZTLP connections
@@ -211,10 +216,11 @@ enum Commands {
         #[arg(long)]
         gateway: bool,
 
-        /// Forward to a local TCP service after session established
-        /// (HOST:PORT, e.g. 127.0.0.1:22)
+        /// Forward to local TCP services after session established.
+        /// Use NAME:HOST:PORT for named services, or HOST:PORT for default.
+        /// Repeatable: --forward ssh:127.0.0.1:22 --forward rdp:127.0.0.1:3389
         #[arg(short, long)]
-        forward: Option<String>,
+        forward: Vec<String>,
     },
 
     /// Manage ZTLP relay nodes
@@ -675,6 +681,7 @@ async fn cmd_connect(
     session_id_hex: &Option<String>,
     bind: &str,
     local_forward: &Option<String>,
+    service: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
     let peer_addr: SocketAddr = target.parse()
@@ -719,6 +726,11 @@ async fn cmd_connect(
     hello_hdr.session_id = session_id;
     hello_hdr.src_node_id = *identity.node_id.as_bytes();
     hello_hdr.payload_len = msg1.len() as u16;
+    // Set DstSvcID if a service is requested
+    if let Some(svc_name) = service {
+        hello_hdr.dst_svc_id = tunnel::encode_service_name(svc_name)?;
+        eprintln!("  {} {}", c_cyan("Service:"), svc_name);
+    }
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;
@@ -818,7 +830,7 @@ async fn cmd_listen(
     bind: &str,
     key: &Option<PathBuf>,
     _gateway_mode: bool,
-    forward: &Option<String>,
+    forward: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -893,11 +905,30 @@ async fn cmd_listen(
     eprintln!();
 
     // Branch: tunnel mode or interactive mode
-    if let Some(fwd) = forward {
-        let forward_addr = tunnel::parse_forward_target(fwd)?;
+    if !forward.is_empty() {
+        let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
+
+        // Resolve which backend this client wants
+        let (svc_name, forward_addr) = registry.resolve(&recv1_header.dst_svc_id)
+            .ok_or_else(|| {
+                let requested = String::from_utf8_lossy(
+                    &recv1_header.dst_svc_id[..recv1_header.dst_svc_id.iter()
+                        .rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0)]
+                ).to_string();
+                if requested.is_empty() {
+                    "client requested default service but no unnamed --forward was configured".to_string()
+                } else {
+                    format!("client requested unknown service '{}'. Available: {:?}",
+                        requested, registry.services.keys().collect::<Vec<_>>())
+                }
+            })?;
 
         eprintln!("--- {} ---", c_bold("ZTLP tunnel active"));
-        eprintln!("  {} {}", c_cyan("Forwarding to:"), forward_addr);
+        if registry.len() > 1 {
+            eprintln!("  {} {} ({})", c_cyan("Service:"), svc_name, forward_addr);
+        } else {
+            eprintln!("  {} {}", c_cyan("Forwarding to:"), forward_addr);
+        }
         eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
 
         // Connect to the local TCP service
@@ -1859,8 +1890,8 @@ async fn main() {
             cmd_keygen(output, format)
         }
 
-        Commands::Connect { target, key, relay, gateway, session_id, bind, local_forward } => {
-            cmd_connect(target, key, relay, gateway, session_id, bind, local_forward).await
+        Commands::Connect { target, key, relay, gateway, session_id, bind, local_forward, service } => {
+            cmd_connect(target, key, relay, gateway, session_id, bind, local_forward, service).await
         }
 
         Commands::Listen { bind, key, gateway, forward } => {

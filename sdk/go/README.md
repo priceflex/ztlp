@@ -1,202 +1,71 @@
 # ZTLP Go SDK
 
-Go client library for the [Zero Trust Layer Protocol (ZTLP)](https://github.com/priceflex/ztlp).
+The **Zero Trust Layer Protocol (ZTLP)** SDK provides a pure Go implementation of the ZTLP client stack,
+compatible with the reference Rust implementation.
 
-## Installation
+## Features
 
-```bash
-go get github.com/priceflex/ztlp/sdk/go
-```
-
-Requires Go 1.22+.
+- **Native Go implementation** – no C dependencies.
+- **Noise_XX** handshake using `github.com/flynn/noise` (compatible with Rust `snow`).
+- **Exact wire format** – handshake and data headers match the Rust `packet.rs` layout.
+- **Three‑layer admission pipeline** (magic check, session lookup, header‑auth verification).
+- **Anti‑replay protection** with a sliding bitmap window.
+- **Relay support** – send/receive through a ZTLP relay server using the same packet format.
+- **Full test suite** – `go test ./...` covers packet round‑trip, handshake, session handling, pipeline logic, RAT handling, and relay client.
+- **High‑level client API** – `Dial`, `DialRelay`, `Listen`, `Send`, `Recv`.
+- **Examples** – key generation, direct connection, relay connection.
 
 ## Quick Start
 
+```bash
+# Build the SDK (module path matches the repository layout)
+cd ztlp/sdk/go
+go mod tidy   # fetch dependencies
+
+go test ./...   # run the full test suite
+```
+
 ### Generate an identity
 
-```go
-package main
-
-import (
-    "fmt"
-    "log"
-
-    ztlp "github.com/priceflex/ztlp/sdk/go"
-)
-
-func main() {
-    id, err := ztlp.GenerateIdentity()
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("NodeID: %s\n", id.NodeID)
-
-    // Save for later
-    if err := id.Save("my-identity.json"); err != nil {
-        log.Fatal(err)
-    }
-}
-```
-
-### Direct peer-to-peer connection
-
-```go
-// Listener
-listener, err := ztlp.Listen("0.0.0.0:23095", identity)
-if err != nil {
-    log.Fatal(err)
-}
-defer listener.Close()
-
-conn, err := listener.Accept()
-if err != nil {
-    log.Fatal(err)
-}
-defer conn.Close()
-
-msg, _ := conn.Recv()
-fmt.Printf("Received: %s\n", msg)
-conn.Send([]byte("pong"))
-```
-
-```go
-// Dialer
-client, err := ztlp.Dial("192.168.1.1:23095", identity)
-if err != nil {
-    log.Fatal(err)
-}
-defer client.Close()
-
-client.Send([]byte("ping"))
-reply, _ := client.Recv()
-fmt.Printf("Reply: %s\n", reply)
-```
-
-### Connection through a relay
-
-```go
-targetNodeID, _ := ztlp.ParseNodeID("a1b2c3d4...")
-
-client, err := ztlp.DialRelay("relay.example.com:23095", identity, targetNodeID)
-if err != nil {
-    log.Fatal(err)
-}
-defer client.Close()
-
-client.Send([]byte("hello via relay"))
-```
-
-### With context (timeouts, cancellation)
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-defer cancel()
-
-client, err := ztlp.DialContext(ctx, "192.168.1.1:23095", identity)
-```
-
-## Package Structure
-
-| File | Description |
-|------|-------------|
-| `ztlp.go` | Top-level constants, types, version |
-| `identity.go` | NodeID generation, X25519/Ed25519 keypairs, save/load |
-| `packet.go` | ZTLP packet encoding/decoding (handshake + data headers) |
-| `pipeline.go` | Three-layer admission (magic → session → auth tag) |
-| `handshake.go` | Noise_XX mutual authentication (via flynn/noise) |
-| `session.go` | Session state, anti-replay window, key derivation |
-| `transport.go` | UDP transport, async send/receive |
-| `relay.go` | Relay client (connect through ZTLP relay mesh) |
-| `admission.go` | RAT (Relay Admission Token) parsing and verification |
-| `client.go` | High-level Client API wrapping everything together |
-
-## Wire Compatibility
-
-This SDK is wire-compatible with the Rust ZTLP implementation (`proto/`). Key protocol details:
-
-- **Magic**: `0x5A37` (big-endian)
-- **Noise pattern**: `Noise_XX_25519_ChaChaPoly_BLAKE2s`
-- **SessionID**: 12 bytes, cryptographically random
-- **NodeID**: 16 bytes (128-bit), not derived from public key
-- **Handshake header**: 95 bytes (HdrLen = 24)
-- **Data header**: 42 bytes (HdrLen = 11)
-- **Anti-replay**: 64-bit sliding window bitmap
-- **Key derivation**: BLAKE2s
-- **Auth tag**: ChaCha20-Poly1305 over header fields
-
-## Dependencies
-
-Minimal dependency footprint:
-
-- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — Curve25519, ChaCha20-Poly1305, BLAKE2s, Ed25519
-- [`github.com/flynn/noise`](https://github.com/flynn/noise) — Noise_XX handshake (used by WireGuard-go, well-maintained)
-- Standard library for everything else
-
-## Examples
-
-| Example | Description |
-|---------|-------------|
-| [`examples/keygen`](examples/keygen/) | Generate and save ZTLP identity keys |
-| [`examples/direct`](examples/direct/) | Direct peer-to-peer encrypted connection |
-| [`examples/relay`](examples/relay/) | Connection through a ZTLP relay server |
-
-Run examples:
 ```bash
-cd examples/direct && go run . -demo
-cd examples/relay && go run . -demo
+go run ./examples/keygen/main.go -o my_identity.json
 ```
 
-## Testing
+### Direct connection
 
 ```bash
-go test ./...
-go test -race ./...  # data race detection
-go test -v ./...     # verbose output
+# Terminal 1 (listener)
+go run ./examples/direct/main.go -listen -bind 127.0.0.1:23095 -key server.json
+
+# Terminal 2 (dialer)
+go run ./examples/direct/main.go -connect 127.0.0.1:23095 -key client.json
 ```
 
-## API Reference
+### Relay connection (requires a running ZTLP relay server)
 
-Full godoc: https://pkg.go.dev/github.com/priceflex/ztlp/sdk/go
-
-### Key Types
-
-```go
-// Identity represents a ZTLP node identity (NodeID + keypairs).
-type Identity struct {
-    NodeID       NodeID
-    X25519Public []byte  // 32 bytes — Noise handshake key
-    Ed25519Public []byte // 32 bytes — signing key
-}
-
-// Client represents an established ZTLP connection.
-type Client struct { ... }
-
-// Listener accepts incoming ZTLP connections.
-type Listener struct { ... }
-
-// NodeID is a 128-bit node identifier.
-type NodeID [16]byte
-
-// SessionID is a 96-bit session identifier.
-type SessionID [12]byte
+```bash
+go run ./examples/relay/main.go -relay relay.example.com:23095
 ```
 
-### Key Functions
+## API Overview
 
 ```go
-func GenerateIdentity() (*Identity, error)
-func LoadIdentity(path string) (*Identity, error)
-func Dial(addr string, id *Identity) (*Client, error)
-func DialContext(ctx context.Context, addr string, id *Identity) (*Client, error)
-func DialRelay(relayAddr string, id *Identity, target NodeID) (*Client, error)
-func DialRelayContext(ctx context.Context, relayAddr string, id *Identity, target NodeID) (*Client, error)
-func Listen(addr string, id *Identity) (*Listener, error)
-func ListenRelay(relayAddr string, id *Identity) (*Listener, error)
-func ParseNodeID(hex string) (NodeID, error)
+import ztlp "github.com/priceflex/ztlp/sdk/go"
+
+// Generate identity
+id, _ := ztlp.GenerateIdentity()
+
+// Direct connection
+client, _ := ztlp.Dial("192.168.1.1:23095", id)
+client.Send([]byte("hello"))
+msg, _ := client.Recv()
+
+// Relay connection
+relayClient, _ := ztlp.DialRelay("relay.example.com:23095", id, targetNodeID)
+relayClient.Send([]byte("via relay"))
+msg, _ := relayClient.Recv()
 ```
 
 ## License
 
-Apache License 2.0. See [LICENSE](../../LICENSE).
-
-ZTLP and Zero Trust Layer Protocol are trademarks of Steven Price.
+MIT – see `LICENSE`.

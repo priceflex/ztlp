@@ -18,7 +18,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
+#[cfg(target_os = "linux")]
+use tracing::trace;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -336,11 +338,22 @@ pub fn raw_to_socket_addr(
     }
 }
 
-/// Non-Linux stub.
-#[cfg(not(target_os = "linux"))]
+/// Non-Linux/Unix stub — these libc socket types don't exist on Windows,
+/// so we use opaque byte slices. The function is never called on non-Linux
+/// but must compile on all platforms.
+#[cfg(all(not(target_os = "linux"), unix))]
 pub fn raw_to_socket_addr(
     _storage: &libc::sockaddr_storage,
     _len: libc::socklen_t,
+) -> Option<SocketAddr> {
+    None
+}
+
+/// Windows stub — libc::sockaddr_storage and socklen_t don't exist on Windows.
+#[cfg(not(unix))]
+pub fn raw_to_socket_addr(
+    _storage: &[u8],
+    _len: u32,
 ) -> Option<SocketAddr> {
     None
 }

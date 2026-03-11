@@ -2,11 +2,16 @@ defmodule ZtlpRelay.LogFormatter do
   @moduledoc """
   Custom Logger formatter for the ZTLP Relay.
 
-  Supports two output formats:
+  Supports three output formats:
 
   - `:structured` (production) — key=value pairs for machine parsing:
     ```
     2026-03-11T14:30:00.000Z level=info component=relay event=session_opened session_id=abc123
+    ```
+
+  - `:json` (production) — JSON lines for log aggregation (ELK, Loki, Datadog):
+    ```json
+    {"timestamp":"2026-03-11T14:30:00.000Z","level":"info","component":"relay","event":"session_opened","session_id":"abc123","msg":"Session opened"}
     ```
 
   - `:console` (development) — human-readable:
@@ -18,6 +23,7 @@ defmodule ZtlpRelay.LogFormatter do
 
   Set via environment variable `ZTLP_LOG_FORMAT`:
   - `structured` → structured format
+  - `json` → JSON lines format
   - `console` → console format (default)
 
   Set log level via `ZTLP_LOG_LEVEL`:
@@ -36,6 +42,7 @@ defmodule ZtlpRelay.LogFormatter do
   def format(level, message, timestamp, metadata) do
     case log_format() do
       :structured -> format_structured(level, message, timestamp, metadata)
+      :json -> format_json(level, message, timestamp, metadata)
       :console -> format_console(level, message, timestamp, metadata)
     end
   rescue
@@ -62,6 +69,24 @@ defmodule ZtlpRelay.LogFormatter do
     [Enum.join(parts, " "), "\n"]
   end
 
+  # ── JSON format ───────────────────────────────────────────────────────
+
+  defp format_json(level, message, timestamp, metadata) do
+    ts = format_iso8601(timestamp)
+    msg = IO.chardata_to_string(message)
+
+    fields = [{"timestamp", ts}, {"level", Atom.to_string(level)}, {"component", "relay"}]
+
+    meta_fields = metadata
+    |> Keyword.drop([:trace, :ansi_color, :erl_level])
+    |> Enum.map(fn {k, v} -> {Atom.to_string(k), json_value(v)} end)
+
+    fields = fields ++ meta_fields
+    fields = if msg != "", do: fields ++ [{"msg", msg}], else: fields
+
+    [encode_json_object(fields), "\n"]
+  end
+
   # ── Console format ────────────────────────────────────────────────────
 
   defp format_console(level, message, timestamp, _metadata) do
@@ -71,9 +96,11 @@ defmodule ZtlpRelay.LogFormatter do
 
   # ── Helpers ───────────────────────────────────────────────────────────
 
-  defp log_format do
+  @doc false
+  def log_format do
     case System.get_env("ZTLP_LOG_FORMAT") do
       "structured" -> :structured
+      "json" -> :json
       _ -> :console
     end
   end
@@ -104,4 +131,36 @@ defmodule ZtlpRelay.LogFormatter do
       s
     end
   end
+
+  # ── JSON encoding (no external deps) ─────────────────────────────────
+
+  @doc false
+  def encode_json_object(pairs) do
+    inner = pairs
+    |> Enum.map(fn {k, v} -> [json_encode_string(k), ":", json_encode(v)] end)
+    |> Enum.intersperse(",")
+    ["{", inner, "}"]
+  end
+
+  defp json_encode(v) when is_binary(v), do: json_encode_string(v)
+  defp json_encode(v) when is_atom(v), do: json_encode_string(Atom.to_string(v))
+  defp json_encode(v) when is_integer(v), do: Integer.to_string(v)
+  defp json_encode(v) when is_float(v), do: Float.to_string(v)
+  defp json_encode(v), do: json_encode_string(inspect(v))
+
+  defp json_encode_string(s) do
+    escaped = s
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
+    |> String.replace("\n", "\\n")
+    |> String.replace("\r", "\\r")
+    |> String.replace("\t", "\\t")
+    ["\"", escaped, "\""]
+  end
+
+  defp json_value(v) when is_binary(v), do: v
+  defp json_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp json_value(v) when is_integer(v), do: v
+  defp json_value(v) when is_float(v), do: v
+  defp json_value(v), do: inspect(v)
 end

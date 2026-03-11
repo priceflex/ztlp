@@ -1,16 +1,37 @@
-defmodule ZtlpGateway.LogFormatter do
+defmodule ZtlpNs.LogFormatter do
   @moduledoc """
-  Custom Logger formatter for the ZTLP Gateway.
+  Custom Logger formatter for the ZTLP Namespace Server.
 
   Supports three output formats:
 
-  - `:structured` — key=value pairs for machine parsing
-  - `:json` — JSON lines for log aggregation (ELK, Loki, Datadog)
-  - `:console` — human-readable (default)
+  - `:structured` (production) — key=value pairs for machine parsing:
+    ```
+    2026-03-11T14:30:00.000Z level=info component=ns event=record_created name=web.example.ztlp
+    ```
 
-  Set via `ZTLP_LOG_FORMAT=structured|json|console` env var.
+  - `:json` (production) — JSON lines for log aggregation (ELK, Loki, Datadog):
+    ```json
+    {"timestamp":"2026-03-11T14:30:00.000Z","level":"info","component":"ns","event":"record_created","name":"web.example.ztlp","msg":"Record created"}
+    ```
+
+  - `:console` (development) — human-readable:
+    ```
+    14:30:00.000 [info] Record created: web.example.ztlp
+    ```
+
+  ## Configuration
+
+  Set via environment variable `ZTLP_LOG_FORMAT`:
+  - `structured` → structured format
+  - `json` → JSON lines format
+  - `console` → console format (default)
   """
 
+  @doc """
+  Logger formatter callback.
+
+  Called by the Elixir Logger backend for each log message.
+  """
   @spec format(Logger.level(), Logger.message(), Logger.Formatter.time(), keyword()) :: IO.chardata()
   def format(level, message, timestamp, metadata) do
     case log_format() do
@@ -26,16 +47,19 @@ defmodule ZtlpGateway.LogFormatter do
 
   defp format_structured(level, message, timestamp, metadata) do
     ts = format_iso8601(timestamp)
-    base = "#{ts} level=#{level} component=gateway"
+    base = "#{ts} level=#{level} component=ns"
+
     meta_str = metadata
     |> Keyword.drop([:trace, :ansi_color, :erl_level])
-    |> Enum.map(fn {k, v} -> "#{k}=#{inspect(v)}" end)
+    |> Enum.map(fn {k, v} -> "#{k}=#{format_value(v)}" end)
     |> Enum.join(" ")
 
     msg = IO.chardata_to_string(message)
+
     parts = [base]
     parts = if meta_str != "", do: parts ++ [meta_str], else: parts
-    parts = if msg != "", do: parts ++ ["msg=\"#{msg}\""], else: parts
+    parts = if msg != "", do: parts ++ ["msg=#{quote_if_needed(msg)}"], else: parts
+
     [Enum.join(parts, " "), "\n"]
   end
 
@@ -45,7 +69,7 @@ defmodule ZtlpGateway.LogFormatter do
     ts = format_iso8601(timestamp)
     msg = IO.chardata_to_string(message)
 
-    fields = [{"timestamp", ts}, {"level", Atom.to_string(level)}, {"component", "gateway"}]
+    fields = [{"timestamp", ts}, {"level", Atom.to_string(level)}, {"component", "ns"}]
 
     meta_fields = metadata
     |> Keyword.drop([:trace, :ansi_color, :erl_level])
@@ -85,6 +109,21 @@ defmodule ZtlpGateway.LogFormatter do
   defp format_time_only({_date, {h, m, s, ms}}) do
     :io_lib.format("~2..0B:~2..0B:~2..0B.~3..0B", [h, m, s, ms])
     |> IO.chardata_to_string()
+  end
+
+  defp format_value(v) when is_binary(v), do: quote_if_needed(v)
+  defp format_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp format_value(v) when is_integer(v), do: Integer.to_string(v)
+  defp format_value(v) when is_float(v), do: Float.to_string(v)
+  defp format_value(v) when is_tuple(v), do: inspect(v)
+  defp format_value(v), do: inspect(v)
+
+  defp quote_if_needed(s) do
+    if String.contains?(s, [" ", "=", "\""]) do
+      "\"#{String.replace(s, "\"", "\\\"")}\""
+    else
+      s
+    end
   end
 
   # ── JSON encoding (no external deps) ─────────────────────────────────

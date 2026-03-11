@@ -33,9 +33,12 @@ defmodule ZtlpGateway.CircuitBreaker do
   use GenServer
 
   @table __MODULE__
+  @metrics_table :ztlp_gateway_circuit_breaker_metrics
 
   # ETS record: {backend_name, state, consecutive_failures, last_failure_at, half_open_allowed}
   # state: :closed | :open | :half_open
+
+  # Metrics ETS record: {backend_name, trips, successes, failures}
 
   # ── Public API ────────────────────────────────────────────────────────
 
@@ -97,6 +100,12 @@ defmodule ZtlpGateway.CircuitBreaker do
   @spec record_success(String.t()) :: :ok
   def record_success(backend) do
     :ets.insert(@table, {backend, :closed, 0, 0, false})
+    try do
+      ensure_metrics_table()
+      :ets.update_counter(@metrics_table, backend, {3, 1}, {backend, 0, 0, 0})
+    rescue
+      ArgumentError -> :ok
+    end
     :ok
   end
 
@@ -111,27 +120,43 @@ defmodule ZtlpGateway.CircuitBreaker do
     threshold = failure_threshold()
     now = System.monotonic_time(:millisecond)
 
-    case :ets.lookup(@table, backend) do
+    tripped? = case :ets.lookup(@table, backend) do
       [] ->
         # First failure for this backend
         if threshold <= 1 do
           :ets.insert(@table, {backend, :open, 1, now, false})
+          true
         else
           :ets.insert(@table, {backend, :closed, 1, now, false})
+          false
         end
 
       [{^backend, :half_open, failures, _last_fail, _}] ->
         # Failed during half-open probe — re-open
         :ets.insert(@table, {backend, :open, failures + 1, now, false})
+        true
 
       [{^backend, state, failures, _last_fail, _}] ->
         new_failures = failures + 1
 
         if new_failures >= threshold do
           :ets.insert(@table, {backend, :open, new_failures, now, false})
+          state != :open  # only count as new trip if wasn't already open
         else
           :ets.insert(@table, {backend, state, new_failures, now, false})
+          false
         end
+    end
+
+    # Update metrics counters (best-effort, never crash the hot path)
+    try do
+      ensure_metrics_table()
+      :ets.update_counter(@metrics_table, backend, {4, 1}, {backend, 0, 0, 0})
+      if tripped? do
+        :ets.update_counter(@metrics_table, backend, {2, 1}, {backend, 0, 0, 0})
+      end
+    rescue
+      ArgumentError -> :ok
     end
 
     :ok
@@ -156,6 +181,49 @@ defmodule ZtlpGateway.CircuitBreaker do
     case :ets.lookup(@table, backend) do
       [{^backend, state, failures, _last_fail, _}] -> {state, failures}
       [] -> :unknown
+    end
+  end
+
+  @doc """
+  Get metrics for all known backends.
+
+  Returns a list of maps with per-backend stats:
+  `[%{backend: name, state: atom, trips: int, successes: int, failures: int}]`
+  """
+  @spec metrics() :: [%{backend: String.t(), state: atom(), trips: non_neg_integer(), successes: non_neg_integer(), failures: non_neg_integer()}]
+  def metrics do
+    ensure_metrics_table()
+
+    # Collect all known backends from both state and metrics tables
+    state_backends = :ets.tab2list(@table) |> Enum.map(fn {b, _, _, _, _} -> b end)
+    metrics_backends = :ets.tab2list(@metrics_table) |> Enum.map(fn {b, _, _, _} -> b end)
+
+    all_backends = Enum.uniq(state_backends ++ metrics_backends)
+
+    Enum.map(all_backends, fn backend ->
+      state = case :ets.lookup(@table, backend) do
+        [{^backend, s, _, _, _}] -> s
+        [] -> :closed
+      end
+
+      {trips, successes, failures} = case :ets.lookup(@metrics_table, backend) do
+        [{^backend, t, s, f}] -> {t, s, f}
+        [] -> {0, 0, 0}
+      end
+
+      %{backend: backend, state: state, trips: trips, successes: successes, failures: failures}
+    end)
+  end
+
+  defp ensure_metrics_table do
+    case :ets.whereis(@metrics_table) do
+      :undefined ->
+        try do
+          :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+        rescue
+          ArgumentError -> :ok
+        end
+      _tid -> :ok
     end
   end
 

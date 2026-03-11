@@ -27,6 +27,7 @@ defmodule ZtlpRelay.Backpressure do
 
   @table __MODULE__
   @load_key :current_load
+  @rejections_key :rejections
 
   # ── Public API ────────────────────────────────────────────────────────
 
@@ -72,6 +73,40 @@ defmodule ZtlpRelay.Backpressure do
       [{@load_key, ratio}] -> ratio
       [] -> 0.0
     end
+  end
+
+  @doc """
+  Record a rejected session due to backpressure.
+
+  Atomically increments the rejection counter.
+  """
+  @spec record_rejection() :: :ok
+  def record_rejection do
+    :ets.update_counter(@table, @rejections_key, {2, 1}, {@rejections_key, 0})
+    :ok
+  end
+
+  @doc """
+  Get metrics for Prometheus export.
+
+  Returns a map with:
+  - `:state` — `:ok | :soft | :hard`
+  - `:load_ratio` — current load as float 0.0–1.0
+  - `:rejections` — total rejected sessions (counter)
+  """
+  @spec metrics() :: %{state: :ok | :soft | :hard, load_ratio: float(), rejections: non_neg_integer()}
+  def metrics do
+    state = case check() do
+      :ok -> :ok
+      {:backpressure, level} -> level
+    end
+
+    rejections = case :ets.lookup(@table, @rejections_key) do
+      [{@rejections_key, n}] -> n
+      [] -> 0
+    end
+
+    %{state: state, load_ratio: current_load(), rejections: rejections}
   end
 
   @doc """

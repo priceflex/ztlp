@@ -29,6 +29,7 @@ defmodule ZtlpNs.RateLimiter do
 
   @table __MODULE__
   @cleanup_interval 60_000
+  @metrics_table :ztlp_ns_ratelimit_metrics
 
   # ETS record: {ip_tuple, tokens_remaining, last_access_monotonic_ms}
 
@@ -47,7 +48,7 @@ defmodule ZtlpNs.RateLimiter do
     rate = queries_per_second()
     burst = burst_size()
 
-    case :ets.lookup(@table, ip) do
+    result = case :ets.lookup(@table, ip) do
       [] ->
         # First query from this IP — create bucket with burst - 1 tokens
         :ets.insert(@table, {ip, burst - 1, now})
@@ -68,6 +69,19 @@ defmodule ZtlpNs.RateLimiter do
           :rate_limited
         end
     end
+
+    # Track metrics (best-effort, never crash the hot path)
+    try do
+      ensure_metrics_table()
+      case result do
+        :ok -> :ets.update_counter(@metrics_table, :allowed, {2, 1}, {:allowed, 0})
+        :rate_limited -> :ets.update_counter(@metrics_table, :rejected, {2, 1}, {:rejected, 0})
+      end
+    rescue
+      ArgumentError -> :ok
+    end
+
+    result
   end
 
   @doc """
@@ -88,6 +102,40 @@ defmodule ZtlpNs.RateLimiter do
   def reset do
     :ets.delete_all_objects(@table)
     :ok
+  end
+
+  @doc """
+  Get metrics for Prometheus export.
+
+  Returns `%{allowed: int, rejected: int}`.
+  """
+  @spec metrics() :: %{allowed: non_neg_integer(), rejected: non_neg_integer()}
+  def metrics do
+    ensure_metrics_table()
+
+    get_counter = fn key ->
+      case :ets.lookup(@metrics_table, key) do
+        [{^key, n}] -> n
+        [] -> 0
+      end
+    end
+
+    %{
+      allowed: get_counter.(:allowed),
+      rejected: get_counter.(:rejected)
+    }
+  end
+
+  defp ensure_metrics_table do
+    case :ets.whereis(@metrics_table) do
+      :undefined ->
+        try do
+          :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+        rescue
+          ArgumentError -> :ok
+        end
+      _tid -> :ok
+    end
   end
 
   # ── Configuration ─────────────────────────────────────────────────────
@@ -117,6 +165,12 @@ defmodule ZtlpNs.RateLimiter do
       read_concurrency: true,
       write_concurrency: true
     ])
+    # Create metrics table eagerly, owned by this GenServer
+    try do
+      :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+    rescue
+      ArgumentError -> :ok
+    end
     schedule_cleanup()
     {:ok, %{table: table}}
   end

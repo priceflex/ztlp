@@ -258,16 +258,134 @@
       "fieldConfig": {"defaults": {"unit": "s"}}
     },
     {
-      "title": "System",
+      "title": "Backpressure & Circuit Breaker",
       "type": "row",
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33},
+      "collapsed": false
+    },
+    {
+      "title": "Backpressure State",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 34},
+      "targets": [
+        {"expr": "ztlp_relay_backpressure_state{instance=~\"$instance\"}", "legendFormat": "{{instance}} state"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 30}, "mappings": [{"type": "value", "options": {"0": {"text": "OK"}, "1": {"text": "Soft"}, "2": {"text": "Hard"}}}], "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}]}}}
+    },
+    {
+      "title": "Backpressure Load & Rejections",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 34},
+      "targets": [
+        {"expr": "ztlp_relay_backpressure_load_ratio{instance=~\"$instance\"}", "legendFormat": "load ratio"},
+        {"expr": "rate(ztlp_relay_backpressure_rejections_total{instance=~\"$instance\"}[5m])", "legendFormat": "rejections/s"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 10}}}
+    },
+    {
+      "title": "Circuit Breaker State (per backend)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 34},
+      "targets": [
+        {"expr": "ztlp_gateway_circuit_breaker_state{instance=~\"$instance\"}", "legendFormat": "{{backend}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 30}, "mappings": [{"type": "value", "options": {"0": {"text": "Closed"}, "1": {"text": "Open"}, "2": {"text": "Half-Open"}}}], "color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}, {"color": "yellow", "value": 2}]}}}
+    },
+    {
+      "title": "Anti-Entropy & Replication",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 40},
+      "collapsed": false
+    },
+    {
+      "title": "Anti-Entropy Sync Rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 41},
+      "targets": [
+        {"expr": "rate(ztlp_ns_antientropy_syncs_total{instance=~\"$instance\"}[5m])", "legendFormat": "syncs/s"},
+        {"expr": "rate(ztlp_ns_antientropy_syncs_needed_total{instance=~\"$instance\"}[5m])", "legendFormat": "needed/s"},
+        {"expr": "rate(ztlp_ns_antientropy_records_merged_total{instance=~\"$instance\"}[5m])", "legendFormat": "merged/s"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 15}}}
+    },
+    {
+      "title": "Replication Success/Failure Rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 41},
+      "targets": [
+        {"expr": "rate(ztlp_ns_replication_push_successes_total{instance=~\"$instance\"}[5m])", "legendFormat": "success/s"},
+        {"expr": "rate(ztlp_ns_replication_push_failures_total{instance=~\"$instance\"}[5m])", "legendFormat": "failure/s"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 15}}}
+    },
+    {
+      "title": "Rate Limiter Rejection Rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 41},
+      "targets": [
+        {"expr": "rate(ztlp_ns_ratelimit_allowed_total{instance=~\"$instance\"}[5m])", "legendFormat": "allowed/s"},
+        {"expr": "rate(ztlp_ns_ratelimit_rejected_total{instance=~\"$instance\"}[5m])", "legendFormat": "rejected/s"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 15}}}
+    },
+    {
+      "title": "Cluster & Auth",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 47},
+      "collapsed": false
+    },
+    {
+      "title": "Cluster Members",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 48},
+      "targets": [
+        {"expr": "ztlp_ns_cluster_members{instance=~\"$instance\"}", "legendFormat": "total"},
+        {"expr": "ztlp_ns_cluster_running_members{instance=~\"$instance\"}", "legendFormat": "running"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}]}}}
+    },
+    {
+      "title": "Component Auth Failures/sec",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 10, "x": 6, "y": 48},
+      "targets": [
+        {"expr": "rate(ztlp_relay_component_auth_failures_total{instance=~\"$instance\"}[5m])", "legendFormat": "relay"},
+        {"expr": "rate(ztlp_gateway_component_auth_failures_total{instance=~\"$instance\"}[5m])", "legendFormat": "gateway"},
+        {"expr": "rate(ztlp_ns_component_auth_failures_total{instance=~\"$instance\"}[5m])", "legendFormat": "ns"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "red", "mode": "fixed"}, "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "title": "Component Auth Success/sec",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 48},
+      "targets": [
+        {"expr": "rate(ztlp_relay_component_auth_successes_total{instance=~\"$instance\"}[5m])", "legendFormat": "relay"},
+        {"expr": "rate(ztlp_gateway_component_auth_successes_total{instance=~\"$instance\"}[5m])", "legendFormat": "gateway"},
+        {"expr": "rate(ztlp_ns_component_auth_successes_total{instance=~\"$instance\"}[5m])", "legendFormat": "ns"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}, "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "title": "System",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
       "collapsed": false
     },
     {
       "title": "BEAM Memory",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 34},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 55},
       "targets": [
         {"expr": "beam_memory_bytes{kind=\"total\",instance=~\"$instance\"}", "legendFormat": "{{instance}} total"},
         {"expr": "beam_memory_bytes{kind=\"processes\",instance=~\"$instance\"}", "legendFormat": "{{instance}} processes"},
@@ -279,7 +397,7 @@
       "title": "BEAM Processes",
       "type": "timeseries",
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 34},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 55},
       "targets": [
         {"expr": "beam_process_count{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]

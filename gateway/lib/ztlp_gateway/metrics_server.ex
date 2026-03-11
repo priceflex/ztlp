@@ -128,8 +128,89 @@ defmodule ZtlpGateway.MetricsServer do
       "# HELP ztlp_gateway_backend_errors_total Backend errors\n",
       "# TYPE ztlp_gateway_backend_errors_total counter\n",
       "ztlp_gateway_backend_errors_total #{stats.backend_errors}\n\n",
+      circuit_breaker_metrics(),
+      gateway_component_auth_metrics(),
       beam_metrics()
     ] |> IO.iodata_to_binary()
+  end
+
+  defp circuit_breaker_metrics do
+    try do
+      backends = ZtlpGateway.CircuitBreaker.metrics()
+
+      if backends == [] do
+        ""
+      else
+        state_lines = Enum.map(backends, fn b ->
+          state_val = case b.state do
+            :closed -> 0
+            :open -> 1
+            :half_open -> 2
+          end
+          "ztlp_gateway_circuit_breaker_state{backend=\"#{b.backend}\"} #{state_val}\n"
+        end)
+
+        trips_lines = Enum.map(backends, fn b ->
+          "ztlp_gateway_circuit_breaker_trips_total{backend=\"#{b.backend}\"} #{b.trips}\n"
+        end)
+
+        successes_lines = Enum.map(backends, fn b ->
+          "ztlp_gateway_circuit_breaker_successes_total{backend=\"#{b.backend}\"} #{b.successes}\n"
+        end)
+
+        failures_lines = Enum.map(backends, fn b ->
+          "ztlp_gateway_circuit_breaker_failures_total{backend=\"#{b.backend}\"} #{b.failures}\n"
+        end)
+
+        [
+          "# HELP ztlp_gateway_circuit_breaker_state Circuit breaker state (0=closed, 1=open, 2=half_open)\n",
+          "# TYPE ztlp_gateway_circuit_breaker_state gauge\n",
+          state_lines,
+          "\n",
+          "# HELP ztlp_gateway_circuit_breaker_trips_total Times circuit breaker tripped to open\n",
+          "# TYPE ztlp_gateway_circuit_breaker_trips_total counter\n",
+          trips_lines,
+          "\n",
+          "# HELP ztlp_gateway_circuit_breaker_successes_total Successful requests through circuit breaker\n",
+          "# TYPE ztlp_gateway_circuit_breaker_successes_total counter\n",
+          successes_lines,
+          "\n",
+          "# HELP ztlp_gateway_circuit_breaker_failures_total Failed requests through circuit breaker\n",
+          "# TYPE ztlp_gateway_circuit_breaker_failures_total counter\n",
+          failures_lines,
+          "\n"
+        ]
+      end
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp gateway_component_auth_metrics do
+    try do
+      auth = ZtlpGateway.ComponentAuth.metrics()
+
+      [
+        "# HELP ztlp_gateway_component_auth_challenges_total Total auth challenges issued\n",
+        "# TYPE ztlp_gateway_component_auth_challenges_total counter\n",
+        "ztlp_gateway_component_auth_challenges_total #{auth.challenges}\n",
+        "\n",
+        "# HELP ztlp_gateway_component_auth_successes_total Successful authentications\n",
+        "# TYPE ztlp_gateway_component_auth_successes_total counter\n",
+        "ztlp_gateway_component_auth_successes_total #{auth.successes}\n",
+        "\n",
+        "# HELP ztlp_gateway_component_auth_failures_total Failed authentications\n",
+        "# TYPE ztlp_gateway_component_auth_failures_total counter\n",
+        "ztlp_gateway_component_auth_failures_total #{auth.failures}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
   end
 
   defp beam_metrics do

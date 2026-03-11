@@ -33,6 +33,7 @@ defmodule ZtlpNs.AntiEntropy do
   alias ZtlpNs.{Record, Store}
 
   @default_interval 30_000
+  @metrics_table :ztlp_ns_antientropy_metrics
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -130,6 +131,68 @@ defmodule ZtlpNs.AntiEntropy do
     {:ok, stats}
   end
 
+  # ── Metrics ─────────────────────────────────────────────────────────
+
+  @doc """
+  Get metrics for Prometheus export.
+
+  Returns a map with counters for sync operations:
+  - `:syncs_total` — total sync attempts
+  - `:syncs_needed` — syncs where data was exchanged
+  - `:records_merged` — records accepted via merge
+  - `:records_rejected` — records rejected (bad sig, stale)
+  - `:last_sync_epoch` — unix timestamp of last completed sync (0 if never)
+  """
+  @spec metrics() :: %{
+    syncs_total: non_neg_integer(),
+    syncs_needed: non_neg_integer(),
+    records_merged: non_neg_integer(),
+    records_rejected: non_neg_integer(),
+    last_sync_epoch: non_neg_integer()
+  }
+  def metrics do
+    ensure_metrics_table()
+
+    get_counter = fn key ->
+      case :ets.lookup(@metrics_table, key) do
+        [{^key, n}] -> n
+        [] -> 0
+      end
+    end
+
+    %{
+      syncs_total: get_counter.(:syncs_total),
+      syncs_needed: get_counter.(:syncs_needed),
+      records_merged: get_counter.(:records_merged),
+      records_rejected: get_counter.(:records_rejected),
+      last_sync_epoch: get_counter.(:last_sync_epoch)
+    }
+  end
+
+  @doc false
+  def increment_metric(key, amount \\ 1) do
+    ensure_metrics_table()
+    :ets.update_counter(@metrics_table, key, {2, amount}, {key, 0})
+  end
+
+  @doc false
+  def set_metric(key, value) do
+    ensure_metrics_table()
+    :ets.insert(@metrics_table, {key, value})
+  end
+
+  defp ensure_metrics_table do
+    case :ets.whereis(@metrics_table) do
+      :undefined ->
+        try do
+          :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+        rescue
+          ArgumentError -> :ok
+        end
+      _tid -> :ok
+    end
+  end
+
   # ── GenServer callbacks ────────────────────────────────────────────
 
   @impl true
@@ -195,6 +258,7 @@ defmodule ZtlpNs.AntiEntropy do
   defp run_sync do
     local_hash = compute_root_hash()
     peers = peer_nodes()
+    increment_metric(:syncs_total)
 
     Enum.each(peers, fn peer ->
       try do
@@ -203,10 +267,15 @@ defmodule ZtlpNs.AntiEntropy do
             :ok
 
           {:needs_sync, _peer_hash} ->
+            increment_metric(:syncs_needed)
+
             # Get all records from peer and merge
             case :rpc.call(peer, __MODULE__, :get_records_in_range, [{"", :bootstrap}, {<<255>>, :svc}]) do
               records when is_list(records) ->
                 {:ok, stats} = merge_remote_records(records)
+
+                increment_metric(:records_merged, stats.accepted)
+                increment_metric(:records_rejected, stats.rejected)
 
                 Logger.info(
                   "[ztlp-ns] Anti-entropy sync with #{peer}: " <>
@@ -225,6 +294,8 @@ defmodule ZtlpNs.AntiEntropy do
           Logger.warn("[ztlp-ns] Anti-entropy error with #{peer}: #{inspect(e)}")
       end
     end)
+
+    set_metric(:last_sync_epoch, System.system_time(:second))
   end
 
   defp peer_nodes do

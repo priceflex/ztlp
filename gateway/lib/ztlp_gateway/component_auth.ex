@@ -205,6 +205,75 @@ defmodule ZtlpGateway.ComponentAuth do
     end
   end
 
+  # ── Metrics Tracking ───────────────────────────────────────────────────
+
+  @metrics_table :ztlp_gateway_component_auth_metrics
+
+  @doc """
+  Record a challenge issued.
+  """
+  @spec record_challenge() :: :ok
+  def record_challenge do
+    ensure_metrics_table()
+    :ets.update_counter(@metrics_table, :challenges, {2, 1}, {:challenges, 0})
+    :ok
+  end
+
+  @doc """
+  Record a successful authentication.
+  """
+  @spec record_success() :: :ok
+  def record_success do
+    ensure_metrics_table()
+    :ets.update_counter(@metrics_table, :successes, {2, 1}, {:successes, 0})
+    :ok
+  end
+
+  @doc """
+  Record a failed authentication.
+  """
+  @spec record_failure() :: :ok
+  def record_failure do
+    ensure_metrics_table()
+    :ets.update_counter(@metrics_table, :failures, {2, 1}, {:failures, 0})
+    :ok
+  end
+
+  @doc """
+  Get metrics for Prometheus export.
+
+  Returns `%{challenges: int, successes: int, failures: int}`.
+  """
+  @spec metrics() :: %{challenges: non_neg_integer(), successes: non_neg_integer(), failures: non_neg_integer()}
+  def metrics do
+    ensure_metrics_table()
+
+    get_counter = fn key ->
+      case :ets.lookup(@metrics_table, key) do
+        [{^key, n}] -> n
+        [] -> 0
+      end
+    end
+
+    %{
+      challenges: get_counter.(:challenges),
+      successes: get_counter.(:successes),
+      failures: get_counter.(:failures)
+    }
+  end
+
+  defp ensure_metrics_table do
+    case :ets.whereis(@metrics_table) do
+      :undefined ->
+        try do
+          :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+        rescue
+          ArgumentError -> :ok
+        end
+      _tid -> :ok
+    end
+  end
+
   # ── Configuration Helpers ─────────────────────────────────────────────
 
   @spec auth_enabled?() :: boolean()

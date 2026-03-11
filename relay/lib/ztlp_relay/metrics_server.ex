@@ -188,6 +188,8 @@ defmodule ZtlpRelay.MetricsServer do
       "ztlp_relay_packets_forwarded_total #{stats.forwarded}\n",
       "\n",
       mesh_metrics(mesh_info),
+      backpressure_metrics(),
+      component_auth_metrics("relay"),
       beam_metrics()
     ] |> IO.iodata_to_binary()
   end
@@ -204,6 +206,61 @@ defmodule ZtlpRelay.MetricsServer do
       "ztlp_relay_mesh_healthy_peers #{healthy}\n",
       "\n"
     ]
+  end
+
+  defp backpressure_metrics do
+    try do
+      bp = ZtlpRelay.Backpressure.metrics()
+      state_val = case bp.state do
+        :ok -> 0
+        :soft -> 1
+        :hard -> 2
+      end
+
+      [
+        "# HELP ztlp_relay_backpressure_state Backpressure state (0=ok, 1=soft, 2=hard)\n",
+        "# TYPE ztlp_relay_backpressure_state gauge\n",
+        "ztlp_relay_backpressure_state #{state_val}\n",
+        "\n",
+        "# HELP ztlp_relay_backpressure_load_ratio Current load ratio (0.0-1.0)\n",
+        "# TYPE ztlp_relay_backpressure_load_ratio gauge\n",
+        "ztlp_relay_backpressure_load_ratio #{Float.round(bp.load_ratio, 4)}\n",
+        "\n",
+        "# HELP ztlp_relay_backpressure_rejections_total Total sessions rejected by backpressure\n",
+        "# TYPE ztlp_relay_backpressure_rejections_total counter\n",
+        "ztlp_relay_backpressure_rejections_total #{bp.rejections}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp component_auth_metrics("relay") do
+    try do
+      auth = ZtlpRelay.ComponentAuth.metrics()
+
+      [
+        "# HELP ztlp_relay_component_auth_challenges_total Total auth challenges issued\n",
+        "# TYPE ztlp_relay_component_auth_challenges_total counter\n",
+        "ztlp_relay_component_auth_challenges_total #{auth.challenges}\n",
+        "\n",
+        "# HELP ztlp_relay_component_auth_successes_total Successful authentications\n",
+        "# TYPE ztlp_relay_component_auth_successes_total counter\n",
+        "ztlp_relay_component_auth_successes_total #{auth.successes}\n",
+        "\n",
+        "# HELP ztlp_relay_component_auth_failures_total Failed authentications\n",
+        "# TYPE ztlp_relay_component_auth_failures_total counter\n",
+        "ztlp_relay_component_auth_failures_total #{auth.failures}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
   end
 
   defp beam_metrics do

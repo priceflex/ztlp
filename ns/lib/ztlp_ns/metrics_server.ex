@@ -113,6 +113,11 @@ defmodule ZtlpNs.MetricsServer do
       "ztlp_ns_uptime_seconds #{uptime}\n\n",
       "# HELP ztlp_ns_records_total Records in the store\n# TYPE ztlp_ns_records_total gauge\n",
       "ztlp_ns_records_total #{records}\n\n",
+      antientropy_metrics(),
+      replication_metrics(),
+      ratelimit_metrics(),
+      cluster_metrics(),
+      ns_component_auth_metrics(),
       beam_metrics()
     ] |> IO.iodata_to_binary()
   end
@@ -124,6 +129,134 @@ defmodule ZtlpNs.MetricsServer do
       _ -> 0
     catch
       _, _ -> 0
+    end
+  end
+
+  defp antientropy_metrics do
+    try do
+      ae = ZtlpNs.AntiEntropy.metrics()
+
+      [
+        "# HELP ztlp_ns_antientropy_syncs_total Total anti-entropy sync attempts\n",
+        "# TYPE ztlp_ns_antientropy_syncs_total counter\n",
+        "ztlp_ns_antientropy_syncs_total #{ae.syncs_total}\n",
+        "\n",
+        "# HELP ztlp_ns_antientropy_syncs_needed_total Syncs where data was exchanged\n",
+        "# TYPE ztlp_ns_antientropy_syncs_needed_total counter\n",
+        "ztlp_ns_antientropy_syncs_needed_total #{ae.syncs_needed}\n",
+        "\n",
+        "# HELP ztlp_ns_antientropy_records_merged_total Records accepted via merge\n",
+        "# TYPE ztlp_ns_antientropy_records_merged_total counter\n",
+        "ztlp_ns_antientropy_records_merged_total #{ae.records_merged}\n",
+        "\n",
+        "# HELP ztlp_ns_antientropy_records_rejected_total Records rejected during merge\n",
+        "# TYPE ztlp_ns_antientropy_records_rejected_total counter\n",
+        "ztlp_ns_antientropy_records_rejected_total #{ae.records_rejected}\n",
+        "\n",
+        "# HELP ztlp_ns_antientropy_last_sync_epoch Unix timestamp of last sync\n",
+        "# TYPE ztlp_ns_antientropy_last_sync_epoch gauge\n",
+        "ztlp_ns_antientropy_last_sync_epoch #{ae.last_sync_epoch}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp replication_metrics do
+    try do
+      rep = ZtlpNs.Replication.metrics()
+
+      [
+        "# HELP ztlp_ns_replication_pushes_total Total replication pushes\n",
+        "# TYPE ztlp_ns_replication_pushes_total counter\n",
+        "ztlp_ns_replication_pushes_total #{rep.pushes_total}\n",
+        "\n",
+        "# HELP ztlp_ns_replication_push_successes_total Successful peer pushes\n",
+        "# TYPE ztlp_ns_replication_push_successes_total counter\n",
+        "ztlp_ns_replication_push_successes_total #{rep.push_successes}\n",
+        "\n",
+        "# HELP ztlp_ns_replication_push_failures_total Failed peer pushes\n",
+        "# TYPE ztlp_ns_replication_push_failures_total counter\n",
+        "ztlp_ns_replication_push_failures_total #{rep.push_failures}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp ratelimit_metrics do
+    try do
+      rl = ZtlpNs.RateLimiter.metrics()
+
+      [
+        "# HELP ztlp_ns_ratelimit_allowed_total Queries allowed by rate limiter\n",
+        "# TYPE ztlp_ns_ratelimit_allowed_total counter\n",
+        "ztlp_ns_ratelimit_allowed_total #{rl.allowed}\n",
+        "\n",
+        "# HELP ztlp_ns_ratelimit_rejected_total Queries rejected by rate limiter\n",
+        "# TYPE ztlp_ns_ratelimit_rejected_total counter\n",
+        "ztlp_ns_ratelimit_rejected_total #{rl.rejected}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp cluster_metrics do
+    try do
+      all_members = [node() | Node.list()]
+      total = length(all_members)
+      # All visible nodes plus ourselves are considered "running"
+      running = total
+
+      [
+        "# HELP ztlp_ns_cluster_members Number of cluster members\n",
+        "# TYPE ztlp_ns_cluster_members gauge\n",
+        "ztlp_ns_cluster_members #{total}\n",
+        "\n",
+        "# HELP ztlp_ns_cluster_running_members Number of running cluster members\n",
+        "# TYPE ztlp_ns_cluster_running_members gauge\n",
+        "ztlp_ns_cluster_running_members #{running}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp ns_component_auth_metrics do
+    try do
+      auth = ZtlpNs.ComponentAuth.metrics()
+
+      [
+        "# HELP ztlp_ns_component_auth_challenges_total Total auth challenges issued\n",
+        "# TYPE ztlp_ns_component_auth_challenges_total counter\n",
+        "ztlp_ns_component_auth_challenges_total #{auth.challenges}\n",
+        "\n",
+        "# HELP ztlp_ns_component_auth_successes_total Successful authentications\n",
+        "# TYPE ztlp_ns_component_auth_successes_total counter\n",
+        "ztlp_ns_component_auth_successes_total #{auth.successes}\n",
+        "\n",
+        "# HELP ztlp_ns_component_auth_failures_total Failed authentications\n",
+        "# TYPE ztlp_ns_component_auth_failures_total counter\n",
+        "ztlp_ns_component_auth_failures_total #{auth.failures}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
     end
   end
 

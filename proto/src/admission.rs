@@ -279,14 +279,14 @@ pub fn hmac_blake2s(key: &[u8], message: &[u8]) -> [u8; 32] {
 
     // Inner hash: H(ipad || message)
     let mut inner_hasher = Blake2s256::new();
-    inner_hasher.update(&ipad);
+    inner_hasher.update(ipad);
     inner_hasher.update(message);
     let inner_hash = inner_hasher.finalize();
 
     // Outer hash: H(opad || inner_hash)
     let mut outer_hasher = Blake2s256::new();
-    outer_hasher.update(&opad);
-    outer_hasher.update(&inner_hash);
+    outer_hasher.update(opad);
+    outer_hasher.update(inner_hash);
     let outer_hash = outer_hasher.finalize();
 
     let mut result = [0u8; 32];

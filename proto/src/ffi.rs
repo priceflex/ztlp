@@ -3,6 +3,10 @@
 //! This module provides a complete C API for integrating ZTLP into iOS and
 //! Android applications. All types are opaque pointers, all functions use
 //! C calling conventions, and memory ownership is clearly documented.
+
+// FFI functions inherently work with raw pointers; callers are responsible for
+// passing valid pointers per the documented ownership contracts.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 //!
 //! # Design Principles
 //!
@@ -44,8 +48,7 @@
 //! }
 //! ```
 
-// FFI requires unsafe code — we carefully document safety invariants.
-#![allow(unsafe_code)]
+// Note: unsafe_code is allowed via #[allow(unsafe_code)] on `pub mod ffi` in lib.rs.
 
 use std::ffi::{CStr, CString};
 use std::net::SocketAddr;

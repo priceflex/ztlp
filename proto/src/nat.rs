@@ -467,11 +467,11 @@ pub fn compute_rendezvous_id(node_a: &NodeId, node_b: &NodeId) -> [u8; 32] {
 
     // Sort by raw bytes to ensure deterministic ordering
     if node_a.0 <= node_b.0 {
-        hasher.update(&node_a.0);
-        hasher.update(&node_b.0);
+        hasher.update(node_a.0);
+        hasher.update(node_b.0);
     } else {
-        hasher.update(&node_b.0);
-        hasher.update(&node_a.0);
+        hasher.update(node_b.0);
+        hasher.update(node_a.0);
     }
 
     let result = hasher.finalize();

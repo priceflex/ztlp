@@ -140,9 +140,9 @@ fn main() {
         .expect("send failed");
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let pubkey_hex = &buf[..rlen];
-    let pubkey_hex_str = String::from_utf8_lossy(pubkey_hex);
+    let _pubkey_hex_str = String::from_utf8_lossy(pubkey_hex);
 
-    if pubkey_hex.len() > 0 && pubkey_hex[0] != 0xFF {
+    if !pubkey_hex.is_empty() && pubkey_hex[0] != 0xFF {
         let pk_len = pubkey_hex.len() as u16;
         let mut query4 = vec![0x05];
         query4.extend_from_slice(&pk_len.to_be_bytes());
@@ -216,7 +216,7 @@ fn main() {
             failed += 1;
         }
     } else {
-        if signed_data.len() > 0 && signed_data[0] == 0xFF {
+        if !signed_data.is_empty() && signed_data[0] == 0xFF {
             println!("⊘ Skipped (control command not supported)");
             passed += 1;
         } else {

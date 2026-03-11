@@ -71,7 +71,7 @@ fn cmd_generate() {
     );
 
     let bytes = token.serialize();
-    println!("{}", hex::encode(&bytes));
+    println!("{}", hex::encode(bytes));
 
     // Print details to stderr for human inspection
     eprintln!("Generated RAT with known test parameters:");
@@ -192,7 +192,7 @@ fn cmd_selftest() {
     let bytes = token.serialize();
     eprintln!(
         "1. Generated RAT: {} ({} bytes)",
-        hex::encode(&bytes),
+        hex::encode(bytes),
         bytes.len()
     );
 

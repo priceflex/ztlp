@@ -101,7 +101,7 @@ fn main() {
     let (clen, _) = socket
         .recv_from(&mut buf)
         .expect("recv handshake complete failed");
-    let confirm = &buf[..clen];
+    let _confirm = &buf[..clen];
 
     if !initiator.is_handshake_finished() {
         println!("✗ Handshake not finished after 3 messages");
@@ -252,7 +252,7 @@ fn main() {
         .send_to(&ready2, server_addr)
         .expect("send wrong key start failed");
 
-    let (len, _) = socket.recv_from(&mut buf).expect("recv failed");
+    let (_len, _) = socket.recv_from(&mut buf).expect("recv failed");
 
     let mut bad_init = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
         .local_private_key(&wrong_kp.private)
@@ -298,7 +298,7 @@ fn main() {
         .send_to(&ready3, server_addr)
         .expect("send replay start failed");
 
-    let (len, _) = socket.recv_from(&mut buf).expect("recv failed");
+    let (_len, _) = socket.recv_from(&mut buf).expect("recv failed");
 
     let mut replay_init = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
         .local_private_key(&replay_kp.private)
@@ -316,7 +316,7 @@ fn main() {
     socket.send_to(&cmd, server_addr).expect("send msg1 failed");
 
     // Receive msg2
-    let (len2, _) = socket.recv_from(&mut buf).expect("recv msg2 failed");
+    let (_len2, _) = socket.recv_from(&mut buf).expect("recv msg2 failed");
 
     // Now send msg1 AGAIN (replay) instead of msg3
     let mut cmd_replay = b"NOISE_REPLAY_MSG1".to_vec();

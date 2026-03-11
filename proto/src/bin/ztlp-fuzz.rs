@@ -819,7 +819,7 @@ async fn fuzz_network(
                 pkt.serialize()
             };
 
-            if let Err(_) = sock.send_to(&hello, target_addr).await {
+            if sock.send_to(&hello, target_addr).await.is_err() {
                 stats.crashes += 1;
                 pb.set_message(format!(
                     "{} errs | {} crashes",

@@ -265,6 +265,12 @@ pub struct TunnelStats {
     pub gro_available: AtomicBool,
 }
 
+impl Default for TunnelStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TunnelStats {
     pub fn new() -> Self {
         let now = Instant::now();

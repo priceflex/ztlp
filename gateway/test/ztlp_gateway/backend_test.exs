@@ -103,7 +103,10 @@ defmodule ZtlpGateway.BackendTest do
     end
 
     test "fails to connect to non-existent service" do
-      # Port 1 is almost certainly not listening
+      # Port 1 is almost certainly not listening.
+      # Trap exits because start_link links before init returns {:stop, _},
+      # so the EXIT signal arrives in the calling process.
+      Process.flag(:trap_exit, true)
       result = Backend.start_link({{127, 0, 0, 1}, 1, self()})
       assert {:error, _} = result
     end

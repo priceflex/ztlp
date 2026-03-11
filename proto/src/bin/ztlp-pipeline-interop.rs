@@ -53,7 +53,7 @@ fn main() {
 
     println!(
         "  Setup: session_id={}, auth_key={}...",
-        hex::encode(&session_id_bytes),
+        hex::encode(session_id_bytes),
         hex::encode(&auth_key[..4])
     );
 

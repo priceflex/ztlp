@@ -225,14 +225,20 @@ impl PlatformIdentity for SoftwareIdentityProvider {
 ///     secure_enclave_ecdh(their_pub)
 /// });
 /// ```
+/// Platform sign callback type — set by iOS/Android glue code.
+type SignCallback = Box<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// Platform DH callback type — set by iOS/Android glue code.
+type DhCallback = Box<dyn Fn(&[u8; 32]) -> Result<[u8; 32], String> + Send + Sync>;
+
 pub struct HardwareIdentityProvider {
     provider_type: IdentityProvider,
     node_id: NodeId,
     public_key: [u8; 32],
     /// Platform sign callback — set by iOS/Android glue code.
-    sign_fn: Option<Box<dyn Fn(&[u8]) -> Result<Vec<u8>, String> + Send + Sync>>,
+    sign_fn: Option<SignCallback>,
     /// Platform DH callback — set by iOS/Android glue code.
-    dh_fn: Option<Box<dyn Fn(&[u8; 32]) -> Result<[u8; 32], String> + Send + Sync>>,
+    dh_fn: Option<DhCallback>,
 }
 
 impl HardwareIdentityProvider {

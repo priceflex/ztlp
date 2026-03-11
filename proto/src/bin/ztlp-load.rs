@@ -454,7 +454,6 @@ async fn run_udp_load(
     for (sid, key) in session_keys {
         let stats = stats.clone();
         let running = running.clone();
-        let target_addr = target_addr;
         let build_packet = build_packet.clone();
 
         let handle = tokio::spawn(async move {
@@ -645,7 +644,7 @@ async fn main() {
                 duration,
                 packet_size,
                 warmup,
-                |sid, seq, key, psize| build_data_packet(sid, seq, key, psize),
+                build_data_packet,
             )
             .await
             {

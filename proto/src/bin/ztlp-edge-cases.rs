@@ -7,7 +7,7 @@
 //! - Rapid reconnection
 //! - Concurrent operations
 
-use ztlp_proto::packet::{DataHeader, SessionId, MAGIC};
+use ztlp_proto::packet::{DataHeader, SessionId};
 use ztlp_proto::pipeline::compute_header_auth_tag;
 
 use std::net::UdpSocket;

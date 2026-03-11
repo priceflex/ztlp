@@ -1,3 +1,6 @@
+// Test code uses index loops for constructing/verifying packet byte patterns.
+#![allow(clippy::needless_range_loop)]
+
 //! Throughput and transport optimization integration tests.
 //!
 //! These tests exercise GSO, GRO, BatchSender, GroReceiver, and their
@@ -7,7 +10,6 @@
 //! equality, and sets timeouts to avoid hanging on failure.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,9 +18,7 @@ use tokio::time::timeout;
 
 use ztlp_proto::batch::BatchSender;
 use ztlp_proto::gro_batch::BatchReceiver;
-use ztlp_proto::gso::{
-    detect_gro, detect_gso, GroReceiver, GsoCapability, GsoMode, MAX_GSO_SEGMENTS,
-};
+use ztlp_proto::gso::{GroReceiver, GsoCapability, GsoMode, MAX_GSO_SEGMENTS};
 use ztlp_proto::transport::TransportNode;
 
 /// Default timeout for receive operations.

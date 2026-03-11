@@ -490,6 +490,7 @@ impl RetransmitBuffer {
     }
 
     /// Get the framed plaintext for a data_seq (for retransmission).
+    #[cfg(test)]
     fn get(&self, data_seq: u64) -> Option<&[u8]> {
         self.entries
             .get(&data_seq)
@@ -991,7 +992,7 @@ pub async fn run_bridge(
                 packet_count: num_chunks,
                 tcp_bytes: n,
                 udp_bytes,
-                tcp_read_time: tcp_read_time,
+                tcp_read_time,
                 encrypt_time,
                 send_time,
                 window_wait_time,
@@ -1385,7 +1386,7 @@ pub async fn run_bridge(
                         if let Some(ref reasm) = reassembly {
                             if let Some(delivered_seq) = reasm.last_delivered_seq() {
                                 // Only send if we have new progress to report
-                                if last_acked_value.map_or(true, |prev| delivered_seq > prev) {
+                                if last_acked_value.is_none_or(|prev| delivered_seq > prev) {
                                     send_ack(
                                         &pipeline_recv,
                                         &ack_cipher,
@@ -1423,7 +1424,7 @@ pub async fn run_bridge(
             if packets_since_ack > 0 || last_ack_time.elapsed() >= ACK_INTERVAL {
                 if let Some(ref reasm) = reassembly {
                     if let Some(delivered_seq) = reasm.last_delivered_seq() {
-                        if last_acked_value.map_or(true, |prev| delivered_seq > prev) {
+                        if last_acked_value.is_none_or(|prev| delivered_seq > prev) {
                             send_ack(
                                 &pipeline_recv,
                                 &ack_cipher,

@@ -12,7 +12,7 @@
 //! Fallback: on systems without GSO/GRO support, we fall back to standard
 //! per-packet send_to() / recv_from() calls.
 
-#![allow(unsafe_code)]
+// Note: unsafe_code is allowed via #[allow(unsafe_code)] on `pub mod gso` in lib.rs.
 
 use std::io;
 use std::net::SocketAddr;
@@ -223,7 +223,7 @@ pub fn split_gro_segments(
     match gso_size {
         Some(seg_size) if seg_size > 0 => {
             let seg = seg_size as usize;
-            let mut segments = Vec::with_capacity((total_len + seg - 1) / seg);
+            let mut segments = Vec::with_capacity(total_len.div_ceil(seg));
             let mut offset = 0;
             while offset < total_len {
                 let remaining = total_len - offset;
@@ -283,7 +283,7 @@ pub fn recv_gro_sync(
 
     // Parse source address
     let addr = raw_to_socket_addr(&sockaddr, msg.msg_namelen)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "failed to parse source address"))?;
+        .ok_or_else(|| io::Error::other("failed to parse source address"))?;
 
     // Parse cmsg for UDP_GRO segment size
     let mut gso_size: Option<u16> = None;
@@ -671,10 +671,7 @@ pub async fn send_gso(
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "CMSG_FIRSTHDR returned null",
-            ));
+            return Err(io::Error::other("CMSG_FIRSTHDR returned null"));
         }
         (*cmsg).cmsg_level = SOL_UDP;
         (*cmsg).cmsg_type = UDP_SEGMENT;
@@ -838,9 +835,10 @@ fn socket_addr_to_raw(addr: SocketAddr) -> (libc::sockaddr_storage, libc::sockle
 // ─── GsoMode configuration ─────────────────────────────────────────────────
 
 /// Configuration for GSO behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GsoMode {
     /// Automatically detect and use GSO if available.
+    #[default]
     Auto,
     /// Force GSO on (fail if unavailable).
     Enabled,
@@ -856,12 +854,6 @@ impl GsoMode {
             "disabled" | "off" | "false" | "no" => GsoMode::Disabled,
             _ => GsoMode::Auto,
         }
-    }
-}
-
-impl Default for GsoMode {
-    fn default() -> Self {
-        GsoMode::Auto
     }
 }
 
@@ -1006,7 +998,7 @@ impl UdpSender {
                 let all_same = packets[..packets.len() - 1]
                     .iter()
                     .all(|p| p.len() == first_size)
-                    && packets.last().map_or(true, |p| p.len() <= first_size);
+                    && packets.last().is_none_or(|p| p.len() <= first_size);
 
                 if all_same && first_size > 0 && first_size <= u16::MAX as usize {
                     let max_segs = match self.capability {
@@ -1031,7 +1023,7 @@ impl UdpSender {
                             }
                         }
                     }
-                    return Ok(total_sent);
+                    Ok(total_sent)
                 } else {
                     // Mixed sizes — can't use GSO, fall back
                     return self.send_batch_fallback(packets, dest).await;
@@ -1194,7 +1186,7 @@ mod tests {
         let dest = receiver.local_addr().unwrap();
 
         // Single segment — should just use send_to
-        let segments = vec![vec![0xAA; 200]];
+        let segments = [vec![0xAA; 200]];
         let refs: Vec<&[u8]> = segments.iter().map(|s| s.as_slice()).collect();
         let bytes_sent = send_gso(&sender, &refs, 200, dest).await.unwrap();
         assert_eq!(bytes_sent, 200);

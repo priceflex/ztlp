@@ -654,7 +654,7 @@ fn cmd_keygen(
     // (In production, the Ed25519 public key would be computed properly.)
     use blake2::{Blake2s256, Digest};
     let mut hasher = Blake2s256::new();
-    hasher.update(&ed25519_seed);
+    hasher.update(ed25519_seed);
     let ed25519_public = hasher.finalize();
 
     match format {
@@ -1062,6 +1062,7 @@ async fn ns_query(
 }
 
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
+#[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
     target: &str,
     key: &Option<PathBuf>,
@@ -2661,19 +2662,12 @@ async fn cmd_ping(
                 rtts.push(rtt);
                 received += 1;
 
-                // Try to parse response
+                // Try to parse response — check if it's a proper pong
                 let pong_info = if len >= HANDSHAKE_HEADER_SIZE {
-                    if let Ok(hdr) = HandshakeHeader::deserialize(&buf[..len]) {
-                        if hdr.msg_type == MsgType::Pong {
-                            "pong"
-                        } else {
-                            "reply"
-                        }
-                    } else {
-                        "reply"
-                    }
-                } else if len >= DATA_HEADER_SIZE {
-                    "reply"
+                    HandshakeHeader::deserialize(&buf[..len])
+                        .ok()
+                        .filter(|hdr| hdr.msg_type == MsgType::Pong)
+                        .map_or("reply", |_| "pong")
                 } else {
                     "reply"
                 };
@@ -2859,7 +2853,7 @@ fn cmd_token_issue(
     let bytes = token.serialize();
 
     // Print the hex token to stdout for piping
-    println!("{}", hex::encode(&bytes));
+    println!("{}", hex::encode(bytes));
 
     // Print details to stderr
     eprintln!("\n{}", c_bold("═══ Issued Relay Admission Token ═══"));

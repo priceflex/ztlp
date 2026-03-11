@@ -31,12 +31,17 @@
 //!    └────────────────────────────────────────┘
 //! ```
 
+// Note: unsafe_code is denied in all modules except ffi.rs, which requires
+// unsafe for C FFI interop. The ffi module uses #![allow(unsafe_code)] locally.
 #![deny(unsafe_code)]
 
 pub mod admission;
 pub mod error;
+#[allow(unsafe_code)]
+pub mod ffi;
 pub mod handshake;
 pub mod identity;
+pub mod mobile;
 pub mod nat;
 pub mod packet;
 pub mod pipeline;

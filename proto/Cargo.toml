@@ -5,6 +5,14 @@ edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"
 
+[lib]
+name = "ztlp_proto"
+crate-type = ["lib", "staticlib"]
+
+# Note: C header is manually maintained at include/ztlp.h
+# To regenerate from Rust source, install cbindgen and run:
+#   cbindgen --config cbindgen.toml --output include/ztlp.h
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 snow = "0.9"

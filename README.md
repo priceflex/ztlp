@@ -57,58 +57,60 @@ View the full documentation — including quick start guides, architecture deep 
 
 ## Table of Contents
 
-1\. Problem Statement
-2\. Introduction and Motivation
-3\. Terminology
-4\. Goals, Non-Goals, and Design Philosophy
-5\. Threat Model
-6\. Protocol Overview
-7\. ZTLP Addressing — Node Identity
-8\. ZTLP Packet Format
-&nbsp;&nbsp;&nbsp;&nbsp;8.1 Handshake / Control Header (64 bytes, fixed)
-&nbsp;&nbsp;&nbsp;&nbsp;8.2 Field Definitions
-&nbsp;&nbsp;&nbsp;&nbsp;8.3 Established Data Header (compact, post-handshake)
-&nbsp;&nbsp;&nbsp;&nbsp;8.4 Extension TLVs (Optional)
-&nbsp;&nbsp;&nbsp;&nbsp;8.5 Payload
-9\. ZTLP-NS — Distributed Trust Namespace
-10\. Node Initialization and Bootstrap Procedure
-11\. Handshake and Session Establishment
-12\. Relay Node Architecture
-&nbsp;&nbsp;&nbsp;&nbsp;12.4 Ingress Admission Domains and Relay Admission Tokens
-&nbsp;&nbsp;&nbsp;&nbsp;12.5 Authenticated Relay Federation and Capacity Classes
-&nbsp;&nbsp;&nbsp;&nbsp;12.6 Geographic Relay Hierarchy
-13\. Hardware Enforcement Profiles
-14\. Transport Fallback and NAT Traversal
-15\. Routing and Path Selection
-16\. Key Management and Hardware Identity
-&nbsp;&nbsp;&nbsp;&nbsp;16.3 Node Identity Assurance Model and Attestation
-17\. Deployment Model and Migration Strategy
-18\. Security Considerations
-19\. Privacy Considerations
-20\. Operational Tooling
-21\. Open Issues and Future Work
-22\. References
-23\. Trust and Authority Model
-24\. Public Internet Interoperability and Overlay Architecture
-25\. Commercial Adoption and Gateway Deployment Model
-26\. Policy-Constrained Adaptive Path Selection
-27\. Handshake Flood Resistance
-28\. Identity-Gated Connectivity: No-Open-Port Networking
-29\. SessionID as Primary Routing Primitive
-30\. Cloud Provider and CDN Integration
-31\. Historical Context: Identity Networking and Protocol Precedents
-32\. Practical Deployment Path and Reference Implementation
-33\. Protected Access Plane for Web, Email, and Account Services
-34\. Identity-Based Service Routing for Sensitive Web Paths
-35\. Session Lifecycle, Rekeying, and Relay State Management
-36\. Client Path Selection Summary
-37\. Relay Abuse Protection
-38\. Federated Identity Architecture
-39\. Admission Plane and Forwarding Plane Separation
-40\. ZTLP Relay Roles and Network Topology
-41\. ZTLP Threat Model
-42\. Operational Deployment Model
-43\. Gateway-First Interoperability Principle
+| # | Section |
+|--:|---------|
+| 1 | Problem Statement |
+| 2 | Introduction and Motivation |
+| 3 | Terminology |
+| 4 | Goals, Non-Goals, and Design Philosophy |
+| 5 | Threat Model |
+| 6 | Protocol Overview |
+| 7 | ZTLP Addressing — Node Identity |
+| 8 | **ZTLP Packet Format** |
+|   | 8.1 Handshake / Control Header (64 bytes, fixed) |
+|   | 8.2 Field Definitions |
+|   | 8.3 Established Data Header (compact, post-handshake) |
+|   | 8.4 Extension TLVs (Optional) |
+|   | 8.5 Payload |
+| 9 | ZTLP-NS — Distributed Trust Namespace |
+| 10 | Node Initialization and Bootstrap Procedure |
+| 11 | Handshake and Session Establishment |
+| 12 | **Relay Node Architecture** |
+|   | 12.4 Ingress Admission Domains and Relay Admission Tokens |
+|   | 12.5 Authenticated Relay Federation and Capacity Classes |
+|   | 12.6 Geographic Relay Hierarchy |
+| 13 | Hardware Enforcement Profiles |
+| 14 | Transport Fallback and NAT Traversal |
+| 15 | Routing and Path Selection |
+| 16 | **Key Management and Hardware Identity** |
+|   | 16.3 Node Identity Assurance Model and Attestation |
+| 17 | Deployment Model and Migration Strategy |
+| 18 | Security Considerations |
+| 19 | Privacy Considerations |
+| 20 | Operational Tooling |
+| 21 | Open Issues and Future Work |
+| 22 | References |
+| 23 | Trust and Authority Model |
+| 24 | Public Internet Interoperability and Overlay Architecture |
+| 25 | Commercial Adoption and Gateway Deployment Model |
+| 26 | Policy-Constrained Adaptive Path Selection |
+| 27 | Handshake Flood Resistance |
+| 28 | Identity-Gated Connectivity: No-Open-Port Networking |
+| 29 | SessionID as Primary Routing Primitive |
+| 30 | Cloud Provider and CDN Integration |
+| 31 | Historical Context: Identity Networking and Protocol Precedents |
+| 32 | Practical Deployment Path and Reference Implementation |
+| 33 | Protected Access Plane for Web, Email, and Account Services |
+| 34 | Identity-Based Service Routing for Sensitive Web Paths |
+| 35 | Session Lifecycle, Rekeying, and Relay State Management |
+| 36 | Client Path Selection Summary |
+| 37 | Relay Abuse Protection |
+| 38 | Federated Identity Architecture |
+| 39 | Admission Plane and Forwarding Plane Separation |
+| 40 | ZTLP Relay Roles and Network Topology |
+| 41 | ZTLP Threat Model |
+| 42 | Operational Deployment Model |
+| 43 | Gateway-First Interoperability Principle |
 
 ---
 

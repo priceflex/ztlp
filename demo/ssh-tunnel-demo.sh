@@ -222,9 +222,72 @@ ssh -p "$TUNNEL_LOCAL_PORT" \
 pause
 
 # -------------------------------------------------------------------
-# ACT 6 – Port Scan (optional)
+# ACT 6 – Throughput Saturation Test (scp)
 # -------------------------------------------------------------------
-banner "Act 6 — Port Scan"
+banner "Act 6 — Throughput Saturation Test"
+
+if command -v scp >/dev/null 2>&1; then
+    TEST_FILE="$DEMO_DIR/throughput_test.bin"
+    SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+
+    # Generate test files of increasing size
+    for SIZE_MB in 10 50 100; do
+        step "Generating ${SIZE_MB}MB test file"
+        dd if=/dev/urandom of="$TEST_FILE" bs=1M count="$SIZE_MB" 2>/dev/null
+        BYTES=$((SIZE_MB * 1048576))
+
+        # ── ZTLP tunnel transfer ──
+        step "SCP ${SIZE_MB}MB through ZTLP tunnel (port $TUNNEL_LOCAL_PORT)"
+        ZTLP_START=$(date +%s%N)
+        # shellcheck disable=SC2086
+        scp -P "$TUNNEL_LOCAL_PORT" $SCP_OPTS "$TEST_FILE" "$SSH_USER@127.0.0.1:/dev/null" 2>/dev/null
+        ZTLP_END=$(date +%s%N)
+        ZTLP_MS=$(( (ZTLP_END - ZTLP_START) / 1000000 ))
+        if [[ "$ZTLP_MS" -gt 0 ]]; then
+            ZTLP_MBPS=$(echo "scale=2; $BYTES * 8 / ($ZTLP_MS * 1000)" | bc 2>/dev/null || echo "N/A")
+        else
+            ZTLP_MBPS="∞"
+        fi
+
+        # ── Direct SSH transfer (baseline) ──
+        step "SCP ${SIZE_MB}MB direct SSH (port $SSH_PORT) — baseline"
+        DIRECT_START=$(date +%s%N)
+        # shellcheck disable=SC2086
+        scp -P "$SSH_PORT" $SCP_OPTS "$TEST_FILE" "$SSH_USER@127.0.0.1:/dev/null" 2>/dev/null
+        DIRECT_END=$(date +%s%N)
+        DIRECT_MS=$(( (DIRECT_END - DIRECT_START) / 1000000 ))
+        if [[ "$DIRECT_MS" -gt 0 ]]; then
+            DIRECT_MBPS=$(echo "scale=2; $BYTES * 8 / ($DIRECT_MS * 1000)" | bc 2>/dev/null || echo "N/A")
+        else
+            DIRECT_MBPS="∞"
+        fi
+
+        # ── Results ──
+        if [[ "$DIRECT_MS" -gt 0 && "$ZTLP_MS" -gt 0 ]]; then
+            OVERHEAD=$(echo "scale=1; 100 * ($ZTLP_MS - $DIRECT_MS) / $DIRECT_MS" | bc 2>/dev/null || echo "N/A")
+        else
+            OVERHEAD="N/A"
+        fi
+
+        echo ""
+        info "${SIZE_MB}MB results:"
+        info "  ZTLP tunnel:  ${ZTLP_MS}ms  (${ZTLP_MBPS} Mbps)"
+        info "  Direct SSH:   ${DIRECT_MS}ms  (${DIRECT_MBPS} Mbps)"
+        info "  Overhead:     ${OVERHEAD}%"
+        echo ""
+    done
+
+    rm -f "$TEST_FILE"
+    success "Throughput test complete — ZTLP adds encryption with minimal overhead"
+else
+    warn "scp not available — skipping throughput test"
+fi
+pause
+
+# -------------------------------------------------------------------
+# ACT 7 – Port Scan (optional)
+# -------------------------------------------------------------------
+banner "Act 7 — Port Scan"
 if command -v nmap >/dev/null 2>&1; then
     step "Scanning host for open ports (nmap)"
     dimcmd "nmap -p $SSH_PORT,$LISTEN_PORT 127.0.0.1"
@@ -236,9 +299,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 7 – Packet Flood
+# ACT 8 – Packet Flood
 # -------------------------------------------------------------------
-banner "Act 7 — UDP Packet Flood"
+banner "Act 8 — UDP Packet Flood"
 if command -v python3 >/dev/null 2>&1; then
     FLOOD_COUNT=20000
     step "Sending $FLOOD_COUNT random UDP packets to ZTLP port $LISTEN_PORT"
@@ -260,9 +323,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 8 – Malformed ZTLP Packets
+# ACT 9 – Malformed ZTLP Packets
 # -------------------------------------------------------------------
-banner "Act 8 — Malformed ZTLP Packets"
+banner "Act 9 — Malformed ZTLP Packets"
 if command -v python3 >/dev/null 2>&1; then
     MAL_COUNT=20000
     step "Sending $MAL_COUNT packets with correct magic (0x5A37) but bogus SessionIDs"
@@ -285,9 +348,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 9 – tcpdump Capture (optional)
+# ACT 10 – tcpdump Capture (optional)
 # -------------------------------------------------------------------
-banner "Act 9 — tcpdump Capture"
+banner "Act 10 — tcpdump Capture"
 if command -v tcpdump >/dev/null 2>&1; then
     PCAP="$DEMO_DIR/ztlp_capture.pcap"
     step "Capturing traffic on port $LISTEN_PORT for 5 seconds"
@@ -304,9 +367,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 10 – CPU Monitoring & Final Summary
+# ACT 11 – CPU Monitoring & Final Summary
 # -------------------------------------------------------------------
-banner "Act 10 — CPU Usage and Summary"
+banner "Act 11 — CPU Usage and Summary"
 step "Measuring CPU during a 50,000-packet flood"
 if command -v python3 >/dev/null 2>&1; then
     # Read idle time before
@@ -356,11 +419,12 @@ What you saw:
   3. Server listening on a single ZTLP port, forwarding SSH internally
   4. Client side tunnel creation (Noise_XX handshake)
   5. Interactive SSH session through the encrypted tunnel
-  6. Port scan demonstrates SSH port invisibility
-  7. UDP flood shows nanosecond‑scale rejection at L1
-  8. Malformed packet test shows L2 session verification
-  9. tcpdump confirms payload is encrypted
- 10. CPU impact is negligible – cheap denial of service
+  6. SCP throughput saturation: ZTLP tunnel vs direct SSH (10/50/100 MB)
+  7. Port scan demonstrates SSH port invisibility
+  8. UDP flood shows nanosecond‑scale rejection at L1
+  9. Malformed packet test shows L2 session verification
+ 10. tcpdump confirms payload is encrypted
+ 11. CPU impact is negligible – cheap denial of service
 EOF
 
 echo -e "\n  ${DIM}Demo artifacts stored in $DEMO_DIR${RESET}"

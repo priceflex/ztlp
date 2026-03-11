@@ -123,6 +123,35 @@ defmodule ZtlpGateway.YamlConfig do
       other -> {config, ["circuit_breaker: expected a map, got: #{inspect(other)}" | errors]}
     end
 
+    # TLS section
+    {config, errors} = case Map.get(raw, "tls", %{}) do
+      tls when is_map(tls) ->
+        {config, errors} = validate_field(config, errors, tls, "enabled", :tls_enabled, :boolean, false, nil)
+        {config, errors} = validate_field(config, errors, tls, "cert_file", :tls_cert_file, :string, nil, nil)
+        {config, errors} = validate_field(config, errors, tls, "key_file", :tls_key_file, :string, nil, nil)
+        validate_field(config, errors, tls, "ca_cert_file", :tls_ca_cert_file, :string, nil, nil)
+      nil -> {config, errors}
+      other -> {config, ["tls: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
+    # Component auth section
+    {config, errors} = case Map.get(raw, "component_auth", %{}) do
+      ca when is_map(ca) ->
+        {config, errors} = validate_field(config, errors, ca, "enabled", :component_auth_enabled, :boolean, false, nil)
+        {config, errors} = validate_field(config, errors, ca, "identity_key_file", :component_auth_identity_key_file, :string, nil, nil)
+        case Map.get(ca, "allowed_keys") do
+          nil -> {config, errors}
+          keys when is_list(keys) ->
+            case ZtlpGateway.ComponentAuth.parse_allowed_keys(keys) do
+              {:ok, parsed} -> {Map.put(config, :component_auth_allowed_keys, parsed), errors}
+              {:error, msg} -> {config, ["component_auth.allowed_keys: #{msg}" | errors]}
+            end
+          other -> {config, ["component_auth.allowed_keys: expected a list, got: #{inspect(other)}" | errors]}
+        end
+      nil -> {config, errors}
+      other -> {config, ["component_auth: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
     case errors do
       [] -> {:ok, config}
       _ -> {:error, Enum.reverse(errors)}

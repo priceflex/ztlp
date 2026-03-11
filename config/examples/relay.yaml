@@ -108,3 +108,27 @@ ns_discovery:
   # This relay's region label
   # Env: ZTLP_RELAY_REGION
   region: "default"
+
+# ─── TLS ─────────────────────────────────────────────────────────────
+# Optional TLS for inter-component communication.
+# Uses Erlang's built-in :ssl module.
+
+# tls:
+#   enabled: false
+#   cert_file: "/etc/ztlp/relay.crt"
+#   key_file: "/etc/ztlp/relay.key"
+#   ca_cert_file: "/etc/ztlp/ca.crt"
+
+# ─── Component Authentication ───────────────────────────────────────
+# Mutual authentication between ZTLP components using Ed25519 challenge-response.
+# Protects against unauthorized components joining the mesh or querying NS.
+
+# component_auth:
+#   enabled: false
+#   # Path to this component's Ed25519 private key (hex-encoded, 64 hex chars = 32 bytes)
+#   # Auto-generated if not set and enabled.
+#   identity_key_file: "/etc/ztlp/relay-identity.key"
+#   # Public keys allowed to connect (hex-encoded Ed25519 pubkeys, 64 hex chars each)
+#   allowed_keys:
+#     - "a1b2c3d4e5f6..."  # NS server pubkey
+#     - "d4e5f6a1b2c3..."  # Other relay pubkey

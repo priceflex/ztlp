@@ -22,3 +22,24 @@ storage_mode: disc
 # Bootstrap discovery URLs
 bootstrap_urls:
   - "https://bootstrap.ztlp.org/.well-known/ztlp-relays.json"
+
+# ─── TLS ─────────────────────────────────────────────────────────────
+# Optional TLS for inter-component communication.
+# NS acts as both TLS server (for queries) and TLS client (cluster peer sync).
+
+# tls:
+#   enabled: false
+#   cert_file: "/etc/ztlp/ns.crt"
+#   key_file: "/etc/ztlp/ns.key"
+#   ca_cert_file: "/etc/ztlp/ca.crt"
+
+# ─── Component Authentication ───────────────────────────────────────
+# Mutual authentication using Ed25519 challenge-response.
+
+# component_auth:
+#   enabled: false
+#   identity_key_file: "/etc/ztlp/ns-identity.key"
+#   allowed_keys:
+#     - "a1b2c3d4e5f6..."  # Relay pubkey
+#     - "d4e5f6a1b2c3..."  # Gateway pubkey
+#     - "f1e2d3c4b5a6..."  # Other NS peer pubkey

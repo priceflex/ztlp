@@ -5,17 +5,28 @@ defmodule ZtlpNs.Application do
   Starts the supervision tree in dependency order:
 
   1. **Mnesia** — initialized before supervision tree starts (schema + tables)
-  2. **TrustAnchor** — creates ETS table for root keys
-  3. **Store** — GenServer that ensures Mnesia tables exist and are ready
-  4. **Server** — opens the UDP socket for queries (depends on Store)
+  2. **Cluster** — attempts to join seed nodes if configured (federation)
+  3. **TrustAnchor** — creates ETS table for root keys
+  4. **Store** — GenServer that ensures Mnesia tables exist and are ready
+  5. **AntiEntropy** — periodic Merkle-tree sync with cluster peers
+  6. **Server** — opens the UDP socket for queries (depends on Store)
 
   Uses `:one_for_one` strategy because each component is independent
   and can be restarted without affecting the others. Unlike the old ETS
   implementation, Mnesia tables survive GenServer crashes — data persists
   on disk and is automatically reloaded on restart.
+
+  ## Federation
+
+  When `cluster.seed_nodes` is configured (or `ZTLP_NS_SEED_NODES` env var),
+  the application will attempt to join an existing NS cluster on startup.
+  If no seed nodes are reachable, it falls back to standalone operation.
+  Anti-entropy runs periodically to keep clustered nodes in sync.
   """
 
   use Application
+
+  require Logger
 
   @impl true
   def start(_type, _args) do
@@ -24,16 +35,34 @@ defmodule ZtlpNs.Application do
 
     :ok = ensure_mnesia_started()
 
+    # Try to join cluster if seed nodes are configured
+    ZtlpNs.Cluster.ensure_replicated()
+
     children = [
-      # Order matters: TrustAnchor first, then Store (Mnesia tables), then Server (UDP)
+      # Order matters: TrustAnchor first, then Store (Mnesia tables),
+      # then AntiEntropy (needs Store), then Server (UDP)
       ZtlpNs.TrustAnchor,
       ZtlpNs.Store,
+      ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
       ZtlpNs.Server
     ]
 
     opts = [strategy: :one_for_one, name: ZtlpNs.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+
+    case result do
+      {:ok, pid} ->
+        if ZtlpNs.Cluster.clustered?() do
+          Logger.info("[ztlp-ns] Started in cluster mode with #{length(ZtlpNs.Cluster.members())} nodes")
+        else
+          Logger.info("[ztlp-ns] Started in standalone mode")
+        end
+        {:ok, pid}
+
+      error ->
+        error
+    end
   end
 
   # Initializes Mnesia before the supervision tree starts.

@@ -1255,8 +1255,10 @@ async fn cmd_listen(
         let udp = node.socket.clone();
         let pipeline = node.pipeline.clone();
 
-        tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await?;
-        eprintln!("{}", c_dim("tunnel closed"));
+        match tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await {
+            Ok(()) => eprintln!("{}", c_dim("tunnel closed")),
+            Err(e) => eprintln!("{} {}", c_red("✗ tunnel error:"), e),
+        }
     } else {
         eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
         eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");

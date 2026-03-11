@@ -69,6 +69,17 @@ struct Config {
     ns_server: Option<String>,
     #[serde(default)]
     bind: Option<String>,
+    #[serde(default)]
+    transport: Option<TransportConfig>,
+}
+
+/// Transport-layer configuration.
+#[derive(Debug, Default, Deserialize)]
+#[allow(dead_code)]
+struct TransportConfig {
+    /// GSO mode: "auto" (default), "enabled", or "disabled".
+    #[serde(default)]
+    gso: Option<String>,
 }
 
 fn load_config() -> Config {

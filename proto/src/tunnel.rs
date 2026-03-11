@@ -695,6 +695,12 @@ pub async fn run_bridge(
         let cipher = ChaCha20Poly1305::new((&send_key).into());
         let mut last_ack_check = Instant::now();
 
+        // Create BatchSender once — reused for every TCP read flush.
+        let batch_sender = crate::batch::BatchSender::new(
+            udp_send.clone(),
+            crate::gso::GsoMode::Auto,
+        );
+
         // Separate data_seq counter for DATA/FIN frames.
         // This is independent of the pipeline's send_seq (which provides
         // nonce uniqueness). The reassembly buffer on the receiver side
@@ -923,15 +929,20 @@ pub async fn run_bridge(
                     outgoing.push((packet, current_data_seq, packet_seq));
                 }
             }
-            // Lock released — now send all packets without holding any locks
-            for (packet, current_data_seq, packet_seq) in &outgoing {
-                udp_send.send_to(packet, peer_addr).await?;
-                debug!(
-                    "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
-                    packet.len(),
-                    current_data_seq,
-                    packet_seq
-                );
+            // Lock released — now send all packets without holding any locks.
+            // Use the pre-created BatchSender for efficient GSO/sendmmsg sends.
+            {
+                let batch_packets: Vec<Vec<u8>> =
+                    outgoing.iter().map(|(pkt, _, _)| pkt.clone()).collect();
+                batch_sender.send_batch(&batch_packets, peer_addr).await?;
+                for (packet, current_data_seq, packet_seq) in &outgoing {
+                    debug!(
+                        "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
+                        packet.len(),
+                        current_data_seq,
+                        packet_seq
+                    );
+                }
             }
 
             // Reset the ACK timeout tracker
@@ -2435,5 +2446,49 @@ mod tests {
         assert_eq!(delivered.len(), 4); // 1, 2, 3, 4
         assert_eq!(rb.expected_seq(), 5);
         assert!(rb.gap_detected_at.is_none());
+    }
+
+    #[test]
+    fn test_reassembly_with_gso_batch_delivery() {
+        // Simulate receiving a burst of packets as would happen from GSO
+        // on the sending end — all packets arrive in rapid succession in
+        // the correct order.
+        let mut rb = ReassemblyBuffer::new(0, 1000);
+
+        // Simulate a GSO batch of 64 packets (max GSO segments)
+        let batch_size = 64;
+        let mut total_delivered = 0;
+        for i in 0..batch_size {
+            let data = vec![(i & 0xFF) as u8; 1400]; // typical MTU-sized payload
+            let result = rb.insert(i as u64, data);
+            assert!(result.is_some());
+            let delivered = result.unwrap();
+            // Each packet should be delivered immediately (in-order)
+            assert_eq!(delivered.len(), 1);
+            assert_eq!(delivered[0].0, i as u64);
+            assert_eq!(delivered[0].1.len(), 1400);
+            total_delivered += 1;
+        }
+        assert_eq!(total_delivered, batch_size);
+        assert_eq!(rb.expected_seq(), batch_size as u64);
+        assert_eq!(rb.buffered_count(), 0);
+
+        // Simulate a second GSO batch arriving with a gap (one packet lost)
+        // Packets 64-127, but packet 65 is lost
+        let _ = rb.insert(64, vec![0xAA; 1400]); // delivered
+        assert_eq!(rb.expected_seq(), 65);
+        // Skip 65
+        for i in 66..128 {
+            let _ = rb.insert(i, vec![0xBB; 1400]); // all buffered
+        }
+        assert_eq!(rb.expected_seq(), 65); // stuck waiting for 65
+        assert_eq!(rb.buffered_count(), 62); // 66..127
+
+        // Retransmitted packet 65 arrives
+        let result = rb.insert(65, vec![0xCC; 1400]).unwrap();
+        // Should deliver 65 + all 62 buffered = 63 packets
+        assert_eq!(result.len(), 63);
+        assert_eq!(rb.expected_seq(), 128);
+        assert_eq!(rb.buffered_count(), 0);
     }
 }

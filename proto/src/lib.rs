@@ -36,9 +36,12 @@
 #![deny(unsafe_code)]
 
 pub mod admission;
+pub mod batch;
 pub mod error;
 #[allow(unsafe_code)]
 pub mod ffi;
+#[allow(unsafe_code)]
+pub mod gso;
 pub mod handshake;
 pub mod identity;
 pub mod mobile;

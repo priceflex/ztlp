@@ -34,6 +34,7 @@ colored = "2"
 indicatif = "0.17"
 ed25519-dalek = { version = "2", features = ["std"] }
 curve25519-dalek = "4"
+libc = "0.2"
 
 [[bin]]
 name = "ztlp-node"
@@ -90,3 +91,7 @@ path = "src/bin/ztlp-edge-cases.rs"
 [[bin]]
 name = "ztlp-rat-interop"
 path = "src/bin/ztlp-rat-interop.rs"
+
+[[bin]]
+name = "ztlp-throughput"
+path = "src/bin/ztlp-throughput.rs"

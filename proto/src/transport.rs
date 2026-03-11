@@ -112,6 +112,27 @@ impl TransportNode {
         Ok(())
     }
 
+    /// Send multiple raw packets to a destination using batched I/O.
+    ///
+    /// Uses GSO/sendmmsg when available for better throughput on bulk sends.
+    /// Falls back to individual send_to calls on unsupported platforms.
+    pub async fn send_batch(
+        &self,
+        packets: &[Vec<u8>],
+        dest: SocketAddr,
+    ) -> Result<usize, TransportError> {
+        if packets.is_empty() {
+            return Ok(0);
+        }
+        let batch_sender = crate::batch::BatchSender::new(
+            self.socket.clone(),
+            crate::gso::GsoMode::Auto,
+        );
+        let sent = batch_sender.send_batch(packets, dest).await?;
+        debug!("batch sent {} packets to {}", sent, dest);
+        Ok(sent)
+    }
+
     /// Send encrypted data through a relay.
     ///
     /// The packet is identical to a direct send — the relay just forwards

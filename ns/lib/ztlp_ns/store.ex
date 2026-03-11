@@ -54,11 +54,34 @@ defmodule ZtlpNs.Store do
   """
   @spec insert(Record.t()) :: :ok | {:error, atom()}
   def insert(%Record{} = record) do
+    insert(record, [])
+  end
+
+  @doc """
+  Insert a signed record with options.
+
+  Accepts the same record as `insert/1`. Options:
+  - `:replicated` — when `true`, skip eager replication to peers
+    (the record was received from a peer and should not loop back).
+  """
+  @spec insert(Record.t(), keyword()) :: :ok | {:error, atom()}
+  def insert(%Record{} = record, opts) when is_list(opts) do
     # Invariant 1: All records must be signed
     if not Record.verify(record) do
       {:error, :invalid_signature}
     else
-      do_insert(record)
+      case do_insert(record) do
+        :ok ->
+          # Trigger eager replication unless this record came from a peer
+          unless opts[:replicated] do
+            ZtlpNs.Replication.replicate_async(record)
+          end
+
+          :ok
+
+        error ->
+          error
+      end
     end
   end
 

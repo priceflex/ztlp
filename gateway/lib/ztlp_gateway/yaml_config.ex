@@ -1,0 +1,215 @@
+defmodule ZtlpGateway.YamlConfig do
+  @moduledoc """
+  YAML configuration loader and validator for the ZTLP Gateway.
+
+  Reads a YAML config file, validates it against the gateway schema,
+  and writes validated values to the OTP application environment
+  so the existing `ZtlpGateway.Config` module picks them up seamlessly.
+
+  ## Config File Resolution
+
+  1. `ZTLP_GATEWAY_CONFIG` environment variable
+  2. `/etc/ztlp/gateway.yaml`
+  3. No file → use defaults (don't crash)
+  """
+
+  require Logger
+
+  @default_path "/etc/ztlp/gateway.yaml"
+
+  @spec load_and_apply() :: :ok | {:error, [String.t()]}
+  def load_and_apply do
+    path = config_path()
+
+    case read_config(path) do
+      {:ok, raw_map} ->
+        case validate(raw_map) do
+          {:ok, config} ->
+            apply_to_app_env(config)
+            Logger.info("[ztlp-gateway] Config loaded from #{path}")
+            :ok
+
+          {:error, errors} ->
+            Logger.error("[ztlp-gateway] Config validation failed:\n" <>
+              Enum.map_join(errors, "\n", &("  - " <> &1)))
+            {:error, errors}
+        end
+
+      {:ok, :empty} ->
+        Logger.info("[ztlp-gateway] Config file empty or not found, using defaults")
+        :ok
+
+      {:error, :not_found} ->
+        Logger.info("[ztlp-gateway] No config file found (checked #{path}), using defaults")
+        :ok
+
+      {:error, reason} ->
+        Logger.error("[ztlp-gateway] Failed to read config #{path}: #{inspect(reason)}")
+        {:error, ["Failed to read config file: #{inspect(reason)}"]}
+    end
+  end
+
+  @spec load(String.t()) :: {:ok, map()} | {:error, [String.t()]}
+  def load(path) do
+    case read_config(path) do
+      {:ok, raw_map} -> validate(raw_map)
+      {:ok, :empty} -> {:ok, %{}}
+      {:error, reason} -> {:error, ["Failed to read config: #{inspect(reason)}"]}
+    end
+  end
+
+  @spec validate(map()) :: {:ok, map()} | {:error, [String.t()]}
+  def validate(raw) when is_map(raw) do
+    errors = []
+    config = %{}
+
+    {config, errors} = validate_field(config, errors, raw, "port", :port, :integer, 23097, 1..65535)
+    {config, errors} = validate_field(config, errors, raw, "session_timeout", :session_timeout_ms, :duration, 300_000, nil)
+    {config, errors} = validate_field(config, errors, raw, "max_sessions", :max_sessions, :integer, 10_000, 1..1_000_000)
+
+    # NS section
+    ns = Map.get(raw, "ns", %{})
+    if is_map(ns) do
+      {config, errors} = validate_field(config, errors, ns, "host", :ns_server_host, :ip_address, {127, 0, 0, 1}, nil)
+      {config, errors} = validate_field(config, errors, ns, "port", :ns_server_port, :integer, 23096, 1..65535)
+      {config, errors} = validate_field(config, errors, ns, "query_timeout", :ns_query_timeout_ms, :duration, 2_000, nil)
+    else
+      errors = if ns != nil, do: ["ns: expected a map, got: #{inspect(ns)}" | errors], else: errors
+    end
+
+    # Backends section (list of maps)
+    backends = Map.get(raw, "backends", [])
+    if is_list(backends) do
+      validated_backends = Enum.map(backends, fn b ->
+        if is_map(b) do
+          %{
+            name: Map.get(b, "name", "default"),
+            host: Map.get(b, "host", "127.0.0.1"),
+            port: Map.get(b, "port", 8080)
+          }
+        else
+          b
+        end
+      end)
+      config = Map.put(config, :backends, validated_backends)
+    else
+      errors = ["backends: expected a list, got: #{inspect(backends)}" | errors]
+    end
+
+    # Policies section (list of maps)
+    policies = Map.get(raw, "policies", [])
+    if is_list(policies) do
+      validated_policies = Enum.map(policies, fn p ->
+        if is_map(p) do
+          %{
+            zone: Map.get(p, "zone", "*"),
+            action: String.to_atom(Map.get(p, "action", "allow")),
+            backends: Map.get(p, "backends", [])
+          }
+        else
+          p
+        end
+      end)
+      config = Map.put(config, :policies, validated_policies)
+    else
+      errors = ["policies: expected a list, got: #{inspect(policies)}" | errors]
+    end
+
+    case errors do
+      [] -> {:ok, config}
+      _ -> {:error, Enum.reverse(errors)}
+    end
+  end
+
+  @spec apply_to_app_env(map()) :: :ok
+  def apply_to_app_env(config) do
+    Enum.each(config, fn {key, value} ->
+      Application.put_env(:ztlp_gateway, key, value)
+    end)
+  end
+
+  # ── Internal ──────────────────────────────────────────────────────────
+
+  defp config_path do
+    System.get_env("ZTLP_GATEWAY_CONFIG") || @default_path
+  end
+
+  defp read_config(path) do
+    case File.read(path) do
+      {:ok, ""} -> {:ok, :empty}
+      {:ok, content} ->
+        case ZtlpGateway.YamlParser.parse(content) do
+          {:ok, result} when is_map(result) -> {:ok, result}
+          {:ok, nil} -> {:ok, :empty}
+          {:ok, _} -> {:error, "YAML root must be a mapping"}
+          {:error, reason} -> {:error, reason}
+        end
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_field(config, errors, source, yaml_key, config_key, type, default, constraint) do
+    case Map.get(source, yaml_key) do
+      nil ->
+        if default != nil, do: {Map.put(config, config_key, default), errors}, else: {config, errors}
+      value ->
+        case coerce(value, type, constraint, yaml_key) do
+          {:ok, v} -> {Map.put(config, config_key, v), errors}
+          {:error, msg} -> {config, [msg | errors]}
+        end
+    end
+  end
+
+  defp coerce(value, :integer, range, key) do
+    case to_int(value) do
+      {:ok, n} ->
+        if range && n not in range,
+          do: {:error, "#{key}: must be between #{range.first} and #{range.last}, got: #{n}"},
+          else: {:ok, n}
+      :error -> {:error, "#{key}: expected an integer, got: #{inspect(value)}"}
+    end
+  end
+
+  defp coerce(value, :duration, _c, key) do
+    case parse_duration_ms(value) do
+      {:ok, ms} -> {:ok, ms}
+      :error -> {:error, "#{key}: invalid duration '#{inspect(value)}', expected e.g. '300s', '5m', '1h'"}
+    end
+  end
+
+  defp coerce(value, :ip_address, _c, key) when is_binary(value) do
+    case :inet.parse_address(String.to_charlist(value)) do
+      {:ok, addr} -> {:ok, addr}
+      {:error, _} -> {:error, "#{key}: invalid IP address '#{value}'"}
+    end
+  end
+  defp coerce(value, :ip_address, _c, _key) when is_tuple(value), do: {:ok, value}
+  defp coerce(value, :ip_address, _c, key),
+    do: {:error, "#{key}: expected an IP address string, got: #{inspect(value)}"}
+
+  defp parse_duration_ms(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp parse_duration_ms(value) when is_binary(value) do
+    case Regex.run(~r/^(\d+)(ms|s|m|h)$/, value) do
+      [_, n, "ms"] -> {:ok, String.to_integer(n)}
+      [_, n, "s"] -> {:ok, String.to_integer(n) * 1_000}
+      [_, n, "m"] -> {:ok, String.to_integer(n) * 60_000}
+      [_, n, "h"] -> {:ok, String.to_integer(n) * 3_600_000}
+      nil ->
+        case Integer.parse(value) do
+          {n, ""} when n >= 0 -> {:ok, n}
+          _ -> :error
+        end
+    end
+  end
+  defp parse_duration_ms(_), do: :error
+
+  defp to_int(n) when is_integer(n), do: {:ok, n}
+  defp to_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> {:ok, n}
+      _ -> :error
+    end
+  end
+  defp to_int(_), do: :error
+end

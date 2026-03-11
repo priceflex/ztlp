@@ -1,0 +1,290 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series"
+    },
+    {
+      "type": "panel",
+      "id": "piechart",
+      "name": "Pie chart"
+    }
+  ],
+  "id": null,
+  "uid": "ztlp-overview",
+  "title": "ZTLP Overview",
+  "description": "Zero Trust Layer Protocol — Relay, Gateway, and Namespace Server metrics",
+  "tags": ["ztlp", "networking", "security"],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(ztlp_relay_info, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "query": "label_values(ztlp_relay_info, instance)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Overview",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "title": "Active Sessions (Relay)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "targets": [{"expr": "ztlp_relay_active_sessions{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5000}, {"color": "red", "value": 9000}]}}}
+    },
+    {
+      "title": "Active Sessions (Gateway)",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "targets": [{"expr": "ztlp_gateway_active_sessions{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5000}, {"color": "red", "value": 9000}]}}}
+    },
+    {
+      "title": "Packets/sec",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "targets": [{"expr": "sum(rate(ztlp_relay_packets_total{instance=~\"$instance\"}[5m]))", "legendFormat": "total"}],
+      "fieldConfig": {"defaults": {"unit": "pps"}}
+    },
+    {
+      "title": "Bytes/sec In",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "targets": [{"expr": "rate(ztlp_gateway_bytes_received_total{instance=~\"$instance\"}[5m])", "legendFormat": "in"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "title": "Bytes/sec Out",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "targets": [{"expr": "rate(ztlp_gateway_bytes_sent_total{instance=~\"$instance\"}[5m])", "legendFormat": "out"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "targets": [{"expr": "ztlp_relay_uptime_seconds{instance=~\"$instance\"}", "legendFormat": "relay"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "title": "Pipeline",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false
+    },
+    {
+      "title": "Pipeline Pass/Drop Rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 10, "x": 0, "y": 6},
+      "targets": [
+        {"expr": "rate(ztlp_relay_packets_total{result=\"passed\",instance=~\"$instance\"}[5m])", "legendFormat": "passed"},
+        {"expr": "rate(ztlp_relay_packets_total{result=\"dropped_l1\",instance=~\"$instance\"}[5m])", "legendFormat": "dropped L1 (magic)"},
+        {"expr": "rate(ztlp_relay_packets_total{result=\"dropped_l2\",instance=~\"$instance\"}[5m])", "legendFormat": "dropped L2 (session)"},
+        {"expr": "rate(ztlp_relay_packets_total{result=\"dropped_l3\",instance=~\"$instance\"}[5m])", "legendFormat": "dropped L3 (auth)"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"stacking": {"mode": "normal"}, "fillOpacity": 30}}}
+    },
+    {
+      "title": "Drop Breakdown",
+      "type": "piechart",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 6, "x": 10, "y": 6},
+      "targets": [
+        {"expr": "ztlp_relay_packets_total{result=~\"dropped.*\",instance=~\"$instance\"}", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "title": "Handshake Rate",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 6},
+      "targets": [
+        {"expr": "rate(ztlp_gateway_handshakes_total{result=\"ok\",instance=~\"$instance\"}[5m])", "legendFormat": "success"},
+        {"expr": "rate(ztlp_gateway_handshakes_total{result=\"fail\",instance=~\"$instance\"}[5m])", "legendFormat": "failure"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 20}}}
+    },
+    {
+      "title": "Mesh",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "collapsed": false
+    },
+    {
+      "title": "Mesh Peers",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 15},
+      "targets": [
+        {"expr": "ztlp_relay_mesh_peers{instance=~\"$instance\"}", "legendFormat": "total peers"},
+        {"expr": "ztlp_relay_mesh_healthy_peers{instance=~\"$instance\"}", "legendFormat": "healthy peers"}
+      ]
+    },
+    {
+      "title": "Forwarded Packets/sec",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 15},
+      "targets": [
+        {"expr": "rate(ztlp_relay_packets_forwarded_total{instance=~\"$instance\"}[5m])", "legendFormat": "fwd pps"}
+      ]
+    },
+    {
+      "title": "Gateway",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false
+    },
+    {
+      "title": "Gateway Bytes In/Out",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 22},
+      "targets": [
+        {"expr": "rate(ztlp_gateway_bytes_received_total{instance=~\"$instance\"}[5m])", "legendFormat": "bytes in"},
+        {"expr": "rate(ztlp_gateway_bytes_sent_total{instance=~\"$instance\"}[5m])", "legendFormat": "bytes out"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+    {
+      "title": "Policy Denials/sec",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 22},
+      "targets": [
+        {"expr": "rate(ztlp_gateway_policy_denials_total{instance=~\"$instance\"}[5m])", "legendFormat": "denials/s"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "red", "mode": "fixed"}}}
+    },
+    {
+      "title": "Backend Errors/sec",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 22},
+      "targets": [
+        {"expr": "rate(ztlp_gateway_backend_errors_total{instance=~\"$instance\"}[5m])", "legendFormat": "errors/s"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "orange", "mode": "fixed"}}}
+    },
+    {
+      "title": "Namespace Server",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "collapsed": false
+    },
+    {
+      "title": "NS Records",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 29},
+      "targets": [{"expr": "ztlp_ns_records_total{instance=~\"$instance\"}", "legendFormat": "records"}]
+    },
+    {
+      "title": "NS Uptime",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 29},
+      "targets": [{"expr": "ztlp_ns_uptime_seconds{instance=~\"$instance\"}", "legendFormat": "uptime"}],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "title": "System",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33},
+      "collapsed": false
+    },
+    {
+      "title": "BEAM Memory",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 34},
+      "targets": [
+        {"expr": "beam_memory_bytes{kind=\"total\",instance=~\"$instance\"}", "legendFormat": "{{instance}} total"},
+        {"expr": "beam_memory_bytes{kind=\"processes\",instance=~\"$instance\"}", "legendFormat": "{{instance}} processes"},
+        {"expr": "beam_memory_bytes{kind=\"ets\",instance=~\"$instance\"}", "legendFormat": "{{instance}} ETS"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "title": "BEAM Processes",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 34},
+      "targets": [
+        {"expr": "beam_process_count{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "version": 1
+}

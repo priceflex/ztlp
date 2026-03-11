@@ -1,0 +1,57 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create ztlp system user/group
+        if ! getent group ztlp >/dev/null; then
+            addgroup --quiet --system ztlp
+        fi
+        if ! getent passwd ztlp >/dev/null; then
+            adduser --quiet --system --ingroup ztlp --home /var/lib/ztlp \
+                --no-create-home --disabled-login ztlp
+        fi
+
+        # Create directories
+        install -d -o ztlp -g ztlp -m 0750 /var/lib/ztlp/relay
+        install -d -o ztlp -g ztlp -m 0750 /var/log/ztlp
+        install -d -o root -g root -m 0755 /etc/ztlp
+
+        # Generate Erlang cookie if not present
+        if [ ! -f /var/lib/ztlp/relay/.cookie ]; then
+            head -c 32 /dev/urandom | base64 | tr -d '\n' > /var/lib/ztlp/relay/.cookie
+            chown ztlp:ztlp /var/lib/ztlp/relay/.cookie
+            chmod 0400 /var/lib/ztlp/relay/.cookie
+        fi
+
+        # Install default config if not present
+        if [ ! -f /etc/ztlp/relay.yaml ]; then
+            cp /usr/share/ztlp/examples/relay.yaml /etc/ztlp/relay.yaml
+            chmod 0640 /etc/ztlp/relay.yaml
+            chown root:ztlp /etc/ztlp/relay.yaml
+        fi
+
+        # Reload systemd
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+
+        echo ""
+        echo "  ZTLP Relay installed successfully."
+        echo "  Edit /etc/ztlp/relay.yaml and then run:"
+        echo "    systemctl enable --now ztlp-relay"
+        echo ""
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

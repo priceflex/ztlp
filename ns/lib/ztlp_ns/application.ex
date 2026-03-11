@@ -19,12 +19,16 @@ defmodule ZtlpNs.Application do
 
   @impl true
   def start(_type, _args) do
+    # Load YAML config before starting supervision tree
+    ZtlpNs.YamlConfig.load_and_apply()
+
     :ok = ensure_mnesia_started()
 
     children = [
       # Order matters: TrustAnchor first, then Store (Mnesia tables), then Server (UDP)
       ZtlpNs.TrustAnchor,
       ZtlpNs.Store,
+      ZtlpNs.MetricsServer,
       ZtlpNs.Server
     ]
 

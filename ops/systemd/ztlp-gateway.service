@@ -1,0 +1,50 @@
+[Unit]
+Description=ZTLP Gateway - Zero Trust Layer Protocol Gateway
+Documentation=https://ztlp.org
+After=network-online.target ztlp-ns.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ztlp
+Group=ztlp
+
+EnvironmentFile=-/etc/ztlp/gateway.env
+Environment=ZTLP_GATEWAY_CONFIG=/etc/ztlp/gateway.yaml
+Environment=RELEASE_NODE=ztlp_gateway@127.0.0.1
+Environment=RELEASE_DISTRIBUTION=sname
+Environment=RELEASE_COOKIE_FILE=/var/lib/ztlp/gateway/.cookie
+
+ExecStart=/usr/lib/ztlp/gateway/bin/ztlp_gateway start
+ExecStop=/usr/lib/ztlp/gateway/bin/ztlp_gateway stop
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+WatchdogSec=60
+LimitNOFILE=65536
+LimitNPROC=4096
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/ztlp/gateway /var/log/ztlp
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+
+WorkingDirectory=/var/lib/ztlp/gateway
+
+[Install]
+WantedBy=multi-user.target

@@ -30,6 +30,8 @@ defmodule ZtlpRelay.InterRelay do
   @relay_forward 0x05
   @relay_session_sync 0x06
   @relay_leave 0x07
+  @relay_drain 0x08
+  @relay_drain_cancel 0x09
 
   @type msg_type ::
           :relay_hello
@@ -39,6 +41,8 @@ defmodule ZtlpRelay.InterRelay do
           | :relay_forward
           | :relay_session_sync
           | :relay_leave
+          | :relay_drain
+          | :relay_drain_cancel
 
   @type relay_info :: %{
           node_id: binary(),
@@ -158,6 +162,38 @@ defmodule ZtlpRelay.InterRelay do
     <<@relay_leave::8, sender_node_id::binary-size(16), timestamp()::64>>
   end
 
+  @doc """
+  Encode a RELAY_DRAIN message (type 0x08).
+  Notifies mesh peers this relay is draining and should not receive new sessions.
+  """
+  @spec encode_drain(binary(), non_neg_integer()) :: binary()
+  def encode_drain(sender_node_id, timeout_ms)
+      when byte_size(sender_node_id) == 16 do
+    <<@relay_drain::8, sender_node_id::binary-size(16), timestamp()::64, timeout_ms::32>>
+  end
+
+  @doc """
+  Encode a RELAY_DRAIN_CANCEL message (type 0x09).
+  Notifies mesh peers this relay is back to normal operation.
+  """
+  @spec encode_drain_cancel(binary()) :: binary()
+  def encode_drain_cancel(sender_node_id)
+      when byte_size(sender_node_id) == 16 do
+    <<@relay_drain_cancel::8, sender_node_id::binary-size(16), timestamp()::64>>
+  end
+
+  @doc """
+  Generic encode for drain messages (used by MeshManager).
+  """
+  @spec encode(atom(), binary(), map()) :: binary()
+  def encode(:drain, sender_node_id, %{timeout_ms: timeout_ms}) do
+    encode_drain(sender_node_id, timeout_ms)
+  end
+
+  def encode(:drain_cancel, sender_node_id, _opts) do
+    encode_drain_cancel(sender_node_id)
+  end
+
   # Decoding
 
   @doc """
@@ -249,6 +285,14 @@ defmodule ZtlpRelay.InterRelay do
     {:ok, {:relay_leave, sender, ts, %{}}}
   end
 
+  def decode(<<@relay_drain::8, sender::binary-size(16), ts::64, timeout_ms::32>>) do
+    {:ok, {:relay_drain, sender, ts, %{timeout_ms: timeout_ms}}}
+  end
+
+  def decode(<<@relay_drain_cancel::8, sender::binary-size(16), ts::64>>) do
+    {:ok, {:relay_drain_cancel, sender, ts, %{}}}
+  end
+
   def decode(<<type::8, _::binary>>)
       when type not in [
              @relay_hello,
@@ -257,7 +301,9 @@ defmodule ZtlpRelay.InterRelay do
              @relay_pong,
              @relay_forward,
              @relay_session_sync,
-             @relay_leave
+             @relay_leave,
+             @relay_drain,
+             @relay_drain_cancel
            ] do
     {:error, :unknown_message_type}
   end

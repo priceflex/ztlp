@@ -1,0 +1,61 @@
+[Unit]
+Description=ZTLP Relay - Zero Trust Layer Protocol Relay
+Documentation=https://ztlp.org
+After=network-online.target ztlp-ns.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ztlp
+Group=ztlp
+
+# Config & environment
+EnvironmentFile=-/etc/ztlp/relay.env
+Environment=ZTLP_RELAY_CONFIG=/etc/ztlp/relay.yaml
+Environment=RELEASE_NODE=ztlp_relay@127.0.0.1
+Environment=RELEASE_DISTRIBUTION=sname
+Environment=RELEASE_COOKIE_FILE=/var/lib/ztlp/relay/.cookie
+
+# Start/Stop
+ExecStart=/usr/lib/ztlp/relay/bin/ztlp_relay start
+ExecStop=/usr/lib/ztlp/relay/bin/ztlp_relay stop
+
+# Drain mode on reload (SIGUSR1)
+ExecReload=/bin/kill -USR1 $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Watchdog
+WatchdogSec=60
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/ztlp/relay /var/log/ztlp
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+
+# Working directory
+WorkingDirectory=/var/lib/ztlp/relay
+
+[Install]
+WantedBy=multi-user.target

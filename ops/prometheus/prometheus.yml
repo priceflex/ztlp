@@ -1,0 +1,27 @@
+# Prometheus scrape configuration for ZTLP
+#
+# Add these jobs to your prometheus.yml scrape_configs section,
+# or use this file as a standalone config.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'ztlp-relay'
+    static_configs:
+      - targets: ['localhost:9101']
+        labels:
+          component: relay
+
+  - job_name: 'ztlp-gateway'
+    static_configs:
+      - targets: ['localhost:9102']
+        labels:
+          component: gateway
+
+  - job_name: 'ztlp-ns'
+    static_configs:
+      - targets: ['localhost:9103']
+        labels:
+          component: ns

@@ -1,0 +1,57 @@
+# ZTLP Gateway Configuration
+# ===========================
+# All values shown are defaults. Uncomment and modify as needed.
+# Environment variables take priority over this file.
+
+# UDP listen port for ZTLP client connections
+# Env: ZTLP_GATEWAY_PORT
+port: 23097
+
+# Session inactivity timeout
+# Env: ZTLP_GATEWAY_SESSION_TIMEOUT_MS
+session_timeout: 300s
+
+# Maximum concurrent gateway sessions
+# Env: ZTLP_GATEWAY_MAX_SESSIONS
+max_sessions: 10000
+
+# ─── NS Integration ─────────────────────────────────────────────────
+# ZTLP-NS server for identity resolution.
+
+ns:
+  # NS server IP address
+  host: "127.0.0.1"
+  # NS server port
+  port: 23096
+  # Query timeout
+  query_timeout: 2s
+
+# ─── Backend Services ───────────────────────────────────────────────
+# TCP backends the gateway bridges ZTLP sessions to.
+
+backends: []
+# Example:
+# backends:
+#   - name: "web"
+#     host: "127.0.0.1"
+#     port: 8080
+#   - name: "api"
+#     host: "10.0.0.5"
+#     port: 3000
+
+# ─── Access Policies ────────────────────────────────────────────────
+# Policy rules evaluated in order. First match wins.
+
+policies: []
+# Example:
+# policies:
+#   - zone: "*.corp.ztlp"
+#     action: allow
+#     backends:
+#       - "web"
+#   - zone: "*.public.ztlp"
+#     action: allow
+#     backends:
+#       - "api"
+#   - zone: "*"
+#     action: deny

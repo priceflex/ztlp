@@ -1,0 +1,24 @@
+# ZTLP-NS (Namespace Server) Configuration
+# ==========================================
+# All values shown are defaults. Uncomment and modify as needed.
+# Environment variables take priority over this file.
+
+# UDP listen port for namespace queries
+# Env: ZTLP_NS_PORT
+port: 23096
+
+# Maximum records in the store
+# Env: ZTLP_NS_MAX_RECORDS
+max_records: 100000
+
+# Storage mode: disc (persistent) or ram (volatile, for testing)
+# Env: ZTLP_NS_STORAGE_MODE
+storage_mode: disc
+
+# Mnesia data directory (leave unset for default location)
+# Env: ZTLP_NS_MNESIA_DIR
+# mnesia_dir: "/var/lib/ztlp/ns/mnesia"
+
+# Bootstrap discovery URLs
+bootstrap_urls:
+  - "https://bootstrap.ztlp.org/.well-known/ztlp-relays.json"

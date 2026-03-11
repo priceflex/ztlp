@@ -1,0 +1,49 @@
+Source: ztlp
+Section: net
+Priority: optional
+Maintainer: Steven Price <steve@techrockstars.com>
+Build-Depends: debhelper (>= 13), erlang-dev (>= 1:24), elixir (>= 1.12), cargo
+Standards-Version: 4.6.0
+Homepage: https://ztlp.org
+Vcs-Git: https://github.com/priceflex/ztlp.git
+
+Package: ztlp-relay
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, erlang-base (>= 1:24)
+Description: ZTLP Relay - Zero Trust Layer Protocol relay node
+ The ZTLP relay forwards encrypted traffic between nodes in a Zero
+ Trust Layer Protocol network. Supports standalone and mesh
+ configurations with consistent-hash routing, PathScore-based relay
+ selection, and multi-hop forwarding.
+
+Package: ztlp-gateway
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, erlang-base (>= 1:24)
+Description: ZTLP Gateway - Zero Trust Layer Protocol TCP bridge
+ The ZTLP gateway bridges ZTLP sessions to TCP backend services.
+ Performs full Noise_XX handshake as responder, policy-based access
+ control, identity resolution via ZTLP-NS, and audit logging.
+
+Package: ztlp-ns
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, erlang-base (>= 1:24)
+Description: ZTLP-NS - Zero Trust Layer Protocol namespace server
+ Distributed namespace server for ZTLP identity resolution.
+ Ed25519-signed records, hierarchical zone delegation, revocation,
+ Mnesia-backed persistent storage, and bootstrap discovery.
+
+Package: ztlp-cli
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: ZTLP CLI - Zero Trust Layer Protocol command-line tool
+ Unified CLI for ZTLP operations: key generation, peer connections,
+ packet inspection, relay management, namespace queries, and
+ diagnostic tools (ping, inspect, load generator, fuzzer).
+
+Package: ztlp
+Architecture: all
+Depends: ztlp-relay, ztlp-gateway, ztlp-ns, ztlp-cli
+Description: ZTLP - Zero Trust Layer Protocol (meta-package)
+ Installs all ZTLP components: relay, gateway, namespace server,
+ and CLI tool. Identity-first network overlay on existing IP
+ infrastructure.

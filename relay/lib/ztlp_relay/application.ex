@@ -20,8 +20,15 @@ defmodule ZtlpRelay.Application do
 
   @impl true
   def start(_type, _args) do
+    # Load YAML config before starting supervision tree
+    ZtlpRelay.YamlConfig.load_and_apply()
+
     base_children = [
       ZtlpRelay.Stats,
+      ZtlpRelay.Drain,
+      ZtlpRelay.SignalHandler,
+      ZtlpRelay.StatsReporter,
+      ZtlpRelay.MetricsServer,
       ZtlpRelay.SessionRegistry,
       {DynamicSupervisor, strategy: :one_for_one, name: ZtlpRelay.SessionSupervisor}
     ]

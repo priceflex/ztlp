@@ -28,11 +28,16 @@ defmodule ZtlpGateway.Application do
 
   @impl true
   def start(_type, _args) do
+    # Load YAML config before starting supervision tree
+    ZtlpGateway.YamlConfig.load_and_apply()
+
     # Initialize the identity cache (ETS table, not a supervised process)
     ZtlpGateway.Identity.init_cache()
 
     children = [
       ZtlpGateway.Stats,
+      ZtlpGateway.StatsReporter,
+      ZtlpGateway.MetricsServer,
       ZtlpGateway.AuditLog,
       ZtlpGateway.SessionRegistry,
       ZtlpGateway.PolicyEngine,

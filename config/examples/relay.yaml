@@ -1,0 +1,110 @@
+# ZTLP Relay Configuration
+# =========================
+# All values shown are defaults. Uncomment and modify as needed.
+# Environment variables take priority over this file.
+# Duration values accept: 300s, 5m, 1h, 100ms, or plain integers (milliseconds)
+
+# UDP listen port for client connections
+# Env: ZTLP_RELAY_PORT
+port: 23095
+
+# UDP listen address (0.0.0.0 = all interfaces)
+# address: "0.0.0.0"
+
+# Session inactivity timeout — sessions idle longer than this are closed
+# Env: ZTLP_RELAY_SESSION_TIMEOUT_MS
+session_timeout: 300s
+
+# Maximum concurrent sessions
+# Env: ZTLP_RELAY_MAX_SESSIONS
+max_sessions: 10000
+
+# ─── Mesh Mode ───────────────────────────────────────────────────────
+# Enable mesh for multi-relay deployments with consistent-hash routing,
+# PathScore-based relay selection, and inter-relay forwarding.
+
+mesh:
+  # Enable mesh mode (standalone if false)
+  # Env: ZTLP_RELAY_MESH
+  enabled: false
+
+  # Inter-relay communication port (separate from client port)
+  # Env: ZTLP_RELAY_MESH_PORT
+  port: 23096
+
+  # Bootstrap relay addresses for mesh discovery
+  # Env: ZTLP_RELAY_MESH_BOOTSTRAP (comma-separated)
+  bootstrap: []
+  # Example:
+  # bootstrap:
+  #   - "10.0.0.2:23096"
+  #   - "10.0.0.3:23096"
+
+  # Relay's 16-byte node ID (hex-encoded, 32 chars)
+  # Auto-generated if not set. Set this for stable identity across restarts.
+  # Env: ZTLP_RELAY_NODE_ID
+  # node_id: "0123456789abcdef0123456789abcdef"
+
+  # Relay role in the mesh: ingress | transit | service | all
+  # Env: ZTLP_RELAY_ROLE
+  role: all
+
+  # Virtual nodes per relay in the hash ring
+  # Env: ZTLP_RELAY_VNODES
+  vnodes: 128
+
+  # PathScore ping sweep interval
+  # Env: ZTLP_RELAY_PING_INTERVAL_MS
+  ping_interval: 15s
+
+  # Remove relays not seen for this long
+  # Env: ZTLP_RELAY_TIMEOUT_MS
+  relay_timeout: 300s
+
+# ─── Admission ───────────────────────────────────────────────────────
+# Relay Admission Token (RAT) and rate limiting configuration.
+
+admission:
+  # RAT signing secret (64 hex chars = 32 bytes)
+  # Auto-generated if not set. Set for stable tokens across restarts.
+  # Env: ZTLP_RELAY_RAT_SECRET
+  # rat_secret: "0123456789abcdef..."
+
+  # Previous RAT secret for key rotation
+  # Env: ZTLP_RELAY_RAT_SECRET_PREVIOUS
+  # rat_secret_previous: "..."
+
+  # RAT time-to-live
+  # Env: ZTLP_RELAY_RAT_TTL_SECONDS
+  rat_ttl: 300s
+
+  # Rate limiting for HELLO messages
+  rate_limit:
+    # Max HELLO messages per IP per minute
+    per_ip: 10
+    # Max HELLO messages per NodeID per minute
+    per_node: 5
+
+  # Trigger Stateless Admission Challenge when session count exceeds
+  # this fraction of max_sessions (0.0 to 1.0)
+  sac_load_threshold: 0.7
+
+# ─── NS Discovery ───────────────────────────────────────────────────
+# ZTLP-NS integration for dynamic relay discovery.
+
+ns_discovery:
+  # NS server address (host:port)
+  # Env: ZTLP_RELAY_NS_SERVER
+  # server: "127.0.0.1:23096"
+
+  # NS zone for relay discovery
+  # Env: ZTLP_RELAY_NS_DISCOVERY_ZONE
+  zone: "relay.ztlp"
+
+  # How often to refresh relay list from NS
+  # Env: ZTLP_RELAY_NS_REFRESH_INTERVAL_MS
+  refresh_interval: 60s
+
+  # This relay's region label
+  # Env: ZTLP_RELAY_REGION
+  region: "default"

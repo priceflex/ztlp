@@ -1,0 +1,12 @@
+/var/log/ztlp/ns.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 ztlp ztlp
+    postrotate
+        systemctl reload ztlp-ns 2>/dev/null || true
+    endscript
+}

@@ -61,6 +61,14 @@ defmodule ZtlpRelay.MeshManager do
   @spec node_id() :: binary()
   def node_id, do: GenServer.call(__MODULE__, :node_id)
 
+  @doc "Broadcast drain notification to mesh peers."
+  @spec broadcast_drain() :: :ok
+  def broadcast_drain, do: GenServer.cast(__MODULE__, :broadcast_drain)
+
+  @doc "Broadcast drain cancel notification to mesh peers."
+  @spec broadcast_drain_cancel() :: :ok
+  def broadcast_drain_cancel, do: GenServer.cast(__MODULE__, :broadcast_drain_cancel)
+
   @impl true
   def init(opts) do
     node_id = Keyword.get(opts, :node_id, Config.relay_node_id())
@@ -197,6 +205,30 @@ defmodule ZtlpRelay.MeshManager do
   def handle_call(:node_id, _from, state), do: {:reply, state.node_id, state}
 
   @impl true
+  def handle_cast(:broadcast_drain, state) do
+    Logger.info("[mesh] Broadcasting DRAIN to #{map_size(state.relays)} peers")
+    Enum.each(state.relays, fn {_id, relay} ->
+      if relay.socket_addr do
+        {ip, port} = relay.socket_addr
+        :gen_udp.send(state.socket, ip, port,
+          InterRelay.encode(:drain, state.node_id, %{timeout_ms: 300_000}))
+      end
+    end)
+    {:noreply, state}
+  end
+
+  def handle_cast(:broadcast_drain_cancel, state) do
+    Logger.info("[mesh] Broadcasting DRAIN_CANCEL to #{map_size(state.relays)} peers")
+    Enum.each(state.relays, fn {_id, relay} ->
+      if relay.socket_addr do
+        {ip, port} = relay.socket_addr
+        :gen_udp.send(state.socket, ip, port,
+          InterRelay.encode(:drain_cancel, state.node_id, %{}))
+      end
+    end)
+    {:noreply, state}
+  end
+
   def handle_cast({:inter_relay_message, data, sender}, state) do
     case InterRelay.handle_message(data, sender) do
       {:ok, decoded} ->

@@ -96,16 +96,35 @@ else
     fail "ztlp binary not found. Install from https://github.com/priceflex/ztlp/releases"
 fi
 
+# Optional tool checks
+HAS_NMAP=false; HAS_TCPDUMP=false; HAS_PYTHON3=false; HAS_NC=false; HAS_SCP=false; HAS_BC=false
+
+command -v nmap    >/dev/null 2>&1 && { HAS_NMAP=true;    success "nmap found";       } || warn "nmap not found — port scan act will be skipped"
+command -v tcpdump >/dev/null 2>&1 && { HAS_TCPDUMP=true; success "tcpdump found";    } || warn "tcpdump not found — capture act will be skipped"
+command -v python3 >/dev/null 2>&1 && { HAS_PYTHON3=true; success "python3 found";    } || warn "python3 not found — flood/malformed/CPU acts will be skipped"
+command -v nc      >/dev/null 2>&1 && { HAS_NC=true;      success "nc (netcat) found"; } || warn "nc not found — SSH pre-check will use alternate method"
+command -v scp     >/dev/null 2>&1 && { HAS_SCP=true;     success "scp found";        } || warn "scp not found — throughput test will be skipped"
+command -v bc      >/dev/null 2>&1 && { HAS_BC=true;      success "bc found";         } || warn "bc not found — some calculations will show N/A"
+
 # SSH server availability
-if nc -z 127.0.0.1 "$SSH_PORT" >/dev/null 2>&1; then
-    success "SSH server reachable on port $SSH_PORT"
+if [[ "$HAS_NC" == "true" ]]; then
+    if nc -z 127.0.0.1 "$SSH_PORT" >/dev/null 2>&1; then
+        success "SSH server reachable on port $SSH_PORT"
+    else
+        fail "SSH server not reachable on port $SSH_PORT. Start sshd first."
+    fi
 else
-    fail "SSH server not reachable on port $SSH_PORT. Start sshd first."
+    # Fallback: try bash /dev/tcp
+    if (echo >/dev/tcp/127.0.0.1/"$SSH_PORT") 2>/dev/null; then
+        success "SSH server reachable on port $SSH_PORT"
+    else
+        fail "SSH server not reachable on port $SSH_PORT. Start sshd first."
+    fi
 fi
 
 # NS server (optional)
 if [[ "$SKIP_NS" != "true" ]]; then
-    if nc -zu 127.0.0.1 "${NS_SERVER##*:}" >/dev/null 2>&1; then
+    if [[ "$HAS_NC" == "true" ]] && nc -zu 127.0.0.1 "${NS_SERVER##*:}" >/dev/null 2>&1; then
         success "NS server reachable at $NS_SERVER"
     else
         warn "NS server not reachable – falling back to --skip-ns"
@@ -226,7 +245,7 @@ pause
 # -------------------------------------------------------------------
 banner "Act 6 — Throughput Saturation Test"
 
-if command -v scp >/dev/null 2>&1; then
+if [[ "$HAS_SCP" == "true" ]]; then
     TEST_FILE="$DEMO_DIR/throughput_test.bin"
     SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
@@ -288,7 +307,7 @@ pause
 # ACT 7 – Port Scan (optional)
 # -------------------------------------------------------------------
 banner "Act 7 — Port Scan"
-if command -v nmap >/dev/null 2>&1; then
+if [[ "$HAS_NMAP" == "true" ]]; then
     step "Scanning host for open ports (nmap)"
     dimcmd "nmap -p $SSH_PORT,$LISTEN_PORT 127.0.0.1"
     nmap -p "$SSH_PORT,$LISTEN_PORT" 127.0.0.1 | sed 's/^/  /'
@@ -302,7 +321,7 @@ pause
 # ACT 8 – Packet Flood
 # -------------------------------------------------------------------
 banner "Act 8 — UDP Packet Flood"
-if command -v python3 >/dev/null 2>&1; then
+if [[ "$HAS_PYTHON3" == "true" ]]; then
     FLOOD_COUNT=20000
     step "Sending $FLOOD_COUNT random UDP packets to ZTLP port $LISTEN_PORT"
     python3 -c "
@@ -326,7 +345,7 @@ pause
 # ACT 9 – Malformed ZTLP Packets
 # -------------------------------------------------------------------
 banner "Act 9 — Malformed ZTLP Packets"
-if command -v python3 >/dev/null 2>&1; then
+if [[ "$HAS_PYTHON3" == "true" ]]; then
     MAL_COUNT=20000
     step "Sending $MAL_COUNT packets with correct magic (0x5A37) but bogus SessionIDs"
     python3 -c "
@@ -351,7 +370,7 @@ pause
 # ACT 10 – tcpdump Capture (optional)
 # -------------------------------------------------------------------
 banner "Act 10 — tcpdump Capture"
-if command -v tcpdump >/dev/null 2>&1; then
+if [[ "$HAS_TCPDUMP" == "true" ]]; then
     PCAP="$DEMO_DIR/ztlp_capture.pcap"
     step "Capturing traffic on port $LISTEN_PORT for 5 seconds"
     dimcmd "tcpdump -i any -w $PCAP -s 0 udp port $LISTEN_PORT & sleep 5; kill \$!"
@@ -371,7 +390,7 @@ pause
 # -------------------------------------------------------------------
 banner "Act 11 — CPU Usage and Summary"
 step "Measuring CPU during a 50,000-packet flood"
-if command -v python3 >/dev/null 2>&1; then
+if [[ "$HAS_PYTHON3" == "true" ]]; then
     # Read idle time before
     read -r _ _ _ _ IDLE_BEFORE _ < /proc/stat
     TOTAL_BEFORE=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)

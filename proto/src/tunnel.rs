@@ -90,12 +90,15 @@ pub const DEFAULT_SERVICE: &str = "_default";
 /// Maximum TCP read buffer size per chunk.
 /// Larger buffers reduce syscall overhead and improve throughput
 /// for bulk transfers (SCP, file copies).
-const TCP_READ_BUF: usize = 65536;
+const TCP_READ_BUF: usize = 131072;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
 /// ZTLP data header is 42 bytes, Poly1305 tag is 16 bytes, so
 /// max plaintext per packet ≈ 65535 - 42 - 16 = 65477.
-/// We use a conservative 16KB to avoid IP fragmentation on most MTUs.
+/// We use 16KB to stay well within IP fragmentation limits.
+/// On 1500-byte MTU networks, ~16KB payloads fragment into ~11 pieces
+/// which is manageable. Larger payloads suffer exponentially worse
+/// fragment loss rates under any packet loss.
 /// Subtract 9 bytes for the frame type prefix (1) + data_seq (8).
 const MAX_PLAINTEXT_PER_PACKET: usize = 16384 - 9;
 
@@ -122,10 +125,10 @@ const SEND_WINDOW: u64 = 2048;
 
 /// The receiver sends an ACK after this many packets have been delivered
 /// to TCP, or when the ACK timer fires — whichever comes first.
-const ACK_EVERY_PACKETS: u64 = 64;
+const ACK_EVERY_PACKETS: u64 = 32;
 
 /// ACK timer interval: send an ACK at least this often while data is flowing.
-const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Maximum number of out-of-order packets the reassembly buffer will hold.
 /// At ~16KB per packet, 4096 packets ≈ 64MB of buffered data.
@@ -144,7 +147,8 @@ const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 // ─── Congestion control parameters ──────────────────────────────────────────
 
-/// Initial congestion window (in packets). 10 is a common modern default.
+/// Initial congestion window (in packets). 10 is the standard modern default
+/// (RFC 6928). Slow start ramps quickly on low-RTT links.
 const INITIAL_CWND: f64 = 10.0;
 
 /// Initial slow-start threshold (in packets).
@@ -803,119 +807,125 @@ pub async fn run_bridge(
 
             // Split the TCP data into chunks that fit in ZTLP packets
             // (accounting for 1-byte frame type + 8-byte data_seq prefix)
-            for chunk in data.chunks(MAX_PLAINTEXT_PER_PACKET) {
-                // ── Flow control: wait for send window ──
-                // The sender must not have more than effective_window DATA packets
-                // in flight. We use data_seq (not pipeline send_seq) so that
-                // ACK/NACK control frames don't consume window space.
-                loop {
-                    let acked = {
-                        let guard = last_acked_seq_reader.lock().await;
-                        *guard
-                    };
+            let chunks: Vec<&[u8]> = data.chunks(MAX_PLAINTEXT_PER_PACKET).collect();
+            let num_chunks = chunks.len();
 
-                    let effective_window = {
-                        let cc = congestion_sender.lock().await;
-                        cc.effective_window()
-                    };
+            // ── Flow control: wait for send window before the batch ──
+            loop {
+                let acked = {
+                    let guard = last_acked_seq_reader.lock().await;
+                    *guard
+                };
 
-                    // Window check uses data_seq (DATA-only counter).
-                    // ACK/NACK frames do NOT affect this counter.
-                    let window_ok = match acked {
-                        Some(acked_data_seq) => data_seq < acked_data_seq + effective_window + 1,
-                        None => data_seq < effective_window,
-                    };
+                let effective_window = {
+                    let cc = congestion_sender.lock().await;
+                    cc.effective_window()
+                };
 
-                    if window_ok {
-                        break;
+                // Window check: ensure we have room for at least one packet.
+                let window_ok = match acked {
+                    Some(acked_data_seq) => data_seq < acked_data_seq + effective_window + 1,
+                    None => data_seq < effective_window,
+                };
+
+                if window_ok {
+                    break;
+                }
+
+                // Window exhausted — check for timeout
+                if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
+                    warn!(
+                        "sender ACK timeout ({:?} with no window progress)",
+                        SENDER_ACK_TIMEOUT
+                    );
+                    return Err("sender ACK timeout".into());
+                }
+
+                // Brief sleep to let ACKs arrive, also drain retransmits.
+                // 100µs avoids busy-spinning while reacting quickly to ACKs.
+                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+
+                // Process retransmit requests while waiting for window
+                while let Ok(nack_seqs) = retransmit_rx.try_recv() {
+                    {
+                        let mut cc = congestion_sender.lock().await;
+                        cc.on_loss();
                     }
-
-                    // Window exhausted — check for timeout
-                    if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
-                        warn!(
-                            "sender ACK timeout ({:?} with no window progress)",
-                            SENDER_ACK_TIMEOUT
-                        );
-                        return Err("sender ACK timeout".into());
-                    }
-
-                    // Yield briefly to let ACKs arrive, also drain retransmits
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-
-                    // Process retransmit requests while waiting for window
-                    while let Ok(nack_seqs) = retransmit_rx.try_recv() {
-                        {
-                            let mut cc = congestion_sender.lock().await;
-                            cc.on_loss();
-                        }
-                        for nack_data_seq in &nack_seqs {
-                            let entry_info = {
-                                let rb = retransmit_buf_sender.lock().await;
-                                rb.get_with_packet_seq(*nack_data_seq)
-                            };
-                            if let Some((plaintext, orig_pkt_seq)) = entry_info {
-                                let mut nonce_bytes = [0u8; 12];
-                                nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_be_bytes());
-                                let nonce = Nonce::from_slice(&nonce_bytes);
-                                if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
-                                    let mut header = DataHeader::new(sid_send, orig_pkt_seq);
-                                    let aad = header.aad_bytes();
-                                    header.header_auth_tag =
-                                        compute_header_auth_tag(&send_key, &aad);
-                                    let mut packet = header.serialize();
-                                    packet.extend_from_slice(&encrypted);
-                                    let _ = udp_send.send_to(&packet, peer_addr).await;
-                                    debug!(
-                                        "retransmitted data_seq {} (while waiting for window)",
-                                        nack_data_seq
-                                    );
-                                }
+                    for nack_data_seq in &nack_seqs {
+                        let entry_info = {
+                            let rb = retransmit_buf_sender.lock().await;
+                            rb.get_with_packet_seq(*nack_data_seq)
+                        };
+                        if let Some((plaintext, orig_pkt_seq)) = entry_info {
+                            let mut nonce_bytes = [0u8; 12];
+                            nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_be_bytes());
+                            let nonce = Nonce::from_slice(&nonce_bytes);
+                            if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
+                                let mut header = DataHeader::new(sid_send, orig_pkt_seq);
+                                let aad = header.aad_bytes();
+                                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                                let mut packet = header.serialize();
+                                packet.extend_from_slice(&encrypted);
+                                let _ = udp_send.send_to(&packet, peer_addr).await;
+                                debug!(
+                                    "retransmitted data_seq {} (while waiting for window)",
+                                    nack_data_seq
+                                );
                             }
                         }
                     }
                 }
+            }
 
-                // Reset the ACK timeout tracker whenever we successfully send
-                last_ack_check = Instant::now();
+            // Batch-allocate packet_seqs for all chunks (one lock acquisition)
+            let first_packet_seq = {
+                let mut pl = pipeline_send.lock().await;
+                let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
+                let first = session.send_seq;
+                session.send_seq += num_chunks as u64;
+                first
+            };
 
-                // Get next packet_seq from the session (for nonce uniqueness)
-                let packet_seq = {
-                    let mut pl = pipeline_send.lock().await;
-                    let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
-                    session.next_send_seq()
-                };
+            // Build, encrypt, and buffer all chunks (lock once for retransmit buffer)
+            let now = Instant::now();
+            let mut outgoing: Vec<(Vec<u8>, u64, u64)> = Vec::with_capacity(num_chunks);
+            {
+                let mut rb = retransmit_buf_sender.lock().await;
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let current_data_seq = data_seq;
+                    data_seq += 1;
+                    let packet_seq = first_packet_seq + i as u64;
 
-                // Build framed plaintext: [FRAME_DATA | data_seq (8B BE) | chunk_bytes...]
-                let current_data_seq = data_seq;
-                data_seq += 1;
-                let mut framed = Vec::with_capacity(1 + 8 + chunk.len());
-                framed.push(FRAME_DATA);
-                framed.extend_from_slice(&current_data_seq.to_be_bytes());
-                framed.extend_from_slice(chunk);
+                    // Build framed plaintext: [FRAME_DATA | data_seq (8B BE) | chunk_bytes...]
+                    let mut framed = Vec::with_capacity(1 + 8 + chunk.len());
+                    framed.push(FRAME_DATA);
+                    framed.extend_from_slice(&current_data_seq.to_be_bytes());
+                    framed.extend_from_slice(chunk);
 
-                // Store in retransmit buffer keyed by data_seq, with packet_seq for nonce
-                {
-                    let mut rb = retransmit_buf_sender.lock().await;
-                    rb.insert(current_data_seq, packet_seq, framed.clone(), Instant::now());
+                    // Store in retransmit buffer
+                    rb.insert(current_data_seq, packet_seq, framed.clone(), now);
+
+                    // Encrypt with nonce = 4 zero bytes + 8-byte big-endian packet_seq
+                    let mut nonce_bytes = [0u8; 12];
+                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
+                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    let encrypted = cipher
+                        .encrypt(nonce, framed.as_slice())
+                        .map_err(|e| format!("encryption error: {}", e))?;
+
+                    // Build data header with packet_seq and auth tag
+                    let mut header = DataHeader::new(sid_send, packet_seq);
+                    let aad = header.aad_bytes();
+                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+                    let mut packet = header.serialize();
+                    packet.extend_from_slice(&encrypted);
+                    outgoing.push((packet, current_data_seq, packet_seq));
                 }
-
-                // Encrypt with nonce = 4 zero bytes + 8-byte big-endian packet_seq
-                let mut nonce_bytes = [0u8; 12];
-                nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
-                let nonce = Nonce::from_slice(&nonce_bytes);
-                let encrypted = cipher
-                    .encrypt(nonce, framed.as_slice())
-                    .map_err(|e| format!("encryption error: {}", e))?;
-
-                // Build data header with packet_seq and auth tag
-                let mut header = DataHeader::new(sid_send, packet_seq);
-                let aad = header.aad_bytes();
-                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
-
-                // Serialize and send
-                let mut packet = header.serialize();
-                packet.extend_from_slice(&encrypted);
-                udp_send.send_to(&packet, peer_addr).await?;
+            }
+            // Lock released — now send all packets without holding any locks
+            for (packet, current_data_seq, packet_seq) in &outgoing {
+                udp_send.send_to(packet, peer_addr).await?;
                 debug!(
                     "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
                     packet.len(),
@@ -923,6 +933,9 @@ pub async fn run_bridge(
                     packet_seq
                 );
             }
+
+            // Reset the ACK timeout tracker
+            last_ack_check = Instant::now();
         }
     };
 

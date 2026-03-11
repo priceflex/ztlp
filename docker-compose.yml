@@ -3,15 +3,14 @@
 # ─────────────────────────────────────────────────────────────
 #
 # Usage:
-#   docker compose up              # Start all services
-#   docker compose up -d           # Start in background
-#   docker compose build           # Rebuild all images
-#   docker compose logs -f ns      # Follow NS logs
+#   docker compose up --build          # Start all services
+#   docker compose up -d --build       # Background
+#   docker compose logs -f relay       # Follow relay logs
+#   docker compose ps                  # Check health status
 #
-# Architecture:
-#   ns (23096/udp) ← gateway (23097/udp) → echo-backend (8080/tcp)
-#   relay (23095/udp)
-#   proto (client — connects to relay/gateway)
+# Overlays:
+#   docker compose -f docker-compose.yml -f docker-compose.mesh.yml up
+#   docker compose -f docker-compose.yml -f docker-compose.federation.yml up
 
 services:
   # ── Namespace Server ────────────────────────────────────────
@@ -20,10 +19,28 @@ services:
     container_name: ztlp-ns
     ports:
       - "23096:23096/udp"
+      - "9103:9103"            # Prometheus metrics
     environment:
-      - ZTLP_NS_PORT=23096
-      - ZTLP_NS_MAX_RECORDS=100000
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "100000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "100"
+      ZTLP_NS_RATE_LIMIT_BURST: "200"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
 
   # ── Relay Server ────────────────────────────────────────────
   relay:
@@ -31,11 +48,28 @@ services:
     container_name: ztlp-relay
     ports:
       - "23095:23095/udp"
+      - "9101:9101"            # Prometheus metrics
     environment:
-      - ZTLP_RELAY_PORT=23095
-      - ZTLP_RELAY_MAX_SESSIONS=10000
-      - ZTLP_RELAY_SESSION_TIMEOUT_MS=300000
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "10000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+      ZTLP_RELAY_BACKPRESSURE_SOFT_PCT: "80"
+      ZTLP_RELAY_BACKPRESSURE_HARD_PCT: "95"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
 
   # ── Gateway ─────────────────────────────────────────────────
   gateway:
@@ -45,20 +79,43 @@ services:
     container_name: ztlp-gateway
     ports:
       - "23097:23097/udp"
+      - "9102:9102"            # Prometheus metrics
     depends_on:
-      - ns
+      ns:
+        condition: service_healthy
     environment:
-      - ZTLP_GATEWAY_PORT=23097
-      - ZTLP_GATEWAY_NS_HOST=ns
-      - ZTLP_GATEWAY_NS_PORT=23096
-      - ZTLP_GATEWAY_MAX_SESSIONS=10000
+      ZTLP_GATEWAY_PORT: "23097"
+      ZTLP_GATEWAY_NS_HOST: "ns"
+      ZTLP_GATEWAY_NS_PORT: "23096"
+      ZTLP_GATEWAY_MAX_SESSIONS: "10000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_GATEWAY_METRICS_ENABLED: "true"
+      ZTLP_GATEWAY_METRICS_PORT: "9102"
+      ZTLP_GATEWAY_CIRCUIT_BREAKER_THRESHOLD: "5"
+      ZTLP_GATEWAY_CIRCUIT_BREAKER_TIMEOUT_MS: "30000"
+      ZTLP_GATEWAY_BACKEND_HOST: "echo-backend"
+      ZTLP_GATEWAY_BACKEND_PORT: "8080"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
 
   # ── Echo Backend (for gateway testing) ──────────────────────
   echo-backend:
     image: alpine/socat:latest
     container_name: ztlp-echo-backend
     command: TCP-LISTEN:8080,fork,reuseaddr SYSTEM:'cat'
-    ports:
-      - "8080:8080"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M

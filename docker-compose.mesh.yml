@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Mesh Overlay — 3-relay mesh topology
+# ─────────────────────────────────────────────────────────────
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.mesh.yml up --build
+#
+# This extends the base compose with mesh networking enabled on the
+# primary relay and adds two additional relay nodes. All three form
+# a consistent-hash ring with PathScore health monitoring.
+
+services:
+  relay:
+    ports:
+      - "23095:23095/udp"
+      - "23098:23098/udp"     # mesh inter-relay port
+      - "9101:9101"
+    environment:
+      ZTLP_RELAY_MESH_ENABLED: "true"
+      ZTLP_RELAY_MESH_PORT: "23098"
+      ZTLP_RELAY_MESH_SEED_NODES: "relay2:23098,relay3:23098"
+
+  relay2:
+    build: ./relay
+    container_name: ztlp-relay-2
+    ports:
+      - "23195:23095/udp"
+      - "23198:23098/udp"
+      - "9111:9101"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "10000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+      ZTLP_RELAY_MESH_ENABLED: "true"
+      ZTLP_RELAY_MESH_PORT: "23098"
+      ZTLP_RELAY_MESH_SEED_NODES: "relay:23098,relay3:23098"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+
+  relay3:
+    build: ./relay
+    container_name: ztlp-relay-3
+    ports:
+      - "23295:23095/udp"
+      - "23298:23098/udp"
+      - "9121:9101"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "10000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+      ZTLP_RELAY_MESH_ENABLED: "true"
+      ZTLP_RELAY_MESH_PORT: "23098"
+      ZTLP_RELAY_MESH_SEED_NODES: "relay:23098,relay2:23098"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G

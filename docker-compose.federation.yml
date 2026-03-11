@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP NS Federation Overlay — 3-node namespace cluster
+# ─────────────────────────────────────────────────────────────
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.federation.yml up --build
+#
+# This extends the base compose with Mnesia disc_copies persistence,
+# Erlang distribution for cluster formation, and anti-entropy sync.
+# Each NS node gets its own persistent volume for Mnesia data.
+
+services:
+  ns:
+    hostname: ns1
+    environment:
+      ZTLP_NS_STORAGE_MODE: "disc_copies"
+      ZTLP_NS_SEED_NODES: "ns2@ns2,ns3@ns3"
+      ZTLP_NS_NODE_NAME: "ns1@ns1"
+      ZTLP_NS_MNESIA_DIR: "/app/data"
+    volumes:
+      - ns1-data:/app/data
+
+  ns2:
+    build: ./ns
+    container_name: ztlp-ns-2
+    hostname: ns2
+    ports:
+      - "23196:23096/udp"
+      - "9113:9103"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "100000"
+      ZTLP_NS_STORAGE_MODE: "disc_copies"
+      ZTLP_NS_SEED_NODES: "ns1@ns1,ns3@ns3"
+      ZTLP_NS_NODE_NAME: "ns2@ns2"
+      ZTLP_NS_MNESIA_DIR: "/app/data"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "100"
+      ZTLP_NS_RATE_LIMIT_BURST: "200"
+    volumes:
+      - ns2-data:/app/data
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  ns3:
+    build: ./ns
+    container_name: ztlp-ns-3
+    hostname: ns3
+    ports:
+      - "23296:23096/udp"
+      - "9123:9103"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "100000"
+      ZTLP_NS_STORAGE_MODE: "disc_copies"
+      ZTLP_NS_SEED_NODES: "ns1@ns1,ns2@ns2"
+      ZTLP_NS_NODE_NAME: "ns3@ns3"
+      ZTLP_NS_MNESIA_DIR: "/app/data"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "100"
+      ZTLP_NS_RATE_LIMIT_BURST: "200"
+    volumes:
+      - ns3-data:/app/data
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+volumes:
+  ns1-data:
+  ns2-data:
+  ns3-data:

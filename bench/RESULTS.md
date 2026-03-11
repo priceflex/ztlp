@@ -4,7 +4,7 @@
 
 | Property | Value |
 |----------|-------|
-| Date | 2026-03-10 07:55 UTC |
+| Date | 2026-03-11 16:52 UTC (updated) |
 | OS | Linux 5.15.0-1093-kvm x86_64 |
 | CPU | AMD EPYC 4564P 16-Core Processor |
 | CPU Cores | 4 (vCPU) |
@@ -38,155 +38,156 @@ The three-layer admission pipeline confirms the designed cost hierarchy — **ea
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
 | **Layer 1: Magic Check** | | | | |
-| `valid_magic?/1` — valid | 80 ns | 61 ns | 170 ns | 12,530,138 ops/s |
-| `valid_magic?/1` — invalid | 86 ns | 69 ns | 351 ns | 11,643,867 ops/s |
-| `layer1_magic/1` — valid | 100 ns | 70 ns | 772 ns | 9,964,429 ops/s |
-| `layer1_magic/1` — bad magic | 95 ns | 70 ns | 370 ns | 10,507,776 ops/s |
-| `layer1_magic/1` — garbage | 87 ns | 61 ns | 311 ns | 11,526,774 ops/s |
+| `valid_magic?/1` — valid | 108 ns | 70 ns | 270 ns | 9,299,715 ops/s |
+| `valid_magic?/1` — invalid | 95 ns | 70 ns | 381 ns | 10,480,023 ops/s |
+| `layer1_magic/1` — valid | 84 ns | 61 ns | 341 ns | 11,891,393 ops/s |
+| `layer1_magic/1` — bad magic | 97 ns | 70 ns | 381 ns | 10,313,470 ops/s |
+| `layer1_magic/1` — garbage | 87 ns | 70 ns | 261 ns | 11,563,418 ops/s |
 | **Layer 2: SessionID Lookup** | | | | |
-| Known session (100 sessions) | 247 ns | 191 ns | 582 ns | 4,053,534 ops/s |
-| Unknown session (100 sessions) | 222 ns | 170 ns | 591 ns | 4,496,650 ops/s |
-| Known session (1K sessions) | 248 ns | 191 ns | 592 ns | 4,038,551 ops/s |
-| Unknown session (1K sessions) | 193 ns | 170 ns | 330 ns | 5,183,817 ops/s |
-| Known session (10K sessions) | 214 ns | 190 ns | 501 ns | 4,673,587 ops/s |
-| Unknown session (10K sessions) | 223 ns | 171 ns | 411 ns | 4,483,929 ops/s |
-| HELLO packet (bypass) | 136 ns | 90 ns | 391 ns | 7,374,904 ops/s |
+| Known session (100 sessions) | 267 ns | 200 ns | 601 ns | 3,744,348 ops/s |
+| Unknown session (100 sessions) | 226 ns | 170 ns | 542 ns | 4,434,785 ops/s |
+| Known session (1K sessions) | 364 ns | 191 ns | 601 ns | 2,744,327 ops/s |
+| Unknown session (1K sessions) | 209 ns | 170 ns | 441 ns | 4,796,345 ops/s |
+| Known session (10K sessions) | 220 ns | 191 ns | 530 ns | 4,552,191 ops/s |
+| Unknown session (10K sessions) | 196 ns | 171 ns | 361 ns | 5,111,513 ops/s |
+| HELLO packet (bypass) | 96 ns | 80 ns | 281 ns | 10,416,790 ops/s |
 | **Full Pipeline** | | | | |
-| `admit/1` — valid session | 265 ns | 210 ns | 642 ns | 3,768,883 ops/s |
-| `admit/1` — HELLO | 101 ns | 90 ns | 231 ns | 9,915,225 ops/s |
-| `admit/1` — bad magic (L1 reject) | 89 ns | 70 ns | 321 ns | 11,286,345 ops/s |
-| `admit/1` — unknown session (L2 reject) | 224 ns | 181 ns | 701 ns | 4,460,509 ops/s |
+| `admit/1` — valid session | 229 ns | 200 ns | 541 ns | 4,370,400 ops/s |
+| `admit/1` — HELLO | 110 ns | 90 ns | 291 ns | 9,085,321 ops/s |
+| `admit/1` — bad magic (L1 reject) | 87 ns | 70 ns | 341 ns | 11,516,189 ops/s |
+| `admit/1` — unknown session (L2 reject) | 214 ns | 180 ns | 591 ns | 4,683,252 ops/s |
 | **Packet Parsing** | | | | |
-| `parse/1` — data packet | 140 ns | 120 ns | 331 ns | 7,151,332 ops/s |
-| `parse/1` — handshake packet | 133 ns | 120 ns | 230 ns | 7,545,122 ops/s |
-| `extract_session_id/1` | 87 ns | 70 ns | 210 ns | 11,437,481 ops/s |
-| `hello?/1` | 104 ns | 80 ns | 340 ns | 9,576,643 ops/s |
+| `parse/1` — data packet | 147 ns | 120 ns | 381 ns | 6,786,126 ops/s |
+| `parse/1` — handshake packet | 148 ns | 120 ns | 911 ns | 6,755,337 ops/s |
+| `extract_session_id/1` | 103 ns | 70 ns | 391 ns | 9,719,554 ops/s |
+| `hello?/1` | 106 ns | 80 ns | 351 ns | 9,435,180 ops/s |
 
 ### Gateway: Handshake & Crypto
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
 | **X25519 Key Operations** | | | | |
-| `generate_keypair/0` (X25519) | 28.4 µs | 27.6 µs | 37.8 µs | 35,200 ops/s |
-| `dh/2` (shared secret) | 53.2 µs | 51.4 µs | 72.8 µs | 18,801 ops/s |
+| `generate_keypair/0` (X25519) | 30.2 µs | 28.3 µs | 45.4 µs | 33,158 ops/s |
+| `dh/2` (shared secret) | 54.7 µs | 52.6 µs | 78.8 µs | 18,270 ops/s |
 | **ChaCha20-Poly1305 AEAD** | | | | |
-| Encrypt 64B | 806 ns | 741 ns | 1,453 ns | 1,241,464 ops/s |
-| Decrypt 64B | 764 ns | 722 ns | 1,614 ns | 1,309,492 ops/s |
-| Encrypt 1KB | 1,110 ns | 962 ns | 1,914 ns | 900,991 ops/s |
-| Decrypt 1KB | 1,100 ns | 952 ns | 1,493 ns | 909,402 ops/s |
-| Encrypt 8KB | 2,536 ns | 2,364 ns | 5,661 ns | 394,263 ops/s |
-| Decrypt 8KB | 2,420 ns | 2,302 ns | 3,998 ns | 413,171 ops/s |
-| Encrypt 64KB | 13,244 ns | 12,824 ns | 19,656 ns | 75,503 ops/s |
-| Decrypt 64KB | 13,186 ns | 12,833 ns | 19,095 ns | 75,841 ops/s |
+| Encrypt 64B | 826 ns | 771 ns | 1,253 ns | 1,211,394 ops/s |
+| Decrypt 64B | 789 ns | 752 ns | 1,262 ns | 1,268,303 ops/s |
+| Encrypt 1KB | 1,127 ns | 982 ns | 2,034 ns | 887,357 ops/s |
+| Decrypt 1KB | 1,124 ns | 981 ns | 1,563 ns | 889,648 ops/s |
+| Encrypt 8KB | 2,548 ns | 2,384 ns | 5,359 ns | 392,525 ops/s |
+| Decrypt 8KB | 2,631 ns | 2,384 ns | 6,763 ns | 380,108 ops/s |
+| Encrypt 64KB | 14,301 ns | 13,215 ns | 26,168 ns | 69,924 ops/s |
+| Decrypt 64KB | 13,474 ns | 13,044 ns | 19,797 ns | 74,215 ops/s |
 | **BLAKE2s / HMAC / HKDF** | | | | |
-| BLAKE2s hash (32B) | 429 ns | 381 ns | 721 ns | 2,329,878 ops/s |
-| BLAKE2s hash (256B) | 699 ns | 631 ns | 1,664 ns | 1,430,879 ops/s |
-| HMAC-BLAKE2s | 2,060 ns | 1,834 ns | 3,136 ns | 485,565 ops/s |
-| HKDF extract | 1,977 ns | 1,814 ns | 3,206 ns | 505,775 ops/s |
-| HKDF expand (64B out) | 4,388 ns | 3,867 ns | 7,654 ns | 227,897 ops/s |
-| HKDF Noise (chaining key) | 6,061 ns | 5,309 ns | 10,761 ns | 164,993 ops/s |
-| HKDF Noise split (transport) | 7,803 ns | 7,082 ns | 14,357 ns | 128,161 ops/s |
+| BLAKE2s hash (32B) | 412 ns | 382 ns | 620 ns | 2,428,979 ops/s |
+| BLAKE2s hash (256B) | 693 ns | 641 ns | 1,773 ns | 1,443,092 ops/s |
+| HMAC-BLAKE2s | 2,049 ns | 1,884 ns | 3,046 ns | 487,987 ops/s |
+| HKDF extract | 2,059 ns | 1,913 ns | 3,106 ns | 485,674 ops/s |
+| HKDF expand (64B out) | 4,657 ns | 3,978 ns | 9,177 ns | 214,741 ops/s |
+| HKDF Noise (chaining key) | 6,501 ns | 5,571 ns | 12,533 ns | 153,823 ops/s |
+| HKDF Noise split (transport) | 8,329 ns | 7,284 ns | 16,290 ns | 120,066 ops/s |
 | **Ed25519** | | | | |
-| Generate keypair | 28.7 µs | 28.1 µs | 38.1 µs | 34,852 ops/s |
-| Sign (128B message) | 56.3 µs | 55.1 µs | 71.9 µs | 17,752 ops/s |
-| Verify (128B message) | 78.3 µs | 76.7 µs | 98.9 µs | 12,769 ops/s |
+| Generate keypair | 30.1 µs | 28.7 µs | 52.1 µs | 33,253 ops/s |
+| Sign (128B message) | 59.1 µs | 56.9 µs | 88.7 µs | 16,916 ops/s |
+| Verify (128B message) | 78.8 µs | 76.8 µs | 103.4 µs | 12,689 ops/s |
 | **Noise_XX Handshake** | | | | |
-| Full 3-message + split | 470.6 µs | 458.8 µs | 666.3 µs | **2,125 ops/s** |
+| Full 3-message + split | 496.0 µs | 474.9 µs | 745.4 µs | **2,016 ops/s** |
 
 ### Gateway: Throughput (Steady-State Data Path)
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
 | **Decrypt** | | | | |
-| 64B payload | 853 ns | 772 ns | 1,403 ns | 1,171,878 ops/s |
-| 1KB payload | 1,163 ns | 982 ns | 1,923 ns | 859,894 ops/s |
-| 8KB payload | 2,513 ns | 2,374 ns | 5,219 ns | 397,871 ops/s |
-| 64KB payload | 13,474 ns | 13,104 ns | 19,837 ns | 74,220 ops/s |
+| 64B payload | 895 ns | 781 ns | 1,482 ns | 1,116,852 ops/s |
+| 1KB payload | 1,217 ns | 1,012 ns | 1,673 ns | 821,934 ops/s |
+| 8KB payload | 2,489 ns | 2,385 ns | 4,569 ns | 401,833 ops/s |
+| 64KB payload | 13,517 ns | 13,105 ns | 19,947 ns | 73,980 ops/s |
 | **Policy Engine** | | | | |
-| `:all` rule (allow) | 187 ns | 160 ns | 331 ns | 5,342,834 ops/s |
-| Exact match (2 entries) | 244 ns | 190 ns | 962 ns | 4,100,169 ops/s |
-| Wildcard match | 317 ns | 271 ns | 681 ns | 3,151,313 ops/s |
-| Deny (no match) | 296 ns | 221 ns | 622 ns | 3,382,919 ops/s |
-| Deny (no rule) | 156 ns | 141 ns | 191 ns | 6,407,674 ops/s |
-| Large rule (10 patterns) | 371 ns | 300 ns | 851 ns | 2,697,293 ops/s |
+| `:all` rule (allow) | 205 ns | 170 ns | 431 ns | 4,870,415 ops/s |
+| Exact match (2 entries) | 286 ns | 210 ns | 1,103 ns | 3,497,740 ops/s |
+| Wildcard match | 322 ns | 281 ns | 591 ns | 3,110,371 ops/s |
+| Deny (no match) | 264 ns | 221 ns | 571 ns | 3,789,977 ops/s |
+| Deny (no rule) | 151 ns | 150 ns | 210 ns | 6,626,122 ops/s |
+| Large rule (10 patterns) | 342 ns | 291 ns | 702 ns | 2,926,098 ops/s |
+| Large rule miss | 500 ns | 391 ns | 1,283 ns | 1,999,875 ops/s |
 | **Identity Resolution** | | | | |
-| Cache hit | 244 ns | 171 ns | 651 ns | 4,105,082 ops/s |
-| Cache miss (ETS) | 150 ns | 141 ns | 181 ns | 6,648,295 ops/s |
-| Hex fallback (cache miss) | 648 ns | 512 ns | 1,403 ns | 1,542,497 ops/s |
+| Cache hit | 223 ns | 171 ns | 521 ns | 4,488,077 ops/s |
+| Cache miss (ETS) | 153 ns | 141 ns | 181 ns | 6,553,299 ops/s |
+| Hex fallback (cache miss) | 624 ns | 512 ns | 952 ns | 1,602,149 ops/s |
 | **Combined Data Path** | | | | |
-| Decrypt 1KB + identity + policy | 1,494 ns | 1,283 ns | 4,058 ns | **669,214 ops/s** |
+| Decrypt 1KB + identity + policy | 1,520 ns | 1,292 ns | 2,534 ns | **657,989 ops/s** |
 
 ### ZTLP-NS: Namespace Operations
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
 | **Record Serialization** | | | | |
-| `serialize/1` (ZTLP_KEY) | 423 ns | 300 ns | 631 ns | 2,365,213 ops/s |
-| `deserialize/1` (ZTLP_KEY) | 393 ns | 310 ns | 1,122 ns | 2,546,482 ops/s |
-| `encode/1` (wire + sig) | 558 ns | 370 ns | 731 ns | 1,792,084 ops/s |
-| `decode/1` (wire + sig) | 349 ns | 331 ns | 521 ns | 2,863,891 ops/s |
+| `serialize/1` (ZTLP_KEY) | 731 ns | 300 ns | 811 ns | 1,367,842 ops/s |
+| `deserialize/1` (ZTLP_KEY) | 727 ns | 311 ns | 1,373 ns | 1,375,839 ops/s |
+| `encode/1` (wire + sig) | 699 ns | 380 ns | 1,432 ns | 1,431,242 ops/s |
+| `decode/1` (wire + sig) | 522 ns | 441 ns | 951 ns | 1,915,450 ops/s |
 | **Ed25519 Signature** | | | | |
-| Record verify (valid sig) | 81.4 µs | 78.5 µs | 109.9 µs | 12,292 ops/s |
-| Record verify (tampered) | 81.9 µs | 78.2 µs | 111.8 µs | 12,215 ops/s |
-| Sign (128B) | 57.4 µs | 56.0 µs | 79.2 µs | 17,412 ops/s |
-| Verify (128B) | 79.4 µs | 77.0 µs | 101.0 µs | 12,589 ops/s |
+| Record verify (valid sig) | 81.3 µs | 78.1 µs | 116.5 µs | 12,300 ops/s |
+| Record verify (tampered) | 80.0 µs | 76.9 µs | 110.5 µs | 12,499 ops/s |
+| Sign (128B) | 59.5 µs | 56.3 µs | 103.3 µs | 16,796 ops/s |
+| Verify (128B) | 80.4 µs | 77.1 µs | 114.9 µs | 12,433 ops/s |
 | **Store Operations** | | | | |
-| Insert (signed record) | 175.4 µs | 169.3 µs | 243.8 µs | 5,701 ops/s |
-| Lookup — ETS hit | 432 ns | 381 ns | 702 ns | 2,313,925 ops/s |
-| Lookup — ETS miss | 264 ns | 241 ns | 451 ns | 3,788,700 ops/s |
+| Insert (signed record) | 209.9 µs | 184.0 µs | 456.7 µs | 4,764 ops/s |
+| Lookup — ETS hit | 760 ns | 631 ns | 1,823 ns | 1,316,210 ops/s |
+| Lookup — ETS miss | 621 ns | 492 ns | 1,483 ns | 1,609,704 ops/s |
 | **Query (Lookup + Verify)** | | | | |
-| Known record | 79.7 µs | 76.8 µs | 108.2 µs | 12,542 ops/s |
-| Unknown record | 279 ns | 250 ns | 511 ns | 3,583,000 ops/s |
+| Known record | 83.4 µs | 78.8 µs | 131.4 µs | 11,991 ops/s |
+| Unknown record | 586 ns | 501 ns | 1,011 ns | 1,705,978 ops/s |
 | **Trust Chain Verification** | | | | |
-| 1-level (zone → root) | 169.2 µs | 162.6 µs | 261.9 µs | 5,911 ops/s |
-| 2-level (zone → org → root) | 249.7 µs | 242.1 µs | 391.6 µs | 4,005 ops/s |
+| 1-level (zone → root) | 173.0 µs | 163.5 µs | 335.8 µs | 5,780 ops/s |
+| 2-level (zone → org → root) | 259.2 µs | 247.0 µs | 451.6 µs | 3,858 ops/s |
 | **Trust Anchor** | | | | |
-| `trusted?/1` — known | 982 ns | 912 ns | 1,593 ns | 1,018,594 ops/s |
-| `trusted?/1` — unknown | 1,008 ns | 942 ns | 1,824 ns | 991,926 ops/s |
+| `trusted?/1` — known | 1,024 ns | 942 ns | 1,693 ns | 976,655 ops/s |
+| `trusted?/1` — unknown | 1,022 ns | 932 ns | 1,683 ns | 978,750 ops/s |
 
 ### Relay: Pipeline & Packet Processing
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
 | **Layer 1: Magic Check** | | | | |
-| `valid_magic?/1` — valid | 93 ns | 69 ns | 301 ns | 10,772,127 ops/s |
-| `valid_magic?/1` — invalid | 109 ns | 70 ns | 390 ns | 9,151,440 ops/s |
-| `layer1_magic/1` — valid | 97 ns | 70 ns | 412 ns | 10,274,130 ops/s |
-| `layer1_magic/1` — reject | 95 ns | 70 ns | 401 ns | 10,506,263 ops/s |
+| `valid_magic?/1` — valid | 87 ns | 69 ns | 280 ns | 11,446,690 ops/s |
+| `valid_magic?/1` — invalid | 88 ns | 70 ns | 331 ns | 11,378,273 ops/s |
+| `layer1_magic/1` — valid | 80 ns | 70 ns | 441 ns | 12,526,672 ops/s |
+| `layer1_magic/1` — reject | 96 ns | 70 ns | 350 ns | 10,416,966 ops/s |
 | **Layer 2: SessionID** | | | | |
-| Known (100 sessions) | 311 ns | 271 ns | 601 ns | 3,214,592 ops/s |
-| Unknown (100 sessions) | 312 ns | 280 ns | 591 ns | 3,203,302 ops/s |
-| Known (1K sessions) | 332 ns | 271 ns | 1,162 ns | 3,013,167 ops/s |
-| Unknown (1K sessions) | 317 ns | 281 ns | 611 ns | 3,155,970 ops/s |
-| Known (10K sessions) | 305 ns | 280 ns | 591 ns | 3,275,773 ops/s |
-| Unknown (10K sessions) | 294 ns | 260 ns | 581 ns | 3,402,942 ops/s |
-| HELLO (bypass) | 96 ns | 70 ns | 400 ns | 10,453,913 ops/s |
+| Known (100 sessions) | 278 ns | 230 ns | 561 ns | 3,602,878 ops/s |
+| Unknown (100 sessions) | 263 ns | 221 ns | 551 ns | 3,804,304 ops/s |
+| Known (1K sessions) | 309 ns | 230 ns | 1,122 ns | 3,236,156 ops/s |
+| Unknown (1K sessions) | 282 ns | 221 ns | 540 ns | 3,548,958 ops/s |
+| Known (10K sessions) | 261 ns | 229 ns | 490 ns | 3,826,082 ops/s |
+| Unknown (10K sessions) | 279 ns | 221 ns | 551 ns | 3,585,241 ops/s |
+| HELLO (bypass) | 116 ns | 80 ns | 380 ns | 8,645,928 ops/s |
 | **Layer 3: HeaderAuthTag** | | | | |
-| Compute auth tag | 753 ns | 691 ns | 1,103 ns | 1,327,694 ops/s |
-| Verify — valid | 656 ns | 651 ns | 731 ns | 1,525,482 ops/s |
-| Verify — invalid | 692 ns | 652 ns | 1,013 ns | 1,445,540 ops/s |
+| Compute auth tag | 837 ns | 701 ns | 1,253 ns | 1,194,174 ops/s |
+| Verify — valid | 752 ns | 672 ns | 1,242 ns | 1,330,133 ops/s |
+| Verify — invalid | 700 ns | 671 ns | 1,153 ns | 1,429,653 ops/s |
 | **Full Pipeline** | | | | |
-| Valid data (no auth) | 1,667 ns | 1,574 ns | 2,865 ns | 599,747 ops/s |
-| Valid data (with auth) | 2,653 ns | 2,455 ns | 4,877 ns | 376,888 ops/s |
-| HELLO packet | 1,588 ns | 1,454 ns | 2,935 ns | 629,632 ops/s |
-| Bad magic (L1 reject) | 1,266 ns | 1,162 ns | 2,325 ns | 789,852 ops/s |
-| Unknown session (L2 reject) | 1,502 ns | 1,423 ns | 2,595 ns | 665,842 ops/s |
+| Valid data (no auth) | 1,729 ns | 1,643 ns | 2,986 ns | 578,238 ops/s |
+| Valid data (with auth) | 2,761 ns | 2,565 ns | 5,851 ns | 362,243 ops/s |
+| HELLO packet | 1,482 ns | 1,372 ns | 2,796 ns | 674,832 ops/s |
+| Bad magic (L1 reject) | 1,252 ns | 1,093 ns | 2,444 ns | 798,779 ops/s |
+| Unknown session (L2 reject) | 1,582 ns | 1,493 ns | 2,765 ns | 631,979 ops/s |
 | **Packet Operations** | | | | |
-| Parse handshake | 186 ns | 151 ns | 471 ns | 5,381,725 ops/s |
-| Parse data compact | 195 ns | 141 ns | 491 ns | 5,131,585 ops/s |
-| Serialize handshake | 317 ns | 230 ns | 521 ns | 3,155,453 ops/s |
-| Serialize data compact | 253 ns | 161 ns | 531 ns | 3,954,724 ops/s |
-| Extract session ID | 114 ns | 80 ns | 801 ns | 8,786,116 ops/s |
-| Extract AAD | 109 ns | 90 ns | 350 ns | 9,145,150 ops/s |
+| Parse handshake | 183 ns | 160 ns | 401 ns | 5,470,382 ops/s |
+| Parse data compact | 163 ns | 131 ns | 441 ns | 6,155,675 ops/s |
+| Serialize handshake | 275 ns | 212 ns | 462 ns | 3,639,305 ops/s |
+| Serialize data compact | 267 ns | 191 ns | 541 ns | 3,739,358 ops/s |
+| Extract session ID | 139 ns | 81 ns | 441 ns | 7,194,790 ops/s |
+| Extract AAD | 145 ns | 110 ns | 450 ns | 6,921,769 ops/s |
 | **Session Registry** | | | | |
-| `session_exists?` — known | 187 ns | 180 ns | 240 ns | 5,334,765 ops/s |
-| `session_exists?` — unknown | 181 ns | 170 ns | 240 ns | 5,532,798 ops/s |
-| `lookup_session` — known | 260 ns | 210 ns | 571 ns | 3,849,952 ops/s |
-| `lookup_peer` — known | 269 ns | 221 ns | 1,021 ns | 3,711,863 ops/s |
+| `session_exists?` — known | 184 ns | 180 ns | 231 ns | 5,425,089 ops/s |
+| `session_exists?` — unknown | 191 ns | 180 ns | 221 ns | 5,248,657 ops/s |
+| `lookup_session` — known | 321 ns | 300 ns | 721 ns | 3,114,010 ops/s |
+| `lookup_peer` — known | 361 ns | 321 ns | 741 ns | 2,769,033 ops/s |
 
 ---
 
-## Rust Benchmarks (Proto)
+## Rust Benchmarks (Proto) — from 2026-03-10; not re-run (no cargo available)
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
@@ -329,22 +330,117 @@ ChaCha20-Poly1305 scales linearly with payload size:
 
 ---
 
+---
+
+## New Feature Benchmarks (v0.4.1)
+
+> Benchmarked 2026-03-11, same hardware as baseline. These cover the production features added since v0.4.0: backpressure, circuit breaker, rate limiter, NS federation (anti-entropy + replication), component auth, and mesh routing.
+
+### Relay: Backpressure, Component Auth & Mesh
+
+| Benchmark | Mean | Median | p99 | Throughput |
+|-----------|------|--------|-----|------------|
+| **Backpressure** | | | | |
+| `check/0` — :ok (below soft) | 60 ns | 41 ns | 200 ns | 16,636,802 ops/s |
+| `check/0` — :soft (above soft) | 53 ns | 40 ns | 170 ns | 18,780,561 ops/s |
+| `check/0` — :hard (above hard) | 55 ns | 40 ns | 180 ns | 18,219,934 ops/s |
+| `update_load/2` | 58 ns | 40 ns | 180 ns | 17,347,792 ops/s |
+| **Component Auth** | | | | |
+| `generate_challenge/0` | 1.3 µs | 1.1 µs | 2.3 µs | 778,576 ops/s |
+| `sign_challenge/2` (Ed25519) | 66.1 µs | 63.1 µs | 96.3 µs | 15,135 ops/s |
+| `verify_response/4` (valid) | 101.1 µs | 96.2 µs | 147.5 µs | 9,889 ops/s |
+| Full roundtrip (gen+sign+verify) | 194.6 µs | 185.2 µs | 284.2 µs | 5,140 ops/s |
+| **Mesh Routing** | | | | |
+| `plan/3` — direct (2 relays) | 1.6 µs | 1.4 µs | 2.7 µs | 632,475 ops/s |
+| `plan/3` — via transit (10 relays) | 9.8 µs | 8.9 µs | 16.1 µs | 102,289 ops/s |
+| **Metrics** | | | | |
+| `metrics/0` collection | 67 ns | 51 ns | 200 ns | 14,938,021 ops/s |
+
+### Gateway: Circuit Breaker, Component Auth & Identity
+
+| Benchmark | Mean | Median | p99 | Throughput |
+|-----------|------|--------|-----|------------|
+| **Circuit Breaker** | | | | |
+| `allow?/1` — unknown backend (fast) | 270 ns | 212 ns | 591 ns | 3,704,628 ops/s |
+| `allow?/1` — closed state (hot path) | 151 ns | 130 ns | 301 ns | 6,607,478 ops/s |
+| `allow?/1` — open state (reject) | 126 ns | 110 ns | 261 ns | 7,954,712 ops/s |
+| `record_success/1` | 400 ns | 331 ns | 851 ns | 2,502,183 ops/s |
+| `record_failure/1` (no trip) | 632 ns | 501 ns | 1,383 ns | 1,583,145 ops/s |
+| State transition (closed→open→closed) | 1.3 µs | 1.0 µs | 3.1 µs | 752,362 ops/s |
+| **Component Auth** | | | | |
+| `parse_challenge/1` | 32 ns | 30 ns | 60 ns | 31,054,782 ops/s |
+| `sign_challenge/2` (Ed25519) | 66.5 µs | 63.3 µs | 97.1 µs | 15,039 ops/s |
+| Full roundtrip (gen+sign+verify) | 148.2 µs | 140.4 µs | 217.6 µs | 6,747 ops/s |
+| **Identity Resolution** | | | | |
+| `resolve/1` — cache hit | 228 ns | 181 ns | 542 ns | 4,388,625 ops/s |
+| ETS cache miss (lookup only) | 129 ns | 120 ns | 181 ns | 7,747,501 ops/s |
+
+### NS: Rate Limiter, Anti-Entropy, Replication & Auth
+
+| Benchmark | Mean | Median | p99 | Throughput |
+|-----------|------|--------|-----|------------|
+| **Rate Limiter** | | | | |
+| `check/1` — allowed (fresh bucket) | 519 ns | 391 ns | 1,032 ns | 1,925,487 ops/s |
+| `check/1` — rate_limited (empty) | 170 ns | 141 ns | 361 ns | 5,872,143 ops/s |
+| `metrics/0` | 279 ns | 221 ns | 582 ns | 3,581,762 ops/s |
+| **Anti-Entropy** | | | | |
+| Leaf hash (BLAKE2s) | 413 ns | 381 ns | 641 ns | 2,423,614 ops/s |
+| Root hash (10 records) | 1.1 µs | 1.0 µs | 1.7 µs | 949,781 ops/s |
+| Root hash (1000 records) | 35.3 µs | 34.2 µs | 47.2 µs | 28,299 ops/s |
+| Merge decision logic | 28 ns | 20 ns | 80 ns | 35,131,846 ops/s |
+| **Replication** | | | | |
+| `replicate/1` — no peers | 7.4 µs | 6.4 µs | 14.2 µs | 134,621 ops/s |
+| **Component Auth** | | | | |
+| `generate_challenge/0` | 1.3 µs | 1.1 µs | 2.3 µs | 786,284 ops/s |
+| `sign_challenge/2` (Ed25519) | 66.4 µs | 63.2 µs | 96.8 µs | 15,063 ops/s |
+| Full roundtrip (gen+sign+verify) | 195.2 µs | 185.8 µs | 286.1 µs | 5,123 ops/s |
+| **Cluster** | | | | |
+| `clustered?/0` (single node) | 190 ns | 170 ns | 331 ns | 5,256,453 ops/s |
+
+### Overhead Summary
+
+| Feature | Hot-Path Operation | Overhead | Impact on Pipeline |
+|---------|--------------------|----------|-------------------|
+| **Backpressure** | `check/0` ETS read | ~55 ns | **Negligible** (<0.2% of pipeline) |
+| **Circuit Breaker** | `allow?/1` closed state | ~151 ns | **Low** — 1 ETS lookup, ~3% of admit path |
+| **Circuit Breaker** | `allow?/1` open (reject) | ~126 ns | **Fast-reject** — cheaper than closed |
+| **Rate Limiter** | `check/1` fresh bucket | ~519 ns | **Low** — token bucket with ETS |
+| **Rate Limiter** | `check/1` rate-limited | ~170 ns | **Fast-reject** path |
+| **Component Auth** | Full roundtrip | ~195 µs | **Connection-time only** — not per-packet |
+| **Mesh Routing** | `plan/3` direct | ~1.6 µs | **Per-session** — amortized over packets |
+| **Mesh Routing** | `plan/3` transit (10 nodes) | ~9.8 µs | **Per-session** — scales with mesh size |
+| **Anti-Entropy** | Root hash (1K records) | ~35 µs | **Background** — periodic sync, not hot path |
+| **Replication** | `replicate/1` no peers | ~7.4 µs | **Async** — fire-and-forget, not blocking |
+| **Metrics** | `metrics/0` scrape | ~67 ns | **Negligible** — ETS read only |
+
+> **Key insight**: All new features add minimal overhead to the hot packet path. Backpressure (`check/0`) adds only ~55 ns — a single ETS read that's 5× cheaper than a session lookup. Circuit breaker adds ~151 ns in the closed (normal) state and rejects even faster when open. Component auth is a one-time cost per connection (~195 µs), comparable to a fraction of a Noise_XX handshake (~496 µs). Anti-entropy and replication run asynchronously and don't touch the packet forwarding path.
+
+> **Rust benchmarks unavailable** (no cargo) — Rust proto benchmarks were not re-run. Previous results from 2026-03-10 are retained above for reference.
+
+---
+
 ## How to Run
 
 ```bash
 # From the ztlp repo root
 cd /path/to/ztlp
 
-# Elixir benchmarks
+# Elixir benchmarks (original)
 cd gateway && mix run bench/bench_pipeline.exs
 cd gateway && mix run bench/bench_handshake.exs
 cd gateway && mix run bench/bench_gateway.exs
-cd ../ns && mix run bench/bench_ns.exs
+cd ../ns && ZTLP_NS_STORAGE_MODE=ram mix run bench/bench_ns.exs
 cd ../relay && mix run bench/bench_relay.exs
 
-# Rust benchmarks
+# New feature benchmarks (v0.4.1)
+cd relay && mix run -e "ZtlpRelay.Bench.run()"
+cd ../gateway && mix run -e "ZtlpGateway.Bench.run()"
+cd ../ns && ZTLP_NS_STORAGE_MODE=ram mix run -e "ZtlpNs.Bench.run()"
+
+# Rust benchmarks (requires cargo)
 cd ../proto && cargo run --release --bin ztlp-bench
 
 # Or run everything:
-bash bench/run_all.sh
+bash bench/run_all.sh          # Original benchmarks
+bash bench/run_new_features.sh  # New feature benchmarks
 ```

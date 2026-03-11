@@ -775,9 +775,9 @@ async fn resolve_target(target: &str, ns_server_opt: &Option<String>) -> Result<
     } else {
         // No address from NS — if this looks like a hostname, try DNS resolution
         let port = explicit_port.unwrap_or(23095);
-        // Try tokio DNS resolution
         let lookup_target = format!("{}:{}", name_part, port);
-        match tokio::net::lookup_host(&lookup_target).await {
+        let dns_result = tokio::net::lookup_host(lookup_target.as_str()).await;
+        match dns_result {
             Ok(mut addrs) => {
                 if let Some(addr) = addrs.next() {
                     eprintln!("  {} DNS fallback → {}", c_yellow("⚠"), addr);

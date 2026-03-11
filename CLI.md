@@ -379,19 +379,53 @@ Uses the NS server's 0x05 query type for public key lookups.
 
 #### `ztlp ns register`
 
-Register a name with ZTLP-NS.
+Register a ZTLP_KEY record (and optionally a ZTLP_SVC record) with ZTLP-NS. This binds a human-readable name to your node's identity (NodeID + public key) and optionally to an endpoint address for auto-resolution by `ztlp connect`.
 
 ```
 ztlp ns register --name <NAME> --zone <ZONE> --key <FILE> [OPTIONS]
 
 Options:
-  -n, --name <NAME>           Name to register
-  -z, --zone <ZONE>           Zone for the registration
+  -n, --name <NAME>           Name to register (e.g., myserver.clients.techrockstars.ztlp)
+  -z, --zone <ZONE>           Zone for the registration (e.g., clients.techrockstars.ztlp)
   -k, --key <FILE>            Path to identity key file
-  --ns-server <ADDR:PORT>     NS server address [default: 127.0.0.1:5353]
+      --ns-server <ADDR:PORT> NS server address [default: 127.0.0.1:5353]
+  -a, --address <ADDR:PORT>   Endpoint address to register as SVC record (optional)
 ```
 
-> **Note:** Direct UDP registration is not yet supported in the wire protocol. Currently provides instructions for registering through the Elixir NS server's admin API.
+**Examples:**
+
+```bash
+# Register identity only (KEY record)
+ztlp ns register --name myserver.clients.techrockstars.ztlp \
+    --zone clients.techrockstars.ztlp \
+    --key ~/.ztlp/identity.json
+
+# Register identity + endpoint address (KEY + SVC records)
+ztlp ns register --name myserver.clients.techrockstars.ztlp \
+    --zone clients.techrockstars.ztlp \
+    --key ~/.ztlp/identity.json \
+    --address 10.42.42.50:23095
+
+# Register with a specific NS server
+ztlp ns register --name myserver.clients.techrockstars.ztlp \
+    --zone clients.techrockstars.ztlp \
+    --key ~/.ztlp/identity.json \
+    --address 10.42.42.50:23095 \
+    --ns-server 10.0.0.1:5353
+```
+
+The registration creates:
+- A **KEY record** binding the name to your NodeID and X25519 public key
+- An optional **SVC record** (with `--address`) containing the endpoint address, enabling `ztlp connect` to resolve the name to an IP automatically
+
+After registration, the CLI verifies the record exists by querying it back and prints follow-up commands:
+```
+✓ Registration complete!
+
+  Verify:  ztlp ns lookup myserver.clients.techrockstars.ztlp --ns-server 127.0.0.1:5353
+  Connect: ztlp connect myserver.clients.techrockstars.ztlp --ns-server 127.0.0.1:5353
+  Ping:    ztlp ping myserver.clients.techrockstars.ztlp --ns-server 127.0.0.1:5353
+```
 
 ---
 

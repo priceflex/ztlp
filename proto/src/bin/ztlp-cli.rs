@@ -425,7 +425,9 @@ enum NsCommands {
     #[command(
         after_help = "EXAMPLES:\n  \
             ztlp ns register --name mynode.office.acme.ztlp --zone office.acme.ztlp \\\n    \
-                --key ~/.ztlp/identity.json --ns-server 127.0.0.1:5353"
+                --key ~/.ztlp/identity.json --ns-server 127.0.0.1:5353\n  \
+            ztlp ns register --name mynode.office.acme.ztlp --zone office.acme.ztlp \\\n    \
+                --key ~/.ztlp/identity.json --address 10.42.42.50:23095"
     )]
     Register {
         /// Name to register (e.g., mynode.office.acme.ztlp)
@@ -443,6 +445,10 @@ enum NsCommands {
         /// NS server address (host:port)
         #[arg(long, default_value = "127.0.0.1:5353")]
         ns_server: String,
+
+        /// Endpoint address to register as a SVC record (host:port)
+        #[arg(short, long)]
+        address: Option<String>,
     },
 
     /// Look up a name in ZTLP-NS
@@ -740,32 +746,18 @@ async fn resolve_target(target: &str, ns_server_opt: &Option<String>) -> Result<
 
     // Query KEY record (type 1) for NodeID (identity verification)
     let mut resolved_node_id: Option<NodeId> = None;
-    if let Ok(Some(key_data)) = ns_query(name_part, &ns_server, 1).await {
-        // KEY record data contains the node's public key (hex).
-        // If the data is 32 bytes hex (64 chars), it's a public key.
-        // If it contains address info, we can use that as fallback.
-        // For now, try to parse as "node_id_hex" or "node_id_hex@address"
-        if key_data.contains('@') {
-            // Format: "node_id_hex@address:port" or "pubkey_hex@address:port"
-            let parts: Vec<&str> = key_data.splitn(2, '@').collect();
-            if parts.len() == 2 {
-                if let Ok(addr) = parts[1].parse::<SocketAddr>() {
-                    if resolved_addr.is_none() {
-                        eprintln!("  {} KEY record → {}", c_green("✓"), addr);
-                        resolved_addr = Some(addr);
+    if let Ok(Some(raw)) = ns_query_raw(name_part, &ns_server, 1).await {
+        // Extract node_id from ETF-encoded KEY record data
+        if let Some(nid_hex) = etf_extract_string(&raw.data_bytes, "node_id") {
+            if nid_hex.len() == 32 {
+                // NodeID is 128-bit = 16 bytes = 32 hex chars
+                if let Ok(bytes) = hex::decode(&nid_hex) {
+                    if bytes.len() == 16 {
+                        let mut nid = [0u8; 16];
+                        nid.copy_from_slice(&bytes);
+                        resolved_node_id = Some(NodeId::from_bytes(nid));
+                        eprintln!("  {} NodeID: {}", c_cyan("ℹ"), &nid_hex);
                     }
-                }
-            }
-        }
-        // Try to extract NodeID from first 32 hex chars of key data
-        let hex_str = key_data.split('@').next().unwrap_or(&key_data);
-        if hex_str.len() >= 32 {
-            if let Ok(bytes) = hex::decode(&hex_str[..32]) {
-                if bytes.len() == 16 {
-                    let mut nid = [0u8; 16];
-                    nid.copy_from_slice(&bytes);
-                    resolved_node_id = Some(NodeId::from_bytes(nid));
-                    eprintln!("  {} NodeID: {}", c_cyan("ℹ"), hex::encode(nid));
                 }
             }
         }
@@ -814,8 +806,93 @@ async fn resolve_target(target: &str, ns_server_opt: &Option<String>) -> Result<
     Ok((final_addr, resolved_node_id))
 }
 
-// Helper to perform an NS query for a given record type. Returns the data field as a string if found.
-async fn ns_query(name: &str, ns_server: &str, record_type: u8) -> Result<Option<String>, Box<dyn std::error::Error>> {
+/// Extract a string value for a given atom key from ETF-encoded map data.
+///
+/// Supports the subset of Erlang External Term Format used by ZTLP-NS:
+/// - MAP_EXT (tag 116) with SMALL_ATOM_UTF8_EXT (tag 119) keys and BINARY_EXT (tag 109) values
+/// - Version byte (131) prefix
+///
+/// Returns None if the key is not found or the format doesn't match.
+fn etf_extract_string(data: &[u8], target_key: &str) -> Option<String> {
+    if data.is_empty() { return None; }
+
+    let mut pos = 0;
+
+    // Skip version byte (131) if present
+    if data[pos] == 131 {
+        pos += 1;
+    }
+
+    // Expect MAP_EXT (116)
+    if pos >= data.len() || data[pos] != 116 { return None; }
+    pos += 1;
+
+    // Map arity (4 bytes big-endian)
+    if pos + 4 > data.len() { return None; }
+    let arity = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+
+    for _ in 0..arity {
+        // Parse key — expect SMALL_ATOM_UTF8_EXT (119)
+        if pos >= data.len() { return None; }
+        let key_name = if data[pos] == 119 {
+            // SMALL_ATOM_UTF8_EXT: <<119, len::8, name>>
+            pos += 1;
+            if pos >= data.len() { return None; }
+            let klen = data[pos] as usize;
+            pos += 1;
+            if pos + klen > data.len() { return None; }
+            let kname = std::str::from_utf8(&data[pos..pos+klen]).ok();
+            pos += klen;
+            kname
+        } else if data[pos] == 100 {
+            // ATOM_EXT: <<100, len::16, name>> (older format)
+            pos += 1;
+            if pos + 2 > data.len() { return None; }
+            let klen = u16::from_be_bytes([data[pos], data[pos+1]]) as usize;
+            pos += 2;
+            if pos + klen > data.len() { return None; }
+            let kname = std::str::from_utf8(&data[pos..pos+klen]).ok();
+            pos += klen;
+            kname
+        } else {
+            // Unknown key type — can't parse further
+            return None;
+        };
+
+        // Parse value — expect BINARY_EXT (109)
+        if pos >= data.len() { return None; }
+        if data[pos] == 109 {
+            // BINARY_EXT: <<109, len::32, bytes>>
+            pos += 1;
+            if pos + 4 > data.len() { return None; }
+            let vlen = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+            pos += 4;
+            if pos + vlen > data.len() { return None; }
+            let value = std::str::from_utf8(&data[pos..pos+vlen]).ok().map(|s| s.to_string());
+            pos += vlen;
+
+            // Check if this is the key we're looking for
+            if key_name == Some(target_key) {
+                return value;
+            }
+        } else {
+            // Unknown value type — skip remaining (can't determine size)
+            return None;
+        }
+    }
+
+    None
+}
+
+/// Query result from NS containing the raw ETF data field.
+struct NsQueryResult {
+    /// Raw ETF-encoded data bytes from the record
+    data_bytes: Vec<u8>,
+}
+
+/// Perform an NS query for a given record type. Returns the raw ETF data field if found.
+async fn ns_query_raw(name: &str, ns_server: &str, record_type: u8) -> Result<Option<NsQueryResult>, Box<dyn std::error::Error>> {
     let ns_addr: SocketAddr = ns_server.parse().map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
     let name_bytes = name.as_bytes();
     let name_len = name_bytes.len() as u16;
@@ -835,20 +912,41 @@ async fn ns_query(name: &str, ns_server: &str, record_type: u8) -> Result<Option
             if data[0] != 0x02 { return Ok(None); }
             let record = &data[1..];
             // Wire format: <<type_byte, name_len::16, name, data_len::32, data, ...>>
-            // Skip type_byte (1 byte), then parse name_len (2 bytes) and name
             if record.len() < 4 { return Ok(None); }
             let _type_byte = record[0];
-            let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
-            if record.len() < 3 + name_len + 4 { return Ok(None); }
-            let offset = 3 + name_len;
+            let rname_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+            if record.len() < 3 + rname_len + 4 { return Ok(None); }
+            let offset = 3 + rname_len;
             let data_len = u32::from_be_bytes([record[offset], record[offset+1], record[offset+2], record[offset+3]]) as usize;
             if record.len() < offset + 4 + data_len { return Ok(None); }
             let data_start = offset + 4;
-            let data_bytes = &record[data_start..data_start+data_len];
-            let s = std::str::from_utf8(data_bytes).ok().map(|s| s.to_string());
-            Ok(s)
+            let data_bytes = record[data_start..data_start+data_len].to_vec();
+            Ok(Some(NsQueryResult { data_bytes }))
         }
         _ => Ok(None),
+    }
+}
+
+/// High-level NS query: extract a specific string field from a record's ETF data.
+async fn ns_query(name: &str, ns_server: &str, record_type: u8) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let result = ns_query_raw(name, ns_server, record_type).await?;
+    match result {
+        Some(r) => {
+            // For SVC records, extract the "address" field
+            // For KEY records, extract "node_id" or "public_key"
+            // Try the most useful field based on record type
+            let value = match record_type {
+                2 => etf_extract_string(&r.data_bytes, "address"),  // SVC → address
+                1 => etf_extract_string(&r.data_bytes, "node_id"),  // KEY → node_id
+                3 => etf_extract_string(&r.data_bytes, "endpoints"), // RELAY → endpoints
+                _ => {
+                    // Fallback: try plain UTF-8
+                    std::str::from_utf8(&r.data_bytes).ok().map(|s| s.to_string())
+                }
+            };
+            Ok(value)
+        }
+        None => Ok(None),
     }
 }
 
@@ -1386,40 +1484,237 @@ async fn cmd_ns_pubkey(hex_key: &str, ns_server: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// Encode a string as an Erlang External Term Format (ETF) binary.
+/// Format: <<109, len::32, bytes>> (BINARY_EXT)
+fn etf_binary(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut buf = Vec::with_capacity(5 + bytes.len());
+    buf.push(109); // BINARY_EXT
+    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(bytes);
+    buf
+}
+
+/// Encode an atom as ETF SMALL_ATOM_UTF8_EXT.
+/// Format: <<119, len::8, name>> (for atoms with name length < 256)
+fn etf_atom(name: &str) -> Vec<u8> {
+    let bytes = name.as_bytes();
+    let mut buf = Vec::with_capacity(2 + bytes.len());
+    buf.push(119); // SMALL_ATOM_UTF8_EXT
+    buf.push(bytes.len() as u8);
+    buf.extend_from_slice(bytes);
+    buf
+}
+
+/// Encode a map with string keys (as atoms) and string values (as binaries)
+/// in Erlang External Term Format, matching `:erlang.term_to_binary(map, [:deterministic])`.
+///
+/// Deterministic encoding requires keys sorted by Erlang term ordering.
+/// For atoms, this is alphabetical comparison of their names.
+fn etf_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
+    // Sort by key name (Erlang term ordering for atoms = alphabetical)
+    pairs.sort_by_key(|&(k, _)| k);
+
+    let mut buf = Vec::new();
+    buf.push(131); // VERSION_MAGIC
+    buf.push(116); // MAP_EXT
+    buf.extend_from_slice(&(pairs.len() as u32).to_be_bytes());
+    for &(key, val) in pairs.iter() {
+        buf.extend_from_slice(&etf_atom(key));
+        buf.extend_from_slice(&etf_binary(val));
+    }
+    buf
+}
+
+/// Build a registration packet for ZTLP-NS.
+///
+/// Wire format (server expects):
+/// ```
+/// <<0x02, name_len::16, name, type_byte::8, data_len::16, data_bin, sig_len::16, sig>>
+/// ```
+///
+/// The server ignores the client signature and re-signs with its own key,
+/// so we send a dummy 0-byte signature.
+fn build_registration_packet(name: &str, type_byte: u8, data_bin: &[u8]) -> Vec<u8> {
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let data_len = data_bin.len() as u16;
+    let sig_len: u16 = 0; // Dummy signature — server re-signs
+
+    let mut pkt = Vec::with_capacity(1 + 2 + name_bytes.len() + 1 + 2 + data_bin.len() + 2);
+    pkt.push(0x02); // Registration opcode
+    pkt.extend_from_slice(&name_len.to_be_bytes());
+    pkt.extend_from_slice(name_bytes);
+    pkt.push(type_byte);
+    pkt.extend_from_slice(&data_len.to_be_bytes());
+    pkt.extend_from_slice(data_bin);
+    pkt.extend_from_slice(&sig_len.to_be_bytes());
+    pkt
+}
+
 /// `ztlp ns register` — Register with ZTLP-NS
 async fn cmd_ns_register(
     name: &str,
     zone: &str,
     key_path: &Path,
     ns_server: &str,
+    address: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ns_addr: SocketAddr = ns_server.parse()
+    let ns_addr: SocketAddr = ns_server.parse()
         .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
 
     let identity = NodeIdentity::load(key_path)?;
+    let node_id_hex = hex::encode(identity.node_id.0);
+    let pubkey_hex = hex::encode(&identity.static_public_key);
 
     eprintln!("{}", c_bold("ZTLP-NS Registration"));
     eprintln!("  {} {}", c_cyan("Name:"), name);
     eprintln!("  {} {}", c_cyan("Zone:"), zone);
-    eprintln!("  {} {}", c_cyan("NodeID:"), identity.node_id);
+    eprintln!("  {} {}", c_cyan("NodeID:"), &node_id_hex);
+    eprintln!("  {} {}", c_cyan("Public Key:"), &pubkey_hex[..16]);
     eprintln!("  {} {}", c_cyan("NS Server:"), ns_server);
+    if let Some(addr) = address {
+        eprintln!("  {} {}", c_cyan("Address:"), addr);
+    }
     eprintln!();
 
-    // The ZTLP-NS registration protocol uses the Elixir server's API.
-    // The wire protocol for registration isn't defined in the query protocol above —
-    // it uses a separate admin channel. For now, explain the manual process.
-    eprintln!("{}", c_yellow("⚠ Direct registration via the CLI is not yet supported."));
-    eprintln!("{}", c_dim("  The Elixir NS server currently manages records through its"));
-    eprintln!("{}", c_dim("  bootstrap/admin API. To register:"));
+    // Validate the name is within the specified zone
+    if !name.ends_with(&format!(".{}", zone)) && name != zone {
+        return Err(format!(
+            "name '{}' is not within zone '{}'\n  The name must end with '.{}'",
+            name, zone, zone
+        ).into());
+    }
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+
+    // ── Step 1: Register KEY record ─────────────────────────────────
+    eprintln!("{}", c_dim("→ Registering KEY record..."));
+
+    let key_data_bin = etf_map(&mut vec![
+        ("algorithm", "Ed25519"),
+        ("node_id", &node_id_hex),
+        ("public_key", &pubkey_hex),
+    ]);
+
+    let key_pkt = build_registration_packet(name, 1, &key_data_bin); // type 1 = KEY
+    sock.send_to(&key_pkt, ns_addr).await?;
+
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let resp = &buf[..len];
+            match resp.first() {
+                Some(0x06) => {
+                    eprintln!("  {} KEY record registered", c_green("✓"));
+                }
+                Some(0xFF) => {
+                    return Err("NS server rejected KEY registration (invalid data format)".into());
+                }
+                Some(code) => {
+                    return Err(format!("NS server returned unexpected response: 0x{:02x}", code).into());
+                }
+                None => {
+                    return Err("NS server returned empty response".into());
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            return Err(format!("network error during KEY registration: {}", e).into());
+        }
+        Err(_) => {
+            return Err(format!(
+                "timeout waiting for NS server response at {}\n  \
+                 Is the NS server running? Try: ztlp ns lookup {} --ns-server {}",
+                ns_server, name, ns_server
+            ).into());
+        }
+    }
+
+    // ── Step 2: Register SVC record (if --address provided) ─────────
+    if let Some(addr_str) = address {
+        // Validate address format
+        let _: SocketAddr = addr_str.parse()
+            .map_err(|e| format!("invalid address '{}': {} (expected ip:port)", addr_str, e))?;
+
+        eprintln!("{}", c_dim("→ Registering SVC record..."));
+
+        let svc_data_bin = etf_map(&mut vec![
+            ("address", addr_str),
+            ("node_id", &node_id_hex),
+            ("zone", zone),
+        ]);
+
+        let svc_pkt = build_registration_packet(name, 2, &svc_data_bin); // type 2 = SVC
+        sock.send_to(&svc_pkt, ns_addr).await?;
+
+        match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
+            Ok(Ok((len, _))) => {
+                let resp = &buf[..len];
+                match resp.first() {
+                    Some(0x06) => {
+                        eprintln!("  {} SVC record registered ({})", c_green("✓"), addr_str);
+                    }
+                    Some(0xFF) => {
+                        eprintln!("  {} SVC registration failed (server rejected)", c_yellow("⚠"));
+                        eprintln!("    {}", c_dim("KEY record was registered successfully. SVC record is optional."));
+                    }
+                    _ => {
+                        eprintln!("  {} SVC registration: unexpected response", c_yellow("⚠"));
+                    }
+                }
+            }
+            _ => {
+                eprintln!("  {} SVC registration timed out (KEY was registered)", c_yellow("⚠"));
+            }
+        }
+    }
+
+    // ── Verify registration ─────────────────────────────────────────
+    eprintln!("\n{}", c_dim("→ Verifying registration..."));
+
+    // Small delay to let server process
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Query for the KEY record we just registered
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let mut query = Vec::with_capacity(4 + name_bytes.len());
+    query.push(0x01); // Query opcode
+    query.extend_from_slice(&name_len.to_be_bytes());
+    query.extend_from_slice(name_bytes);
+    query.push(1); // KEY record type
+
+    sock.send_to(&query, ns_addr).await?;
+
+    match timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let resp = &buf[..len];
+            match resp.first() {
+                Some(0x02) => {
+                    eprintln!("  {} Registration verified — record found in NS", c_green("✓"));
+                }
+                Some(0x03) => {
+                    eprintln!("  {} Record not found after registration", c_yellow("⚠"));
+                    eprintln!("    {}", c_dim("This may indicate a zone or authority issue."));
+                }
+                _ => {
+                    eprintln!("  {} Could not verify registration", c_yellow("⚠"));
+                }
+            }
+        }
+        _ => {
+            eprintln!("  {} Verification timed out (registration may still be successful)", c_yellow("⚠"));
+        }
+    }
+
+    eprintln!("\n{}", c_green("✓ Registration complete!"));
     eprintln!();
-    eprintln!("  1. Ensure the NS server is running at {}", ns_server);
-    eprintln!("  2. Use the Elixir admin API to create a ZTLP_KEY record:");
-    eprintln!("     - Name: {}", name);
-    eprintln!("     - NodeID: {}", identity.node_id);
-    eprintln!("     - Public Key: {}", hex::encode(&identity.static_public_key));
-    eprintln!("     - Zone: {}", zone);
-    eprintln!();
-    eprintln!("{}", c_dim("  Future versions will support direct UDP registration."));
+    eprintln!("  {} ztlp ns lookup {} --ns-server {}", c_dim("Verify:"), name, ns_server);
+    eprintln!("  {} ztlp connect {} --ns-server {}", c_dim("Connect:"), name, ns_server);
+    if address.is_some() {
+        eprintln!("  {} ztlp ping {} --ns-server {}", c_dim("Ping:"), name, ns_server);
+    }
 
     Ok(())
 }
@@ -2125,8 +2420,8 @@ async fn main() {
         },
 
         Commands::Ns(subcmd) => match subcmd {
-            NsCommands::Register { name, zone, key, ns_server } => {
-                cmd_ns_register(name, zone, key, ns_server).await
+            NsCommands::Register { name, zone, key, ns_server, address } => {
+                cmd_ns_register(name, zone, key, ns_server, address).await
             }
             NsCommands::Lookup { name, ns_server, record_type } => {
                 cmd_ns_lookup(name, ns_server, *record_type).await

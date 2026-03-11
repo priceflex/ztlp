@@ -90,12 +90,40 @@ defmodule ZtlpNs.YamlConfig do
     end
 
     # Rate limit section
-    {config, errors} = case Map.get(raw, "rate_limit", %{}) do
+    {config, errors} = case Map.get(raw, "rate_limit") do
       rl when is_map(rl) ->
         {config, errors} = validate_field(config, errors, rl, "queries_per_second", :rate_limit_queries_per_second, :integer, 100, 1..1_000_000)
         validate_field(config, errors, rl, "burst", :rate_limit_burst, :integer, 200, 1..10_000_000)
-      nil -> {config, errors}
+      nil ->
+        {config, errors} = validate_field(config, errors, %{}, "queries_per_second", :rate_limit_queries_per_second, :integer, 100, 1..1_000_000)
+        validate_field(config, errors, %{}, "burst", :rate_limit_burst, :integer, 200, 1..10_000_000)
       other -> {config, ["rate_limit: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
+    # Cluster section
+    {config, errors} = case Map.get(raw, "cluster") do
+      cl when is_map(cl) ->
+        case Map.get(cl, "seed_nodes") do
+          nil ->
+            {Map.put(config, :seed_nodes, []), errors}
+
+          nodes when is_list(nodes) ->
+            if Enum.all?(nodes, &is_binary/1) do
+              atoms = Enum.map(nodes, &String.to_atom/1)
+              {Map.put(config, :seed_nodes, atoms), errors}
+            else
+              {config, ["cluster.seed_nodes: expected a list of strings" | errors]}
+            end
+
+          other ->
+            {config, ["cluster.seed_nodes: expected a list, got: #{inspect(other)}" | errors]}
+        end
+
+      nil ->
+        {Map.put(config, :seed_nodes, []), errors}
+
+      other ->
+        {config, ["cluster: expected a map, got: #{inspect(other)}" | errors]}
     end
 
     case errors do

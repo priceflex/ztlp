@@ -73,4 +73,31 @@ defmodule ZtlpNs.Config do
       "https://bootstrap.ztlp.org/.well-known/ztlp-relays.json"
     ])
   end
+
+  @doc """
+  Seed nodes for automatic cluster joining on startup.
+
+  If configured, the node will attempt to join the first reachable
+  seed node when the application starts. An empty list means
+  standalone mode (default).
+
+  Set via `ZTLP_NS_SEED_NODES` (comma-separated) or
+  `config :ztlp_ns, :seed_nodes, [:"ns1@host1", :"ns2@host2"]`.
+  """
+  @spec seed_nodes() :: [atom()]
+  def seed_nodes do
+    case System.get_env("ZTLP_NS_SEED_NODES") do
+      nil ->
+        Application.get_env(:ztlp_ns, :seed_nodes, [])
+
+      "" ->
+        []
+
+      nodes_str ->
+        nodes_str
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.map(&String.to_atom/1)
+    end
+  end
 end

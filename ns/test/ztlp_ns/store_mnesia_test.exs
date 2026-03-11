@@ -196,17 +196,9 @@ defmodule ZtlpNs.StoreMnesiaTest do
     end
   end
 
-  describe "cluster stubs" do
-    test "join returns not_implemented" do
-      assert {:error, :not_implemented} = ZtlpNs.Cluster.join(:some_node)
-    end
-
-    test "leave returns not_implemented" do
-      assert {:error, :not_implemented} = ZtlpNs.Cluster.leave()
-    end
-
-    test "members returns current node" do
-      assert [node()] == ZtlpNs.Cluster.members()
+  describe "cluster basics" do
+    test "members returns at least the current node" do
+      assert node() in ZtlpNs.Cluster.members()
     end
 
     test "clustered? returns false for single node" do

@@ -101,13 +101,17 @@ ALL_SCENARIOS=(
     "concurrent-sessions"
     "gateway-policy"
     "network-partition"
+    "ns-federation-basic"
+    "ns-federation-partition"
+    "ns-federation-conflict"
+    "ns-federation-node-recovery"
 )
 
 # Scenarios that are safe to run in parallel (no side effects on shared state)
 PARALLEL_GROUP_1=("basic-connectivity" "ns-resolution" "concurrent-sessions")
 PARALLEL_GROUP_2=("handshake-through-gateway" "gateway-policy")
 # These must run sequentially (they modify network/restart services):
-SEQUENTIAL=("full-stack-e2e" "latency-resilience" "packet-loss-resilience" "reconnection" "network-partition")
+SEQUENTIAL=("full-stack-e2e" "latency-resilience" "packet-loss-resilience" "reconnection" "network-partition" "ns-federation-basic" "ns-federation-partition" "ns-federation-conflict" "ns-federation-node-recovery")
 
 # ── Banner ───────────────────────────────────────────────────
 echo -e "${BOLD}"

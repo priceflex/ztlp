@@ -372,7 +372,8 @@ pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8]) -> [u8; 16] {
     // SAFETY: ChaCha20Poly1305 encryption with a valid 32-byte key and empty
     // plaintext is infallible — the only failure mode is invalid key length,
     // which cannot happen since we take &[u8; 32].
-    let ciphertext = match cipher.encrypt(&nonce, chacha20poly1305::aead::Payload { msg: &[], aad }) {
+    let ciphertext = match cipher.encrypt(&nonce, chacha20poly1305::aead::Payload { msg: &[], aad })
+    {
         Ok(ct) => ct,
         Err(_) => {
             // Defensive: return zero tag if encryption somehow fails

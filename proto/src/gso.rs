@@ -18,9 +18,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{debug, warn};
 #[cfg(target_os = "linux")]
 use tracing::trace;
+use tracing::{debug, warn};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -96,7 +96,10 @@ pub fn detect_gso(socket: &UdpSocket) -> GsoCapability {
                 std::mem::size_of::<u16>() as libc::socklen_t,
             );
         }
-        debug!("GSO detected: available (max_segments={})", MAX_GSO_SEGMENTS);
+        debug!(
+            "GSO detected: available (max_segments={})",
+            MAX_GSO_SEGMENTS
+        );
         GsoCapability::Available {
             max_segments: MAX_GSO_SEGMENTS,
         }
@@ -301,10 +304,7 @@ pub fn recv_gro_sync(
 
 /// Non-Linux: GRO recv falls back to regular recv_from.
 #[cfg(not(target_os = "linux"))]
-pub fn recv_gro_sync(
-    _fd: i32,
-    _buf: &mut [u8],
-) -> io::Result<(usize, SocketAddr, Option<u16>)> {
+pub fn recv_gro_sync(_fd: i32, _buf: &mut [u8]) -> io::Result<(usize, SocketAddr, Option<u16>)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "GRO recvmsg is only available on Linux",
@@ -351,10 +351,7 @@ pub fn raw_to_socket_addr(
 
 /// Windows stub — libc::sockaddr_storage and socklen_t don't exist on Windows.
 #[cfg(not(unix))]
-pub fn raw_to_socket_addr(
-    _storage: &[u8],
-    _len: u32,
-) -> Option<SocketAddr> {
+pub fn raw_to_socket_addr(_storage: &[u8], _len: u32) -> Option<SocketAddr> {
     None
 }
 
@@ -1029,8 +1026,7 @@ impl UdpSender {
                                 // GSO failed — fall back to sendmmsg or individual
                                 warn!("GSO send failed, falling back: {}", e);
                                 let remaining = &packets[total_sent..];
-                                total_sent +=
-                                    self.send_batch_fallback(remaining, dest).await?;
+                                total_sent += self.send_batch_fallback(remaining, dest).await?;
                                 return Ok(total_sent);
                             }
                         }
@@ -1086,10 +1082,7 @@ impl UdpSender {
                     if sent == 0 {
                         return Err(e);
                     }
-                    warn!(
-                        "individual send failed after {} packets: {}",
-                        sent, e
-                    );
+                    warn!("individual send failed after {} packets: {}", sent, e);
                     return Ok(sent);
                 }
             }
@@ -1133,8 +1126,7 @@ mod tests {
         if !cap.is_available() {
             println!("Skipping GSO send test — GSO not available");
             // Test the fallback path instead
-            let udp_sender =
-                UdpSender::new(std::sync::Arc::new(sender), GsoMode::Auto);
+            let udp_sender = UdpSender::new(std::sync::Arc::new(sender), GsoMode::Auto);
             let packets: Vec<Vec<u8>> = (0..10).map(|i| vec![i; 100]).collect();
             let sent = udp_sender.send_batch(&packets, dest).await.unwrap();
             assert_eq!(sent, 10);
@@ -1248,8 +1240,7 @@ mod tests {
         let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let dest = receiver.local_addr().unwrap();
 
-        let udp_sender =
-            UdpSender::new(std::sync::Arc::new(sender), GsoMode::Disabled);
+        let udp_sender = UdpSender::new(std::sync::Arc::new(sender), GsoMode::Disabled);
         assert!(!udp_sender.capability().is_available());
 
         let packets: Vec<Vec<u8>> = (0..5).map(|i| vec![i; 80]).collect();
@@ -1326,8 +1317,7 @@ mod tests {
     fn test_gso_cmsg_construction() {
         // Verify the cmsg buffer layout for UDP_SEGMENT
         let segment_size: u16 = 1200;
-        let cmsg_space =
-            unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) } as usize;
+        let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<u16>() as u32) } as usize;
         let mut cmsg_buf = vec![0u8; cmsg_space];
 
         // Simulate building the msghdr + cmsg
@@ -1389,9 +1379,13 @@ mod tests {
             SendStrategy::Gso
         } else {
             #[cfg(target_os = "linux")]
-            { SendStrategy::SendMmsg }
+            {
+                SendStrategy::SendMmsg
+            }
             #[cfg(not(target_os = "linux"))]
-            { SendStrategy::Individual }
+            {
+                SendStrategy::Individual
+            }
         };
         assert_eq!(sender.strategy(), expected);
     }
@@ -1473,7 +1467,10 @@ mod tests {
         let mut gro_recv = GroReceiver::new(recv_sock, GsoMode::Auto);
 
         // Send one packet
-        sender.send_to(&[0xDE, 0xAD, 0xBE, 0xEF], dest).await.unwrap();
+        sender
+            .send_to(&[0xDE, 0xAD, 0xBE, 0xEF], dest)
+            .await
+            .unwrap();
 
         // Receive it
         let batch = gro_recv.recv().await.unwrap();
@@ -1482,7 +1479,10 @@ mod tests {
         let seg = &batch.segments()[0];
         assert_eq!(seg.offset, 0);
         assert_eq!(seg.len, 4);
-        assert_eq!(&batch.buffer()[seg.offset..seg.offset + seg.len], &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(
+            &batch.buffer()[seg.offset..seg.offset + seg.len],
+            &[0xDE, 0xAD, 0xBE, 0xEF]
+        );
     }
 
     #[tokio::test]
@@ -1510,13 +1510,10 @@ mod tests {
             if total_segments >= 10 {
                 break;
             }
-            let batch = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                gro_recv.recv(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(2), gro_recv.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
             total_segments += batch.len();
             total_bytes += batch.total_bytes();
@@ -1562,12 +1559,8 @@ mod tests {
         let segments = split_gro_segments(4800, Some(1200), addr);
         assert_eq!(segments.len(), 4);
 
-        let expected: Vec<(usize, usize)> = vec![
-            (0, 1200),
-            (1200, 1200),
-            (2400, 1200),
-            (3600, 1200),
-        ];
+        let expected: Vec<(usize, usize)> =
+            vec![(0, 1200), (1200, 1200), (2400, 1200), (3600, 1200)];
 
         for (seg, (exp_off, exp_len)) in segments.iter().zip(expected.iter()) {
             assert_eq!(seg.offset, *exp_off);
@@ -1612,11 +1605,8 @@ mod tests {
         let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let mut gro_recv = GroReceiver::new(sock, GsoMode::Auto);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            gro_recv.recv(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), gro_recv.recv()).await;
 
         // Should timeout since nobody sends anything
         assert!(result.is_err());

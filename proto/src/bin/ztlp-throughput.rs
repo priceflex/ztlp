@@ -22,9 +22,7 @@ use tracing::debug;
 use ztlp_proto::gso::{self, GsoMode};
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
-use ztlp_proto::packet::{
-    HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE,
-};
+use ztlp_proto::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use ztlp_proto::pipeline::Pipeline;
 use ztlp_proto::tunnel;
 
@@ -272,7 +270,10 @@ async fn bench_ztlp_tunnel(
                 break;
             }
             Err(_) => {
-                eprintln!("Backend read timeout (received {} of {} bytes)", total_read, size);
+                eprintln!(
+                    "Backend read timeout (received {} of {} bytes)",
+                    total_read, size
+                );
                 break;
             }
         }
@@ -404,15 +405,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("ZTLP Throughput Benchmark");
     println!("═══════════════════════════════════════════════════════");
-    println!(
-        "Transfer size: {}",
-        format_size(args.size)
-    );
+    println!("Transfer size: {}", format_size(args.size));
     println!(
         "System: {} (GSO: {}, GRO: {})",
         system_info(),
-        if gso_available { "available" } else { "unavailable" },
-        if gro_available { "available" } else { "unavailable" },
+        if gso_available {
+            "available"
+        } else {
+            "unavailable"
+        },
+        if gro_available {
+            "available"
+        } else {
+            "unavailable"
+        },
     );
     println!("Iterations: {}", args.repeat);
     println!();
@@ -459,8 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !gso_available {
                         eprintln!("Warning: GSO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO)")
-                        .await?
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO)").await?
                 }
                 "ztlp-nogso" => {
                     bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (no GSO)")
@@ -542,10 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if results.len() >= 2 {
         if let (Some(raw_tp), Some(nogso), Some(gso)) = (
             results.iter().find(|r| r.0 == "Raw TCP").map(|r| r.1),
-            results
-                .iter()
-                .find(|r| r.0.contains("no GSO"))
-                .map(|r| r.1),
+            results.iter().find(|r| r.0.contains("no GSO")).map(|r| r.1),
             results
                 .iter()
                 .find(|r| r.0.contains("GSO") && !r.0.contains("no GSO"))

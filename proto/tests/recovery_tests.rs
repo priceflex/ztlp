@@ -36,7 +36,11 @@ async fn test_truncated_data_header() {
 
     for pkt in &short_packets {
         let result = DataHeader::deserialize(pkt);
-        assert!(result.is_err(), "Expected Err for packet of len {}", pkt.len());
+        assert!(
+            result.is_err(),
+            "Expected Err for packet of len {}",
+            pkt.len()
+        );
     }
 }
 
@@ -75,7 +79,10 @@ async fn test_corrupted_auth_tag() {
 
     // Valid packet should pass
     let result = pipeline.process(&packet);
-    assert!(matches!(result, AdmissionResult::Pass), "Valid packet should pass");
+    assert!(
+        matches!(result, AdmissionResult::Pass),
+        "Valid packet should pass"
+    );
 
     // Corrupt the auth tag
     let mut corrupted = packet.clone();
@@ -106,8 +113,8 @@ async fn test_oversized_packet_handling() {
 
 #[tokio::test]
 async fn test_zero_length_payload() {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
     use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 
     let key_bytes = [0x42u8; 32];
     let key = GenericArray::from_slice(&key_bytes);
@@ -117,18 +124,24 @@ async fn test_zero_length_payload() {
     let nonce = GenericArray::from_slice(&nonce_bytes);
 
     let ciphertext = cipher.encrypt(nonce, &[] as &[u8]).unwrap();
-    assert!(!ciphertext.is_empty(), "AEAD should produce auth tag even for empty plaintext");
+    assert!(
+        !ciphertext.is_empty(),
+        "AEAD should produce auth tag even for empty plaintext"
+    );
 
     let plaintext = cipher.decrypt(nonce, ciphertext.as_slice()).unwrap();
-    assert!(plaintext.is_empty(), "Decrypted empty payload should be empty");
+    assert!(
+        plaintext.is_empty(),
+        "Decrypted empty payload should be empty"
+    );
 }
 
 // ─── Test 6: Maximum-length payload ──────────────────────────────
 
 #[tokio::test]
 async fn test_maximum_length_payload() {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
     use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 
     let key_bytes = [0x42u8; 32];
     let key = GenericArray::from_slice(&key_bytes);
@@ -240,7 +253,10 @@ async fn test_handshake_corrupted_messages() {
 
     // Initiator should reject corrupted authenticated message
     let result = ctx_a.read_message(&corrupted);
-    assert!(result.is_err(), "Corrupted authenticated handshake msg should fail");
+    assert!(
+        result.is_err(),
+        "Corrupted authenticated handshake msg should fail"
+    );
 }
 
 // ─── Test 12: Transport send to unreachable address ──────────────

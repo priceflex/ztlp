@@ -17,7 +17,7 @@ use tokio::time::timeout;
 use ztlp_proto::batch::BatchSender;
 use ztlp_proto::gro_batch::BatchReceiver;
 use ztlp_proto::gso::{
-    detect_gso, detect_gro, GsoCapability, GsoMode, GroReceiver, MAX_GSO_SEGMENTS,
+    detect_gro, detect_gso, GroReceiver, GsoCapability, GsoMode, MAX_GSO_SEGMENTS,
 };
 use ztlp_proto::transport::TransportNode;
 
@@ -26,11 +26,7 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ─── Helper: receive exactly N packets via individual recv_from ─────────────
 
-async fn recv_n_packets(
-    socket: &UdpSocket,
-    n: usize,
-    timeout_dur: Duration,
-) -> Vec<Vec<u8>> {
+async fn recv_n_packets(socket: &UdpSocket, n: usize, timeout_dur: Duration) -> Vec<Vec<u8>> {
     let mut received = Vec::with_capacity(n);
     let mut buf = vec![0u8; 65535];
     for i in 0..n {
@@ -239,7 +235,11 @@ async fn test_gso_roundtrip_exceeds_max() {
         let id = pkt[0] as u16 | ((pkt[1] as u16) << 8);
         seen_ids.insert(id);
     }
-    assert_eq!(seen_ids.len(), num_packets, "all 200 packet IDs should be unique");
+    assert_eq!(
+        seen_ids.len(),
+        num_packets,
+        "all 200 packet IDs should be unique"
+    );
 }
 
 // ─── Test 5: GRO coalesced receive ─────────────────────────────────────────
@@ -662,11 +662,8 @@ async fn test_gso_fallback_sends_correctly() {
     let dest = receiver_sock.local_addr().unwrap();
 
     // Force GSO disabled — must use sendmmsg or individual fallback
-    let batch_sender = BatchSender::with_capability(
-        sender_sock,
-        GsoMode::Disabled,
-        GsoCapability::Unavailable,
-    );
+    let batch_sender =
+        BatchSender::with_capability(sender_sock, GsoMode::Disabled, GsoCapability::Unavailable);
 
     let num_packets = 20;
     let packets: Vec<Vec<u8>> = (0..num_packets)
@@ -703,7 +700,11 @@ async fn test_gso_fallback_sends_correctly() {
         }
         seen.insert(id);
     }
-    assert_eq!(seen.len(), num_packets, "all fallback packets should arrive");
+    assert_eq!(
+        seen.len(),
+        num_packets,
+        "all fallback packets should arrive"
+    );
 }
 
 // ─── Test 13: Large payload batch (max-MTU packets) ─────────────────────────
@@ -749,9 +750,7 @@ async fn test_large_payload_batch() {
 
         // Verify checksum
         let computed: u32 = pkt[..pkt_size - 4].iter().map(|&b| b as u32).sum();
-        let stored = u32::from_be_bytes(
-            pkt[pkt_size - 4..pkt_size].try_into().unwrap(),
-        );
+        let stored = u32::from_be_bytes(pkt[pkt_size - 4..pkt_size].try_into().unwrap());
         assert_eq!(
             computed, stored,
             "checksum mismatch for large packet id={}",
@@ -843,6 +842,14 @@ async fn test_concurrent_batch_senders() {
             other => panic!("unexpected marker: 0x{:02X}", other),
         }
     }
-    assert_eq!(from_1.len(), pkts_per_sender, "all sender 1 packets received");
-    assert_eq!(from_2.len(), pkts_per_sender, "all sender 2 packets received");
+    assert_eq!(
+        from_1.len(),
+        pkts_per_sender,
+        "all sender 1 packets received"
+    );
+    assert_eq!(
+        from_2.len(),
+        pkts_per_sender,
+        "all sender 2 packets received"
+    );
 }

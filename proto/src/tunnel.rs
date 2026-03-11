@@ -75,7 +75,7 @@ use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
-use crate::stats::{TunnelStats, TxBatchStats, RxBatchStats};
+use crate::stats::{RxBatchStats, TunnelStats, TxBatchStats};
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -710,10 +710,8 @@ pub async fn run_bridge(
         let mut last_ack_check = Instant::now();
 
         // Create BatchSender once — reused for every TCP read flush.
-        let batch_sender = crate::batch::BatchSender::new(
-            udp_send.clone(),
-            crate::gso::GsoMode::Auto,
-        );
+        let batch_sender =
+            crate::batch::BatchSender::new(udp_send.clone(), crate::gso::GsoMode::Auto);
 
         // Record the send strategy for debug stats.
         if stats_tx.enabled {
@@ -997,8 +995,11 @@ pub async fn run_bridge(
                 encrypt_time,
                 send_time,
                 window_wait_time,
-                send_strategy: stats_tx.send_strategy.lock()
-                    .map(|s| s.clone()).unwrap_or_default(),
+                send_strategy: stats_tx
+                    .send_strategy
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_default(),
                 data_seq,
                 cwnd: cwnd_snap,
                 effective_window: ew_snap,
@@ -1031,10 +1032,8 @@ pub async fn run_bridge(
 
         // GRO-aware receiver: transparently uses GRO when available.
         // A single recv() may yield multiple coalesced datagrams.
-        let mut gro_receiver = crate::gso::GroReceiver::new(
-            udp_recv.clone(),
-            crate::gso::GsoMode::Auto,
-        );
+        let mut gro_receiver =
+            crate::gso::GroReceiver::new(udp_recv.clone(), crate::gso::GsoMode::Auto);
 
         // Reassembly buffer: reorders packets for in-order TCP delivery.
         // Initial expected_seq = 0 (first data packet the sender will send).
@@ -1067,276 +1066,284 @@ pub async fn run_bridge(
             // and check for stalls even when no packets are arriving.
             // With GRO, a single recv may return multiple coalesced datagrams.
             let recv_start = Instant::now();
-            let recv_result =
-                tokio::time::timeout(ACK_INTERVAL, gro_receiver.recv()).await;
+            let recv_result = tokio::time::timeout(ACK_INTERVAL, gro_receiver.recv()).await;
 
             match recv_result {
                 Ok(Ok(batch)) => {
-                  let recv_time = recv_start.elapsed();
-                  // Process each segment in the GRO batch. When GRO coalesces
-                  // packets, we get multiple segments from one recv call.
-                  let num_segments = batch.segments().len();
-                  let total_udp_bytes: usize = batch.segments().iter().map(|s| s.len).sum();
-                  let mut batch_packets_ok: usize = 0;
-                  let mut batch_packets_drop: usize = 0;
-                  let mut batch_tcp_bytes: usize = 0;
-                  let mut batch_delivered: usize = 0;
-                  let mut batch_buffered: usize = 0;
-                  let mut batch_pipeline_time = Duration::ZERO;
-                  let mut batch_decrypt_time = Duration::ZERO;
-                  let mut batch_reassembly_time = Duration::ZERO;
-                  let mut batch_tcp_write_time = Duration::ZERO;
+                    let recv_time = recv_start.elapsed();
+                    // Process each segment in the GRO batch. When GRO coalesces
+                    // packets, we get multiple segments from one recv call.
+                    let num_segments = batch.segments().len();
+                    let total_udp_bytes: usize = batch.segments().iter().map(|s| s.len).sum();
+                    let mut batch_packets_ok: usize = 0;
+                    let mut batch_packets_drop: usize = 0;
+                    let mut batch_tcp_bytes: usize = 0;
+                    let mut batch_delivered: usize = 0;
+                    let mut batch_buffered: usize = 0;
+                    let mut batch_pipeline_time = Duration::ZERO;
+                    let mut batch_decrypt_time = Duration::ZERO;
+                    let mut batch_reassembly_time = Duration::ZERO;
+                    let mut batch_tcp_write_time = Duration::ZERO;
 
-                  for segment in batch.segments() {
-                    let data = &batch.buffer()[segment.offset..segment.offset + segment.len];
-                    let n = segment.len;
+                    for segment in batch.segments() {
+                        let data = &batch.buffer()[segment.offset..segment.offset + segment.len];
+                        let n = segment.len;
 
-                    // Run through pipeline admission (magic, session, header auth)
-                    let pipeline_start = Instant::now();
-                    {
-                        let pl = pipeline_recv.lock().await;
-                        let result = pl.process(data);
-                        if !matches!(result, AdmissionResult::Pass) {
-                            batch_pipeline_time += pipeline_start.elapsed();
-                            batch_packets_drop += 1;
-                            debug!("packet dropped by pipeline");
-                            continue;
-                        }
-                    }
-                    batch_pipeline_time += pipeline_start.elapsed();
-
-                    // Parse data header
-                    if n < DATA_HEADER_SIZE {
-                        batch_packets_drop += 1;
-                        debug!("packet too short for data header");
-                        continue;
-                    }
-                    let header = match DataHeader::deserialize(data) {
-                        Ok(h) => h,
-                        Err(_) => {
-                            batch_packets_drop += 1;
-                            debug!("failed to parse data header");
-                            continue;
-                        }
-                    };
-
-                    // Verify session ID matches
-                    if header.session_id != sid_recv {
-                        batch_packets_drop += 1;
-                        debug!("wrong session ID, ignoring");
-                        continue;
-                    }
-
-                    // Decrypt the payload
-                    let decrypt_start = Instant::now();
-                    let encrypted_payload = &data[DATA_HEADER_SIZE..];
-                    let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-
-                    let plaintext = match recv_cipher.decrypt(nonce, encrypted_payload) {
-                        Ok(pt) => {
-                            batch_decrypt_time += decrypt_start.elapsed();
-                            pt
-                        }
-                        Err(e) => {
-                            batch_decrypt_time += decrypt_start.elapsed();
-                            batch_packets_drop += 1;
-                            warn!("decryption failed (seq {}): {}", header.packet_seq, e);
-                            continue;
-                        }
-                    };
-                    batch_packets_ok += 1;
-
-                    // Parse the frame type (first byte of plaintext)
-                    if plaintext.is_empty() {
-                        debug!("empty plaintext, ignoring");
-                        continue;
-                    }
-
-                    let frame_type = plaintext[0];
-                    let frame_payload = &plaintext[1..];
-
-                    match frame_type {
-                        FRAME_DATA => {
-                            // DATA frame: [0x00] [data_seq: 8B BE] [payload...]
-                            if frame_payload.len() < 8 {
-                                debug!("DATA frame too short for data_seq");
+                        // Run through pipeline admission (magic, session, header auth)
+                        let pipeline_start = Instant::now();
+                        {
+                            let pl = pipeline_recv.lock().await;
+                            let result = pl.process(data);
+                            if !matches!(result, AdmissionResult::Pass) {
+                                batch_pipeline_time += pipeline_start.elapsed();
+                                batch_packets_drop += 1;
+                                debug!("packet dropped by pipeline");
                                 continue;
                             }
-                            // SAFETY: frame_payload.len() >= 8 verified above
-                            let data_seq = u64::from_be_bytes(
-                                match frame_payload[..8].try_into() {
-                                    Ok(b) => b,
-                                    Err(_) => continue,
-                                },
-                            );
-                            let tcp_payload = &frame_payload[8..];
+                        }
+                        batch_pipeline_time += pipeline_start.elapsed();
 
-                            // Initialize reassembly buffer on first data packet.
-                            let reassembly_start = Instant::now();
-                            let reasm = reassembly.get_or_insert_with(|| {
-                                debug!("reassembly: initialized with first data_seq {}", data_seq);
-                                ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
-                            });
-
-                            // Insert into reassembly buffer keyed by data_seq
-                            if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec())
-                            {
-                                batch_reassembly_time += reassembly_start.elapsed();
-                                // Write all deliverable packets to TCP in order
-                                let tcp_write_start = Instant::now();
-                                for (_seq, payload) in &deliverable {
-                                    batch_tcp_bytes += payload.len();
-                                    if let Err(e) = tcp_writer.write_all(payload).await {
-                                        warn!("TCP write error: {}", e);
-                                        return Err::<(), Box<dyn std::error::Error>>(e.into());
-                                    }
-                                }
-
-                                if !deliverable.is_empty() {
-                                    // Flush when we've delivered data
-                                    if let Err(e) = tcp_writer.flush().await {
-                                        warn!("TCP flush error: {}", e);
-                                        return Err(e.into());
-                                    }
-                                    batch_tcp_write_time += tcp_write_start.elapsed();
-                                    batch_delivered += deliverable.len();
-                                    packets_since_ack += deliverable.len() as u64;
-                                }
-                            } else {
-                                batch_reassembly_time += reassembly_start.elapsed();
-                                batch_buffered += 1;
+                        // Parse data header
+                        if n < DATA_HEADER_SIZE {
+                            batch_packets_drop += 1;
+                            debug!("packet too short for data header");
+                            continue;
+                        }
+                        let header = match DataHeader::deserialize(data) {
+                            Ok(h) => h,
+                            Err(_) => {
+                                batch_packets_drop += 1;
+                                debug!("failed to parse data header");
+                                continue;
                             }
+                        };
+
+                        // Verify session ID matches
+                        if header.session_id != sid_recv {
+                            batch_packets_drop += 1;
+                            debug!("wrong session ID, ignoring");
+                            continue;
                         }
 
-                        FRAME_ACK => {
-                            // ACK frame from the remote sender's receiver side.
-                            // Contains the highest contiguous seq delivered to TCP.
-                            if frame_payload.len() >= 8 {
-                                // SAFETY: frame_payload.len() >= 8 verified by condition
-                                let acked_seq = match frame_payload[..8].try_into() {
-                                    Ok(b) => u64::from_be_bytes(b),
-                                    Err(_) => continue,
-                                };
-                                debug!("received ACK for data_seq {}", acked_seq);
-                                stats_rx.acks_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Decrypt the payload
+                        let decrypt_start = Instant::now();
+                        let encrypted_payload = &data[DATA_HEADER_SIZE..];
+                        let mut nonce_bytes = [0u8; 12];
+                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
+                        let nonce = Nonce::from_slice(&nonce_bytes);
 
-                                // Compute newly acked count for congestion control
-                                let prev_acked = {
-                                    let guard = last_acked_seq_writer.lock().await;
-                                    *guard
-                                };
-                                let newly_acked = match prev_acked {
-                                    Some(prev) if acked_seq > prev => acked_seq - prev,
-                                    None => acked_seq + 1,
-                                    _ => 0,
-                                };
+                        let plaintext = match recv_cipher.decrypt(nonce, encrypted_payload) {
+                            Ok(pt) => {
+                                batch_decrypt_time += decrypt_start.elapsed();
+                                pt
+                            }
+                            Err(e) => {
+                                batch_decrypt_time += decrypt_start.elapsed();
+                                batch_packets_drop += 1;
+                                warn!("decryption failed (seq {}): {}", header.packet_seq, e);
+                                continue;
+                            }
+                        };
+                        batch_packets_ok += 1;
 
-                                // Update the shared acked seq
-                                {
-                                    let mut guard = last_acked_seq_writer.lock().await;
-                                    match *guard {
-                                        Some(prev) if acked_seq > prev => *guard = Some(acked_seq),
-                                        None => *guard = Some(acked_seq),
-                                        _ => {}
-                                    }
+                        // Parse the frame type (first byte of plaintext)
+                        if plaintext.is_empty() {
+                            debug!("empty plaintext, ignoring");
+                            continue;
+                        }
+
+                        let frame_type = plaintext[0];
+                        let frame_payload = &plaintext[1..];
+
+                        match frame_type {
+                            FRAME_DATA => {
+                                // DATA frame: [0x00] [data_seq: 8B BE] [payload...]
+                                if frame_payload.len() < 8 {
+                                    debug!("DATA frame too short for data_seq");
+                                    continue;
                                 }
+                                // SAFETY: frame_payload.len() >= 8 verified above
+                                let data_seq =
+                                    u64::from_be_bytes(match frame_payload[..8].try_into() {
+                                        Ok(b) => b,
+                                        Err(_) => continue,
+                                    });
+                                let tcp_payload = &frame_payload[8..];
 
-                                // RTT measurement: find the send time of the acked seq
-                                // in the retransmit buffer and compute the sample
+                                // Initialize reassembly buffer on first data packet.
+                                let reassembly_start = Instant::now();
+                                let reasm = reassembly.get_or_insert_with(|| {
+                                    debug!(
+                                        "reassembly: initialized with first data_seq {}",
+                                        data_seq
+                                    );
+                                    ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
+                                });
+
+                                // Insert into reassembly buffer keyed by data_seq
+                                if let Some(deliverable) =
+                                    reasm.insert(data_seq, tcp_payload.to_vec())
                                 {
-                                    let rb = retransmit_buf_ack.lock().await;
-                                    if let Some(send_time) = rb.send_time(acked_seq) {
-                                        let rtt_sample = send_time.elapsed().as_secs_f64() * 1000.0;
-                                        let mut cc = congestion_receiver.lock().await;
-                                        cc.update_rtt(rtt_sample);
-                                        if newly_acked > 0 {
+                                    batch_reassembly_time += reassembly_start.elapsed();
+                                    // Write all deliverable packets to TCP in order
+                                    let tcp_write_start = Instant::now();
+                                    for (_seq, payload) in &deliverable {
+                                        batch_tcp_bytes += payload.len();
+                                        if let Err(e) = tcp_writer.write_all(payload).await {
+                                            warn!("TCP write error: {}", e);
+                                            return Err::<(), Box<dyn std::error::Error>>(e.into());
+                                        }
+                                    }
+
+                                    if !deliverable.is_empty() {
+                                        // Flush when we've delivered data
+                                        if let Err(e) = tcp_writer.flush().await {
+                                            warn!("TCP flush error: {}", e);
+                                            return Err(e.into());
+                                        }
+                                        batch_tcp_write_time += tcp_write_start.elapsed();
+                                        batch_delivered += deliverable.len();
+                                        packets_since_ack += deliverable.len() as u64;
+                                    }
+                                } else {
+                                    batch_reassembly_time += reassembly_start.elapsed();
+                                    batch_buffered += 1;
+                                }
+                            }
+
+                            FRAME_ACK => {
+                                // ACK frame from the remote sender's receiver side.
+                                // Contains the highest contiguous seq delivered to TCP.
+                                if frame_payload.len() >= 8 {
+                                    // SAFETY: frame_payload.len() >= 8 verified by condition
+                                    let acked_seq = match frame_payload[..8].try_into() {
+                                        Ok(b) => u64::from_be_bytes(b),
+                                        Err(_) => continue,
+                                    };
+                                    debug!("received ACK for data_seq {}", acked_seq);
+                                    stats_rx
+                                        .acks_received
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                    // Compute newly acked count for congestion control
+                                    let prev_acked = {
+                                        let guard = last_acked_seq_writer.lock().await;
+                                        *guard
+                                    };
+                                    let newly_acked = match prev_acked {
+                                        Some(prev) if acked_seq > prev => acked_seq - prev,
+                                        None => acked_seq + 1,
+                                        _ => 0,
+                                    };
+
+                                    // Update the shared acked seq
+                                    {
+                                        let mut guard = last_acked_seq_writer.lock().await;
+                                        match *guard {
+                                            Some(prev) if acked_seq > prev => {
+                                                *guard = Some(acked_seq)
+                                            }
+                                            None => *guard = Some(acked_seq),
+                                            _ => {}
+                                        }
+                                    }
+
+                                    // RTT measurement: find the send time of the acked seq
+                                    // in the retransmit buffer and compute the sample
+                                    {
+                                        let rb = retransmit_buf_ack.lock().await;
+                                        if let Some(send_time) = rb.send_time(acked_seq) {
+                                            let rtt_sample =
+                                                send_time.elapsed().as_secs_f64() * 1000.0;
+                                            let mut cc = congestion_receiver.lock().await;
+                                            cc.update_rtt(rtt_sample);
+                                            if newly_acked > 0 {
+                                                cc.on_ack(newly_acked);
+                                            }
+                                        } else if newly_acked > 0 {
+                                            // No RTT sample available, just notify congestion controller
+                                            let mut cc = congestion_receiver.lock().await;
                                             cc.on_ack(newly_acked);
                                         }
-                                    } else if newly_acked > 0 {
-                                        // No RTT sample available, just notify congestion controller
-                                        let mut cc = congestion_receiver.lock().await;
-                                        cc.on_ack(newly_acked);
+                                    }
+
+                                    // Prune retransmit buffer up to acked_seq
+                                    {
+                                        let mut rb = retransmit_buf_ack.lock().await;
+                                        rb.prune_up_to(acked_seq);
                                     }
                                 }
-
-                                // Prune retransmit buffer up to acked_seq
-                                {
-                                    let mut rb = retransmit_buf_ack.lock().await;
-                                    rb.prune_up_to(acked_seq);
-                                }
                             }
-                        }
 
-                        FRAME_NACK => {
-                            // NACK frame from the remote receiver: they're missing packets.
-                            // Decode and forward to the sender for retransmission.
-                            if let Some(missing_seqs) = decode_nack_payload(frame_payload) {
-                                stats_rx.nacks_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                debug!(
-                                    "received NACK for {} missing seqs: {:?}",
-                                    missing_seqs.len(),
-                                    &missing_seqs[..missing_seqs.len().min(5)]
-                                );
-                                if let Err(e) = retransmit_tx.send(missing_seqs) {
-                                    warn!("failed to forward NACK to sender: {}", e);
-                                }
-                            } else {
-                                debug!("malformed NACK frame, ignoring");
-                            }
-                        }
-
-                        FRAME_FIN => {
-                            // FIN frame: [0x02] [data_seq: 8B BE]
-                            // Remote side signaled TCP EOF.
-                            if frame_payload.len() >= 8 {
-                                // SAFETY: frame_payload.len() >= 8 verified by condition
-                                let _fin_data_seq = match frame_payload[..8].try_into() {
-                                    Ok(b) => u64::from_be_bytes(b),
-                                    Err(_) => {
-                                        info!("received FIN frame — remote TCP stream ended (malformed seq)");
-                                        fin_received = true;
-                                        break;
+                            FRAME_NACK => {
+                                // NACK frame from the remote receiver: they're missing packets.
+                                // Decode and forward to the sender for retransmission.
+                                if let Some(missing_seqs) = decode_nack_payload(frame_payload) {
+                                    stats_rx
+                                        .nacks_received
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    debug!(
+                                        "received NACK for {} missing seqs: {:?}",
+                                        missing_seqs.len(),
+                                        &missing_seqs[..missing_seqs.len().min(5)]
+                                    );
+                                    if let Err(e) = retransmit_tx.send(missing_seqs) {
+                                        warn!("failed to forward NACK to sender: {}", e);
                                     }
-                                };
-                                info!(
+                                } else {
+                                    debug!("malformed NACK frame, ignoring");
+                                }
+                            }
+
+                            FRAME_FIN => {
+                                // FIN frame: [0x02] [data_seq: 8B BE]
+                                // Remote side signaled TCP EOF.
+                                if frame_payload.len() >= 8 {
+                                    // SAFETY: frame_payload.len() >= 8 verified by condition
+                                    let _fin_data_seq = match frame_payload[..8].try_into() {
+                                        Ok(b) => u64::from_be_bytes(b),
+                                        Err(_) => {
+                                            info!("received FIN frame — remote TCP stream ended (malformed seq)");
+                                            fin_received = true;
+                                            break;
+                                        }
+                                    };
+                                    info!(
                                     "received FIN frame (data_seq {}) — remote TCP stream ended",
                                     _fin_data_seq
                                 );
-                            } else {
-                                info!("received FIN frame — remote TCP stream ended");
-                            }
-                            fin_received = true;
-
-                            // If there are buffered packets, give them time to arrive
-                            if let Some(ref reasm) = reassembly {
-                                if reasm.buffered_count() > 0 {
-                                    debug!(
-                                        "FIN received with {} buffered packets, draining",
-                                        reasm.buffered_count()
-                                    );
-                                    // Continue the loop to drain, but with FIN_DRAIN_TIMEOUT
-                                    continue;
+                                } else {
+                                    info!("received FIN frame — remote TCP stream ended");
                                 }
+                                fin_received = true;
+
+                                // If there are buffered packets, give them time to arrive
+                                if let Some(ref reasm) = reassembly {
+                                    if reasm.buffered_count() > 0 {
+                                        debug!(
+                                            "FIN received with {} buffered packets, draining",
+                                            reasm.buffered_count()
+                                        );
+                                        // Continue the loop to drain, but with FIN_DRAIN_TIMEOUT
+                                        continue;
+                                    }
+                                }
+
+                                // Flush TCP and signal completion
+                                if let Err(e) = tcp_writer.flush().await {
+                                    warn!("TCP flush error during FIN: {}", e);
+                                }
+                                if let Some(tx) = fin_tx.take() {
+                                    let _ = tx.send(());
+                                }
+                                return Ok(());
                             }
 
-                            // Flush TCP and signal completion
-                            if let Err(e) = tcp_writer.flush().await {
-                                warn!("TCP flush error during FIN: {}", e);
+                            _ => {
+                                debug!("unknown frame type 0x{:02x}, ignoring", frame_type);
                             }
-                            if let Some(tx) = fin_tx.take() {
-                                let _ = tx.send(());
-                            }
-                            return Ok(());
                         }
-
-                        _ => {
-                            debug!("unknown frame type 0x{:02x}, ignoring", frame_type);
-                        }
-                    }
-
-                  } // end for segment in batch.segments()
+                    } // end for segment in batch.segments()
 
                     // Emit per-batch debug stats
                     rx_batch_num += 1;
@@ -1633,9 +1640,9 @@ impl ServiceRegistry {
             String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
         };
 
-        self.services.get_key_value(&name).map(|(key, addr)| {
-            (key.as_str(), *addr)
-        })
+        self.services
+            .get_key_value(&name)
+            .map(|(key, addr)| (key.as_str(), *addr))
     }
 
     /// Check if this registry has any services.

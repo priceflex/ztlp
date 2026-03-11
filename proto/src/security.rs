@@ -260,10 +260,7 @@ mod tests {
             peer_addr: Some("10.0.0.1:5000".into()),
             session_id: None,
         };
-        assert_eq!(
-            event.to_string(),
-            "handshake_failed: noise protocol error"
-        );
+        assert_eq!(event.to_string(), "handshake_failed: noise protocol error");
     }
 
     #[test]

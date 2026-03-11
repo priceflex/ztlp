@@ -47,8 +47,7 @@ use tracing::{debug, info};
 /// Check if debug stats are enabled.
 /// Returns true if ZTLP_DEBUG is set or tracing is at debug level for this module.
 pub fn debug_enabled() -> bool {
-    std::env::var("ZTLP_DEBUG").is_ok()
-        || tracing::enabled!(tracing::Level::DEBUG)
+    std::env::var("ZTLP_DEBUG").is_ok() || tracing::enabled!(tracing::Level::DEBUG)
 }
 
 // ─── Timing helper ──────────────────────────────────────────────────────────
@@ -148,7 +147,11 @@ impl TxBatchStats {
             self.data_seq,
             self.cwnd,
             self.effective_window,
-            if self.window_stall { "WINDOW_STALL" } else { "" },
+            if self.window_stall {
+                "WINDOW_STALL"
+            } else {
+                ""
+            },
         );
     }
 }
@@ -306,13 +309,20 @@ impl TunnelStats {
     /// Record a completed TX batch.
     pub fn record_tx(&self, batch: &TxBatchStats) {
         self.tx_batches.fetch_add(1, Ordering::Relaxed);
-        self.tx_packets.fetch_add(batch.packet_count as u64, Ordering::Relaxed);
-        self.tx_bytes_tcp.fetch_add(batch.tcp_bytes as u64, Ordering::Relaxed);
-        self.tx_bytes_udp.fetch_add(batch.udp_bytes as u64, Ordering::Relaxed);
-        self.tcp_read_ns.fetch_add(batch.tcp_read_time.as_nanos() as u64, Ordering::Relaxed);
-        self.encrypt_ns.fetch_add(batch.encrypt_time.as_nanos() as u64, Ordering::Relaxed);
-        self.send_ns.fetch_add(batch.send_time.as_nanos() as u64, Ordering::Relaxed);
-        self.window_wait_ns.fetch_add(batch.window_wait_time.as_nanos() as u64, Ordering::Relaxed);
+        self.tx_packets
+            .fetch_add(batch.packet_count as u64, Ordering::Relaxed);
+        self.tx_bytes_tcp
+            .fetch_add(batch.tcp_bytes as u64, Ordering::Relaxed);
+        self.tx_bytes_udp
+            .fetch_add(batch.udp_bytes as u64, Ordering::Relaxed);
+        self.tcp_read_ns
+            .fetch_add(batch.tcp_read_time.as_nanos() as u64, Ordering::Relaxed);
+        self.encrypt_ns
+            .fetch_add(batch.encrypt_time.as_nanos() as u64, Ordering::Relaxed);
+        self.send_ns
+            .fetch_add(batch.send_time.as_nanos() as u64, Ordering::Relaxed);
+        self.window_wait_ns
+            .fetch_add(batch.window_wait_time.as_nanos() as u64, Ordering::Relaxed);
         if batch.window_stall {
             self.window_stalls.fetch_add(1, Ordering::Relaxed);
         }
@@ -324,18 +334,30 @@ impl TunnelStats {
     /// Record a completed RX batch.
     pub fn record_rx(&self, batch: &RxBatchStats) {
         self.rx_batches.fetch_add(1, Ordering::Relaxed);
-        self.rx_packets.fetch_add(batch.packets_processed as u64, Ordering::Relaxed);
-        self.rx_packets_dropped.fetch_add(batch.packets_dropped as u64, Ordering::Relaxed);
-        self.rx_bytes_udp.fetch_add(batch.udp_bytes as u64, Ordering::Relaxed);
-        self.rx_bytes_tcp.fetch_add(batch.tcp_bytes as u64, Ordering::Relaxed);
-        self.rx_gro_segments.fetch_add(batch.gro_segments as u64, Ordering::Relaxed);
-        self.recv_ns.fetch_add(batch.recv_time.as_nanos() as u64, Ordering::Relaxed);
-        self.pipeline_ns.fetch_add(batch.pipeline_time.as_nanos() as u64, Ordering::Relaxed);
-        self.decrypt_ns.fetch_add(batch.decrypt_time.as_nanos() as u64, Ordering::Relaxed);
-        self.reassembly_ns.fetch_add(batch.reassembly_time.as_nanos() as u64, Ordering::Relaxed);
-        self.tcp_write_ns.fetch_add(batch.tcp_write_time.as_nanos() as u64, Ordering::Relaxed);
-        self.delivered_packets.fetch_add(batch.delivered_count as u64, Ordering::Relaxed);
-        self.buffered_packets.fetch_add(batch.buffered_count as u64, Ordering::Relaxed);
+        self.rx_packets
+            .fetch_add(batch.packets_processed as u64, Ordering::Relaxed);
+        self.rx_packets_dropped
+            .fetch_add(batch.packets_dropped as u64, Ordering::Relaxed);
+        self.rx_bytes_udp
+            .fetch_add(batch.udp_bytes as u64, Ordering::Relaxed);
+        self.rx_bytes_tcp
+            .fetch_add(batch.tcp_bytes as u64, Ordering::Relaxed);
+        self.rx_gro_segments
+            .fetch_add(batch.gro_segments as u64, Ordering::Relaxed);
+        self.recv_ns
+            .fetch_add(batch.recv_time.as_nanos() as u64, Ordering::Relaxed);
+        self.pipeline_ns
+            .fetch_add(batch.pipeline_time.as_nanos() as u64, Ordering::Relaxed);
+        self.decrypt_ns
+            .fetch_add(batch.decrypt_time.as_nanos() as u64, Ordering::Relaxed);
+        self.reassembly_ns
+            .fetch_add(batch.reassembly_time.as_nanos() as u64, Ordering::Relaxed);
+        self.tcp_write_ns
+            .fetch_add(batch.tcp_write_time.as_nanos() as u64, Ordering::Relaxed);
+        self.delivered_packets
+            .fetch_add(batch.delivered_count as u64, Ordering::Relaxed);
+        self.buffered_packets
+            .fetch_add(batch.buffered_count as u64, Ordering::Relaxed);
     }
 
     /// Check if it's time to emit a periodic summary (every ~1 second).
@@ -393,7 +415,11 @@ impl TunnelStats {
         let tcp_write = self.tcp_write_ns.load(Ordering::Relaxed);
         let total_ns = total_elapsed.as_nanos() as u64;
 
-        let strategy = self.send_strategy.lock().map(|s| s.clone()).unwrap_or_default();
+        let strategy = self
+            .send_strategy
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
         let gro = self.gro_available.load(Ordering::Relaxed);
 
         info!(
@@ -447,19 +473,28 @@ impl TunnelStats {
             info!(
                 "        time: tcp_read={}({:.1}%) encrypt={}({:.1}%) send={}({:.1}%) \
                  window_wait={}({:.1}%)",
-                format_ns(tcp_read), pct(tcp_read, total_ns),
-                format_ns(encrypt), pct(encrypt, total_ns),
-                format_ns(send), pct(send, total_ns),
-                format_ns(window_wait), pct(window_wait, total_ns),
+                format_ns(tcp_read),
+                pct(tcp_read, total_ns),
+                format_ns(encrypt),
+                pct(encrypt, total_ns),
+                format_ns(send),
+                pct(send, total_ns),
+                format_ns(window_wait),
+                pct(window_wait, total_ns),
             );
             info!(
                 "              recv={}({:.1}%) pipeline={}({:.1}%) decrypt={}({:.1}%) \
                  reassembly={}({:.1}%) tcp_write={}({:.1}%)",
-                format_ns(recv), pct(recv, total_ns),
-                format_ns(pipeline), pct(pipeline, total_ns),
-                format_ns(decrypt), pct(decrypt, total_ns),
-                format_ns(reassembly), pct(reassembly, total_ns),
-                format_ns(tcp_write), pct(tcp_write, total_ns),
+                format_ns(recv),
+                pct(recv, total_ns),
+                format_ns(pipeline),
+                pct(pipeline, total_ns),
+                format_ns(decrypt),
+                pct(decrypt, total_ns),
+                format_ns(reassembly),
+                pct(reassembly, total_ns),
+                format_ns(tcp_write),
+                pct(tcp_write, total_ns),
             );
         }
 
@@ -480,16 +515,17 @@ impl TunnelStats {
         info!("╔══════════════════════════════════════════════════════════╗");
         info!("║           ZTLP Tunnel — Final Statistics                ║");
         info!("╠══════════════════════════════════════════════════════════╣");
-        info!(
-            "║ Duration:     {:<42} ║",
-            format!("{:.2}s", total_secs)
-        );
+        info!("║ Duration:     {:<42} ║", format!("{:.2}s", total_secs));
         info!(
             "║ TX (TCP→ZTLP): {:<41} ║",
             format!(
                 "{} ({}/s)",
                 format_bytes(tx_tcp),
-                format_bytes(if total_secs > 0.0 { (tx_tcp as f64 / total_secs) as u64 } else { 0 })
+                format_bytes(if total_secs > 0.0 {
+                    (tx_tcp as f64 / total_secs) as u64
+                } else {
+                    0
+                })
             )
         );
         info!(
@@ -497,7 +533,11 @@ impl TunnelStats {
             format!(
                 "{} ({}/s)",
                 format_bytes(rx_tcp),
-                format_bytes(if total_secs > 0.0 { (rx_tcp as f64 / total_secs) as u64 } else { 0 })
+                format_bytes(if total_secs > 0.0 {
+                    (rx_tcp as f64 / total_secs) as u64
+                } else {
+                    0
+                })
             )
         );
         info!(
@@ -527,7 +567,11 @@ impl TunnelStats {
             cwnd, ssthresh, srtt_ms, rto_ms
         );
 
-        let strategy = self.send_strategy.lock().map(|s| s.clone()).unwrap_or_default();
+        let strategy = self
+            .send_strategy
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
         let gro = self.gro_available.load(Ordering::Relaxed);
         info!("║                                                          ║");
         info!("║ Transport:                                               ║");

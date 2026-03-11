@@ -78,7 +78,10 @@ impl TransportNode {
         let mut results = Vec::with_capacity(batch.len());
         for segment in batch.segments() {
             let data = batch.buffer()[segment.offset..segment.offset + segment.len].to_vec();
-            debug!("received {} bytes from {} (batch)", segment.len, segment.addr);
+            debug!(
+                "received {} bytes from {} (batch)",
+                segment.len, segment.addr
+            );
             results.push((data, segment.addr));
         }
         Ok(results)
@@ -144,10 +147,8 @@ impl TransportNode {
         if packets.is_empty() {
             return Ok(0);
         }
-        let batch_sender = crate::batch::BatchSender::new(
-            self.socket.clone(),
-            crate::gso::GsoMode::Auto,
-        );
+        let batch_sender =
+            crate::batch::BatchSender::new(self.socket.clone(), crate::gso::GsoMode::Auto);
         let sent = batch_sender.send_batch(packets, dest).await?;
         debug!("batch sent {} packets to {}", sent, dest);
         Ok(sent)

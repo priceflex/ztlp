@@ -122,13 +122,10 @@ mod tests {
         let mut total_bytes = 0;
 
         while total_segments < 20 {
-            let batch = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                batch_recv.recv(),
-            )
-            .await
-            .expect("receive timed out")
-            .expect("receive failed");
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(2), batch_recv.recv())
+                .await
+                .expect("receive timed out")
+                .expect("receive failed");
 
             for seg in batch.segments() {
                 assert_eq!(seg.len, 200);
@@ -167,13 +164,10 @@ mod tests {
         let mut total_bytes = 0;
 
         while total_segments < 15 {
-            let batch = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                batch_recv.recv(),
-            )
-            .await
-            .expect("receive timed out")
-            .expect("receive failed");
+            let batch = tokio::time::timeout(std::time::Duration::from_secs(2), batch_recv.recv())
+                .await
+                .expect("receive timed out")
+                .expect("receive failed");
 
             for seg in batch.segments() {
                 assert_eq!(seg.len, 300);

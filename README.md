@@ -8,6 +8,8 @@
 
 **Version 1.0 | Experimental / Informational**
 
+> 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
+
 ---
 
 **Author:** Steven Price  

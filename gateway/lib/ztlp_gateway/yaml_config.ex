@@ -113,6 +113,16 @@ defmodule ZtlpGateway.YamlConfig do
       other -> {config, ["policies: expected a list, got: #{inspect(other)}" | errors]}
     end
 
+    # Circuit breaker section
+    {config, errors} = case Map.get(raw, "circuit_breaker", %{}) do
+      cb when is_map(cb) ->
+        {config, errors} = validate_field(config, errors, cb, "enabled", :circuit_breaker_enabled, :boolean, true, nil)
+        {config, errors} = validate_field(config, errors, cb, "failure_threshold", :circuit_breaker_failure_threshold, :integer, 5, 1..1000)
+        validate_field(config, errors, cb, "cooldown", :circuit_breaker_cooldown_ms, :duration, 30_000, nil)
+      nil -> {config, errors}
+      other -> {config, ["circuit_breaker: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
     case errors do
       [] -> {:ok, config}
       _ -> {:error, Enum.reverse(errors)}
@@ -166,6 +176,15 @@ defmodule ZtlpGateway.YamlConfig do
           do: {:error, "#{key}: must be between #{range.first} and #{range.last}, got: #{n}"},
           else: {:ok, n}
       :error -> {:error, "#{key}: expected an integer, got: #{inspect(value)}"}
+    end
+  end
+
+  defp coerce(value, :boolean, _c, key) do
+    case value do
+      v when v in [true, false] -> {:ok, v}
+      "true" -> {:ok, true}
+      "false" -> {:ok, false}
+      _ -> {:error, "#{key}: expected true or false, got: #{inspect(value)}"}
     end
   end
 

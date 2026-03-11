@@ -89,6 +89,15 @@ defmodule ZtlpNs.YamlConfig do
       other -> {config, ["bootstrap_urls: expected a list, got: #{inspect(other)}" | errors]}
     end
 
+    # Rate limit section
+    {config, errors} = case Map.get(raw, "rate_limit", %{}) do
+      rl when is_map(rl) ->
+        {config, errors} = validate_field(config, errors, rl, "queries_per_second", :rate_limit_queries_per_second, :integer, 100, 1..1_000_000)
+        validate_field(config, errors, rl, "burst", :rate_limit_burst, :integer, 200, 1..10_000_000)
+      nil -> {config, errors}
+      other -> {config, ["rate_limit: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
     case errors do
       [] -> {:ok, config}
       _ -> {:error, Enum.reverse(errors)}

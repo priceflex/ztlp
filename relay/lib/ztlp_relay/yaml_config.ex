@@ -125,6 +125,15 @@ defmodule ZtlpRelay.YamlConfig do
       other -> {config, ["admission: expected a map, got: #{inspect(other)}" | errors]}
     end
 
+    # Backpressure section
+    {config, errors} = case Map.get(raw, "backpressure", %{}) do
+      bp when is_map(bp) ->
+        {config, errors} = validate_field(config, errors, bp, "soft_threshold", :backpressure_soft_threshold, :float, 0.8, {0.0, 1.0})
+        validate_field(config, errors, bp, "hard_threshold", :backpressure_hard_threshold, :float, 0.95, {0.0, 1.0})
+      nil -> {config, errors}
+      other -> {config, ["backpressure: expected a map, got: #{inspect(other)}" | errors]}
+    end
+
     # NS Discovery section
     {config, errors} = case Map.get(raw, "ns_discovery", %{}) do
       ns when is_map(ns) ->

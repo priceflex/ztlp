@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::packet::{self, MsgType, SessionId, MAGIC};
+use crate::security::{log_security_event, SecurityEvent};
 use crate::session::SessionState;
 
 /// Result of a pipeline admission check at any layer.
@@ -279,11 +280,25 @@ impl Pipeline {
     }
 
     /// Run all three layers on a raw packet. Returns the final admission result.
+    ///
+    /// Emits [`SecurityEvent`] warnings for each rejection layer so that
+    /// drops are auditable.
     pub fn process(&self, data: &[u8]) -> AdmissionResult {
+        self.process_from(data, None)
+    }
+
+    /// Same as [`process`](Self::process) but accepts an optional peer address
+    /// for richer audit logging.
+    pub fn process_from(&self, data: &[u8], peer_addr: Option<&str>) -> AdmissionResult {
         // Layer 1: Magic check
         let r1 = self.layer1_magic_check(data);
         if r1 != AdmissionResult::Pass {
             self.counters.layer1_drops.fetch_add(1, Ordering::Relaxed);
+            log_security_event(&SecurityEvent::MalformedPacket {
+                reason: "bad magic (layer 1)".into(),
+                peer_addr: peer_addr.map(|s| s.to_string()),
+                bytes_received: Some(data.len()),
+            });
             return r1;
         }
 
@@ -291,6 +306,13 @@ impl Pipeline {
         let r2 = self.layer2_session_check(data);
         if r2 != AdmissionResult::Pass {
             self.counters.layer2_drops.fetch_add(1, Ordering::Relaxed);
+            // Extract session_id hex for logging (best-effort)
+            let sid_hex = extract_session_id_hex(data);
+            log_security_event(&SecurityEvent::MalformedPacket {
+                reason: format!("unknown session (layer 2), session_id={}", sid_hex),
+                peer_addr: peer_addr.map(|s| s.to_string()),
+                bytes_received: Some(data.len()),
+            });
             return r2;
         }
 
@@ -298,6 +320,12 @@ impl Pipeline {
         let r3 = self.layer3_auth_check(data);
         if r3 != AdmissionResult::Pass {
             self.counters.layer3_drops.fetch_add(1, Ordering::Relaxed);
+            let sid_hex = extract_session_id_hex(data);
+            log_security_event(&SecurityEvent::AuthTagInvalid {
+                peer_addr: peer_addr.map(|s| s.to_string()),
+                session_id: Some(sid_hex),
+                direction: "rx".into(),
+            });
             return r3;
         }
 
@@ -309,6 +337,24 @@ impl Pipeline {
 impl Default for Pipeline {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Best-effort extraction of session ID hex from a raw packet for logging.
+fn extract_session_id_hex(data: &[u8]) -> String {
+    if data.len() < 4 {
+        return "-".into();
+    }
+    let ver_hdrlen = u16::from_be_bytes([data[2], data[3]]);
+    let hdr_len = ver_hdrlen & 0x0FFF;
+    let is_handshake = hdr_len == 24;
+
+    if is_handshake && data.len() >= 23 {
+        hex::encode(&data[11..23])
+    } else if !is_handshake && data.len() >= 18 {
+        hex::encode(&data[6..18])
+    } else {
+        "-".into()
     }
 }
 

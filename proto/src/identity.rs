@@ -5,6 +5,7 @@
 //! For this prototype, identities are stored as simple JSON files.
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -150,6 +151,7 @@ mod hex_bytes {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

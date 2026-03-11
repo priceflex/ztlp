@@ -567,12 +567,22 @@ pub fn assemble_gso_buffer(segments: &[&[u8]], segment_size: u16) -> io::Result<
     }
 
     // Last segment must be <= segment_size
-    if segments.last().unwrap().len() > seg_sz {
+    // SAFETY: `segments` is guaranteed non-empty (checked above)
+    let last_seg = match segments.last() {
+        Some(s) => s,
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "segments must not be empty",
+            ))
+        }
+    };
+    if last_seg.len() > seg_sz {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "last segment is {} bytes, exceeds segment_size {}",
-                segments.last().unwrap().len(),
+                last_seg.len(),
                 seg_sz
             ),
         ));

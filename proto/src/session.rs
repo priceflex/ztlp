@@ -11,6 +11,7 @@
 //! - Anti-replay window
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use crate::identity::NodeId;
 use crate::packet::SessionId;
@@ -152,6 +153,7 @@ impl SessionState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

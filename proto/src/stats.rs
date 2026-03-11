@@ -346,7 +346,10 @@ impl TunnelStats {
         }
 
         let now = Instant::now();
-        let mut last = self.last_report.lock().unwrap();
+        let mut last = match self.last_report.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if now.duration_since(*last) < Duration::from_secs(1) {
             return false;
         }

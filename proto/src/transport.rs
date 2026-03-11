@@ -5,6 +5,7 @@
 //! The send path looks up sessions, encrypts, serializes, and sends.
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;

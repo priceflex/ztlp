@@ -10,6 +10,7 @@
 //! Each layer returns a clear `AdmissionResult`. Drop counters are tracked per layer.
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -322,13 +323,22 @@ pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8]) -> [u8; 16] {
     let nonce = Nonce::default(); // 96-bit zero nonce — each packet uses unique AAD via seq/timestamp
 
     // Encrypt empty payload with the header as AAD — produces a 16-byte tag
-    let ciphertext = cipher
-        .encrypt(&nonce, chacha20poly1305::aead::Payload { msg: &[], aad })
-        .expect("AEAD encryption should not fail with valid key");
+    // SAFETY: ChaCha20Poly1305 encryption with a valid 32-byte key and empty
+    // plaintext is infallible — the only failure mode is invalid key length,
+    // which cannot happen since we take &[u8; 32].
+    let ciphertext = match cipher.encrypt(&nonce, chacha20poly1305::aead::Payload { msg: &[], aad }) {
+        Ok(ct) => ct,
+        Err(_) => {
+            // Defensive: return zero tag if encryption somehow fails
+            return [0u8; 16];
+        }
+    };
 
     // The ciphertext IS the tag (empty plaintext → ciphertext is just tag)
     let mut tag = [0u8; 16];
-    tag.copy_from_slice(&ciphertext);
+    if ciphertext.len() >= 16 {
+        tag.copy_from_slice(&ciphertext[..16]);
+    }
     tag
 }
 

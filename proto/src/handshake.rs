@@ -10,6 +10,7 @@
 //! is assigned. The session is registered in the session table.
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use blake2::{Blake2s256, Digest};
 use snow::{Builder, HandshakeState, TransportState};

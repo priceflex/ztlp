@@ -59,6 +59,7 @@
 //!   connections through the encrypted ZTLP tunnel.
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -418,7 +419,12 @@ fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
     let mut seqs = Vec::with_capacity(count);
     for i in 0..count {
         let offset = 2 + i * 8;
-        let seq = u64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap());
+        // SAFETY: slice is exactly 8 bytes — length verified by `expected_len` check above
+        let byte8: [u8; 8] = match payload[offset..offset + 8].try_into() {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+        let seq = u64::from_be_bytes(byte8);
         seqs.push(seq);
     }
     Some(seqs)
@@ -1158,8 +1164,13 @@ pub async fn run_bridge(
                                 debug!("DATA frame too short for data_seq");
                                 continue;
                             }
-                            let data_seq =
-                                u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
+                            // SAFETY: frame_payload.len() >= 8 verified above
+                            let data_seq = u64::from_be_bytes(
+                                match frame_payload[..8].try_into() {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                },
+                            );
                             let tcp_payload = &frame_payload[8..];
 
                             // Initialize reassembly buffer on first data packet.
@@ -1203,8 +1214,11 @@ pub async fn run_bridge(
                             // ACK frame from the remote sender's receiver side.
                             // Contains the highest contiguous seq delivered to TCP.
                             if frame_payload.len() >= 8 {
-                                let acked_seq =
-                                    u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
+                                // SAFETY: frame_payload.len() >= 8 verified by condition
+                                let acked_seq = match frame_payload[..8].try_into() {
+                                    Ok(b) => u64::from_be_bytes(b),
+                                    Err(_) => continue,
+                                };
                                 debug!("received ACK for data_seq {}", acked_seq);
                                 stats_rx.acks_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1277,8 +1291,15 @@ pub async fn run_bridge(
                             // FIN frame: [0x02] [data_seq: 8B BE]
                             // Remote side signaled TCP EOF.
                             if frame_payload.len() >= 8 {
-                                let _fin_data_seq =
-                                    u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
+                                // SAFETY: frame_payload.len() >= 8 verified by condition
+                                let _fin_data_seq = match frame_payload[..8].try_into() {
+                                    Ok(b) => u64::from_be_bytes(b),
+                                    Err(_) => {
+                                        info!("received FIN frame — remote TCP stream ended (malformed seq)");
+                                        fin_received = true;
+                                        break;
+                                    }
+                                };
                                 info!(
                                     "received FIN frame (data_seq {}) — remote TCP stream ended",
                                     _fin_data_seq
@@ -1612,8 +1633,7 @@ impl ServiceRegistry {
             String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
         };
 
-        self.services.get(&name).map(|addr| {
-            let key = self.services.keys().find(|k| *k == &name).unwrap();
+        self.services.get_key_value(&name).map(|(key, addr)| {
             (key.as_str(), *addr)
         })
     }
@@ -1736,6 +1756,7 @@ pub fn parse_local_forward(s: &str) -> Result<(u16, String), String> {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

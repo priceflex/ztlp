@@ -28,6 +28,7 @@
 //! - HeaderAuthTag: 128 bits (16 bytes)
 
 #![deny(unsafe_code)]
+#![deny(clippy::unwrap_used)]
 
 use crate::error::PacketError;
 

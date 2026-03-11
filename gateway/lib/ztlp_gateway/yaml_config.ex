@@ -68,51 +68,49 @@ defmodule ZtlpGateway.YamlConfig do
     {config, errors} = validate_field(config, errors, raw, "max_sessions", :max_sessions, :integer, 10_000, 1..1_000_000)
 
     # NS section
-    ns = Map.get(raw, "ns", %{})
-    if is_map(ns) do
-      {config, errors} = validate_field(config, errors, ns, "host", :ns_server_host, :ip_address, {127, 0, 0, 1}, nil)
-      {config, errors} = validate_field(config, errors, ns, "port", :ns_server_port, :integer, 23096, 1..65535)
-      {config, errors} = validate_field(config, errors, ns, "query_timeout", :ns_query_timeout_ms, :duration, 2_000, nil)
-    else
-      errors = if ns != nil, do: ["ns: expected a map, got: #{inspect(ns)}" | errors], else: errors
+    {config, errors} = case Map.get(raw, "ns", %{}) do
+      ns when is_map(ns) ->
+        {config, errors} = validate_field(config, errors, ns, "host", :ns_server_host, :ip_address, {127, 0, 0, 1}, nil)
+        {config, errors} = validate_field(config, errors, ns, "port", :ns_server_port, :integer, 23096, 1..65535)
+        validate_field(config, errors, ns, "query_timeout", :ns_query_timeout_ms, :duration, 2_000, nil)
+      nil -> {config, errors}
+      other -> {config, ["ns: expected a map, got: #{inspect(other)}" | errors]}
     end
 
     # Backends section (list of maps)
-    backends = Map.get(raw, "backends", [])
-    if is_list(backends) do
-      validated_backends = Enum.map(backends, fn b ->
-        if is_map(b) do
-          %{
-            name: Map.get(b, "name", "default"),
-            host: Map.get(b, "host", "127.0.0.1"),
-            port: Map.get(b, "port", 8080)
-          }
-        else
-          b
-        end
-      end)
-      config = Map.put(config, :backends, validated_backends)
-    else
-      errors = ["backends: expected a list, got: #{inspect(backends)}" | errors]
+    {config, errors} = case Map.get(raw, "backends", []) do
+      backends when is_list(backends) ->
+        validated_backends = Enum.map(backends, fn b ->
+          case b do
+            b when is_map(b) ->
+              %{
+                name: Map.get(b, "name", "default"),
+                host: Map.get(b, "host", "127.0.0.1"),
+                port: Map.get(b, "port", 8080)
+              }
+            _ -> b
+          end
+        end)
+        {Map.put(config, :backends, validated_backends), errors}
+      other -> {config, ["backends: expected a list, got: #{inspect(other)}" | errors]}
     end
 
     # Policies section (list of maps)
-    policies = Map.get(raw, "policies", [])
-    if is_list(policies) do
-      validated_policies = Enum.map(policies, fn p ->
-        if is_map(p) do
-          %{
-            zone: Map.get(p, "zone", "*"),
-            action: String.to_atom(Map.get(p, "action", "allow")),
-            backends: Map.get(p, "backends", [])
-          }
-        else
-          p
-        end
-      end)
-      config = Map.put(config, :policies, validated_policies)
-    else
-      errors = ["policies: expected a list, got: #{inspect(policies)}" | errors]
+    {config, errors} = case Map.get(raw, "policies", []) do
+      policies when is_list(policies) ->
+        validated_policies = Enum.map(policies, fn p ->
+          case p do
+            p when is_map(p) ->
+              %{
+                zone: Map.get(p, "zone", "*"),
+                action: String.to_atom(Map.get(p, "action", "allow")),
+                backends: Map.get(p, "backends", [])
+              }
+            _ -> p
+          end
+        end)
+        {Map.put(config, :policies, validated_policies), errors}
+      other -> {config, ["policies: expected a list, got: #{inspect(other)}" | errors]}
     end
 
     case errors do

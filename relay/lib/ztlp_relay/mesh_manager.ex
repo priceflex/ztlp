@@ -206,25 +206,23 @@ defmodule ZtlpRelay.MeshManager do
 
   @impl true
   def handle_cast(:broadcast_drain, state) do
-    Logger.info("[mesh] Broadcasting DRAIN to #{map_size(state.relays)} peers")
-    Enum.each(state.relays, fn {_id, relay} ->
-      if relay.socket_addr do
-        {ip, port} = relay.socket_addr
-        :gen_udp.send(state.socket, ip, port,
-          InterRelay.encode(:drain, state.node_id, %{timeout_ms: 300_000}))
-      end
+    peers = RelayRegistry.get_all()
+    Logger.info("[mesh] Broadcasting DRAIN to #{length(peers)} peers")
+    Enum.each(peers, fn relay ->
+      {ip, port} = relay.address
+      :gen_udp.send(state.socket, ip, port,
+        InterRelay.encode(:drain, state.node_id, %{timeout_ms: 300_000}))
     end)
     {:noreply, state}
   end
 
   def handle_cast(:broadcast_drain_cancel, state) do
-    Logger.info("[mesh] Broadcasting DRAIN_CANCEL to #{map_size(state.relays)} peers")
-    Enum.each(state.relays, fn {_id, relay} ->
-      if relay.socket_addr do
-        {ip, port} = relay.socket_addr
-        :gen_udp.send(state.socket, ip, port,
-          InterRelay.encode(:drain_cancel, state.node_id, %{}))
-      end
+    peers = RelayRegistry.get_all()
+    Logger.info("[mesh] Broadcasting DRAIN_CANCEL to #{length(peers)} peers")
+    Enum.each(peers, fn relay ->
+      {ip, port} = relay.address
+      :gen_udp.send(state.socket, ip, port,
+        InterRelay.encode(:drain_cancel, state.node_id, %{}))
     end)
     {:noreply, state}
   end

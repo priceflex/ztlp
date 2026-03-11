@@ -89,7 +89,7 @@ ztlp keygen --format hex --output ~/.ztlp/identity.hex
 
 ### `ztlp connect <target>`
 
-Connect to a ZTLP peer or gateway, perform a Noise_XX handshake, and enter interactive encrypted messaging mode.
+Connect to a ZTLP peer or gateway, perform a Noise_XX handshake, and enter interactive encrypted messaging mode. With `--local-forward`, opens a local TCP listener and tunnels connections through the ZTLP session.
 
 ```
 ztlp connect <TARGET> [OPTIONS]
@@ -103,6 +103,8 @@ Options:
   -g, --gateway <ADDR:PORT> Connect via gateway
   -s, --session-id <HEX>    Use a specific session ID (24 hex chars)
   -b, --bind <ADDR:PORT>    Local bind address [default: 0.0.0.0:0]
+  -L, --local-forward <LOCAL_PORT:REMOTE_HOST:REMOTE_PORT>
+                            Forward a local TCP port through the tunnel
 ```
 
 **Examples:**
@@ -116,6 +118,14 @@ ztlp connect 10.0.0.1:23095 --key ~/.ztlp/identity.json
 
 # Connect through a relay
 ztlp connect peer.example.com:23095 --relay relay.example.com:23095
+
+# Tunnel SSH: local port 2222 → remote 127.0.0.1:22
+ztlp connect server:23095 --key ~/.ztlp/identity.json -L 2222:127.0.0.1:22
+# Then: ssh -p 2222 user@127.0.0.1
+
+# Tunnel RDP: local port 3389 → remote 127.0.0.1:3389
+ztlp connect server:23095 --key ~/.ztlp/identity.json -L 3389:127.0.0.1:3389
+# Then: mstsc /v:127.0.0.1
 ```
 
 After the handshake completes, the CLI shows:
@@ -129,7 +139,7 @@ Then enters interactive mode where you type messages and see received messages. 
 
 ### `ztlp listen`
 
-Listen for incoming ZTLP connections and act as a Noise_XX responder.
+Listen for incoming ZTLP connections and act as a Noise_XX responder. With `--forward`, bridges authenticated sessions to a local TCP service.
 
 ```
 ztlp listen [OPTIONS]
@@ -138,19 +148,31 @@ Options:
   -b, --bind <ADDR:PORT>  Address to bind on [default: 0.0.0.0:23095]
   -k, --key <FILE>        Path to identity key file
   --gateway               Run as mini-gateway (accept multiple connections)
+  -f, --forward <HOST:PORT>  Forward to a local TCP service after handshake
 ```
 
 **Examples:**
 
 ```bash
-# Listen on the default ZTLP port
+# Listen on the default ZTLP port (interactive mode)
 ztlp listen
 
 # Listen on a custom port with a persistent identity
 ztlp listen --bind 0.0.0.0:9999 --key ~/.ztlp/identity.json
+
+# Protect SSH: forward authenticated sessions to local sshd
+ztlp listen --key server.json --forward 127.0.0.1:22
+
+# Protect RDP: forward to local RDP service
+ztlp listen --key server.json --forward 127.0.0.1:3389
+
+# Protect a database
+ztlp listen --key server.json --forward 127.0.0.1:5432
 ```
 
-Waits for an incoming HELLO, completes the 3-message handshake, then enters interactive mode.
+Without `--forward`: waits for an incoming HELLO, completes the 3-message handshake, then enters interactive mode.
+
+With `--forward`: after handshake, connects to the specified TCP address and bridges traffic bidirectionally. All TCP data is encrypted through the ZTLP session. The backend service (SSH, RDP, etc.) is unchanged — it sees a normal TCP connection from localhost.
 
 ---
 

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::UdpSocket;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -44,6 +44,7 @@ use ztlp_proto::packet::{
 };
 use ztlp_proto::relay::SimulatedRelay;
 use ztlp_proto::transport::TransportNode;
+use ztlp_proto::tunnel;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -180,6 +181,11 @@ enum Commands {
         /// Local bind address
         #[arg(short, long, default_value = "0.0.0.0:0")]
         bind: String,
+
+        /// Forward a local TCP port through the ZTLP tunnel
+        /// (LOCAL_PORT:REMOTE_HOST:REMOTE_PORT, e.g. 2222:127.0.0.1:22)
+        #[arg(short = 'L', long)]
+        local_forward: Option<String>,
     },
 
     /// Listen for incoming ZTLP connections
@@ -204,6 +210,11 @@ enum Commands {
         /// Run as a mini-gateway (accept multiple connections)
         #[arg(long)]
         gateway: bool,
+
+        /// Forward to a local TCP service after session established
+        /// (HOST:PORT, e.g. 127.0.0.1:22)
+        #[arg(short, long)]
+        forward: Option<String>,
     },
 
     /// Manage ZTLP relay nodes
@@ -663,6 +674,7 @@ async fn cmd_connect(
     _gateway: &Option<String>,
     session_id_hex: &Option<String>,
     bind: &str,
+    local_forward: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
     let peer_addr: SocketAddr = target.parse()
@@ -759,11 +771,44 @@ async fn cmd_connect(
     eprintln!("  {} {}", c_cyan("Session ID:"), session_id);
     eprintln!("  {} {:.2}ms", c_cyan("Handshake latency:"), handshake_time.as_secs_f64() * 1000.0);
     eprintln!();
-    eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
-    eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
 
-    // Interactive data loop
-    interactive_data_loop(&node, session_id, send_addr).await?;
+    // Branch: tunnel mode or interactive mode
+    if let Some(lf) = local_forward {
+        let (local_port, _remote_target) = tunnel::parse_local_forward(lf)?;
+        let listen_addr = format!("127.0.0.1:{}", local_port);
+
+        eprintln!("--- {} ---", c_bold("ZTLP tunnel active"));
+        eprintln!("  {} {}", c_cyan("Local listener:"), listen_addr);
+        eprintln!("  {} Connect your TCP client to {}", c_cyan("Usage:"), listen_addr);
+        eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+        let tcp_listener = tokio::net::TcpListener::bind(&listen_addr).await
+            .map_err(|e| format!("failed to bind TCP listener on {}: {}", listen_addr, e))?;
+
+        eprintln!("{} {}", c_green("✓ Listening for TCP connections on"), listen_addr);
+
+        loop {
+            let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
+            eprintln!("{} {} → tunnel", c_cyan("TCP connection from"), tcp_addr);
+
+            let udp = node.socket.clone();
+            let pipeline = node.pipeline.clone();
+
+            // Run bridge (blocks until TCP connection closes)
+            if let Err(e) = tunnel::run_bridge(
+                tcp_stream, udp, pipeline, session_id, send_addr
+            ).await {
+                eprintln!("{} {}", c_red("✗ tunnel error:"), e);
+            }
+            eprintln!("{} {}", c_dim("TCP connection closed:"), tcp_addr);
+        }
+    } else {
+        eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
+        eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
+
+        // Interactive data loop
+        interactive_data_loop(&node, session_id, send_addr).await?;
+    }
 
     Ok(())
 }
@@ -773,6 +818,7 @@ async fn cmd_listen(
     bind: &str,
     key: &Option<PathBuf>,
     _gateway_mode: bool,
+    forward: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -845,10 +891,31 @@ async fn cmd_listen(
     eprintln!("  {} {}", c_cyan("Remote NodeID:"), peer_node_id);
     eprintln!("  {} {}", c_cyan("Session ID:"), session_id);
     eprintln!();
-    eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
-    eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
 
-    interactive_data_loop(&node, session_id, from1).await?;
+    // Branch: tunnel mode or interactive mode
+    if let Some(fwd) = forward {
+        let forward_addr = tunnel::parse_forward_target(fwd)?;
+
+        eprintln!("--- {} ---", c_bold("ZTLP tunnel active"));
+        eprintln!("  {} {}", c_cyan("Forwarding to:"), forward_addr);
+        eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+        // Connect to the local TCP service
+        let tcp_stream = TcpStream::connect(forward_addr).await
+            .map_err(|e| format!("failed to connect to {}: {}", forward_addr, e))?;
+        eprintln!("{} {}", c_green("✓ Connected to backend"), forward_addr);
+
+        let udp = node.socket.clone();
+        let pipeline = node.pipeline.clone();
+
+        tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await?;
+        eprintln!("{}", c_dim("tunnel closed"));
+    } else {
+        eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
+        eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
+
+        interactive_data_loop(&node, session_id, from1).await?;
+    }
 
     Ok(())
 }
@@ -1792,12 +1859,12 @@ async fn main() {
             cmd_keygen(output, format)
         }
 
-        Commands::Connect { target, key, relay, gateway, session_id, bind } => {
-            cmd_connect(target, key, relay, gateway, session_id, bind).await
+        Commands::Connect { target, key, relay, gateway, session_id, bind, local_forward } => {
+            cmd_connect(target, key, relay, gateway, session_id, bind, local_forward).await
         }
 
-        Commands::Listen { bind, key, gateway } => {
-            cmd_listen(bind, key, *gateway).await
+        Commands::Listen { bind, key, gateway, forward } => {
+            cmd_listen(bind, key, *gateway, forward).await
         }
 
         Commands::Relay(subcmd) => match subcmd {

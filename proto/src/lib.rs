@@ -42,3 +42,4 @@ pub mod pipeline;
 pub mod relay;
 pub mod session;
 pub mod transport;
+pub mod tunnel;

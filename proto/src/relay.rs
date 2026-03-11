@@ -14,11 +14,16 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::admission::RelayAdmissionToken;
+use crate::nat::{
+    decode_rv_message, encode_rv_peer_info, is_rendezvous_packet,
+    RendezvousEntry, RendezvousMessage,
+};
 use crate::packet::{SessionId, MAGIC};
 use crate::transport::MAX_PACKET_SIZE;
 
@@ -87,6 +92,8 @@ pub struct SimulatedRelay {
     pub local_addr: SocketAddr,
     /// Session routing table: SessionID → peer addresses.
     peers: Arc<Mutex<HashMap<SessionId, PeerState>>>,
+    /// Rendezvous table for NAT traversal coordination.
+    rendezvous: Arc<Mutex<HashMap<[u8; 32], RendezvousEntry>>>,
 }
 
 impl SimulatedRelay {
@@ -100,6 +107,7 @@ impl SimulatedRelay {
             socket: Arc::new(socket),
             local_addr,
             peers: Arc::new(Mutex::new(HashMap::new())),
+            rendezvous: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -148,6 +156,11 @@ impl SimulatedRelay {
     /// Returns `Ok(true)` if the packet was forwarded, `Ok(false)` if it
     /// was only used to learn a peer address (first packet on a new session).
     pub async fn process_one(&self, data: &[u8], from: SocketAddr) -> Result<bool, std::io::Error> {
+        // Check for rendezvous packets first (before ZTLP header parsing)
+        if is_rendezvous_packet(data) {
+            return self.process_rendezvous(data, from).await;
+        }
+
         let session_id = match Self::extract_session_id(data) {
             Some(sid) => sid,
             None => {
@@ -214,6 +227,97 @@ impl SimulatedRelay {
                 Ok(true)
             }
         }
+    }
+
+    /// Process a rendezvous packet for NAT traversal coordination.
+    ///
+    /// When the first peer registers, we store their info. When the second
+    /// peer registers with the same rendezvous ID, we send each peer the
+    /// other's mapped endpoint information.
+    async fn process_rendezvous(&self, data: &[u8], from: SocketAddr) -> Result<bool, std::io::Error> {
+        let msg = match decode_rv_message(data) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("relay: invalid rendezvous packet from {}: {}", from, e);
+                return Ok(false);
+            }
+        };
+
+        match msg {
+            RendezvousMessage::Register {
+                rendezvous_id,
+                mapped_addr,
+            } => {
+                let mut table = self.rendezvous.lock().await;
+
+                // Purge expired entries
+                table.retain(|_, entry| !entry.is_expired());
+
+                if let Some(existing) = table.remove(&rendezvous_id) {
+                    // Second peer arrived — exchange endpoint info
+                    if existing.addr == from {
+                        // Same peer re-registering — put it back
+                        debug!(
+                            "relay: rendezvous {} — same peer {} re-registered",
+                            hex::encode(&rendezvous_id[..8]),
+                            from
+                        );
+                        table.insert(rendezvous_id, existing);
+                        return Ok(false);
+                    }
+
+                    debug!(
+                        "relay: rendezvous {} — pairing {} <-> {}",
+                        hex::encode(&rendezvous_id[..8]),
+                        existing.addr,
+                        from
+                    );
+
+                    // Send first peer the second peer's info
+                    let info_for_first =
+                        encode_rv_peer_info(&rendezvous_id, mapped_addr);
+                    self.socket.send_to(&info_for_first, existing.addr).await?;
+
+                    // Send second peer the first peer's info
+                    let info_for_second =
+                        encode_rv_peer_info(&rendezvous_id, existing.mapped_addr);
+                    self.socket.send_to(&info_for_second, from).await?;
+
+                    info!(
+                        "relay: rendezvous {} complete — exchanged endpoints",
+                        hex::encode(&rendezvous_id[..8])
+                    );
+                    Ok(true)
+                } else {
+                    // First peer — store and wait
+                    debug!(
+                        "relay: rendezvous {} — first peer {} (mapped: {})",
+                        hex::encode(&rendezvous_id[..8]),
+                        from,
+                        mapped_addr
+                    );
+                    table.insert(
+                        rendezvous_id,
+                        RendezvousEntry {
+                            addr: from,
+                            mapped_addr,
+                            registered_at: Instant::now(),
+                        },
+                    );
+                    Ok(false)
+                }
+            }
+            _ => {
+                debug!("relay: ignoring non-register rendezvous message from {}", from);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Get the number of active rendezvous entries (for testing).
+    pub async fn rendezvous_count(&self) -> usize {
+        let table = self.rendezvous.lock().await;
+        table.len()
     }
 
     /// Run the relay loop — receive and forward packets indefinitely.

@@ -37,6 +37,7 @@ pub mod admission;
 pub mod error;
 pub mod handshake;
 pub mod identity;
+pub mod nat;
 pub mod packet;
 pub mod pipeline;
 pub mod policy;

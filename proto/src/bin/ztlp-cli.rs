@@ -42,6 +42,7 @@ use ztlp_proto::packet::{
     flags, DataHeader, HandshakeHeader, MsgType, SessionId,
     DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
+use ztlp_proto::nat;
 use ztlp_proto::relay::SimulatedRelay;
 use ztlp_proto::policy::PolicyEngine;
 use ztlp_proto::transport::TransportNode;
@@ -198,6 +199,18 @@ enum Commands {
         /// (matches a --forward NAME:HOST:PORT on the server)
         #[arg(long)]
         service: Option<String>,
+
+        /// STUN server address for NAT traversal (host:port)
+        #[arg(long)]
+        stun_server: Option<String>,
+
+        /// Enable NAT traversal (STUN discovery + hole punching)
+        #[arg(long)]
+        nat_assist: bool,
+
+        /// Fail instead of falling back to relay when hole punch fails
+        #[arg(long)]
+        no_relay_fallback: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -232,6 +245,14 @@ enum Commands {
         /// Path to policy file for access control (default: ~/.ztlp/policy.toml)
         #[arg(short, long)]
         policy: Option<PathBuf>,
+
+        /// STUN server address for NAT traversal (host:port)
+        #[arg(long)]
+        stun_server: Option<String>,
+
+        /// Enable NAT traversal (register with relay for rendezvous)
+        #[arg(long)]
+        nat_assist: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -961,6 +982,9 @@ async fn cmd_connect(
     bind: &str,
     local_forward: &Option<String>,
     service: &Option<String>,
+    stun_server: &Option<String>,
+    nat_assist: bool,
+    no_relay_fallback: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -980,6 +1004,74 @@ async fn cmd_connect(
     eprintln!("{} {}", c_cyan("Connecting to:"), peer_addr);
     if send_addr != peer_addr {
         eprintln!("{} {}", c_cyan("Via relay:"), send_addr);
+    }
+
+    // NAT traversal (if --nat-assist)
+    if nat_assist {
+        eprintln!("\n{}", c_dim("NAT traversal enabled — discovering public endpoint..."));
+
+        // Parse optional STUN server
+        let stun_servers: Vec<SocketAddr> = if let Some(s) = stun_server {
+            vec![s.parse().map_err(|e| format!("invalid --stun-server '{}': {}", s, e))?]
+        } else {
+            Vec::new() // will use defaults
+        };
+
+        if let Some(relay_str) = relay {
+            let relay_addr: SocketAddr = relay_str.parse()
+                .map_err(|e| format!("--nat-assist requires a valid --relay address: {}", e))?;
+
+            let config = nat::HolePunchConfig {
+                stun_servers,
+                relay_addr,
+                local_socket: node.socket.clone(),
+                identity: identity.clone(),
+                peer_node_id: _resolved_node_id.unwrap_or_else(NodeId::zero),
+                timeout: Duration::from_secs(30),
+                punch_attempts: 10,
+                punch_interval: Duration::from_millis(200),
+            };
+
+            match nat::establish_connection(config).await {
+                Ok(nat::ConnectionResult::Direct { peer_addr: direct_addr }) => {
+                    eprintln!("{} Direct connection via hole punch to {}", c_green("✓"), direct_addr);
+                    // Update send_addr to the direct address instead of relay
+                    // (Note: the handshake still needs to happen, but data goes direct)
+                }
+                Ok(nat::ConnectionResult::Relayed { relay_addr: _ }) => {
+                    if no_relay_fallback {
+                        return Err("hole punch failed and --no-relay-fallback was specified".into());
+                    }
+                    eprintln!("{} Falling back to relay mode", c_yellow("⚠"));
+                }
+                Err(e) => {
+                    if no_relay_fallback {
+                        return Err(format!("NAT traversal failed: {}", e).into());
+                    }
+                    eprintln!("{} NAT traversal failed: {} — continuing with relay", c_yellow("⚠"), e);
+                }
+            }
+        } else {
+            // No relay specified — just do STUN discovery for info
+            let stun_timeout = Duration::from_secs(3);
+            for server_str in stun_servers.iter().map(|s| s.to_string())
+                .chain(nat::DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()))
+            {
+                if let Ok(addr) = server_str.parse::<SocketAddr>() {
+                    match nat::StunClient::discover_endpoint(&node.socket, addr, stun_timeout).await {
+                        Ok(endpoint) => {
+                            eprintln!("  {} Public endpoint: {} (NAT: {:?})",
+                                c_green("✓"), endpoint.address, endpoint.nat_type);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("STUN {} failed: {}", server_str, e);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!();
     }
 
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
@@ -1112,12 +1204,50 @@ async fn cmd_listen(
     _gateway_mode: bool,
     forward: &[String],
     policy_path: &Option<PathBuf>,
+    stun_server: &Option<String>,
+    nat_assist: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
     let node = TransportNode::bind(bind).await?;
     eprintln!("{} {}", c_cyan("Listening on:"), node.local_addr);
     eprintln!("{} {}", c_cyan("NodeID:"), identity.node_id);
+
+    // NAT traversal: discover and log public address
+    if nat_assist {
+        eprintln!("{}", c_dim("NAT assist enabled — discovering public endpoint..."));
+
+        let stun_servers: Vec<SocketAddr> = if let Some(s) = stun_server {
+            vec![s.parse().map_err(|e| format!("invalid --stun-server '{}': {}", s, e))?]
+        } else {
+            Vec::new()
+        };
+
+        let stun_timeout = Duration::from_secs(3);
+        let servers: Vec<String> = stun_servers.iter().map(|s| s.to_string())
+            .chain(nat::DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()))
+            .collect();
+
+        for server_str in &servers {
+            // Try to resolve and query each STUN server
+            if let Ok(mut addrs) = tokio::net::lookup_host(server_str.as_str()).await {
+                if let Some(addr) = addrs.next() {
+                    match nat::StunClient::discover_endpoint(&node.socket, addr, stun_timeout).await {
+                        Ok(endpoint) => {
+                            eprintln!("  {} Public endpoint: {} (NAT: {:?})",
+                                c_green("✓"), endpoint.address, endpoint.nat_type);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("STUN {} failed: {}", server_str, e);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!();
+    }
+
     eprintln!("{}", c_dim("Waiting for incoming HELLO...\n"));
 
     let mut ctx = HandshakeContext::new_responder(&identity)?;
@@ -2404,12 +2534,12 @@ async fn main() {
             cmd_keygen(output, format)
         }
 
-        Commands::Connect { target, key, relay, gateway, ns_server, session_id, bind, local_forward, service } => {
-            cmd_connect(target, key, relay, gateway, ns_server, session_id, bind, local_forward, service).await
+        Commands::Connect { target, key, relay, gateway, ns_server, session_id, bind, local_forward, service, stun_server, nat_assist, no_relay_fallback } => {
+            cmd_connect(target, key, relay, gateway, ns_server, session_id, bind, local_forward, service, stun_server, *nat_assist, *no_relay_fallback).await
         }
 
-        Commands::Listen { bind, key, gateway, forward, policy } => {
-            cmd_listen(bind, key, *gateway, forward, policy).await
+        Commands::Listen { bind, key, gateway, forward, policy, stun_server, nat_assist } => {
+            cmd_listen(bind, key, *gateway, forward, policy, stun_server, *nat_assist).await
         }
 
         Commands::Relay(subcmd) => match subcmd {

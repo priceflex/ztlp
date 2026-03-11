@@ -1,0 +1,47 @@
+# ZTLP Access Control Policy
+# Place at ~/.ztlp/policy.toml or specify with --policy
+#
+# Identity is the client's NodeID (hex) or ZTLP-NS zone name.
+# After Noise_XX handshake, the server knows the client's identity
+# cryptographically — no passwords, no tokens, just keys.
+
+# Default policy for services with no explicit rule.
+# "deny" = zero trust (recommended)
+# "allow" = open access for unlisted services
+default = "deny"
+
+# ── SSH: Only ops team and admins ──────────────────────────────
+[[services]]
+name = "ssh"
+allow = [
+    "steve.ops.techrockstars.ztlp",
+    "*.admins.techrockstars.ztlp"
+]
+
+# ── RDP: Technicians and admins ────────────────────────────────
+[[services]]
+name = "rdp"
+allow = [
+    "*.techs.techrockstars.ztlp",
+    "*.admins.techrockstars.ztlp"
+]
+
+# ── Database: DBAs only ────────────────────────────────────────
+[[services]]
+name = "db"
+allow = [
+    "dba.ops.techrockstars.ztlp"
+]
+
+# ── Web: Any authenticated identity ───────────────────────────
+[[services]]
+name = "web"
+allow = ["*"]
+
+# ── Using raw NodeID hex (when NS isn't configured) ───────────
+# [[services]]
+# name = "ssh"
+# allow = [
+#     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+#     "f0e1d2c3b4a5f0e1d2c3b4a5f0e1d2c3"
+# ]

@@ -176,6 +176,69 @@ With `--forward`: after handshake, connects to the specified TCP address and bri
 
 ---
 
+### Access Control (Policy Engine)
+
+The listener enforces per-service access control via a TOML policy file.
+After the Noise_XX handshake, the server cryptographically knows the client's
+identity (NodeID). The policy engine checks whether that identity is allowed
+to access the requested service.
+
+**Policy file location:** `~/.ztlp/policy.toml` (auto-detected) or `--policy <path>`
+
+```toml
+# Default: deny access to any service without an explicit rule
+default = "deny"
+
+# SSH: only ops team and admins
+[[services]]
+name = "ssh"
+allow = ["steve.ops.techrockstars.ztlp", "*.admins.techrockstars.ztlp"]
+
+# RDP: technicians and admins
+[[services]]
+name = "rdp"
+allow = ["*.techs.techrockstars.ztlp", "*.admins.techrockstars.ztlp"]
+
+# Database: DBAs only
+[[services]]
+name = "db"
+allow = ["dba.ops.techrockstars.ztlp"]
+
+# Web: any authenticated identity
+[[services]]
+name = "web"
+allow = ["*"]
+```
+
+**Pattern matching:**
+- Exact: `"steve.ops.techrockstars.ztlp"`
+- Wildcard suffix: `"*.admins.techrockstars.ztlp"` matches any identity ending in `.admins.techrockstars.ztlp`
+- Universal: `"*"` matches all authenticated identities
+- Raw NodeID hex: `"a1b2c3d4..."` (when NS isn't configured)
+
+**Behavior:**
+- No policy file → allow all (backward compatible)
+- Policy file present → enforce rules, default deny for unlisted services
+- Denied connections are terminated immediately after handshake, before any TCP bridge
+
+**Example — multi-service with policy:**
+
+```bash
+# Server: protect SSH and RDP with per-service access control
+ztlp listen --key server.json \
+    --forward ssh:127.0.0.1:22 \
+    --forward rdp:127.0.0.1:3389 \
+    --policy ~/.ztlp/policy.toml
+
+# Client (ops team): can access SSH ✓
+ztlp connect server:23095 --key ops-admin.json --service ssh -L 2222:127.0.0.1:22
+
+# Client (technician): can access RDP ✓, SSH ✗
+ztlp connect server:23095 --key tech.json --service rdp -L 3389:127.0.0.1:3389
+```
+
+---
+
 ### `ztlp relay`
 
 Manage ZTLP relay nodes.

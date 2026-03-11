@@ -52,5 +52,6 @@ pub mod pipeline;
 pub mod policy;
 pub mod relay;
 pub mod session;
+pub mod stats;
 pub mod transport;
 pub mod tunnel;

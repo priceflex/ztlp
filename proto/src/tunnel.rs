@@ -63,6 +63,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -73,6 +74,7 @@ use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
+use crate::stats::{TunnelStats, TxBatchStats, RxBatchStats};
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -667,6 +669,12 @@ pub async fn run_bridge(
     let congestion_sender = congestion.clone();
     let congestion_receiver = congestion;
 
+    // Debug statistics for performance analysis.
+    // Enabled when ZTLP_DEBUG=1 or RUST_LOG=ztlp_proto::stats=debug.
+    let tunnel_stats = Arc::new(TunnelStats::new());
+    let stats_tx = tunnel_stats.clone();
+    let stats_rx = tunnel_stats.clone();
+
     // Retransmit buffer: sender stores sent packets for retransmission on NACK.
     let retransmit_buf: Arc<Mutex<RetransmitBuffer>> =
         Arc::new(Mutex::new(RetransmitBuffer::new(RETRANSMIT_BUF_MAX)));
@@ -700,6 +708,16 @@ pub async fn run_bridge(
             udp_send.clone(),
             crate::gso::GsoMode::Auto,
         );
+
+        // Record the send strategy for debug stats.
+        if stats_tx.enabled {
+            let strategy = format!("{:?}", batch_sender.strategy());
+            if let Ok(mut s) = stats_tx.send_strategy.lock() {
+                *s = strategy;
+            }
+        }
+
+        let mut tx_batch_num: u64 = 0;
 
         // Separate data_seq counter for DATA/FIN frames.
         // This is independent of the pipeline's send_seq (which provides
@@ -768,6 +786,7 @@ pub async fn run_bridge(
                 }
             }
 
+            let tcp_read_start = Instant::now();
             let n = match tcp_reader.read(&mut buf).await {
                 Ok(0) => {
                     // TCP EOF — send FIN frame to signal stream end to remote.
@@ -808,6 +827,7 @@ pub async fn run_bridge(
                 }
             };
 
+            let tcp_read_time = tcp_read_start.elapsed();
             let data = &buf[..n];
             debug!("TCP → ZTLP: {} bytes", n);
 
@@ -817,6 +837,8 @@ pub async fn run_bridge(
             let num_chunks = chunks.len();
 
             // ── Flow control: wait for send window before the batch ──
+            let window_wait_start = Instant::now();
+            let mut had_window_stall = false;
             loop {
                 let acked = {
                     let guard = last_acked_seq_reader.lock().await;
@@ -837,6 +859,8 @@ pub async fn run_bridge(
                 if window_ok {
                     break;
                 }
+
+                had_window_stall = true;
 
                 // Window exhausted — check for timeout
                 if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
@@ -893,6 +917,8 @@ pub async fn run_bridge(
             };
 
             // Build, encrypt, and buffer all chunks (lock once for retransmit buffer)
+            let window_wait_time = window_wait_start.elapsed();
+            let encrypt_start = Instant::now();
             let now = Instant::now();
             let mut outgoing: Vec<(Vec<u8>, u64, u64)> = Vec::with_capacity(num_chunks);
             {
@@ -929,8 +955,11 @@ pub async fn run_bridge(
                     outgoing.push((packet, current_data_seq, packet_seq));
                 }
             }
+            let encrypt_time = encrypt_start.elapsed();
+
             // Lock released — now send all packets without holding any locks.
             // Use the pre-created BatchSender for efficient GSO/sendmmsg sends.
+            let send_start = Instant::now();
             {
                 let batch_packets: Vec<Vec<u8>> =
                     outgoing.iter().map(|(pkt, _, _)| pkt.clone()).collect();
@@ -944,6 +973,33 @@ pub async fn run_bridge(
                     );
                 }
             }
+            let send_time = send_start.elapsed();
+            let udp_bytes: usize = outgoing.iter().map(|(p, _, _)| p.len()).sum();
+
+            // Emit per-batch debug stats
+            tx_batch_num += 1;
+            let (cwnd_snap, ew_snap) = {
+                let cc = congestion_sender.lock().await;
+                (cc.cwnd, cc.effective_window())
+            };
+            let tx_stats = TxBatchStats {
+                batch_num: tx_batch_num,
+                packet_count: num_chunks,
+                tcp_bytes: n,
+                udp_bytes,
+                tcp_read_time: tcp_read_time,
+                encrypt_time,
+                send_time,
+                window_wait_time,
+                send_strategy: stats_tx.send_strategy.lock()
+                    .map(|s| s.clone()).unwrap_or_default(),
+                data_seq,
+                cwnd: cwnd_snap,
+                effective_window: ew_snap,
+                window_stall: had_window_stall,
+            };
+            tx_stats.log();
+            stats_tx.record_tx(&tx_stats);
 
             // Reset the ACK timeout tracker
             last_ack_check = Instant::now();
@@ -991,39 +1047,68 @@ pub async fn run_bridge(
         let mut fin_tx = Some(fin_tx);
         let mut fin_received = false;
 
+        // Debug stats for receiver
+        let mut rx_batch_num: u64 = 0;
+
+        // Record GRO availability
+        stats_rx.gro_available.store(
+            gro_receiver.is_gro_enabled(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         loop {
             // Use a timeout on UDP recv so we can periodically send ACKs
             // and check for stalls even when no packets are arriving.
             // With GRO, a single recv may return multiple coalesced datagrams.
+            let recv_start = Instant::now();
             let recv_result =
                 tokio::time::timeout(ACK_INTERVAL, gro_receiver.recv()).await;
 
             match recv_result {
                 Ok(Ok(batch)) => {
+                  let recv_time = recv_start.elapsed();
                   // Process each segment in the GRO batch. When GRO coalesces
                   // packets, we get multiple segments from one recv call.
+                  let num_segments = batch.segments().len();
+                  let total_udp_bytes: usize = batch.segments().iter().map(|s| s.len).sum();
+                  let mut batch_packets_ok: usize = 0;
+                  let mut batch_packets_drop: usize = 0;
+                  let mut batch_tcp_bytes: usize = 0;
+                  let mut batch_delivered: usize = 0;
+                  let mut batch_buffered: usize = 0;
+                  let mut batch_pipeline_time = Duration::ZERO;
+                  let mut batch_decrypt_time = Duration::ZERO;
+                  let mut batch_reassembly_time = Duration::ZERO;
+                  let mut batch_tcp_write_time = Duration::ZERO;
+
                   for segment in batch.segments() {
                     let data = &batch.buffer()[segment.offset..segment.offset + segment.len];
                     let n = segment.len;
 
                     // Run through pipeline admission (magic, session, header auth)
+                    let pipeline_start = Instant::now();
                     {
                         let pl = pipeline_recv.lock().await;
                         let result = pl.process(data);
                         if !matches!(result, AdmissionResult::Pass) {
+                            batch_pipeline_time += pipeline_start.elapsed();
+                            batch_packets_drop += 1;
                             debug!("packet dropped by pipeline");
                             continue;
                         }
                     }
+                    batch_pipeline_time += pipeline_start.elapsed();
 
                     // Parse data header
                     if n < DATA_HEADER_SIZE {
+                        batch_packets_drop += 1;
                         debug!("packet too short for data header");
                         continue;
                     }
                     let header = match DataHeader::deserialize(data) {
                         Ok(h) => h,
                         Err(_) => {
+                            batch_packets_drop += 1;
                             debug!("failed to parse data header");
                             continue;
                         }
@@ -1031,23 +1116,31 @@ pub async fn run_bridge(
 
                     // Verify session ID matches
                     if header.session_id != sid_recv {
+                        batch_packets_drop += 1;
                         debug!("wrong session ID, ignoring");
                         continue;
                     }
 
                     // Decrypt the payload
+                    let decrypt_start = Instant::now();
                     let encrypted_payload = &data[DATA_HEADER_SIZE..];
                     let mut nonce_bytes = [0u8; 12];
                     nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
                     let nonce = Nonce::from_slice(&nonce_bytes);
 
                     let plaintext = match recv_cipher.decrypt(nonce, encrypted_payload) {
-                        Ok(pt) => pt,
+                        Ok(pt) => {
+                            batch_decrypt_time += decrypt_start.elapsed();
+                            pt
+                        }
                         Err(e) => {
+                            batch_decrypt_time += decrypt_start.elapsed();
+                            batch_packets_drop += 1;
                             warn!("decryption failed (seq {}): {}", header.packet_seq, e);
                             continue;
                         }
                     };
+                    batch_packets_ok += 1;
 
                     // Parse the frame type (first byte of plaintext)
                     if plaintext.is_empty() {
@@ -1070,6 +1163,7 @@ pub async fn run_bridge(
                             let tcp_payload = &frame_payload[8..];
 
                             // Initialize reassembly buffer on first data packet.
+                            let reassembly_start = Instant::now();
                             let reasm = reassembly.get_or_insert_with(|| {
                                 debug!("reassembly: initialized with first data_seq {}", data_seq);
                                 ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
@@ -1078,8 +1172,11 @@ pub async fn run_bridge(
                             // Insert into reassembly buffer keyed by data_seq
                             if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec())
                             {
+                                batch_reassembly_time += reassembly_start.elapsed();
                                 // Write all deliverable packets to TCP in order
+                                let tcp_write_start = Instant::now();
                                 for (_seq, payload) in &deliverable {
+                                    batch_tcp_bytes += payload.len();
                                     if let Err(e) = tcp_writer.write_all(payload).await {
                                         warn!("TCP write error: {}", e);
                                         return Err::<(), Box<dyn std::error::Error>>(e.into());
@@ -1092,8 +1189,13 @@ pub async fn run_bridge(
                                         warn!("TCP flush error: {}", e);
                                         return Err(e.into());
                                     }
+                                    batch_tcp_write_time += tcp_write_start.elapsed();
+                                    batch_delivered += deliverable.len();
                                     packets_since_ack += deliverable.len() as u64;
                                 }
+                            } else {
+                                batch_reassembly_time += reassembly_start.elapsed();
+                                batch_buffered += 1;
                             }
                         }
 
@@ -1104,6 +1206,7 @@ pub async fn run_bridge(
                                 let acked_seq =
                                     u64::from_be_bytes(frame_payload[..8].try_into().unwrap());
                                 debug!("received ACK for data_seq {}", acked_seq);
+                                stats_rx.acks_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                                 // Compute newly acked count for congestion control
                                 let prev_acked = {
@@ -1156,6 +1259,7 @@ pub async fn run_bridge(
                             // NACK frame from the remote receiver: they're missing packets.
                             // Decode and forward to the sender for retransmission.
                             if let Some(missing_seqs) = decode_nack_payload(frame_payload) {
+                                stats_rx.nacks_received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 debug!(
                                     "received NACK for {} missing seqs: {:?}",
                                     missing_seqs.len(),
@@ -1212,6 +1316,37 @@ pub async fn run_bridge(
                     }
 
                   } // end for segment in batch.segments()
+
+                    // Emit per-batch debug stats
+                    rx_batch_num += 1;
+                    let reasm_depth = reassembly.as_ref().map(|r| r.buffered_count()).unwrap_or(0);
+                    let rx_stats = RxBatchStats {
+                        batch_num: rx_batch_num,
+                        gro_segments: num_segments,
+                        packets_processed: batch_packets_ok,
+                        packets_dropped: batch_packets_drop,
+                        udp_bytes: total_udp_bytes,
+                        tcp_bytes: batch_tcp_bytes,
+                        recv_time,
+                        pipeline_time: batch_pipeline_time,
+                        decrypt_time: batch_decrypt_time,
+                        reassembly_time: batch_reassembly_time,
+                        tcp_write_time: batch_tcp_write_time,
+                        delivered_count: batch_delivered,
+                        buffered_count: batch_buffered,
+                        reasm_buffer_depth: reasm_depth,
+                    };
+                    rx_stats.log();
+                    stats_rx.record_rx(&rx_stats);
+
+                    // Periodic summary (every 1 second)
+                    {
+                        let (cwnd, ssthresh, srtt, rto) = {
+                            let cc = congestion_receiver.lock().await;
+                            (cc.cwnd, cc.ssthresh, cc.srtt_ms, cc.rto_ms)
+                        };
+                        stats_rx.maybe_report(cwnd, ssthresh, srtt, rto);
+                    }
 
                     // ── Periodic ACK sending (once per recv call, after all segments) ──
                     // Send an ACK when we've delivered enough packets or enough

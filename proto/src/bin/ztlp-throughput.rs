@@ -52,6 +52,11 @@ struct Args {
     /// Enable GRO on the receive side (overrides per-mode defaults)
     #[arg(long)]
     gro: bool,
+
+    /// Enable debug mode — shows per-batch timing stats and periodic summaries
+    /// from the tunnel internals (sets ZTLP_DEBUG=1)
+    #[arg(long)]
+    debug: bool,
 }
 
 // ─── Results ────────────────────────────────────────────────────────────────
@@ -375,6 +380,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
+
+    // Enable debug mode — sets ZTLP_DEBUG so the tunnel emits per-batch stats
+    if args.debug {
+        std::env::set_var("ZTLP_DEBUG", "1");
+        // Reconfigure tracing if the user hasn't already set RUST_LOG
+        if std::env::var("RUST_LOG").is_err() {
+            eprintln!("[debug] Debug mode enabled — tunnel will emit per-batch timing stats");
+        }
+    }
 
     // Detect GSO and GRO capabilities
     let probe_socket = UdpSocket::bind("127.0.0.1:0").await?;

@@ -95,6 +95,19 @@ RUST_OUT=$(cargo run --release --bin ztlp-bench 2>&1) || true
 echo "$RUST_OUT"
 echo ""
 
+# ── Throughput Benchmarks (GSO/GRO) ─────────────────────────────
+
+echo ""
+echo "============================================================"
+echo "  Running Throughput Benchmarks (GSO/GRO)"
+echo "============================================================"
+echo ""
+
+cd "$ZTLP_ROOT/proto"
+THROUGHPUT_OUT=$(cargo run --release --bin ztlp-throughput -- --mode all --size 104857600 --repeat 3 2>&1) || true
+echo "$THROUGHPUT_OUT"
+echo ""
+
 # ── Generate RESULTS.md ─────────────────────────────────────────
 
 cat > "$RESULTS_FILE" <<RESULTS_EOF
@@ -142,6 +155,14 @@ $RELAY_OUT
 
 \`\`\`
 $RUST_OUT
+\`\`\`
+
+---
+
+## Throughput Benchmarks (GSO/GRO)
+
+\`\`\`
+$THROUGHPUT_OUT
 \`\`\`
 
 ---

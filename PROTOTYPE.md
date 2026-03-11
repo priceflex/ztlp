@@ -689,6 +689,105 @@ the test file.
 
 ---
 
+## Phase 9: Transport Optimization (GSO + GRO)
+
+### Motivation
+
+At high packet rates, the per-packet system call overhead becomes the dominant
+bottleneck. Each UDP `sendto()` and `recvfrom()` requires a user-to-kernel
+context switch. For a 100 MB transfer split into ~6,000 ZTLP packets, that's
+12,000 syscalls just for I/O — not counting encryption, framing, and reliability
+processing.
+
+Modern Linux kernels offer two UDP-specific optimizations that dramatically
+reduce this overhead:
+
+- **UDP GSO (Generic Segmentation Offload):** Introduced in Linux 4.18. The
+  application hands the kernel a single large buffer containing N logical
+  datagrams and a segment size. The kernel (or NIC) splits them with one
+  `sendmsg()` call instead of N. Cloudflare's QUIC implementation uses this
+  for 3–5× send throughput improvement.
+
+- **UDP GRO (Generic Receive Offload):** Introduced in Linux 5.0. The kernel
+  coalesces incoming UDP datagrams of the same size into a single buffer.
+  One `recvmsg()` returns all coalesced datagrams with a cmsg indicating the
+  segment size. Tailscale reports ~50% CPU reduction with GRO enabled.
+
+Both features are used in production by WireGuard, Tailscale, and Cloudflare.
+
+### Implementation
+
+The transport optimization layer is implemented in three tiers:
+
+**Send path (`gso.rs` + `batch.rs`):**
+
+1. **GSO** — single `sendmsg()` with `UDP_SEGMENT` cmsg. Requires all packets
+   to be the same size (except the last). Batches up to `MAX_GSO_SEGMENTS` (64)
+   packets per call. Multiple batches for larger sends.
+
+2. **sendmmsg** — single syscall with multiple independent messages. No
+   size uniformity requirement. Available on Linux ≥ 3.0.
+
+3. **Individual `send_to()`** — universal fallback. Always works.
+
+The `UdpSender` wraps a `UdpSocket` and automatically selects the best
+strategy. `BatchSender` provides the tunnel integration layer, collecting
+encrypted packets from the TCP→ZTLP sender loop and flushing them as
+efficient batches.
+
+**Receive path (`gso.rs` + `gro_batch.rs`):**
+
+1. **GRO receive** — `recvmsg()` with a 1 MB buffer. Parses the `UDP_GRO`
+   cmsg to determine segment size and splits the buffer into individual
+   ZTLP packets via `split_gro_segments()`.
+
+2. **Plain `recv_from()`** — single packet per call. Always works.
+
+The `GroReceiver` wraps a `UdpSocket` and transparently uses GRO when
+available. `BatchReceiver` provides the tunnel integration layer.
+
+**Runtime detection:** At startup, `detect_gso()` probes the socket by
+attempting `setsockopt(SOL_UDP, UDP_SEGMENT, ...)`. If the kernel accepts
+it, GSO is available. `detect_gro()` does the same with `UDP_GRO` and
+leaves it enabled on the socket. Both probes are safe and require no
+elevated privileges.
+
+### Key Files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `proto/src/gso.rs` | 1643 | Core GSO/GRO detection, send, receive |
+| `proto/src/batch.rs` | 332 | BatchSender for tunnel integration |
+| `proto/src/gro_batch.rs` | 189 | BatchReceiver for tunnel integration |
+| `proto/src/bin/ztlp-throughput.rs` | 556 | Throughput benchmark binary |
+| `proto/tests/throughput_tests.rs` | ~680 | Integration tests (15 tests) |
+| `bench/run_throughput.sh` | ~400 | Benchmark runner script |
+
+### Running the Benchmarks
+
+```bash
+# Full benchmark suite (100 MB, 5 iterations, all modes)
+bash bench/run_throughput.sh
+
+# Quick sanity test
+bash bench/run_throughput.sh --quick
+
+# Just raw TCP baseline
+bash bench/run_throughput.sh --mode raw
+
+# Custom: 1 GB transfer, 10 iterations
+bash bench/run_throughput.sh --size 1073741824 --repeat 10
+```
+
+Results are written to `bench/THROUGHPUT.md` with system info, per-mode
+throughput, overhead vs raw TCP, and analysis.
+
+See `proto/TRANSPORT.md` for the full transport optimization documentation
+including architecture diagrams, API reference, kernel requirements, and
+troubleshooting.
+
+---
+
 ## Roadmap
 
 | Phase | Component | Language | Status |
@@ -698,6 +797,7 @@ the test file.
 | **3** | eBPF/XDP packet filter | C | ✅ **Complete** |
 | **4** | ZTLP-NS trust namespace | Elixir/OTP | ✅ **Complete** (105 tests) |
 | **5** | Gateway (ZTLP ↔ legacy) | Elixir/OTP | ✅ **Complete** (97 tests) |
+| **9** | Transport optimization (GSO+GRO) | Rust | ✅ **Complete** (15 integration tests) |
 
 ---
 

@@ -9,7 +9,8 @@ defmodule ZtlpNs.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       # Use ns/lib as the source directory
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      releases: releases()
     ]
   end
 
@@ -30,4 +31,14 @@ defmodule ZtlpNs.MixProject do
   end
 
   defp elixirc_paths(_), do: ["lib"]
+
+  defp releases do
+    [
+      ztlp_ns: [
+        include_executables_for: [:unix],
+        strip_beams: true,
+        cookie: System.get_env("RELEASE_COOKIE", "ztlp_ns_default_cookie")
+      ]
+    ]
+  end
 end

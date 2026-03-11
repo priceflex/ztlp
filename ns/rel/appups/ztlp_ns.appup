@@ -1,0 +1,23 @@
+%% Appup file for ztlp_ns — hot code upgrade instructions.
+%%
+%% This is a template for upgrading from 0.1.0 to 0.1.1.
+%% Duplicate and adjust the version strings for each new release.
+%%
+%% See: https://www.erlang.org/doc/design_principles/appup_cookbook
+{"0.1.1",
+  %% --- Upgrade from 0.1.0 ---
+  [{"0.1.0", [
+    {load_module, 'Elixir.ZtlpNs.Config'},
+    {update, 'Elixir.ZtlpNs.Server', {advanced, []}, []},
+    {update, 'Elixir.ZtlpNs.Store', {advanced, []}, []},
+    {update, 'Elixir.ZtlpNs.Cluster', {advanced, []}, []}
+    %% Add module upgrades as needed
+  ]}],
+  %% --- Downgrade to 0.1.0 ---
+  [{"0.1.0", [
+    {load_module, 'Elixir.ZtlpNs.Config'},
+    {update, 'Elixir.ZtlpNs.Server', {advanced, []}, []},
+    {update, 'Elixir.ZtlpNs.Store', {advanced, []}, []},
+    {update, 'Elixir.ZtlpNs.Cluster', {advanced, []}, []}
+  ]}]
+}.

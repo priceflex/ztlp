@@ -9,7 +9,8 @@ defmodule ZtlpGateway.MixProject do
       version: "0.1.0",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      releases: releases()
     ]
   end
 
@@ -27,6 +28,16 @@ defmodule ZtlpGateway.MixProject do
   defp deps do
     [
       {:ztlp_ns, path: "../ns", only: :test, runtime: false}
+    ]
+  end
+
+  defp releases do
+    [
+      ztlp_gateway: [
+        include_executables_for: [:unix],
+        strip_beams: true,
+        cookie: System.get_env("RELEASE_COOKIE", "ztlp_gateway_default_cookie")
+      ]
     ]
   end
 end

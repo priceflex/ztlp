@@ -14,8 +14,30 @@ use std::path::Path;
 use crate::error::IdentityError;
 
 /// 128-bit Node ID — the permanent identity of a ZTLP node.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Serializes to/from hex strings in JSON (e.g., "76f200a5...").
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub [u8; 16]);
+
+impl serde::Serialize for NodeId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NodeId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 16 {
+            return Err(serde::de::Error::custom(
+                format!("expected 16 bytes for NodeId, got {}", bytes.len())
+            ));
+        }
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&bytes);
+        Ok(NodeId(arr))
+    }
+}
 
 impl NodeId {
     /// Generate a new random NodeID.

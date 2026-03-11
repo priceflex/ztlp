@@ -36,14 +36,18 @@
 //!
 //! ### Frame format
 //!
-//! Each ZTLP data packet's plaintext is prefixed with a 1-byte frame type:
+//! Each ZTLP data packet's plaintext is prefixed with a 1-byte frame type.
+//! DATA and FIN frames carry an embedded `data_seq` (8-byte BE) that is
+//! independent of the ZTLP packet header's `packet_seq`. The `packet_seq`
+//! provides nonce uniqueness; `data_seq` provides reassembly ordering.
+//! ACK/NACK frames reference `data_seq` values, NOT `packet_seq`.
 //!
 //! | Type | Byte | Payload |
 //! |------|------|---------|
-//! | DATA | 0x00 | Raw TCP bytes |
-//! | ACK  | 0x01 | 8-byte big-endian u64: highest delivered seq |
-//! | FIN  | 0x02 | (empty) |
-//! | NACK | 0x03 | 2-byte BE count + N × 8-byte BE missing seqs |
+//! | DATA | 0x00 | 8-byte BE data_seq + raw TCP bytes |
+//! | ACK  | 0x01 | 8-byte BE data_seq: highest delivered data_seq |
+//! | FIN  | 0x02 | 8-byte BE data_seq |
+//! | NACK | 0x03 | 2-byte BE count + N × 8-byte BE missing data_seqs |
 //!
 //! Two modes of operation:
 //!
@@ -92,8 +96,8 @@ const TCP_READ_BUF: usize = 65536;
 /// ZTLP data header is 42 bytes, Poly1305 tag is 16 bytes, so
 /// max plaintext per packet ≈ 65535 - 42 - 16 = 65477.
 /// We use a conservative 16KB to avoid IP fragmentation on most MTUs.
-/// Subtract 1 byte for the frame type prefix.
-const MAX_PLAINTEXT_PER_PACKET: usize = 16384 - 1;
+/// Subtract 9 bytes for the frame type prefix (1) + data_seq (8).
+const MAX_PLAINTEXT_PER_PACKET: usize = 16384 - 9;
 
 // ─── Frame types ────────────────────────────────────────────────────────────
 
@@ -403,10 +407,12 @@ fn decode_nack_payload(payload: &[u8]) -> Option<Vec<u64>> {
 
 // ─── Retransmit buffer ──────────────────────────────────────────────────────
 
-/// An entry in the retransmit buffer: the framed plaintext and send timestamp.
+/// An entry in the retransmit buffer: the framed plaintext, packet_seq, and send timestamp.
 struct RetransmitEntry {
-    /// The framed plaintext (FRAME_DATA byte + data) ready for re-encryption.
+    /// The framed plaintext (FRAME_DATA byte + data_seq + payload) ready for re-encryption.
     framed_plaintext: Vec<u8>,
+    /// The original packet_seq used as nonce for encryption (needed for retransmit).
+    packet_seq: u64,
     /// When this packet was originally sent (for RTT measurement).
     send_time: Instant,
 }
@@ -430,26 +436,31 @@ impl RetransmitBuffer {
     }
 
     /// Store a sent packet for potential retransmission.
-    /// If the buffer is full, the insert is silently dropped (oldest entries
-    /// should have been pruned by ACK advancement).
-    fn insert(&mut self, seq: u64, framed_plaintext: Vec<u8>, send_time: Instant) {
+    /// `data_seq` is the data-layer sequence number (used as key for NACK lookup).
+    /// `packet_seq` is the pipeline sequence number (used as encryption nonce).
+    /// If the buffer is full, the insert is silently dropped.
+    fn insert(&mut self, data_seq: u64, packet_seq: u64, framed_plaintext: Vec<u8>, send_time: Instant) {
         if self.entries.len() >= self.max_entries {
-            // Buffer full — shouldn't happen if ACKs are pruning properly,
-            // but don't OOM. Skip this entry.
-            debug!("retransmit buffer full ({} entries), skipping seq {}", self.entries.len(), seq);
+            debug!("retransmit buffer full ({} entries), skipping data_seq {}", self.entries.len(), data_seq);
             return;
         }
-        self.entries.insert(seq, RetransmitEntry { framed_plaintext, send_time });
+        self.entries.insert(data_seq, RetransmitEntry { framed_plaintext, packet_seq, send_time });
     }
 
-    /// Get the framed plaintext for a sequence number (for retransmission).
-    fn get(&self, seq: u64) -> Option<&[u8]> {
-        self.entries.get(&seq).map(|e| e.framed_plaintext.as_slice())
+    /// Get the framed plaintext for a data_seq (for retransmission).
+    fn get(&self, data_seq: u64) -> Option<&[u8]> {
+        self.entries.get(&data_seq).map(|e| e.framed_plaintext.as_slice())
     }
 
-    /// Get the send timestamp for a sequence number (for RTT measurement).
-    fn send_time(&self, seq: u64) -> Option<Instant> {
-        self.entries.get(&seq).map(|e| e.send_time)
+    /// Get the framed plaintext and original packet_seq for a data_seq.
+    /// Returns (plaintext_copy, packet_seq) for retransmission.
+    fn get_with_packet_seq(&self, data_seq: u64) -> Option<(Vec<u8>, u64)> {
+        self.entries.get(&data_seq).map(|e| (e.framed_plaintext.clone(), e.packet_seq))
+    }
+
+    /// Get the send timestamp for a data_seq (for RTT measurement).
+    fn send_time(&self, data_seq: u64) -> Option<Instant> {
+        self.entries.get(&data_seq).map(|e| e.send_time)
     }
 
     /// Prune all entries with seq <= acked_seq (they've been ACKed).
@@ -640,6 +651,12 @@ pub async fn run_bridge(
         let cipher = ChaCha20Poly1305::new((&send_key).into());
         let mut last_ack_check = Instant::now();
 
+        // Separate data_seq counter for DATA/FIN frames.
+        // This is independent of the pipeline's send_seq (which provides
+        // nonce uniqueness). The reassembly buffer on the receiver side
+        // uses data_seq for ordering, not the packet header's packet_seq.
+        let mut data_seq: u64 = 0;
+
         loop {
             // ── Check for retransmit requests before reading new TCP data ──
             // Process any pending NACK-triggered retransmissions.
@@ -650,70 +667,71 @@ pub async fn run_bridge(
                     cc.on_loss();
                 }
 
-                for nack_seq in &nack_seqs {
-                    let framed_plaintext = {
+                for nack_data_seq in &nack_seqs {
+                    let entry_info = {
                         let rb = retransmit_buf_sender.lock().await;
-                        rb.get(*nack_seq).map(|s| s.to_vec())
+                        rb.get_with_packet_seq(*nack_data_seq)
                     };
-                    if let Some(plaintext) = framed_plaintext {
-                        // Re-encrypt with the ORIGINAL seq's nonce.
+                    if let Some((plaintext, orig_packet_seq)) = entry_info {
+                        // Re-encrypt with the ORIGINAL packet_seq as nonce.
                         // ChaCha20-Poly1305 is deterministic: same key+nonce+plaintext
                         // produces identical ciphertext.
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&nack_seq.to_be_bytes());
+                        nonce_bytes[4..12].copy_from_slice(&orig_packet_seq.to_be_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
                         let encrypted = match cipher.encrypt(nonce, plaintext.as_slice()) {
                             Ok(enc) => enc,
                             Err(e) => {
-                                warn!("retransmit encryption error for seq {}: {}", nack_seq, e);
+                                warn!("retransmit encryption error for data_seq {}: {}", nack_data_seq, e);
                                 continue;
                             }
                         };
 
-                        let mut header = DataHeader::new(sid_send, *nack_seq);
+                        let mut header = DataHeader::new(sid_send, orig_packet_seq);
                         let aad = header.aad_bytes();
                         header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
                         if let Err(e) = udp_send.send_to(&packet, peer_addr).await {
-                            warn!("retransmit send error for seq {}: {}", nack_seq, e);
+                            warn!("retransmit send error for data_seq {}: {}", nack_data_seq, e);
                         } else {
-                            debug!("retransmitted seq {} ({} bytes)", nack_seq, packet.len());
+                            debug!("retransmitted data_seq {} (packet_seq {}, {} bytes)", nack_data_seq, orig_packet_seq, packet.len());
                         }
-
-                        // Note: we intentionally do NOT update the send_time in the
-                        // retransmit buffer (Karn's algorithm: don't use retransmitted
-                        // packets for RTT measurement).
                     } else {
-                        debug!("retransmit requested for seq {} but not in buffer", nack_seq);
+                        debug!("retransmit requested for data_seq {} but not in buffer", nack_data_seq);
                     }
                 }
             }
 
             let n = match tcp_reader.read(&mut buf).await {
                 Ok(0) => {
-                    // TCP EOF — send FIN frame to signal stream end to remote
+                    // TCP EOF — send FIN frame to signal stream end to remote.
+                    // FIN carries the current data_seq so the receiver knows
+                    // which data_seq marks the end of the stream.
                     info!("TCP connection closed (read EOF), sending FIN");
-                    let fin_frame = vec![FRAME_FIN];
-                    let seq = {
+                    let fin_data_seq = data_seq;
+                    let mut fin_frame = Vec::with_capacity(9);
+                    fin_frame.push(FRAME_FIN);
+                    fin_frame.extend_from_slice(&fin_data_seq.to_be_bytes());
+                    let packet_seq = {
                         let mut pl = pipeline_send.lock().await;
                         let session = pl.get_session_mut(&sid_send)
                             .ok_or("session not found")?;
                         session.next_send_seq()
                     };
                     let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
                     let nonce = Nonce::from_slice(&nonce_bytes);
                     let encrypted = cipher.encrypt(nonce, fin_frame.as_slice())
                         .map_err(|e| format!("FIN encryption error: {}", e))?;
-                    let mut header = DataHeader::new(sid_send, seq);
+                    let mut header = DataHeader::new(sid_send, packet_seq);
                     let aad = header.aad_bytes();
                     header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
                     let mut packet = header.serialize();
                     packet.extend_from_slice(&encrypted);
                     udp_send.send_to(&packet, peer_addr).await?;
-                    debug!("sent FIN frame (seq {})", seq);
+                    debug!("sent FIN frame (data_seq {}, packet_seq {})", fin_data_seq, packet_seq);
                     return Ok::<_, Box<dyn std::error::Error>>(());
                 }
                 Ok(n) => n,
@@ -727,20 +745,13 @@ pub async fn run_bridge(
             debug!("TCP → ZTLP: {} bytes", n);
 
             // Split the TCP data into chunks that fit in ZTLP packets
-            // (accounting for the 1-byte frame type prefix)
+            // (accounting for 1-byte frame type + 8-byte data_seq prefix)
             for chunk in data.chunks(MAX_PLAINTEXT_PER_PACKET) {
                 // ── Flow control: wait for send window ──
-                // The sender must not have more than effective_window packets in
-                // flight (sent but not yet ACKed). The effective window is the
-                // minimum of the congestion window and the static SEND_WINDOW.
+                // The sender must not have more than effective_window DATA packets
+                // in flight. We use data_seq (not pipeline send_seq) so that
+                // ACK/NACK control frames don't consume window space.
                 loop {
-                    let current_seq = {
-                        let pl = pipeline_send.lock().await;
-                        let session = pl.get_session(&sid_send)
-                            .ok_or("session not found")?;
-                        session.send_seq
-                    };
-
                     let acked = {
                         let guard = last_acked_seq_reader.lock().await;
                         *guard
@@ -751,12 +762,11 @@ pub async fn run_bridge(
                         cc.effective_window()
                     };
 
-                    // Calculate available window using congestion-controlled window.
-                    // If we haven't received any ACK yet, allow effective_window
-                    // packets from the start (bootstrapping the connection).
+                    // Window check uses data_seq (DATA-only counter).
+                    // ACK/NACK frames do NOT affect this counter.
                     let window_ok = match acked {
-                        Some(acked_seq) => current_seq < acked_seq + effective_window + 1,
-                        None => current_seq < effective_window,
+                        Some(acked_data_seq) => data_seq < acked_data_seq + effective_window + 1,
+                        None => data_seq < effective_window,
                     };
 
                     if window_ok {
@@ -778,23 +788,23 @@ pub async fn run_bridge(
                             let mut cc = congestion_sender.lock().await;
                             cc.on_loss();
                         }
-                        for nack_seq in &nack_seqs {
-                            let framed_plaintext = {
+                        for nack_data_seq in &nack_seqs {
+                            let entry_info = {
                                 let rb = retransmit_buf_sender.lock().await;
-                                rb.get(*nack_seq).map(|s| s.to_vec())
+                                rb.get_with_packet_seq(*nack_data_seq)
                             };
-                            if let Some(plaintext) = framed_plaintext {
+                            if let Some((plaintext, orig_pkt_seq)) = entry_info {
                                 let mut nonce_bytes = [0u8; 12];
-                                nonce_bytes[4..12].copy_from_slice(&nack_seq.to_be_bytes());
+                                nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_be_bytes());
                                 let nonce = Nonce::from_slice(&nonce_bytes);
                                 if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
-                                    let mut header = DataHeader::new(sid_send, *nack_seq);
+                                    let mut header = DataHeader::new(sid_send, orig_pkt_seq);
                                     let aad = header.aad_bytes();
                                     header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ = udp_send.send_to(&packet, peer_addr).await;
-                                    debug!("retransmitted seq {} (while waiting for window)", nack_seq);
+                                    debug!("retransmitted data_seq {} (while waiting for window)", nack_data_seq);
                                 }
                             }
                         }
@@ -804,34 +814,37 @@ pub async fn run_bridge(
                 // Reset the ACK timeout tracker whenever we successfully send
                 last_ack_check = Instant::now();
 
-                // Get next sequence number from the session
-                let seq = {
+                // Get next packet_seq from the session (for nonce uniqueness)
+                let packet_seq = {
                     let mut pl = pipeline_send.lock().await;
                     let session = pl.get_session_mut(&sid_send)
                         .ok_or("session not found")?;
                     session.next_send_seq()
                 };
 
-                // Build the framed plaintext: [FRAME_DATA | chunk_bytes...]
-                let mut framed = Vec::with_capacity(1 + chunk.len());
+                // Build framed plaintext: [FRAME_DATA | data_seq (8B BE) | chunk_bytes...]
+                let current_data_seq = data_seq;
+                data_seq += 1;
+                let mut framed = Vec::with_capacity(1 + 8 + chunk.len());
                 framed.push(FRAME_DATA);
+                framed.extend_from_slice(&current_data_seq.to_be_bytes());
                 framed.extend_from_slice(chunk);
 
-                // Store in retransmit buffer before sending
+                // Store in retransmit buffer keyed by data_seq, with packet_seq for nonce
                 {
                     let mut rb = retransmit_buf_sender.lock().await;
-                    rb.insert(seq, framed.clone(), Instant::now());
+                    rb.insert(current_data_seq, packet_seq, framed.clone(), Instant::now());
                 }
 
-                // Encrypt with nonce = 4 zero bytes + 8-byte big-endian seq
+                // Encrypt with nonce = 4 zero bytes + 8-byte big-endian packet_seq
                 let mut nonce_bytes = [0u8; 12];
-                nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+                nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 let encrypted = cipher.encrypt(nonce, framed.as_slice())
                     .map_err(|e| format!("encryption error: {}", e))?;
 
-                // Build data header with correct seq and auth tag
-                let mut header = DataHeader::new(sid_send, seq);
+                // Build data header with packet_seq and auth tag
+                let mut header = DataHeader::new(sid_send, packet_seq);
                 let aad = header.aad_bytes();
                 header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
 
@@ -839,7 +852,7 @@ pub async fn run_bridge(
                 let mut packet = header.serialize();
                 packet.extend_from_slice(&encrypted);
                 udp_send.send_to(&packet, peer_addr).await?;
-                debug!("ZTLP sent: {} bytes (seq {})", packet.len(), seq);
+                debug!("ZTLP sent: {} bytes (data_seq {}, packet_seq {})", packet.len(), current_data_seq, packet_seq);
             }
         }
     };
@@ -945,15 +958,24 @@ pub async fn run_bridge(
 
                     match frame_type {
                         FRAME_DATA => {
+                            // DATA frame: [0x00] [data_seq: 8B BE] [payload...]
+                            if frame_payload.len() < 8 {
+                                debug!("DATA frame too short for data_seq");
+                                continue;
+                            }
+                            let data_seq = u64::from_be_bytes(
+                                frame_payload[..8].try_into().unwrap()
+                            );
+                            let tcp_payload = &frame_payload[8..];
+
                             // Initialize reassembly buffer on first data packet.
-                            // The first data packet's seq becomes our expected_seq.
                             let reasm = reassembly.get_or_insert_with(|| {
-                                debug!("reassembly: initialized with first seq {}", header.packet_seq);
-                                ReassemblyBuffer::new(header.packet_seq, REASSEMBLY_MAX_BUFFERED)
+                                debug!("reassembly: initialized with first data_seq {}", data_seq);
+                                ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
                             });
 
-                            // Insert into reassembly buffer
-                            if let Some(deliverable) = reasm.insert(header.packet_seq, frame_payload.to_vec()) {
+                            // Insert into reassembly buffer keyed by data_seq
+                            if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec()) {
                                 // Write all deliverable packets to TCP in order
                                 for (_seq, payload) in &deliverable {
                                     if let Err(e) = tcp_writer.write_all(payload).await {
@@ -980,7 +1002,7 @@ pub async fn run_bridge(
                                 let acked_seq = u64::from_be_bytes(
                                     frame_payload[..8].try_into().unwrap()
                                 );
-                                debug!("received ACK for seq {}", acked_seq);
+                                debug!("received ACK for data_seq {}", acked_seq);
 
                                 // Compute newly acked count for congestion control
                                 let prev_acked = {
@@ -1044,8 +1066,16 @@ pub async fn run_bridge(
                         }
 
                         FRAME_FIN => {
+                            // FIN frame: [0x02] [data_seq: 8B BE]
                             // Remote side signaled TCP EOF.
-                            info!("received FIN frame — remote TCP stream ended");
+                            if frame_payload.len() >= 8 {
+                                let _fin_data_seq = u64::from_be_bytes(
+                                    frame_payload[..8].try_into().unwrap()
+                                );
+                                info!("received FIN frame (data_seq {}) — remote TCP stream ended", _fin_data_seq);
+                            } else {
+                                info!("received FIN frame — remote TCP stream ended");
+                            }
                             fin_received = true;
 
                             // If there are buffered packets, give them time to arrive
@@ -1786,9 +1816,10 @@ mod tests {
     fn test_retransmit_buffer_insert_and_get() {
         let mut rb = RetransmitBuffer::new(100);
         let now = Instant::now();
-        rb.insert(0, vec![FRAME_DATA, 0xAA], now);
-        rb.insert(1, vec![FRAME_DATA, 0xBB], now);
-        rb.insert(2, vec![FRAME_DATA, 0xCC], now);
+        // insert(data_seq, packet_seq, framed_plaintext, send_time)
+        rb.insert(0, 0, vec![FRAME_DATA, 0xAA], now);
+        rb.insert(1, 1, vec![FRAME_DATA, 0xBB], now);
+        rb.insert(2, 2, vec![FRAME_DATA, 0xCC], now);
 
         assert_eq!(rb.len(), 3);
         assert_eq!(rb.get(0), Some(&[FRAME_DATA, 0xAA][..]));
@@ -1798,18 +1829,38 @@ mod tests {
     }
 
     #[test]
+    fn test_retransmit_buffer_get_with_packet_seq() {
+        let mut rb = RetransmitBuffer::new(100);
+        let now = Instant::now();
+        // data_seq and packet_seq differ (e.g., ACK/NACK consumed some packet_seqs)
+        rb.insert(0, 0, vec![FRAME_DATA, 0xAA], now);
+        rb.insert(1, 3, vec![FRAME_DATA, 0xBB], now); // packet_seq=3 (ACK consumed 1,2)
+        rb.insert(2, 5, vec![FRAME_DATA, 0xCC], now); // packet_seq=5
+
+        let (data, pkt_seq) = rb.get_with_packet_seq(1).unwrap();
+        assert_eq!(data, vec![FRAME_DATA, 0xBB]);
+        assert_eq!(pkt_seq, 3);
+
+        let (data, pkt_seq) = rb.get_with_packet_seq(2).unwrap();
+        assert_eq!(data, vec![FRAME_DATA, 0xCC]);
+        assert_eq!(pkt_seq, 5);
+
+        assert!(rb.get_with_packet_seq(99).is_none());
+    }
+
+    #[test]
     fn test_retransmit_buffer_prune() {
         let mut rb = RetransmitBuffer::new(100);
         let now = Instant::now();
         for i in 0..10 {
-            rb.insert(i, vec![FRAME_DATA, i as u8], now);
+            rb.insert(i, i, vec![FRAME_DATA, i as u8], now);
         }
         assert_eq!(rb.len(), 10);
 
-        // Prune up to seq 4 (0..=4 removed)
+        // Prune up to data_seq 4 (0..=4 removed)
         rb.prune_up_to(4);
         assert_eq!(rb.len(), 5);
-        assert_eq!(rb.get(4), None); // 4 was pruned (seq <= 4)
+        assert_eq!(rb.get(4), None); // 4 was pruned (data_seq <= 4)
         assert!(rb.get(5).is_some());
         assert!(rb.get(9).is_some());
     }
@@ -1818,13 +1869,13 @@ mod tests {
     fn test_retransmit_buffer_full() {
         let mut rb = RetransmitBuffer::new(3);
         let now = Instant::now();
-        rb.insert(0, vec![0xAA], now);
-        rb.insert(1, vec![0xBB], now);
-        rb.insert(2, vec![0xCC], now);
+        rb.insert(0, 0, vec![0xAA], now);
+        rb.insert(1, 1, vec![0xBB], now);
+        rb.insert(2, 2, vec![0xCC], now);
         assert_eq!(rb.len(), 3);
 
         // Buffer full — new insert silently dropped
-        rb.insert(3, vec![0xDD], now);
+        rb.insert(3, 3, vec![0xDD], now);
         assert_eq!(rb.len(), 3);
         assert_eq!(rb.get(3), None);
     }
@@ -1833,7 +1884,7 @@ mod tests {
     fn test_retransmit_buffer_send_time() {
         let mut rb = RetransmitBuffer::new(100);
         let t1 = Instant::now();
-        rb.insert(42, vec![0xAA], t1);
+        rb.insert(42, 42, vec![0xAA], t1);
 
         let stored_time = rb.send_time(42).unwrap();
         assert_eq!(stored_time, t1);
@@ -2208,9 +2259,9 @@ mod tests {
         let mut rb = RetransmitBuffer::new(100);
         let now = Instant::now();
 
-        // Simulate sending 20 packets
+        // Simulate sending 20 packets (data_seq == packet_seq for simplicity)
         for i in 0..20 {
-            rb.insert(i, vec![FRAME_DATA, i as u8], now);
+            rb.insert(i, i, vec![FRAME_DATA, i as u8], now);
         }
         assert_eq!(rb.len(), 20);
 

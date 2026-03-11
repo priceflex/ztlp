@@ -21,7 +21,7 @@ defmodule ZtlpRelay.NsClientTest do
 
         response =
           case data do
-            <<0x01, _name_len::16, _name::binary-size(_name_len), _type::8>> ->
+            <<0x01, name_len::16, _name::binary-size(name_len), _type::8>> ->
               handle_mock_query(opts)
 
             <<0x02, _rest::binary>> ->

@@ -1,6 +1,6 @@
 defmodule ZtlpRelay.PacketTest do
   use ExUnit.Case, async: true
-  use Bitwise
+  import Bitwise
 
   alias ZtlpRelay.Packet
 

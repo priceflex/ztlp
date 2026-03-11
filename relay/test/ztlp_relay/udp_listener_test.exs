@@ -101,6 +101,8 @@ defmodule ZtlpRelay.UdpListenerTest do
       # Peer A should receive the forwarded packet
       assert_receive {:udp, ^client_a, {127, 0, 0, 1}, ^port, ^raw2}, 1_000
 
+      # Stats updates are async — allow time for counter to propagate
+      Process.sleep(50)
       stats = Stats.get_stats()
       assert stats.forwarded >= 2
 

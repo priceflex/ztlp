@@ -37,6 +37,7 @@
 
 pub mod admission;
 pub mod batch;
+pub mod enrollment;
 pub mod error;
 #[allow(unsafe_code)]
 pub mod ffi;

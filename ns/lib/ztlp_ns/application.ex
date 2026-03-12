@@ -38,6 +38,20 @@ defmodule ZtlpNs.Application do
     # Try to join cluster if seed nodes are configured
     ZtlpNs.Cluster.ensure_replicated()
 
+    # Initialize enrollment token tracking table
+    ZtlpNs.Enrollment.init()
+
+    # Load enrollment secret from env if provided
+    case System.get_env("ZTLP_ENROLLMENT_SECRET") do
+      nil -> :ok
+      hex when byte_size(hex) == 64 ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, secret} -> ZtlpNs.Enrollment.set_zone_secret(secret)
+          _ -> :ok
+        end
+      _ -> :ok
+    end
+
     children = [
       # Order matters: TrustAnchor first, then Store (Mnesia tables),
       # then AntiEntropy (needs Store), then Server (UDP)

@@ -50,7 +50,7 @@ defmodule ZtlpNs.Server do
 
   use GenServer
 
-  alias ZtlpNs.{Query, Record, Store}
+  alias ZtlpNs.{Enrollment, Query, Record, Store}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -222,6 +222,11 @@ defmodule ZtlpNs.Server do
         end
       end
     end
+  end
+
+  # Enrollment (0x07) — device enrollment with token
+  defp process_query(<<0x07, rest::binary>>) do
+    Enrollment.process_enroll(rest)
   end
 
   # Malformed query → invalid response

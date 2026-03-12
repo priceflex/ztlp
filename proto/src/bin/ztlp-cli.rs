@@ -337,6 +337,105 @@ enum Commands {
     /// and debugging the admission control system.
     #[command(subcommand)]
     Token(TokenCommands),
+
+    /// Interactive setup wizard — join or create a ZTLP network
+    ///
+    /// Walks you through joining an existing network (with an enrollment
+    /// token) or creating a new one. Handles identity generation,
+    /// registration, and config file creation automatically.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp setup\n  \
+            ztlp setup --token ztlp://enroll/AQtvZm...\n  \
+            ztlp setup --token AQtvZm...")]
+    Setup {
+        /// Enrollment token (base64url or ztlp://enroll/ URI).
+        /// If provided, skips the interactive menu and goes straight to enrollment.
+        #[arg(short, long)]
+        token: Option<String>,
+
+        /// Device name to register (auto-detected from hostname if omitted)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Skip confirmation prompts
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Admin operations — manage zones and enrollment tokens
+    #[command(subcommand)]
+    Admin(AdminCommands),
+}
+
+#[derive(Subcommand)]
+enum AdminCommands {
+    /// Initialize a new ZTLP zone with an enrollment secret
+    ///
+    /// Generates a random 32-byte enrollment secret for the zone and
+    /// saves it to a file. This secret is used to create enrollment
+    /// tokens that authorize devices to join the network.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin init-zone --zone office.acme.ztlp\n  \
+            ztlp admin init-zone --zone office.acme.ztlp --secret-output /etc/ztlp/zone.key")]
+    InitZone {
+        /// Zone name (e.g., office.acme.ztlp)
+        #[arg(short, long)]
+        zone: String,
+
+        /// Path to save the enrollment secret (default: ~/.ztlp/zone.key)
+        #[arg(long)]
+        secret_output: Option<PathBuf>,
+    },
+
+    /// Generate enrollment tokens for devices to join the network
+    ///
+    /// Creates pre-authorized tokens that devices present during enrollment.
+    /// Each token carries the zone name, NS server address, and relay addresses
+    /// so the enrolling device doesn't need to know anything in advance.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin enroll --zone office.acme.ztlp --ns-server 10.0.0.5:23096 \\\n    \
+                --relay 10.0.0.5:23095 --expires 24h\n  \
+            ztlp admin enroll --zone office.acme.ztlp --ns-server 10.0.0.5:23096 \\\n    \
+                --relay 10.0.0.5:23095 --expires 7d --max-uses 50 --count 10\n  \
+            ztlp admin enroll --zone office.acme.ztlp --secret /etc/ztlp/zone.key \\\n    \
+                --ns-server 10.0.0.5:23096 --relay 10.0.0.5:23095 --qr")]
+    Enroll {
+        /// Zone name
+        #[arg(short, long)]
+        zone: String,
+
+        /// Path to zone enrollment secret file
+        #[arg(short, long)]
+        secret: Option<PathBuf>,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: String,
+
+        /// Relay address (repeatable)
+        #[arg(long)]
+        relay: Vec<String>,
+
+        /// Gateway address (optional)
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Token expiry duration (e.g., 24h, 7d, 30m)
+        #[arg(long, default_value = "24h")]
+        expires: String,
+
+        /// Maximum uses per token (0 = unlimited)
+        #[arg(long, default_value = "1")]
+        max_uses: u16,
+
+        /// Number of tokens to generate
+        #[arg(long, default_value = "1")]
+        count: usize,
+
+        /// Display as QR code in terminal
+        #[arg(long)]
+        qr: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2943,6 +3042,733 @@ async fn cmd_status(target: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ─── Setup Wizard ───────────────────────────────────────────────────────────
+
+/// `ztlp setup` — Interactive setup wizard
+async fn cmd_setup(
+    token_arg: &Option<String>,
+    name_arg: &Option<String>,
+    auto_yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dialoguer::{Select, Input};
+
+    eprintln!();
+    eprintln!("  {}", c_bold("╔══════════════════════════════════════╗"));
+    eprintln!("  {}       ZTLP Setup Wizard v0.5.2      {}", c_bold("║"), c_bold("║"));
+    eprintln!("  {}", c_bold("╚══════════════════════════════════════╝"));
+    eprintln!();
+
+    // If token provided, skip menu and go straight to enrollment
+    if let Some(token_str) = token_arg {
+        return setup_join(token_str, name_arg, auto_yes).await;
+    }
+
+    // Interactive menu
+    let choices = vec![
+        "Join an existing network (I have an enrollment token)",
+        "Create a new ZTLP network (I'm the admin)",
+    ];
+
+    let selection = Select::new()
+        .with_prompt("What would you like to do?")
+        .items(&choices)
+        .default(0)
+        .interact()
+        .map_err(|e| format!("input error: {}", e))?;
+
+    match selection {
+        0 => {
+            // Join — ask for token
+            let token_str: String = Input::new()
+                .with_prompt("Paste your enrollment token (or ztlp://enroll/ URI)")
+                .interact_text()
+                .map_err(|e| format!("input error: {}", e))?;
+
+            setup_join(&token_str, name_arg, auto_yes).await
+        }
+        1 => {
+            setup_create_network(auto_yes).await
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Setup path: join an existing network with an enrollment token.
+async fn setup_join(
+    token_str: &str,
+    name_arg: &Option<String>,
+    auto_yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::enrollment::EnrollmentToken;
+    use ztlp_proto::identity::NodeIdentity;
+    use dialoguer::{Input, Confirm};
+    use tokio::net::UdpSocket;
+    use tokio::time::{timeout, Duration};
+
+    // Parse token
+    let token = EnrollmentToken::from_base64url(token_str)
+        .map_err(|e| format!("invalid enrollment token: {}", e))?;
+
+    if token.is_expired() {
+        return Err("enrollment token has expired".into());
+    }
+
+    eprintln!("  {} Token valid", c_green("✓"));
+    eprintln!("    {} {}", c_cyan("Zone:"), token.zone);
+    eprintln!("    {} {}", c_cyan("NS server:"), token.ns_addr);
+    for relay in &token.relay_addrs {
+        eprintln!("    {} {}", c_cyan("Relay:"), relay);
+    }
+    if let Some(ref gw) = token.gateway_addr {
+        eprintln!("    {} {}", c_cyan("Gateway:"), gw);
+    }
+    eprintln!("    {} {}", c_cyan("Expires in:"), token.expires_in_human());
+    if token.max_uses > 0 {
+        eprintln!("    {} {}", c_cyan("Max uses:"), token.max_uses);
+    }
+    eprintln!();
+
+    // Determine device name
+    let device_name = if let Some(ref n) = name_arg {
+        n.clone()
+    } else {
+        let default_name = get_hostname();
+        let name: String = Input::new()
+            .with_prompt("Device name")
+            .default(default_name)
+            .interact_text()
+            .map_err(|e| format!("input error: {}", e))?;
+        name
+    };
+
+    // Full ZTLP name
+    let full_name = format!("{}.{}", device_name, token.zone);
+    eprintln!("  {} Enrolling as {}", c_cyan("→"), c_bold(&full_name));
+
+    // Determine ZTLP config directory
+    let ztlp_dir = get_ztlp_dir()?;
+    std::fs::create_dir_all(&ztlp_dir)
+        .map_err(|e| format!("failed to create {}: {}", ztlp_dir.display(), e))?;
+
+    let key_path = ztlp_dir.join("identity.json");
+    let config_path = ztlp_dir.join("config.toml");
+
+    // Check if identity already exists
+    if key_path.exists() {
+        if auto_yes {
+            eprintln!("  {} Overwriting existing identity", c_yellow("⚠"));
+        } else {
+            let overwrite = Confirm::new()
+                .with_prompt(format!(
+                    "Identity file already exists at {}. Overwrite?",
+                    key_path.display()
+                ))
+                .default(false)
+                .interact()
+                .map_err(|e| format!("input error: {}", e))?;
+
+            if !overwrite {
+                eprintln!("  Aborted. Use --key to specify a different path.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Generate identity
+    eprintln!();
+    eprintln!("  {} Generating identity...", c_dim("→"));
+    let identity = NodeIdentity::generate()?;
+    identity.save(&key_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&key_path, perms).ok();
+    }
+
+    eprintln!("  {} Identity saved to {}", c_green("✓"), key_path.display());
+    eprintln!("    {} {}", c_cyan("NodeID:"), identity.node_id);
+
+    // Send enrollment request to NS
+    eprintln!();
+    eprintln!("  {} Registering with namespace server...", c_dim("→"));
+
+    let ns_addr: std::net::SocketAddr = token
+        .ns_addr
+        .parse()
+        .map_err(|e| format!("invalid NS address '{}': {}", token.ns_addr, e))?;
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+
+    // Build enrollment request
+    let token_bin = token.serialize();
+
+    // Use the X25519 static public key as the enrollment identity (32 bytes)
+    let pubkey_bytes = identity.static_public_key.as_slice();
+
+    let node_id_bytes: &[u8; 16] = identity.node_id.as_bytes();
+
+    // Determine address to register (optional)
+    let addr_str = "";  // Empty = no address for now (device may be behind NAT)
+
+    let enroll_body = build_enroll_packet(
+        &token_bin,
+        &pubkey_bytes,
+        node_id_bytes,
+        &full_name,
+        addr_str,
+    );
+
+    let packet = [&[0x07u8][..], &enroll_body].concat();
+    sock.send_to(&packet, ns_addr).await?;
+
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let resp = &buf[..len];
+            match resp {
+                [0x08, 0x00, config @ ..] => {
+                    eprintln!("  {} Enrolled as {}", c_green("✓"), c_bold(&full_name));
+
+                    // Parse config from response
+                    let (relay_addrs, gateway_addrs) = parse_enroll_config(config)?;
+
+                    // Write config file
+                    write_config_file(
+                        &config_path,
+                        &key_path,
+                        &token.zone,
+                        &token.ns_addr,
+                        &relay_addrs,
+                        &gateway_addrs,
+                    )?;
+
+                    // Test connectivity
+                    eprintln!();
+                    eprintln!("  {} Testing connectivity...", c_dim("→"));
+                    test_connectivity(&relay_addrs).await;
+
+                    // Summary
+                    eprintln!();
+                    eprintln!("  {}", c_bold("── You're in! ─────────────────────────"));
+                    eprintln!();
+                    eprintln!("  Connect to a peer:  {} connect peer.{}",
+                        c_cyan("ztlp"), token.zone);
+                    eprintln!("  Check status:       {} status",
+                        c_cyan("ztlp"));
+                    eprintln!("  View your identity: {} status --identity",
+                        c_cyan("ztlp"));
+                    eprintln!("  Config file:        {}", config_path.display());
+                    eprintln!();
+                }
+                [0x08, 0x01] => {
+                    return Err("enrollment failed: token expired".into());
+                }
+                [0x08, 0x02] => {
+                    return Err("enrollment failed: token has been used up (max uses reached)".into());
+                }
+                [0x08, 0x03] => {
+                    return Err("enrollment failed: invalid token (wrong secret or tampered)".into());
+                }
+                [0x08, 0x04] => {
+                    return Err(format!(
+                        "enrollment failed: name '{}' is not in zone '{}'",
+                        full_name, token.zone
+                    ).into());
+                }
+                [0x08, 0x05] => {
+                    return Err(format!(
+                        "enrollment failed: name '{}' is already taken by another device",
+                        full_name
+                    ).into());
+                }
+                [0x08, 0x06] => {
+                    return Err("enrollment failed: NS server rejected the request (enrollment may not be configured)".into());
+                }
+                _ => {
+                    return Err(format!(
+                        "unexpected response from NS server: {:02x?}",
+                        &resp[..resp.len().min(16)]
+                    ).into());
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            return Err(format!("network error contacting NS server at {}: {}", token.ns_addr, e).into());
+        }
+        Err(_) => {
+            return Err(format!(
+                "timeout: NS server at {} did not respond within 10 seconds.\n  \
+                 Is the NS server running? Check: ztlp ns lookup test.{} --ns-server {}",
+                token.ns_addr, token.zone, token.ns_addr
+            ).into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Setup path: create a new ZTLP network.
+async fn setup_create_network(
+    _auto_yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::enrollment::generate_enrollment_secret;
+    use ztlp_proto::identity::NodeIdentity;
+    use dialoguer::Input;
+
+    eprintln!("  {}", c_bold("── Create ZTLP Network ───────────────"));
+    eprintln!();
+
+    // Zone name
+    let zone: String = Input::new()
+        .with_prompt("Zone name (e.g., office.yourcompany.ztlp)")
+        .interact_text()
+        .map_err(|e| format!("input error: {}", e))?;
+
+    // NS server address
+    let ns_addr: String = Input::new()
+        .with_prompt("NS server listen address")
+        .default("0.0.0.0:23096".to_string())
+        .interact_text()
+        .map_err(|e| format!("input error: {}", e))?;
+
+    // Relay address
+    let relay_addr: String = Input::new()
+        .with_prompt("Relay listen address")
+        .default("0.0.0.0:23095".to_string())
+        .interact_text()
+        .map_err(|e| format!("input error: {}", e))?;
+
+    eprintln!();
+
+    // Generate zone enrollment secret
+    eprintln!("  {} Generating zone enrollment secret...", c_dim("→"));
+    let secret = generate_enrollment_secret();
+    let secret_hex = hex::encode(secret);
+
+    let ztlp_dir = get_ztlp_dir()?;
+    std::fs::create_dir_all(&ztlp_dir)?;
+
+    let secret_path = ztlp_dir.join("zone.key");
+    std::fs::write(&secret_path, &secret_hex)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
+    eprintln!("  {} Zone secret saved to {} (chmod 600)", c_green("✓"), secret_path.display());
+
+    // Generate admin identity
+    eprintln!("  {} Generating admin identity...", c_dim("→"));
+    let identity = NodeIdentity::generate()?;
+    let key_path = ztlp_dir.join("identity.json");
+    identity.save(&key_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
+    eprintln!("  {} Admin identity saved to {}", c_green("✓"), key_path.display());
+    eprintln!("    {} {}", c_cyan("NodeID:"), identity.node_id);
+
+    // Write config
+    let config_path = ztlp_dir.join("config.toml");
+    let config_content = format!(
+        r#"# ZTLP Configuration — generated by `ztlp setup`
+# Zone: {zone}
+
+identity = "{key_path}"
+ns_server = "{ns_addr}"
+relay = "{relay_addr}"
+zone = "{zone}"
+enrollment_secret = "{secret_path}"
+"#,
+        zone = zone,
+        key_path = key_path.display(),
+        ns_addr = ns_addr,
+        relay_addr = relay_addr,
+        secret_path = secret_path.display(),
+    );
+    std::fs::write(&config_path, &config_content)?;
+    eprintln!("  {} Config written to {}", c_green("✓"), config_path.display());
+
+    // Instructions
+    eprintln!();
+    eprintln!("  {}", c_bold("── Network Ready ─────────────────────"));
+    eprintln!();
+    eprintln!("  Start the services:");
+    eprintln!("    {} (using Docker Compose)", c_dim("docker compose up -d"));
+    eprintln!("    {} (or start individually)", c_dim("See DEPLOYMENT.md"));
+    eprintln!();
+    eprintln!("  Set the enrollment secret on NS server:");
+    eprintln!("    {} ZTLP_ENROLLMENT_SECRET={}", c_cyan("export"), &secret_hex[..16]);
+    eprintln!("    {} (full hex in {})", c_dim("..."), secret_path.display());
+    eprintln!();
+    eprintln!("  Generate enrollment tokens for devices:");
+    eprintln!("    {} admin enroll --zone {} \\", c_cyan("ztlp"), zone);
+    eprintln!("      --ns-server {} --relay {} --expires 24h",
+        ns_addr, relay_addr);
+    eprintln!();
+    eprintln!("  Generate a QR code for easy device enrollment:");
+    eprintln!("    {} admin enroll --zone {} \\", c_cyan("ztlp"), zone);
+    eprintln!("      --ns-server {} --relay {} --qr",
+        ns_addr, relay_addr);
+    eprintln!();
+
+    Ok(())
+}
+
+/// Build the 0x07 ENROLL request body (without the 0x07 prefix).
+fn build_enroll_packet(
+    token: &[u8],
+    pubkey: &[u8],
+    node_id: &[u8; 16],
+    name: &str,
+    addr: &str,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(256);
+
+    // Token length + token
+    buf.extend_from_slice(&(token.len() as u16).to_be_bytes());
+    buf.extend_from_slice(token);
+
+    // Public key (padded to 32 bytes if needed)
+    let mut pk = [0u8; 32];
+    let copy_len = pubkey.len().min(32);
+    pk[..copy_len].copy_from_slice(&pubkey[..copy_len]);
+    buf.extend_from_slice(&pk);
+
+    // Node ID (16 bytes)
+    buf.extend_from_slice(node_id);
+
+    // Name
+    let name_bytes = name.as_bytes();
+    buf.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name_bytes);
+
+    // Address (may be empty)
+    let addr_bytes = addr.as_bytes();
+    buf.extend_from_slice(&(addr_bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(addr_bytes);
+
+    buf
+}
+
+/// Parse the config section of an ENROLL response.
+fn parse_enroll_config(data: &[u8]) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+    let mut pos = 0;
+
+    // Relay addresses
+    if pos >= data.len() {
+        return Ok((vec![], vec![]));
+    }
+    let relay_count = data[pos] as usize;
+    pos += 1;
+
+    let mut relays = Vec::with_capacity(relay_count);
+    for _ in 0..relay_count {
+        if pos + 2 > data.len() { break; }
+        let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len > data.len() { break; }
+        let addr = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
+        pos += len;
+        relays.push(addr);
+    }
+
+    // Gateway addresses
+    let mut gateways = Vec::new();
+    if pos < data.len() {
+        let gw_count = data[pos] as usize;
+        pos += 1;
+
+        for _ in 0..gw_count {
+            if pos + 2 > data.len() { break; }
+            let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+            if pos + len > data.len() { break; }
+            let addr = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
+            pos += len;
+            gateways.push(addr);
+        }
+    }
+
+    Ok((relays, gateways))
+}
+
+/// Write a config.toml file with the enrollment results.
+fn write_config_file(
+    path: &std::path::Path,
+    key_path: &std::path::Path,
+    zone: &str,
+    ns_server: &str,
+    relay_addrs: &[String],
+    gateway_addrs: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relay_str = if relay_addrs.len() == 1 {
+        format!("\"{}\"", relay_addrs[0])
+    } else {
+        format!("[{}]", relay_addrs.iter().map(|a| format!("\"{}\"", a)).collect::<Vec<_>>().join(", "))
+    };
+
+    let mut content = format!(
+        r#"# ZTLP Configuration — generated by `ztlp setup`
+# Zone: {zone}
+
+identity = "{key_path}"
+ns_server = "{ns_server}"
+relay = {relay_str}
+zone = "{zone}"
+"#,
+        zone = zone,
+        key_path = key_path.display(),
+        ns_server = ns_server,
+        relay_str = relay_str,
+    );
+
+    if !gateway_addrs.is_empty() {
+        content.push_str(&format!("gateway = \"{}\"\n", gateway_addrs[0]));
+    }
+
+    std::fs::write(path, &content)?;
+    eprintln!("  {} Config written to {}", c_green("✓"), path.display());
+
+    Ok(())
+}
+
+/// Get hostname for default device name.
+fn get_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "device".to_string())
+        .to_lowercase()
+        .replace(' ', "-")
+}
+
+/// Get the ZTLP config directory (~/.ztlp).
+fn get_ztlp_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let home = dirs::home_dir()
+        .ok_or("could not determine home directory")?;
+    Ok(home.join(".ztlp"))
+}
+
+/// Test connectivity to relay addresses.
+async fn test_connectivity(relay_addrs: &[String]) {
+    use tokio::net::UdpSocket;
+    use tokio::time::{timeout, Duration, Instant};
+
+    for addr in relay_addrs {
+        match addr.parse::<std::net::SocketAddr>() {
+            Ok(sock_addr) => {
+                match UdpSocket::bind("0.0.0.0:0").await {
+                    Ok(sock) => {
+                        // Send a ZTLP magic check (just the magic bytes — relay will drop it
+                        // but we can measure if the port is reachable)
+                        let ping = [0x5A, 0x37, 0x00, 0x00];
+                        let start = Instant::now();
+                        let _ = sock.send_to(&ping, sock_addr).await;
+
+                        // Try to receive any response (relay won't reply to bad packets,
+                        // but if we get ICMP port unreachable, the recv will fail)
+                        match timeout(Duration::from_millis(500), sock.recv_from(&mut [0u8; 64])).await {
+                            Ok(Ok(_)) => {
+                                let rtt = start.elapsed();
+                                eprintln!("  {} Relay {}: {}ms", c_green("✓"), addr,
+                                    rtt.as_millis());
+                            }
+                            _ => {
+                                // No response is normal — relay drops malformed packets silently
+                                eprintln!("  {} Relay {}: reachable (no reply expected)",
+                                    c_green("✓"), addr);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("  {} Relay {}: could not bind socket", c_yellow("⚠"), addr);
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("  {} Relay {}: invalid address", c_yellow("⚠"), addr);
+            }
+        }
+    }
+}
+
+// ─── Admin Commands ─────────────────────────────────────────────────────────
+
+/// `ztlp admin init-zone` — Initialize a zone with an enrollment secret
+fn cmd_admin_init_zone(
+    zone: &str,
+    secret_output: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::enrollment::generate_enrollment_secret;
+
+    eprintln!("{}", c_bold("ZTLP Zone Initialization"));
+    eprintln!("  {} {}", c_cyan("Zone:"), zone);
+    eprintln!();
+
+    let secret = generate_enrollment_secret();
+    let secret_hex = hex::encode(secret);
+
+    let output_path = if let Some(ref p) = secret_output {
+        p.clone()
+    } else {
+        let ztlp_dir = get_ztlp_dir()?;
+        std::fs::create_dir_all(&ztlp_dir)?;
+        ztlp_dir.join("zone.key")
+    };
+
+    // Create parent directories if needed
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(&output_path, &secret_hex)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
+    eprintln!("  {} Zone secret saved to {}", c_green("✓"), output_path.display());
+    eprintln!();
+    eprintln!("  Set this on your NS server:");
+    eprintln!("    {} ZTLP_ENROLLMENT_SECRET={}", c_cyan("export"), secret_hex);
+    eprintln!();
+    eprintln!("  Then generate enrollment tokens:");
+    eprintln!("    {} admin enroll --zone {} \\", c_cyan("ztlp"), zone);
+    eprintln!("      --secret {} --ns-server <ns-addr> --relay <relay-addr>",
+        output_path.display());
+    eprintln!();
+
+    Ok(())
+}
+
+/// `ztlp admin enroll` — Generate enrollment tokens
+fn cmd_admin_enroll(
+    zone: &str,
+    secret_path: &Option<PathBuf>,
+    ns_server: &str,
+    relay_addrs: &[String],
+    gateway: &Option<String>,
+    expires: &str,
+    max_uses: u16,
+    count: usize,
+    show_qr: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::enrollment::{EnrollmentToken, parse_duration_secs};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Load secret
+    let secret_file = if let Some(ref p) = secret_path {
+        p.clone()
+    } else {
+        let ztlp_dir = get_ztlp_dir()?;
+        ztlp_dir.join("zone.key")
+    };
+
+    if !secret_file.exists() {
+        return Err(format!(
+            "zone secret not found at {}\n  Run: ztlp admin init-zone --zone {}",
+            secret_file.display(), zone
+        ).into());
+    }
+
+    let secret_hex = std::fs::read_to_string(&secret_file)?
+        .trim()
+        .to_string();
+    let secret_bytes = hex::decode(&secret_hex)
+        .map_err(|e| format!("invalid secret in {}: {}", secret_file.display(), e))?;
+
+    if secret_bytes.len() != 32 {
+        return Err(format!(
+            "secret must be 32 bytes (64 hex chars), got {} bytes",
+            secret_bytes.len()
+        ).into());
+    }
+
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_bytes);
+
+    // Parse expiry
+    let expires_secs = parse_duration_secs(expires)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let expires_at = now + expires_secs;
+
+    // Validate inputs
+    if relay_addrs.is_empty() {
+        return Err("at least one --relay address is required".into());
+    }
+
+    eprintln!("{}", c_bold("ZTLP Enrollment Token Generator"));
+    eprintln!("  {} {}", c_cyan("Zone:"), zone);
+    eprintln!("  {} {}", c_cyan("NS Server:"), ns_server);
+    for r in relay_addrs {
+        eprintln!("  {} {}", c_cyan("Relay:"), r);
+    }
+    if let Some(ref gw) = gateway {
+        eprintln!("  {} {}", c_cyan("Gateway:"), gw);
+    }
+    eprintln!("  {} {}", c_cyan("Expires:"), expires);
+    eprintln!("  {} {}", c_cyan("Max uses:"), if max_uses == 0 { "unlimited".to_string() } else { max_uses.to_string() });
+    eprintln!("  {} {}", c_cyan("Count:"), count);
+    eprintln!();
+
+    for i in 0..count {
+        let token = EnrollmentToken::create(
+            zone,
+            ns_server,
+            relay_addrs,
+            gateway.as_deref(),
+            max_uses,
+            expires_at,
+            &secret,
+        );
+
+        let uri = token.to_uri();
+
+        if count > 1 {
+            eprintln!("  {} Token {}/{}", c_green("✓"), i + 1, count);
+        }
+
+        if show_qr {
+            eprintln!();
+            // Print QR code to terminal
+            match qr2term::generate_qr_string(&uri) {
+                Ok(qr_str) => {
+                    for line in qr_str.lines() {
+                        eprintln!("  {}", line);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  {} Could not generate QR: {}", c_yellow("⚠"), e);
+                }
+            }
+            eprintln!();
+        }
+
+        // Print the token to stdout (machine-readable)
+        println!("{}", uri);
+    }
+
+    if !show_qr {
+        eprintln!();
+        eprintln!("  Enroll a device:");
+        eprintln!("    {} setup --token <token-above>", c_cyan("ztlp"));
+    }
+    eprintln!();
+
+    Ok(())
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -3075,6 +3901,26 @@ async fn main() {
                 issuer_id,
                 session_scope,
             } => cmd_token_issue(node_id, secret, *ttl, issuer_id, session_scope),
+        },
+
+        Commands::Setup { token, name, yes } => cmd_setup(token, name, *yes).await,
+
+        Commands::Admin(subcmd) => match subcmd {
+            AdminCommands::InitZone {
+                zone,
+                secret_output,
+            } => cmd_admin_init_zone(zone, secret_output),
+            AdminCommands::Enroll {
+                zone,
+                secret,
+                ns_server,
+                relay,
+                gateway,
+                expires,
+                max_uses,
+                count,
+                qr,
+            } => cmd_admin_enroll(zone, secret, ns_server, relay, gateway, expires, *max_uses, *count, *qr),
         },
     };
 

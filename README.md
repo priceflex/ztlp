@@ -538,14 +538,11 @@ flowchart LR
 ## 6.1 Layering
 
 ```mermaid
-block-beta
-  columns 1
-  A["Application Data (Encrypted Payload)"]
-  B["ZTLP Header — identity, auth, routing"]
-  C["UDP or QUIC — transport substrate"]
-  D["IPv4 or IPv6 — public Internet routing"]
-  E["Physical / Ethernet"]
-  A --> B --> C --> D --> E
+graph TB
+  A["Application Data (Encrypted Payload)"] --> B["ZTLP Header — identity, auth, routing"]
+  B --> C["UDP or QUIC — transport substrate"]
+  C --> D["IPv4 or IPv6 — public Internet routing"]
+  D --> E["Physical / Ethernet"]
 ```
 *ZTLP rides above the existing Internet transport stack. Routers and ISPs see ordinary UDP traffic.*
 
@@ -3600,13 +3597,11 @@ to routers, ISPs, or Internet infrastructure.
 ZTLP sits above IP but below applications. Internet routers do not need to understand ZTLP — packets are encapsulated inside normal UDP or TCP traffic and forwarded without modification.
 
 ```mermaid
-block-beta
-  columns 1
-  A["Application"]
-  B["ZTLP Transport (identity, auth, encrypted session)"]
-  C["UDP or TCP"]
-  D["IPv4 or IPv6"]
-  E["Public Internet (routers see ordinary UDP — no ZTLP awareness required)"]
+graph TB
+  A["Application"] --> B["ZTLP Transport (identity, auth, encrypted session)"]
+  B --> C["UDP or TCP"]
+  C --> D["IPv4 or IPv6"]
+  D --> E["Public Internet (routers see ordinary UDP — no ZTLP awareness required)"]
 ```
 
 This overlay model follows the same deployment precedent as WireGuard

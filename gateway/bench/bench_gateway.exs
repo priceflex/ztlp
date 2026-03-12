@@ -64,7 +64,7 @@ IO.puts("\n--- Data Packet Decrypt Throughput ---")
 
 key = :crypto.strong_rand_bytes(32)
 nonce = :crypto.strong_rand_bytes(12)
-aad = :crypto.strong_rand_bytes(42)  # Simulating full data header as AAD
+aad = :crypto.strong_rand_bytes(30)  # Simulating data header AAD (26 pre-tag + 4 post-tag)
 
 for {label, size} <- [{"64B", 64}, {"1KB", 1024}, {"8KB", 8192}, {"64KB", 65536}] do
   plaintext = :crypto.strong_rand_bytes(size)

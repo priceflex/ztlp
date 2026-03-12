@@ -66,10 +66,10 @@ alias ZtlpGateway.{Packet, Pipeline, SessionRegistry, Crypto}
 hello_packet = Packet.build_hello(<<>>)
 
 # Valid data packet with a known session
-session_id = :crypto.strong_rand_bytes(16)
-auth_tag = :crypto.strong_rand_bytes(12)
+session_id = :crypto.strong_rand_bytes(12)
+auth_tag = :crypto.strong_rand_bytes(16)
 payload = :crypto.strong_rand_bytes(64)
-data_packet = Packet.build_data(session_id, 1, auth_tag, payload)
+data_packet = Packet.build_data(session_id, 1, header_auth_tag: auth_tag, payload: payload) |> Packet.serialize()
 
 # Invalid magic packet
 bad_magic_packet = <<0xDE, 0xAD>> <> :crypto.strong_rand_bytes(40)
@@ -117,7 +117,7 @@ for count <- [100, 1_000, 10_000] do
   # Clear and re-populate
   # Note: can't easily clear SessionRegistry, so we just add more sessions
   pids = for _ <- 1..count do
-    sid = :crypto.strong_rand_bytes(16)
+    sid = :crypto.strong_rand_bytes(12)
     # Use self() as dummy pid since register requires a pid
     SessionRegistry.register(sid, self())
     sid
@@ -125,11 +125,11 @@ for count <- [100, 1_000, 10_000] do
 
   # Pick a known session to look up
   known_sid = Enum.random(pids)
-  known_packet = Packet.build_data(known_sid, 42, auth_tag, payload)
+  known_packet = Packet.build_data(known_sid, 42, header_auth_tag: auth_tag, payload: payload) |> Packet.serialize()
 
   # Unknown session
-  unknown_sid = :crypto.strong_rand_bytes(16)
-  unknown_packet = Packet.build_data(unknown_sid, 42, auth_tag, payload)
+  unknown_sid = :crypto.strong_rand_bytes(12)
+  unknown_packet = Packet.build_data(unknown_sid, 42, header_auth_tag: auth_tag, payload: payload) |> Packet.serialize()
 
   Bench.run("Pipeline.layer2_session/1 — known session (#{count} sessions in ETS)", fn ->
     Pipeline.layer2_session(known_packet)
@@ -162,7 +162,7 @@ Bench.run("Pipeline.admit/1 — bad magic (rejected at L1)", fn ->
   Pipeline.admit(bad_magic_packet)
 end)
 
-unknown_data = Packet.build_data(:crypto.strong_rand_bytes(16), 1, auth_tag, payload)
+unknown_data = Packet.build_data(:crypto.strong_rand_bytes(12), 1, header_auth_tag: auth_tag, payload: payload) |> Packet.serialize()
 Bench.run("Pipeline.admit/1 — unknown session (rejected at L2)", fn ->
   Pipeline.admit(unknown_data)
 end)

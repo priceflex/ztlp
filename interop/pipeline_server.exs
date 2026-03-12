@@ -8,15 +8,15 @@
 #
 # Also generates packets for Rust to validate.
 #
-# Data Header Layout (42 bytes):
-#   Magic(2) + Ver|HdrLen(2) + Flags(2) + SessionID(12) + PacketSeq(8) + AuthTag(16)
-#   AAD = first 26 bytes
+# Data Header Layout (46 bytes):
+#   Magic(2) + Ver|HdrLen(2) + Flags(2) + SessionID(12) + PacketSeq(8) + AuthTag(16) + ExtLen(2) + PayloadLen(2)
+#   AAD = first 26 bytes (pre-tag) + last 4 bytes (post-tag)
 #
-# Handshake Header Layout (95 bytes):
+# Handshake Header Layout (96 bytes):
 #   Magic(2) + Ver|HdrLen(2) + Flags(2) + MsgType(1) + CryptoSuite(2) + KeyID(2)
 #   + SessionID(12) + PacketSeq(8) + Timestamp(8) + SrcNodeID(16) + DstSvcID(16)
-#   + PolicyTag(4) + ExtLen(2) + PayloadLen(2) + AuthTag(16)
-#   AAD = first 79 bytes
+#   + PolicyTag(4) + ExtLen(2) + PayloadLen(2) + Reserved(1) + AuthTag(16)
+#   AAD = first 80 bytes
 #
 # Usage: elixir pipeline_server.exs [port]
 
@@ -101,7 +101,7 @@ defmodule PipelineServer do
 
   # ── Validation ─────────────────────────────────────────────────
 
-  defp validate_data_packet(state, packet) when byte_size(packet) < 42 do
+  defp validate_data_packet(state, packet) when byte_size(packet) < 46 do
     case packet do
       <<0x5A, 0x37, _::binary>> -> "REJECTED_TRUNCATED"
       _ when byte_size(packet) < 2 -> "REJECTED_TRUNCATED"
@@ -110,10 +110,11 @@ defmodule PipelineServer do
   end
 
   defp validate_data_packet(state, packet) do
-    # Data header: Magic(2) + Ver|HdrLen(2) + Flags(2) + SessionID(12) + Seq(8) + AuthTag(16) = 42
+    # Data header: Magic(2) + Ver|HdrLen(2) + Flags(2) + SessionID(12) + Seq(8) + AuthTag(16) + ExtLen(2) + PayloadLen(2) = 46
     <<magic::binary-size(2), _ver_hdrlen::binary-size(2), _flags::binary-size(2),
       session_id::binary-size(12), _seq::unsigned-big-64,
-      auth_tag::binary-size(16), _payload::binary>> = packet
+      auth_tag::binary-size(16), _ext_len::binary-size(2), _payload_len::binary-size(2),
+      _payload::binary>> = packet
 
     # Layer 1: Magic
     if magic != @magic do
@@ -124,8 +125,10 @@ defmodule PipelineServer do
         "REJECTED_SESSION_UNKNOWN"
       else
         # Layer 3: HeaderAuthTag
-        # AAD = first 26 bytes (everything before auth tag)
-        aad = binary_part(packet, 0, 26)
+        # AAD = first 26 bytes (pre-tag) + last 4 bytes of header (post-tag: ExtLen + PayloadLen)
+        pre_tag_aad = binary_part(packet, 0, 26)
+        post_tag_aad = binary_part(packet, 42, 4)
+        aad = pre_tag_aad <> post_tag_aad
         expected_tag = compute_header_auth_tag(state.auth_key, aad)
 
         if auth_tag == expected_tag do
@@ -137,7 +140,7 @@ defmodule PipelineServer do
     end
   end
 
-  defp validate_handshake_packet(state, packet) when byte_size(packet) < 95 do
+  defp validate_handshake_packet(state, packet) when byte_size(packet) < 96 do
     case packet do
       <<0x5A, 0x37, _::binary>> -> "REJECTED_TRUNCATED"
       _ -> "REJECTED_MAGIC"
@@ -147,12 +150,12 @@ defmodule PipelineServer do
   defp validate_handshake_packet(state, packet) do
     # HS header: Magic(2) + Ver|HdrLen(2) + Flags(2) + MsgType(1) + CryptoSuite(2) + KeyID(2)
     #            + SessionID(12) + Seq(8) + Timestamp(8) + SrcNodeID(16) + DstSvcID(16)
-    #            + PolicyTag(4) + ExtLen(2) + PayloadLen(2) + AuthTag(16) = 95
+    #            + PolicyTag(4) + ExtLen(2) + PayloadLen(2) + Reserved(1) + AuthTag(16) = 96
     <<magic::binary-size(2), _ver_hdrlen::binary-size(2), _flags::binary-size(2),
       _msg_type::8, _crypto_suite::16, _key_id::16,
       session_id::binary-size(12), _seq::unsigned-big-64, _ts::unsigned-big-64,
       _src_node::binary-size(16), _dst_svc::binary-size(16),
-      _policy_tag::32, _ext_len::16, _payload_len::16,
+      _policy_tag::32, _ext_len::16, _payload_len::16, _reserved::8,
       auth_tag::binary-size(16), _rest::binary>> = packet
 
     # Layer 1: Magic
@@ -164,8 +167,8 @@ defmodule PipelineServer do
         "REJECTED_SESSION_UNKNOWN"
       else
         # Layer 3: HeaderAuthTag
-        # AAD = first 79 bytes
-        aad = binary_part(packet, 0, 79)
+        # AAD = first 80 bytes (everything before auth tag)
+        aad = binary_part(packet, 0, 80)
         expected_tag = compute_header_auth_tag(state.auth_key, aad)
 
         if auth_tag == expected_tag do
@@ -187,8 +190,11 @@ defmodule PipelineServer do
 
     seq = 42
     flags = 0
+    payload = "elixir_payload"
+    ext_len = 0
+    payload_len = byte_size(payload)
 
-    # Header without auth tag (26 bytes)
+    # Header prefix (26 bytes, before auth tag)
     header_prefix = <<
       0x5A, 0x37,                          # Magic
       ver_hdrlen::unsigned-big-16,          # Ver|HdrLen
@@ -197,11 +203,18 @@ defmodule PipelineServer do
       seq::unsigned-big-64                  # PacketSeq
     >>
 
-    # Compute auth tag over AAD
-    auth_tag = compute_header_auth_tag(state.auth_key, header_prefix)
+    # Post-tag header fields (4 bytes)
+    post_tag = <<
+      ext_len::unsigned-big-16,             # ExtLen
+      payload_len::unsigned-big-16          # PayloadLen
+    >>
 
-    # Full packet: header + auth_tag + payload
-    header_prefix <> auth_tag <> "elixir_payload"
+    # AAD = pre-tag + post-tag (non-contiguous in wire format, concatenated for AEAD)
+    aad = header_prefix <> post_tag
+    auth_tag = compute_header_auth_tag(state.auth_key, aad)
+
+    # Full packet: prefix + auth_tag + post_tag + payload
+    header_prefix <> auth_tag <> post_tag <> payload
   end
 
   defp generate_handshake_packet(state) do
@@ -220,8 +233,9 @@ defmodule PipelineServer do
     ext_len = 0
     payload_len = 32
     flags = 0
+    reserved = 0
 
-    # Header without auth tag (79 bytes)
+    # Header without auth tag (80 bytes)
     header_prefix = <<
       0x5A, 0x37,                          # Magic
       ver_hdrlen::unsigned-big-16,          # Ver|HdrLen
@@ -236,7 +250,8 @@ defmodule PipelineServer do
       dst_svc::binary-size(16),             # DstSvcID
       policy_tag::unsigned-big-32,          # PolicyTag
       ext_len::unsigned-big-16,             # ExtLen
-      payload_len::unsigned-big-16          # PayloadLen
+      payload_len::unsigned-big-16,         # PayloadLen
+      reserved::8                           # Reserved
     >>
 
     auth_tag = compute_header_auth_tag(state.auth_key, header_prefix)

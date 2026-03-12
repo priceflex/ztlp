@@ -206,8 +206,8 @@ fn main() {
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv generated packet");
     let elixir_packet = &buf[..rlen];
 
-    // Parse the data header
-    if elixir_packet.len() >= 42 {
+    // Parse the data header (46 bytes: 26B pre-tag + 16B tag + 4B ext/payload)
+    if elixir_packet.len() >= 46 {
         // Verify magic
         let magic = u16::from_be_bytes([elixir_packet[0], elixir_packet[1]]);
         if magic != MAGIC {
@@ -219,10 +219,13 @@ fn main() {
             sid.copy_from_slice(&elixir_packet[6..18]);
             if sid == session_id_bytes {
                 // Verify auth tag
-                let aad = &elixir_packet[..26]; // Data header AAD = header without auth tag
+                // AAD = bytes 0..26 (pre-tag) + bytes 42..46 (ext_len + payload_len)
+                let mut aad = Vec::with_capacity(30);
+                aad.extend_from_slice(&elixir_packet[..26]);
+                aad.extend_from_slice(&elixir_packet[42..46]);
                 let auth_tag = &elixir_packet[26..42];
 
-                let expected_tag = compute_header_auth_tag(&auth_key, aad);
+                let expected_tag = compute_header_auth_tag(&auth_key, &aad);
                 if auth_tag == expected_tag {
                     println!("✓ Rust validated Elixir-generated data header + auth tag");
                     passed += 1;
@@ -236,7 +239,10 @@ fn main() {
             }
         }
     } else {
-        println!("✗ Elixir packet too short: {} bytes", elixir_packet.len());
+        println!(
+            "✗ Elixir packet too short: {} bytes (need 46)",
+            elixir_packet.len()
+        );
         failed += 1;
     }
 
@@ -251,15 +257,16 @@ fn main() {
         .expect("recv generated hs packet");
     let elixir_hs_packet = &buf[..rlen];
 
-    if elixir_hs_packet.len() >= 95 {
+    if elixir_hs_packet.len() >= 96 {
         let magic = u16::from_be_bytes([elixir_hs_packet[0], elixir_hs_packet[1]]);
         if magic != MAGIC {
             println!("✗ Bad magic from Elixir: 0x{:04X}", magic);
             failed += 1;
         } else {
-            // Handshake header: auth tag at bytes 79..95
-            let aad = &elixir_hs_packet[..79]; // header without auth tag
-            let auth_tag = &elixir_hs_packet[79..95];
+            // Handshake header (96 bytes): auth tag at bytes 80..96
+            // AAD = everything except the 16-byte auth tag = bytes 0..80
+            let aad = &elixir_hs_packet[..80];
+            let auth_tag = &elixir_hs_packet[80..96];
 
             let expected_tag = compute_header_auth_tag(&auth_key, aad);
             if auth_tag == expected_tag {
@@ -272,7 +279,7 @@ fn main() {
         }
     } else {
         println!(
-            "✗ Elixir handshake packet too short: {} bytes",
+            "✗ Elixir handshake packet too short: {} bytes (need 96)",
             elixir_hs_packet.len()
         );
         failed += 1;

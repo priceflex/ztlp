@@ -185,7 +185,7 @@ defmodule PipelineServer do
   defp generate_data_packet(state) do
     # Build exactly like the Rust DataHeader::new + serialize
     version = 1
-    hdr_len = 11
+    hdr_len = 12
     ver_hdrlen = bor(bsl(band(version, 0x0F), 12), band(hdr_len, 0x0FFF))
 
     seq = 42

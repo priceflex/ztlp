@@ -123,7 +123,7 @@ fn main() {
     }
 
     // ── Test 4: Minimum valid packet (just the header) ──────────
-    print!("  Test 4: Minimum valid data packet (42-byte header only)... ");
+    print!("  Test 4: Minimum valid data packet (46-byte header only)... ");
 
     let mut header = DataHeader::new(session_id, 103);
     let aad = header.aad_bytes();
@@ -132,8 +132,8 @@ fn main() {
     let serialized = header.serialize();
     assert_eq!(
         serialized.len(),
-        42,
-        "data header should be exactly 42 bytes"
+        46,
+        "data header should be exactly 46 bytes (v0.5.1 format)"
     );
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
@@ -145,7 +145,7 @@ fn main() {
     let (rlen, _) = socket.recv_from(&mut buf).expect("recv failed");
     let resp = &buf[..rlen];
     if resp.starts_with(b"VALID") {
-        println!("✓ Minimum 42-byte data header accepted");
+        println!("✓ Minimum 46-byte data header accepted");
         passed += 1;
     } else {
         println!("✗ Response: {}", String::from_utf8_lossy(resp));
@@ -218,7 +218,7 @@ fn main() {
     // ── Test 7: Partial header (various truncation lengths) ─────
     print!("  Test 7: Truncated packets at various lengths... ");
 
-    let truncation_lengths = [0, 1, 2, 3, 5, 10, 20, 41]; // All less than 42-byte data header
+    let truncation_lengths = [0, 1, 2, 3, 5, 10, 20, 41, 45]; // All less than 46-byte data header
     let mut all_rejected = true;
 
     for &tlen in &truncation_lengths {

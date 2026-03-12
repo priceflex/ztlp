@@ -95,6 +95,18 @@ pub const DEFAULT_SERVICE: &str = "_default";
 /// for bulk transfers (SCP, file copies).
 const TCP_READ_BUF: usize = 131072;
 
+/// Maximum number of packets to send in a single sub-batch.
+/// Smaller values reduce burst size, preventing UDP receive-buffer overflow
+/// on the remote side. 4 packets × ~16KB = ~64KB per burst, well within
+/// the Linux default rmem of 208KB.
+///
+/// Limits the burst size to avoid overflowing the receiver's UDP socket
+/// buffer. On Linux, the default `rmem_max` is 208KB (~12 packets at
+/// ~16.5KB each). We use 8 to leave headroom for ACKs and retransmits.
+/// The congestion window can be larger than this — we just spread the
+/// sends across multiple sub-batches with async yield points between them.
+const MAX_SUB_BATCH: usize = 8;
+
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
 /// ZTLP data header is 46 bytes, Poly1305 tag is 16 bytes, so
 /// max plaintext per packet ≈ 65535 - 46 - 16 = 65473.
@@ -128,7 +140,7 @@ const SEND_WINDOW: u64 = 2048;
 
 /// The receiver sends an ACK after this many packets have been delivered
 /// to TCP, or when the ACK timer fires — whichever comes first.
-const ACK_EVERY_PACKETS: u64 = 32;
+const ACK_EVERY_PACKETS: u64 = 2;
 
 /// ACK timer interval: send an ACK at least this often while data is flowing.
 const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
@@ -155,7 +167,11 @@ const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 const INITIAL_CWND: f64 = 10.0;
 
 /// Initial slow-start threshold (in packets).
-const INITIAL_SSTHRESH: f64 = 1024.0;
+/// Slow-start threshold in packets. Slow start doubles the window each
+/// RTT until this limit, then switches to linear (congestion avoidance)
+/// growth. The default of 256 is large enough to avoid artificial limits
+/// on high-bandwidth links while the congestion controller adapts.
+const INITIAL_SSTHRESH: f64 = 256.0;
 
 /// Minimum retransmission timeout in milliseconds.
 const MIN_RTO_MS: f64 = 200.0;
@@ -520,6 +536,21 @@ impl RetransmitBuffer {
     fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Return the `count` oldest entries (by data_seq) as (data_seq, packet_seq, plaintext).
+    /// Used for RTO retransmission of the earliest unacked packets.
+    fn oldest_entries(&self, count: usize) -> Vec<(u64, u64, Vec<u8>)> {
+        let mut seqs: Vec<u64> = self.entries.keys().copied().collect();
+        seqs.sort_unstable();
+        seqs.into_iter()
+            .take(count)
+            .filter_map(|ds| {
+                self.entries
+                    .get(&ds)
+                    .map(|e| (ds, e.packet_seq, e.framed_plaintext.clone()))
+            })
+            .collect()
+    }
 }
 
 // ─── Congestion controller ──────────────────────────────────────────────────
@@ -654,6 +685,33 @@ pub async fn run_bridge(
     session_id: SessionId,
     peer_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    info!(
+        "run_bridge: starting for session {} peer={} local_udp={:?}",
+        session_id,
+        peer_addr,
+        udp_socket.local_addr()
+    );
+
+    // Increase UDP receive buffer to handle burst sends. Default Linux
+    // buffer (208KB) is too small when the sender fires a full window
+    // of 16KB packets in one batch. 4MB accommodates ~250 packets.
+    #[allow(unsafe_code)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let raw_fd = udp_socket.as_raw_fd();
+        let desired_buf: libc::c_int = 4 * 1024 * 1024;
+        // SAFETY: raw_fd is valid, desired_buf is a simple integer value.
+        unsafe {
+            libc::setsockopt(
+                raw_fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &desired_buf as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
     let (mut tcp_reader, tcp_writer) = tcp_stream.into_split();
 
     let udp_send = udp_socket.clone();
@@ -663,12 +721,35 @@ pub async fn run_bridge(
     let sid_send = session_id;
     let sid_recv = session_id;
 
+    // ── Pre-extract cryptographic keys before the select! ──────────────
+    // Both directions need to lock the pipeline to get their keys.
+    // Extracting them here avoids lock contention between the two
+    // async blocks inside tokio::select!, which would cause one direction
+    // to starve (a pending mutex .await inside select! may never be
+    // re-polled if the other branch continuously makes progress).
+    let (send_key, recv_key, send_key_for_acks) = {
+        let pl = pipeline_send.lock().await;
+        let session = pl.get_session(&sid_send).ok_or("session not found")?;
+        (session.send_key, session.recv_key, session.send_key)
+    };
+    debug!(
+        "run_bridge: pre-extracted crypto keys for session {}",
+        session_id
+    );
+
     // Shared state for ACK-based flow control.
     // The receiver task updates `last_acked_seq` when it sends ACKs.
     // The sender task reads it to determine how many more packets it can send.
     let last_acked_seq: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     let last_acked_seq_writer = last_acked_seq.clone();
     let last_acked_seq_reader = last_acked_seq;
+
+    // Notify the sender when an ACK arrives, so it can wake up immediately
+    // instead of polling every 100µs. This dramatically improves throughput
+    // for transfers that exceed the initial congestion window.
+    let ack_notify = Arc::new(tokio::sync::Notify::new());
+    let ack_notify_writer = ack_notify.clone();
+    let ack_notify_reader = ack_notify;
 
     // Congestion controller shared between sender and receiver.
     let congestion: Arc<Mutex<CongestionController>> =
@@ -697,15 +778,11 @@ pub async fn run_bridge(
     // ── TCP → ZTLP direction (sender) ──────────────────────────────────
 
     let tcp_to_ztlp = async move {
+        info!("tcp_to_ztlp: starting, peer_addr={}", peer_addr);
         let mut buf = vec![0u8; TCP_READ_BUF];
 
-        // Extract the send key upfront to avoid holding the mutex in the hot loop.
-        // The send key is established during the handshake and doesn't change.
-        let send_key = {
-            let pl = pipeline_send.lock().await;
-            let session = pl.get_session(&sid_send).ok_or("session not found")?;
-            session.send_key
-        };
+        // Send key is pre-extracted before select! to avoid lock contention.
+        let send_key = send_key;
 
         let cipher = ChaCha20Poly1305::new((&send_key).into());
         let mut last_ack_check = Instant::now();
@@ -841,145 +918,240 @@ pub async fn run_bridge(
             let chunks: Vec<&[u8]> = data.chunks(MAX_PLAINTEXT_PER_PACKET).collect();
             let num_chunks = chunks.len();
 
-            // ── Flow control: wait for send window before the batch ──
+            // ── Per-packet flow control + batch send ──
+            // Send chunks in sub-batches that fit within the congestion window.
+            // This prevents overwhelming the receiver's UDP buffer.
             let window_wait_start = Instant::now();
             let mut had_window_stall = false;
-            loop {
+            let mut chunk_idx = 0;
+            let mut total_udp_bytes = 0usize;
+
+            while chunk_idx < num_chunks {
+                // Determine how many packets fit in the current window
                 let acked = {
                     let guard = last_acked_seq_reader.lock().await;
                     *guard
                 };
-
                 let effective_window = {
                     let cc = congestion_sender.lock().await;
                     cc.effective_window()
                 };
 
-                // Window check: ensure we have room for at least one packet.
-                let window_ok = match acked {
-                    Some(acked_data_seq) => data_seq < acked_data_seq + effective_window + 1,
-                    None => data_seq < effective_window,
+                // How many packets can we send right now?
+                let window_avail = match acked {
+                    Some(acked_data_seq) => {
+                        if data_seq < acked_data_seq + effective_window + 1 {
+                            (acked_data_seq + effective_window + 1 - data_seq) as usize
+                        } else {
+                            0
+                        }
+                    }
+                    None => {
+                        if data_seq < effective_window {
+                            (effective_window - data_seq) as usize
+                        } else {
+                            0
+                        }
+                    }
                 };
 
-                if window_ok {
-                    break;
-                }
+                if window_avail == 0 {
+                    had_window_stall = true;
 
-                had_window_stall = true;
-
-                // Window exhausted — check for timeout
-                if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
-                    warn!(
-                        "sender ACK timeout ({:?} with no window progress)",
-                        SENDER_ACK_TIMEOUT
-                    );
-                    return Err("sender ACK timeout".into());
-                }
-
-                // Brief sleep to let ACKs arrive, also drain retransmits.
-                // 100µs avoids busy-spinning while reacting quickly to ACKs.
-                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
-
-                // Process retransmit requests while waiting for window
-                while let Ok(nack_seqs) = retransmit_rx.try_recv() {
-                    {
-                        let mut cc = congestion_sender.lock().await;
-                        cc.on_loss();
+                    if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
+                        warn!(
+                            "sender ACK timeout ({:?} with no window progress)",
+                            SENDER_ACK_TIMEOUT
+                        );
+                        return Err("sender ACK timeout".into());
                     }
-                    for nack_data_seq in &nack_seqs {
-                        let entry_info = {
-                            let rb = retransmit_buf_sender.lock().await;
-                            rb.get_with_packet_seq(*nack_data_seq)
+
+                    // RTO-based loss detection: if we've been waiting for window
+                    // space longer than the congestion controller's RTO, treat
+                    // this as packet loss. This handles the case where both the
+                    // data packets AND the NACKs were dropped (e.g., UDP buffer
+                    // overflow on systems with small rmem_max).
+                    {
+                        let rto = {
+                            let cc = congestion_sender.lock().await;
+                            cc.rto_ms
                         };
-                        if let Some((plaintext, orig_pkt_seq)) = entry_info {
-                            let mut nonce_bytes = [0u8; 12];
-                            nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_le_bytes());
-                            let nonce = Nonce::from_slice(&nonce_bytes);
-                            if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
-                                let mut header = DataHeader::new(sid_send, orig_pkt_seq);
-                                let aad = header.aad_bytes();
-                                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
-                                let mut packet = header.serialize();
-                                packet.extend_from_slice(&encrypted);
-                                let _ = udp_send.send_to(&packet, peer_addr).await;
-                                debug!(
-                                    "retransmitted data_seq {} (while waiting for window)",
-                                    nack_data_seq
-                                );
+                        let rto_dur = std::time::Duration::from_millis(rto.max(MIN_RTO_MS) as u64);
+                        if last_ack_check.elapsed() > rto_dur {
+                            let old_cwnd = {
+                                let mut cc = congestion_sender.lock().await;
+                                let old = cc.cwnd;
+                                cc.on_loss();
+                                old
+                            };
+                            let new_cwnd = {
+                                let cc = congestion_sender.lock().await;
+                                cc.cwnd
+                            };
+                            debug!(
+                                "RTO loss detection: no ACK for {:?}, cwnd {:.0} → {:.0}",
+                                rto_dur, old_cwnd, new_cwnd
+                            );
+
+                            // Retransmit the earliest unacked packets to recover
+                            // from complete loss (both data and NACK dropped).
+                            // Retransmit up to new_cwnd packets from the retransmit buffer.
+                            let retransmit_count = (new_cwnd as usize).min(8);
+                            let entries = {
+                                let rb = retransmit_buf_sender.lock().await;
+                                rb.oldest_entries(retransmit_count)
+                            };
+                            for (ds, ps, plaintext) in &entries {
+                                let mut nonce_bytes = [0u8; 12];
+                                nonce_bytes[4..12].copy_from_slice(&ps.to_le_bytes());
+                                let nonce = Nonce::from_slice(&nonce_bytes);
+                                if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
+                                    let mut header = DataHeader::new(sid_send, *ps);
+                                    let aad = header.aad_bytes();
+                                    header.header_auth_tag =
+                                        compute_header_auth_tag(&send_key, &aad);
+                                    let mut packet = header.serialize();
+                                    packet.extend_from_slice(&encrypted);
+                                    let _ = udp_send.send_to(&packet, peer_addr).await;
+                                    debug!("RTO retransmit data_seq {} (packet_seq {})", ds, ps);
+                                }
+                            }
+
+                            // Reset the ACK check so we don't immediately
+                            // trigger another RTO
+                            last_ack_check = Instant::now();
+                        }
+                    }
+
+                    // Wait for an ACK notification (with short timeout fallback).
+                    // The ACK receiver calls ack_notify_writer.notify_one() when
+                    // it processes an ACK, waking us up immediately.
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(5),
+                        ack_notify_reader.notified(),
+                    )
+                    .await
+                    .ok();
+
+                    // Process retransmit requests while waiting for window
+                    while let Ok(nack_seqs) = retransmit_rx.try_recv() {
+                        {
+                            let mut cc = congestion_sender.lock().await;
+                            cc.on_loss();
+                        }
+                        for nack_data_seq in &nack_seqs {
+                            let entry_info = {
+                                let rb = retransmit_buf_sender.lock().await;
+                                rb.get_with_packet_seq(*nack_data_seq)
+                            };
+                            if let Some((plaintext, orig_pkt_seq)) = entry_info {
+                                let mut nonce_bytes = [0u8; 12];
+                                nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_le_bytes());
+                                let nonce = Nonce::from_slice(&nonce_bytes);
+                                if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
+                                    let mut header = DataHeader::new(sid_send, orig_pkt_seq);
+                                    let aad = header.aad_bytes();
+                                    header.header_auth_tag =
+                                        compute_header_auth_tag(&send_key, &aad);
+                                    let mut packet = header.serialize();
+                                    packet.extend_from_slice(&encrypted);
+                                    let _ = udp_send.send_to(&packet, peer_addr).await;
+                                    debug!(
+                                        "retransmitted data_seq {} (while waiting for window)",
+                                        nack_data_seq
+                                    );
+                                }
                             }
                         }
                     }
+                    continue;
+                }
+
+                // Send up to window_avail packets from remaining chunks,
+                // capped by MAX_SUB_BATCH to avoid overflowing the receiver's
+                // UDP socket buffer on systems with small rmem_max.
+                let send_count = window_avail.min(num_chunks - chunk_idx).min(MAX_SUB_BATCH);
+
+                // Allocate packet_seqs for this sub-batch
+                let first_packet_seq = {
+                    let mut pl = pipeline_send.lock().await;
+                    let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
+                    let first = session.send_seq;
+                    session.send_seq += send_count as u64;
+                    first
+                };
+
+                // Encrypt and build packets
+                let now = Instant::now();
+                let mut outgoing: Vec<(Vec<u8>, u64, u64)> = Vec::with_capacity(send_count);
+                {
+                    let mut rb = retransmit_buf_sender.lock().await;
+                    for i in 0..send_count {
+                        let chunk = &chunks[chunk_idx + i];
+                        let current_data_seq = data_seq;
+                        data_seq += 1;
+                        let packet_seq = first_packet_seq + i as u64;
+
+                        let mut framed = Vec::with_capacity(1 + 8 + chunk.len());
+                        framed.push(FRAME_DATA);
+                        framed.extend_from_slice(&current_data_seq.to_be_bytes());
+                        framed.extend_from_slice(chunk);
+
+                        rb.insert(current_data_seq, packet_seq, framed.clone(), now);
+
+                        let mut nonce_bytes = [0u8; 12];
+                        nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        let encrypted = cipher
+                            .encrypt(nonce, framed.as_slice())
+                            .map_err(|e| format!("encryption error: {}", e))?;
+
+                        let mut header = DataHeader::new(sid_send, packet_seq);
+                        let aad = header.aad_bytes();
+                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+                        let mut packet = header.serialize();
+                        packet.extend_from_slice(&encrypted);
+                        outgoing.push((packet, current_data_seq, packet_seq));
+                    }
+                }
+
+                // Send the sub-batch
+                {
+                    let batch_packets: Vec<Vec<u8>> =
+                        outgoing.iter().map(|(pkt, _, _)| pkt.clone()).collect();
+                    batch_sender.send_batch(&batch_packets, peer_addr).await?;
+                    for (packet, current_data_seq, packet_seq) in &outgoing {
+                        debug!(
+                            "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
+                            packet.len(),
+                            current_data_seq,
+                            packet_seq
+                        );
+                    }
+                }
+
+                total_udp_bytes += outgoing.iter().map(|(p, _, _)| p.len()).sum::<usize>();
+                chunk_idx += send_count;
+
+                // Reset ACK timeout on progress
+                last_ack_check = Instant::now();
+
+                // Brief pause between sub-batches to prevent flooding the
+                // receiver's UDP buffer. We use std::thread::sleep because
+                // tokio::time::sleep has kernel timer resolution (~4ms on
+                // HZ=250 systems), which would kill throughput.
+                // 50µs is short enough to maintain high throughput while
+                // giving the OS scheduler a chance to run the receiver.
+                if chunk_idx < num_chunks {
+                    std::thread::sleep(std::time::Duration::from_micros(50));
                 }
             }
 
-            // Batch-allocate packet_seqs for all chunks (one lock acquisition)
-            let first_packet_seq = {
-                let mut pl = pipeline_send.lock().await;
-                let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
-                let first = session.send_seq;
-                session.send_seq += num_chunks as u64;
-                first
-            };
-
-            // Build, encrypt, and buffer all chunks (lock once for retransmit buffer)
             let window_wait_time = window_wait_start.elapsed();
-            let encrypt_start = Instant::now();
-            let now = Instant::now();
-            let mut outgoing: Vec<(Vec<u8>, u64, u64)> = Vec::with_capacity(num_chunks);
-            {
-                let mut rb = retransmit_buf_sender.lock().await;
-                for (i, chunk) in chunks.iter().enumerate() {
-                    let current_data_seq = data_seq;
-                    data_seq += 1;
-                    let packet_seq = first_packet_seq + i as u64;
-
-                    // Build framed plaintext: [FRAME_DATA | data_seq (8B BE) | chunk_bytes...]
-                    let mut framed = Vec::with_capacity(1 + 8 + chunk.len());
-                    framed.push(FRAME_DATA);
-                    framed.extend_from_slice(&current_data_seq.to_be_bytes());
-                    framed.extend_from_slice(chunk);
-
-                    // Store in retransmit buffer
-                    rb.insert(current_data_seq, packet_seq, framed.clone(), now);
-
-                    // Encrypt with nonce = 4 zero bytes + 8-byte little-endian packet_seq
-                    let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    let encrypted = cipher
-                        .encrypt(nonce, framed.as_slice())
-                        .map_err(|e| format!("encryption error: {}", e))?;
-
-                    // Build data header with packet_seq and auth tag
-                    let mut header = DataHeader::new(sid_send, packet_seq);
-                    let aad = header.aad_bytes();
-                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
-
-                    let mut packet = header.serialize();
-                    packet.extend_from_slice(&encrypted);
-                    outgoing.push((packet, current_data_seq, packet_seq));
-                }
-            }
-            let encrypt_time = encrypt_start.elapsed();
-
-            // Lock released — now send all packets without holding any locks.
-            // Use the pre-created BatchSender for efficient GSO/sendmmsg sends.
-            let send_start = Instant::now();
-            {
-                let batch_packets: Vec<Vec<u8>> =
-                    outgoing.iter().map(|(pkt, _, _)| pkt.clone()).collect();
-                batch_sender.send_batch(&batch_packets, peer_addr).await?;
-                for (packet, current_data_seq, packet_seq) in &outgoing {
-                    debug!(
-                        "ZTLP sent: {} bytes (data_seq {}, packet_seq {})",
-                        packet.len(),
-                        current_data_seq,
-                        packet_seq
-                    );
-                }
-            }
-            let send_time = send_start.elapsed();
-            let udp_bytes: usize = outgoing.iter().map(|(p, _, _)| p.len()).sum();
+            let encrypt_time = window_wait_time; // approximation (mixed with send)
+            let send_time = window_wait_time; // approximation
+            let udp_bytes = total_udp_bytes;
 
             // Emit per-batch debug stats
             tx_batch_num += 1;
@@ -1017,14 +1189,8 @@ pub async fn run_bridge(
     // ── ZTLP → TCP direction (receiver) ────────────────────────────────
 
     let ztlp_to_tcp = async move {
-        // Extract recv key upfront — it doesn't change after handshake
-        let (recv_key, send_key_for_acks) = {
-            let pl = pipeline_recv.lock().await;
-            let session = pl
-                .get_session(&sid_recv)
-                .ok_or("session not found for recv key extraction")?;
-            (session.recv_key, session.send_key)
-        };
+        info!("ztlp_to_tcp: starting");
+        // Recv key and ACK key are pre-extracted before select! to avoid lock contention.
         let recv_cipher = ChaCha20Poly1305::new((&recv_key).into());
         let ack_cipher = ChaCha20Poly1305::new((&send_key_for_acks).into());
 
@@ -1049,9 +1215,12 @@ pub async fn run_bridge(
         let mut last_ack_time = Instant::now();
         let mut last_acked_value: Option<u64> = None;
 
-        // FIN tracking
+        // FIN tracking: fin_data_seq records the data_seq carried in the FIN
+        // frame, which is one past the last data packet's seq. We must wait
+        // for all data_seqs < fin_data_seq to be delivered before closing.
         let mut fin_tx = Some(fin_tx);
         let mut fin_received = false;
+        let mut fin_data_seq: Option<u64> = None;
 
         // Debug stats for receiver
         let mut rx_batch_num: u64 = 0;
@@ -1249,6 +1418,9 @@ pub async fn run_bridge(
                                         }
                                     }
 
+                                    // Wake the sender if it's waiting for window space
+                                    ack_notify_writer.notify_one();
+
                                     // RTT measurement: find the send time of the acked seq
                                     // in the retransmit buffer and compute the sample
                                     {
@@ -1298,46 +1470,36 @@ pub async fn run_bridge(
 
                             FRAME_FIN => {
                                 // FIN frame: [0x02] [data_seq: 8B BE]
-                                // Remote side signaled TCP EOF.
-                                if frame_payload.len() >= 8 {
-                                    // SAFETY: frame_payload.len() >= 8 verified by condition
-                                    let _fin_data_seq = match frame_payload[..8].try_into() {
-                                        Ok(b) => u64::from_be_bytes(b),
+                                // Remote side signaled TCP EOF. The data_seq in
+                                // the FIN is one past the last DATA frame's seq.
+                                // We must deliver all data_seqs < fin_data_seq
+                                // before shutting down TCP.
+                                let parsed_fin_seq = if frame_payload.len() >= 8 {
+                                    match frame_payload[..8].try_into() {
+                                        Ok(b) => {
+                                            let fds = u64::from_be_bytes(b);
+                                            info!(
+                                                "received FIN frame (data_seq {}) — remote TCP stream ended",
+                                                fds
+                                            );
+                                            Some(fds)
+                                        }
                                         Err(_) => {
                                             info!("received FIN frame — remote TCP stream ended (malformed seq)");
-                                            fin_received = true;
-                                            break;
+                                            None
                                         }
-                                    };
-                                    info!(
-                                    "received FIN frame (data_seq {}) — remote TCP stream ended",
-                                    _fin_data_seq
-                                );
+                                    }
                                 } else {
                                     info!("received FIN frame — remote TCP stream ended");
-                                }
+                                    None
+                                };
                                 fin_received = true;
+                                fin_data_seq = parsed_fin_seq;
 
-                                // If there are buffered packets, give them time to arrive
-                                if let Some(ref reasm) = reassembly {
-                                    if reasm.buffered_count() > 0 {
-                                        debug!(
-                                            "FIN received with {} buffered packets, draining",
-                                            reasm.buffered_count()
-                                        );
-                                        // Continue the loop to drain, but with FIN_DRAIN_TIMEOUT
-                                        continue;
-                                    }
-                                }
-
-                                // Flush TCP and signal completion
-                                if let Err(e) = tcp_writer.flush().await {
-                                    warn!("TCP flush error during FIN: {}", e);
-                                }
-                                if let Some(tx) = fin_tx.take() {
-                                    let _ = tx.send(());
-                                }
-                                return Ok(());
+                                // Don't return here — continue the recv loop so
+                                // remaining in-flight DATA packets are received
+                                // and delivered. The FIN drain check below will
+                                // close the connection once all data is delivered.
                             }
 
                             _ => {
@@ -1499,15 +1661,26 @@ pub async fn run_bridge(
                 }
             }
 
-            // FIN drain: if we received FIN and buffer is now empty, close
+            // FIN drain: if we received FIN, check whether all DATA packets
+            // up to fin_data_seq have been delivered to TCP before closing.
             if fin_received {
-                let can_close = match &reassembly {
-                    Some(reasm) => reasm.buffered_count() == 0,
-                    None => true,
+                let all_delivered = match (&reassembly, fin_data_seq) {
+                    // All data up to fin_data_seq delivered (seq is exclusive)
+                    (Some(reasm), Some(fds)) => {
+                        reasm.last_delivered_seq().is_some_and(|lds| lds + 1 >= fds)
+                            && reasm.buffered_count() == 0
+                    }
+                    // FIN had no data_seq or no reassembly — close immediately
+                    _ => true,
                 };
-                if can_close {
+
+                if all_delivered {
+                    info!("FIN drain complete, shutting down TCP write half");
                     if let Err(e) = tcp_writer.flush().await {
                         warn!("TCP flush error during FIN drain: {}", e);
+                    }
+                    if let Err(e) = tcp_writer.shutdown().await {
+                        warn!("TCP shutdown error during FIN drain: {}", e);
                     }
                     if let Some(tx) = fin_tx.take() {
                         let _ = tx.send(());
@@ -1518,18 +1691,43 @@ pub async fn run_bridge(
         }
     };
 
-    // Run both directions concurrently, stop when either ends
+    // Wrap both directions to use Send-compatible error types for tokio::spawn.
+    let tcp_to_ztlp_send = async move { tcp_to_ztlp.await.map_err(|e| e.to_string()) };
+    let ztlp_to_tcp_send = async move { ztlp_to_tcp.await.map_err(|e| e.to_string()) };
+
+    // Run both directions as independent tokio tasks so they make progress
+    // concurrently without starving each other (select! can starve one branch
+    // if the other holds resources or is polled first).
+    let tx_handle = tokio::spawn(tcp_to_ztlp_send);
+    let rx_handle = tokio::spawn(ztlp_to_tcp_send);
+
+    // AbortOnDrop ensures spawned tasks are cancelled even if run_bridge
+    // is aborted from outside (e.g., parent calls .abort()). Without this,
+    // the spawned tasks would outlive run_bridge and leak resources forever.
+    struct AbortOnDrop(tokio::task::AbortHandle);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _tx_guard = AbortOnDrop(tx_handle.abort_handle());
+    let _rx_guard = AbortOnDrop(rx_handle.abort_handle());
+
+    // Wait for either direction to complete, then the guard for the other
+    // is dropped (by the scope of this function), which aborts it.
     tokio::select! {
-        result = tcp_to_ztlp => {
+        result = tx_handle => {
             match result {
-                Ok(()) => info!("tunnel closed (TCP side sent FIN)"),
-                Err(e) => warn!("tunnel error (TCP→ZTLP): {}", e),
+                Ok(Ok(())) => info!("tunnel closed (TCP side sent FIN)"),
+                Ok(Err(e)) => warn!("tunnel error (TCP→ZTLP): {}", e),
+                Err(e) => warn!("tunnel task panicked (TCP→ZTLP): {}", e),
             }
         }
-        result = ztlp_to_tcp => {
+        result = rx_handle => {
             match result {
-                Ok(()) => info!("tunnel closed (ZTLP side received FIN)"),
-                Err(e) => warn!("tunnel error (ZTLP→TCP): {}", e),
+                Ok(Ok(())) => info!("tunnel closed (ZTLP side received FIN)"),
+                Ok(Err(e)) => warn!("tunnel error (ZTLP→TCP): {}", e),
+                Err(e) => warn!("tunnel task panicked (ZTLP→TCP): {}", e),
             }
         }
     }

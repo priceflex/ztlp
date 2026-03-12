@@ -282,10 +282,14 @@ async fn bench_ztlp_tunnel(
 
     // Clean up
     sender.await?;
-    // Give bridges a moment to finish
+    // Give bridges a moment to finish gracefully
     tokio::time::sleep(Duration::from_millis(100)).await;
+    // Abort bridge tasks — AbortOnDrop inside run_bridge will
+    // cascade to the inner spawned tasks.
     server_bridge.abort();
     client_bridge.abort();
+    // Wait briefly for abort to propagate
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let time_ms = elapsed.as_secs_f64() * 1000.0;
     let throughput_mbps = if elapsed.as_secs_f64() > 0.0 {
@@ -568,5 +572,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    Ok(())
+    // Force exit — bridge tasks spawned during benchmarks may still be
+    // cleaning up (waiting for timeouts, drain intervals, etc.). The
+    // AbortOnDrop guards cancel them but the runtime may still wait for
+    // in-progress I/O. This is fine for a benchmark tool.
+    std::process::exit(0);
 }

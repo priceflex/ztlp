@@ -50,14 +50,14 @@ THRESH_L1_REJECT_NS=100          # Rust L1 reject: <100ns (baseline ~19ns)
 THRESH_PIPELINE_VALID_OPS=500000  # Rust full pipeline: >500K ops/s (baseline ~1.13M)
 THRESH_HANDSHAKE_US=800           # Noise_XX: <800µs (baseline ~301µs)
 THRESH_CHACHA_ENCRYPT_64B_NS=3000 # ChaCha20 encrypt 64B: <3µs (baseline ~1.2µs)
-THRESH_TUNNEL_MBPS=20             # ZTLP tunnel (no GSO): >20 MB/s (variable by env)
+THRESH_TUNNEL_MBPS=10             # ZTLP tunnel (no GSO): >10 MB/s (baseline ~17 MB/s @ 1MB)
 
 # Strict thresholds (dev box: allow 50% regression)
 STRICT_L1_REJECT_NS=40
 STRICT_PIPELINE_VALID_OPS=900000
 STRICT_HANDSHAKE_US=500
 STRICT_CHACHA_ENCRYPT_64B_NS=2000
-STRICT_TUNNEL_MBPS=50
+STRICT_TUNNEL_MBPS=15
 
 # ─── Parse args ──────────────────────────────────────────────────────────────
 

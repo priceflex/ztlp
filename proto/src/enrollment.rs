@@ -553,10 +553,7 @@ mod tests {
         );
 
         let wrong_secret = [0xAA; 32];
-        assert_eq!(
-            token.validate(&wrong_secret),
-            TokenValidation::InvalidMac
-        );
+        assert_eq!(token.validate(&wrong_secret), TokenValidation::InvalidMac);
     }
 
     #[test]
@@ -670,7 +667,7 @@ mod tests {
         let mut data = vec![0x02, 0x00]; // version 2
         data.extend_from_slice(&[0x00, 0x04]); // zone len
         data.extend_from_slice(b"test");
-        let err = EnrollmentToken::deserialize(&data).unwrap_err();
+        let err = EnrollmentToken::deserialize(&data).expect_err("should fail on bad version");
         assert!(err.contains("unsupported version"));
     }
 

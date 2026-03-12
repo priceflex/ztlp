@@ -13,7 +13,11 @@ use ztlp_proto::session::{ReplayWindow, SessionState, DEFAULT_REPLAY_WINDOW};
 fn test_handshake_header_exact_96_bytes() {
     let h = HandshakeHeader::new(MsgType::Hello);
     let bytes = h.serialize();
-    assert_eq!(bytes.len(), 96, "handshake header MUST be exactly 96 bytes (768 bits, 4-byte aligned)");
+    assert_eq!(
+        bytes.len(),
+        96,
+        "handshake header MUST be exactly 96 bytes (768 bits, 4-byte aligned)"
+    );
 }
 
 #[test]

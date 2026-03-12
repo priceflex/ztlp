@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/priceflex/ztlp/actions/workflows/ci.yml/badge.svg)](https://github.com/priceflex/ztlp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Spec: v1.0](https://img.shields.io/badge/Spec-v1.0-green.svg)](https://ztlp.org)
+[![Spec: v0.5.1](https://img.shields.io/badge/Spec-v0.5.1-green.svg)](https://ztlp.org)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](proto/)
 [![Elixir](https://img.shields.io/badge/Elixir-1.15%2B-purple.svg)](relay/)
 
@@ -377,10 +377,10 @@ interpreted as described in RFC 2119.
 
 -   ZTLP does not require Internet routers or BGP to be modified.
 
--   ZTLP v0.9.2 does not implement hard bandwidth reservations across
+-   ZTLP v0.5.1 does not implement hard bandwidth reservations across
     the public Internet backbone. Bandwidth-aware path selection and
     soft admission control via the `BANDWIDTH_HINT` extension TLV are
-    defined in Section 14. Hard per-session bandwidth reservation
+    defined in Section 8.4. Hard per-session bandwidth reservation
     between participating relay operators is a target capability for a
     future revision - motivated primarily by its application to
     volumetric DDoS mitigation, where pre-allocated authenticated
@@ -554,9 +554,9 @@ block-beta
 ZTLP uses a connection-oriented model with explicit session
 establishment. The phases are:
 
-1.  Node discovers relay via bootstrap procedure (Section 9).
+1.  Node discovers relay via bootstrap procedure (Section 10).
 
-2.  Node performs HELLO handshake with relay or peer (Section 10).
+2.  Node performs HELLO handshake with relay or peer (Section 11).
 
 3.  Mutual identity verification and policy check.
 
@@ -689,7 +689,7 @@ backup.server.example.ztlp  →  ServiceID: c341:0f8a:21bc:...
 
 ## 7.3 Human-Readable Names
 
-The ZTLP-NS namespace (Section 8) maps human-readable names to Node IDs,
+The ZTLP-NS namespace (Section 9) maps human-readable names to Node IDs,
 Service IDs, relay addresses, and policy records - functioning
 similarly to DNS but with mandatory signing and delegated trust.
 
@@ -810,12 +810,12 @@ Versions 2–15 are reserved for future protocol revisions.
 
 ## 8.3 Established Data Header (compact, post-handshake)
 
-The 64-byte header defined in Section 7.1 applies only to handshake and
+The 64-byte header defined in Section 8.1 applies only to handshake and
 control-plane messages (HELLO, `HELLO_ACK`, REKEY, CLOSE, ERROR, PING,
 PONG). After session establishment, data-plane packets MUST use the
 following compact fixed header. SrcNodeID and DstSvcID MUST NOT appear
 in established data packets. Relays forward data packets using only the
-SessionID as the routing key (see Section 28).
+SessionID as the routing key (see Section 29).
 
 ```mermaid
 packet
@@ -835,7 +835,7 @@ Flags = 16 bits; SessionID = 96 bits; PacketSequence = 64 bits;
 HeaderAuthTag = 128 bits. The compact data header contains no NodeID or
 ServiceID fields. Relays perform a single SessionID table lookup and
 forward immediately. This design enables MPLS-like hardware acceleration
-of the data path (see Section 28 and Section 31.4).
+of the data path (see Section 29 and Section 29.5).
 
 ## 8.4 Extension TLVs (Optional)
 
@@ -850,6 +850,7 @@ base header:
 | 0x04 | TRACE_CTX | Correlation ID for distributed tracing and diagnostics. |
 | 0x05 | `BANDWIDTH_HINT` | Requested bandwidth profile (informational; not a hard reservation). |
 | 0x06 | RELAY_PATH | Ordered list of relay Node IDs traversed (for diagnostics). |
+| 0x07 | ADMISSION_PROOF | Challenge cookie proving successful proof-of-work admission (see Section 8.5.4). |
 | 0xFF | PADDING | Random padding bytes (MUST be ignored by the parser). Used to satisfy the amplification prevention requirement in Section 18.2. |
 
 ### 8.4.1 TLV Binary Layout
@@ -1582,18 +1583,18 @@ sequenceDiagram
 The Responder MUST perform the following checks before issuing
 `SESSION_OPEN`:
 
-7.  Verify the Initiator\'s certificate chain against a trusted ZTLP-NS
+1.  Verify the Initiator\'s certificate chain against a trusted ZTLP-NS
     root.
 
-8.  Verify the certificate has not been revoked (`ZTLP_REVOKE` record
+2.  Verify the certificate has not been revoked (`ZTLP_REVOKE` record
     check).
 
-9.  Evaluate policy: is SrcNodeID authorized to reach DstSvcID?
+3.  Evaluate policy: is SrcNodeID authorized to reach DstSvcID?
 
-10. Check device posture if `DEVICE_POSTURE` extension is present and
+4.  Check device posture if `DEVICE_POSTURE` extension is present and
     required by policy.
 
-11. Reject with ERROR if any check fails. No state is allocated on
+5.  Reject with ERROR if any check fails. No state is allocated on
     failure.
 
 ## 11.4 Key Rotation
@@ -1668,7 +1669,7 @@ Relay nodes MUST:
 -   Publish latency and capacity metrics no less than once per 60
     seconds.
 
--   Support all four transport modes defined in Section 13 (Transport Fallback and NAT Traversal).
+-   Support all four transport modes defined in Section 14 (Transport Fallback and NAT Traversal).
 
 -   Honor CLOSE messages and release session state within 30 seconds.
 
@@ -1687,7 +1688,7 @@ ZTLP mitigates this risk by separating relay roles and limiting where
 first-contact admission occurs. ZTLP relay deployments SHOULD organize
 relays into Ingress Admission Domains, within which a subset of relays
 handle initial session establishment and Stateless Admission Challenge
-(Section 16.3). Other relays in the network primarily forward
+(Section 18.3). Other relays in the network primarily forward
 authenticated traffic and SHOULD NOT accept unauthenticated
 first-contact handshakes except from trusted ingress relays.
 
@@ -1727,7 +1728,7 @@ consistent hashing over relay NodeIDs:
 The bootstrap_salt is a periodically rotated value published by ZTLP-NS,
 preventing long-term fingerprinting of ingress assignments. The
 initiator attempts connections to relays in its assigned ingress set,
-selecting the relay with the lowest PathScore (Section 14). This
+selecting the relay with the lowest PathScore (Section 12.2). This
 distributes admission load evenly across the relay mesh while providing
 stable relay assignment and preventing popular services from
 concentrating handshake pressure on a small subset of relays.
@@ -1815,7 +1816,7 @@ Traffic exchanged between relays within a federation is considered
 authenticated relay traffic. Such traffic has the following properties:
 the sending relay has a verified OperatorID; the session originates from
 a previously authenticated endpoint or relay; Relay Admission Tokens
-(Section 11.4.3) have been validated where required; and packets conform
+(Section 12.4.3) have been validated where required; and packets conform
 to the ZTLP header authentication pipeline. Because this traffic
 originates from authenticated relay infrastructure rather than arbitrary
 endpoints, participating networks may treat it as a trusted overlay
@@ -1923,7 +1924,7 @@ traverse the hierarchy as follows:
 -   Los Angeles Edge Relay delivers to Service Gateway
 
 Each tier is selected using PathScore optimization within the
-consistent-hash candidate set defined in Section 11.2. The result is a
+consistent-hash candidate set defined in Section 12.2. The result is a
 predictable, latency-aware path without requiring centralized path
 computation.
 
@@ -1933,7 +1934,7 @@ The three-tier model is a recommended architectural pattern, not a hard
 protocol requirement. Small private deployments MAY operate with only
 Edge Relays. Operators adding capacity organically migrate toward the
 full hierarchy. The relay discovery and PathScore mechanisms in Sections
-11.2 and 14 operate correctly at any tier depth. Operators SHOULD
+12.2 and 15 operate correctly at any tier depth. Operators SHOULD
 publish their relay tier in the ZTLP_RELAY namespace record to assist
 clients in making optimal selection decisions.
 
@@ -2221,7 +2222,7 @@ byte offset in the packet for the RAT magic marker.
 -   Sustained attack traffic of tens of millions of packets per second
     can be absorbed on a single modern host without service degradation.
 
-### 13.1.3 Deployment Requirements
+### 13.1.4 Deployment Requirements
 
 -   Linux kernel 5.4 or later (XDP support required).
 
@@ -2476,7 +2477,7 @@ within the ZTLP overlay, using relay-published metrics.
 ZTLP relay networks are modeled as weighted directed graphs for path
 optimization purposes. Each relay node is a vertex; each inter-relay
 connection is a directed edge with an associated cost computed from the
-PathScore formula in Section 11.2. This graph model enables optimal path
+PathScore formula in Section 12.2. This graph model enables optimal path
 selection using well-established algorithms from distributed routing
 theory.
 
@@ -2494,7 +2495,7 @@ Basic operation: (1) Model the known relay network as a graph where edge
 weights represent PathScore costs. (2) Apply Dijkstra\'s algorithm from
 the session\'s current relay to the destination relay. (3) Cache the
 resulting path for the session duration. (4) Recompute when metrics
-change beyond the hysteresis threshold (Section 14.1.3).
+change beyond the hysteresis threshold (Section 15.1.3).
 
 ### 15.1.2 Gossip Protocol for Relay Topology Distribution
 
@@ -2692,7 +2693,7 @@ A0.
 
 ### 16.3.4 Device Posture Evidence
 
-ZTLP supports a `DEVICE_POSTURE` extension TLV (Section 7.4). When
+ZTLP supports a `DEVICE_POSTURE` extension TLV (Section 8.4). When
 present, this extension MAY contain TPM attestation quotes, Secure
 Enclave attestation blobs, enterprise device posture tokens, or managed
 device certificates. If a service policy requires device posture
@@ -3201,8 +3202,8 @@ The following issues remain open or are identified as future work areas:
 | Hardware identity enrollment UX | Open | Simplifying the YubiKey/TPM enrollment flow for non-technical users. |
 | ZTLP for IoT | Open | Lightweight profile for constrained devices. |
 | Formal security proof | Open | Cryptographic analysis of the `Noise_XX` handshake under ZTLP's threat model. |
-| Relay discovery mechanism | Addressed | Implemented via Phase 8b NS-based relay discovery. Relay records are published and resolved through ZTLP-NS with authenticated advertisement verification (see Section 37.2). |
-| Path selection algorithm | Addressed | Implemented via PathScore-based selection in Phase 8/8b. Client relay selection logic covers direct, single-relay, and multi-relay decision criteria (see Section 37.1). |
+| Relay discovery mechanism | Addressed | Implemented via Phase 8b NS-based relay discovery. Relay records are published and resolved through ZTLP-NS with authenticated advertisement verification (see Section 36.2). |
+| Path selection algorithm | Addressed | Implemented via PathScore-based selection in Phase 8/8b. Client relay selection logic covers direct, single-relay, and multi-relay decision criteria (see Section 36.1). |
 | Session expiration and relay state cleanup | Addressed | Specified normatively in Section 35: session lifetime limits, mandatory rekeying intervals, and relay session table garbage collection procedures. |
 | Relay abuse protection parameters | Addressed | Specified normatively in Section 37: per-identity rate limits, per-session quotas, and relay admission control thresholds with standardized default values. |
 | Post-quantum cryptographic migration | Open | Migration path to post-quantum primitives (e.g., ML-KEM for key exchange, ML-DSA or SLH-DSA for signatures) to replace X25519 and Ed25519. See Section 41 threat model discussion. |
@@ -3235,7 +3236,7 @@ The following issues remain open or are identified as future work areas:
 | Nebula | A scalable overlay networking tool. Slack Technologies / Defined Networking, 2019. https://github.com/slackhq/nebula. \[Informative: ZTLP's relay architecture extends the Nebula lighthouse/relay model to public Internet deployment with identity-first security and structural DDoS resistance as primary design constraints.\] |
 | WireGuard: Next Generation Kernel Network Tunnel | Donenfeld, J., NDSS 2017. \[Informative: demonstrates that a minimal, auditable, high-performance cryptographic protocol can achieve widespread deployment. ZTLP builds on this precedent.\] |
 | RFC 6830 | The Locator/ID Separation Protocol (LISP). \[Informative: prior work on identifier/locator separation; ZTLP achieves the same architectural separation as an overlay without requiring router changes.\] |
-| RFC 9000 Section 8 | QUIC Address Validation and Retry Tokens. \[Informative: the stateless cookie model used by ZTLP's Stateless Admission Challenge (Section 16.3) is directly analogous to QUIC retry token design.\] |
+| RFC 9000 Section 8 | QUIC Address Validation and Retry Tokens. \[Informative: the stateless cookie model used by ZTLP's Stateless Admission Challenge (Section 18.3) is directly analogous to QUIC retry token design.\] |
 
 
 ---
@@ -3978,8 +3979,8 @@ relay or gateway during session establishment and is the sole routing
 primitive for transit forwarding. The data path does not use separate
 SrcSessionID and DstSessionID fields in the compact post-handshake
 header. NodeID values are present only during the authenticated
-handshake phase. This canonical model aligns with Sections 28.1 through
-28.3 and with the MPLS-like forwarding design goal stated throughout
+handshake phase. This canonical model aligns with Sections 29.1 through
+29.3 and with the MPLS-like forwarding design goal stated throughout
 this specification.
 
 # 30. Cloud Provider and CDN Integration
@@ -4147,7 +4148,7 @@ enhancements that may follow once the protocol proves useful in
 user-space deployments. QUIC operated in user-space for years before
 receiving operating system-level support. ZTLP follows the same
 trajectory: user-space first, kernel acceleration later. The fixed base
-header structure defined in Section 28.2 is intentionally designed to
+header structure defined in Section 29.2 is intentionally designed to
 allow hardware acceleration of the SessionID lookup and HeaderAuthTag
 verification paths when SmartNIC or kernel bypass support is available.
 
@@ -4239,7 +4240,7 @@ who is allowed"]
 
 Bot floods, credential stuffing, and unauthenticated scanning never
 reach the login application logic. The gateway enforces the ZTLP
-three-layer admission pipeline (Section 5) before any authenticated path
+three-layer admission pipeline (Section 18.1) before any authenticated path
 is exposed. This does not eliminate application-layer security
 requirements, but it substantially reduces the volume and diversity of
 attack traffic that the application must handle.
@@ -4651,8 +4652,8 @@ relay paths simultaneously for failover.
 
 When no single relay provides adequate connectivity, the client MAY use
 a multi-relay path through the geographic relay hierarchy (Section
-11.6). Multi-relay paths SHOULD be selected using the Dijkstra-based
-path computation defined in Section 14.1.1. The client SHOULD prefer the
+12.6). Multi-relay paths SHOULD be selected using the Dijkstra-based
+path computation defined in Section 15.1.1. The client SHOULD prefer the
 path with minimum total PathScore across all hops. Multi-relay paths
 increase latency and SHOULD only be used when single-relay paths are
 unavailable or inadequate.
@@ -4685,17 +4686,17 @@ relay advertisements MUST be rejected to prevent relay spoofing attacks.
 
 Clients MUST continuously monitor active relay path quality. If
 PathScore for the current path exceeds the hysteresis threshold (Section
-14.1.3) compared to an available alternative, the client SHOULD migrate
+15.1.3) compared to an available alternative, the client SHOULD migrate
 to the better path. If the current relay path fails (no packets received
 within the keepalive timeout), the client MUST failover to the secondary
 relay path immediately, without application-layer session interruption.
 The SessionID remains stable across path changes, as defined in Section
-28.3.
+29.3.
 
 # 37. Relay Abuse Protection
 
 ZTLP relay nodes are high-value infrastructure that must be protected
-against both volumetric attacks and protocol-level abuse. Section 26
+against both volumetric attacks and protocol-level abuse. Section 27
 defines handshake flood resistance. This section defines additional
 relay-level protections for established session traffic and per-identity
 usage limits.
@@ -4735,7 +4736,7 @@ can perform relay selection accordingly.
 ## 37.3 Relay Admission Control
 
 In addition to the Ingress Admission Domain model defined in Section
-11.4, relay nodes SHOULD implement dynamic admission control based on
+12.4, relay nodes SHOULD implement dynamic admission control based on
 current load:
 
 -   When session table occupancy exceeds 80% of capacity, the relay
@@ -4744,7 +4745,7 @@ current load:
 
 -   When processing load exceeds defined thresholds, the relay MAY apply
     graduated Stateless Admission Challenge difficulty increases
-    (Section 26.1) to rate-limit new handshake attempts.
+    (Section 18.3) to rate-limit new handshake attempts.
 
 -   Relay nodes MUST NOT drop established authenticated sessions to
     accommodate new admission requests; load shedding MUST only affect
@@ -4782,7 +4783,7 @@ protocol does not require trust in any single authority, including the
 body that published this specification.
 
 **Layer 2 - Namespace and Delegation.** Answers: "Who controls names
-and service identity records?" ZTLP-NS (Section 8) provides hierarchical
+and service identity records?" ZTLP-NS (Section 9) provides hierarchical
 delegation analogous to DNS, with signed records and local control over
 sub-namespaces. Cross-organization trust is established only when
 explicitly delegated. Unsigned records MUST be rejected.
@@ -4791,7 +4792,7 @@ explicitly delegated. Unsigned records MUST be rejected.
 prove it is really that identity?" The NodeID is stable; the key rotates
 independently. Private keys SHOULD be hardware-bound where available
 (TPM 2.0, Secure Enclave, ARM TrustZone). Attestation and assurance
-levels are optional but policy-aware, as defined in Section 15.3.
+levels are optional but policy-aware, as defined in Section 16.3.
 
 ## 38.2 Supported Identity Classes
 
@@ -4841,14 +4842,14 @@ a typical session:
 >
 > **3. Handshake.** The node proves possession of its current private
 > key and, optionally, device posture or assurance level, as defined in
-> Section 10.
+> Section 11.
 >
 > **4. Policy Decision.** The service gateway evaluates the NodeID
 > against the trust chain, assurance level, and `ZTLP_POLICY` record.
 > Access is granted or denied before any session state is allocated.
 >
 > **5. Session.** The gateway issues a SessionID and traffic transitions
-> to the relay fast-path as defined in Section 28. Identity verification
+> to the relay fast-path as defined in Section 29.5. Identity verification
 > does not re-occur per packet; the SessionID binding established at
 > handshake carries the trust context for the session lifetime.
 
@@ -5193,7 +5194,7 @@ but handling a progressively smaller fraction of attack traffic:
 
 | Layer | Check | Cost | Effect |
 |-------|-------|------|--------|
-| L1 — Magic byte | Single-byte comparison against `0xA7` | ~19 ns (Rust) / ~89 ns (Elixir) | Rejects all non-ZTLP traffic with zero state allocation |
+| L1 — Magic byte | Two-byte comparison against `0x5A37` | ~19 ns (Rust) / ~89 ns (Elixir) | Rejects all non-ZTLP traffic with zero state allocation |
 | L2 — SessionID lookup | Hash table membership test | O(1) lookup | Rejects traffic with unknown SessionIDs; no cryptographic work |
 | L3 — HeaderAuthTag | AEAD verification (ChaCha20-Poly1305) | ~200–500 ns | Rejects forged packets targeting valid SessionIDs |
 
@@ -5218,7 +5219,7 @@ for a random guess against a sparse session table) reaches L3.
   solve computational puzzles during session establishment under load
   (see Section 27), increasing the cost of session-creation floods.
 - **Stateless admission challenge:** The stateless cookie mechanism
-  (Section 16.3) prevents source-address-spoofed handshake floods from
+  (Section 18.3) prevents source-address-spoofed handshake floods from
   allocating relay state.
 
 ### 41.1.4 Compromised Relay Operator
@@ -5681,7 +5682,7 @@ cross-organization collaboration, secure B2B communication, and
 controlled service exposure. Each organization retains control over its
 own identity authority and namespace delegation. Cross-organization
 trust is established only when explicitly delegated, consistent with the
-layered identity model defined in Section 37.
+layered identity model defined in Section 38.
 
 ## 42.4 Relay Provider Networks
 
@@ -5821,6 +5822,6 @@ Tech Rockstar Academy is a research and development initiative focused on advanc
 
 ---
 
-*End of ZTLP Specification — Version 1.0*
+*End of ZTLP Specification — Version 0.5.1*
 
 **ZTLP.org — 2026**

@@ -448,15 +448,19 @@
         }
       });
 
-      // Render Mermaid diagrams
+      // Render Mermaid diagrams (errors are non-fatal — a single bad
+      // diagram should not prevent the rest of the page from rendering)
       const mermaidNodes = body.querySelectorAll('.mermaid');
       if (mermaidNodes.length > 0) {
-        // Reset mermaid to handle re-rendering
         mermaidNodes.forEach((node, i) => {
           node.removeAttribute('data-processed');
           node.id = 'mermaid-' + pageKey + '-' + i;
         });
-        await mermaid.run({ nodes: mermaidNodes });
+        try {
+          await mermaid.run({ nodes: mermaidNodes });
+        } catch (mermaidErr) {
+          console.warn('Mermaid rendering error (non-fatal):', mermaidErr.message);
+        }
       }
 
       // Build TOC and activate observer

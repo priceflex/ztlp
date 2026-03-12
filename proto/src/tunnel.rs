@@ -105,7 +105,7 @@ const TCP_READ_BUF: usize = 131072;
 /// ~16.5KB each). We use 8 to leave headroom for ACKs and retransmits.
 /// The congestion window can be larger than this — we just spread the
 /// sends across multiple sub-batches with async yield points between them.
-const MAX_SUB_BATCH: usize = 8;
+const MAX_SUB_BATCH: usize = 64;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
 /// ZTLP data header is 46 bytes, Poly1305 tag is 16 bytes, so
@@ -140,7 +140,7 @@ const SEND_WINDOW: u64 = 2048;
 
 /// The receiver sends an ACK after this many packets have been delivered
 /// to TCP, or when the ACK timer fires — whichever comes first.
-const ACK_EVERY_PACKETS: u64 = 2;
+const ACK_EVERY_PACKETS: u64 = 16;
 
 /// ACK timer interval: send an ACK at least this often while data is flowing.
 const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
@@ -164,7 +164,7 @@ const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 /// Initial congestion window (in packets). 10 is the standard modern default
 /// (RFC 6928). Slow start ramps quickly on low-RTT links.
-const INITIAL_CWND: f64 = 10.0;
+const INITIAL_CWND: f64 = 64.0;
 
 /// Initial slow-start threshold (in packets).
 /// Slow-start threshold in packets. Slow start doubles the window each
@@ -1137,14 +1137,13 @@ pub async fn run_bridge(
                 // Reset ACK timeout on progress
                 last_ack_check = Instant::now();
 
-                // Brief pause between sub-batches to prevent flooding the
-                // receiver's UDP buffer. We use std::thread::sleep because
-                // tokio::time::sleep has kernel timer resolution (~4ms on
-                // HZ=250 systems), which would kill throughput.
-                // 50µs is short enough to maintain high throughput while
-                // giving the OS scheduler a chance to run the receiver.
-                if chunk_idx < num_chunks {
-                    std::thread::sleep(std::time::Duration::from_micros(50));
+                // Pace between sub-batches. On systems with small UDP
+                // receive buffers (Linux default rmem_max=208KB ≈ 12
+                // packets), we must pause to let the receiver drain.
+                // std::thread::sleep(10µs) actually sleeps ~65µs on
+                // Linux (scheduler overhead), which is ideal pacing.
+                if chunk_idx < num_chunks && send_count > 0 {
+                    std::thread::sleep(std::time::Duration::from_micros(10));
                 }
             }
 

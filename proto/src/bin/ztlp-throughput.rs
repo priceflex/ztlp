@@ -245,18 +245,24 @@ async fn bench_ztlp_tunnel(
     let data = generate_data(size);
     let data_clone = data.clone();
 
+    // Use a oneshot to signal when the sender actually starts writing,
+    // so the timer doesn't include bridge startup overhead.
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<Instant>();
+
     // Sender: connect to client TCP listener and push data
     let sender = tokio::spawn(async move {
-        // Small delay to let the bridge accept
+        // Small delay to let the bridge's TCP listener become ready.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut stream = TcpStream::connect(client_tcp_addr).await.unwrap();
+        let _ = start_tx.send(Instant::now());
         stream.write_all(&data_clone).await.unwrap();
         stream.shutdown().await.unwrap();
     });
 
     // Receiver: accept from the backend listener
-    let start = Instant::now();
     let (mut backend_stream, _) = backend_listener.accept().await?;
+    // Wait for the sender to signal it's actually writing
+    let start = start_rx.await.unwrap_or_else(|_| Instant::now());
     let mut total_read = 0u64;
     let mut buf = vec![0u8; 131072];
     loop {

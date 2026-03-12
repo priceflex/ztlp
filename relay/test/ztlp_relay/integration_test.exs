@@ -69,8 +69,12 @@ defmodule ZtlpRelay.IntegrationTest do
       # A should receive exactly the packet B sent
       assert_receive {:udp, ^client_a, {127, 0, 0, 1}, ^relay_port, ^raw_b}, 1_000
 
-      # Verify stats
-      stats = Stats.get_stats()
+      # Verify stats (counter updates are async — retry briefly)
+      stats =
+        Enum.reduce_while(1..10, nil, fn _, _ ->
+          s = Stats.get_stats()
+          if s.forwarded >= 2, do: {:halt, s}, else: (Process.sleep(20); {:cont, s})
+        end)
       assert stats.passed >= 2
       assert stats.forwarded >= 2
 
@@ -132,7 +136,11 @@ defmodule ZtlpRelay.IntegrationTest do
         assert_receive {:udp, ^cb, {127, 0, 0, 1}, ^relay_port, ^raw}, 1_000
       end
 
-      stats = Stats.get_stats()
+      stats =
+        Enum.reduce_while(1..10, nil, fn _, _ ->
+          s = Stats.get_stats()
+          if s.forwarded >= 5, do: {:halt, s}, else: (Process.sleep(20); {:cont, s})
+        end)
       assert stats.forwarded >= 5
 
       # Cleanup

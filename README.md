@@ -839,18 +839,28 @@ following compact fixed header. SrcNodeID and DstSvcID MUST NOT appear
 in established data packets. Relays forward data packets using only the
 SessionID as the routing key (see Section 29).
 
-```mermaid
-packet
-  0-15: "Magic (16)"
-  16-19: "Ver (4)"
-  20-31: "HdrLen (12)"
-  32-47: "Flags (16)"
-  48-143: "SessionID (96 bits)"
-  144-207: "PacketSequence (64 bits)"
-  208-335: "HeaderAuthTag (128 bits)"
-  336-351: "ExtLen (16 bits)"
-  352-367: "PayloadLen (16 bits)"
-  368-...: "Encrypted Payload (variable)"
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Magic (0x5A37)        | Ver(4)|    HdrLen (12)        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Flags (16)         |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+|                       SessionID (96 bits)                     |
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+|                    PacketSequence (64 bits)                    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                    HeaderAuthTag (128 bits)                    +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|        ExtLen (16)            |       PayloadLen (16)         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   Encrypted Payload (variable)                |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 *The compact post-handshake data header omits NodeID, SrcNodeID, and DstSvcID. Only the SessionID is needed for relay forwarding — no identity lookup required on the fast path.*
 
@@ -3995,18 +4005,28 @@ No NodeID — MPLS-speed forwarding"]
 The following ASCII diagram shows the base ZTLP data packet header
 layout after session establishment:
 
-```mermaid
-packet
-  0-15: "Magic (16)"
-  16-19: "Ver (4)"
-  20-31: "HdrLen (12)"
-  32-47: "Flags (16)"
-  48-143: "SessionID (96 bits)"
-  144-207: "PacketSequence (64 bits)"
-  208-335: "HeaderAuthTag (128 bits)"
-  336-351: "ExtLen (16 bits)"
-  352-367: "PayloadLen (16 bits)"
-  368-...: "Encrypted Payload (variable)"
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Magic (0x5A37)        | Ver(4)|    HdrLen (12)        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Flags (16)         |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+|                       SessionID (96 bits)                     |
++                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               |                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+|                    PacketSequence (64 bits)                    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                    HeaderAuthTag (128 bits)                    +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|        ExtLen (16)            |       PayloadLen (16)         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                   Encrypted Payload (variable)                |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 NodeID values do not appear in data packet headers after session

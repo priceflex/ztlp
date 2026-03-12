@@ -695,6 +695,9 @@ pub async fn run_bridge(
     // Increase UDP receive buffer to handle burst sends. Default Linux
     // buffer (208KB) is too small when the sender fires a full window
     // of 16KB packets in one batch. 4MB accommodates ~250 packets.
+    // On Windows the default buffer is typically larger and the libc
+    // setsockopt API differs, so we only set this on Unix targets.
+    #[cfg(unix)]
     #[allow(unsafe_code)]
     {
         use std::os::unix::io::AsRawFd;

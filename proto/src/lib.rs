@@ -48,6 +48,8 @@ pub mod handshake;
 pub mod identity;
 pub mod mobile;
 pub mod nat;
+#[allow(unsafe_code)]
+pub mod pacing;
 pub mod packet;
 pub mod pipeline;
 pub mod policy;

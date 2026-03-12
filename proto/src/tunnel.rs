@@ -58,7 +58,6 @@
 //!   a ZTLP handshake with the remote peer, and bridges incoming TCP
 //!   connections through the encrypted ZTLP tunnel.
 
-#![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 
 use std::collections::{BTreeMap, HashMap};
@@ -95,16 +94,14 @@ pub const DEFAULT_SERVICE: &str = "_default";
 /// for bulk transfers (SCP, file copies).
 const TCP_READ_BUF: usize = 131072;
 
-/// Maximum number of packets to send in a single sub-batch.
-/// Smaller values reduce burst size, preventing UDP receive-buffer overflow
-/// on the remote side. 4 packets × ~16KB = ~64KB per burst, well within
-/// the Linux default rmem of 208KB.
+/// Default maximum number of packets to send in a single sub-batch.
+/// The actual value is determined at runtime by the pacing module's
+/// `SystemProfile::max_sub_batch`, which adapts based on the detected
+/// UDP receive buffer size. This constant serves as the fallback when
+/// system detection is unavailable.
 ///
-/// Limits the burst size to avoid overflowing the receiver's UDP socket
-/// buffer. On Linux, the default `rmem_max` is 208KB (~12 packets at
-/// ~16.5KB each). We use 8 to leave headroom for ACKs and retransmits.
-/// The congestion window can be larger than this — we just spread the
-/// sends across multiple sub-batches with async yield points between them.
+/// At ~16KB per packet, 64 packets ≈ 1MB per burst.
+#[allow(dead_code)]
 const MAX_SUB_BATCH: usize = 64;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
@@ -715,6 +712,52 @@ pub async fn run_bridge(
         }
     }
 
+    // ── Detect system capabilities and choose pacing strategy ──────────
+    // This runs once at bridge startup. On older kernels (HZ=250),
+    // std::thread::sleep(10µs) actually sleeps 4ms, which destroys
+    // throughput. The pacing module detects this and adapts.
+    let system_profile = {
+        #[cfg(unix)]
+        #[allow(unsafe_code)]
+        let udp_std = {
+            use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+            // Convert tokio UdpSocket's raw fd to a std UdpSocket reference
+            // for buffer detection. We use from_raw_fd + into_raw_fd to avoid
+            // closing the fd (the tokio socket still owns it).
+            let fd = udp_socket.as_raw_fd();
+            // SAFETY: fd is a valid open socket, and we immediately convert
+            // back via into_raw_fd to prevent the std UdpSocket from closing it.
+            let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
+            let profile = crate::pacing::detect_system(
+                peer_addr,
+                Some(&std_sock),
+                Duration::from_micros(10),
+            );
+            // Don't let std_sock close the fd — it belongs to the tokio socket
+            let _ = std_sock.into_raw_fd();
+            profile
+        };
+        #[cfg(not(unix))]
+        let udp_std = crate::pacing::detect_system(
+            peer_addr,
+            None,
+            Duration::from_micros(10),
+        );
+        udp_std
+    };
+
+    let pacing_strategy = system_profile.pacing;
+    let adaptive_sub_batch = system_profile.max_sub_batch;
+    info!(
+        "bridge pacing: strategy={}, sub_batch={}, HZ≈{}, recv_buf={}",
+        pacing_strategy,
+        adaptive_sub_batch,
+        system_profile.estimated_hz,
+        system_profile.recv_buffer_size
+            .map(|s| format!("{}KB", s / 1024))
+            .unwrap_or_else(|| "unknown".into()),
+    );
+
     let (mut tcp_reader, tcp_writer) = tcp_stream.into_split();
 
     let udp_send = udp_socket.clone();
@@ -1073,7 +1116,7 @@ pub async fn run_bridge(
                 // Send up to window_avail packets from remaining chunks,
                 // capped by MAX_SUB_BATCH to avoid overflowing the receiver's
                 // UDP socket buffer on systems with small rmem_max.
-                let send_count = window_avail.min(num_chunks - chunk_idx).min(MAX_SUB_BATCH);
+                let send_count = window_avail.min(num_chunks - chunk_idx).min(adaptive_sub_batch);
 
                 // Allocate packet_seqs for this sub-batch
                 let first_packet_seq = {
@@ -1140,13 +1183,14 @@ pub async fn run_bridge(
                 // Reset ACK timeout on progress
                 last_ack_check = Instant::now();
 
-                // Pace between sub-batches. On systems with small UDP
-                // receive buffers (Linux default rmem_max=208KB ≈ 12
-                // packets), we must pause to let the receiver drain.
-                // std::thread::sleep(10µs) actually sleeps ~65µs on
-                // Linux (scheduler overhead), which is ideal pacing.
+                // Pace between sub-batches to let the receiver drain its
+                // UDP buffer. The pacing strategy was chosen at bridge
+                // startup based on kernel capabilities:
+                // - HZ=1000+: sleep(10µs) → ~65µs (ideal)
+                // - HZ=250:   spin-yield(100µs) (avoids 4ms sleep penalty)
+                // - Loopback + large buffer: no-op (receiver drains fast)
                 if chunk_idx < num_chunks && send_count > 0 {
-                    std::thread::sleep(std::time::Duration::from_micros(10));
+                    crate::pacing::pace(&pacing_strategy);
                 }
             }
 

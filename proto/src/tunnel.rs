@@ -1697,8 +1697,8 @@ pub async fn run_bridge(
     // Run both directions as independent tokio tasks so they make progress
     // concurrently without starving each other (select! can starve one branch
     // if the other holds resources or is polled first).
-    let tx_handle = tokio::spawn(tcp_to_ztlp_send);
-    let rx_handle = tokio::spawn(ztlp_to_tcp_send);
+    let mut tx_handle = tokio::spawn(tcp_to_ztlp_send);
+    let mut rx_handle = tokio::spawn(ztlp_to_tcp_send);
 
     // AbortOnDrop ensures spawned tasks are cancelled even if run_bridge
     // is aborted from outside (e.g., parent calls .abort()). Without this,
@@ -1712,21 +1712,38 @@ pub async fn run_bridge(
     let _tx_guard = AbortOnDrop(tx_handle.abort_handle());
     let _rx_guard = AbortOnDrop(rx_handle.abort_handle());
 
-    // Wait for either direction to complete, then the guard for the other
-    // is dropped (by the scope of this function), which aborts it.
+    // Wait for the first direction to complete, then give the other a grace
+    // period. Bidirectional protocols like SCP/SSH need both sides: when
+    // the sender sends FIN, the receiver may still need to deliver ACK
+    // bytes back. But we can't wait forever — after one side finishes,
+    // the other should complete within a reasonable time.
     tokio::select! {
-        result = tx_handle => {
+        result = &mut tx_handle => {
             match result {
-                Ok(Ok(())) => info!("tunnel closed (TCP side sent FIN)"),
+                Ok(Ok(())) => info!("tunnel: TCP side sent FIN, waiting for ZTLP side..."),
                 Ok(Err(e)) => warn!("tunnel error (TCP→ZTLP): {}", e),
                 Err(e) => warn!("tunnel task panicked (TCP→ZTLP): {}", e),
             }
+            // Give the receiver time to finish delivering remaining data
+            match tokio::time::timeout(FIN_DRAIN_TIMEOUT, rx_handle).await {
+                Ok(Ok(Ok(()))) => info!("tunnel closed (ZTLP side finished)"),
+                Ok(Ok(Err(e))) => warn!("tunnel error (ZTLP→TCP): {}", e),
+                Ok(Err(e)) => warn!("tunnel task panicked (ZTLP→TCP): {}", e),
+                Err(_) => info!("tunnel: ZTLP side drain timeout, closing"),
+            }
         }
-        result = rx_handle => {
+        result = &mut rx_handle => {
             match result {
-                Ok(Ok(())) => info!("tunnel closed (ZTLP side received FIN)"),
+                Ok(Ok(())) => info!("tunnel: ZTLP side received FIN, waiting for TCP side..."),
                 Ok(Err(e)) => warn!("tunnel error (ZTLP→TCP): {}", e),
                 Err(e) => warn!("tunnel task panicked (ZTLP→TCP): {}", e),
+            }
+            // Give the sender time to finish
+            match tokio::time::timeout(FIN_DRAIN_TIMEOUT, tx_handle).await {
+                Ok(Ok(Ok(()))) => info!("tunnel closed (TCP side finished)"),
+                Ok(Ok(Err(e))) => warn!("tunnel error (TCP→ZTLP): {}", e),
+                Ok(Err(e)) => warn!("tunnel task panicked (TCP→ZTLP): {}", e),
+                Err(_) => info!("tunnel: TCP side drain timeout, closing"),
             }
         }
     }

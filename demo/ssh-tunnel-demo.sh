@@ -26,7 +26,25 @@ set -euo pipefail
 # -------------------------------------------------------------------
 # Configuration (environment variables can override defaults)
 # -------------------------------------------------------------------
-ZTLP="${ZTLP_BIN:-ztlp}"
+# Resolve ztlp binary: check ZTLP_BIN env, then PATH, then same dir as
+# this script, then common build output locations in the repo.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -n "${ZTLP_BIN:-}" ]]; then
+    ZTLP="$ZTLP_BIN"
+elif command -v ztlp >/dev/null 2>&1; then
+    ZTLP="ztlp"
+elif [[ -x "$SCRIPT_DIR/ztlp" ]]; then
+    ZTLP="$SCRIPT_DIR/ztlp"
+elif [[ -x "$REPO_DIR/proto/target/release/ztlp" ]]; then
+    ZTLP="$REPO_DIR/proto/target/release/ztlp"
+elif [[ -x "$REPO_DIR/proto/target/debug/ztlp" ]]; then
+    ZTLP="$REPO_DIR/proto/target/debug/ztlp"
+else
+    ZTLP="ztlp"  # fall through — will fail at the pre-flight check with a clear error
+fi
+
 DEMO_DIR="${DEMO_DIR:-/tmp/ztlp-demo}"
 NS_SERVER="${NS_SERVER:-127.0.0.1:5353}"
 LISTEN_PORT="${LISTEN_PORT:-23095}"
@@ -93,7 +111,19 @@ if command -v "$ZTLP" >/dev/null 2>&1; then
     ZTLP_VER=$("$ZTLP" --version 2>/dev/null || echo "unknown")
     success "ztlp binary found: $ZTLP_VER"
 else
-    fail "ztlp binary not found. Install from https://github.com/priceflex/ztlp/releases"
+    echo ""
+    echo -e "  ${RED}Searched in:${RESET}"
+    echo -e "  ${DIM}  1. \$ZTLP_BIN env var${RESET}"
+    echo -e "  ${DIM}  2. \$PATH${RESET}"
+    echo -e "  ${DIM}  3. $SCRIPT_DIR/ztlp  (same dir as this script)${RESET}"
+    echo -e "  ${DIM}  4. $REPO_DIR/proto/target/release/ztlp  (cargo build --release)${RESET}"
+    echo -e "  ${DIM}  5. $REPO_DIR/proto/target/debug/ztlp  (cargo build)${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}Options:${RESET}"
+    echo -e "  ${DIM}  • Build from source:  cd proto && cargo build --release${RESET}"
+    echo -e "  ${DIM}  • Set path:           ZTLP_BIN=/path/to/ztlp ./ssh-tunnel-demo.sh${RESET}"
+    echo -e "  ${DIM}  • Download release:   https://github.com/priceflex/ztlp/releases${RESET}"
+    fail "ztlp binary not found"
 fi
 
 # Optional tool checks

@@ -16,12 +16,27 @@ In addition to the core workflow, the demo includes throughput benchmarking and 
 
 ### Quick Start
 
-```bash
-# Download the latest ztlp binary
-# https://github.com/priceflex/ztlp/releases
+The script automatically finds the `ztlp` binary by checking (in order):
 
-# Run the demo (requires an SSH server on localhost:22)
-./ssh-tunnel-demo.sh
+1. `$ZTLP_BIN` environment variable
+2. `ztlp` in your `$PATH`
+3. `./ztlp` in the same directory as the script (`demo/`)
+4. `proto/target/release/ztlp` (cargo release build)
+5. `proto/target/debug/ztlp` (cargo debug build)
+
+If you built from source (`cd proto && cargo build --release`), the script will find it automatically. Otherwise, download a release binary and either put it in your PATH or in the `demo/` directory.
+
+```bash
+# Option A: Build from source (binary auto-detected)
+cd proto && cargo build --release
+cd ../demo && ./ssh-tunnel-demo.sh
+
+# Option B: Point to a specific binary
+ZTLP_BIN=/path/to/ztlp ./ssh-tunnel-demo.sh
+
+# Option C: Put binary in demo/ dir
+cp /path/to/ztlp demo/
+cd demo && ./ssh-tunnel-demo.sh
 
 # Skip NS registration (use raw IP instead of name)
 ./ssh-tunnel-demo.sh --skip-ns

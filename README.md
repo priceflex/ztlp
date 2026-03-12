@@ -851,16 +851,21 @@ packet
   48-143: "SessionID (96 bits)"
   144-207: "PacketSequence (64 bits)"
   208-335: "HeaderAuthTag (128 bits)"
-  336-383: "Encrypted Payload (variable)"
+  336-351: "ExtLen (16 bits)"
+  352-367: "PayloadLen (16 bits)"
+  368-...: "Encrypted Payload (variable)"
 ```
 *The compact post-handshake data header omits NodeID, SrcNodeID, and DstSvcID. Only the SessionID is needed for relay forwarding — no identity lookup required on the fast path.*
 
 Fields: Magic = 16 bits (`0x5A37`); Version = 4 bits; HdrLen = 12 bits;
 Flags = 16 bits; SessionID = 96 bits; PacketSequence = 64 bits;
-HeaderAuthTag = 128 bits. The compact data header contains no NodeID or
+HeaderAuthTag = 128 bits; ExtLen = 16 bits; PayloadLen = 16 bits.
+The compact data header contains no NodeID or
 ServiceID fields. Relays perform a single SessionID table lookup and
 forward immediately. This design enables MPLS-like hardware acceleration
 of the data path (see Section 29 and Section 29.5).
+
+ExtLen specifies the total length in bytes of any extension TLVs that follow the base compact header. PayloadLen specifies the length of the encrypted payload in bytes. When HAS_EXT is set, extension TLVs (of total length ExtLen) follow the base compact header before the payload. When HAS_EXT is not set, ExtLen MUST be zero. PayloadLen enables unambiguous parsing of the packet structure regardless of whether extensions are present.
 
 ## 8.4 Extension TLVs (Optional)
 
@@ -1034,6 +1039,8 @@ derived session keys:
   24      2       Rekey interval (uint16, seconds)
 ```
 
+The rekey interval is a uint16 field with a maximum value of 65,535 seconds (~18.2 hours). Since the maximum session lifetime is 24 hours (Section 35.1) and rekeying must occur at least once during a session's lifetime, this constraint is inherently satisfied. Implementations MUST reject SESSION_OPEN messages where the rekey interval exceeds the remaining session lifetime.
+
 ### 8.5.7 ERROR Payload (MsgType = 5)
 
 ```
@@ -1059,10 +1066,11 @@ derived session keys:
 | 0x0A | RELAY\_UNAVAILABLE | Relay cannot forward (capacity or policy). |
 | 0x0B | RATE\_LIMITED | Per-identity or per-IP rate limit exceeded. Retry after backoff. |
 | 0x0C | QUOTA\_EXCEEDED | Per-session bandwidth or packet quota exceeded. |
+| 0x0D | RELAY\_BUSY | Relay at capacity. Client SHOULD try an alternative relay. |
 | 0x10 | CHALLENGE\_REQUIRED | Proof-of-work challenge (see Section 8.5.3). |
 | 0xFF | INTERNAL\_ERROR | Unspecified server-side error. |
 
-Error codes `0x0D` through `0x0F` are reserved for future control-plane errors. Codes `0x11` through `0xFE` are reserved for future use. Implementations MUST treat unrecognized error codes as equivalent to `0xFF` (INTERNAL\_ERROR) for logging purposes but MUST NOT change protocol behavior based on unrecognized codes.
+Error codes `0x0E` through `0x0F` are reserved for future control-plane errors. Codes `0x11` through `0xFE` are reserved for future use. Implementations MUST treat unrecognized error codes as equivalent to `0xFF` (INTERNAL\_ERROR) for logging purposes but MUST NOT change protocol behavior based on unrecognized codes.
 
 ### 8.5.8 PING / PONG Payloads (MsgType = 6, 7)
 
@@ -1147,6 +1155,7 @@ graph TD
 | `ZTLP_POLICY` | Access policy: which Node IDs can reach which Service IDs. | policy.acmedental.ztlp → ACL |
 | `ZTLP_REVOKE` | Revocation notice for a Node ID or Token ID. | revoke.acmedental.ztlp → revoked IDs + timestamp |
 | `ZTLP_BOOTSTRAP` | Signed list of relay nodes for initial discovery. | bootstrap.ztlp → signed relay list |
+| `ZTLP_OPERATOR` | Relay operator identity and federation membership. Contains operator NodeID, organization name, federation membership proof, and capacity class. | operator.relay-corp.ztlp → OperatorID + org + federation |
 
 ## 9.4 Federated Trust Roots
 
@@ -1184,7 +1193,7 @@ the message type.
 | Byte | Direction | Name | Description |
 |------|-----------|------|-------------|
 | 0x01 | client → server | QUERY | Look up a record by name and type. |
-| 0x02 | client → server | REGISTER | Insert or update a signed record. |
+| 0x09 | client → server | REGISTER | Insert or update a signed record. |
 | 0x02 | server → client | RESPONSE\_FOUND | Record found (overloaded byte; direction disambiguates). |
 | 0x03 | server → client | RESPONSE\_NOT\_FOUND | No record exists for this name/type. |
 | 0x04 | server → client | RESPONSE\_REVOKED | Record exists but has been revoked. |
@@ -1215,6 +1224,7 @@ the message type.
 | 4 | ZTLP\_POLICY |
 | 5 | ZTLP\_REVOKE |
 | 6 | ZTLP\_BOOTSTRAP |
+| 7 | ZTLP\_OPERATOR |
 
 ### 9.5.3 RESPONSE\_FOUND (0x02)
 
@@ -1267,12 +1277,12 @@ Intended for reverse lookups (e.g., "which node owns this key?").
 
 Response is 0x02 (found), 0x03 (not found), or 0x04 (revoked).
 
-### 9.5.7 REGISTER (0x02, client → server)
+### 9.5.7 REGISTER (0x09, client → server)
 
 ```
   Offset  Size        Field
   ──────  ──────────  ─────────────────────────────────
-  0       1           Message type (0x02)
+  0       1           Message type (0x09)
   1       2           Name length (uint16)
   3       name_len    Name
   3+N     1           Record type byte
@@ -1284,6 +1294,8 @@ Response is 0x02 (found), 0x03 (not found), or 0x04 (revoked).
 
 The server verifies the signature, signs the record with its own zone
 key, and stores it. Response is 0x06 (success) or 0xFF (error).
+
+> **Note:** Message type 0x02 is used exclusively for RESPONSE\_FOUND (server→client). Earlier drafts overloaded 0x02 for REGISTER; implementations MUST use 0x09 for REGISTER requests.
 
 ### 9.5.8 ENROLL (0x07)
 
@@ -1367,6 +1379,8 @@ MUST NOT be used for wire encoding.
 | REVOKE | `revoked_ids` (list of hex), `reason` (string), `effective_at` (ISO 8601 string) | `%{revoked_ids: ["ab01..."], reason: "key compromise", effective_at: "2026-03-01T00:00:00Z"}` |
 | BOOTSTRAP | `relays` (list of relay objects) | `%{relays: [%{node_id: "...", endpoint: "..."}]}` |
 
+Individual ZTLP-NS records MUST NOT exceed 4,096 bytes in total wire format size (including canonical form, signature, and public key). Implementations MUST reject records exceeding this limit to prevent amplification attacks and resource exhaustion. The 4 KB limit accommodates all standard record types with generous headroom.
+
 ### 9.5.10 Design Rationale
 
 ZTLP-NS uses a native binary protocol rather than DNS or HTTPS because:
@@ -1447,6 +1461,8 @@ The hardcoded list is a bootstrap-of-last-resort. Nodes that
 successfully complete Step 1 SHOULD NOT rely on hardcoded anchors for
 subsequent connections.
 
+To update the bootstrap relay list without requiring software updates, implementations SHOULD support a DNS-based bootstrap fallback. Implementations MAY query a well-known DNS TXT record at `_ztlp-bootstrap.<zone>.ztlp` to retrieve a current list of bootstrap relay endpoints. The TXT record contains a comma-separated list of `ip:port` pairs. The DNS response MUST be validated using DNSSEC. If DNSSEC validation fails or DNS is unavailable, implementations MUST fall back to the hardcoded list. The hardcoded list serves as the ultimate fallback and MUST always be present in the implementation.
+
 ## 10.2 Post-Bootstrap Peer Exchange
 
 Once a node establishes a session with any relay, it MUST request the
@@ -1498,6 +1514,8 @@ Enrollment tokens are variable-length binary structures (typically
 BLAKE2s-256 as the hash function. The key is the 32-byte zone enrollment
 secret. The MAC covers all bytes from offset 0 through the end of the
 nonce field (everything except the MAC itself).
+
+The total enrollment token size MUST NOT exceed 512 bytes. Implementations MUST reject tokens exceeding this limit during parsing. This prevents parsing-based denial-of-service attacks.
 
 ### 10.4.2 Enrollment URI Scheme
 
@@ -1595,6 +1613,8 @@ responder_to_initiator_key = BLAKE2s(handshake_hash || "ztlp-r2i")
 
 where `handshake_hash` is the `h` value from the completed Noise
 handshake state.
+
+This key derivation uses BLAKE2s-256 in **unkeyed mode** with a 32-byte output. The construction `BLAKE2s(handshake_hash || label)` is equivalent to computing `BLAKE2s-256` over the concatenation of the 32-byte handshake hash and the ASCII label string. This provides domain separation between the two directional keys. The construction is deliberately simple and avoids HKDF dependency, following the Noise Framework's preference for BLAKE2-based key derivation.
 
 **AEAD nonce construction for data packets:** After the handshake
 completes, data-plane packets are encrypted using ChaCha20-Poly1305 with
@@ -1825,6 +1845,26 @@ short lifetimes (RECOMMENDED: 5--30 minutes). Transit and service relays
 MAY accept new session establishment attempts accompanied by a valid
 Relay Admission Token issued by a trusted ingress relay.
 
+**RAT Binary Encoding:**
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       16          Issuing Relay NodeID (128 bits)
+  16      16          Authorized NodeID (128 bits, or all-zeros for bearer tokens)
+  32      8           Issued-at (uint64, epoch-ms, big-endian)
+  40      8           Expires-at (uint64, epoch-ms, big-endian)
+  48      4           Scope flags (uint32, bitfield: bit 31 = allow-transit,
+                      bit 30 = allow-egress, bits 29–0 reserved)
+  52      2           Max sessions (uint16, 0 = unlimited)
+  54      2           Reserved (must be zero)
+  56      32          HMAC-BLAKE2s MAC (keyed with issuing relay's RAT secret)
+```
+
+Total RAT size: 88 bytes. The MAC covers bytes 0–55. Relays MUST
+verify the MAC before accepting any RAT. Expired tokens (current time >
+expires-at) MUST be rejected.
+
 ### 12.4.4 Token Verification
 
 Relay Admission Tokens MUST be verifiable without requiring global
@@ -2052,6 +2092,7 @@ unauthorized parties.
 | 0x07 | RELAY\_LEAVE | Graceful departure from the mesh. |
 | 0x08 | RELAY\_DRAIN | Signal that this relay is draining (no new sessions). |
 | 0x09 | RELAY\_DRAIN\_CANCEL | Cancel a previous drain signal. |
+| 0x0A | RELAY\_PEER\_EXCHANGE | Gossip topology update with relay metrics. |
 
 ### 12.7.2 RELAY\_HELLO / RELAY\_HELLO\_ACK (0x01, 0x02)
 
@@ -2137,6 +2178,35 @@ the peer to remove the sender from its routing table and hash ring.
 A relay receiving DRAIN MUST stop routing new sessions to the draining
 peer but MUST continue forwarding packets for existing sessions until
 the timeout expires or a LEAVE is received.
+
+### 12.7.9 RELAY\_PEER\_EXCHANGE (0x0A)
+
+Carries relay topology gossip updates (see Section 15.1.2). Each message
+contains the sender's current metric measurements for dissemination:
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  89      4           Peer count (uint32)
+  93      var         Peer entries (repeated, see below)
+```
+
+Each peer entry:
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       16          Peer NodeID (128 bits)
+  16      4           Latency (uint32, microseconds)
+  20      2           Packet loss (uint16, basis points, 0–10000 = 0%–100%)
+  22      1           Congestion level (uint8, 0=none, 255=severe)
+  23      4           Available bandwidth (uint32, Kbps)
+```
+
+Relays MUST discard RELAY\_PEER\_EXCHANGE messages with invalid signatures
+(per the common header authentication requirement in Section 12.7).
+Relays SHOULD send topology updates at least once per 30 seconds and
+no more than once per 5 seconds under stable conditions.
 
 # 13. Hardware Enforcement Profiles
 
@@ -2228,6 +2298,8 @@ struct {
 The daemon inserts an entry when a session is established and deletes
 it on session close or expiry. The XDP program performs a lookup — if
 the key is present, the packet passes Layer 2.
+
+When `session_map` reaches capacity, the ZTLP daemon MUST reject new session establishment with ERROR code `0x0D` (RELAY_BUSY) until entries are freed. Implementations MUST NOT silently evict existing sessions to make room for new ones — this would cause active sessions to fail Layer 2 validation. Operators SHOULD monitor map utilization and scale `max_entries` based on expected concurrent session counts.
 
 **Map 2: `hello_rate_map`** — Per-source-IP HELLO rate limiter.
 
@@ -2644,6 +2716,8 @@ optimized for multi-relay paths with heterogeneous latency profiles is a
 target for a future revision of this specification and is listed as an
 open issue in Section 21.
 
+Congestion control in ZTLP operates **end-to-end** between the initiator and responder. Relay nodes do not perform congestion control — they forward packets without rate adjustment. The initiator MUST measure round-trip time through the full relay path and adjust its sending rate accordingly. When multiple relay paths are in use (MULTIPATH), each path SHOULD maintain an independent congestion control state.
+
 ## 15.3 Path MTU Discovery and Fragmentation
 
 The ZTLP base header is 96 bytes. Combined with a UDP header (8 bytes)
@@ -2720,7 +2794,7 @@ connection break during migration.
 
 ## 16.1 Hardware-Backed Keys
 
-ZTLP STRONGLY RECOMMENDS that long-term private keys be stored in
+ZTLP nodes SHOULD store long-term private keys in
 hardware security devices. Supported hardware includes:
 
 -   FIDO2 / YubiKey (USB, NFC)
@@ -2750,6 +2824,44 @@ The certificate lifecycle is:
 
 Certificate TTL SHOULD NOT exceed 90 days. Short-lived session tokens
 (issued per-session) SHOULD NOT exceed 24 hours.
+
+### 16.2.1 Certificate Wire Format
+
+ZTLP node certificates are encoded as signed CBOR (RFC 8949) structures.
+The certificate contains the following fields in a CBOR map with
+sorted keys:
+
+| Key | CBOR Type | Description |
+|-----|-----------|-------------|
+| `algorithm` | text | Signing algorithm ("Ed25519"). |
+| `issued_at` | uint | Unix epoch seconds of issuance. |
+| `issuer_pubkey` | bytes | Ed25519 public key of the issuing authority (32 bytes). |
+| `node_id` | bytes | 128-bit NodeID of the certified node (16 bytes). |
+| `not_after` | uint | Unix epoch seconds of expiry. Certificate TTL SHOULD NOT exceed 90 days. |
+| `not_before` | uint | Unix epoch seconds of validity start. |
+| `pubkey_ed25519` | bytes | Node's Ed25519 signing public key (32 bytes). |
+| `pubkey_x25519` | bytes | Node's X25519 static public key (32 bytes). |
+| `serial` | uint | Monotonically increasing serial number. |
+| `zone` | text | ZTLP-NS zone (e.g., "office.acme.ztlp"). |
+
+The certificate is signed by the issuing Enrollment Authority using
+Ed25519. The signature covers the deterministic CBOR encoding of the
+map above (sorted keys, no signature field). The signed certificate
+wire format is:
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       2           Certificate length (uint16, big-endian)
+  2       cert_len    CBOR-encoded certificate map
+  2+C     2           Signature length (uint16, always 64)
+  4+C     64          Ed25519 signature
+```
+
+Implementations MUST verify the signature against the issuer's public
+key before trusting any certificate fields. Certificate chains are
+supported: the issuer_pubkey may itself be certified by a higher
+authority, up to the trust root.
 
 ## 16.3 Node Identity Assurance Model and Attestation
 
@@ -2806,7 +2918,7 @@ AttestationType (TPM, Secure Enclave, FIDO2, or HSM), IssuingAuthority
 ValidUntil timestamps, and a Signature by the attestation authority.
 These records MUST be signed and verifiable using the ZTLP-NS trust
 chain. Nodes without attestation records are treated as Assurance Level
-A0.
+A0. The ZTLP_ATTEST record data is encoded in sorted-key CBOR with the following fields: `node_id` (bytes, 16-byte NodeID), `assurance_level` (uint, 1–4 per Section 16.3.2), `attestation_type` (text, one of `"tpm2"`, `"fido2"`, `"secure_enclave"`, `"software"`), `attested_at` (uint, epoch seconds), `attester_pubkey` (bytes, public key of the attestation authority), and `evidence_hash` (bytes, BLAKE2s hash of the raw attestation evidence). The record is signed by the attestation authority.
 
 ### 16.3.4 Device Posture Evidence
 
@@ -3088,7 +3200,7 @@ sequenceDiagram
 
     I->>R: HELLO
     R-->>I: CHALLENGE (nonce, difficulty, expiry, cookie)
-    Note over I: Solve proof-of-work puzzle<br/>find nonce: HASH(challenge ∥ nonce) has N leading zero bits
+    Note over I: Solve proof-of-work puzzle<br/>find nonce: BLAKE2s(challenge ∥ nonce) has N leading zero bits
     I->>R: HELLO_PROOF (puzzle solution + original HELLO)
     Note over R: Verify cookie (stateless — no per-client state stored)<br/>Verify puzzle solution
     R-->>I: HELLO_ACK (proceed with Noise_XX handshake)
@@ -3102,9 +3214,9 @@ stored. This is directly analogous to TCP SYN cookies and QUIC retry
 tokens - a proven technique for stateless flood defense.
 
 The puzzle SHOULD require the initiator to find a nonce such that
-HASH(challenge \|\| nonce) has N leading zero bits. Difficulty N SHOULD
+BLAKE2s(challenge \|\| nonce) has N leading zero bits. Difficulty N SHOULD
 be adaptive - zero or disabled under normal load, increasing
-automatically as HELLO rate exceeds configurable thresholds. This
+automatically as HELLO rate exceeds configurable thresholds. The proof-of-work hash function is BLAKE2s-256 (RFC 7693). This is consistent with the hash function used throughout the ZTLP protocol. This
 preserves low-friction operation for legitimate users while dramatically
 increasing the cost of botnet-scale handshake floods.
 
@@ -3128,6 +3240,8 @@ PTP for clock synchronization where available, and SHOULD flag packets
 with timestamps more than ±5 minutes from local time for additional
 scrutiny, but MUST NOT drop them on that basis alone.
 
+For certificate validation, implementations MUST allow a clock skew tolerance of 5 minutes (300 seconds) when checking `not_before` and `not_after` fields. Certificates that expire during an active session do NOT cause immediate session termination — the session remains valid until its own lifetime expires or rekeying occurs. However, expired certificates MUST NOT be used for NEW session establishment.
+
 ## 18.5 Cryptographic Agility
 
 The CryptoSuite field allows future algorithm upgrades without protocol
@@ -3149,6 +3263,8 @@ suites MAY be added in future protocol revisions.
 | `0x0100`–`0x01FF` | — | — | — | — | — | Reserved for experimental / private use. |
 | `0xFFFF` | — | — | — | — | — | Reserved (MUST NOT be used). |
 
+CryptoSuite values `0x0004` through `0x00FF` are reserved for future standardized suites. Values `0x0100` through `0xFFFE` are available for experimental or private use. Value `0x0000` is reserved and MUST NOT be used. Value `0xFFFF` is reserved as a sentinel.
+
 **Suite negotiation:** CryptoSuite negotiation is implicit in ZTLP. The
 Initiator sets the `CryptoSuite` field in the HELLO header to its
 preferred suite. If the Responder does not support that suite, it MUST
@@ -3157,6 +3273,8 @@ Responder's preferred CryptoSuite ID in the first two bytes of the
 Error Detail field. The Initiator MAY retry with the suggested suite.
 Implementations MUST NOT downgrade to a suite with known weaknesses
 even if suggested by a peer.
+
+Each CryptoSuite specifies a recommended rekeying interval. For CryptoSuite 0x0001: 3,600 seconds (1 hour). For CryptoSuites 0x0002 and 0x0003: 3,600 seconds (1 hour). Implementations MAY override the rekeying interval via policy but MUST NOT exceed the maximum session lifetime (Section 35.1).
 
 In protocol version 1, CryptoSuite `0x0001` (ChaCha20-Poly1305 + BLAKE2s + Noise\_XX) is the ONLY permitted suite. Initiators MUST propose `0x0001`. Responders MUST reject any other suite with ERROR code `0x07` (CRYPTO\_MISMATCH). CryptoSuites `0x0002` and `0x0003` are registered for future protocol versions and MUST NOT be used in version 1. This eliminates downgrade attacks while preserving the registry for future algorithm agility.
 
@@ -3188,7 +3306,7 @@ the TLS SNI leakage problem prior to Encrypted Client Hello (ECH), and
 must be addressed at the design level.
 
 ZTLP addresses this through the canonical data-plane model: after
-`SESSION_OK`, the compact post-handshake header contains only the
+`SESSION_OPEN`, the compact post-handshake header contains only the
 96-bit `SessionID` — no `SrcNodeID`, no `DstSvcID`. This is the same model
 used by QUIC (Connection ID), WireGuard (Session Index), and MPLS
 (Label): identity is verified once at handshake time, then routing
@@ -3445,7 +3563,7 @@ signed delegation records. Delegation may include enrollment authority
 delegation, operator authority delegation, and tenant policy authority
 delegation. Delegation records allow large organizations or federated
 networks to manage identities locally while maintaining a verifiable
-chain of trust.
+chain of trust. A delegation record is a standard ZTLP-NS record of type ZTLP_POLICY with the following data fields encoded in sorted-key CBOR: `delegate_zone` (text, the delegated zone name), `delegate_pubkey` (bytes, Ed25519 public key of the delegate authority), `permissions` (array of text, e.g., `["enroll", "sign_key", "sign_svc"]`), and `max_depth` (uint, maximum further delegation depth, 0 = no sub-delegation). The delegation record MUST be signed by the parent zone's authority key.
 
 ## 23.6 Conflict Resolution Across Multiple Roots
 
@@ -3575,7 +3693,7 @@ healthcare, and government environments.
 
 Commercial deployment requires simple service discovery. A DNS record of
 the form \_ztlp.api.service.example.com returns the service NodeID,
-relay endpoint, and policy requirements. ZTLP-aware clients
+relay endpoint, and policy requirements. The `_ztlp` discovery record is a DNS TXT record with the following semicolon-delimited fields: `v=ztlp1;nid=<hex NodeID>;relay=<ip:port>;policy=<FQDN>`. Example: `_ztlp.api.example.com TXT "v=ztlp1;nid=ab01cd02...;relay=203.0.113.10:23095;policy=api-policy.example.ztlp"`. Implementations MUST validate the NodeID by querying ZTLP-NS before establishing a session. ZTLP-aware clients
 automatically connect using identity-first session establishment. Legacy
 clients that do not support ZTLP fall back to standard HTTPS, preserving
 backward compatibility.
@@ -3891,7 +4009,9 @@ packet
   48-143: "SessionID (96 bits)"
   144-207: "PacketSequence (64 bits)"
   208-335: "HeaderAuthTag (128 bits)"
-  336-383: "Encrypted Payload (variable)"
+  336-351: "ExtLen (16 bits)"
+  352-367: "PayloadLen (16 bits)"
+  368-...: "Encrypted Payload (variable)"
 ```
 
 NodeID values do not appear in data packet headers after session
@@ -3935,7 +4055,7 @@ protocol.
 ### 29.4.3 Handshake Layer
 
 The handshake layer is used during session establishment. Handshake
-messages include HELLO, CHALLENGE, AUTH, and `SESSION_OPEN`. The handshake
+messages include HELLO (MsgType 1, carrying Noise\_XX Messages 1 and 3), CHALLENGE (MsgType 2), and SESSION\_OPEN (MsgType 0, the responder's session confirmation). The handshake
 layer provides mutual authentication, identity verification, session key
 derivation, replay protection, and forward secrecy. Handshake encryption
 SHOULD use a modern authenticated key exchange protocol such as the
@@ -4054,11 +4174,9 @@ Packets that fail endpoint verification MUST be silently discarded.
 
 ### 29.5.3 Forwarding Authenticator
 
-ZTLP MAY define a lightweight forwarding authenticator for transit use.
-The purpose of this authenticator is to allow relays to reject malformed
-or spoofed packets cheaply without imposing full end-to-end decryption
-cost on every relay hop. A forwarding authenticator, if used, MUST
-satisfy the following properties:
+ZTLP defines a lightweight forwarding authenticator for relay-to-relay packet validation. The forwarding authenticator is a truncated HMAC-BLAKE2s computed as: `FA = HMAC-BLAKE2s(relay_shared_key, SessionID || PacketSeq)[0:8]` (first 8 bytes of the HMAC output). The `relay_shared_key` is established during relay mesh peering (Section 12.7). The FA is carried in the RELAY_PATH extension TLV (Section 8.4) and verified at each relay hop. This provides per-hop authentication without full AEAD overhead on the forwarding fast path.
+
+The forwarding authenticator MUST satisfy the following properties:
 
 -   Bound to the active SessionID.
 
@@ -4243,15 +4361,15 @@ sequenceDiagram
     Note over R: Magic check + SessionID lookup (fast path)
     R-->>C: CHALLENGE (puzzle + nonce)
     Note over C: Solve proof-of-work — stateless, no relay alloc yet
-    C->>R: AUTH (signature + puzzle solution)
+    C->>R: HELLO Message 3 (identity + signature + puzzle solution)
     Note over R: AEAD verify → state allocated only here
-    R-->>C: SESSION_OK (SessionID)
+    R-->>C: SESSION_OPEN (SessionID)
     Note over C,R: All subsequent packets carry SessionID only — no NodeID on data path
     C->>R: Encrypted Data (SessionID)
     R-->>C: Encrypted Data (SessionID)
 ```
 
-After `SESSION_OK`, all packets carry only the SessionID. NodeID values do
+After `SESSION_OPEN`, all packets carry only the SessionID. NodeID values do
 not appear in the data path. Session state is allocated only after the
 client has passed magic byte validation, challenge-response, and AEAD
 verification.
@@ -4615,8 +4733,7 @@ MUST be rotated upon any of the following conditions:
 -   Elapsed time since last keying exceeds the CryptoSuite-defined
     rekeying interval (default: 1 hour).
 
--   Packet sequence number approaches the maximum window (at 2\^48
-    packets for a 64-bit sequence field).
+-   Packet sequence number approaches the maximum window. Sessions MUST initiate rekeying when PacketSeq reaches 2^48 (281,474,976,710,656). This threshold provides a safety margin below the 2^64 nonce space to account for implementation variance and ensures no single key encrypts an excessive volume of data. The 2^48 threshold is consistent with the AEAD safety limits recommended for ChaCha20-Poly1305.
 
 -   Explicit REKEY message received from either endpoint.
 
@@ -4873,6 +4990,8 @@ current load:
 -   Relay nodes MUST NOT drop established authenticated sessions to
     accommodate new admission requests; load shedding MUST only affect
     new session establishment.
+
+The maximum session table size is deployment-specific and SHOULD be configured based on available memory and CPU resources. Implementations MUST expose the maximum session count as a configuration parameter with a default of 65,536 (matching the eBPF session_map default). The '80% of capacity' threshold for admission control is computed as `0.8 × max_sessions`.
 
 ## 37.4 Authenticated Session Priority
 

@@ -109,7 +109,7 @@ impl TransportNode {
         let cipher = ChaCha20Poly1305::new((&send_key).into());
         // Use packet sequence as nonce (padded to 12 bytes)
         let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let encrypted = cipher
@@ -189,7 +189,7 @@ impl TransportNode {
 
                         let cipher = ChaCha20Poly1305::new((&recv_key).into());
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
+                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
 
                         match cipher.decrypt(nonce, encrypted_payload) {

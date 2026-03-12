@@ -4,31 +4,31 @@ defmodule ZtlpRelay.Packet do
 
   Implements the exact bit-level layout from the ZTLP spec:
 
-  **Handshake Header (95 bytes):**
+  **Handshake Header (96 bytes):**
 
       <<magic::16, ver::4, hdr_len::12, flags::16, msg_type::8,
         crypto_suite::16, key_id::16, session_id::binary-size(12),
         packet_seq::64, timestamp::64, src_node_id::binary-size(16),
         dst_svc_id::binary-size(16), policy_tag::32, ext_len::16,
-        payload_len::16, header_auth_tag::binary-size(16)>>
+        payload_len::16, reserved::8, header_auth_tag::binary-size(16)>>
 
-  **Compact Data Header (42 bytes):**
+  **Compact Data Header (46 bytes):**
 
       <<magic::16, ver::4, hdr_len::12, flags::16,
         session_id::binary-size(12), packet_seq::64,
-        header_auth_tag::binary-size(16)>>
+        header_auth_tag::binary-size(16), ext_len::16, payload_len::16>>
 
   Packet type discrimination uses the HdrLen field:
-  - HdrLen = 24 → Handshake header (95 bytes)
-  - HdrLen = 11 → Compact data header (42 bytes)
+  - HdrLen = 24 → Handshake header (96 bytes)
+  - HdrLen = 12 → Compact data header (46 bytes)
   """
 
   @magic 0x5A37
   @version 1
-  @handshake_header_size 95
-  @data_header_size 42
+  @handshake_header_size 96
+  @data_header_size 46
   @handshake_hdr_len 24
-  @data_hdr_len 11
+  @data_hdr_len 12
 
   # Message types
   @msg_data 0
@@ -39,9 +39,10 @@ defmodule ZtlpRelay.Packet do
   @msg_error 5
   @msg_ping 6
   @msg_pong 7
+  @msg_migrate 8
 
   @type session_id :: <<_::96>>
-  @type msg_type :: :data | :hello | :hello_ack | :rekey | :close | :error | :ping | :pong
+  @type msg_type :: :data | :hello | :hello_ack | :rekey | :close | :error | :ping | :pong | :migrate
 
   @type handshake_packet :: %{
           type: :handshake,
@@ -87,21 +88,21 @@ defmodule ZtlpRelay.Packet do
   @doc """
   Returns the handshake header size in bytes.
   """
-  @spec handshake_header_size() :: 95
+  @spec handshake_header_size() :: 96
   def handshake_header_size, do: @handshake_header_size
 
   @doc """
   Returns the compact data header size in bytes.
   """
-  @spec data_header_size() :: 42
+  @spec data_header_size() :: 46
   def data_header_size, do: @data_header_size
 
   @doc """
   Parse a raw binary packet into a structured map.
 
   Uses the HdrLen field to discriminate between handshake and data headers:
-  - HdrLen = 24 → Handshake header (95 bytes)
-  - HdrLen = 11 → Compact data header (42 bytes)
+  - HdrLen = 24 → Handshake header (96 bytes)
+  - HdrLen = 12 → Compact data header (46 bytes)
 
   Returns `{:ok, parsed_packet}` or `{:error, reason}`.
   """
@@ -110,8 +111,8 @@ defmodule ZtlpRelay.Packet do
         <<@magic::16, @version::4, @handshake_hdr_len::12, flags::16, msg_type_byte::8,
           crypto_suite::16, key_id::16, session_id::binary-size(12), packet_seq::64,
           timestamp::64, src_node_id::binary-size(16), dst_svc_id::binary-size(16),
-          policy_tag::32, ext_len::16, payload_len::16, header_auth_tag::binary-size(16),
-          payload::binary>>
+          policy_tag::32, ext_len::16, payload_len::16, _reserved::8,
+          header_auth_tag::binary-size(16), payload::binary>>
       ) do
     case decode_msg_type(msg_type_byte) do
       {:ok, msg_type} ->
@@ -144,7 +145,8 @@ defmodule ZtlpRelay.Packet do
 
   def parse(
         <<@magic::16, @version::4, @data_hdr_len::12, flags::16, session_id::binary-size(12),
-          packet_seq::64, header_auth_tag::binary-size(16), payload::binary>>
+          packet_seq::64, header_auth_tag::binary-size(16), ext_len::16, payload_len::16,
+          payload::binary>>
       ) do
     {:ok,
      %{
@@ -156,6 +158,8 @@ defmodule ZtlpRelay.Packet do
        session_id: session_id,
        packet_seq: packet_seq,
        header_auth_tag: header_auth_tag,
+       ext_len: ext_len,
+       payload_len: payload_len,
        payload: payload
      }}
   end
@@ -204,6 +208,7 @@ defmodule ZtlpRelay.Packet do
       pkt.policy_tag::32,
       pkt.ext_len::16,
       pkt.payload_len::16,
+      0::8,
       pkt.header_auth_tag::binary-size(16)
     >>
 
@@ -222,7 +227,9 @@ defmodule ZtlpRelay.Packet do
       pkt.flags::16,
       pkt.session_id::binary-size(12),
       pkt.packet_seq::64,
-      pkt.header_auth_tag::binary-size(16)
+      pkt.header_auth_tag::binary-size(16),
+      Map.get(pkt, :ext_len, 0)::16,
+      Map.get(pkt, :payload_len, 0)::16
     >>
 
     <<header::binary, pkt.payload::binary>>
@@ -243,12 +250,14 @@ defmodule ZtlpRelay.Packet do
   @spec extract_aad(binary()) :: {:ok, binary()} | {:error, atom()}
   def extract_aad(<<@magic::16, @version::4, @handshake_hdr_len::12, _::binary>> = data)
       when byte_size(data) >= @handshake_header_size do
-    {:ok, binary_part(data, 0, @handshake_header_size - 16)}
+    {:ok, binary_part(data, 0, 80)}
   end
 
   def extract_aad(<<@magic::16, @version::4, @data_hdr_len::12, _::binary>> = data)
       when byte_size(data) >= @data_header_size do
-    {:ok, binary_part(data, 0, @data_header_size - 16)}
+    pre_tag = binary_part(data, 0, 26)
+    post_tag = binary_part(data, 42, 4)
+    {:ok, <<pre_tag::binary, post_tag::binary>>}
   end
 
   def extract_aad(_), do: {:error, :cannot_extract_aad}
@@ -259,12 +268,12 @@ defmodule ZtlpRelay.Packet do
   @spec extract_auth_tag(binary()) :: {:ok, binary()} | {:error, atom()}
   def extract_auth_tag(<<@magic::16, @version::4, @handshake_hdr_len::12, _::binary>> = data)
       when byte_size(data) >= @handshake_header_size do
-    {:ok, binary_part(data, @handshake_header_size - 16, 16)}
+    {:ok, binary_part(data, 80, 16)}
   end
 
   def extract_auth_tag(<<@magic::16, @version::4, @data_hdr_len::12, _::binary>> = data)
       when byte_size(data) >= @data_header_size do
-    {:ok, binary_part(data, @data_header_size - 16, 16)}
+    {:ok, binary_part(data, 26, 16)}
   end
 
   def extract_auth_tag(_), do: {:error, :cannot_extract_auth_tag}
@@ -369,6 +378,8 @@ defmodule ZtlpRelay.Packet do
       session_id: session_id,
       packet_seq: packet_seq,
       header_auth_tag: Keyword.get(opts, :header_auth_tag, <<0::128>>),
+      ext_len: Keyword.get(opts, :ext_len, 0),
+      payload_len: Keyword.get(opts, :payload_len, 0),
       payload: Keyword.get(opts, :payload, <<>>)
     }
   end
@@ -384,6 +395,7 @@ defmodule ZtlpRelay.Packet do
   defp decode_msg_type(@msg_error), do: {:ok, :error}
   defp decode_msg_type(@msg_ping), do: {:ok, :ping}
   defp decode_msg_type(@msg_pong), do: {:ok, :pong}
+  defp decode_msg_type(@msg_migrate), do: {:ok, :migrate}
   defp decode_msg_type(_), do: {:error, :invalid_msg_type}
 
   @doc false
@@ -396,4 +408,5 @@ defmodule ZtlpRelay.Packet do
   def encode_msg_type(:error), do: @msg_error
   def encode_msg_type(:ping), do: @msg_ping
   def encode_msg_type(:pong), do: @msg_pong
+  def encode_msg_type(:migrate), do: @msg_migrate
 end

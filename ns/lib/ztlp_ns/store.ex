@@ -225,7 +225,10 @@ defmodule ZtlpNs.Store do
 
   # When a ZTLP_REVOKE record is inserted, extract all revoked IDs
   # and add them to the revocation table for O(1) lookup.
-  defp index_revocations(%Record{type: :revoke, data: %{revoked_ids: ids}} = record) do
+  # Handles both atom keys (from constructors) and string keys (from CBOR decode).
+  defp index_revocations(%Record{type: :revoke, data: data} = record) do
+    ids = Map.get(data, :revoked_ids) || Map.get(data, "revoked_ids") || []
+
     Enum.each(ids, fn id ->
       :mnesia.dirty_write({@revoked_table, id, record})
     end)

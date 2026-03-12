@@ -2,7 +2,7 @@ defmodule ZtlpGateway.SessionRegistry do
   @moduledoc """
   ETS-based session registry for the ZTLP Gateway.
 
-  Maps SessionID (16 bytes) → Session pid. Provides O(1) lookup
+  Maps SessionID (12 bytes / 96-bit) → Session pid. Provides O(1) lookup
   for the admission pipeline's Layer 2 (SessionID check).
 
   ## Concurrency
@@ -36,7 +36,7 @@ defmodule ZtlpGateway.SessionRegistry do
   the entry is automatically removed.
   """
   @spec register(binary(), pid()) :: :ok | {:error, :already_registered}
-  def register(session_id, pid) when byte_size(session_id) == 16 do
+  def register(session_id, pid) when byte_size(session_id) == 12 do
     GenServer.call(__MODULE__, {:register, session_id, pid})
   end
 
@@ -47,7 +47,7 @@ defmodule ZtlpGateway.SessionRegistry do
   This is called on every incoming packet — must be fast.
   """
   @spec lookup(binary()) :: {:ok, pid()} | :error
-  def lookup(session_id) when byte_size(session_id) == 16 do
+  def lookup(session_id) when byte_size(session_id) == 12 do
     case :ets.lookup(@table, session_id) do
       [{^session_id, pid}] -> {:ok, pid}
       [] -> :error
@@ -58,7 +58,7 @@ defmodule ZtlpGateway.SessionRegistry do
   Unregister a session (called during clean shutdown).
   """
   @spec unregister(binary()) :: :ok
-  def unregister(session_id) when byte_size(session_id) == 16 do
+  def unregister(session_id) when byte_size(session_id) == 12 do
     :ets.delete(@table, session_id)
     :ok
   end

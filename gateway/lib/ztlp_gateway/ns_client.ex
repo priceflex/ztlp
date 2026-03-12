@@ -254,7 +254,7 @@ defmodule ZtlpGateway.NsClient do
   #   sig_len::16, signature::binary-size(sig_len),
   #   pub_len::16, public_key::binary-size(pub_len)>>
 
-  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap}
+  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator}
 
   defp decode_record(data) when is_binary(data) do
     <<type_byte::8, name_len::16, rest::binary>> = data
@@ -268,7 +268,7 @@ defmodule ZtlpGateway.NsClient do
     <<sig_len::16, sig::binary-size(sig_len), pub_len::16, pub::binary-size(pub_len)>> = rest5
 
     type = Map.get(@type_map, type_byte, :unknown)
-    record_data = :erlang.binary_to_term(data_bin, [:safe])
+    record_data = case ZtlpGateway.Cbor.decode(data_bin) do {:ok, d} -> d; _ -> %{} end
 
     # Reconstruct the canonical bytes (everything before the signature)
     canonical =

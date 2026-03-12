@@ -104,7 +104,7 @@ defmodule ZtlpGateway.Pipeline do
             :error -> {:reject, :unknown_session}
           end
 
-        :error ->
+        {:error, _} ->
           {:reject, :truncated}
       end
     end

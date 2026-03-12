@@ -28,22 +28,24 @@ defmodule ZtlpGateway.PipelineTest do
     end
 
     test "rejects unknown SessionID" do
-      sid = :crypto.strong_rand_bytes(16)
-      auth = :crypto.strong_rand_bytes(12)
-      pkt = Packet.build_data(sid, 1, auth, "data")
-      assert {:reject, :unknown_session} = Pipeline.admit(pkt)
+      sid = :crypto.strong_rand_bytes(12)
+      auth = :crypto.strong_rand_bytes(16)
+      pkt = Packet.build_data(sid, 1, payload: "data", header_auth_tag: auth)
+      raw = Packet.serialize(pkt)
+      assert {:reject, :unknown_session} = Pipeline.admit(raw)
     end
 
     test "admits packet for registered session" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
 
       # Spawn a dummy process to register
       {:ok, pid} = Agent.start_link(fn -> nil end)
       :ok = SessionRegistry.register(sid, pid)
 
-      auth = :crypto.strong_rand_bytes(12)
-      pkt = Packet.build_data(sid, 1, auth, "data")
-      assert {:ok, :known_session, ^pid} = Pipeline.admit(pkt)
+      auth = :crypto.strong_rand_bytes(16)
+      pkt = Packet.build_data(sid, 1, payload: "data", header_auth_tag: auth)
+      raw = Packet.serialize(pkt)
+      assert {:ok, :known_session, ^pid} = Pipeline.admit(raw)
 
       # Clean up
       SessionRegistry.unregister(sid)

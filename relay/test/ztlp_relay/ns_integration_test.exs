@@ -68,8 +68,8 @@ defmodule ZtlpRelay.NsIntegrationTest do
       {:ok, _} = NsClient.start_link(ns_server: {{127, 0, 0, 1}, ns_port})
       assert {:ok, record} = NsClient.lookup_relay(name)
       assert record.type == :relay
-      assert record.data.node_id == Base.encode16(relay_node_id, case: :lower)
-      assert record.data.endpoints == relay_endpoints
+      assert record.data["node_id"] == Base.encode16(relay_node_id, case: :lower)
+      assert record.data["endpoints"] == relay_endpoints
       GenServer.stop(ns_pid)
     end
 
@@ -86,8 +86,8 @@ defmodule ZtlpRelay.NsIntegrationTest do
       {:ok, _} = NsClient.start_link(ns_server: {{127, 0, 0, 1}, ns_port})
       assert {:ok, found} = NsClient.lookup_relay(name)
       assert found.type == :relay
-      assert found.data.capacity == 50
-      assert found.data.region == "us-east"
+      assert found.data["capacity"] == 50
+      assert found.data["region"] == "us-east"
       GenServer.stop(ns_pid)
     end
 
@@ -110,10 +110,10 @@ defmodule ZtlpRelay.NsIntegrationTest do
 
       case ZtlpNs.Store.lookup(expected_name, :relay) do
         {:ok, record} ->
-          assert record.data.node_id == node_id_hex
-          assert record.data.endpoints == ["127.0.0.1:4444"]
-          assert record.data.capacity == 200
-          assert record.data.region == "eu-west"
+          assert record.data["node_id"] == node_id_hex
+          assert record.data["endpoints"] == ["127.0.0.1:4444"]
+          assert record.data["capacity"] == 200
+          assert record.data["region"] == "eu-west"
 
         :not_found ->
           flunk("Expected relay record '#{expected_name}' to exist in NS store")

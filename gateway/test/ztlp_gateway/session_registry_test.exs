@@ -5,7 +5,7 @@ defmodule ZtlpGateway.SessionRegistryTest do
 
   describe "register/lookup/unregister" do
     test "register and lookup" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       {:ok, pid} = Agent.start_link(fn -> nil end)
       :ok = SessionRegistry.register(sid, pid)
       assert {:ok, ^pid} = SessionRegistry.lookup(sid)
@@ -14,12 +14,12 @@ defmodule ZtlpGateway.SessionRegistryTest do
     end
 
     test "lookup returns :error for unknown session" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       assert :error = SessionRegistry.lookup(sid)
     end
 
     test "double registration returns error" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       {:ok, pid1} = Agent.start_link(fn -> nil end)
       {:ok, pid2} = Agent.start_link(fn -> nil end)
 
@@ -32,7 +32,7 @@ defmodule ZtlpGateway.SessionRegistryTest do
     end
 
     test "unregister removes entry" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       {:ok, pid} = Agent.start_link(fn -> nil end)
       :ok = SessionRegistry.register(sid, pid)
 
@@ -44,7 +44,7 @@ defmodule ZtlpGateway.SessionRegistryTest do
     test "count reflects active sessions" do
       initial = SessionRegistry.count()
 
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       {:ok, pid} = Agent.start_link(fn -> nil end)
       :ok = SessionRegistry.register(sid, pid)
       assert SessionRegistry.count() == initial + 1
@@ -56,7 +56,7 @@ defmodule ZtlpGateway.SessionRegistryTest do
     end
 
     test "auto-unregisters on process death" do
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
       {:ok, pid} = Agent.start_link(fn -> nil end)
       :ok = SessionRegistry.register(sid, pid)
 

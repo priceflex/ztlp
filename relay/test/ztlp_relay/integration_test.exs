@@ -199,8 +199,8 @@ defmodule ZtlpRelay.IntegrationTest do
         )
 
       raw = Packet.serialize(pkt)
-      # No payload
-      assert byte_size(raw) == 95
+      # No payload — 96 bytes for handshake header (includes reserved byte)
+      assert byte_size(raw) == 96
 
       {:ok, parsed} = Packet.parse(raw)
       assert parsed.msg_type == :hello

@@ -7,7 +7,7 @@ defmodule ZtlpRelay.PacketTest do
   @magic 0x5A37
   @version 1
   @handshake_hdr_len 24
-  @data_hdr_len 11
+  @data_hdr_len 12
 
   describe "parse/1 handshake header" do
     test "parses a valid HELLO packet" do
@@ -72,10 +72,10 @@ defmodule ZtlpRelay.PacketTest do
       assert parsed.header_auth_tag == auth_tag
     end
 
-    test "serialized handshake header is exactly 95 bytes" do
+    test "serialized handshake header is exactly 96 bytes" do
       pkt = Packet.build_handshake(:hello, <<0::96>>)
       raw = Packet.serialize_handshake(pkt)
-      assert byte_size(raw) == 95
+      assert byte_size(raw) == 96
     end
 
     test "preserves payload through roundtrip" do
@@ -109,10 +109,10 @@ defmodule ZtlpRelay.PacketTest do
       assert parsed.packet_seq == 42
     end
 
-    test "serialized data header is exactly 42 bytes" do
+    test "serialized data header is exactly 46 bytes" do
       pkt = Packet.build_data(<<0::96>>, 0)
       raw = Packet.serialize_data(pkt)
-      assert byte_size(raw) == 42
+      assert byte_size(raw) == 46
     end
 
     test "preserves fields through roundtrip" do
@@ -166,7 +166,7 @@ defmodule ZtlpRelay.PacketTest do
     test "rejects unknown header type" do
       # Valid magic and version, but hdr_len = 99 (unknown)
       ver_hdrlen = @version <<< 12 ||| 99
-      raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 91)
+      raw = <<@magic::16, ver_hdrlen::16>> <> :binary.copy(<<0>>, 92)
       assert {:error, :unknown_header_type} = Packet.parse(raw)
     end
 
@@ -242,7 +242,8 @@ defmodule ZtlpRelay.PacketTest do
       raw = Packet.serialize(pkt)
 
       assert {:ok, aad} = Packet.extract_aad(raw)
-      assert byte_size(aad) == 95 - 16
+      # AAD = bytes 0..79 (before HeaderAuthTag at offset 80)
+      assert byte_size(aad) == 80
 
       assert {:ok, ^auth_tag} = Packet.extract_auth_tag(raw)
     end
@@ -253,7 +254,8 @@ defmodule ZtlpRelay.PacketTest do
       raw = Packet.serialize(pkt)
 
       assert {:ok, aad} = Packet.extract_aad(raw)
-      assert byte_size(aad) == 42 - 16
+      # AAD = first 26 bytes + ExtLen(2) + PayloadLen(2) = 30 bytes
+      assert byte_size(aad) == 30
 
       assert {:ok, ^auth_tag} = Packet.extract_auth_tag(raw)
     end

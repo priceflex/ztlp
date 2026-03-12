@@ -27,6 +27,7 @@ defmodule ZtlpNs.Record do
   - `:policy` (ZTLP_POLICY) — Access control rules
   - `:revoke` (ZTLP_REVOKE) — Revocation notice
   - `:bootstrap` (ZTLP_BOOTSTRAP) — Signed relay list for discovery
+  - `:operator` (ZTLP_OPERATOR) — Operator configuration
 
   ## Canonical Serialization
 
@@ -34,15 +35,15 @@ defmodule ZtlpNs.Record do
   The signed bytes are: `type_byte ++ name_len ++ name ++ data_binary ++
   created_at(8 bytes) ++ ttl(4 bytes) ++ serial(8 bytes)`.
 
-  We use `:erlang.term_to_binary(data, [:deterministic])` for the data
-  field to ensure identical maps always produce identical bytes —
-  critical for signature verification.
+  We use CBOR (RFC 8949) with sorted keys for the data field to ensure
+  identical maps always produce identical bytes — critical for signature
+  verification.
   """
 
   @enforce_keys [:name, :type, :data, :created_at, :ttl, :serial]
   defstruct [:name, :type, :data, :signature, :signer_public_key, :created_at, :ttl, :serial]
 
-  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap
+  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -59,21 +60,21 @@ defmodule ZtlpNs.Record do
   # These byte values appear in both the wire format and the canonical
   # serialization. They MUST NOT change without a protocol version bump.
 
-  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6}
-  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap}
+  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7}
+  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator}
 
   @doc "Convert a record type atom to its wire format byte."
-  @spec type_to_byte(record_type()) :: 1..6
+  @spec type_to_byte(record_type()) :: 1..7
   def type_to_byte(type), do: Map.fetch!(@type_bytes, type)
 
   @doc "Convert a wire format byte to a record type atom."
-  @spec byte_to_type(1..6) :: record_type()
+  @spec byte_to_type(1..7) :: record_type()
   def byte_to_type(byte), do: Map.fetch!(@byte_types, byte)
 
   # ── Canonical Serialization ────────────────────────────────────────
   # This is the binary form that gets signed. It MUST be deterministic —
   # the same record MUST always produce the same bytes. This is why we
-  # use :erlang.term_to_binary with the :deterministic option.
+  # use CBOR with sorted keys (RFC 8949 §4.2).
 
   @doc """
   Serialize a record to its canonical binary form (for signing).
@@ -93,8 +94,8 @@ defmodule ZtlpNs.Record do
     type_byte = type_to_byte(record.type)
     name_bin = record.name
     name_len = byte_size(name_bin)
-    # :deterministic ensures identical maps → identical bytes
-    data_bin = :erlang.term_to_binary(record.data, [:deterministic])
+    # CBOR with sorted keys ensures identical maps → identical bytes
+    data_bin = ZtlpNs.Cbor.encode(record.data)
     data_len = byte_size(data_bin)
 
     <<type_byte::8, name_len::16, name_bin::binary, data_len::32, data_bin::binary,
@@ -116,9 +117,8 @@ defmodule ZtlpNs.Record do
           serial::unsigned-big-64>>
       ) do
     type = byte_to_type(type_byte)
-    # :safe prevents atoms from being created during deserialization,
-    # protecting against atom table exhaustion attacks
-    data = :erlang.binary_to_term(data_bin, [:safe])
+    # CBOR decode — returns string keys (no atom creation)
+    {:ok, data} = ZtlpNs.Cbor.decode(data_bin)
 
     {:ok,
      %__MODULE__{
@@ -221,7 +221,7 @@ defmodule ZtlpNs.Record do
     <<sig_len::16, sig::binary-size(sig_len), pub_len::16, pub::binary-size(pub_len)>> = rest5
 
     type = byte_to_type(type_byte)
-    record_data = :erlang.binary_to_term(data_bin, [:safe])
+    {:ok, record_data} = ZtlpNs.Cbor.decode(data_bin)
 
     {:ok,
      %__MODULE__{

@@ -2,7 +2,7 @@
 //!
 //! Implements the exact bit-level layout from the ZTLP spec:
 //!
-//! **Handshake/Control Header (95 bytes):**
+//! **Handshake/Control Header (96 bytes):**
 //! - Magic: 16 bits (0x5A37)
 //! - Ver: 4 bits + HdrLen: 12 bits (packed into one u16)
 //! - Flags: 16 bits
@@ -17,15 +17,18 @@
 //! - PolicyTag: 32 bits
 //! - ExtLen: 16 bits
 //! - PayloadLen: 16 bits
+//! - Reserved: 8 bits (alignment, must be zero)
 //! - HeaderAuthTag: 128 bits (16 bytes)
 //!
-//! **Compact Data Header (42 bytes, post-handshake):**
+//! **Compact Data Header (46 bytes, post-handshake):**
 //! - Magic: 16 bits
 //! - Ver: 4 bits + HdrLen: 12 bits
 //! - Flags: 16 bits
 //! - SessionID: 96 bits (12 bytes)
 //! - PacketSequence: 64 bits
 //! - HeaderAuthTag: 128 bits (16 bytes)
+//! - ExtLen: 16 bits
+//! - PayloadLen: 16 bits
 
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
@@ -39,10 +42,10 @@ pub const MAGIC: u16 = 0x5A37;
 pub const VERSION: u8 = 1;
 
 /// Size of the handshake/control header in bytes.
-pub const HANDSHAKE_HEADER_SIZE: usize = 95;
+pub const HANDSHAKE_HEADER_SIZE: usize = 96;
 
 /// Size of the compact data header in bytes.
-pub const DATA_HEADER_SIZE: usize = 42;
+pub const DATA_HEADER_SIZE: usize = 46;
 
 /// Message types per the spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,7 @@ pub enum MsgType {
     Error = 5,
     Ping = 6,
     Pong = 7,
+    Migrate = 8,
 }
 
 impl MsgType {
@@ -70,6 +74,7 @@ impl MsgType {
             5 => Ok(Self::Error),
             6 => Ok(Self::Ping),
             7 => Ok(Self::Pong),
+            8 => Ok(Self::Migrate),
             _ => Err(PacketError::InvalidMsgType(v)),
         }
     }
@@ -77,12 +82,18 @@ impl MsgType {
 
 /// Flag bits.
 pub mod flags {
-    pub const HAS_EXT: u16 = 1 << 0;
-    pub const ACK_REQ: u16 = 1 << 1;
-    pub const REKEY: u16 = 1 << 2;
-    pub const MIGRATE: u16 = 1 << 3;
-    pub const MULTIPATH: u16 = 1 << 4;
-    pub const RELAY_HOP: u16 = 1 << 5;
+    /// Extension TLVs present after the header.
+    pub const HAS_EXT: u16 = 1 << 15;
+    /// Acknowledgment requested for this packet.
+    pub const ACK_REQ: u16 = 1 << 14;
+    /// Rekeying in progress.
+    pub const REKEY: u16 = 1 << 13;
+    /// Session migration (endpoint change).
+    pub const MIGRATE: u16 = 1 << 12;
+    /// Multipath session — multiple concurrent paths.
+    pub const MULTIPATH: u16 = 1 << 11;
+    /// Packet has traversed a relay hop.
+    pub const RELAY_HOP: u16 = 1 << 10;
 }
 
 /// 96-bit Session ID.
@@ -119,7 +130,7 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Handshake / Control header (95 bytes).
+/// Handshake / Control header (96 bytes).
 #[derive(Debug, Clone)]
 pub struct HandshakeHeader {
     /// Protocol version (4 bits, current: 1).
@@ -150,12 +161,14 @@ pub struct HandshakeHeader {
     pub ext_len: u16,
     /// Payload length in bytes.
     pub payload_len: u16,
+    /// Reserved byte for 4-byte alignment (must be zero).
+    pub reserved: u8,
     /// 128-bit AEAD authentication tag over the header.
     pub header_auth_tag: [u8; 16],
 }
 
 impl HandshakeHeader {
-    /// Serialize to bytes (95 bytes).
+    /// Serialize to bytes (96 bytes).
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HANDSHAKE_HEADER_SIZE);
 
@@ -201,6 +214,9 @@ impl HandshakeHeader {
 
         // PayloadLen (16 bits)
         buf.extend_from_slice(&self.payload_len.to_be_bytes());
+
+        // Reserved (8 bits, must be zero)
+        buf.push(self.reserved);
 
         // HeaderAuthTag (128 bits = 16 bytes)
         buf.extend_from_slice(&self.header_auth_tag);
@@ -307,6 +323,10 @@ impl HandshakeHeader {
         let payload_len = u16::from_be_bytes([data[pos], data[pos + 1]]);
         pos += 2;
 
+        // Reserved
+        let reserved = data[pos];
+        pos += 1;
+
         // HeaderAuthTag (16 bytes)
         let mut header_auth_tag = [0u8; 16];
         header_auth_tag.copy_from_slice(&data[pos..pos + 16]);
@@ -326,6 +346,7 @@ impl HandshakeHeader {
             policy_tag,
             ext_len,
             payload_len,
+            reserved,
             header_auth_tag,
         })
     }
@@ -361,7 +382,7 @@ impl HandshakeHeader {
     /// Parse an extension from raw bytes that follow the handshake header.
     ///
     /// The caller should provide the `ext_len` bytes that immediately
-    /// follow the 95-byte header. Returns `None` if `ext_len` is 0.
+    /// follow the 96-byte header. Returns `None` if `ext_len` is 0.
     pub fn parse_extension(
         &self,
         ext_data: &[u8],
@@ -379,7 +400,7 @@ impl HandshakeHeader {
     pub fn new(msg_type: MsgType) -> Self {
         Self {
             version: VERSION,
-            // 95 bytes = 23.75 words → round up to 24 words
+            // 96 bytes = 24 words
             hdr_len: 24,
             flags: 0,
             msg_type,
@@ -396,12 +417,13 @@ impl HandshakeHeader {
             policy_tag: 0,
             ext_len: 0,
             payload_len: 0,
+            reserved: 0,
             header_auth_tag: [0u8; 16],
         }
     }
 }
 
-/// Compact Data Header (42 bytes, post-handshake).
+/// Compact Data Header (46 bytes, post-handshake).
 ///
 /// Used for established data-plane packets. No NodeID or ServiceID fields —
 /// routing is by SessionID only.
@@ -419,10 +441,14 @@ pub struct DataHeader {
     pub packet_seq: u64,
     /// 128-bit AEAD authentication tag over the header.
     pub header_auth_tag: [u8; 16],
+    /// Extension TLV length in bytes (0 if no extensions).
+    pub ext_len: u16,
+    /// Payload length in bytes.
+    pub payload_len: u16,
 }
 
 impl DataHeader {
-    /// Serialize to bytes (42 bytes).
+    /// Serialize to bytes (46 bytes).
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(DATA_HEADER_SIZE);
 
@@ -444,6 +470,12 @@ impl DataHeader {
 
         // HeaderAuthTag (128 bits = 16 bytes)
         buf.extend_from_slice(&self.header_auth_tag);
+
+        // ExtLen (16 bits)
+        buf.extend_from_slice(&self.ext_len.to_be_bytes());
+
+        // PayloadLen (16 bits)
+        buf.extend_from_slice(&self.payload_len.to_be_bytes());
 
         debug_assert_eq!(buf.len(), DATA_HEADER_SIZE);
         buf
@@ -502,6 +534,14 @@ impl DataHeader {
         // HeaderAuthTag
         let mut header_auth_tag = [0u8; 16];
         header_auth_tag.copy_from_slice(&data[pos..pos + 16]);
+        pos += 16;
+
+        // ExtLen
+        let ext_len = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
+
+        // PayloadLen
+        let payload_len = u16::from_be_bytes([data[pos], data[pos + 1]]);
 
         Ok(Self {
             version,
@@ -510,15 +550,22 @@ impl DataHeader {
             session_id: SessionId(session_id),
             packet_seq,
             header_auth_tag,
+            ext_len,
+            payload_len,
         })
     }
 
-    /// Return the header bytes WITHOUT the auth tag (first 26 bytes),
-    /// used as AAD for AEAD computation.
+    /// Return the header bytes excluding the HeaderAuthTag, used as AAD
+    /// for AEAD computation. The auth tag sits at bytes 26..42, so AAD is
+    /// the non-contiguous regions: bytes 0..26 + bytes 42..46.
     pub fn aad_bytes(&self) -> Vec<u8> {
         let full = self.serialize();
-        // Everything except the last 16 bytes (HeaderAuthTag)
-        full[..DATA_HEADER_SIZE - 16].to_vec()
+        let mut aad = Vec::with_capacity(DATA_HEADER_SIZE - 16);
+        // Everything before HeaderAuthTag (26 bytes)
+        aad.extend_from_slice(&full[..26]);
+        // Everything after HeaderAuthTag (ExtLen + PayloadLen = 4 bytes)
+        aad.extend_from_slice(&full[42..46]);
+        aad
     }
 
     /// Check if this packet has been through a relay hop.
@@ -535,12 +582,14 @@ impl DataHeader {
     pub fn new(session_id: SessionId, packet_seq: u64) -> Self {
         Self {
             version: VERSION,
-            // 42 bytes = 10.5 words → round up to 11
-            hdr_len: 11,
+            // 46 bytes = 11.5 words → round up to 12
+            hdr_len: 12,
             flags: 0,
             session_id,
             packet_seq,
             header_auth_tag: [0u8; 16],
+            ext_len: 0,
+            payload_len: 0,
         }
     }
 }

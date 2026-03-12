@@ -62,7 +62,7 @@ defmodule ZtlpGateway.IntegrationTest do
       {gateway, _} = Handshake.handle_msg1(gateway, parsed_hello.payload)
 
       # Msg 2 wrapped in HELLO_ACK
-      session_id = :crypto.strong_rand_bytes(16)
+      session_id = :crypto.strong_rand_bytes(12)
       {gateway, msg2_bytes} = Handshake.create_msg2(gateway)
       hello_ack = Packet.build_hello_ack(session_id, msg2_bytes)
 
@@ -73,7 +73,8 @@ defmodule ZtlpGateway.IntegrationTest do
 
       # Msg 3 wrapped in HANDSHAKE packet
       {client, msg3_bytes} = Handshake.create_msg3(client)
-      hs_pkt = Packet.serialize_handshake(session_id, :handshake, <<0::512>>, msg3_bytes)
+      hs_pkt_map = Packet.build_handshake(:rekey, session_id, payload: msg3_bytes)
+      hs_pkt = Packet.serialize(hs_pkt_map)
 
       {:ok, parsed_hs} = Packet.parse(hs_pkt)
       {gateway, _} = Handshake.handle_msg3(gateway, parsed_hs.payload)
@@ -101,7 +102,7 @@ defmodule ZtlpGateway.IntegrationTest do
       {:ok, ck} = Handshake.split(client)
       {:ok, gk} = Handshake.split(gateway)
 
-      sid = :crypto.strong_rand_bytes(16)
+      sid = :crypto.strong_rand_bytes(12)
 
       # Client builds an encrypted data packet
       seq = 1
@@ -109,20 +110,21 @@ defmodule ZtlpGateway.IntegrationTest do
       plaintext = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
       {ct, tag} = Crypto.encrypt(ck.i2r_key, nonce, plaintext, "")
       encrypted_payload = ct <> tag
-      auth_tag = :crypto.strong_rand_bytes(12)
+      auth_tag = :crypto.strong_rand_bytes(16)
 
-      data_pkt = Packet.build_data(sid, seq, auth_tag, encrypted_payload)
+      data_pkt_map = Packet.build_data(sid, seq, payload: encrypted_payload, header_auth_tag: auth_tag)
+      data_pkt = Packet.serialize(data_pkt_map)
 
       # Gateway receives and decrypts
       {:ok, parsed} = Packet.parse(data_pkt)
-      assert parsed.type == :data
-      assert parsed.sequence == seq
+      assert parsed.type == :data_compact
+      assert parsed.packet_seq == seq
 
       payload = parsed.payload
       ct_len = byte_size(payload) - 16
       recv_ct = binary_part(payload, 0, ct_len)
       recv_tag = binary_part(payload, ct_len, 16)
-      recv_nonce = <<0::32, parsed.sequence::little-64>>
+      recv_nonce = <<0::32, parsed.packet_seq::little-64>>
 
       decrypted = Crypto.decrypt(gk.i2r_key, recv_nonce, recv_ct, "", recv_tag)
       assert decrypted == plaintext

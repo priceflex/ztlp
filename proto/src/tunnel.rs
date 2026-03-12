@@ -96,8 +96,8 @@ pub const DEFAULT_SERVICE: &str = "_default";
 const TCP_READ_BUF: usize = 131072;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
-/// ZTLP data header is 42 bytes, Poly1305 tag is 16 bytes, so
-/// max plaintext per packet ≈ 65535 - 42 - 16 = 65477.
+/// ZTLP data header is 46 bytes, Poly1305 tag is 16 bytes, so
+/// max plaintext per packet ≈ 65535 - 46 - 16 = 65473.
 /// We use 16KB to stay well within IP fragmentation limits.
 /// On 1500-byte MTU networks, ~16KB payloads fragment into ~11 pieces
 /// which is manageable. Larger payloads suffer exponentially worse
@@ -750,7 +750,7 @@ pub async fn run_bridge(
                         // ChaCha20-Poly1305 is deterministic: same key+nonce+plaintext
                         // produces identical ciphertext.
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&orig_packet_seq.to_be_bytes());
+                        nonce_bytes[4..12].copy_from_slice(&orig_packet_seq.to_le_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
                         let encrypted = match cipher.encrypt(nonce, plaintext.as_slice()) {
                             Ok(enc) => enc,
@@ -808,7 +808,7 @@ pub async fn run_bridge(
                         session.next_send_seq()
                     };
                     let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
+                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
                     let nonce = Nonce::from_slice(&nonce_bytes);
                     let encrypted = cipher
                         .encrypt(nonce, fin_frame.as_slice())
@@ -893,7 +893,7 @@ pub async fn run_bridge(
                         };
                         if let Some((plaintext, orig_pkt_seq)) = entry_info {
                             let mut nonce_bytes = [0u8; 12];
-                            nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_be_bytes());
+                            nonce_bytes[4..12].copy_from_slice(&orig_pkt_seq.to_le_bytes());
                             let nonce = Nonce::from_slice(&nonce_bytes);
                             if let Ok(encrypted) = cipher.encrypt(nonce, plaintext.as_slice()) {
                                 let mut header = DataHeader::new(sid_send, orig_pkt_seq);
@@ -942,9 +942,9 @@ pub async fn run_bridge(
                     // Store in retransmit buffer
                     rb.insert(current_data_seq, packet_seq, framed.clone(), now);
 
-                    // Encrypt with nonce = 4 zero bytes + 8-byte big-endian packet_seq
+                    // Encrypt with nonce = 4 zero bytes + 8-byte little-endian packet_seq
                     let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_be_bytes());
+                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
                     let nonce = Nonce::from_slice(&nonce_bytes);
                     let encrypted = cipher
                         .encrypt(nonce, framed.as_slice())
@@ -1130,7 +1130,7 @@ pub async fn run_bridge(
                         let decrypt_start = Instant::now();
                         let encrypted_payload = &data[DATA_HEADER_SIZE..];
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
+                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
 
                         let plaintext = match recv_cipher.decrypt(nonce, encrypted_payload) {
@@ -1472,7 +1472,7 @@ pub async fn run_bridge(
                             session.next_send_seq()
                         };
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+                        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
                         let encrypted = ack_cipher
                             .encrypt(nonce, nack_frame.as_slice())
@@ -1568,7 +1568,7 @@ async fn send_ack(
 
     // Encrypt
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[4..12].copy_from_slice(&seq.to_be_bytes());
+    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
     let encrypted = cipher
         .encrypt(nonce, ack_frame.as_slice())

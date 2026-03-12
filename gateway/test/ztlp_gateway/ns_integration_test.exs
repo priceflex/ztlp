@@ -352,7 +352,7 @@ defmodule ZtlpGateway.NsIntegrationTest do
       assert <<0x02, record_bin::binary>> = response
       assert {:ok, decoded} = Record.decode(record_bin)
       assert decoded.name == "proto-test.ztlp"
-      assert decoded.data.public_key == pk_hex
+      assert decoded.data["public_key"] == pk_hex
     end
 
     test "raw UDP 0x05 query returns not-found for unknown key" do

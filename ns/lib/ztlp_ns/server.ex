@@ -37,7 +37,7 @@ defmodule ZtlpNs.Server do
   ```
 
   ## Type Bytes
-  - 1 = KEY, 2 = SVC, 3 = RELAY, 4 = POLICY, 5 = REVOKE, 6 = BOOTSTRAP
+  - 1 = KEY, 2 = SVC, 3 = RELAY, 4 = POLICY, 5 = REVOKE, 6 = BOOTSTRAP, 7 = OPERATOR
 
   ### Query by Public Key (client → server)
   ```
@@ -141,7 +141,9 @@ defmodule ZtlpNs.Server do
     result =
       ZtlpNs.Store.list()
       |> Enum.find(fn {_name, type, record} ->
-        type == :key and Map.get(record.data, :public_key) == pk_hex_lower
+        type == :key and
+          (Map.get(record.data, :public_key) == pk_hex_lower or
+             Map.get(record.data, "public_key") == pk_hex_lower)
       end)
 
     case result do
@@ -168,9 +170,9 @@ defmodule ZtlpNs.Server do
     end
   end
 
-  # Registration (0x02) — insert/update a record in the store
+  # Registration (0x09) — insert/update a record in the store
   defp process_query(
-         <<0x02, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
+         <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
            data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
        ) do
     type =
@@ -184,10 +186,9 @@ defmodule ZtlpNs.Server do
       <<0xFF>>
     else
       data =
-        try do
-          :erlang.binary_to_term(data_bin, [:safe])
-        rescue
-          _ -> nil
+        case ZtlpNs.Cbor.decode(data_bin) do
+          {:ok, data} -> data
+          {:error, _} -> nil
         end
 
       if is_nil(data) do

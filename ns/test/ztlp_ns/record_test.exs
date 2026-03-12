@@ -12,8 +12,8 @@ defmodule ZtlpNs.RecordTest do
   end
 
   describe "type_to_byte/1 and byte_to_type/1" do
-    test "round-trips all 6 types" do
-      types = [:key, :svc, :relay, :policy, :revoke, :bootstrap]
+    test "round-trips all 7 types" do
+      types = [:key, :svc, :relay, :policy, :revoke, :bootstrap, :operator]
 
       for type <- types do
         byte = Record.type_to_byte(type)
@@ -21,13 +21,14 @@ defmodule ZtlpNs.RecordTest do
       end
     end
 
-    test "type bytes are 1-6" do
+    test "type bytes are 1-7" do
       assert Record.type_to_byte(:key) == 1
       assert Record.type_to_byte(:svc) == 2
       assert Record.type_to_byte(:relay) == 3
       assert Record.type_to_byte(:policy) == 4
       assert Record.type_to_byte(:revoke) == 5
       assert Record.type_to_byte(:bootstrap) == 6
+      assert Record.type_to_byte(:operator) == 7
     end
   end
 
@@ -43,7 +44,10 @@ defmodule ZtlpNs.RecordTest do
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.name == "node1.acme.ztlp"
       assert restored.type == :key
-      assert restored.data == record.data
+      # CBOR round-trip produces string keys; compare values
+      assert restored.data["algorithm"] == "Ed25519"
+      assert restored.data["node_id"] == record.data[:node_id]
+      assert restored.data["public_key"] == record.data[:public_key]
       assert restored.created_at == 1000
       assert restored.ttl == 3600
       assert restored.serial == 1
@@ -84,7 +88,7 @@ defmodule ZtlpNs.RecordTest do
       bin = Record.serialize(record)
       assert {:ok, restored} = Record.deserialize(bin)
       assert restored.type == :relay
-      assert restored.data[:endpoints] == ["192.168.1.1:23095", "[::1]:23095"]
+      assert restored.data["endpoints"] == ["192.168.1.1:23095", "[::1]:23095"]
     end
 
     test "round-trips a POLICY record" do
@@ -194,7 +198,10 @@ defmodule ZtlpNs.RecordTest do
 
       assert decoded.name == record.name
       assert decoded.type == record.type
-      assert decoded.data == record.data
+      # CBOR round-trip produces string keys; compare by value
+      assert decoded.data["algorithm"] == to_string(record.data[:algorithm])
+      assert decoded.data["node_id"] == record.data[:node_id]
+      assert decoded.data["public_key"] == record.data[:public_key]
       assert decoded.signature == record.signature
       assert decoded.signer_public_key == record.signer_public_key
     end
@@ -253,9 +260,10 @@ defmodule ZtlpNs.RecordTest do
     test "new_relay sets endpoints and capacity" do
       nid = :crypto.strong_rand_bytes(16)
       rec = Record.new_relay("r.ztlp", nid, ["1.2.3.4:23095"], 1000, "us-west")
-      assert rec.data[:endpoints] == ["1.2.3.4:23095"]
-      assert rec.data[:capacity] == 1000
-      assert rec.data[:region] == "us-west"
+      # These are fresh (not deserialized) — atom keys
+      assert rec.data.endpoints == ["1.2.3.4:23095"]
+      assert rec.data.capacity == 1000
+      assert rec.data.region == "us-west"
     end
 
     test "new_revoke defaults TTL to 0" do

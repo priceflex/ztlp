@@ -143,10 +143,10 @@ defmodule ZtlpRelay.NsClient do
       region: info.region
     }
 
-    data_bin = :erlang.term_to_binary(data, [:deterministic])
+    data_bin = ZtlpRelay.Cbor.encode(data)
 
     reg =
-      <<0x02, byte_size(name)::16, name::binary, @relay_type_byte::8, byte_size(data_bin)::16,
+      <<0x09, byte_size(name)::16, name::binary, @relay_type_byte::8, byte_size(data_bin)::16,
         data_bin::binary, 0::16>>
 
     case resolve_host(host) do
@@ -172,7 +172,7 @@ defmodule ZtlpRelay.NsClient do
   defp parse_response(<<0xFF>>), do: {:error, :invalid_query}
   defp parse_response(_), do: {:error, :invalid_response}
 
-  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap}
+  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator}
 
   defp decode_record(data) do
     <<tb::8, nl::16, rest::binary>> = data
@@ -186,7 +186,7 @@ defmodule ZtlpRelay.NsClient do
      %{
        name: name,
        type: Map.get(@type_map, tb, :unknown),
-       data: :erlang.binary_to_term(db, [:safe]),
+       data: (case ZtlpRelay.Cbor.decode(db) do {:ok, d} -> d; _ -> %{} end),
        signature: sig,
        signer_public_key: pub,
        created_at: ca,

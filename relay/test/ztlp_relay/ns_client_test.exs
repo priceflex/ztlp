@@ -24,7 +24,7 @@ defmodule ZtlpRelay.NsClientTest do
             <<0x01, name_len::16, _name::binary-size(name_len), _type::8>> ->
               handle_mock_query(opts)
 
-            <<0x02, _rest::binary>> ->
+            <<0x09, _rest::binary>> ->
               handle_mock_registration(opts)
 
             _ ->
@@ -67,7 +67,7 @@ defmodule ZtlpRelay.NsClientTest do
     }
 
     type_byte = 3
-    data_bin = :erlang.term_to_binary(data, [:deterministic])
+    data_bin = ZtlpRelay.Cbor.encode(data)
     created_at = System.system_time(:second)
     ttl = 3600
     serial = 1
@@ -138,7 +138,7 @@ defmodule ZtlpRelay.NsClientTest do
       }
 
       assert :ok = NsClient.register_self("relay.ztlp", our_info)
-      assert_receive {:mock_ns_received, <<0x02, _rest::binary>>}
+      assert_receive {:mock_ns_received, <<0x09, _rest::binary>>}
       GenServer.stop(NsClient)
     end
 
@@ -225,8 +225,8 @@ defmodule ZtlpRelay.NsClientTest do
       our_info = %{node_id: node_id, endpoints: ["127.0.0.1:5555"], capacity: 50, region: "test"}
       NsClient.register_self("relay.ztlp", our_info)
       assert_receive {:mock_ns_received, reg_msg}
-      assert <<0x02, name_len::16, _rest::binary>> = reg_msg
-      <<0x02, ^name_len::16, name::binary-size(name_len), rest2::binary>> = reg_msg
+      assert <<0x09, name_len::16, _rest::binary>> = reg_msg
+      <<0x09, ^name_len::16, name::binary-size(name_len), rest2::binary>> = reg_msg
       assert String.ends_with?(name, ".relay.ztlp")
       <<3::8, _rest3::binary>> = rest2
       GenServer.stop(NsClient)

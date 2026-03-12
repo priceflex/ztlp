@@ -779,8 +779,201 @@ base header:
 | 0x04 | TRACE_CTX | Correlation ID for distributed tracing and diagnostics. |
 | 0x05 | `BANDWIDTH_HINT` | Requested bandwidth profile (informational; not a hard reservation). |
 | 0x06 | RELAY_PATH | Ordered list of relay Node IDs traversed (for diagnostics). |
+| 0xFF | PADDING | Random padding bytes (MUST be ignored by the parser). Used to satisfy the amplification prevention requirement in Section 18.2. |
 
-## 8.5 Payload
+### 8.4.1 TLV Binary Layout
+
+Each Extension TLV is encoded as follows:
+
+```
+  0       7 8      23
+  +--------+--------+--------+
+  |  Type  |     Length       |
+  | (8 bit)|    (16 bit)      |
+  +--------+--------+--------+
+  |      Value (Length bytes) |
+  +---------------------------+
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| Type | 8 bits | Extension type identifier (see table above). |
+| Length | 16 bits | Length of the Value field in bytes (big-endian). Does NOT include the 3-byte TLV header itself. |
+| Value | variable | Extension-specific data. Exactly `Length` bytes. |
+
+Multiple TLVs are concatenated sequentially. The parser MUST consume
+TLVs until exactly `ExtLen` bytes (from the base header) have been read.
+If a TLV type is not recognized, the implementation MUST skip it by
+advancing `Length` bytes (forward compatibility). A TLV with Type `0xFF`
+(PADDING) MUST be silently ignored — its Value bytes are meaningless
+filler.
+
+**Constraints:**
+
+-   The sum of all TLV sizes (3 + Length per TLV) MUST equal `ExtLen`.
+-   If `ExtLen` is non-zero, the HAS\_EXT flag MUST be set.
+-   If `ExtLen` is zero, no TLV data follows and HAS\_EXT SHOULD be clear.
+-   Implementations MUST NOT include TLVs with Length = 0 except for PADDING.
+
+## 8.5 Control Message Payload Structures
+
+The 64-byte handshake header (Section 8.1) carries the common fields for
+all control messages. The payload area (following the header and any
+Extension TLVs) contains message-specific data, structured as follows.
+All multi-byte fields are big-endian unless noted otherwise.
+
+### 8.5.1 MsgType Values
+
+| Value | Name | Direction | Description |
+|-------|------|-----------|-------------|
+| 0 | DATA | bidirectional | Encrypted application data (uses compact header, Section 8.3). |
+| 1 | HELLO | initiator → relay | Session initiation. Carries Noise\_XX Message 1 (ephemeral public key). |
+| 2 | HELLO\_ACK | responder → initiator | Session response. Carries Noise\_XX Message 2 (ephemeral + static + signature). |
+| 3 | REKEY | bidirectional | Key rotation request. New SessionID issued after completion. |
+| 4 | CLOSE | bidirectional | Graceful session teardown. |
+| 5 | ERROR | responder → initiator | Session rejection or protocol error. |
+| 6 | PING | bidirectional | Liveness probe. |
+| 7 | PONG | bidirectional | Liveness response. |
+
+### 8.5.2 HELLO Payload (MsgType = 1)
+
+Sent by the Initiator to begin a Noise\_XX handshake through a relay.
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       32      Noise Message 1 (ephemeral pubkey `e`)
+  32      var     (reserved for future use — MUST be zero-length
+                   in protocol version 1)
+```
+
+The header fields are set as follows:
+
+-   `SessionID`: zero (no session exists yet).
+-   `SrcNodeID`: zero (identity is hidden until Message 3).
+-   `DstSvcID`: target service identifier.
+-   `MsgType`: 1 (HELLO).
+-   `HeaderAuthTag`: zeroed (no shared key exists yet). The relay uses
+    Magic and rate-limiting for admission; the responder verifies the
+    Noise handshake cryptographically.
+
+### 8.5.3 CHALLENGE Payload (Admission Plane)
+
+A CHALLENGE is NOT a Noise protocol message. It is an admission-plane
+response sent by the Ingress Relay when it requires proof-of-work before
+forwarding the HELLO to the responder (see Section 18.3). The relay
+responds to a HELLO with:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       16      Challenge Cookie (opaque, relay-generated)
+  16      4       Difficulty (uint32, number of leading zero bits required)
+  20      8       Timestamp (uint64, relay's epoch-ms clock)
+  28      var     PADDING (to satisfy response_bytes ≤ request_bytes)
+```
+
+The header `MsgType` is 5 (ERROR) with a specific error code of `0x10`
+(CHALLENGE\_REQUIRED) in the first byte of the payload prefix. The full
+payload is: `<<0x10, cookie::16-bytes, difficulty::32, timestamp::64, padding::binary>>`.
+
+### 8.5.4 HELLO\_PROOF Payload (Admission Plane)
+
+Sent by the Initiator after solving the proof-of-work puzzle:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       16      Challenge Cookie (echoed from CHALLENGE)
+  16      8       Nonce (uint64, the proof-of-work solution)
+  24      32      Original HELLO Noise Message 1 (ephemeral pubkey)
+```
+
+The relay verifies: `BLAKE2s(cookie || nonce)` has at least `difficulty`
+leading zero bits. If valid, the relay forwards the original HELLO to
+the responder. The header `MsgType` is 1 (HELLO) with the CHALLENGE
+cookie embedded as an Extension TLV (Type 0x07, ADMISSION\_PROOF).
+
+### 8.5.5 HELLO\_ACK Payload (MsgType = 2)
+
+Sent by the Responder, carrying Noise\_XX Message 2:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       var     Noise Message 2 (ephemeral `e`, encrypted static `s`,
+                  encrypted payload containing identity + certificate)
+```
+
+The Noise Message 2 payload is variable-length because it contains the
+responder's encrypted static key (32 bytes + 16-byte AEAD tag) and an
+encrypted payload (16-byte AEAD tag minimum, plus optional identity data).
+Typical size: 96 bytes.
+
+### 8.5.6 SESSION\_OPEN (Initiator Message 3 + Responder Confirmation)
+
+The Initiator sends Noise\_XX Message 3 (MsgType = 1, HELLO, with
+`message_index = 2` tracked internally):
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       var     Noise Message 3 (encrypted static `s`, encrypted
+                  payload containing identity + certificate + policy request)
+```
+
+Upon successful verification, the Responder sends a SESSION\_OPEN
+confirmation as a DATA message (MsgType = 0) encrypted with the newly
+derived session keys:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       12      Assigned SessionID (96 bits)
+  12      4       PolicyTag (uint32)
+  16      8       Session expiry (uint64, epoch-ms)
+  24      2       Rekey interval (uint16, seconds)
+```
+
+### 8.5.7 ERROR Payload (MsgType = 5)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Error Code (uint8)
+  1       var     Error Detail (UTF-8 string, optional)
+```
+
+**Error Code Table:**
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0x01 | AUTH\_FAILED | Identity verification or certificate chain validation failed. |
+| 0x02 | RATE\_LIMITED | Request rate exceeded. Retry after backoff. |
+| 0x03 | QUOTA\_EXCEEDED | Session or resource quota exhausted. |
+| 0x04 | POLICY\_DENIED | Access policy does not permit this connection. |
+| 0x05 | REVOKED | Node ID or certificate has been revoked. |
+| 0x06 | VERSION\_MISMATCH | Unsupported protocol version. |
+| 0x07 | CRYPTO\_MISMATCH | Unsupported CryptoSuite. |
+| 0x08 | SESSION\_EXPIRED | Session timed out or was forcibly closed. |
+| 0x09 | INVALID\_PACKET | Malformed packet structure. |
+| 0x0A | RELAY\_UNAVAILABLE | Relay cannot forward (capacity or policy). |
+| 0x10 | CHALLENGE\_REQUIRED | Proof-of-work challenge (see Section 8.5.3). |
+| 0xFF | INTERNAL\_ERROR | Unspecified server-side error. |
+
+### 8.5.8 PING / PONG Payloads (MsgType = 6, 7)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       8       Sequence number (uint64)
+  8       8       Timestamp (uint64, sender's epoch-ms)
+```
+
+PONG echoes the PING's sequence number and includes the responder's own
+timestamp. This enables RTT calculation and clock drift estimation.
+
+## 8.6 Payload
 
 The payload is AEAD-encrypted application data. The authentication tag
 produced by the AEAD cipher is appended to the ciphertext. Decryption
@@ -855,6 +1048,159 @@ to prevent any single party from controlling network access. This
 requirement exists because ZTLP\'s zero trust philosophy applies equally
 to its own governance: the protocol does not trust any single authority,
 including the one that published this specification.
+
+## 9.5 ZTLP-NS Wire Protocol
+
+ZTLP-NS uses a custom binary protocol over UDP. The default port is
+**23097**. All messages are binary, big-endian. The first byte identifies
+the message type.
+
+### 9.5.1 Message Types
+
+| Byte | Direction | Name | Description |
+|------|-----------|------|-------------|
+| 0x01 | client → server | QUERY | Look up a record by name and type. |
+| 0x02 | client → server | REGISTER | Insert or update a signed record. |
+| 0x02 | server → client | RESPONSE\_FOUND | Record found (overloaded byte; direction disambiguates). |
+| 0x03 | server → client | RESPONSE\_NOT\_FOUND | No record exists for this name/type. |
+| 0x04 | server → client | RESPONSE\_REVOKED | Record exists but has been revoked. |
+| 0x05 | client → server | QUERY\_BY\_PUBKEY | Look up a KEY record by public key. |
+| 0x06 | server → client | REGISTER\_ACK | Registration succeeded. |
+| 0x07 | client → server | ENROLL | Device enrollment request (see Section 10). |
+| 0x08 | server → client | ENROLL\_RESPONSE | Enrollment result. |
+| 0xFF | server → client | INVALID | Malformed or unrecognized query. |
+
+### 9.5.2 QUERY (0x01)
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x01)
+  1       2           Name length (uint16, big-endian)
+  3       name_len    Name (UTF-8 encoded FQDN, e.g. "node1.office.acme.ztlp")
+  3+N     1           Record type byte
+```
+
+**Record Type Bytes:**
+
+| Byte | Record Type |
+|------|-------------|
+| 1 | ZTLP\_KEY |
+| 2 | ZTLP\_SVC |
+| 3 | ZTLP\_RELAY |
+| 4 | ZTLP\_POLICY |
+| 5 | ZTLP\_REVOKE |
+| 6 | ZTLP\_BOOTSTRAP |
+
+### 9.5.3 RESPONSE\_FOUND (0x02)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Message type (0x02)
+  1       var     Record wire format (canonical serialization
+                  including name, type, data, TTL, serial,
+                  signature, and signer public key)
+```
+
+The record wire format is the canonical binary encoding produced by
+`Record.encode()`. Implementations MUST verify the Ed25519 signature
+before trusting any record data.
+
+### 9.5.4 RESPONSE\_NOT\_FOUND (0x03)
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x03)
+  1       2           Name length (uint16)
+  3       name_len    Name (echoed from query)
+  3+N     1           Record type byte (echoed)
+```
+
+### 9.5.5 RESPONSE\_REVOKED (0x04)
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x04)
+  1       2           Name length (uint16)
+  3       name_len    Name (echoed from query)
+```
+
+### 9.5.6 QUERY\_BY\_PUBKEY (0x05)
+
+Performs an O(n) scan for a KEY record matching the given public key.
+Intended for reverse lookups (e.g., "which node owns this key?").
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x05)
+  1       2           Public key hex length (uint16)
+  3       pk_len      Public key (lowercase hex-encoded Ed25519, 64 chars)
+```
+
+Response is 0x02 (found), 0x03 (not found), or 0x04 (revoked).
+
+### 9.5.7 REGISTER (0x02, client → server)
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x02)
+  1       2           Name length (uint16)
+  3       name_len    Name
+  3+N     1           Record type byte
+  4+N     2           Data length (uint16)
+  6+N     data_len    Record data (binary-encoded)
+  6+N+D   2           Signature length (uint16)
+  8+N+D   sig_len     Ed25519 signature
+```
+
+The server verifies the signature, signs the record with its own zone
+key, and stores it. Response is 0x06 (success) or 0xFF (error).
+
+### 9.5.8 ENROLL (0x07)
+
+Device enrollment wire format (see Section 10 for the enrollment flow):
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Message type (0x07)
+  1       var         Enrollment payload (token + device identity)
+```
+
+Response codes in 0x08 (ENROLL\_RESPONSE):
+
+| Code | Meaning |
+|------|---------|
+| 0x00 | Success — device enrolled. |
+| 0x01 | Token expired. |
+| 0x02 | Token usage limit exhausted. |
+| 0x03 | Invalid MAC (bad token). |
+| 0x04 | Zone mismatch. |
+| 0x05 | Name already taken. |
+| 0x06 | Invalid enrollment request. |
+
+### 9.5.9 Design Rationale
+
+ZTLP-NS uses a native binary protocol rather than DNS or HTTPS because:
+
+1.  **Minimal attack surface** — no DNS parsing stack, no TLS handshake
+    for simple lookups.
+2.  **Identity-native** — record types (KEY, SVC, POLICY) map directly
+    to ZTLP concepts that have no DNS equivalent.
+3.  **Signed records** — every response includes an Ed25519 signature
+    chain, providing authentication without relying on transport-layer
+    security.
+4.  **Low overhead** — a typical query/response round-trip is under 200
+    bytes, suitable for constrained devices and high-frequency lookups.
+
+Implementations MAY additionally expose an HTTPS/JSON interface for
+management and debugging, but the UDP binary protocol is the normative
+query interface.
 
 # 10. Node Initialization and Bootstrap Procedure
 
@@ -947,6 +1293,47 @@ establishment. This provides:
 
 -   Identity hiding - identities are encrypted after the first
     message.
+
+### 11.1.1 Noise Protocol Parameters
+
+The normative Noise protocol name string is:
+
+```
+Noise_XX_25519_ChaChaPoly_BLAKE2s
+```
+
+This specifies:
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| Pattern | XX | Mutual authentication with identity hiding. Both parties transmit static keys encrypted. |
+| DH | 25519 | Curve25519 (X25519). Widely implemented, constant-time, 128-bit security level. |
+| Cipher | ChaChaPoly | ChaCha20-Poly1305. Software-friendly AEAD, constant-time on all platforms (no AES-NI dependency). |
+| Hash | BLAKE2s | 256-bit output, faster than SHA-256 in software, used for both handshake hashing and key derivation. |
+
+**Prologue:** The Noise prologue is empty (zero-length byte string) in
+protocol version 1. Implementations MUST call `MixHash(prologue)` per
+Noise Framework Section 5.3, but with an empty prologue this is
+equivalent to `MixHash("")`. Future protocol versions MAY define a
+non-empty prologue (e.g., incorporating the ZTLP Magic bytes and version
+number) to provide cross-protocol binding.
+
+**Nonce format:** The ChaCha20-Poly1305 nonce is 12 bytes: 4 zero bytes
+followed by an 8-byte little-endian counter, as specified by the Noise
+Framework.
+
+**Key derivation for directional transport keys:** After the three-message
+Noise\_XX handshake completes, the resulting `CipherState` pair provides
+two symmetric keys (one per direction). Implementations MUST additionally
+derive per-direction session keys using BLAKE2s-256:
+
+```
+initiator_to_responder_key = BLAKE2s(handshake_hash || "ztlp-i2r")
+responder_to_initiator_key = BLAKE2s(handshake_hash || "ztlp-r2i")
+```
+
+where `handshake_hash` is the `h` value from the completed Noise
+handshake state.
 
 ## 11.2 Message Flow
 
@@ -1409,7 +1796,101 @@ map. When a session closes or expires, it is removed. The XDP program
 reads this map without kernel involvement - lookup time is O(1) at
 nanosecond scale.
 
-### 13.1.2 What This Achieves
+### 13.1.2 BPF Map Definitions
+
+The XDP program relies on five BPF maps shared between the kernel-space
+XDP program and the user-space ZTLP daemon. All maps MUST conform to
+the following definitions to ensure interoperability between different
+daemon implementations and a standardized XDP program.
+
+**Map 1: `session_map`** — SessionID allowlist.
+
+```c
+struct session_id {
+    __u8 id[12];       /* 96-bit SessionID */
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key,   struct session_id);   /* 12 bytes */
+    __type(value, __u8);                /* 1 byte (always 1; presence is the check) */
+    __uint(max_entries, 65536);         /* tune per deployment */
+} session_map SEC("maps");
+```
+
+The daemon inserts an entry when a session is established and deletes
+it on session close or expiry. The XDP program performs a lookup — if
+the key is present, the packet passes Layer 2.
+
+**Map 2: `hello_rate_map`** — Per-source-IP HELLO rate limiter.
+
+```c
+struct hello_bucket {
+    __u64 tokens;           /* current token count (0 = drop) */
+    __u64 last_refill_ns;   /* ktime_ns of last refill */
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key,   __be32);              /* IPv4 source address */
+    __type(value, struct hello_bucket); /* 16 bytes */
+    __uint(max_entries, 131072);
+} hello_rate_map SEC("maps");
+```
+
+Token bucket parameters (tokens per refill, refill interval) are
+compile-time constants in the XDP program. Recommended defaults: 10
+tokens per second, burst capacity of 20.
+
+**Map 3: `stats_map`** — Per-CPU drop/pass counters.
+
+```c
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key,   __u32);   /* stat index */
+    __type(value, __u64);   /* counter */
+    __uint(max_entries, 16);
+} stats_map SEC("maps");
+```
+
+Stat indices: 0 = total packets, 1 = magic drops, 2 = session drops,
+3 = rate limit drops, 4 = HELLO passed, 5 = data passed, 6 = mesh
+port packets, 7 = mesh passed, 8 = mesh peer drops.
+
+**Map 4: `mesh_peer_map`** — Authorized relay NodeID allowlist (mesh port only).
+
+```c
+struct mesh_peer_id {
+    __u8 id[16];       /* 128-bit NodeID */
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key,   struct mesh_peer_id); /* 16 bytes */
+    __type(value, __u8);                /* 1 byte (presence check) */
+    __uint(max_entries, 1024);
+} mesh_peer_map SEC("maps");
+```
+
+Used on the mesh port (default 23096) to restrict inter-relay traffic
+to known peers. Managed by the relay daemon.
+
+**Map 5: `rat_bypass_map`** — Relay Admission Token bypass flag.
+
+```c
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key,   __u32);   /* index (only 0 used) */
+    __type(value, __u8);    /* 0 = normal, 1 = bypass rate-limit for RAT HELLOs */
+    __uint(max_entries, 1);
+} rat_bypass_map SEC("maps");
+```
+
+When set to 1, HELLO packets that contain a valid Relay Admission Token
+prefix bypass the per-IP rate limiter. The XDP program checks a fixed
+byte offset in the packet for the RAT magic marker.
+
+### 13.1.3 What This Achieves
 
 -   Random UDP noise and Magic mismatches are dropped at the NIC driver
     before consuming any kernel CPU.
@@ -2070,6 +2551,37 @@ prevents an attacker from sending small spoofed HELLO packets and
 causing ZTLP nodes to send large responses to a victim IP - the
 classic UDP amplification pattern used in DNS, NTP, and SSDP reflection
 attacks.
+
+### 18.2.1 Padding Mechanism
+
+When a response to an unauthenticated request would be smaller than the
+request, no padding is required (the constraint is already satisfied).
+When a response would exceed the request size, the sender MUST append a
+PADDING Extension TLV (Type `0xFF`, defined in Section 8.4) to the
+**request** to ensure the request is at least as large as the expected
+response. Alternatively, the responder MAY truncate optional fields from
+its response.
+
+For CHALLENGE responses specifically (Section 8.5.3), the responder MUST
+append PADDING bytes (Type `0xFF` TLV) to fill the response to exactly
+`request_bytes`. The PADDING TLV Value field MUST contain
+cryptographically random bytes (not zeros) to prevent compression-based
+attacks on encrypted channels. Parsers MUST silently ignore the PADDING
+TLV and MUST NOT interpret its contents.
+
+**Implementation guidance:**
+
+1.  The Initiator SHOULD send HELLO packets of at least 128 bytes
+    (padding with a PADDING TLV if needed) to allow adequate room for
+    the CHALLENGE response.
+2.  If the Initiator's HELLO is too small for a complete CHALLENGE
+    response, the relay MUST truncate the CHALLENGE — omitting the
+    timestamp field first, then reducing difficulty precision — rather
+    than exceeding the request size.
+3.  HELLO\_ACK messages are sent only after the Noise handshake has
+    progressed past Message 1, at which point the conversation is no
+    longer unauthenticated. The amplification constraint therefore does
+    NOT apply to HELLO\_ACK.
 
 ## 18.3 Stateless Admission Challenge
 

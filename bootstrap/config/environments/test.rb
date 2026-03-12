@@ -52,6 +52,9 @@ Rails.application.configure do
   # Raise error when a before_action's only/except options reference missing actions
   config.action_controller.raise_on_missing_callback_actions = true
 
+  # Use test adapter for ActiveJob (enables assert_enqueued_with, perform_enqueued_jobs)
+  config.active_job.queue_adapter = :test
+
   # Active Record Encryption keys for test
   config.active_record.encryption.primary_key = "test-primary-key-for-encryption"
   config.active_record.encryption.deterministic_key = "test-deterministic-key-encrypt"

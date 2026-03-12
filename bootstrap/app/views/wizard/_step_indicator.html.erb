@@ -1,0 +1,38 @@
+<%# Wizard step indicator — shows progress through 4 steps %>
+<% steps = [
+  { name: "Network", path: wizard_new_path, number: 1 },
+  { name: "Machines", path: wizard_machines_path, number: 2 },
+  { name: "Review", path: wizard_review_path, number: 3 },
+  { name: "Deploy", path: wizard_deploy_path, number: 4 }
+] %>
+
+<nav aria-label="Progress" class="mb-8">
+  <ol class="flex items-center justify-center space-x-5">
+    <% steps.each do |step| %>
+      <li class="flex items-center">
+        <% if step[:number] < current_step %>
+          <%# Completed step %>
+          <span class="flex h-10 w-10 items-center justify-center rounded-full bg-ztlp-600">
+            <span class="text-white text-sm font-bold">✓</span>
+          </span>
+        <% elsif step[:number] == current_step %>
+          <%# Current step %>
+          <span class="flex h-10 w-10 items-center justify-center rounded-full border-2 border-ztlp-600 bg-white">
+            <span class="text-ztlp-600 text-sm font-bold"><%= step[:number] %></span>
+          </span>
+        <% else %>
+          <%# Future step %>
+          <span class="flex h-10 w-10 items-center justify-center rounded-full border-2 border-gray-300 bg-white">
+            <span class="text-gray-500 text-sm font-bold"><%= step[:number] %></span>
+          </span>
+        <% end %>
+        <span class="ml-2 text-sm font-medium <%= step[:number] == current_step ? 'text-ztlp-600' : 'text-gray-500' %>">
+          <%= step[:name] %>
+        </span>
+        <% unless step == steps.last %>
+          <div class="ml-5 h-0.5 w-12 bg-gray-300"></div>
+        <% end %>
+      </li>
+    <% end %>
+  </ol>
+</nav>

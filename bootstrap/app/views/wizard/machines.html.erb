@@ -1,0 +1,28 @@
+<%# Step 2: Add Machines %>
+<div class="max-w-3xl mx-auto">
+  <%= render "wizard/step_indicator", current_step: 2 %>
+
+  <div class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-bold text-gray-900 mb-1">Add Machines</h2>
+    <p class="text-sm text-gray-500 mb-6">
+      Add the machines for network <strong><%= @network.name %></strong> (<code class="text-xs"><%= @network.zone %></code>).
+      Each machine needs at least one role: NS, Relay, or Gateway.
+    </p>
+
+    <%# List of added machines %>
+    <%= render "wizard/machine_list", machines: @machines, network: @network %>
+
+    <div class="mt-6">
+      <%= render "wizard/machine_form", machine: @new_machine, network: @network %>
+    </div>
+
+    <div class="mt-6 flex justify-between">
+      <%= link_to "← Back", wizard_new_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
+      <% if @machines.any? %>
+        <%= link_to "Next: Review →", wizard_review_path, class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
+      <% else %>
+        <span class="rounded-md bg-gray-300 px-4 py-2 text-sm font-semibold text-gray-500 cursor-not-allowed" title="Add at least one machine">Next: Review →</span>
+      <% end %>
+    </div>
+  </div>
+</div>

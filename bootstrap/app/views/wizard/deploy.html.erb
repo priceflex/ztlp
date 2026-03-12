@@ -1,0 +1,52 @@
+<%# Step 4: Live Deploy %>
+<div class="max-w-3xl mx-auto">
+  <%= render "wizard/step_indicator", current_step: 4 %>
+
+  <div class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-bold text-gray-900 mb-1">Live Deploy</h2>
+    <p class="text-sm text-gray-500 mb-6">
+      Deploy all components to network <strong><%= @network.name %></strong>.
+      Progress will update in real-time.
+    </p>
+
+    <% if @network.status == "deploying" %>
+      <%# Already deploying — show live area %>
+      <%= render "wizard/deploy_live", network: @network, machines: @machines %>
+    <% else %>
+      <%# Ready to deploy %>
+      <div id="deploy-area">
+        <div class="text-center py-8">
+          <div class="text-5xl mb-4">🚀</div>
+          <h3 class="text-lg font-semibold text-gray-900 mb-2">Ready to Deploy</h3>
+          <p class="text-sm text-gray-500 mb-6">
+            This will deploy <%= @machines.sum { |m| m.role_list.size } %> components
+            across <%= @machines.size %> machines.
+          </p>
+
+          <%# Component summary %>
+          <div class="inline-flex items-center space-x-4 mb-6">
+            <% @machines.each do |machine| %>
+              <% machine.role_list.each do |role| %>
+                <span class="text-xs text-gray-500">
+                  <%= role_badges(role) %>
+                  <span class="ml-1"><%= machine.hostname %></span>
+                </span>
+              <% end %>
+            <% end %>
+          </div>
+
+          <div>
+            <%= button_to "Start Deployment", wizard_start_deploy_path, method: :post,
+                class: "rounded-md bg-green-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-green-500",
+                data: { turbo_method: :post } %>
+          </div>
+        </div>
+      </div>
+    <% end %>
+
+    <div class="mt-6 flex justify-between">
+      <%= link_to "← Back to Review", wizard_review_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
+      <%= link_to "Go to Dashboard", root_path, class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+    </div>
+  </div>
+</div>

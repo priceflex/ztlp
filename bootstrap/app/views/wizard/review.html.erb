@@ -1,0 +1,77 @@
+<%# Step 3: Review & Deploy %>
+<div class="max-w-3xl mx-auto">
+  <%= render "wizard/step_indicator", current_step: 3 %>
+
+  <div class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-bold text-gray-900 mb-1">Review Configuration</h2>
+    <p class="text-sm text-gray-500 mb-6">Review your network and machine setup before deploying.</p>
+
+    <%# Network Summary %>
+    <div class="bg-gray-50 rounded-lg p-4 border border-gray-200 mb-6">
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">Network</h3>
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <dt class="text-gray-500">Name</dt>
+        <dd class="text-gray-900 font-medium"><%= @network.name %></dd>
+        <dt class="text-gray-500">Zone</dt>
+        <dd class="text-gray-900 font-mono text-xs"><%= @network.zone %></dd>
+        <dt class="text-gray-500">Status</dt>
+        <dd><%= status_badge(@network.status) %></dd>
+        <% if @network.notes.present? %>
+          <dt class="text-gray-500">Notes</dt>
+          <dd class="text-gray-700"><%= @network.notes %></dd>
+        <% end %>
+      </dl>
+    </div>
+
+    <%# Role Summary %>
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <% %w[ns relay gateway].each do |role| %>
+        <div class="bg-gray-50 rounded-lg p-3 border border-gray-200 text-center">
+          <div class="text-2xl font-bold text-gray-900"><%= @role_counts[role] || 0 %></div>
+          <div class="text-xs font-medium text-gray-500 uppercase"><%= role %> nodes</div>
+        </div>
+      <% end %>
+    </div>
+
+    <%# Machine List %>
+    <div class="mb-6">
+      <h3 class="text-sm font-semibold text-gray-700 mb-3">Machines (<%= @machines.size %>)</h3>
+      <div class="space-y-2">
+        <% @machines.each do |machine| %>
+          <div class="flex items-center justify-between bg-gray-50 rounded-lg p-3 border border-gray-200">
+            <div>
+              <span class="font-medium text-gray-900"><%= machine.hostname %></span>
+              <span class="text-sm text-gray-500 ml-2"><%= machine.ip_address %></span>
+              <span class="text-xs text-gray-400 ml-2">(<%= machine.ssh_user %>:<%= machine.ssh_port %>, auth: <%= machine.ssh_auth_method %>)</span>
+            </div>
+            <div class="flex items-center space-x-1">
+              <%= role_badges(machine.roles) %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <%# Deploy Plan %>
+    <div class="bg-blue-50 rounded-lg p-4 border border-blue-200 mb-6">
+      <h3 class="text-sm font-semibold text-blue-800 mb-2">📋 Deploy Plan</h3>
+      <p class="text-sm text-blue-700 mb-2">The following components will be deployed:</p>
+      <ul class="list-disc pl-5 text-sm text-blue-700 space-y-1">
+        <% @machines.each do |machine| %>
+          <% machine.role_list.each do |role| %>
+            <li><strong><%= role %></strong> on <strong><%= machine.hostname %></strong> (<%= machine.ip_address %>)</li>
+          <% end %>
+        <% end %>
+      </ul>
+      <p class="text-xs text-blue-600 mt-2">
+        Total: <%= @machines.sum { |m| m.role_list.size } %> component deployments across <%= @machines.size %> machines
+      </p>
+    </div>
+
+    <%# Navigation %>
+    <div class="flex justify-between">
+      <%= link_to "← Back to Machines", wizard_machines_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
+      <%= link_to "Deploy All 🚀", wizard_deploy_path, class: "rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
+    </div>
+  </div>
+</div>

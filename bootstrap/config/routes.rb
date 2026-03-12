@@ -24,6 +24,17 @@ Rails.application.routes.draw do
   resources :deployments, only: [:index, :show]
   resources :audit_logs, only: [:index]
 
+  # Setup Wizard
+  get  "wizard",           to: "wizard#new",            as: :wizard_new
+  post "wizard/network",   to: "wizard#create_network", as: :wizard_create_network
+  get  "wizard/machines",  to: "wizard#machines",       as: :wizard_machines
+  post "wizard/machines",  to: "wizard#add_machine",    as: :wizard_add_machine
+  delete "wizard/machines/:machine_id", to: "wizard#remove_machine", as: :wizard_remove_machine
+  get  "wizard/review",    to: "wizard#review",         as: :wizard_review
+  get  "wizard/deploy",    to: "wizard#deploy",         as: :wizard_deploy
+  post "wizard/deploy",    to: "wizard#start_deploy",   as: :wizard_start_deploy
+  get  "wizard/suggest_zone", to: "wizard#suggest_zone", as: :wizard_suggest_zone
+
   # Health check endpoint
   get "up" => "rails/health#show", as: :rails_health_check
 end

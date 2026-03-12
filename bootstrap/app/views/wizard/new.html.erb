@@ -1,0 +1,52 @@
+<%# Step 1: Create Network %>
+<div class="max-w-2xl mx-auto">
+  <%= render "wizard/step_indicator", current_step: 1 %>
+
+  <div class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-bold text-gray-900 mb-2">Create Network</h2>
+    <p class="text-sm text-gray-500 mb-6">Define your ZTLP network name and zone identifier.</p>
+
+    <%= form_with model: @network, url: wizard_create_network_path, method: :post,
+        data: { controller: "wizard", action: "input->wizard#suggestZone" } do |f| %>
+
+      <% if @network.errors.any? %>
+        <div class="rounded-md bg-red-50 p-4 mb-6">
+          <div class="text-sm text-red-700">
+            <ul class="list-disc pl-5 space-y-1">
+              <% @network.errors.full_messages.each do |message| %>
+                <li><%= message %></li>
+              <% end %>
+            </ul>
+          </div>
+        </div>
+      <% end %>
+
+      <div class="space-y-4">
+        <div>
+          <%= f.label :name, "Network Name", class: "block text-sm font-medium text-gray-700" %>
+          <%= f.text_field :name, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm p-2 border",
+              placeholder: "e.g., Office Network", autofocus: true,
+              data: { wizard_target: "nameInput", action: "input->wizard#suggestZone" } %>
+        </div>
+
+        <div>
+          <%= f.label :zone, "Zone", class: "block text-sm font-medium text-gray-700" %>
+          <%= f.text_field :zone, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm p-2 border font-mono",
+              placeholder: "e.g., office.ztlp",
+              data: { wizard_target: "zoneInput" } %>
+          <p class="mt-1 text-xs text-gray-500">Auto-suggested from name. Must be a valid ZTLP zone (lowercase, dots, hyphens).</p>
+        </div>
+
+        <div>
+          <%= f.label :notes, "Notes (optional)", class: "block text-sm font-medium text-gray-700" %>
+          <%= f.text_area :notes, rows: 3, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm p-2 border",
+              placeholder: "Any notes about this network..." %>
+        </div>
+      </div>
+
+      <div class="mt-6 flex justify-end">
+        <%= f.submit "Next: Add Machines →", class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+      </div>
+    <% end %>
+  </div>
+</div>

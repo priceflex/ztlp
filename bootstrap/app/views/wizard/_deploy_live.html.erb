@@ -1,0 +1,55 @@
+<%# Live deploy area — replaced via Turbo Stream when deploy starts %>
+<div id="deploy-area" data-controller="deploy-log" data-deploy-log-network-id-value="<%= network.id %>">
+
+  <%# Overall progress %>
+  <div class="mb-6">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-sm font-medium text-gray-700" data-deploy-log-target="statusBadge">Deploying...</span>
+      <span class="text-sm text-gray-500" data-deploy-log-target="progressText">0/<%= machines.sum { |m| m.role_list.size } %> completed</span>
+    </div>
+    <div class="w-full bg-gray-200 rounded-full h-3">
+      <div data-deploy-log-target="progressBar" class="bg-ztlp-600 h-3 rounded-full transition-all duration-300" style="width: 0%"></div>
+    </div>
+  </div>
+
+  <%# Per-machine/component cards %>
+  <div class="space-y-4">
+    <% machines.each do |machine| %>
+      <% machine.role_list.each do |component| %>
+        <% deployment = machine.deployments.where(component: component).order(created_at: :desc).first %>
+        <div id="deploy-card-<%= machine.id %>-<%= component %>" class="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+          <%# Header %>
+          <div class="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200 cursor-pointer"
+               data-action="click->deploy-log#toggleLog"
+               data-log-target="deploy-log-<%= machine.id %>-<%= component %>">
+            <div class="flex items-center space-x-3">
+              <span data-arrow class="text-gray-400 transform transition-transform">▶</span>
+              <div>
+                <span class="font-medium text-gray-900"><%= machine.hostname %></span>
+                <span class="text-gray-500 text-sm ml-1">/ <%= component %></span>
+              </div>
+              <span class="text-xs text-gray-400"><%= machine.ip_address %></span>
+            </div>
+            <div class="flex items-center space-x-3">
+              <span data-status-message class="text-xs text-gray-500"><%= deployment&.status == "pending" ? "Queued" : "Waiting..." %></span>
+              <span data-status-badge class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800">
+                <%= deployment&.status || "pending" %>
+              </span>
+            </div>
+          </div>
+
+          <%# Log output (collapsed by default) %>
+          <div id="deploy-log-<%= machine.id %>-<%= component %>" class="hidden bg-gray-900 p-4 max-h-64 overflow-y-auto">
+            <% if deployment&.log.present? %>
+              <% deployment.log.lines.each do |line| %>
+                <div class="text-xs font-mono text-gray-300"><%= line.strip %></div>
+              <% end %>
+            <% else %>
+              <div class="text-xs font-mono text-gray-500">Waiting for deployment to start...</div>
+            <% end %>
+          </div>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+</div>

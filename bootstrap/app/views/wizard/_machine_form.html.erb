@@ -1,0 +1,78 @@
+<%# Form to add a new machine %>
+<div id="new-machine-form">
+  <%= form_with model: machine, url: wizard_add_machine_path, method: :post,
+      data: { controller: "machine-form" } do |f| %>
+
+    <% if machine.errors.any? %>
+      <div class="rounded-md bg-red-50 p-4 mb-4">
+        <div class="text-sm text-red-700">
+          <ul class="list-disc pl-5 space-y-1">
+            <% machine.errors.full_messages.each do |message| %>
+              <li><%= message %></li>
+            <% end %>
+          </ul>
+        </div>
+      </div>
+    <% end %>
+
+    <div class="bg-gray-50 rounded-lg p-4 border border-gray-200 space-y-4">
+      <h4 class="text-sm font-medium text-gray-700">Add Machine</h4>
+
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <%= f.label :hostname, class: "block text-xs font-medium text-gray-600" %>
+          <%= f.text_field :hostname, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border",
+              placeholder: "e.g., ns1.office" %>
+        </div>
+        <div>
+          <%= f.label :ip_address, "IP Address", class: "block text-xs font-medium text-gray-600" %>
+          <%= f.text_field :ip_address, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border",
+              placeholder: "e.g., 10.0.1.10" %>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-3 gap-4">
+        <div>
+          <%= f.label :ssh_user, "SSH User", class: "block text-xs font-medium text-gray-600" %>
+          <%= f.text_field :ssh_user, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border" %>
+        </div>
+        <div>
+          <%= f.label :ssh_port, "SSH Port", class: "block text-xs font-medium text-gray-600" %>
+          <%= f.number_field :ssh_port, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border" %>
+        </div>
+        <div>
+          <%= f.label :ssh_auth_method, "Auth Method", class: "block text-xs font-medium text-gray-600" %>
+          <%= f.select :ssh_auth_method, [["SSH Key", "key"], ["Password", "password"], ["SSH Agent", "agent"]],
+              {}, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border" %>
+        </div>
+      </div>
+
+      <div>
+        <%= f.label :ssh_private_key_ciphertext, "SSH Private Key", class: "block text-xs font-medium text-gray-600" %>
+        <%= f.text_area :ssh_private_key_ciphertext, rows: 3, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 text-sm p-2 border font-mono",
+            placeholder: "Paste SSH private key..." %>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-2">Roles</label>
+        <div class="flex items-center space-x-6">
+          <% Machine::VALID_ROLES.each do |role| %>
+            <label class="flex items-center space-x-2">
+              <input type="checkbox" value="<%= role %>" name="role_checks[]"
+                     data-machine-form-target="roleCheckbox"
+                     data-action="change->machine-form#updateRoles"
+                     class="rounded border-gray-300 text-ztlp-600 focus:ring-ztlp-500"
+                     <%= "checked" if machine.role_list.include?(role) %>>
+              <span class="text-sm text-gray-700"><%= role.upcase %></span>
+            </label>
+          <% end %>
+        </div>
+        <%= f.hidden_field :roles, value: machine.roles, data: { roles_field: true } %>
+      </div>
+
+      <div class="flex justify-end">
+        <%= f.submit "Add Machine", class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+      </div>
+    </div>
+  <% end %>
+</div>

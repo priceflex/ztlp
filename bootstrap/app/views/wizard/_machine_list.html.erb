@@ -1,0 +1,33 @@
+<%# List of machines added so far %>
+<div id="machine-list">
+  <% if machines.any? %>
+    <div class="space-y-3">
+      <% machines.select(&:persisted?).each do |machine| %>
+        <div class="flex items-center justify-between bg-gray-50 rounded-lg p-4 border border-gray-200">
+          <div class="flex-1">
+            <div class="flex items-center space-x-3">
+              <span class="font-medium text-gray-900"><%= machine.hostname %></span>
+              <span class="text-sm text-gray-500"><%= machine.ip_address %></span>
+              <span class="text-xs text-gray-400"><%= machine.ssh_user %>@<%= machine.ssh_port %></span>
+            </div>
+            <div class="mt-1 flex items-center space-x-2">
+              <% machine.role_list.each do |role| %>
+                <% color = case role
+                  when "ns" then "bg-purple-100 text-purple-800"
+                  when "relay" then "bg-indigo-100 text-indigo-800"
+                  when "gateway" then "bg-cyan-100 text-cyan-800"
+                  end %>
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium <%= color %>"><%= role %></span>
+              <% end %>
+            </div>
+          </div>
+          <%= button_to "Remove", wizard_remove_machine_path(machine_id: machine.id), method: :delete,
+              class: "ml-4 text-sm text-red-600 hover:text-red-800 font-medium",
+              data: { turbo_method: :delete } %>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <p class="text-center text-gray-400 py-6">No machines added yet. Add your first machine below.</p>
+  <% end %>
+</div>

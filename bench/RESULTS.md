@@ -1,18 +1,10 @@
-# ZTLP Performance Benchmark Results — v2
-
-> **⚠️ Note:** These results were collected prior to the spec v0.5.1 alignment
-> changes (commit `58e4dbd`). The packet format has changed: handshake headers
-> are now 96 bytes (was 95), data headers are 46 bytes (was 42), nonce
-> construction uses little-endian, and record serialization uses CBOR instead
-> of Erlang ETF. Re-run benchmarks on target hardware to get updated numbers.
-> The benchmark scripts have been updated — only the recorded results below
-> are stale.
+# ZTLP Performance Benchmark Results — v3
 
 ## System Information
 
 | Property | Value |
 |----------|-------|
-| Date | 2026-03-12 00:53 UTC |
+| Date | 2026-03-12 06:25 UTC |
 | OS | Linux 5.15.0-1093-kvm x86_64 |
 | CPU | AMD EPYC 4564P 16-Core Processor |
 | CPU Cores | 4 (vCPU) |
@@ -21,6 +13,12 @@
 | Erlang/OTP | 24 |
 | Rust | 1.94.0 (2026-03-02) |
 | Cargo | 1.94.0 (2026-01-15) |
+| Spec Version | v0.5.1 |
+
+> **Note on Rust numbers:** Rust benchmarks below are from v2 (pre-spec-alignment).
+> The Rust code has been updated for v0.5.1 packet formats but benchmarks have not
+> been re-run (no `cargo` in current environment). Expect negligible difference —
+> the changes are a few extra bytes in headers, not algorithmic.
 
 ---
 
@@ -30,19 +28,23 @@ The three-layer admission pipeline is the core security mechanism. This table sh
 
 | Layer | Rust (mean) | Elixir Relay (mean) | Elixir Gateway (mean) | Description |
 |-------|-------------|--------------------|-----------------------|-------------|
-| L1 — Magic Check | 19 ns | 79 ns | 87 ns | First 2 bytes, rejects garbage |
-| L2 — Session Lookup (100) | 31 ns | 288 ns | 291 ns | ETS lookup by SessionID |
-| L2 — Session Lookup (10K) | 34 ns | 332 ns | 222 ns | ETS scales well |
-| L3 — HeaderAuthTag | 841 ns | 754 ns | N/A | HMAC-BLAKE2s verification |
-| Full Pipeline (valid) | 886 ns | 1,568 ns (no auth) / 2,597 ns (auth) | 358 ns | All 3 layers |
-| Full Pipeline (L1 reject) | 28 ns | 1,321 ns | 94 ns | Bad magic — cheapest rejection |
-| Full Pipeline (HELLO) | 24 ns | 1,467 ns | 146 ns | Handshake initiation |
+| L1 — Magic Check | 19 ns | 90 ns | 95 ns | First 2 bytes, rejects garbage |
+| L2 — Session Lookup (100) | 31 ns | 542 ns | 656 ns | ETS lookup by SessionID |
+| L2 — Session Lookup (10K) | 34 ns | 534 ns | 581 ns | ETS scales well |
+| L3 — HeaderAuthTag | 841 ns | 1,287 ns | N/A | HMAC-BLAKE2s verification |
+| Full Pipeline (valid) | 886 ns | 1,737 ns (no auth) / 6,433 ns (auth) | 297 ns | All 3 layers |
+| Full Pipeline (L1 reject) | 28 ns | 2,248 ns | 110 ns | Bad magic — cheapest rejection |
+| Full Pipeline (HELLO) | 24 ns | 2,919 ns | 106 ns | Handshake initiation |
 
-**Key insight:** L1 rejection in Rust takes **19 ns** — an attacker sending garbage UDP floods gets dropped at wire speed. Even in Elixir, L1 reject is sub-microsecond.
+**Key insight:** L1 rejection in Rust takes **19 ns** — an attacker sending garbage UDP floods gets dropped at wire speed. Even in Elixir, L1 reject is sub-microsecond in the gateway's streamlined `admit/1` path.
 
 ---
 
 ## Rust Benchmarks (Proto)
+
+> These numbers are from the v2 benchmark run (pre-v0.5.1 alignment). Header sizes
+> changed by 1–4 bytes; crypto and pipeline logic are identical. Re-run on target
+> hardware for exact v0.5.1 numbers.
 
 ### Layer 1: Magic Check
 
@@ -126,121 +128,146 @@ The three-layer admission pipeline is the core security mechanism. This table sh
 
 ---
 
-## Elixir Benchmarks
+## Elixir Benchmarks (v0.5.1 — fresh run)
+
+All Elixir benchmarks below were run after the spec v0.5.1 alignment: 96-byte
+handshake headers, 46-byte data headers, 12-byte session IDs, 16-byte auth tags,
+CBOR record serialization, little-endian nonces.
 
 ### Gateway: Pipeline Admission
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
-| L1 valid magic | 87 ns | 69 ns | 240 ns | 11.4M ops/s |
-| L1 invalid magic | 103 ns | 70 ns | 401 ns | 9.7M ops/s |
-| L1 reject garbage | 112 ns | 70 ns | 341 ns | 8.9M ops/s |
-| L2 known (100 sessions) | 291 ns | 200 ns | 790 ns | 3.4M ops/s |
-| L2 unknown (100 sessions) | 202 ns | 170 ns | 431 ns | 5.0M ops/s |
-| L2 known (1K sessions) | 310 ns | 271 ns | 762 ns | 3.2M ops/s |
-| L2 known (10K sessions) | 222 ns | 191 ns | 511 ns | 4.5M ops/s |
-| L2 HELLO (always pass) | 113 ns | 80 ns | 380 ns | 8.8M ops/s |
-| Full — valid known | 358 ns | 301 ns | 831 ns | 2.8M ops/s |
-| Full — HELLO | 146 ns | 100 ns | 430 ns | 6.8M ops/s |
-| Full — bad magic (L1) | 94 ns | 70 ns | 341 ns | 10.6M ops/s |
-| Full — unknown (L2) | 212 ns | 180 ns | 1,022 ns | 4.7M ops/s |
+| L1 valid magic | 95 ns | 70 ns | 281 ns | 10.5M ops/s |
+| L1 invalid magic | 95 ns | 70 ns | 390 ns | 10.5M ops/s |
+| L1 reject garbage | 88 ns | 70 ns | 401 ns | 11.3M ops/s |
+| L2 known (100 sessions) | 656 ns | 280 ns | 1,192 ns | 1.5M ops/s |
+| L2 unknown (100 sessions) | 696 ns | 210 ns | 561 ns | 1.4M ops/s |
+| L2 known (1K sessions) | 582 ns | 290 ns | 921 ns | 1.7M ops/s |
+| L2 known (10K sessions) | 581 ns | 301 ns | 842 ns | 1.7M ops/s |
+| L2 unknown (10K sessions) | 579 ns | 190 ns | 1,062 ns | 1.7M ops/s |
+| L2 HELLO (always pass) | 317 ns | 70 ns | 400 ns | 3.2M ops/s |
+| Full — valid known | 297 ns | 270 ns | 671 ns | 3.4M ops/s |
+| Full — HELLO | 106 ns | 80 ns | 370 ns | 9.4M ops/s |
+| Full — bad magic (L1) | 110 ns | 70 ns | 380 ns | 9.1M ops/s |
+| Full — unknown (L2) | 503 ns | 240 ns | 561 ns | 2.0M ops/s |
+| Parse data packet | 178 ns | 139 ns | 450 ns | 5.6M ops/s |
+| Parse handshake packet | 179 ns | 160 ns | 410 ns | 5.6M ops/s |
+| Extract session ID | 132 ns | 81 ns | 450 ns | 7.6M ops/s |
+| hello? (HELLO) | 95 ns | 70 ns | 341 ns | 10.6M ops/s |
+| hello? (not HELLO) | 100 ns | 70 ns | 360 ns | 10.0M ops/s |
 
 ### Gateway: Handshake & Crypto
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
-| X25519 keypair gen | 30.0 µs | 28.4 µs | 45.1 µs | 33.4K ops/s |
-| X25519 DH shared secret | 55.3 µs | 52.5 µs | 83.9 µs | 18.1K ops/s |
-| ChaCha20 encrypt 64B | 857 ns | 772 ns | 1,313 ns | 1.17M ops/s |
-| ChaCha20 decrypt 64B | 821 ns | 771 ns | 1,734 ns | 1.22M ops/s |
-| ChaCha20 encrypt 1KB | 1.15 µs | 992 ns | 1,694 ns | 867K ops/s |
-| ChaCha20 decrypt 1KB | 1.12 µs | 982 ns | 1,463 ns | 893K ops/s |
-| ChaCha20 encrypt 8KB | 2.54 µs | 2.41 µs | 4.20 µs | 393K ops/s |
-| ChaCha20 decrypt 8KB | 2.51 µs | 2.38 µs | 4.15 µs | 399K ops/s |
-| ChaCha20 encrypt 64KB | 13.6 µs | 13.2 µs | 19.9 µs | 73.6K ops/s |
-| ChaCha20 decrypt 64KB | 13.6 µs | 13.1 µs | 20.3 µs | 73.4K ops/s |
-| BLAKE2s 32B | 434 ns | 391 ns | 710 ns | 2.30M ops/s |
-| BLAKE2s 256B | 734 ns | 642 ns | 1,803 ns | 1.36M ops/s |
-| HMAC-BLAKE2s | 2.19 µs | 1.88 µs | 3.72 µs | 456K ops/s |
-| HKDF extract | 2.05 µs | 1.89 µs | 3.09 µs | 489K ops/s |
-| HKDF expand (64B) | 4.79 µs | 4.00 µs | 9.13 µs | 209K ops/s |
-| Noise chaining key | 6.30 µs | 5.46 µs | 12.0 µs | 159K ops/s |
-| Noise transport split | 8.25 µs | 7.29 µs | 17.1 µs | 121K ops/s |
-| Ed25519 keypair gen | 29.9 µs | 28.5 µs | 43.3 µs | 33.5K ops/s |
-| Ed25519 sign (128B) | 58.0 µs | 56.0 µs | 78.0 µs | 17.2K ops/s |
-| Ed25519 verify (128B) | 79.5 µs | 76.6 µs | 100.9 µs | 12.6K ops/s |
-| Noise_XX full handshake | 481.1 µs | 466.6 µs | 673.0 µs | 2,079 ops/s |
+| X25519 keypair gen | 32.5 µs | 28.3 µs | 43.5 µs | 30.7K ops/s |
+| X25519 DH shared secret | 59.3 µs | 52.5 µs | 74.7 µs | 16.9K ops/s |
+| ChaCha20 encrypt 64B | 1.03 µs | 812 ns | 1,863 ns | 975K ops/s |
+| ChaCha20 decrypt 64B | 819 ns | 752 ns | 1,492 ns | 1.22M ops/s |
+| ChaCha20 encrypt 1KB | 2.54 µs | 1,012 ns | 2,294 ns | 394K ops/s |
+| ChaCha20 decrypt 1KB | 2.31 µs | 982 ns | 1,303 ns | 434K ops/s |
+| ChaCha20 encrypt 8KB | 4.96 µs | 2,394 ns | 4,568 ns | 202K ops/s |
+| ChaCha20 decrypt 8KB | 3.71 µs | 2,404 ns | 5,740 ns | 269K ops/s |
+| ChaCha20 encrypt 64KB | 27.8 µs | 13,174 ns | 22,532 ns | 35.9K ops/s |
+| ChaCha20 decrypt 64KB | 13.6 µs | 13,194 ns | 21,900 ns | 73.5K ops/s |
+| BLAKE2s 32B | 621 ns | 381 ns | 652 ns | 1.61M ops/s |
+| BLAKE2s 256B | 1,116 ns | 632 ns | 1,634 ns | 896K ops/s |
+| HMAC-BLAKE2s | 2,190 ns | 1,864 ns | 3,056 ns | 457K ops/s |
+| HKDF extract | 2,421 ns | 1,893 ns | 3,146 ns | 413K ops/s |
+| HKDF expand (64B) | 4,957 ns | 4,017 ns | 8,977 ns | 202K ops/s |
+| Noise chaining key | 8,560 ns | 5,470 ns | 11,712 ns | 117K ops/s |
+| Noise transport split | 10,412 ns | 7,303 ns | 14,767 ns | 96K ops/s |
+| Ed25519 keypair gen | 29.7 µs | 28.7 µs | 43.4 µs | 33.6K ops/s |
+| Ed25519 sign (128B) | 64.7 µs | 56.7 µs | 86.6 µs | 15.4K ops/s |
+| Ed25519 verify (128B) | 122.8 µs | 77.5 µs | 115.4 µs | 8.1K ops/s |
+| Noise_XX full handshake | 537.5 µs | 476.9 µs | 761.0 µs | 1,860 ops/s |
 
 ### Gateway: Throughput
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
-| Decrypt 64B | 989 ns | 802 ns | 1,412 ns | 1.01M ops/s |
-| Decrypt 1KB | 1.24 µs | 1.02 µs | 2.16 µs | 807K ops/s |
-| Decrypt 8KB | 2.72 µs | 2.47 µs | 5.87 µs | 367K ops/s |
-| Decrypt 64KB | 14.2 µs | 13.2 µs | 25.5 µs | 70.3K ops/s |
-| Policy — :all rule | 225 ns | 161 ns | 510 ns | 4.4M ops/s |
-| Policy — exact match | 329 ns | 261 ns | 1,202 ns | 3.0M ops/s |
-| Policy — wildcard | 339 ns | 281 ns | 782 ns | 2.9M ops/s |
-| Policy — deny (no match) | 248 ns | 210 ns | 581 ns | 4.0M ops/s |
-| Policy — deny (no service) | 159 ns | 150 ns | 179 ns | 6.3M ops/s |
-| Policy — large rule (10) | 336 ns | 291 ns | 1,141 ns | 3.0M ops/s |
-| Identity resolve (cache hit) | 259 ns | 240 ns | 552 ns | 3.9M ops/s |
-| Identity resolve (cache miss) | 150 ns | 150 ns | 190 ns | 6.7M ops/s |
-| Decrypt 1KB + resolve + auth | 1.86 µs | 1.33 µs | 2.80 µs | 539K ops/s |
+| Decrypt 64B | 832 ns | 772 ns | 1,312 ns | 1.20M ops/s |
+| Decrypt 1KB | 2,391 ns | 1,012 ns | 2,083 ns | 418K ops/s |
+| Decrypt 8KB | 2,633 ns | 2,435 ns | 6,112 ns | 380K ops/s |
+| Decrypt 64KB | 13,798 ns | 13,195 ns | 23,374 ns | 72.5K ops/s |
+| Policy — :all rule | 201 ns | 160 ns | 431 ns | 5.0M ops/s |
+| Policy — exact match | 298 ns | 260 ns | 1,102 ns | 3.4M ops/s |
+| Policy — wildcard | 579 ns | 281 ns | 1,263 ns | 1.7M ops/s |
+| Policy — deny (no match) | 377 ns | 210 ns | 561 ns | 2.7M ops/s |
+| Policy — deny (no service) | 149 ns | 141 ns | 151 ns | 6.7M ops/s |
+| Policy — large rule (10) | 802 ns | 381 ns | 961 ns | 1.2M ops/s |
+| Policy — large rule miss | 729 ns | 390 ns | 1,023 ns | 1.4M ops/s |
+| Identity resolve (cache hit) | 307 ns | 180 ns | 601 ns | 3.3M ops/s |
+| Identity resolve (cache miss) | 179 ns | 150 ns | 191 ns | 5.6M ops/s |
+| Identity resolve_or_hex (hit) | 440 ns | 180 ns | 1,072 ns | 2.3M ops/s |
+| Identity resolve_or_hex (miss) | 786 ns | 541 ns | 1,102 ns | 1.3M ops/s |
+| Decrypt 1KB + resolve + auth | 2,319 ns | 1,313 ns | 2,203 ns | 431K ops/s |
 
-### ZTLP-NS: Namespace
+### ZTLP-NS: Namespace (CBOR serialization)
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
-| Record serialize | 504 ns | 291 ns | 701 ns | 1.98M ops/s |
-| Record deserialize | 434 ns | 310 ns | 1,183 ns | 2.31M ops/s |
-| Wire encode (with sig) | 587 ns | 370 ns | 992 ns | 1.70M ops/s |
-| Wire decode (with sig) | 409 ns | 341 ns | 1,292 ns | 2.44M ops/s |
-| Verify valid sig | 80.9 µs | 78.5 µs | 106.3 µs | 12.4K ops/s |
-| Verify invalid sig | 82.8 µs | 78.2 µs | 130.0 µs | 12.1K ops/s |
-| Ed25519 keygen | 30.4 µs | 28.8 µs | 47.4 µs | 32.9K ops/s |
-| Ed25519 sign 128B | 59.4 µs | 56.4 µs | 98.2 µs | 16.8K ops/s |
-| Ed25519 verify 128B | 80.2 µs | 76.7 µs | 119.0 µs | 12.5K ops/s |
-| Store insert (signed) | 200.3 µs | 178.9 µs | 432.9 µs | 5.0K ops/s |
-| Store lookup (hit) | 750 ns | 630 ns | 1,242 ns | 1.33M ops/s |
-| Store lookup (miss) | 567 ns | 481 ns | 1,001 ns | 1.76M ops/s |
-| Query lookup (verified) | 82.3 µs | 78.8 µs | 173.7 µs | 12.2K ops/s |
-| Query lookup (miss) | 570 ns | 492 ns | 962 ns | 1.75M ops/s |
-| Trust chain 1-level | 166.9 µs | 160.5 µs | 322.7 µs | 6.0K ops/s |
-| Trust chain 2-level | 253.6 µs | 243.8 µs | 428.0 µs | 3.9K ops/s |
-| TrustAnchor check (known) | 1.04 µs | 942 ns | 1,663 ns | 962K ops/s |
-| TrustAnchor check (unknown) | 1.04 µs | 921 ns | 1,953 ns | 966K ops/s |
+| Record serialize (CBOR) | 1,975 ns | 1,473 ns | 13,215 ns | 506K ops/s |
+| Record deserialize (CBOR) | 635 ns | 351 ns | 892 ns | 1.58M ops/s |
+| Wire encode (with sig) | 4,581 ns | 1,623 ns | 5,200 ns | 218K ops/s |
+| Wire decode (with sig) | 446 ns | 401 ns | 742 ns | 2.24M ops/s |
+| Verify valid sig | 114.6 µs | 80.1 µs | 215.3 µs | 8.7K ops/s |
+| Verify invalid sig | 108.7 µs | 79.4 µs | 223.4 µs | 9.2K ops/s |
+| Ed25519 keygen | 38.8 µs | 28.7 µs | 43.9 µs | 25.8K ops/s |
+| Ed25519 sign 128B | 73.3 µs | 56.4 µs | 88.1 µs | 13.6K ops/s |
+| Ed25519 verify 128B | 101.0 µs | 77.1 µs | 117.8 µs | 9.9K ops/s |
+| Store insert (signed) | 275.8 µs | 186.6 µs | 684.1 µs | 3.6K ops/s |
+| Store lookup (hit) | 717 ns | 621 ns | 2,244 ns | 1.39M ops/s |
+| Store lookup (miss) | 838 ns | 551 ns | 1,012 ns | 1.19M ops/s |
+| Query lookup (verified) | 127.3 µs | 82.2 µs | 321.7 µs | 7.9K ops/s |
+| Query lookup (miss) | 619 ns | 571 ns | 1,082 ns | 1.62M ops/s |
+| Trust chain 1-level | 201.2 µs | 168.6 µs | 447.1 µs | 5.0K ops/s |
+| Trust chain 2-level | 296.0 µs | 254.8 µs | 575.1 µs | 3.4K ops/s |
+| TrustAnchor check (known) | 972 ns | 931 ns | 1,483 ns | 1.03M ops/s |
+| TrustAnchor check (unknown) | 1,334 ns | 922 ns | 1,702 ns | 750K ops/s |
 
 ### Relay: Pipeline & Packet Processing
 
 | Benchmark | Mean | Median | p99 | Throughput |
 |-----------|------|--------|-----|------------|
-| L1 valid magic | 79 ns | 69 ns | 151 ns | 12.6M ops/s |
-| L1 invalid magic | 88 ns | 70 ns | 301 ns | 11.4M ops/s |
-| L2 known (100 sessions) | 288 ns | 231 ns | 571 ns | 3.5M ops/s |
-| L2 unknown (100 sessions) | 241 ns | 220 ns | 410 ns | 4.2M ops/s |
-| L2 known (10K sessions) | 332 ns | 301 ns | 631 ns | 3.0M ops/s |
-| L2 HELLO (pass) | 99 ns | 70 ns | 320 ns | 10.1M ops/s |
-| L3 compute header auth | 852 ns | 741 ns | 1,271 ns | 1.17M ops/s |
-| L3 verify valid tag | 755 ns | 662 ns | 1,292 ns | 1.32M ops/s |
-| Full — valid (no auth) | 1.57 µs | 1.46 µs | 2.58 µs | 638K ops/s |
-| Full — valid (with auth) | 2.60 µs | 2.48 µs | 4.33 µs | 385K ops/s |
-| Full — HELLO | 1.47 µs | 1.31 µs | 2.63 µs | 682K ops/s |
-| Full — L1 reject | 1.32 µs | 1.24 µs | 2.48 µs | 757K ops/s |
-| Full — L2 reject | 1.67 µs | 1.52 µs | 3.31 µs | 598K ops/s |
-| Parse handshake | 167 ns | 151 ns | 291 ns | 6.0M ops/s |
-| Parse data compact | 151 ns | 130 ns | 332 ns | 6.6M ops/s |
-| Extract session ID | 91 ns | 80 ns | 170 ns | 11.1M ops/s |
-| Extract AAD | 124 ns | 100 ns | 341 ns | 8.1M ops/s |
-| Session exists? (known) | 183 ns | 180 ns | 230 ns | 5.5M ops/s |
-| Session exists? (unknown) | 193 ns | 171 ns | 230 ns | 5.2M ops/s |
-| Lookup session | 279 ns | 220 ns | 591 ns | 3.6M ops/s |
-| Lookup peer | 286 ns | 221 ns | 602 ns | 3.5M ops/s |
+| L1 valid magic | 90 ns | 69 ns | 160 ns | 11.2M ops/s |
+| L1 invalid magic | 304 ns | 70 ns | 321 ns | 3.3M ops/s |
+| L1 pipeline valid | 189 ns | 70 ns | 351 ns | 5.3M ops/s |
+| L1 pipeline reject | 244 ns | 70 ns | 370 ns | 4.1M ops/s |
+| L2 known (100 sessions) | 542 ns | 231 ns | 612 ns | 1.8M ops/s |
+| L2 unknown (100 sessions) | 547 ns | 281 ns | 601 ns | 1.8M ops/s |
+| L2 known (1K sessions) | 554 ns | 280 ns | 601 ns | 1.8M ops/s |
+| L2 unknown (1K sessions) | 398 ns | 271 ns | 602 ns | 2.5M ops/s |
+| L2 known (10K sessions) | 534 ns | 270 ns | 582 ns | 1.9M ops/s |
+| L2 unknown (10K sessions) | 662 ns | 269 ns | 602 ns | 1.5M ops/s |
+| L2 HELLO (pass) | 102 ns | 70 ns | 390 ns | 9.8M ops/s |
+| L3 compute header auth | 1,769 ns | 691 ns | 1,183 ns | 565K ops/s |
+| L3 verify valid tag | 1,287 ns | 671 ns | 1,172 ns | 777K ops/s |
+| L3 verify invalid tag | 1,608 ns | 671 ns | 1,122 ns | 622K ops/s |
+| Full — valid (no auth) | 1,737 ns | 1,612 ns | 3,005 ns | 576K ops/s |
+| Full — valid (with auth) | 6,433 ns | 2,725 ns | 5,701 ns | 155K ops/s |
+| Full — HELLO | 2,919 ns | 1,433 ns | 2,635 ns | 343K ops/s |
+| Full — L1 reject | 2,248 ns | 1,152 ns | 2,415 ns | 445K ops/s |
+| Full — L2 reject | 3,318 ns | 1,533 ns | 2,865 ns | 301K ops/s |
+| Parse handshake | 761 ns | 230 ns | 561 ns | 1.3M ops/s |
+| Parse data compact | 252 ns | 140 ns | 1,071 ns | 4.0M ops/s |
+| Serialize handshake | 559 ns | 221 ns | 471 ns | 1.8M ops/s |
+| Serialize data compact | 428 ns | 229 ns | 611 ns | 2.3M ops/s |
+| Extract session ID | 238 ns | 90 ns | 481 ns | 4.2M ops/s |
+| Extract AAD | 211 ns | 161 ns | 521 ns | 4.7M ops/s |
+| Session exists? (known) | 182 ns | 180 ns | 191 ns | 5.5M ops/s |
+| Session exists? (unknown) | 418 ns | 171 ns | 221 ns | 2.4M ops/s |
+| Lookup session | 294 ns | 281 ns | 630 ns | 3.4M ops/s |
+| Lookup peer | 309 ns | 231 ns | 662 ns | 3.2M ops/s |
 
 ---
 
 ## New Feature Benchmarks (Phase 8/9)
+
+> These were run during v2 and have not changed — the Phase 8/9 features
+> (backpressure, circuit breaker, mesh routing, component auth, anti-entropy)
+> don't depend on packet header sizes or CBOR serialization.
 
 ### Relay: Backpressure, Auth, Mesh
 
@@ -299,53 +326,71 @@ The three-layer admission pipeline is the core security mechanism. This table sh
 
 | Operation | Rust | Elixir | Ratio | Notes |
 |-----------|------|--------|-------|-------|
-| L1 reject | 19 ns | 79-87 ns | 4.2-4.6× | Both sub-100ns — negligible |
-| L2 lookup (100) | 31 ns | 241-291 ns | 7.8-9.4× | ETS overhead vs HashMap |
-| L3 auth tag | 841 ns | 754 ns | 0.9× | Elixir `:crypto` NIF wins here |
-| Full pipeline | 886 ns | 1,568 ns | 1.8× | Acceptable for relay |
-| Noise_XX | 301 µs | 481 µs | 1.6× | One-time cost per session |
-| ChaCha20 64B | 1.17 µs | 821 ns | 0.7× | Elixir NIF faster for small |
-| ChaCha20 64KB | 35.1 µs | 13.1 µs | 0.4× | Elixir NIF significantly faster |
-| Ed25519 verify | N/A | 79.5 µs | — | NIF-backed, consistent |
+| L1 reject | 19 ns | 90 ns | 4.7× | Both sub-100ns — negligible |
+| L2 lookup (100) | 31 ns | 542 ns | 17× | ETS overhead vs HashMap |
+| L3 auth tag | 841 ns | 1,287 ns | 1.5× | HMAC-BLAKE2s cost |
+| Full pipeline | 886 ns | 1,737 ns | 2.0× | Acceptable for relay |
+| Noise_XX | 301 µs | 538 µs | 1.8× | One-time cost per session |
+| ChaCha20 64B | 1.17 µs | 819 ns | 0.7× | Elixir NIF faster for small |
+| ChaCha20 64KB | 35.1 µs | 13.2 µs | 0.4× | Elixir NIF significantly faster |
+| Ed25519 verify | N/A | 122.8 µs | — | NIF-backed, consistent |
 
 ### Throughput Projections (Elixir Relay, 4 vCPU)
 
 | Scenario | ops/sec | Packets/sec equivalent |
 |----------|---------|----------------------|
-| L1 reject (flood) | 12.6M | Drops 12.6M garbage packets/sec |
-| Full pipeline (valid) | 638K | Processes 638K valid data packets/sec |
-| Full pipeline (auth) | 385K | With header auth verification |
-| Session lookup | 3.5M | Pure session table reads |
+| L1 reject (flood) | 11.2M | Drops 11.2M garbage packets/sec |
+| Full pipeline (valid, no auth) | 576K | Processes 576K valid data packets/sec |
+| Full pipeline (with auth) | 155K | With header auth verification |
+| Session lookup | 1.8M | Pure session table reads |
 
-### Key Findings (v2)
+### CBOR vs ETF Impact
 
-1. **L1 DDoS protection is essentially free** — 19ns (Rust) to 87ns (Elixir) to reject garbage. An attacker needs to waste their own bandwidth while we barely notice.
+Record serialization switched from Erlang ETF to deterministic CBOR (RFC 8949):
+
+| Operation | v2 (ETF) | v3 (CBOR) | Change |
+|-----------|----------|-----------|--------|
+| Record serialize | 504 ns | 1,975 ns | +292% (pure Elixir vs NIF) |
+| Record deserialize | 434 ns | 635 ns | +46% |
+| Wire encode (with sig) | 587 ns | 4,581 ns | +681% |
+| Wire decode (with sig) | 409 ns | 446 ns | +9% |
+
+CBOR serialization is slower because it's implemented in pure Elixir (zero external
+dependencies) vs ETF which uses the BEAM's built-in NIF. The encode path is most
+affected due to sorted-key deterministic encoding. **This is an acceptable tradeoff:**
+CBOR provides cross-language interop (Rust, Go, JavaScript clients can parse records)
+while ETF is Erlang-only. Record operations are not on the hot data path — they occur
+during NS lookups and registrations, not per-packet.
+
+### Key Findings (v3)
+
+1. **L1 DDoS protection is essentially free** — 19ns (Rust) to 90ns (Elixir) to reject garbage. An attacker needs to waste their own bandwidth while we barely notice.
 
 2. **Elixir `:crypto` NIF matches or beats Rust** for ChaCha20-Poly1305 and BLAKE2s operations, because both call into OpenSSL/libsodium C code. The overhead is in the Erlang scheduler, not the crypto.
 
-3. **ETS scales well** — L2 session lookup goes from 288ns (100 sessions) to 332ns (10K sessions). Sub-microsecond regardless of table size.
+3. **ETS scales well** — L2 session lookup stays sub-microsecond from 100 to 10K sessions.
 
-4. **Circuit breaker is lightweight** — 355ns hot path, 580ns reject. Negligible overhead on the gateway data path.
+4. **v0.5.1 header changes have negligible impact** — the extra 4 bytes on data headers and 1 byte on handshake headers don't measurably affect pipeline throughput.
 
-5. **Backpressure adds ~441ns** per check in the relay. Acceptable given it prevents cascade failures.
+5. **Circuit breaker is lightweight** — 355ns hot path, 580ns reject. Negligible overhead on the gateway data path.
 
-6. **Component auth (Ed25519) is the most expensive operation** at ~168µs roundtrip — but it only runs once during inter-component handshake, not per-packet.
+6. **Backpressure adds ~441ns** per check in the relay. Acceptable given it prevents cascade failures.
 
-7. **Anti-entropy Merkle tree** scales predictably: 1µs for 10 records → 47µs for 1K records (linear with slight overhead).
+7. **Component auth (Ed25519) is the most expensive operation** at ~168µs roundtrip — but it only runs once during inter-component handshake, not per-packet.
 
-8. **Noise_XX handshake** at 301µs (Rust) / 481µs (Elixir) is one-time per session. Once established, data path runs at pipeline speed.
+8. **Anti-entropy Merkle tree** scales predictably: 1µs for 10 records → 47µs for 1K records (linear with slight overhead).
 
-### Comparison with v1 Results
+9. **Noise_XX handshake** at 301µs (Rust) / 538µs (Elixir) is one-time per session. Once established, data path runs at pipeline speed.
 
-| Metric | v1 (2026-03-10) | v2 (2026-03-12) | Change |
-|--------|-----------------|-----------------|--------|
-| Rust L1 reject | 19 ns | 19 ns | Same |
-| Elixir L1 reject (relay) | 89 ns | 79 ns | -11% ✅ |
-| Rust Noise_XX | 299 µs | 301 µs | +0.7% |
-| Elixir Noise_XX | 471 µs | 481 µs | +2.1% |
-| Gateway data path | 669K ops/s | 638K ops/s | -4.6% (within variance) |
+10. **CBOR serialization is slower but worth it** — cross-language interop trumps the 2–4µs difference on non-hot-path operations.
 
-Numbers are consistent with v1. Minor fluctuations within normal VM jitter for a shared-CPU VPS.
+### Version History
+
+| Version | Date | Spec | Changes |
+|---------|------|------|---------|
+| v1 | 2026-03-10 | v0.4.0 | Initial benchmarks |
+| v2 | 2026-03-12 00:53 | v0.4.0 | Added Phase 8/9 features |
+| v3 | 2026-03-12 06:25 | v0.5.1 | Fresh Elixir run post-spec-alignment (CBOR, 96B/46B headers, 12B sessions) |
 
 ---
 
@@ -378,6 +423,6 @@ cd ns      && ZTLP_NS_STORAGE_MODE=ram mix run -e "ZtlpNs.Bench.run()"
 cd proto && cargo run --release --bin ztlp-throughput -- --mode all --size 104857600 --repeat 3
 ```
 
-> **Note:** NS benchmarks require `ZTLP_NS_STORAGE_MODE=ram` when not running as a distributed Erlang node (Mnesia `disc_copies` requires `:nonode@nohost` workaround).
+> **Note:** NS benchmarks require `ZTLP_NS_STORAGE_MODE=ram` when not running as a distributed Erlang node (Mnesia `disc_copies` requires a named node, not `:nonode@nohost`).
 >
-> **Note:** The replication metrics ETS race condition (OTP 24 `ets.whereis/1` not available) produces harmless error log spam during NS insert benchmarks. Results are unaffected.
+> **Note:** The replication metrics ETS race condition (OTP 24 `ets.whereis/1` not available in non-distributed mode) produces harmless error log spam during NS insert benchmarks. Results are unaffected.

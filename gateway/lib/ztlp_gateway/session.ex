@@ -381,8 +381,13 @@ defmodule ZtlpGateway.Session do
 
     # Build a data packet with a dummy auth tag (12 bytes of zeros for prototype)
     # In production, the header auth tag would be computed over the header fields
-    header_auth_tag = :crypto.strong_rand_bytes(12)
-    packet = Packet.build_data(state.session_id, seq, header_auth_tag, encrypted)
+    header_auth_tag = :crypto.strong_rand_bytes(16)
+    pkt = Packet.build_data(state.session_id, seq,
+      header_auth_tag: header_auth_tag,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize(pkt)
 
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))

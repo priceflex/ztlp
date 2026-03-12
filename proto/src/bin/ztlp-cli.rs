@@ -3050,11 +3050,15 @@ async fn cmd_setup(
     name_arg: &Option<String>,
     auto_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use dialoguer::{Select, Input};
+    use dialoguer::{Input, Select};
 
     eprintln!();
     eprintln!("  {}", c_bold("╔══════════════════════════════════════╗"));
-    eprintln!("  {}       ZTLP Setup Wizard v0.5.2      {}", c_bold("║"), c_bold("║"));
+    eprintln!(
+        "  {}       ZTLP Setup Wizard v0.5.2      {}",
+        c_bold("║"),
+        c_bold("║")
+    );
     eprintln!("  {}", c_bold("╚══════════════════════════════════════╝"));
     eprintln!();
 
@@ -3086,9 +3090,7 @@ async fn cmd_setup(
 
             setup_join(&token_str, name_arg, auto_yes).await
         }
-        1 => {
-            setup_create_network(auto_yes).await
-        }
+        1 => setup_create_network(auto_yes).await,
         _ => unreachable!(),
     }
 }
@@ -3099,9 +3101,9 @@ async fn setup_join(
     name_arg: &Option<String>,
     auto_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use dialoguer::{Confirm, Input};
     use ztlp_proto::enrollment::EnrollmentToken;
     use ztlp_proto::identity::NodeIdentity;
-    use dialoguer::{Input, Confirm};
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, Duration};
 

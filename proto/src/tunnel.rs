@@ -728,21 +728,14 @@ pub async fn run_bridge(
             // SAFETY: fd is a valid open socket, and we immediately convert
             // back via into_raw_fd to prevent the std UdpSocket from closing it.
             let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-            let profile = crate::pacing::detect_system(
-                peer_addr,
-                Some(&std_sock),
-                Duration::from_micros(10),
-            );
+            let profile =
+                crate::pacing::detect_system(peer_addr, Some(&std_sock), Duration::from_micros(10));
             // Don't let std_sock close the fd — it belongs to the tokio socket
             let _ = std_sock.into_raw_fd();
             profile
         };
         #[cfg(not(unix))]
-        let udp_std = crate::pacing::detect_system(
-            peer_addr,
-            None,
-            Duration::from_micros(10),
-        );
+        let udp_std = crate::pacing::detect_system(peer_addr, None, Duration::from_micros(10));
         udp_std
     };
 
@@ -753,7 +746,8 @@ pub async fn run_bridge(
         pacing_strategy,
         adaptive_sub_batch,
         system_profile.estimated_hz,
-        system_profile.recv_buffer_size
+        system_profile
+            .recv_buffer_size
             .map(|s| format!("{}KB", s / 1024))
             .unwrap_or_else(|| "unknown".into()),
     );
@@ -1116,7 +1110,9 @@ pub async fn run_bridge(
                 // Send up to window_avail packets from remaining chunks,
                 // capped by MAX_SUB_BATCH to avoid overflowing the receiver's
                 // UDP socket buffer on systems with small rmem_max.
-                let send_count = window_avail.min(num_chunks - chunk_idx).min(adaptive_sub_batch);
+                let send_count = window_avail
+                    .min(num_chunks - chunk_idx)
+                    .min(adaptive_sub_batch);
 
                 // Allocate packet_seqs for this sub-batch
                 let first_packet_seq = {

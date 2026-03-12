@@ -198,9 +198,9 @@ pub fn detect_system(
     let max_sub_batch = match recv_buffer_size {
         Some(sz) if sz >= 4 * 1024 * 1024 => 128, // 4MB+ buffer: larger batches OK
         Some(sz) if sz >= 2 * 1024 * 1024 => 64,  // 2MB+: default
-        Some(sz) if sz >= 512 * 1024 => 32,        // 512KB+: conservative
-        Some(_) => 16,                               // Small buffer: very conservative
-        None => 64,                                  // Can't detect: use default
+        Some(sz) if sz >= 512 * 1024 => 32,       // 512KB+: conservative
+        Some(_) => 16,                            // Small buffer: very conservative
+        None => 64,                               // Can't detect: use default
     };
 
     let profile = SystemProfile {

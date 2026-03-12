@@ -111,3 +111,20 @@ flow control with congestion window, ACK-driven pacing.
 | Elixir NS | 286 | 0 |
 | Elixir gateway | 202 | 0 |
 | **Total** | **1,443** | **0** |
+
+## SCP Through ZTLP Tunnel (v0.5.3)
+
+Real-world SCP file transfers through the ZTLP encrypted tunnel (localhost loopback).
+
+| Size | ZTLP Tunnel | Direct SSH | Overhead |
+|------|-------------|-----------|----------|
+| 10 KB | 562ms | — | SSH handshake |
+| 100 KB | 262ms, 0.3 MB/s | — | — |
+| 512 KB | 239ms, 2.1 MB/s | — | — |
+| 1 MB | 266ms, 3.9 MB/s | 165ms, 6.3 MB/s | 1.6x |
+| 5 MB | 432ms, 12.1 MB/s | — | — |
+| 10 MB | 338ms, 31.0 MB/s | 217ms, 48.3 MB/s | 1.6x |
+
+All transfers verified with md5 checksum integrity. ZTLP adds ~60% overhead
+vs direct SSH, which includes Noise_XX session crypto + UDP encapsulation +
+flow control + reassembly.

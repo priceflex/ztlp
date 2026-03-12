@@ -1,0 +1,88 @@
+<div class="mb-6 flex items-center justify-between" data-controller="alert">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">
+      🚨 Alerts
+      <% if @active_count > 0 %>
+        <span class="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800">
+          <%= @active_count %> active
+        </span>
+      <% end %>
+    </h1>
+    <p class="mt-1 text-sm text-gray-500">Monitor and manage system alerts</p>
+  </div>
+  <div class="flex items-center space-x-3">
+    <% if @active_count > 0 %>
+      <%= link_to acknowledge_all_alerts_path, method: :post,
+          class: "inline-flex items-center rounded-md bg-yellow-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-yellow-400",
+          data: { confirm: "Acknowledge all active alerts?" } do %>
+        ✓ Acknowledge All
+      <% end %>
+    <% end %>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="mb-6 flex space-x-4" data-alert-target="filters">
+  <% { nil => "All", "active" => "Active", "acknowledged" => "Acknowledged", "resolved" => "Resolved" }.each do |val, label| %>
+    <%
+      active = params[:status] == val
+      base_class = "rounded-md px-3 py-1.5 text-sm font-medium"
+      color = active ? "bg-ztlp-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-300"
+    %>
+    <%= link_to label, alerts_path(status: val, severity: params[:severity]), class: "#{base_class} #{color}" %>
+  <% end %>
+  <span class="border-l border-gray-300 mx-2"></span>
+  <% { nil => "All Severity", "warning" => "⚠️ Warning", "critical" => "🔴 Critical" }.each do |val, label| %>
+    <%
+      active = params[:severity] == val
+      base_class = "rounded-md px-3 py-1.5 text-sm font-medium"
+      color = active ? "bg-ztlp-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50 border border-gray-300"
+    %>
+    <%= link_to label, alerts_path(severity: val, status: params[:status]), class: "#{base_class} #{color}" %>
+  <% end %>
+</div>
+
+<!-- Alerts List -->
+<div class="bg-white shadow rounded-lg">
+  <ul class="divide-y divide-gray-200">
+    <% @alerts.each do |alert| %>
+      <li class="px-4 py-4 sm:px-6 <%= alert.resolved? ? 'bg-gray-50' : '' %>">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center space-x-3">
+            <span class="text-lg">
+              <%= alert.severity == 'critical' ? '🔴' : '🟡' %>
+            </span>
+            <div>
+              <p class="text-sm font-medium text-gray-900"><%= alert.message %></p>
+              <p class="text-xs text-gray-500">
+                <%= alert.machine.hostname %> (<%= alert.network.name %>) —
+                <%= time_ago_short(alert.created_at) %>
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center space-x-3">
+            <% if alert.resolved? %>
+              <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
+                Resolved <%= time_ago_short(alert.resolved_at) %>
+              </span>
+            <% elsif alert.acknowledged %>
+              <span class="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
+                Acknowledged
+              </span>
+            <% else %>
+              <%= link_to acknowledge_alert_path(alert), method: :post,
+                  class: "inline-flex items-center rounded-md bg-yellow-100 px-2.5 py-1 text-xs font-medium text-yellow-800 hover:bg-yellow-200" do %>
+                ✓ Acknowledge
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      </li>
+    <% end %>
+    <% if @alerts.empty? %>
+      <li class="px-4 py-8 sm:px-6 text-center text-gray-500">
+        🎉 No alerts. Everything looks good!
+      </li>
+    <% end %>
+  </ul>
+</div>

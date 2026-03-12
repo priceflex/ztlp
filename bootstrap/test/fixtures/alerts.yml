@@ -1,0 +1,33 @@
+gateway_down:
+  network: office
+  machine: gateway1
+  component: gateway
+  severity: critical
+  message: "GATEWAY on gw1.office changed from unknown to down"
+  acknowledged: false
+
+relay_degraded:
+  network: office
+  machine: multi_role
+  component: relay
+  severity: warning
+  message: "RELAY on multi.office changed from healthy to degraded"
+  acknowledged: false
+
+old_resolved:
+  network: office
+  machine: ns1
+  component: ns
+  severity: warning
+  message: "NS on ns1.office changed from healthy to degraded"
+  acknowledged: true
+  acknowledged_at: <%= 30.minutes.ago %>
+  resolved_at: <%= 20.minutes.ago %>
+
+production_critical:
+  network: production
+  machine: ns1
+  component: ns
+  severity: critical
+  message: "NS on ns1.office changed from healthy to down"
+  acknowledged: false

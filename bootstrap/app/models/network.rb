@@ -2,6 +2,8 @@ class Network < ApplicationRecord
   has_many :machines, dependent: :destroy
   has_many :enrollment_tokens, dependent: :destroy
   has_many :deployments, through: :machines
+  has_many :health_checks, through: :machines
+  has_many :alerts, dependent: :destroy
 
   encrypts :enrollment_secret_ciphertext
   encrypts :zone_key_ciphertext
@@ -37,5 +39,25 @@ class Network < ApplicationRecord
 
   def gateway_machines
     machines.select { |m| m.role_list.include?("gateway") }
+  end
+
+  def health_status
+    statuses = machines.map(&:health_status)
+    return "unknown" if statuses.empty? || statuses.all? { |s| s == "unknown" }
+    return "down" if statuses.any? { |s| s == "down" }
+    return "degraded" if statuses.any? { |s| s == "degraded" }
+    "healthy"
+  end
+
+  def health_summary
+    total = machines.count
+    statuses = machines.map(&:health_status)
+    {
+      total: total,
+      healthy: statuses.count { |s| s == "healthy" },
+      degraded: statuses.count { |s| s == "degraded" },
+      down: statuses.count { |s| s == "down" },
+      unknown: statuses.count { |s| s == "unknown" }
+    }
   end
 end

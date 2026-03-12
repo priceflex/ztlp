@@ -39,6 +39,9 @@
                 <%= link_to "Dashboard", root_path, class: nav_link_class(root_path) %>
                 <%= link_to "Networks", networks_path, class: nav_link_class(networks_path) %>
                 <%= link_to "Deployments", deployments_path, class: nav_link_class(deployments_path) %>
+                <%= link_to alerts_path, class: nav_link_class(alerts_path) do %>
+                  🚨 Alerts<%= alert_count_badge %>
+                <% end %>
                 <%= link_to "Audit Log", audit_logs_path, class: nav_link_class(audit_logs_path) %>
                 <%= link_to "🧙 Wizard", wizard_new_path, class: nav_link_class(wizard_new_path) %>
               </div>

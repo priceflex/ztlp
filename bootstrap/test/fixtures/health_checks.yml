@@ -1,0 +1,56 @@
+ns1_healthy:
+  machine: ns1
+  component: ns
+  status: healthy
+  metrics: '{"port_listening": true, "metrics_available": true, "container_started_at": "2026-03-10T00:00:00Z", "uptime_seconds": 172800, "sessions_active": 5, "cpu_percent": 2.3, "memory_usage": "50MiB / 512MiB"}'
+  container_state: running
+  response_time_ms: 150
+  checked_at: <%= 5.minutes.ago %>
+
+relay1_healthy:
+  machine: relay1
+  component: relay
+  status: healthy
+  metrics: '{"port_listening": true, "metrics_available": true, "packets_per_sec": 1234.5, "cpu_percent": 5.1}'
+  container_state: running
+  response_time_ms: 200
+  checked_at: <%= 5.minutes.ago %>
+
+gateway1_down:
+  machine: gateway1
+  component: gateway
+  status: down
+  metrics: '{}'
+  container_state: not_found
+  error_message: "Container not running (state: not_found)"
+  response_time_ms: 50
+  checked_at: <%= 10.minutes.ago %>
+
+ns1_degraded_old:
+  machine: ns1
+  component: ns
+  status: degraded
+  metrics: '{"port_listening": false}'
+  container_state: running
+  error_message: "Port 23097 not listening"
+  response_time_ms: 300
+  checked_at: <%= 1.hour.ago %>
+
+multi_ns_healthy:
+  machine: multi_role
+  component: ns
+  status: healthy
+  metrics: '{"port_listening": true, "metrics_available": true}'
+  container_state: running
+  response_time_ms: 100
+  checked_at: <%= 3.minutes.ago %>
+
+multi_relay_degraded:
+  machine: multi_role
+  component: relay
+  status: degraded
+  metrics: '{"port_listening": true, "metrics_available": false}'
+  container_state: running
+  error_message: "Metrics endpoint unavailable"
+  response_time_ms: 250
+  checked_at: <%= 3.minutes.ago %>

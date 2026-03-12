@@ -1,0 +1,59 @@
+<div id="machine_health_<%= machine.id %>" class="bg-white rounded-lg shadow p-4">
+  <div class="flex items-center justify-between mb-3">
+    <div class="flex items-center space-x-2">
+      <span class="text-lg"><%= health_status_icon(machine.health_status) %></span>
+      <div>
+        <h4 class="font-medium text-gray-900"><%= machine.hostname %></h4>
+        <p class="text-xs text-gray-500"><%= machine.ip_address %></p>
+      </div>
+    </div>
+    <%= health_status_badge(machine.health_status) %>
+  </div>
+
+  <div class="space-y-2">
+    <% machine.role_list.each do |role| %>
+      <% check = machine.latest_health_check_for(role) %>
+      <div class="flex items-center justify-between text-sm">
+        <div class="flex items-center space-x-2">
+          <%= role_badges(role) %>
+          <span class="<%= check&.healthy? ? 'text-green-600' : check&.down? ? 'text-red-600' : 'text-yellow-600' %>">
+            <%= check ? check.status : 'unchecked' %>
+          </span>
+        </div>
+        <% if check %>
+          <span class="text-xs text-gray-400"><%= check.response_time_ms %>ms</span>
+        <% end %>
+      </div>
+      <% if check && check.parsed_metrics.any? %>
+        <div class="ml-4 flex flex-wrap gap-2">
+          <% metrics = check.parsed_metrics %>
+          <% if metrics["sessions_active"] %>
+            <span class="inline-flex items-center rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+              Sessions: <%= metrics["sessions_active"] %>
+            </span>
+          <% end %>
+          <% if metrics["packets_per_sec"] %>
+            <span class="inline-flex items-center rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+              Pkt/s: <%= metrics["packets_per_sec"] %>
+            </span>
+          <% end %>
+          <% if metrics["cpu_percent"] %>
+            <span class="inline-flex items-center rounded bg-gray-50 px-2 py-0.5 text-xs text-gray-600">
+              CPU: <%= metrics["cpu_percent"] %>%
+            </span>
+          <% end %>
+          <% if metrics["memory_usage"] %>
+            <span class="inline-flex items-center rounded bg-gray-50 px-2 py-0.5 text-xs text-gray-600">
+              Mem: <%= metrics["memory_usage"] %>
+            </span>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+
+  <div class="mt-3 flex items-center justify-between text-xs text-gray-400">
+    <span>Last check: <%= machine.last_health_check_at ? time_ago_short(machine.last_health_check_at) : 'never' %></span>
+    <%= link_to "Details →", health_network_machine_path(machine.network, machine), class: "text-ztlp-600 hover:text-ztlp-500" %>
+  </div>
+</div>

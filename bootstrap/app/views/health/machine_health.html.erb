@@ -1,0 +1,181 @@
+<div class="mb-6" data-controller="health-dashboard">
+  <div class="flex items-center justify-between">
+    <div>
+      <nav class="text-sm text-gray-500 mb-2">
+        <%= link_to @network.name, @network, class: "hover:text-ztlp-600" %> /
+        <%= link_to @machine.hostname, network_machine_path(@network, @machine), class: "hover:text-ztlp-600" %> /
+        Health
+      </nav>
+      <h1 class="text-2xl font-bold text-gray-900">
+        <%= health_status_icon(@machine.health_status) %>
+        <%= @machine.hostname %> Health
+      </h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @machine.ip_address %> — Roles: <%= @machine.roles %></p>
+    </div>
+    <div class="flex items-center space-x-3">
+      <div class="flex items-center space-x-2 text-sm text-gray-500">
+        <span>Auto-refresh:</span>
+        <select data-health-dashboard-target="interval" data-action="change->health-dashboard#changeInterval"
+                class="rounded border-gray-300 text-sm">
+          <option value="0">Off</option>
+          <option value="30" selected>30s</option>
+          <option value="60">60s</option>
+        </select>
+      </div>
+      <%= link_to check_health_network_machine_path(@network, @machine), method: :post,
+          class: "inline-flex items-center rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" do %>
+        🔍 Check Now
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Component Status Cards -->
+<%= turbo_frame_tag "machine_health_detail_#{@machine.id}" do %>
+  <div class="grid grid-cols-1 gap-6 sm:grid-cols-3 mb-8">
+    <% @machine.role_list.each do |role| %>
+      <% check = @machine.latest_health_check_for(role) %>
+      <div class="bg-white rounded-lg shadow p-5 border-l-4 <%= health_border_color(check&.status) %>">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-lg font-semibold text-gray-900"><%= role.upcase %></h3>
+          <%= health_status_badge(check&.status || 'unknown') %>
+        </div>
+
+        <% if check %>
+          <div class="space-y-2 text-sm" data-controller="metrics">
+            <div class="flex justify-between">
+              <span class="text-gray-500">Container</span>
+              <span class="font-medium"><%= check.container_state || 'unknown' %></span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Response Time</span>
+              <span class="font-medium"><%= check.response_time_ms %>ms</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-500">Last Check</span>
+              <span class="font-medium"><%= time_ago_short(check.checked_at) %></span>
+            </div>
+
+            <% metrics = check.parsed_metrics %>
+            <% if metrics["uptime_seconds"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Uptime</span>
+                <span class="font-medium" data-metrics-target="uptime" data-value="<%= metrics["uptime_seconds"] %>">
+                  <%= format_uptime(metrics["uptime_seconds"]) %>
+                </span>
+              </div>
+            <% end %>
+            <% if metrics["sessions_active"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Active Sessions</span>
+                <span class="font-medium"><%= metrics["sessions_active"] %></span>
+              </div>
+            <% end %>
+            <% if metrics["packets_per_sec"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Packets/sec</span>
+                <span class="font-medium"><%= "%.1f" % metrics["packets_per_sec"] %></span>
+              </div>
+            <% end %>
+            <% if metrics["ns_records_count"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">NS Records</span>
+                <span class="font-medium"><%= metrics["ns_records_count"] %></span>
+              </div>
+            <% end %>
+            <% if metrics["cpu_percent"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">CPU</span>
+                <span class="font-medium"><%= "%.1f" % metrics["cpu_percent"] %>%</span>
+              </div>
+            <% end %>
+            <% if metrics["memory_usage"] %>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Memory</span>
+                <span class="font-medium"><%= metrics["memory_usage"] %></span>
+              </div>
+            <% end %>
+
+            <% if check.error_message.present? %>
+              <div class="mt-2 p-2 bg-red-50 rounded text-xs text-red-700">
+                <%= check.error_message %>
+              </div>
+            <% end %>
+          </div>
+        <% else %>
+          <p class="text-sm text-gray-400">No health data yet. Run a health check.</p>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<!-- Health History -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Health History (Last 24h)</h3>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Component</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Container</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Response</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Error</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @health_checks.each do |check| %>
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+              <%= check.checked_at.strftime("%b %d %H:%M:%S") %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= role_badges(check.component) %></td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= health_status_badge(check.status) %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= check.container_state %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= check.response_time_ms %>ms</td>
+            <td class="px-6 py-4 text-sm text-red-600 max-w-xs truncate"><%= check.error_message %></td>
+          </tr>
+        <% end %>
+        <% if @health_checks.empty? %>
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-gray-500">No health checks recorded yet.</td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Recent Alerts -->
+<% if @recent_alerts.any? %>
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6">
+      <h3 class="text-lg font-medium text-gray-900">Recent Alerts</h3>
+    </div>
+    <ul class="divide-y divide-gray-200">
+      <% @recent_alerts.each do |alert| %>
+        <li class="px-4 py-3 sm:px-6">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+              <span class="<%= alert.severity == 'critical' ? 'text-red-500' : 'text-yellow-500' %>">
+                <%= alert.severity == 'critical' ? '🔴' : '🟡' %>
+              </span>
+              <div>
+                <p class="text-sm font-medium text-gray-900"><%= alert.message %></p>
+                <p class="text-xs text-gray-500">
+                  <%= time_ago_short(alert.created_at) %>
+                  <% if alert.resolved? %> — <span class="text-green-600">Resolved</span><% end %>
+                  <% if alert.acknowledged %> — <span class="text-blue-600">Acknowledged</span><% end %>
+                </p>
+              </div>
+            </div>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

@@ -9,5 +9,17 @@ class DashboardController < ApplicationController
       error: Machine.where(status: "error").count,
       pending: Machine.where(status: "pending").count
     }
+
+    # Health stats
+    all_statuses = Machine.all.map(&:health_status)
+    @health_stats = {
+      total: all_statuses.count,
+      healthy: all_statuses.count { |s| s == "healthy" },
+      degraded: all_statuses.count { |s| s == "degraded" },
+      down: all_statuses.count { |s| s == "down" },
+      unknown: all_statuses.count { |s| s == "unknown" }
+    }
+
+    @active_alerts = Alert.active.recent.limit(5)
   end
 end

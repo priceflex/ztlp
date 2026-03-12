@@ -1,0 +1,19 @@
+<div id="network_health_<%= network.id %>" class="bg-white rounded-lg shadow p-4">
+  <div class="flex items-center justify-between mb-2">
+    <div>
+      <h4 class="font-medium text-gray-900"><%= network.name %></h4>
+      <p class="text-xs text-gray-500"><%= network.zone %></p>
+    </div>
+    <%= health_status_badge(network.health_status) %>
+  </div>
+  <% summary = network.health_summary %>
+  <div class="flex space-x-4 text-sm">
+    <span class="text-green-600"><%= summary[:healthy] %> healthy</span>
+    <span class="text-yellow-600"><%= summary[:degraded] %> degraded</span>
+    <span class="text-red-600"><%= summary[:down] %> down</span>
+    <span class="text-gray-400"><%= summary[:unknown] %> unknown</span>
+  </div>
+  <div class="mt-2">
+    <%= link_to "View Health →", network_health_path(network), class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+  </div>
+</div>

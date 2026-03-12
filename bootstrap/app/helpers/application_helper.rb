@@ -44,4 +44,55 @@ module ApplicationHelper
     return "never" if time.nil?
     time_ago_in_words(time) + " ago"
   end
+
+  def health_status_badge(status)
+    colors = {
+      "healthy"  => "bg-green-100 text-green-800",
+      "degraded" => "bg-yellow-100 text-yellow-800",
+      "down"     => "bg-red-100 text-red-800",
+      "unknown"  => "bg-gray-100 text-gray-800"
+    }
+    color = colors[status.to_s] || "bg-gray-100 text-gray-800"
+    content_tag(:span, status || "unknown",
+      class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium #{color}")
+  end
+
+  def health_status_icon(status)
+    case status.to_s
+    when "healthy"  then "🟢"
+    when "degraded" then "🟡"
+    when "down"     then "🔴"
+    else "⚪"
+    end
+  end
+
+  def health_border_color(status)
+    case status.to_s
+    when "healthy"  then "border-green-500"
+    when "degraded" then "border-yellow-500"
+    when "down"     then "border-red-500"
+    else "border-gray-300"
+    end
+  end
+
+  def format_uptime(seconds)
+    return "N/A" unless seconds
+    seconds = seconds.to_i
+    if seconds < 60
+      "#{seconds}s"
+    elsif seconds < 3600
+      "#{seconds / 60}m #{seconds % 60}s"
+    elsif seconds < 86400
+      "#{seconds / 3600}h #{(seconds % 3600) / 60}m"
+    else
+      "#{seconds / 86400}d #{(seconds % 86400) / 3600}h"
+    end
+  end
+
+  def alert_count_badge
+    count = Alert.active_count
+    return "" if count == 0
+    content_tag(:span, count,
+      class: "ml-1 inline-flex items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-xs font-bold text-white")
+  end
 end

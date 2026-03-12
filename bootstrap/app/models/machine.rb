@@ -1,6 +1,8 @@
 class Machine < ApplicationRecord
   belongs_to :network
   has_many :deployments, dependent: :destroy
+  has_many :health_checks, dependent: :destroy
+  has_many :alerts, dependent: :destroy
 
   encrypts :ssh_private_key_ciphertext
   encrypts :ssh_password_ciphertext
@@ -45,6 +47,25 @@ class Machine < ApplicationRecord
     role_list.all? do |role|
       dep = latest_deployment_for(role)
       dep&.status == "success"
+    end
+  end
+
+  def latest_health_check_for(component)
+    health_checks.where(component: component).order(checked_at: :desc).first
+  end
+
+  def health_status
+    checks = role_list.map { |role| latest_health_check_for(role) }.compact
+    return "unknown" if checks.empty?
+    return "down" if checks.any?(&:down?)
+    return "degraded" if checks.any?(&:degraded?)
+    "healthy"
+  end
+
+  def health_summary
+    role_list.each_with_object({}) do |role, hash|
+      check = latest_health_check_for(role)
+      hash[role] = check ? { status: check.status, checked_at: check.checked_at, metrics: check.parsed_metrics } : { status: "unknown", checked_at: nil, metrics: {} }
     end
   end
 

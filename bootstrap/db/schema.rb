@@ -10,7 +10,26 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_12_020004) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_12_030001) do
+  create_table "alerts", force: :cascade do |t|
+    t.integer "network_id", null: false
+    t.integer "machine_id", null: false
+    t.string "component", null: false
+    t.string "severity", default: "warning", null: false
+    t.text "message", null: false
+    t.boolean "acknowledged", default: false, null: false
+    t.datetime "acknowledged_at"
+    t.datetime "resolved_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["acknowledged"], name: "index_alerts_on_acknowledged"
+    t.index ["machine_id", "component"], name: "index_alerts_on_machine_id_and_component"
+    t.index ["machine_id"], name: "index_alerts_on_machine_id"
+    t.index ["network_id"], name: "index_alerts_on_network_id"
+    t.index ["resolved_at"], name: "index_alerts_on_resolved_at"
+    t.index ["severity"], name: "index_alerts_on_severity"
+  end
+
   create_table "audit_logs", force: :cascade do |t|
     t.string "action", null: false
     t.string "target_type"
@@ -61,6 +80,24 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_12_020004) do
     t.index ["token_id"], name: "index_enrollment_tokens_on_token_id", unique: true
   end
 
+  create_table "health_checks", force: :cascade do |t|
+    t.integer "machine_id", null: false
+    t.string "component", null: false
+    t.string "status", default: "unknown", null: false
+    t.text "metrics"
+    t.string "container_state"
+    t.text "error_message"
+    t.integer "response_time_ms"
+    t.datetime "checked_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["checked_at"], name: "index_health_checks_on_checked_at"
+    t.index ["machine_id", "component", "checked_at"], name: "index_health_checks_on_machine_component_time"
+    t.index ["machine_id", "component"], name: "index_health_checks_on_machine_id_and_component"
+    t.index ["machine_id"], name: "index_health_checks_on_machine_id"
+    t.index ["status"], name: "index_health_checks_on_status"
+  end
+
   create_table "machines", force: :cascade do |t|
     t.integer "network_id", null: false
     t.string "hostname", null: false
@@ -95,7 +132,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_12_020004) do
     t.index ["zone"], name: "index_networks_on_zone", unique: true
   end
 
+  add_foreign_key "alerts", "machines"
+  add_foreign_key "alerts", "networks"
   add_foreign_key "deployments", "machines"
   add_foreign_key "enrollment_tokens", "networks"
+  add_foreign_key "health_checks", "machines"
   add_foreign_key "machines", "networks"
 end

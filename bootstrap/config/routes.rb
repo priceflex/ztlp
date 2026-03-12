@@ -6,12 +6,20 @@ Rails.application.routes.draw do
       post :deploy
     end
 
+    # Health monitoring routes
+    get :health, to: "health#network_health", as: :health
+    post :check_health, to: "health#check_health"
+
     resources :machines do
       member do
         post :provision
         post :test_connection
         post :health_check
       end
+
+      # Machine health detail
+      get :health, on: :member, to: "health#machine_health", as: :health
+      post :check_health, on: :member, to: "health#check_machine_health"
     end
 
     resources :tokens, only: [:index, :show, :new, :create] do
@@ -24,6 +32,16 @@ Rails.application.routes.draw do
   resources :deployments, only: [:index, :show]
   resources :audit_logs, only: [:index]
 
+  # Alerts
+  resources :alerts, only: [:index] do
+    member do
+      post :acknowledge
+    end
+    collection do
+      post :acknowledge_all
+    end
+  end
+
   # Setup Wizard
   get  "wizard",           to: "wizard#new",            as: :wizard_new
   post "wizard/network",   to: "wizard#create_network", as: :wizard_create_network
@@ -34,6 +52,13 @@ Rails.application.routes.draw do
   get  "wizard/deploy",    to: "wizard#deploy",         as: :wizard_deploy
   post "wizard/deploy",    to: "wizard#start_deploy",   as: :wizard_start_deploy
   get  "wizard/suggest_zone", to: "wizard#suggest_zone", as: :wizard_suggest_zone
+
+  # API endpoints (JSON)
+  namespace :api do
+    get "networks/:network_id/health", to: "health#network_health", as: :network_health
+    get "machines/:id/health", to: "health#machine_health", as: :machine_health
+    get "alerts", to: "alerts#index", as: :alerts
+  end
 
   # Health check endpoint
   get "up" => "rails/health#show", as: :rails_health_check

@@ -1,0 +1,89 @@
+<div class="mb-6 flex items-center justify-between" data-controller="health-dashboard">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Health: <%= @network.name %></h1>
+    <p class="mt-1 text-sm text-gray-500"><%= @network.zone %> — <%= @network.machines.count %> machines</p>
+  </div>
+  <div class="flex items-center space-x-3">
+    <div class="flex items-center space-x-2 text-sm text-gray-500">
+      <span>Auto-refresh:</span>
+      <select data-health-dashboard-target="interval" data-action="change->health-dashboard#changeInterval"
+              class="rounded border-gray-300 text-sm">
+        <option value="0">Off</option>
+        <option value="30" selected>30s</option>
+        <option value="60">60s</option>
+        <option value="300">5m</option>
+      </select>
+    </div>
+    <%= link_to network_check_health_path(@network), method: :post,
+        class: "inline-flex items-center rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" do %>
+      🔍 Check Now
+    <% end %>
+  </div>
+</div>
+
+<!-- Summary Cards -->
+<div class="grid grid-cols-1 gap-5 sm:grid-cols-5 mb-8">
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Total Machines</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900"><%= @summary[:total] %></dd>
+  </div>
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Healthy</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-green-600"><%= @summary[:healthy] %></dd>
+  </div>
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Degraded</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-yellow-600"><%= @summary[:degraded] %></dd>
+  </div>
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Down</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-red-600"><%= @summary[:down] %></dd>
+  </div>
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Unknown</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-400"><%= @summary[:unknown] %></dd>
+  </div>
+</div>
+
+<!-- Machine Health Grid -->
+<%= turbo_frame_tag "health_network_#{@network.id}" do %>
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-8">
+    <% @machines.each do |machine| %>
+      <%= render partial: "health/machine_health_card", locals: { machine: machine } %>
+    <% end %>
+    <% if @machines.empty? %>
+      <div class="col-span-full text-center text-gray-500 py-8">
+        No machines in this network. <%= link_to "Add machines", new_network_machine_path(@network), class: "text-ztlp-600" %>.
+      </div>
+    <% end %>
+  </div>
+<% end %>
+
+<!-- Recent Alerts -->
+<% if @recent_alerts.any? %>
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6 flex justify-between items-center">
+      <h3 class="text-lg font-medium text-gray-900">Active Alerts</h3>
+      <%= link_to "View All", alerts_path, class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+    </div>
+    <ul class="divide-y divide-gray-200">
+      <% @recent_alerts.each do |alert| %>
+        <li class="px-4 py-3 sm:px-6">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+              <span class="<%= alert.severity == 'critical' ? 'text-red-500' : 'text-yellow-500' %>">
+                <%= alert.severity == 'critical' ? '🔴' : '🟡' %>
+              </span>
+              <div>
+                <p class="text-sm font-medium text-gray-900"><%= alert.message %></p>
+                <p class="text-xs text-gray-500"><%= time_ago_short(alert.created_at) %></p>
+              </div>
+            </div>
+            <%= link_to "Acknowledge", acknowledge_alert_path(alert), method: :post,
+                class: "text-xs text-ztlp-600 hover:text-ztlp-500" %>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>

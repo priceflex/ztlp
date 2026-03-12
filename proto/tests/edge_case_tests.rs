@@ -10,17 +10,17 @@ use ztlp_proto::session::{ReplayWindow, SessionState, DEFAULT_REPLAY_WINDOW};
 // ─── Packet Edge Cases ──────────────────────────────────────────────
 
 #[test]
-fn test_handshake_header_exact_95_bytes() {
+fn test_handshake_header_exact_96_bytes() {
     let h = HandshakeHeader::new(MsgType::Hello);
     let bytes = h.serialize();
-    assert_eq!(bytes.len(), 95, "handshake header MUST be exactly 95 bytes");
+    assert_eq!(bytes.len(), 96, "handshake header MUST be exactly 96 bytes (768 bits, 4-byte aligned)");
 }
 
 #[test]
-fn test_data_header_exact_42_bytes() {
+fn test_data_header_exact_46_bytes() {
     let h = DataHeader::new(SessionId::generate(), 0);
     let bytes = h.serialize();
-    assert_eq!(bytes.len(), 42, "data header MUST be exactly 42 bytes");
+    assert_eq!(bytes.len(), 46, "data header MUST be exactly 46 bytes");
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn test_pipeline_hdrlen_discrimination() {
     let mut bytes = header.serialize();
     bytes.extend_from_slice(&[0xCC; 200]); // large payload makes total > 95
 
-    assert_eq!(bytes.len(), 42 + 200, "total packet should be 242 bytes");
+    assert_eq!(bytes.len(), 46 + 200, "total packet should be 246 bytes");
     assert_eq!(
         pipeline.process(&bytes),
         AdmissionResult::Pass,

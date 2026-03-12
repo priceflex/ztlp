@@ -60,13 +60,13 @@ fn test_data_header_roundtrip() {
     assert_eq!(
         bytes.len(),
         DATA_HEADER_SIZE,
-        "data header should be exactly 42 bytes"
+        "data header should be exactly 46 bytes"
     );
 
     let restored = DataHeader::deserialize(&bytes).expect("deserialize should succeed");
 
     assert_eq!(restored.version, VERSION);
-    assert_eq!(restored.hdr_len, 11);
+    assert_eq!(restored.hdr_len, 12);
     assert_eq!(restored.flags, flags::MULTIPATH);
     assert_eq!(restored.session_id, SessionId([0x11; 12]));
     assert_eq!(restored.packet_seq, 42);

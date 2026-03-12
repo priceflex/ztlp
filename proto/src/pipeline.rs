@@ -265,10 +265,14 @@ impl Pipeline {
             let session_id = SessionId(sid);
 
             if let Some(session) = self.sessions.get(&session_id) {
-                let aad = &data[..packet::DATA_HEADER_SIZE - 16];
-                let auth_tag = &data[packet::DATA_HEADER_SIZE - 16..packet::DATA_HEADER_SIZE];
+                // Data header AAD is non-contiguous: bytes before AuthTag + bytes after AuthTag
+                // Layout: [0..26] pre-tag | [26..42] AuthTag | [42..46] ExtLen+PayloadLen
+                let mut aad = Vec::with_capacity(30);
+                aad.extend_from_slice(&data[..26]);
+                aad.extend_from_slice(&data[42..46]);
+                let auth_tag = &data[26..42];
 
-                if verify_header_auth_tag(&session.recv_key, aad, auth_tag) {
+                if verify_header_auth_tag(&session.recv_key, &aad, auth_tag) {
                     AdmissionResult::Pass
                 } else {
                     AdmissionResult::Drop

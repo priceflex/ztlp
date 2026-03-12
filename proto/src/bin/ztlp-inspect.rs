@@ -143,6 +143,7 @@ fn msg_type_name(mt: MsgType) -> &'static str {
         MsgType::Error => "ERROR",
         MsgType::Ping => "PING",
         MsgType::Pong => "PONG",
+        MsgType::Migrate => "MIGRATE",
     }
 }
 

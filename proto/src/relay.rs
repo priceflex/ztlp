@@ -113,7 +113,7 @@ impl SimulatedRelay {
 
     /// Extract a SessionID from a raw ZTLP packet.
     ///
-    /// Uses HdrLen to discriminate handshake (24 words) vs data (11 words)
+    /// Uses HdrLen to discriminate handshake (24 words) vs data (12 words)
     /// headers, then reads the SessionID from the appropriate offset.
     fn extract_session_id(data: &[u8]) -> Option<SessionId> {
         // Need at least 4 bytes for Magic + VerHdrLen
@@ -137,8 +137,8 @@ impl SimulatedRelay {
             let mut sid = [0u8; 12];
             sid.copy_from_slice(&data[11..23]);
             Some(SessionId(sid))
-        } else if hdr_len == 11 {
-            // Data header: SessionID at bytes 6..18
+        } else if hdr_len == 12 {
+            // Data header (46 bytes): SessionID at bytes 6..18
             if data.len() < 18 {
                 return None;
             }

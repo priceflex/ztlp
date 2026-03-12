@@ -691,6 +691,7 @@ fn format_msg_type(mt: MsgType) -> &'static str {
         MsgType::Error => "ERROR (0x05)",
         MsgType::Ping => "PING (0x06)",
         MsgType::Pong => "PONG (0x07)",
+        MsgType::Migrate => "MIGRATE (0x08)",
     }
 }
 

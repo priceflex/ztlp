@@ -737,6 +737,77 @@ similarly to DNS but with mandatory signing and delegated trust.
 | PayloadLen | 16 bits | Length in bytes of the encrypted payload following extensions. |
 | HeaderAuthTag | 128 bits | AEAD tag over the base header. Verified BEFORE decrypting payload. Invalid = silent drop. |
 
+### 8.2.1 PolicyTag Layout
+
+The 32-bit PolicyTag field encodes three subfields for fast edge
+admission decisions without requiring a full policy lookup:
+
+```
+  31          20 19         8 7            0
+  ┌────────────┬────────────┬──────────────┐
+  │ TenantID   │   RoleID   │   ZoneID     │
+  │  (12 bits) │  (12 bits) │   (8 bits)   │
+  └────────────┴────────────┴──────────────┘
+```
+
+| Subfield | Bits | Range | Description |
+|----------|------|-------|-------------|
+| TenantID | 31–20 (12 bits) | 0–4095 | Identifies the organization or tenant. Assigned during enrollment. Value 0 is reserved (unassigned). |
+| RoleID | 19–8 (12 bits) | 0–4095 | Identifies the role or group within the tenant. Mapped from policy records. |
+| ZoneID | 7–0 (8 bits) | 0–255 | Identifies the network zone or segment. Used for coarse geographic or security-domain routing. |
+
+**Semantics:** The PolicyTag is a **hint** for fast-path decisions. It
+enables relay and gateway nodes to make coarse admission/routing
+decisions in O(1) time by matching against a compact bitmask rather than
+performing a full ZTLP\_POLICY record lookup. The PolicyTag is
+**not authoritative** — the full policy check (Section 11.3) is always
+performed during session establishment. The PolicyTag accelerates
+data-plane forwarding after the session is established.
+
+**Assignment:** The PolicyTag is assigned by the Responder during
+`SESSION_OPEN` (Section 8.5.6) based on the authenticated identity and
+applicable ZTLP\_POLICY records. The Initiator copies it into all
+subsequent handshake headers for this session.
+
+**Reserved values:** PolicyTag `0x00000000` (all zeros) means "no policy
+hint available" — edge nodes MUST fall through to full policy evaluation
+when they encounter this value.
+
+### 8.2.2 Version Handling
+
+The `Ver` field is a 4-bit unsigned integer (range 0–15). The current
+protocol version is **1**.
+
+**Receiving a packet with a mismatched version:**
+
+-   If the received version is **0** or **greater than the highest
+    version the implementation supports**, the packet MUST be silently
+    dropped. No ERROR response is sent because the receiver cannot
+    reliably interpret the packet structure of an unknown version.
+
+-   Implementations MUST NOT attempt to parse or process any fields
+    beyond the Magic when the version is unsupported. This prevents
+    parser exploits via crafted future-version packets.
+
+**Version negotiation:** ZTLP does **not** perform in-band version
+negotiation. The protocol version is determined by the software deployed,
+not negotiated per-session. This is a deliberate design choice:
+
+1.  Negotiation adds round-trips and complexity to the handshake.
+2.  Version downgrade attacks are eliminated — there is nothing to
+    downgrade to.
+3.  Operators control which versions are deployed and can enforce minimum
+    versions through policy.
+
+If a deployment needs to support multiple protocol versions during a
+migration, relay nodes MAY implement multi-version parsing (inspecting
+the Ver field before selecting a parser). However, both endpoints of a
+session MUST use the same protocol version — mixed-version sessions are
+not supported.
+
+**Reserved versions:** Version 0 is reserved and MUST NOT be used.
+Versions 2–15 are reserved for future protocol revisions.
+
 ## 8.3 Established Data Header (compact, post-handshake)
 
 The 64-byte header defined in Section 7.1 applies only to handshake and
@@ -1184,7 +1255,64 @@ Response codes in 0x08 (ENROLL\_RESPONSE):
 | 0x05 | Name already taken. |
 | 0x06 | Invalid enrollment request. |
 
-### 9.5.9 Design Rationale
+### 9.5.9 Record Wire Encoding (Canonical Serialization)
+
+ZTLP-NS records are serialized to a deterministic binary format for
+both signing and wire transmission. This canonical form ensures that
+the same record always produces identical bytes, which is essential for
+signature verification across different implementations and platforms.
+
+**Canonical form (signed content):**
+
+```
+  Offset  Size        Field
+  ──────  ──────────  ─────────────────────────────────
+  0       1           Record type byte (1=KEY, 2=SVC, ..., 6=BOOTSTRAP)
+  1       2           Name length (uint16, big-endian)
+  3       name_len    Name (UTF-8 FQDN)
+  3+N     4           Data length (uint32, big-endian)
+  7+N     data_len    Record data (deterministic binary encoding, see below)
+  7+N+D   8           Created-at (uint64, Unix epoch seconds, big-endian)
+  15+N+D  4           TTL (uint32, seconds, big-endian; 0 = never expires)
+  19+N+D  8           Serial (uint64, big-endian, monotonically increasing)
+```
+
+The canonical form is the input to the Ed25519 signing operation. It
+does NOT include the signature or signer public key — those are metadata
+about the signature, not part of the signed content.
+
+**Wire format (for transmission, includes signature):**
+
+```
+  Offset      Size        Field
+  ──────────  ──────────  ─────────────────────────────────
+  0           var         Canonical form (as above)
+  var         2           Signature length (uint16, always 64 for Ed25519)
+  var+2       sig_len     Ed25519 signature
+  var+2+sig   2           Public key length (uint16, always 32 for Ed25519)
+  var+4+sig   pub_len     Signer's Ed25519 public key
+```
+
+**Record data encoding:** The `data` field is a key-value map. For
+interoperability, implementations MUST use a deterministic encoding that
+produces identical bytes for identical logical content regardless of
+insertion order. The reference implementation uses Erlang External Term
+Format with the `:deterministic` flag; alternative implementations (e.g.,
+Rust, Go) MUST produce byte-identical output for the same data or use
+a canonical encoding such as sorted-key CBOR (RFC 8949, Section 4.2).
+
+**Record data schemas by type:**
+
+| Type | Required Keys | Example |
+|------|---------------|---------|
+| KEY | `node_id` (hex), `public_key` (hex), `algorithm` ("Ed25519") | `%{node_id: "ab01...", public_key: "cd02...", algorithm: "Ed25519"}` |
+| SVC | `service_id` (hex), `allowed_node_ids` (list of hex), `policy_ref` (string) | `%{service_id: "ef03...", allowed_node_ids: ["ab01...", "ab02..."], policy_ref: "policy.acme.ztlp"}` |
+| RELAY | `node_id` (hex), `endpoints` (list of "ip:port"), `capacity` (uint), `region` (string) | `%{node_id: "ab01...", endpoints: ["10.0.1.10:23095"], capacity: 10000, region: "us-west"}` |
+| POLICY | `allowed_node_ids` (list of hex), `allowed_services` (list of FQDN), `deny_node_ids` (list of hex) | `%{allowed_node_ids: [...], allowed_services: ["rdp.acme.ztlp"], deny_node_ids: []}` |
+| REVOKE | `revoked_ids` (list of hex), `reason` (string), `effective_at` (ISO 8601 string) | `%{revoked_ids: ["ab01..."], reason: "key compromise", effective_at: "2026-03-01T00:00:00Z"}` |
+| BOOTSTRAP | `relays` (list of relay objects) | `%{relays: [%{node_id: "...", endpoint: "..."}]}` |
+
+### 9.5.10 Design Rationale
 
 ZTLP-NS uses a native binary protocol rather than DNS or HTTPS because:
 
@@ -1278,6 +1406,84 @@ Implementations MUST include discovery URLs hosted by at least 3
 independent operators. This prevents a single-point-of-failure in HTTPS
 discovery. Discovery URL operators MUST be geographically and
 organizationally independent.
+
+## 10.4 Device Enrollment
+
+Device enrollment is the process by which a new device joins an existing
+ZTLP network. An administrator generates a pre-authorized **Enrollment
+Token** that encodes the target zone, NS address, relay endpoints, and
+usage constraints. The device presents this token to the ZTLP-NS server
+via the ENROLL wire message (0x07, Section 9.5.8).
+
+### 10.4.1 Enrollment Token Wire Format
+
+Enrollment tokens are variable-length binary structures (typically
+120–200 bytes) secured with HMAC-BLAKE2s:
+
+```
+  Offset  Size          Field
+  ──────  ────────────  ─────────────────────────────────
+  0       1             Version (uint8, current: 0x01)
+  1       1             Flags (uint8, bit 0: has gateway address)
+  2       2             Zone name length (uint16, big-endian)
+  4       zone_len      Zone name (UTF-8, e.g. "office.acme.ztlp")
+  4+Z     2             NS address length (uint16)
+  6+Z     ns_len        NS address (UTF-8, e.g. "10.0.0.5:23097")
+  6+Z+N   1             Relay count (uint8)
+  7+Z+N   var           Relay addresses (for each: uint16 length + UTF-8 address)
+  var     2             Gateway address length (uint16, only if flag bit 0 set)
+  var     gw_len        Gateway address (UTF-8, only if flag bit 0 set)
+  var     2             Max uses (uint16, 0 = unlimited)
+  var     8             Expires at (uint64, Unix epoch seconds, big-endian)
+  var     16            Nonce (128 bits, random, prevents replay)
+  var     32            MAC (HMAC-BLAKE2s-256 over all preceding bytes)
+```
+
+**MAC computation:** The MAC is computed using HMAC (RFC 2104) with
+BLAKE2s-256 as the hash function. The key is the 32-byte zone enrollment
+secret. The MAC covers all bytes from offset 0 through the end of the
+nonce field (everything except the MAC itself).
+
+### 10.4.2 Enrollment URI Scheme
+
+Enrollment tokens MAY be encoded as URIs for convenient distribution
+(e.g., QR codes, links):
+
+```
+ztlp://enroll/<base64url-encoded-token>
+```
+
+The token is encoded using base64url (RFC 4648, Section 5) without
+padding. Implementations MUST decode the URI, extract the binary token,
+and validate it before proceeding with enrollment.
+
+### 10.4.3 Enrollment Flow
+
+1.  Administrator generates a token using the zone enrollment secret
+    (via CLI: `ztlp admin enroll --zone office.acme.ztlp`).
+2.  Token is delivered to the device operator (QR code, secure message,
+    or `ztlp://enroll/` URI).
+3.  Device presents the token to the NS server specified in the token
+    via a 0x07 ENROLL message.
+4.  NS server validates the MAC, checks expiry and usage count, verifies
+    the zone matches, and generates a Node ID + ZTLP\_KEY record.
+5.  NS server responds with 0x08 containing the assigned Node ID and
+    initial configuration, or an error code (Section 9.5.8).
+6.  Device stores its Node ID, keys, and NS/relay addresses, then
+    proceeds to the bootstrap sequence (Section 10.1).
+
+### 10.4.4 Token Security Properties
+
+-   **Pre-authorized:** Tokens are generated offline using the zone
+    secret. No online ceremony is required.
+-   **Usage-limited:** Each token tracks a usage counter. The NS server
+    rejects tokens that have exceeded their `max_uses` limit.
+-   **Time-limited:** Tokens have an absolute expiry timestamp.
+-   **Zone-bound:** The MAC binds the token to a specific zone. A token
+    for `office.acme.ztlp` cannot enroll a device into `prod.acme.ztlp`.
+-   **Replay-resistant:** The 128-bit random nonce prevents replay.
+    The NS server SHOULD additionally track consumed nonces for tokens
+    with `max_uses > 1`.
 
 # 11. Handshake and Session Establishment
 
@@ -1731,6 +1937,117 @@ full hierarchy. The relay discovery and PathScore mechanisms in Sections
 publish their relay tier in the ZTLP_RELAY namespace record to assist
 clients in making optimal selection decisions.
 
+## 12.7 Inter-Relay Mesh Wire Protocol
+
+Relay nodes in a mesh communicate over a dedicated UDP port (default:
+**23096**, separate from the client-facing port 23095). All inter-relay
+messages share a common header prefix:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Message type (uint8)
+  1       16      Sender NodeID (128 bits)
+  17      8       Timestamp (uint64, epoch-ms, big-endian)
+  25      var     Type-specific payload
+```
+
+### 12.7.1 Mesh Message Types
+
+| Byte | Name | Description |
+|------|------|-------------|
+| 0x01 | RELAY\_HELLO | Introduce self to a new peer. |
+| 0x02 | RELAY\_HELLO\_ACK | Acknowledge a peer introduction. |
+| 0x03 | RELAY\_PING | Health probe with sequence number. |
+| 0x04 | RELAY\_PONG | Health response with metrics. |
+| 0x05 | RELAY\_FORWARD | Forward a wrapped ZTLP client packet through the mesh. |
+| 0x06 | RELAY\_SESSION\_SYNC | Synchronize session state to a peer. |
+| 0x07 | RELAY\_LEAVE | Graceful departure from the mesh. |
+| 0x08 | RELAY\_DRAIN | Signal that this relay is draining (no new sessions). |
+| 0x09 | RELAY\_DRAIN\_CANCEL | Cancel a previous drain signal. |
+
+### 12.7.2 RELAY\_HELLO / RELAY\_HELLO\_ACK (0x01, 0x02)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  25      4       IPv4 address (big-endian)
+  29      2       Port (uint16)
+  31      1       Role byte (see below)
+  32      4       Capabilities (uint32, bitfield)
+```
+
+**Role bytes:** 0x00 = all, 0x01 = ingress, 0x02 = transit, 0x03 = egress.
+
+### 12.7.3 RELAY\_PING (0x03)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  25      4       Sequence number (uint32)
+```
+
+### 12.7.4 RELAY\_PONG (0x04)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  25      4       Active sessions (uint32)
+  29      4       Max sessions (uint32)
+  33      4       Uptime seconds (uint32)
+  37      4       Echo sequence number (uint32, from PING)
+```
+
+### 12.7.5 RELAY\_FORWARD (0x05)
+
+Multi-hop forwarding with TTL and loop detection:
+
+```
+  Offset  Size            Field
+  ──────  ──────────────  ─────────────────────────────────
+  25      1               TTL (uint8, decremented at each hop, max 4)
+  26      1               Path length (uint8, number of NodeIDs traversed)
+  27      path_len × 16   Path (list of 128-bit NodeIDs already traversed)
+  27+P    4               Inner packet length (uint32)
+  31+P    inner_len       Inner ZTLP packet (unmodified client packet)
+```
+
+A relay MUST drop a FORWARD if: TTL reaches 0, its own NodeID appears
+in the path (loop), or the inner packet fails Magic validation.
+
+### 12.7.6 RELAY\_SESSION\_SYNC (0x06)
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  25      12      SessionID (96 bits)
+  37      4       Peer A IPv4 address
+  41      2       Peer A port (uint16)
+  43      4       Peer B IPv4 address
+  47      2       Peer B port (uint16)
+```
+
+### 12.7.7 RELAY\_LEAVE (0x07)
+
+No additional payload beyond the common header. Receipt of LEAVE causes
+the peer to remove the sender from its routing table and hash ring.
+
+### 12.7.8 RELAY\_DRAIN / RELAY\_DRAIN\_CANCEL (0x08, 0x09)
+
+**DRAIN:**
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  25      4       Drain timeout (uint32, milliseconds until full shutdown)
+```
+
+**DRAIN\_CANCEL:** No additional payload beyond the common header.
+
+A relay receiving DRAIN MUST stop routing new sessions to the draining
+peer but MUST continue forwarding packets for existing sessions until
+the timeout expires or a LEAVE is received.
+
 # 13. Hardware Enforcement Profiles
 
 The ZTLP base specification assumes packet enforcement occurs at
@@ -2095,7 +2412,55 @@ attempt them in order and use the first that succeeds. The selected
 transport SHOULD be remembered and used for subsequent connections to
 the same relay.
 
-## 14.1 NAT Traversal
+### 14.1 TCP/TLS Framing Format
+
+When ZTLP packets are carried over a TCP stream (Priority 3 or 4),
+individual packets MUST be framed using a length-prefix to preserve
+message boundaries. The framing format is:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       4       Packet length (uint32, big-endian, in bytes)
+  4       N       ZTLP packet (unchanged — identical to the UDP payload)
+```
+
+The 4-byte length prefix contains the size of the ZTLP packet only; it
+does NOT include the length prefix itself. Maximum packet size is
+65535 bytes (matching the UDP PayloadLen field width). Receivers MUST
+reject frames with length exceeding 65535 bytes.
+
+**TLS wrapping (Priority 3):** The length-prefixed ZTLP stream is
+carried inside a standard TLS 1.3 connection on port 443. The TLS
+connection uses ALPN protocol identifier `"ztlp/1"` to distinguish ZTLP
+traffic from HTTPS on the same port. Relay nodes listening on port 443
+MUST inspect the ALPN extension and route `"ztlp/1"` connections to the
+ZTLP handler.
+
+**WebSocket wrapping (Priority 4):** Each ZTLP packet is sent as a
+single WebSocket binary message (opcode `0x02`). No additional length
+prefix is needed because WebSocket frames already include length. The
+WebSocket connection MUST use the subprotocol `"ztlp.v1"` in the
+`Sec-WebSocket-Protocol` header. The WebSocket endpoint path SHOULD be
+`/ztlp`.
+
+### 14.2 Transport Detection and Fallback Timing
+
+Implementations MUST attempt each transport level in order with the
+following timeouts before falling back:
+
+| Level | Timeout | Fallback condition |
+|-------|---------|-------------------|
+| UDP / ZTLP Port | 3 seconds (no HELLO\_ACK) | Fall back to UDP/443. |
+| UDP / 443 | 3 seconds | Fall back to TCP/443 + TLS. |
+| TCP / 443 (TLS) | 5 seconds (TLS handshake) | Fall back to WebSocket. |
+| WebSocket / HTTPS | 10 seconds | Report connection failure. |
+
+Implementations SHOULD cache the last successful transport per relay
+endpoint and skip failed levels on reconnection for a configurable
+duration (recommended: 10 minutes).
+
+## 14.3 NAT Traversal
 
 For direct peer-to-peer connections (without relay), ZTLP nodes SHOULD
 attempt UDP hole-punching coordinated via a relay node. If hole-punching
@@ -2649,8 +3014,31 @@ scrutiny, but MUST NOT drop them on that basis alone.
 
 The CryptoSuite field allows future algorithm upgrades without protocol
 version changes. Implementations MUST NOT negotiate CryptoSuites with
-known weaknesses. A registry of approved CryptoSuite identifiers will be
-maintained separately.
+known weaknesses.
+
+### 18.5.1 CryptoSuite Registry
+
+The following table defines the initial CryptoSuite identifiers. All
+compliant implementations MUST support CryptoSuite `0x0001`. Additional
+suites MAY be added in future protocol revisions.
+
+| ID | Name | Noise Pattern | DH | AEAD | Hash | Status |
+|----|------|---------------|----|------|------|--------|
+| `0x0000` | — | — | — | — | — | Reserved (MUST NOT be used). |
+| `0x0001` | `ZTLP_XX_25519_CHACHA_BLAKE2S` | `Noise_XX` | X25519 | ChaCha20-Poly1305 | BLAKE2s | **Mandatory**. MUST be supported by all implementations. |
+| `0x0002` | `ZTLP_XX_25519_AES_SHA256` | `Noise_XX` | X25519 | AES-256-GCM | SHA-256 | Optional. For hardware with AES-NI acceleration. |
+| `0x0003` | `ZTLP_XX_448_CHACHA_BLAKE2B` | `Noise_XX` | X448 | ChaCha20-Poly1305 | BLAKE2b | Optional. 224-bit security level for high-assurance deployments. |
+| `0x0100`–`0x01FF` | — | — | — | — | — | Reserved for experimental / private use. |
+| `0xFFFF` | — | — | — | — | — | Reserved (MUST NOT be used). |
+
+**Suite negotiation:** CryptoSuite negotiation is implicit in ZTLP. The
+Initiator sets the `CryptoSuite` field in the HELLO header to its
+preferred suite. If the Responder does not support that suite, it MUST
+respond with an ERROR (code `0x07`, CRYPTO\_MISMATCH) containing the
+Responder's preferred CryptoSuite ID in the first two bytes of the
+Error Detail field. The Initiator MAY retry with the suggested suite.
+Implementations MUST NOT downgrade to a suite with known weaknesses
+even if suggested by a peer.
 
 ## 18.6 Revocation Latency
 
@@ -4119,6 +4507,41 @@ old SessionID MUST remain valid for a short overlap window (recommended:
 5 seconds) to allow in-flight packets to drain before the old entry is
 removed.
 
+### 35.2.1 REKEY Wire Format (MsgType = 3)
+
+A REKEY initiates an in-session Noise\_XX handshake to derive fresh
+session keys and a new SessionID. The REKEY message uses the full
+64-byte handshake header (Section 8.1) with the **current** session's
+encryption. The payload contains:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       32      Noise Message 1 (new ephemeral pubkey `e`)
+  32      12      Proposed SessionID (new, generated by initiator)
+  44      2       Proposed CryptoSuite (uint16, may differ from current)
+  46      2       Proposed rekey interval (uint16, seconds)
+```
+
+The REKEY flag (bit 2) MUST be set in the header Flags field. The
+`SessionID` in the header is the **current** (old) session — the new
+SessionID takes effect only after the full three-message Noise exchange
+completes.
+
+**REKEY response flow:**
+
+1.  Endpoint A sends REKEY (Noise Message 1 + proposed SessionID).
+2.  Endpoint B responds with MsgType = 2 (HELLO\_ACK) carrying Noise
+    Message 2, with the REKEY flag set and the current SessionID.
+3.  Endpoint A sends MsgType = 0 (DATA) carrying Noise Message 3,
+    encrypted under the **old** session keys.
+4.  Both endpoints derive new keys. Endpoint B installs the new
+    SessionID in the relay forwarding table.
+5.  The old SessionID remains valid for the overlap window (5 seconds).
+
+If Endpoint B rejects the proposed CryptoSuite, it MUST respond with
+ERROR (code `0x07`) instead of HELLO\_ACK.
+
 ## 35.3 Session Termination
 
 Sessions are terminated through one of three mechanisms: explicit CLOSE
@@ -4130,6 +4553,45 @@ terminated. Relays SHOULD expire sessions whose last packet was seen
 more than the configured inactivity timeout ago (recommended default: 5
 minutes for interactive sessions, 30 minutes for background service
 sessions).
+
+### 35.3.1 CLOSE Wire Format (MsgType = 4)
+
+A CLOSE message is sent by either endpoint to gracefully terminate a
+session. It uses the full 64-byte handshake header, encrypted under the
+current session keys. The payload contains:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Reason code (uint8)
+  1       8       Final packet sequence (uint64, highest seq sent)
+  9       var     Reason detail (UTF-8 string, optional)
+```
+
+**Reason Code Table:**
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0x00 | NORMAL | Graceful close initiated by application. |
+| 0x01 | IDLE\_TIMEOUT | Session idle timeout exceeded. |
+| 0x02 | LIFETIME\_EXPIRED | Session maximum lifetime reached. |
+| 0x03 | POLICY\_CHANGE | Policy no longer permits this session. |
+| 0x04 | KEY\_COMPROMISE | Key compromise suspected; immediate teardown. |
+| 0x05 | ADMIN\_CLOSE | Administrative forced closure. |
+| 0xFF | UNSPECIFIED | No specific reason provided. |
+
+Upon receiving CLOSE, the peer MUST:
+
+1.  Stop sending new DATA packets on this session.
+2.  Send its own CLOSE (with its final packet sequence) as acknowledgment
+    if it has not already sent one.
+3.  Retain the session state for a drain period (recommended: 5 seconds)
+    to process any in-flight packets.
+4.  Remove the session from its local table after the drain period.
+
+Relays that observe a CLOSE in either direction SHOULD begin their
+cleanup timer (Section 35.4) immediately rather than waiting for the
+inactivity timeout.
 
 ## 35.4 Relay State Cleanup
 

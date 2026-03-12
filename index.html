@@ -311,6 +311,15 @@
         a.href = '#' + h.id;
         a.textContent = h.textContent;
         if (h.tagName === 'H2') a.style.paddingLeft = '.25rem';
+        // Use smooth scroll instead of hash navigation to prevent
+        // the hashchange handler from misinterpreting section anchors
+        // as page navigation and reloading the spec page
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          // Update hash silently for deep-linking without triggering hashchange
+          history.replaceState(null, '', '#' + h.id);
+        });
         toc.appendChild(a);
         links.push(a);
       }
@@ -481,6 +490,8 @@
   // ── Navigate to a page (updates hash + loads) ─────────
   function navigateTo(pageKey) {
     if (!PAGES[pageKey]) pageKey = DEFAULT_PAGE;
+    // Use a page: prefix in the hash to distinguish page navigation
+    // from in-page section anchors
     window.location.hash = '#' + pageKey;
   }
 
@@ -489,24 +500,44 @@
     const hash = window.location.hash.replace('#', '');
     if (PAGES[hash]) return hash;
     if (!hash || hash === '') return DEFAULT_PAGE;
-    return DEFAULT_PAGE;
+    // Hash doesn't match any page — it's a section anchor within the current page
+    return null;
   }
 
   // ── Hash change handler ───────────────────────────────
   function onHashChange() {
     const pageKey = getPageFromHash();
+    if (pageKey === null) {
+      // It's an in-page section anchor (e.g., #abstract, #41-goals).
+      // Scroll to the element if it exists — do NOT reload any page.
+      const hash = window.location.hash.replace('#', '');
+      const target = document.getElementById(hash);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      return;
+    }
     loadPage(pageKey);
   }
 
   // ── Initialize ────────────────────────────────────────
   window.addEventListener('hashchange', onHashChange);
 
-  // Also fetch README.md in background for version info if starting on a non-spec page
+  // On initial load, if hash doesn't match a page key, load the default
+  // page first, then scroll to the anchor after rendering
   const initialPage = getPageFromHash();
-  if (initialPage !== 'spec') {
+  const initialHash = window.location.hash.replace('#', '');
+
+  if (initialPage !== null && initialPage !== 'spec') {
     fetch('README.md').then(r => r.text()).then(md => extractMeta(md)).catch(() => {});
   }
-  loadPage(initialPage);
+  loadPage(initialPage || DEFAULT_PAGE).then(() => {
+    // If the hash was a section anchor (not a page key), scroll to it
+    if (initialPage === null && initialHash) {
+      const target = document.getElementById(initialHash);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
 </script>
 </body>
 </html>

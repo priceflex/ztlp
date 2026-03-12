@@ -69,7 +69,7 @@ View the full documentation — including quick start guides, architecture deep 
 | 6 | Protocol Overview |
 | 7 | ZTLP Addressing — Node Identity |
 | 8 | **ZTLP Packet Format** |
-|   | 8.1 Handshake / Control Header (64 bytes, fixed) |
+|   | 8.1 Handshake / Control Header (96 bytes, fixed) |
 |   | 8.2 Field Definitions |
 |   | 8.3 Established Data Header (compact, post-handshake) |
 |   | 8.4 Extension TLVs (Optional) |
@@ -695,7 +695,7 @@ similarly to DNS but with mandatory signing and delegated trust.
 
 # 8. ZTLP Packet Format
 
-## 8.1 Handshake / Control Header (64 bytes, fixed)
+## 8.1 Handshake / Control Header (96 bytes, fixed)
 
 ```packet
   0-15: "Magic (16)"
@@ -714,7 +714,13 @@ similarly to DNS but with mandatory signing and delegated trust.
   600-615: "ExtLen (16)"
   616-631: "PayloadLen (16)"
   632-759: "HeaderAuthTag (128)"
+  760-767: "Reserved (8)"
 ```
+
+*Note:* The fields above total 760 bits (95 bytes). A single byte of
+reserved padding (bits 760–767) is appended to yield a 96-byte (768-bit)
+header aligned to 4-byte word boundaries. The Reserved byte MUST be set
+to zero on transmission and MUST be ignored on receipt.
 
 ## 8.2 Field Definitions
 
@@ -728,7 +734,7 @@ similarly to DNS but with mandatory signing and delegated trust.
 | CryptoSuite | 16 bits | Identifies AEAD + hash + handshake family (e.g., ChaCha20-Poly1305 + `Noise_XX`). |
 | KeyID/TokenID | 16 bits | Selects active credential slot; allows edge to pick correct verification key instantly. |
 | SessionID | 96 bits | Stable per-flow identifier. Assigned during HELLO with cryptographically strong entropy. 96-bit width provides sufficient keyspace to make random guessing attacks computationally infeasible even under large-scale enumeration attempts. Rotates on REKEY. |
-| PacketSeq | 64 bits | Monotonically increasing per-session counter. Anti-replay window enforced. In multipath sessions (MULTIPATH flag set), the anti-replay window MUST be sized to accommodate path-induced reordering — implementations SHOULD use a minimum window of 1024 packets. Per-path sequence tracking is RECOMMENDED for sessions with high reordering variance. |
+| PacketSeq | 64 bits | Monotonically increasing per-session counter. Anti-replay window enforced. For single-path sessions, the default anti-replay window size MUST be at least 256 packets. Implementations MAY use larger windows. In multipath sessions (MULTIPATH flag set), the anti-replay window MUST be sized to accommodate path-induced reordering — implementations SHOULD use a minimum window of 1024 packets. Per-path sequence tracking is RECOMMENDED for sessions with high reordering variance. |
 | Timestamp | 64 bits | Unix epoch milliseconds. Used as a replay heuristic — packets with timestamps significantly outside the receiver's clock window SHOULD be treated as suspicious and deprioritized. Implementations MUST NOT hard-reject packets solely on timestamp deviation, as clock drift, NTP failure, or embedded device timekeeping limitations can produce legitimate out-of-window timestamps. The HeaderAuthTag provides the authoritative replay defense; the Timestamp field is supplementary. |
 | SrcNodeID | 128 bits | Sender's Node ID (stable 128-bit enrollment identifier). Zero during initial HELLO. |
 | DstSvcID | 128 bits | Destination Service ID. No port numbers; services are resolved by identity. |
@@ -808,9 +814,28 @@ not supported.
 **Reserved versions:** Version 0 is reserved and MUST NOT be used.
 Versions 2–15 are reserved for future protocol revisions.
 
+### 8.2.3 Flags Bit Layout
+
+The 16-bit Flags field uses the following bit assignments (bit 15 is the
+most significant bit):
+
+```
+  Bit 15 (MSB): HAS_EXT    — Extension TLVs follow the base header
+  Bit 14:       ACK_REQ    — Sender requests acknowledgment
+  Bit 13:       REKEY      — Rekeying in progress
+  Bit 12:       MIGRATE    — Session migration (endpoint change)
+  Bit 11:       MULTIPATH  — Multipath session mode
+  Bit 10:       RELAY_HOP  — Packet has traversed at least one relay
+  Bits 9–0:     Reserved (MUST be zero, MUST be ignored on receipt)
+```
+
+Implementations MUST set reserved bits to zero on transmission.
+Receivers MUST ignore reserved bits to allow forward compatibility with
+future flag assignments.
+
 ## 8.3 Established Data Header (compact, post-handshake)
 
-The 64-byte header defined in Section 8.1 applies only to handshake and
+The 96-byte header defined in Section 8.1 applies only to handshake and
 control-plane messages (HELLO, `HELLO_ACK`, REKEY, CLOSE, ERROR, PING,
 PONG). After session establishment, data-plane packets MUST use the
 following compact fixed header. SrcNodeID and DstSvcID MUST NOT appear
@@ -851,6 +876,7 @@ base header:
 | 0x05 | `BANDWIDTH_HINT` | Requested bandwidth profile (informational; not a hard reservation). |
 | 0x06 | RELAY_PATH | Ordered list of relay Node IDs traversed (for diagnostics). |
 | 0x07 | ADMISSION_PROOF | Challenge cookie proving successful proof-of-work admission (see Section 8.5.4). |
+| 0x08 | FRAGMENT | Fragmentation metadata (Fragment ID, offset, total length, flags). See Section 15.3.1. |
 | 0xFF | PADDING | Random padding bytes (MUST be ignored by the parser). Used to satisfy the amplification prevention requirement in Section 18.2. |
 
 ### 8.4.1 TLV Binary Layout
@@ -889,7 +915,7 @@ filler.
 
 ## 8.5 Control Message Payload Structures
 
-The 64-byte handshake header (Section 8.1) carries the common fields for
+The 96-byte handshake header (Section 8.1) carries the common fields for
 all control messages. The payload area (following the header and any
 Extension TLVs) contains message-specific data, structured as follows.
 All multi-byte fields are big-endian unless noted otherwise.
@@ -906,6 +932,7 @@ All multi-byte fields are big-endian unless noted otherwise.
 | 5 | ERROR | responder → initiator | Session rejection or protocol error. |
 | 6 | PING | bidirectional | Liveness probe. |
 | 7 | PONG | bidirectional | Liveness response. |
+| 8 | MIGRATE | initiator → relay | Endpoint migration notification. Informs relays of a new transport address. |
 
 ### 8.5.2 HELLO Payload (MsgType = 1)
 
@@ -1030,8 +1057,12 @@ derived session keys:
 | 0x08 | SESSION\_EXPIRED | Session timed out or was forcibly closed. |
 | 0x09 | INVALID\_PACKET | Malformed packet structure. |
 | 0x0A | RELAY\_UNAVAILABLE | Relay cannot forward (capacity or policy). |
+| 0x0B | RATE\_LIMITED | Per-identity or per-IP rate limit exceeded. Retry after backoff. |
+| 0x0C | QUOTA\_EXCEEDED | Per-session bandwidth or packet quota exceeded. |
 | 0x10 | CHALLENGE\_REQUIRED | Proof-of-work challenge (see Section 8.5.3). |
 | 0xFF | INTERNAL\_ERROR | Unspecified server-side error. |
+
+Error codes `0x0D` through `0x0F` are reserved for future control-plane errors. Codes `0x11` through `0xFE` are reserved for future use. Implementations MUST treat unrecognized error codes as equivalent to `0xFF` (INTERNAL\_ERROR) for logging purposes but MUST NOT change protocol behavior based on unrecognized codes.
 
 ### 8.5.8 PING / PONG Payloads (MsgType = 6, 7)
 
@@ -1044,6 +1075,27 @@ derived session keys:
 
 PONG echoes the PING's sequence number and includes the responder's own
 timestamp. This enables RTT calculation and clock drift estimation.
+
+### 8.5.9 MIGRATE Payload (MsgType = 8)
+
+Sent by a node to inform its relay of a new transport endpoint (e.g.,
+after a network change from Wi-Fi to cellular):
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       12      SessionID (96 bits, existing session)
+  12      1       Address type (0x04 = IPv4, 0x06 = IPv6)
+  13      4/16    New IP address (4 bytes for IPv4, 16 for IPv6)
+  17/29   2       New port (uint16)
+  19/31   8       Migration token (HMAC-BLAKE2s of SessionID || new endpoint,
+                  keyed with the session's initiator-to-responder key)
+```
+
+The migration token prevents spoofed MIGRATE messages. The relay MUST
+verify the token using the session's known keys before updating the
+endpoint mapping. If verification fails, the MIGRATE MUST be silently
+discarded.
 
 ## 8.6 Payload
 
@@ -1294,13 +1346,15 @@ about the signature, not part of the signed content.
   var+4+sig   pub_len     Signer's Ed25519 public key
 ```
 
-**Record data encoding:** The `data` field is a key-value map. For
-interoperability, implementations MUST use a deterministic encoding that
-produces identical bytes for identical logical content regardless of
-insertion order. The reference implementation uses Erlang External Term
-Format with the `:deterministic` flag; alternative implementations (e.g.,
-Rust, Go) MUST produce byte-identical output for the same data or use
-a canonical encoding such as sorted-key CBOR (RFC 8949, Section 4.2).
+**Record data encoding:** Record data MUST be encoded using deterministic
+sorted-key CBOR (RFC 8949, Section 4.2) as the canonical wire encoding.
+Map keys MUST be sorted in bytewise lexicographic order. This ensures
+byte-identical output across all implementations regardless of
+programming language. The ZTLP reference implementation (Elixir) uses a
+CBOR library for canonical encoding; implementations in other languages
+MUST produce byte-identical CBOR for the same logical data. Erlang
+External Term Format (ETF) is NOT suitable for interoperable use and
+MUST NOT be used for wire encoding.
 
 **Record data schemas by type:**
 
@@ -1541,6 +1595,29 @@ responder_to_initiator_key = BLAKE2s(handshake_hash || "ztlp-r2i")
 
 where `handshake_hash` is the `h` value from the completed Noise
 handshake state.
+
+**AEAD nonce construction for data packets:** After the handshake
+completes, data-plane packets are encrypted using ChaCha20-Poly1305 with
+the directional session keys derived above. The 12-byte AEAD nonce for
+each packet is constructed as follows:
+
+```
+  Bytes 0–3:   0x00 0x00 0x00 0x00  (four zero bytes)
+  Bytes 4–11:  PacketSeq (64-bit little-endian)
+```
+
+This matches the Noise Framework nonce format used during the handshake.
+The PacketSeq field from the ZTLP header provides the counter. Each
+direction maintains an independent sequence counter starting at zero.
+Implementations MUST NOT reuse a nonce with the same key — if the
+PacketSeq approaches 2^64, the session MUST be rekeyed or terminated.
+
+**AEAD additional data (AAD):** The HeaderAuthTag in the base header
+authenticates the header fields. For data-plane AEAD encryption, the
+additional authenticated data (AAD) is the complete ZTLP header
+(excluding the HeaderAuthTag field itself and any extension TLVs). This
+binds the ciphertext to the header fields, preventing header
+manipulation without detection.
 
 ## 11.2 Message Flow
 
@@ -1950,8 +2027,17 @@ messages share a common header prefix:
   0       1       Message type (uint8)
   1       16      Sender NodeID (128 bits)
   17      8       Timestamp (uint64, epoch-ms, big-endian)
-  25      var     Type-specific payload
+  25      64      Ed25519 Signature (over bytes 0–24 + type-specific payload)
+  89      var     Type-specific payload
 ```
+
+All inter-relay messages MUST be signed by the sender's Ed25519 identity
+key. The signature covers bytes 0 through 24 (message type, NodeID, and
+timestamp) concatenated with the type-specific payload. Receiving relays
+MUST verify the signature against the sender's known public key (resolved
+via ZTLP-NS or local peer table) and MUST silently discard messages with
+invalid signatures. This prevents topology poisoning attacks from
+unauthorized parties.
 
 ### 12.7.1 Mesh Message Types
 
@@ -1970,12 +2056,13 @@ messages share a common header prefix:
 ### 12.7.2 RELAY\_HELLO / RELAY\_HELLO\_ACK (0x01, 0x02)
 
 ```
-  Offset  Size    Field
-  ──────  ──────  ─────────────────────────────────
-  25      4       IPv4 address (big-endian)
-  29      2       Port (uint16)
-  31      1       Role byte (see below)
-  32      4       Capabilities (uint32, bitfield)
+  Offset   Size    Field
+  ───────  ──────  ─────────────────────────────────
+  89       1       Address type (0x04 = IPv4, 0x06 = IPv6)
+  90       4/16    IP address (4 bytes for IPv4, 16 bytes for IPv6)
+  94/106   2       Port (uint16)
+  96/108   1       Role byte (see below)
+  97/109   4       Capabilities (uint32, bitfield)
 ```
 
 **Role bytes:** 0x00 = all, 0x01 = ingress, 0x02 = transit, 0x03 = egress.
@@ -1985,7 +2072,7 @@ messages share a common header prefix:
 ```
   Offset  Size    Field
   ──────  ──────  ─────────────────────────────────
-  25      4       Sequence number (uint32)
+  89      4       Sequence number (uint32)
 ```
 
 ### 12.7.4 RELAY\_PONG (0x04)
@@ -1993,10 +2080,10 @@ messages share a common header prefix:
 ```
   Offset  Size    Field
   ──────  ──────  ─────────────────────────────────
-  25      4       Active sessions (uint32)
-  29      4       Max sessions (uint32)
-  33      4       Uptime seconds (uint32)
-  37      4       Echo sequence number (uint32, from PING)
+  89      4       Active sessions (uint32)
+  93      4       Max sessions (uint32)
+  97      4       Uptime seconds (uint32)
+  101     4       Echo sequence number (uint32, from PING)
 ```
 
 ### 12.7.5 RELAY\_FORWARD (0x05)
@@ -2006,11 +2093,11 @@ Multi-hop forwarding with TTL and loop detection:
 ```
   Offset  Size            Field
   ──────  ──────────────  ─────────────────────────────────
-  25      1               TTL (uint8, decremented at each hop, max 4)
-  26      1               Path length (uint8, number of NodeIDs traversed)
-  27      path_len × 16   Path (list of 128-bit NodeIDs already traversed)
-  27+P    4               Inner packet length (uint32)
-  31+P    inner_len       Inner ZTLP packet (unmodified client packet)
+  89      1               TTL (uint8, decremented at each hop, max 4)
+  90      1               Path length (uint8, number of NodeIDs traversed)
+  91      path_len × 16   Path (list of 128-bit NodeIDs already traversed)
+  91+P    4               Inner packet length (uint32)
+  95+P    inner_len       Inner ZTLP packet (unmodified client packet)
 ```
 
 A relay MUST drop a FORWARD if: TTL reaches 0, its own NodeID appears
@@ -2019,13 +2106,15 @@ in the path (loop), or the inner packet fails Magic validation.
 ### 12.7.6 RELAY\_SESSION\_SYNC (0x06)
 
 ```
-  Offset  Size    Field
-  ──────  ──────  ─────────────────────────────────
-  25      12      SessionID (96 bits)
-  37      4       Peer A IPv4 address
-  41      2       Peer A port (uint16)
-  43      4       Peer B IPv4 address
-  47      2       Peer B port (uint16)
+  Offset       Size    Field
+  ───────────  ──────  ─────────────────────────────────
+  89           12      SessionID (96 bits)
+  101          1       Peer A address type (0x04 = IPv4, 0x06 = IPv6)
+  102          4/16    Peer A IP address (4 bytes for IPv4, 16 bytes for IPv6)
+  106/118      2       Peer A port (uint16)
+  108/120      1       Peer B address type (0x04 = IPv4, 0x06 = IPv6)
+  109/121      4/16    Peer B IP address (4 bytes for IPv4, 16 bytes for IPv6)
+  113/137      2       Peer B port (uint16)
 ```
 
 ### 12.7.7 RELAY\_LEAVE (0x07)
@@ -2040,7 +2129,7 @@ the peer to remove the sender from its routing table and hash ring.
 ```
   Offset  Size    Field
   ──────  ──────  ─────────────────────────────────
-  25      4       Drain timeout (uint32, milliseconds until full shutdown)
+  89      4       Drain timeout (uint32, milliseconds until full shutdown)
 ```
 
 **DRAIN\_CANCEL:** No additional payload beyond the common header.
@@ -2557,9 +2646,9 @@ open issue in Section 21.
 
 ## 15.3 Path MTU Discovery and Fragmentation
 
-The ZTLP base header is 64 bytes. Combined with a UDP header (8 bytes)
+The ZTLP base header is 96 bytes. Combined with a UDP header (8 bytes)
 and an IPv6 header (40 bytes), the minimum overhead before payload is
-112 bytes. On paths with a 1280-byte IPv6 minimum MTU, this leaves 1168
+144 bytes. On paths with a 1280-byte IPv6 minimum MTU, this leaves 1136
 bytes for ZTLP extension headers and payload. On paths with conventional
 1500-byte Ethernet MTU and IPv4, overhead is lower but fragmentation
 must still be considered when extension headers are present.
@@ -2569,7 +2658,7 @@ standard ICMP/ICMPv6 \"Packet Too Big\" mechanism before sending large
 payloads. Implementations MUST support ZTLP-layer fragmentation and
 reassembly for payloads that exceed the discovered path MTU after header
 overhead is accounted for. The default maximum payload size SHOULD be
-calculated as: PathMTU - 112 - ExtensionHeaderBytes. Implementations
+calculated as: PathMTU - 144 - ExtensionHeaderBytes. Implementations
 MUST NOT rely on IP fragmentation as a substitute for ZTLP-layer
 fragmentation, as IP fragments bypass the ZTLP header authentication
 check at the receiver.
@@ -2590,6 +2679,34 @@ sessions MUST be at least 1024 packets. Implementations SHOULD track
 sequence state per path where path identifiers are available, falling
 back to per-session tracking with an expanded window when path identity
 is ambiguous.
+
+### 15.3.1 Fragmentation Header
+
+When a ZTLP payload exceeds the path MTU after header overhead,
+the sender MUST fragment at the ZTLP layer using the following
+extension TLV:
+
+| Type | Name | Description |
+|------|------|-------------|
+| 0x08 | FRAGMENT | Fragmentation metadata for reassembly. |
+
+The FRAGMENT TLV (Type 0x08) Value field is encoded as:
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       4       Fragment ID (uint32, random per original packet)
+  4       2       Fragment offset (uint16, in 8-byte units)
+  6       2       Total length (uint16, original payload length in bytes)
+  8       1       Flags (bit 7: More Fragments; bits 6–0: reserved)
+```
+
+All fragments of a single packet share the same Fragment ID, SessionID,
+and base PacketSeq. The receiver reassembles fragments by Fragment ID
+and MUST discard incomplete fragment sets after a timeout of 5 seconds.
+Implementations MUST NOT accept more than 64 fragments per Fragment ID
+to prevent resource exhaustion. The HAS\_EXT flag MUST be set on all
+fragmented packets.
 
 ## 15.4 Mobility
 
@@ -3041,6 +3158,8 @@ Error Detail field. The Initiator MAY retry with the suggested suite.
 Implementations MUST NOT downgrade to a suite with known weaknesses
 even if suggested by a peer.
 
+In protocol version 1, CryptoSuite `0x0001` (ChaCha20-Poly1305 + BLAKE2s + Noise\_XX) is the ONLY permitted suite. Initiators MUST propose `0x0001`. Responders MUST reject any other suite with ERROR code `0x07` (CRYPTO\_MISMATCH). CryptoSuites `0x0002` and `0x0003` are registered for future protocol versions and MUST NOT be used in version 1. This eliminates downgrade attacks while preserving the registry for future algorithm agility.
+
 ## 18.6 Revocation Latency
 
 `ZTLP_REVOKE` records propagate through ZTLP-NS with TTL-governed latency.
@@ -3218,10 +3337,14 @@ The following issues remain open or are identified as future work areas:
 | Reference | Description |
 |---|---|
 | RFC 2119 | Key words for use in RFCs to indicate requirement levels. |
-| RFC 8446 | TLS 1.3. |
+| RFC 7693 | The BLAKE2 Cryptographic Hash and Message Authentication Code (MAC). |
 | RFC 7748 | Elliptic Curves for Diffie-Hellman Key Agreement (X25519, X448). |
-| Noise Protocol Framework | Trevor Perrin, 2018. |
+| RFC 8032 | Edwards-Curve Digital Signature Algorithm (EdDSA) — Ed25519 and Ed448. |
+| RFC 8439 | ChaCha20 and Poly1305 for IETF Protocols. |
+| RFC 8446 | TLS 1.3. |
+| RFC 8949 | Concise Binary Object Representation (CBOR). |
 | RFC 9000 | QUIC: A UDP-Based Multiplexed and Secure Transport. |
+| Noise Protocol Framework | Trevor Perrin, 2018. https://noiseprotocol.org/noise.html |
 
 ## 22.2 Informative References
 
@@ -4512,7 +4635,7 @@ removed.
 
 A REKEY initiates an in-session Noise\_XX handshake to derive fresh
 session keys and a new SessionID. The REKEY message uses the full
-64-byte handshake header (Section 8.1) with the **current** session's
+96-byte handshake header (Section 8.1) with the **current** session's
 encryption. The payload contains:
 
 ```
@@ -4558,7 +4681,7 @@ sessions).
 ### 35.3.1 CLOSE Wire Format (MsgType = 4)
 
 A CLOSE message is sent by either endpoint to gracefully terminate a
-session. It uses the full 64-byte handshake header, encrypted under the
+session. It uses the full 96-byte handshake header, encrypted under the
 current session keys. The payload contains:
 
 ```
@@ -5239,10 +5362,10 @@ memory, storage, and network interfaces.
   handshake between the communicating nodes. The relay does not
   participate in key agreement and cannot generate valid session keys or
   SessionIDs for sessions it is not authorized to relay.
-- **Impersonate nodes.** Node identity is bound to Ed25519 private keys
-  held by the communicating endpoints. A relay operator does not possess
-  these keys and cannot complete a Noise_XX handshake as a different
-  node.
+- **Impersonate nodes.** Node identity is bound to Ed25519 signing keys
+  and X25519 static keys held by the communicating endpoints. A relay
+  operator does not possess these keys and cannot complete a Noise_XX
+  handshake (which requires the X25519 static key) as a different node.
 
 **What a compromised relay operator CAN do:**
 
@@ -5265,8 +5388,9 @@ and egress sides of a session when multi-hop relay paths are used.
 ### 41.1.5 Compromised Endpoint
 
 A compromised endpoint is one where the attacker has obtained the
-node's Ed25519 private key, either through malware, physical access,
-or key extraction from software storage.
+node's long-term private keys (Ed25519 signing key and/or X25519 static
+key), either through malware, physical access, or key extraction from
+software storage.
 
 **ZTLP cannot protect against this attacker class.** If the attacker
 possesses a node's private key, the attacker IS that node from the
@@ -5434,12 +5558,15 @@ implement complementary controls where these risks are relevant.
 
 ### 41.3.1 Endpoint Compromise with Key Extraction
 
-If an attacker possesses a node's Ed25519 private key, the attacker is
-indistinguishable from the legitimate node at the protocol level. ZTLP's
-security boundary is the cryptographic identity. The protocol cannot
-differentiate between a legitimate key holder and an attacker who has
-obtained the key through malware, physical access, or side-channel
-attacks.
+If an attacker possesses a node's long-term private keys (the Ed25519
+signing key and the X25519 static key), the attacker is indistinguishable
+from the legitimate node at the protocol level. ZTLP's security boundary
+is the cryptographic identity. The protocol cannot differentiate between
+a legitimate key holder and an attacker who has obtained the keys through
+malware, physical access, or side-channel attacks. Note: the X25519
+static key is required for Noise_XX session establishment, while the
+Ed25519 signing key is required for ZTLP-NS record updates and relay
+mesh authentication.
 
 **Complementary controls:** Hardware-backed key storage (TPM, Secure
 Enclave, YubiKey), device posture attestation, behavioral anomaly
@@ -5572,9 +5699,29 @@ Framework, the AEAD construction, and ZTLP's session lifecycle design.
 Every ZTLP session is established using a Noise_XX handshake that
 includes ephemeral X25519 Diffie-Hellman key exchange. Session keys are
 derived from both ephemeral and static key material. Compromise of a
-node's long-term Ed25519 identity key does NOT reveal the session keys
+node's long-term X25519 static key does NOT reveal the session keys
 of previously established sessions, because the ephemeral key exchange
 values are generated per-session and are not stored after key derivation.
+
+**Dual-key identity model:** Each ZTLP node maintains two long-term key
+pairs:
+
+1. **Ed25519 signing key** — Used for ZTLP-NS record signatures, relay
+   mesh authentication, enrollment token signing, and any operation
+   requiring a digital signature. This is the node's *identity signing
+   key*.
+
+2. **X25519 static key** — Used as the static key (`s`) in the Noise_XX
+   handshake for session establishment. This is the node's *session key
+   agreement key*.
+
+Both keys are bound to the same NodeID via a signed ZTLP\_KEY record in
+ZTLP-NS. Hardware-backed storage (Section 16.1) applies to both keys.
+The Ed25519 key signs the binding between the NodeID and the X25519
+public key, creating a verifiable chain from identity to session.
+Implementations MUST NOT use the Ed25519 key for X25519 key agreement or
+vice versa — the key types are cryptographically distinct (Edwards curve
+vs Montgomery curve).
 
 ### 41.5.2 Mutual Authentication
 

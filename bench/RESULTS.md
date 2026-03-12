@@ -1,5 +1,13 @@
 # ZTLP Performance Benchmark Results — v2
 
+> **⚠️ Note:** These results were collected prior to the spec v0.5.1 alignment
+> changes (commit `58e4dbd`). The packet format has changed: handshake headers
+> are now 96 bytes (was 95), data headers are 46 bytes (was 42), nonce
+> construction uses little-endian, and record serialization uses CBOR instead
+> of Erlang ETF. Re-run benchmarks on target hardware to get updated numbers.
+> The benchmark scripts have been updated — only the recorded results below
+> are stale.
+
 ## System Information
 
 | Property | Value |

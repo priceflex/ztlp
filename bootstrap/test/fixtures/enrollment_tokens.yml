@@ -1,0 +1,26 @@
+active_token:
+  network: office
+  token_id: abc123def456
+  token_uri: "ztlp://enroll/?zone=office.acme.ztlp&ns=10.0.1.10:23097&token=abc123def456"
+  max_uses: 5
+  current_uses: 2
+  expires_at: <%= 24.hours.from_now %>
+  status: active
+
+expired_token:
+  network: office
+  token_id: expired999
+  token_uri: "ztlp://enroll/?zone=office.acme.ztlp&token=expired999"
+  max_uses: 1
+  current_uses: 0
+  expires_at: <%= 1.hour.ago %>
+  status: active
+
+exhausted_token:
+  network: office
+  token_id: used111
+  token_uri: "ztlp://enroll/?zone=office.acme.ztlp&token=used111"
+  max_uses: 1
+  current_uses: 1
+  expires_at: <%= 24.hours.from_now %>
+  status: exhausted

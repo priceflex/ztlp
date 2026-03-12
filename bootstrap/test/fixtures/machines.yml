@@ -1,0 +1,44 @@
+ns1:
+  network: office
+  hostname: ns1.office
+  ip_address: 10.0.1.10
+  ssh_port: 22
+  ssh_user: root
+  ssh_auth_method: key
+  ssh_private_key_ciphertext: fake-key-data
+  roles: ns
+  status: pending
+
+relay1:
+  network: office
+  hostname: relay1.office
+  ip_address: 10.0.1.20
+  ssh_port: 22
+  ssh_user: root
+  ssh_auth_method: key
+  ssh_private_key_ciphertext: fake-key-data
+  roles: relay
+  status: ready
+  docker_installed: true
+
+gateway1:
+  network: office
+  hostname: gw1.office
+  ip_address: 10.0.1.30
+  ssh_port: 22
+  ssh_user: root
+  ssh_auth_method: key
+  ssh_private_key_ciphertext: fake-key-data
+  roles: gateway
+  status: pending
+
+multi_role:
+  network: office
+  hostname: multi.office
+  ip_address: 10.0.1.40
+  ssh_port: 22
+  ssh_user: root
+  ssh_auth_method: key
+  ssh_private_key_ciphertext: fake-key-data
+  roles: ns,relay
+  status: pending

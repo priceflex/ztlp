@@ -1,0 +1,35 @@
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-gray-900">Deployments</h1>
+  <p class="mt-1 text-sm text-gray-500">All deployment history across networks</p>
+</div>
+
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Network</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machine</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Component</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Duration</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Log</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @deployments.each do |dep| %>
+        <tr>
+          <td class="px-6 py-4 text-sm"><%= link_to dep.machine.network.name, dep.machine.network, class: "text-ztlp-600 hover:text-ztlp-500" %></td>
+          <td class="px-6 py-4 text-sm font-medium"><%= dep.machine.hostname %></td>
+          <td class="px-6 py-4 text-sm"><%= dep.component %></td>
+          <td class="px-6 py-4"><%= status_badge(dep.status) %></td>
+          <td class="px-6 py-4 text-sm text-gray-500"><%= dep.duration ? "%.1fs" % dep.duration : "—" %></td>
+          <td class="px-6 py-4 text-sm text-gray-500"><%= dep.created_at.strftime("%b %d %H:%M") %></td>
+          <td class="px-6 py-4 text-right text-sm">
+            <%= link_to "View", deployment_path(dep), class: "text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

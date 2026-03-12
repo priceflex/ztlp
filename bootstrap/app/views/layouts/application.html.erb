@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-50">
+  <head>
+    <title>ZTLP Bootstrap</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              ztlp: { 50: '#f0f9ff', 100: '#e0f2fe', 500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1', 800: '#075985', 900: '#0c4a6e' }
+            }
+          }
+        }
+      }
+    </script>
+
+    <%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
+    <%= javascript_importmap_tags %>
+  </head>
+
+  <body class="h-full">
+    <div class="min-h-full">
+      <!-- Navigation -->
+      <nav class="bg-ztlp-800">
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div class="flex h-16 items-center justify-between">
+            <div class="flex items-center">
+              <%= link_to root_path, class: "flex items-center space-x-2" do %>
+                <span class="text-2xl">🔐</span>
+                <span class="text-white font-bold text-xl">ZTLP Bootstrap</span>
+              <% end %>
+              <div class="ml-10 flex items-baseline space-x-4">
+                <%= link_to "Dashboard", root_path, class: nav_link_class(root_path) %>
+                <%= link_to "Networks", networks_path, class: nav_link_class(networks_path) %>
+                <%= link_to "Deployments", deployments_path, class: nav_link_class(deployments_path) %>
+                <%= link_to "Audit Log", audit_logs_path, class: nav_link_class(audit_logs_path) %>
+              </div>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Flash messages -->
+      <% if notice %>
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 mt-4">
+          <div class="rounded-md bg-green-50 p-4">
+            <div class="flex">
+              <div class="flex-shrink-0"><span class="text-green-400">✓</span></div>
+              <div class="ml-3"><p class="text-sm font-medium text-green-800"><%= notice %></p></div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+      <% if alert %>
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 mt-4">
+          <div class="rounded-md bg-red-50 p-4">
+            <div class="flex">
+              <div class="flex-shrink-0"><span class="text-red-400">✗</span></div>
+              <div class="ml-3"><p class="text-sm font-medium text-red-800"><%= alert %></p></div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+
+      <!-- Main content -->
+      <main>
+        <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+          <%= yield %>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+deploy_success:
+  action: deploy
+  target_type: Machine
+  target_id: 1
+  status: success
+  details: '{"component":"ns","machine":"ns1.office"}'
+  ip_address: 10.0.1.10

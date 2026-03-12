@@ -1,0 +1,24 @@
+ns1_deploy:
+  machine: ns1
+  status: success
+  component: ns
+  docker_image: priceflex/ztlp-ns:latest
+  started_at: <%= 10.minutes.ago %>
+  finished_at: <%= 5.minutes.ago %>
+  log: "Deployed NS successfully"
+
+relay1_deploy:
+  machine: relay1
+  status: running
+  component: relay
+  docker_image: priceflex/ztlp-relay:latest
+  started_at: <%= 2.minutes.ago %>
+
+failed_deploy:
+  machine: gateway1
+  status: failed
+  component: gateway
+  docker_image: priceflex/ztlp-gateway:latest
+  started_at: <%= 15.minutes.ago %>
+  finished_at: <%= 14.minutes.ago %>
+  log: "ERROR: Connection refused"

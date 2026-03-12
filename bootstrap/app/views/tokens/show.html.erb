@@ -1,0 +1,70 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Tokens", network_tokens_path(@network), class: "hover:text-gray-700" %> /
+  </nav>
+  <h1 class="text-2xl font-bold text-gray-900">Token: <%= @token.token_id %></h1>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+  <!-- Token Details -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6">
+      <h3 class="text-lg font-medium text-gray-900">Details</h3>
+    </div>
+    <dl class="divide-y divide-gray-200">
+      <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+        <dt class="text-sm font-medium text-gray-500">Status</dt>
+        <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= status_badge(@token.status) %></dd>
+      </div>
+      <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+        <dt class="text-sm font-medium text-gray-500">Uses</dt>
+        <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= @token.current_uses %> / <%= @token.max_uses %></dd>
+      </div>
+      <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+        <dt class="text-sm font-medium text-gray-500">Expires</dt>
+        <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= @token.expires_at.strftime("%B %d, %Y %H:%M UTC") %></dd>
+      </div>
+      <% if @token.allowed_roles.present? %>
+        <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+          <dt class="text-sm font-medium text-gray-500">Allowed Roles</dt>
+          <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= role_badges(@token.allowed_roles) %></dd>
+        </div>
+      <% end %>
+      <% if @token.notes.present? %>
+        <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+          <dt class="text-sm font-medium text-gray-500">Notes</dt>
+          <dd class="mt-1 sm:mt-0 sm:col-span-2 text-sm text-gray-600"><%= @token.notes %></dd>
+        </div>
+      <% end %>
+    </dl>
+    <% if @token.usable? %>
+      <div class="px-4 py-4 sm:px-6">
+        <%= button_to "Revoke Token", revoke_network_token_path(@network, @token), method: :post, class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500", data: { turbo_confirm: "Revoke this enrollment token?" } %>
+      </div>
+    <% end %>
+  </div>
+
+  <!-- QR Code + URI -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6">
+      <h3 class="text-lg font-medium text-gray-900">Enrollment</h3>
+      <p class="text-sm text-gray-500 mt-1">Scan QR or use token URI with <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">ztlp setup --token</code></p>
+    </div>
+    <div class="px-6 py-4">
+      <% if @token.qr_svg.present? %>
+        <div class="flex justify-center mb-6">
+          <div class="w-64 h-64"><%= @token.qr_svg.html_safe %></div>
+        </div>
+      <% end %>
+      <div class="bg-gray-50 rounded-md p-4">
+        <label class="block text-xs font-medium text-gray-500 mb-1">Token URI</label>
+        <code class="block text-xs break-all text-gray-700"><%= @token.token_uri %></code>
+      </div>
+      <div class="mt-4 bg-gray-50 rounded-md p-4">
+        <label class="block text-xs font-medium text-gray-500 mb-1">CLI Command</label>
+        <code class="block text-xs break-all text-gray-700">ztlp setup --token "<%= @token.token_uri %>"</code>
+      </div>
+    </div>
+  </div>
+</div>

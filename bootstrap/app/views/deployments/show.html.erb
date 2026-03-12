@@ -1,0 +1,48 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @deployment.machine.network.name, @deployment.machine.network, class: "hover:text-gray-700" %> /
+    <%= link_to @deployment.machine.hostname, network_machine_path(@deployment.machine.network, @deployment.machine), class: "hover:text-gray-700" %> /
+  </nav>
+  <h1 class="text-2xl font-bold text-gray-900">
+    Deployment: <%= @deployment.component %> on <%= @deployment.machine.hostname %>
+  </h1>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+  <div class="bg-white shadow rounded-lg p-4">
+    <dt class="text-sm text-gray-500">Status</dt>
+    <dd class="mt-1"><%= status_badge(@deployment.status) %></dd>
+  </div>
+  <div class="bg-white shadow rounded-lg p-4">
+    <dt class="text-sm text-gray-500">Duration</dt>
+    <dd class="mt-1 text-lg font-medium"><%= @deployment.duration ? "%.1fs" % @deployment.duration : "—" %></dd>
+  </div>
+  <div class="bg-white shadow rounded-lg p-4">
+    <dt class="text-sm text-gray-500">Image</dt>
+    <dd class="mt-1 text-sm font-mono"><%= @deployment.docker_image || "—" %></dd>
+  </div>
+</div>
+
+<% if @deployment.config_generated.present? %>
+  <div class="bg-white shadow rounded-lg mb-8">
+    <div class="px-4 py-5 sm:px-6">
+      <h3 class="text-lg font-medium text-gray-900">Generated Config</h3>
+    </div>
+    <div class="px-6 pb-6">
+      <pre class="bg-gray-900 text-green-400 rounded-md p-4 text-sm overflow-x-auto"><%= @deployment.config_generated %></pre>
+    </div>
+  </div>
+<% end %>
+
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Deploy Log</h3>
+  </div>
+  <div class="px-6 pb-6">
+    <% if @deployment.log.present? %>
+      <pre class="bg-gray-900 text-gray-300 rounded-md p-4 text-sm overflow-x-auto max-h-96 overflow-y-auto"><%= @deployment.log %></pre>
+    <% else %>
+      <p class="text-gray-500">No log output yet.</p>
+    <% end %>
+  </div>
+</div>

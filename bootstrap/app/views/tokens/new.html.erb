@@ -1,0 +1,31 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Tokens", network_tokens_path(@network), class: "hover:text-gray-700" %> /
+  </nav>
+  <h1 class="text-2xl font-bold text-gray-900">Generate Enrollment Token</h1>
+</div>
+
+<div class="max-w-2xl">
+  <%= form_with(url: network_tokens_path(@network), method: :post, class: "space-y-6") do |form| %>
+    <div>
+      <%= form.label :expires_in, "Expires In", class: "block text-sm font-medium text-gray-700" %>
+      <%= form.select :expires_in, [["1 hour", "1h"], ["6 hours", "6h"], ["24 hours", "24h"], ["7 days", "168h"], ["30 days", "720h"]], { selected: "24h" }, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm px-3 py-2 border" %>
+    </div>
+
+    <div>
+      <%= form.label :max_uses, "Maximum Uses", class: "block text-sm font-medium text-gray-700" %>
+      <%= form.number_field :max_uses, value: 1, min: 1, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm px-3 py-2 border" %>
+    </div>
+
+    <div>
+      <%= form.label :notes, class: "block text-sm font-medium text-gray-700" %>
+      <%= form.text_area :notes, rows: 2, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm px-3 py-2 border", placeholder: "Optional notes (e.g. 'For office laptops')" %>
+    </div>
+
+    <div class="flex items-center space-x-4">
+      <%= form.submit "Generate Token", class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+      <%= link_to "Cancel", network_tokens_path(@network), class: "text-sm text-gray-600 hover:text-gray-500" %>
+    </div>
+  <% end %>
+</div>

@@ -1,0 +1,101 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <nav class="text-sm text-gray-500 mb-2">
+        <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+      </nav>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @machine.hostname %></h1>
+      <p class="mt-1 text-sm text-gray-500 font-mono"><%= @machine.ip_address %>:<%= @machine.ssh_port %></p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= button_to "Test SSH", test_connection_network_machine_path(@network, @machine), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= button_to "Health Check", health_check_network_machine_path(@network, @machine), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= link_to "Edit", edit_network_machine_path(@network, @machine), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+    </div>
+  </div>
+</div>
+
+<!-- Machine Info -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Machine Details</h3>
+  </div>
+  <dl class="divide-y divide-gray-200">
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">Status</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= status_badge(@machine.status) %></dd>
+    </div>
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">Roles</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= role_badges(@machine.roles) %></dd>
+    </div>
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">SSH</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2 font-mono text-sm"><%= @machine.ssh_user %>@<%= @machine.ip_address %>:<%= @machine.ssh_port %> (<%= @machine.ssh_auth_method %>)</dd>
+    </div>
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">Docker</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= @machine.docker_installed? ? "✓ Installed" : "Not installed" %></dd>
+    </div>
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">Last Health Check</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= time_ago_short(@machine.last_health_check_at) %></dd>
+    </div>
+    <% if @machine.last_error.present? %>
+      <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+        <dt class="text-sm font-medium text-gray-500">Last Error</dt>
+        <dd class="mt-1 sm:mt-0 sm:col-span-2 text-red-600 text-sm"><%= @machine.last_error %></dd>
+      </div>
+    <% end %>
+  </dl>
+</div>
+
+<!-- Deploy Components -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Components</h3>
+  </div>
+  <div class="px-4 py-4 sm:px-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+    <% @machine.role_list.each do |role| %>
+      <div class="border rounded-lg p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h4 class="font-medium"><%= role.upcase %></h4>
+          <% dep = @machine.latest_deployment_for(role) %>
+          <%= status_badge(dep&.status || "not deployed") if dep %>
+        </div>
+        <%= button_to "Deploy #{role}", provision_network_machine_path(@network, @machine, component: role), method: :post, class: "w-full rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500", data: { turbo_confirm: "Deploy #{role} to #{@machine.hostname}?" } %>
+      </div>
+    <% end %>
+  </div>
+</div>
+
+<!-- Deployment History -->
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Deployment History</h3>
+  </div>
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Component</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Duration</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Log</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @deployments.each do |dep| %>
+        <tr>
+          <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><%= dep.component %></td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(dep.status) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= dep.duration ? "%.1fs" % dep.duration : "—" %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= dep.created_at.strftime("%b %d %H:%M") %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+            <%= link_to "View Log", deployment_path(dep), class: "text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

@@ -1,0 +1,102 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @network.name %></h1>
+      <p class="mt-1 text-sm text-gray-500 font-mono"><%= @network.zone %></p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to "Edit", edit_network_path(@network), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <% if @network.deployable? %>
+        <%= button_to "Deploy All", deploy_network_path(@network), method: :post, class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500", data: { turbo_confirm: "Deploy all components to all machines?" } %>
+      <% end %>
+    </div>
+  </div>
+  <%= status_badge(@network.status) %>
+  <% if @network.notes.present? %>
+    <p class="mt-2 text-sm text-gray-600"><%= @network.notes %></p>
+  <% end %>
+</div>
+
+<!-- Machines -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6 flex justify-between items-center">
+    <h3 class="text-lg font-medium text-gray-900">Machines (<%= @machines.count %>)</h3>
+    <%= link_to "Add Machine", new_network_machine_path(@network), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
+  </div>
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hostname</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP Address</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Roles</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Docker</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Check</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @machines.each do |machine| %>
+        <tr>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <%= link_to machine.hostname, network_machine_path(@network, machine), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono"><%= machine.ip_address %></td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= role_badges(machine.roles) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm">
+            <% if machine.docker_installed? %>
+              <span class="text-green-600">✓</span>
+            <% else %>
+              <span class="text-gray-400">—</span>
+            <% end %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(machine.status) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= time_ago_short(machine.last_health_check_at) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+            <%= link_to "View", network_machine_path(@network, machine), class: "text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+  <% if @machines.empty? %>
+    <div class="px-6 py-8 text-center text-gray-500">
+      No machines yet. <%= link_to "Add one", new_network_machine_path(@network), class: "text-ztlp-600" %>.
+    </div>
+  <% end %>
+</div>
+
+<!-- Enrollment Tokens -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6 flex justify-between items-center">
+    <h3 class="text-lg font-medium text-gray-900">Enrollment Tokens (<%= @active_tokens.count %> active)</h3>
+    <%= link_to "Generate Token", new_network_token_path(@network), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
+  </div>
+  <%= link_to "View All Tokens", network_tokens_path(@network), class: "block px-6 py-3 text-sm text-ztlp-600 hover:text-ztlp-500" %>
+</div>
+
+<!-- Recent Deployments -->
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Recent Deployments</h3>
+  </div>
+  <ul class="divide-y divide-gray-200">
+    <% @recent_deployments.each do |dep| %>
+      <li class="px-6 py-4 flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium text-gray-900"><%= dep.machine.hostname %> / <%= dep.component %></p>
+          <p class="text-xs text-gray-500"><%= dep.created_at.strftime("%b %d %H:%M") %></p>
+        </div>
+        <div class="flex items-center space-x-2">
+          <% if dep.duration %>
+            <span class="text-xs text-gray-500"><%= "%.1f" % dep.duration %>s</span>
+          <% end %>
+          <%= status_badge(dep.status) %>
+        </div>
+      </li>
+    <% end %>
+    <% if @recent_deployments.empty? %>
+      <li class="px-6 py-8 text-center text-gray-500">No deployments yet.</li>
+    <% end %>
+  </ul>
+</div>

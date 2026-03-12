@@ -1,0 +1,45 @@
+<div class="sm:flex sm:items-center sm:justify-between mb-8">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Networks</h1>
+    <p class="mt-1 text-sm text-gray-500">ZTLP network zones and their machines</p>
+  </div>
+  <%= link_to "New Network", new_network_path, class: "mt-4 sm:mt-0 rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
+</div>
+
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Zone</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machines</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @networks.each do |network| %>
+        <tr>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <%= link_to network.name, network, class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono"><%= network.zone %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= network.machines.count %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= network.enrollment_tokens.active.count %> active</td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(network.status) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm space-x-2">
+            <%= link_to "View", network, class: "text-ztlp-600 hover:text-ztlp-500" %>
+            <%= link_to "Edit", edit_network_path(network), class: "text-gray-600 hover:text-gray-500" %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+  <% if @networks.empty? %>
+    <div class="px-6 py-12 text-center">
+      <p class="text-gray-500 mb-4">No networks configured yet.</p>
+      <%= link_to "Create your first network", new_network_path, class: "text-ztlp-600 hover:text-ztlp-500 font-medium" %>
+    </div>
+  <% end %>
+</div>

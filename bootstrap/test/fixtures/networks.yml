@@ -1,0 +1,11 @@
+office:
+  name: Office Network
+  zone: office.acme.ztlp
+  status: created
+  enrollment_secret_ciphertext: deadbeef1234567890abcdef12345678deadbeef1234567890abcdef12345678
+  notes: Test office network
+
+production:
+  name: Production
+  zone: prod.acme.ztlp
+  status: active

@@ -1,8 +1,33 @@
 #!/bin/bash -e
 
-# If running the rails server then create or migrate existing database
-if [ "${1}" == "./bin/rails" ] && [ "${2}" == "server" ]; then
-  ./bin/rails db:prepare
+# Ensure SECRET_KEY_BASE is set
+if [ -z "$SECRET_KEY_BASE" ]; then
+  echo "⚠️  SECRET_KEY_BASE not set — generating a random one for this session."
+  echo "   Set SECRET_KEY_BASE in your environment for persistent sessions."
+  export SECRET_KEY_BASE=$(ruby -rsecurerandom -e 'puts SecureRandom.hex(64)')
 fi
+
+# Set encryption keys from env or generate defaults (warns if not set)
+if [ -z "$ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" ]; then
+  echo "⚠️  ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY not set — using generated key."
+  echo "   SSH keys in the database will NOT survive container rebuilds without setting this."
+  export ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=$(ruby -rsecurerandom -e 'puts SecureRandom.hex(16)')
+fi
+
+if [ -z "$ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY" ]; then
+  export ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=$(ruby -rsecurerandom -e 'puts SecureRandom.hex(16)')
+fi
+
+if [ -z "$ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT" ]; then
+  export ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT=$(ruby -rsecurerandom -e 'puts SecureRandom.hex(16)')
+fi
+
+# Use /data for SQLite if the volume is mounted
+if [ -d "/data" ] && [ -w "/data" ]; then
+  export DATABASE_PATH="${DATABASE_PATH:-/data/production.sqlite3}"
+fi
+
+# Prepare database (create + migrate)
+./bin/rails db:prepare
 
 exec "${@}"

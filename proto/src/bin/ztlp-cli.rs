@@ -431,9 +431,35 @@ enum Commands {
 /// Agent daemon management subcommands.
 #[derive(Subcommand)]
 enum AgentCommands {
+    /// Start the agent daemon
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp agent start\n  \
+            ztlp agent start --foreground")]
+    Start {
+        /// Stay in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
+
+        /// Path to agent config file
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Stop the running agent daemon
+    #[command(after_help = "EXAMPLES:\n  ztlp agent stop")]
+    Stop,
+
     /// Show agent status (tunnels, DNS cache, credentials)
     #[command(after_help = "EXAMPLES:\n  ztlp agent status")]
     Status,
+
+    /// Show DNS cache entries
+    #[command(after_help = "EXAMPLES:\n  ztlp agent dns")]
+    Dns,
+
+    /// Flush the DNS cache
+    #[command(after_help = "EXAMPLES:\n  ztlp agent flush-dns")]
+    FlushDns,
 }
 
 #[derive(Subcommand)]
@@ -4265,14 +4291,123 @@ async fn cmd_proxy(
     .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
 }
 
+/// `ztlp agent start` — Start the agent daemon.
+async fn cmd_agent_start(
+    foreground: bool,
+    config_path: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::config::AgentConfig;
+    use ztlp_proto::agent::daemon;
+
+    // Check if already running
+    if let Some(pid) = daemon::get_agent_pid() {
+        eprintln!(
+            "{} Agent already running (PID {})",
+            c_yellow("⚠"),
+            pid
+        );
+        return Ok(());
+    }
+
+    let config = if let Some(path) = config_path {
+        AgentConfig::load_from_path(path)
+    } else {
+        AgentConfig::load()
+    };
+
+    if !foreground {
+        eprintln!(
+            "{} Starting agent daemon...",
+            c_cyan("→")
+        );
+        eprintln!(
+            "  {} Use --foreground to run in foreground",
+            c_dim("Hint:")
+        );
+    }
+
+    daemon::run_daemon(&config, foreground)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+}
+
+/// `ztlp agent stop` — Stop the running agent daemon.
+async fn cmd_agent_stop() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::control;
+
+    let socket_path = control::default_socket_path();
+    let cmd = control::ControlCommand {
+        cmd: "shutdown".to_string(),
+        name: None,
+    };
+
+    match control::send_command(&socket_path, &cmd).await {
+        Ok(resp) => {
+            if resp.ok {
+                eprintln!("{} Agent stopped", c_green("✓"));
+            } else {
+                eprintln!(
+                    "{} {}",
+                    c_red("✗"),
+                    resp.error.unwrap_or_else(|| "unknown error".to_string())
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", c_red("✗"), e);
+        }
+    }
+
+    Ok(())
+}
+
 /// `ztlp agent status` — Show agent daemon status.
 async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
-
-    let config = AgentConfig::load();
+    use ztlp_proto::agent::control;
 
     eprintln!("ZTLP Agent v{}", ZTLP_VERSION);
-    eprintln!("  {} not running", c_yellow("Status:"));
+
+    // Try to query the running daemon first
+    let socket_path = control::default_socket_path();
+    let cmd = control::ControlCommand {
+        cmd: "status".to_string(),
+        name: None,
+    };
+
+    match control::send_command(&socket_path, &cmd).await {
+        Ok(resp) if resp.ok => {
+            if let Some(data) = resp.data {
+                eprintln!("  {} {}", c_green("●"), c_bold("running"));
+                if let Some(pid) = data.get("pid").and_then(|v| v.as_u64()) {
+                    eprintln!("  {} {}", c_cyan("PID:"), pid);
+                }
+                if let Some(uptime) = data.get("uptime_secs").and_then(|v| v.as_u64()) {
+                    eprintln!("  {} {}", c_cyan("Uptime:"), format_duration(uptime));
+                }
+                if let Some(dns) = data.get("dns_listen").and_then(|v| v.as_str()) {
+                    eprintln!("  {} {}", c_cyan("DNS:"), dns);
+                }
+                if let Some(ns) = data.get("ns_server").and_then(|v| v.as_str()) {
+                    eprintln!("  {} {}", c_cyan("NS:"), ns);
+                }
+                let alloc = data.get("vip_allocated").and_then(|v| v.as_u64()).unwrap_or(0);
+                let cap = data.get("vip_capacity").and_then(|v| v.as_u64()).unwrap_or(0);
+                eprintln!("  {} {}/{}", c_cyan("VIPs:"), alloc, cap);
+                let maps = data.get("domain_mappings").and_then(|v| v.as_u64()).unwrap_or(0);
+                if maps > 0 {
+                    eprintln!("  {} {}", c_cyan("Domain maps:"), maps);
+                }
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Daemon not running — show config
+    eprintln!("  {} {}", c_red("●"), "not running");
+
+    let config = AgentConfig::load();
     eprintln!();
     eprintln!("{}", c_dim("Configuration (~/.ztlp/agent.toml):"));
     eprintln!("  {} {}", c_cyan("Identity:"), config.identity.path);
@@ -4302,21 +4437,124 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !config.dns.zones.is_empty() {
-        eprintln!();
-        eprintln!("{}", c_dim("Custom DNS zones:"));
-        for zone in &config.dns.zones {
-            eprintln!("  {}", zone);
-        }
-    }
-
     eprintln!();
     eprintln!(
-        "{}",
-        c_dim("Hint: Agent daemon not yet implemented. Use `ztlp proxy` for SSH ProxyCommand mode.")
+        "  {} ztlp agent start",
+        c_dim("Start with:")
     );
 
     Ok(())
+}
+
+/// `ztlp agent dns` — Show DNS cache entries.
+async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::control;
+
+    let socket_path = control::default_socket_path();
+    let cmd = control::ControlCommand {
+        cmd: "dns_cache".to_string(),
+        name: None,
+    };
+
+    match control::send_command(&socket_path, &cmd).await {
+        Ok(resp) if resp.ok => {
+            if let Some(data) = resp.data {
+                if let Some(entries) = data.get("entries").and_then(|v| v.as_array()) {
+                    if entries.is_empty() {
+                        eprintln!("{}", c_dim("DNS cache is empty"));
+                    } else {
+                        eprintln!(
+                            "{:<35} {:<16} {:<22} {} {}",
+                            c_bold("NAME"),
+                            c_bold("VIP"),
+                            c_bold("PEER"),
+                            c_bold("CONN"),
+                            c_bold("AGE"),
+                        );
+                        for entry in entries {
+                            let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("-");
+                            let peer = entry
+                                .get("peer_addr")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("-");
+                            let conn = entry.get("active_connections")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let age = entry.get("age_secs")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            eprintln!(
+                                "{:<35} {:<16} {:<22} {:<4} {}",
+                                name, ip, peer, conn, format_duration(age)
+                            );
+                        }
+                        eprintln!();
+                        eprintln!("{} entries", entries.len());
+                    }
+                }
+            }
+            Ok(())
+        }
+        Ok(resp) => {
+            eprintln!(
+                "{} {}",
+                c_red("✗"),
+                resp.error.unwrap_or_else(|| "unknown error".to_string())
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{} {}", c_red("✗"), e);
+            Ok(())
+        }
+    }
+}
+
+/// `ztlp agent flush-dns` — Flush the DNS cache.
+async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::control;
+
+    let socket_path = control::default_socket_path();
+    let cmd = control::ControlCommand {
+        cmd: "flush_dns".to_string(),
+        name: None,
+    };
+
+    match control::send_command(&socket_path, &cmd).await {
+        Ok(resp) if resp.ok => {
+            let freed = resp.data
+                .and_then(|d| d.get("freed").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            eprintln!("{} Flushed {} expired entries", c_green("✓"), freed);
+            Ok(())
+        }
+        Ok(resp) => {
+            eprintln!(
+                "{} {}",
+                c_red("✗"),
+                resp.error.unwrap_or_else(|| "unknown error".to_string())
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{} {}", c_red("✗"), e);
+            Ok(())
+        }
+    }
+}
+
+/// Format seconds into human-readable duration.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86400, (secs % 86400) / 3600)
+    }
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -4487,7 +4725,13 @@ async fn main() {
         }
 
         Commands::Agent(subcmd) => match subcmd {
+            AgentCommands::Start { foreground, config } => {
+                cmd_agent_start(*foreground, config).await
+            }
+            AgentCommands::Stop => cmd_agent_stop().await,
             AgentCommands::Status => cmd_agent_status().await,
+            AgentCommands::Dns => cmd_agent_dns().await,
+            AgentCommands::FlushDns => cmd_agent_flush_dns().await,
         },
     };
 

@@ -9,14 +9,15 @@
 //! - **config** — Agent configuration (TOML)
 //! - **domain_map** — Custom domain → ZTLP zone mapping
 //! - **proxy** — SSH ProxyCommand (stdin/stdout ↔ ZTLP tunnel)
-//! - **dns** — DNS resolver for `*.ztlp` + custom zones
 //! - **vip_pool** — Virtual IP allocator
-//! - **tunnel_manager** — Tunnel lifecycle, pooling, reconnect
+//! - **dns** — DNS resolver for `*.ztlp` + custom zones
 //! - **control** — Unix socket control interface
 //! - **daemon** — Agent daemon main loop
-//! - **renewal** — Credential renewal daemon
-//! - **dns_setup** — System DNS configuration helpers
 
 pub mod config;
+pub mod control;
+pub mod daemon;
+pub mod dns;
 pub mod domain_map;
 pub mod proxy;
+pub mod vip_pool;

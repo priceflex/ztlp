@@ -464,6 +464,30 @@ enum AgentCommands {
     /// Show active tunnels
     #[command(after_help = "EXAMPLES:\n  ztlp agent tunnels")]
     Tunnels,
+
+    /// Configure system DNS to forward ZTLP zones to the agent
+    #[command(after_help = "EXAMPLES:\n  \
+            sudo ztlp agent dns-setup\n  \
+            sudo ztlp agent dns-setup --zones corp.ztlp,internal.techrockstars.com")]
+    DnsSetup {
+        /// Additional DNS zones to forward (comma-separated)
+        #[arg(long)]
+        zones: Option<String>,
+    },
+
+    /// Remove ZTLP DNS configuration
+    #[command(after_help = "EXAMPLES:\n  sudo ztlp agent dns-teardown")]
+    DnsTeardown,
+
+    /// Install the agent as a system service (systemd/LaunchAgent)
+    #[command(after_help = "EXAMPLES:\n  \
+            sudo ztlp agent install\n  \
+            sudo ztlp agent install --binary /usr/local/bin/ztlp")]
+    Install {
+        /// Path to the ztlp binary (default: current binary)
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4621,6 +4645,112 @@ async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// `ztlp agent dns-setup` — Configure system DNS.
+async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::config::AgentConfig;
+    use ztlp_proto::agent::dns_setup;
+
+    let config = AgentConfig::load();
+
+    let mut zone_list: Vec<String> = config.dns.zones.clone();
+    for (domain, _) in &config.dns.domain_map {
+        if !zone_list.contains(domain) {
+            zone_list.push(domain.clone());
+        }
+    }
+    if let Some(extra) = zones {
+        for z in extra.split(',') {
+            let z = z.trim().to_string();
+            if !z.is_empty() && !zone_list.contains(&z) {
+                zone_list.push(z);
+            }
+        }
+    }
+
+    match dns_setup::setup_dns(&config.dns.listen, &zone_list) {
+        Ok(result) => {
+            eprintln!("{} DNS configured ({})", c_green("✓"), format!("{:?}", result.backend));
+            for file in &result.files_written {
+                eprintln!("  wrote {}", file.display());
+            }
+            if let Some(instructions) = &result.instructions {
+                eprintln!();
+                eprintln!("{}", instructions);
+            }
+            if result.needs_restart {
+                eprintln!();
+                eprintln!(
+                    "{}",
+                    c_yellow("⚠ Service restart required (see instructions above)")
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("{} DNS setup failed: {}", c_red("✗"), e);
+            eprintln!();
+            eprintln!("{}",c_dim("Hint: DNS setup usually requires root. Try: sudo ztlp agent dns-setup"));
+        }
+    }
+
+    Ok(())
+}
+
+/// `ztlp agent dns-teardown` — Remove ZTLP DNS configuration.
+async fn cmd_agent_dns_teardown() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::dns_setup;
+
+    match dns_setup::teardown_dns() {
+        Ok(removed) => {
+            if removed.is_empty() {
+                eprintln!("{}", c_dim("No ZTLP DNS configuration found"));
+            } else {
+                eprintln!("{} DNS configuration removed", c_green("✓"));
+                for file in &removed {
+                    eprintln!("  removed {}", file.display());
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{} DNS teardown failed: {}", c_red("✗"), e);
+        }
+    }
+
+    Ok(())
+}
+
+/// `ztlp agent install` — Install as system service.
+async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::dns_setup;
+
+    let ztlp_binary = if let Some(path) = binary {
+        path.to_string_lossy().to_string()
+    } else {
+        // Try to find the current binary path
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/usr/local/bin/ztlp".to_string())
+    };
+
+    match dns_setup::install_service(&ztlp_binary) {
+        Ok((path, instructions)) => {
+            eprintln!("{} Service installed", c_green("✓"));
+            eprintln!("  {}", path.display());
+            eprintln!();
+            eprintln!("{}", instructions);
+        }
+        Err(e) => {
+            eprintln!("{} Installation failed: {}", c_red("✗"), e);
+            eprintln!();
+            eprintln!(
+                "{}",
+                c_dim("Hint: Installation usually requires root. Try: sudo ztlp agent install")
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Format seconds into human-readable duration.
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
@@ -4810,6 +4940,9 @@ async fn main() {
             AgentCommands::Dns => cmd_agent_dns().await,
             AgentCommands::FlushDns => cmd_agent_flush_dns().await,
             AgentCommands::Tunnels => cmd_agent_tunnels().await,
+            AgentCommands::DnsSetup { zones } => cmd_agent_dns_setup(zones).await,
+            AgentCommands::DnsTeardown => cmd_agent_dns_teardown().await,
+            AgentCommands::Install { binary } => cmd_agent_install(binary).await,
         },
     };
 

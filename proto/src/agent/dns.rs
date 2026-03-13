@@ -419,7 +419,7 @@ fn build_dns_query(name: &str, id: u16) -> Vec<u8> {
 }
 
 /// Forward a DNS query to the upstream resolver and return the response.
-async fn forward_to_upstream(
+pub async fn forward_to_upstream(
     query: &[u8],
     upstream: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {

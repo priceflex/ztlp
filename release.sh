@@ -134,8 +134,9 @@ echo ""
 echo -e "${CYAN}3.${NC} Committing version bump..."
 
 if [[ "$DRY_RUN" == "false" ]]; then
-    git add proto/Cargo.toml proto/Cargo.lock
-    git commit -m "Release ${TAG}" --quiet
+    git add proto/Cargo.toml
+    git add proto/Cargo.lock 2>/dev/null || true  # may be .gitignored
+    git -c user.name="Steven Price" -c user.email="steve@techrockstars.com" commit -m "Release ${TAG}" --quiet
     echo -e "  ${GREEN}✓${NC} Committed"
 else
     echo "  (dry run — skipping)"

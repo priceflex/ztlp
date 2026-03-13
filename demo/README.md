@@ -19,14 +19,29 @@ uses NodeID hex strings in the policy file. Works anywhere with just the
 For the complete experience with human-readable identities
 (`alice.tunnel.ztlp` instead of `f40685...`), run a ZTLP-NS server first.
 
-### 1. Start the NS Server
+### 1. Install Elixir/OTP (if needed)
+
+The NS server is pure Elixir/OTP with **zero external dependencies**.
+It only needs the Erlang VM and Elixir compiler.
+
+| OS | Install |
+|---|---|
+| macOS | `brew install elixir` |
+| Ubuntu/Debian | `sudo apt install elixir erlang` |
+| Arch | `sudo pacman -S elixir` |
+| Fedora | `sudo dnf install elixir erlang` |
+| asdf | `asdf install erlang 26.2 && asdf install elixir 1.15.7` |
+
+Minimum: **Elixir 1.12+** / **Erlang OTP 24+** (for Ed25519 crypto support).
+
+### 2. Start the NS Server
 
 ```bash
 cd ../ns
-ZTLP_NS_PORT=23096 mix run --no-halt
+mix run --no-halt
 ```
 
-Or with custom storage:
+Or with custom port/storage:
 
 ```bash
 cd ../ns
@@ -35,9 +50,10 @@ ZTLP_NS_STORAGE_MODE=ram_copies \
 mix run --no-halt
 ```
 
-The NS server will listen on UDP port 23096.
+The NS server listens on UDP port 23096 by default. First run
+will compile (takes ~10s) — subsequent starts are instant.
 
-### 2. Run the Demo
+### 3. Run the Demo
 
 ```bash
 ./ssh-tunnel-demo.sh

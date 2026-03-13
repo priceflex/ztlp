@@ -164,7 +164,10 @@ if [[ "$SKIP_NS" != "true" ]]; then
     if [[ "$HAS_NC" == "true" ]] && nc -zu 127.0.0.1 "${NS_SERVER##*:}" >/dev/null 2>&1; then
         success "NS server reachable at $NS_SERVER"
     else
-        warn "NS server not reachable – falling back to --skip-ns"
+        warn "NS server not reachable at $NS_SERVER – using NodeID hex for policy"
+        info "For human-readable names (alice.tunnel.ztlp), start NS first:"
+        info "  cd ns && ZTLP_NS_PORT=23096 mix run --no-halt"
+        info "Requires: Elixir 1.12+ / Erlang OTP 24+ (zero external deps)"
         SKIP_NS=true
     fi
 fi

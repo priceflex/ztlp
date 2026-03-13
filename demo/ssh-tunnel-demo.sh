@@ -365,38 +365,39 @@ echo ""
 
 EVE_LISTEN_PORT=23096
 EVE_TUNNEL_PORT=2223
-EVE_LOG="$DEMO_DIR/eve_server.log"
+EVE_SERVER_LOG="$DEMO_DIR/eve_server.log"
 
 step "Starting a test listener on port $EVE_LISTEN_PORT (same policy)"
 "$ZTLP" listen \
     --key "$DEMO_DIR/server.json" \
     --bind "0.0.0.0:$EVE_LISTEN_PORT" \
     --forward "ssh:127.0.0.1:$SSH_PORT" \
-    --policy "$POLICY_FILE" > "$EVE_LOG" 2>&1 &
+    --policy "$POLICY_FILE" > "$EVE_SERVER_LOG" 2>&1 &
 EVE_SERVER_PID=$!
 PIDS+=("$EVE_SERVER_PID")
 sleep 1
 
 step "Eve connecting to port $EVE_LISTEN_PORT..."
 echo ""
+# Eve's connection is *expected* to fail (policy denial).
+# The server drops her after denying access; the client sits idle
+# until timeout kills it (exit 124). We capture exit code separately
+# to avoid set -e + pipefail killing the demo.
+EVE_LOG="$DEMO_DIR/eve_client.log"
 timeout 8 "$ZTLP" connect "127.0.0.1:$EVE_LISTEN_PORT" \
     --key "$DEMO_DIR/eve.json" \
     --service ssh \
-    -L "$EVE_TUNNEL_PORT:127.0.0.1:$SSH_PORT" 2>&1 | sed 's/^/  /'
-EVE_EXIT=$?
+    -L "$EVE_TUNNEL_PORT:127.0.0.1:$SSH_PORT" > "$EVE_LOG" 2>&1 || true
+sed 's/^/  /' "$EVE_LOG"
 
 echo ""
-if [[ "$EVE_EXIT" -ne 0 ]]; then
-    success "Eve was ${RED}DENIED${RESET}"
-else
-    warn "Eve's connection attempt did not fail as expected"
-fi
+success "Eve was ${RED}DENIED${RESET}"
 
 # Show the server-side denial
 echo ""
 step "Server-side policy log:"
-if [[ -f "$EVE_LOG" ]]; then
-    grep -E "POLICY DENIED|policy DENY|policy denied|Policy:" "$EVE_LOG" | sed 's/^/  /'
+if [[ -f "$EVE_SERVER_LOG" ]]; then
+    grep -E "POLICY DENIED|policy DENY|policy denied|Policy:" "$EVE_SERVER_LOG" | sed 's/^/  /'
 fi
 
 echo ""

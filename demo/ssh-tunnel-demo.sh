@@ -345,13 +345,20 @@ pause
 # -------------------------------------------------------------------
 banner "Act 6 — SSH Through the ZTLP Tunnel"
 info "Alice can now SSH through her encrypted ZTLP tunnel"
-step "Connecting via SSH"
-dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1"
-ssh -p "$TUNNEL_LOCAL_PORT" \
+step "Running command via SSH tunnel"
+dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1 'echo \"Hello from \$(hostname) via ZTLP tunnel! [\$(date)]\"'"
+SSH_OUTPUT=$(timeout 10 ssh -p "$TUNNEL_LOCAL_PORT" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
-    "$SSH_USER@127.0.0.1" || warn "SSH session ended"
+    "$SSH_USER@127.0.0.1" \
+    'echo "Hello from $(hostname) via ZTLP tunnel! [$(date)]"' 2>&1) || true
+if [[ -n "$SSH_OUTPUT" ]]; then
+    echo -e "  ${GREEN}$SSH_OUTPUT${RESET}"
+    success "SSH command executed through ZTLP tunnel"
+else
+    warn "SSH session timed out or failed"
+fi
 
 pause
 
@@ -363,7 +370,7 @@ info "Eve has a valid ZTLP identity — she can complete the Noise_XX handshake"
 info "But the policy engine will deny her access to the SSH service"
 echo ""
 
-EVE_LISTEN_PORT=23096
+EVE_LISTEN_PORT=23099
 EVE_TUNNEL_PORT=2223
 EVE_SERVER_LOG="$DEMO_DIR/eve_server.log"
 

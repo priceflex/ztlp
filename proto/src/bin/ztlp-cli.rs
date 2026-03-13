@@ -252,6 +252,12 @@ enum Commands {
         #[arg(short, long)]
         policy: Option<PathBuf>,
 
+        /// ZTLP-NS server address for identity resolution in policy checks.
+        /// When set, the listener resolves the peer's public key to their
+        /// registered NS name, enabling name-based policy rules.
+        #[arg(long)]
+        ns_server: Option<String>,
+
         /// STUN server address for NAT traversal (host:port)
         #[arg(long)]
         stun_server: Option<String>,
@@ -1300,6 +1306,61 @@ async fn ns_query(
     }
 }
 
+/// Look up a record by public key (query type 0x05) and extract the name.
+/// Used for NS reverse lookup: given a peer's X25519 pubkey hex, find their
+/// registered ZTLP-NS name for policy evaluation.
+async fn ns_pubkey_lookup(
+    pubkey_hex: &str,
+    ns_server: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let ns_addr: SocketAddr = ns_server.parse()?;
+    let pk_bytes = pubkey_hex.as_bytes();
+    let pk_len = pk_bytes.len() as u16;
+    let mut query = Vec::with_capacity(3 + pk_bytes.len());
+    query.push(0x05); // pubkey query
+    query.extend_from_slice(&pk_len.to_be_bytes());
+    query.extend_from_slice(pk_bytes);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    sock.send_to(&query, ns_addr).await?;
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let data = &buf[..len];
+            if data.is_empty() || data[0] != 0x02 {
+                return Ok(None);
+            }
+            // Parse the record to extract the name.
+            // Handle truncation flag (0x01 after 0x02) from amplification prevention.
+            let record = 'parse: {
+                if data.len() > 5 && data[1] == 0x01 {
+                    let maybe_type = data[2];
+                    if (1..=7).contains(&maybe_type) && data.len() > 4 {
+                        let maybe_name_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+                        if maybe_name_len < 1024 && data.len() >= 5 + maybe_name_len {
+                            break 'parse &data[2..];
+                        }
+                    }
+                }
+                &data[1..]
+            };
+            if record.len() < 4 {
+                return Ok(None);
+            }
+            let _type_byte = record[0];
+            let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+            if record.len() < 3 + name_len {
+                return Ok(None);
+            }
+            let name = std::str::from_utf8(&record[3..3 + name_len])
+                .ok()
+                .map(|s| s.to_string());
+            Ok(name)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 #[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
@@ -1585,12 +1646,14 @@ async fn cmd_connect(
 }
 
 /// `ztlp listen` — Listen for incoming connections
+#[allow(clippy::too_many_arguments)]
 async fn cmd_listen(
     bind: &str,
     key: &Option<PathBuf>,
     _gateway_mode: bool,
     forward: &[String],
     policy_path: &Option<PathBuf>,
+    ns_server: &Option<String>,
     stun_server: &Option<String>,
     nat_assist: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1709,6 +1772,11 @@ async fn cmd_listen(
     }
 
     let peer_node_id = NodeId::from_bytes(recv1_header.src_node_id);
+
+    // Extract the peer's X25519 public key from the Noise handshake state
+    // before finalize() consumes it. Used for NS reverse lookup.
+    let peer_pubkey_hex = ctx.remote_static_hex();
+
     let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
 
     let session_id = session.session_id;
@@ -1717,8 +1785,23 @@ async fn cmd_listen(
         pipeline.register_session(session);
     }
 
-    // Client identity for policy evaluation: NodeID hex string
-    let client_identity = format!("{}", peer_node_id);
+    // Client identity for policy evaluation.
+    // Try NS reverse lookup by pubkey to get the registered name;
+    // fall back to NodeID hex if NS is unavailable or lookup fails.
+    let client_identity = if let (Some(ns), Some(pk_hex)) = (ns_server.as_ref(), &peer_pubkey_hex) {
+        match ns_pubkey_lookup(pk_hex, ns).await {
+            Ok(Some(name)) => {
+                debug!("NS reverse lookup: {} → {}", pk_hex, name);
+                name
+            }
+            _ => {
+                debug!("NS reverse lookup failed for {}, using NodeID", pk_hex);
+                format!("{}", peer_node_id)
+            }
+        }
+    } else {
+        format!("{}", peer_node_id)
+    };
 
     eprintln!("\n{}", c_green("✓ Handshake complete!"));
     eprintln!("  {} {}", c_cyan("Remote NodeID:"), peer_node_id);
@@ -4950,6 +5033,7 @@ async fn main() {
             gateway,
             forward,
             policy,
+            ns_server,
             stun_server,
             nat_assist,
         } => {
@@ -4959,6 +5043,7 @@ async fn main() {
                 *gateway,
                 forward,
                 policy,
+                ns_server,
                 stun_server,
                 *nat_assist,
             )

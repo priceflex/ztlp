@@ -324,13 +324,17 @@ banner "Act 4 — Start ZTLP Server (SSH Forward + Policy)"
 info "Server will listen on $LISTEN_PORT and forward SSH on $SSH_PORT"
 info "Policy enforcement enabled — only Alice can connect"
 step "Launching listener with policy"
-dimcmd "$ZTLP listen --key $DEMO_DIR/server.json --bind 0.0.0.0:$LISTEN_PORT --forward ssh:127.0.0.1:$SSH_PORT --policy $POLICY_FILE --gateway"
+NS_LISTEN_FLAG=""
+if [[ -n "$NS_FLAG" ]]; then
+    NS_LISTEN_FLAG="--ns-server $NS_SERVER"
+fi
+dimcmd "$ZTLP listen --key $DEMO_DIR/server.json --bind 0.0.0.0:$LISTEN_PORT --forward ssh:127.0.0.1:$SSH_PORT --policy $POLICY_FILE --gateway $NS_LISTEN_FLAG"
 "$ZTLP" listen \
     --key "$DEMO_DIR/server.json" \
     --bind "0.0.0.0:$LISTEN_PORT" \
     --forward "ssh:127.0.0.1:$SSH_PORT" \
     --policy "$POLICY_FILE" \
-    --gateway &
+    --gateway $NS_LISTEN_FLAG &
 SERVER_PID=$!
 PIDS+=("$SERVER_PID")
 
@@ -429,7 +433,8 @@ step "Starting a test listener on port $EVE_LISTEN_PORT (same policy)"
     --key "$DEMO_DIR/server.json" \
     --bind "0.0.0.0:$EVE_LISTEN_PORT" \
     --forward "ssh:127.0.0.1:$SSH_PORT" \
-    --policy "$POLICY_FILE" > "$EVE_SERVER_LOG" 2>&1 &
+    --policy "$POLICY_FILE" \
+    $NS_LISTEN_FLAG > "$EVE_SERVER_LOG" 2>&1 &
 EVE_SERVER_PID=$!
 PIDS+=("$EVE_SERVER_PID")
 sleep 1

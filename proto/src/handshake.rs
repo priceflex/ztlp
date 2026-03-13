@@ -113,6 +113,13 @@ impl HandshakeContext {
         self.noise.is_handshake_finished()
     }
 
+    /// Get the remote peer's static X25519 public key as a hex string.
+    /// Available after the handshake is finished (message 2+ for responder).
+    /// Returns `None` if the remote static key is not yet available.
+    pub fn remote_static_hex(&self) -> Option<String> {
+        self.noise.get_remote_static().map(hex::encode)
+    }
+
     /// Finalize the handshake — derive transport keys and create session state.
     ///
     /// The `session_id` must be agreed upon by both sides (typically the

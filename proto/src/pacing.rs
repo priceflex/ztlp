@@ -176,20 +176,25 @@ pub fn detect_system(
     } else if sleep_granularity <= target_pace * 50 {
         // Sleep granularity is within 50× of target — sleep is acceptable.
         // On HZ=1000, sleep(10µs) → ~65µs, which is 6.5× target. Fine.
-        // On HZ=250, sleep(10µs) → ~4ms, which is 400× target. NOT fine.
         PacingStrategy::Sleep(target_pace)
     } else {
-        // Sleep is too coarse — use spin-yield for precise pacing.
-        // Target a longer duration than the original 10µs to avoid
-        // burning too much CPU, but much shorter than the 4ms sleep.
-        // 100µs is a good compromise: 100× more precise than sleep on
-        // HZ=250, but only burns the core for ~100µs per sub-batch.
+        // Sleep is too coarse (HZ=100-300: 3-10ms per sleep).
+        // Use spin-yield but with a SHORT duration to avoid burning
+        // 100% CPU. The spin only needs to last long enough to let
+        // the receiver's UDP stack drain a sub-batch — not long enough
+        // to visibly affect CPU usage.
+        //
+        // Key insight: on HZ=250/300, we DON'T need 4ms pacing —
+        // we just need a brief ~50-100µs pause. The spin loop provides
+        // this without the kernel timer overhead.
+        //
+        // The spin duration is kept short AND we limit it to only fire
+        // between sub-batches (not per-packet), so total spin time per
+        // window is bounded: 64 sub-batches × 100µs = 6.4ms max.
         let spin_target = if is_loopback {
-            // On loopback, use minimal spin — receiver is very fast
-            Duration::from_micros(20)
+            Duration::from_micros(10) // Loopback: minimal
         } else {
-            // On real networks, pace a bit more to avoid buffer overflow
-            Duration::from_micros(100)
+            Duration::from_micros(50) // Remote: moderate (was 100µs — halved)
         };
         PacingStrategy::SpinYield(spin_target)
     };

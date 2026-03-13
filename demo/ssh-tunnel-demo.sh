@@ -387,6 +387,7 @@ SSH_OUTPUT=$(timeout 15 ssh -p "$TUNNEL_LOCAL_PORT" \
     -o LogLevel=ERROR \
     -o PreferredAuthentications=publickey,keyboard-interactive,password \
     -o GSSAPIAuthentication=no \
+    -o KexAlgorithms=curve25519-sha256 \
     "$SSH_USER@127.0.0.1" \
     'echo "Hello from $(hostname) via ZTLP tunnel! [$(date)]"' 2>&1) || true
 if echo "$SSH_OUTPUT" | grep -q "Hello from"; then

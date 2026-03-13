@@ -2,6 +2,8 @@
 _build
 deps
 target
+**/target
+proto/target
 *.beam
 erl_crash.dump
 .github
@@ -13,3 +15,4 @@ sdk/
 fuzz/
 *.md
 !**/README.md
+bootstrap/

@@ -1,0 +1,188 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Full-Stack Integration Test
+# ─────────────────────────────────────────────────────────────
+#
+# Topology:
+#
+#   ┌──────────┐      ┌──────────┐      ┌──────────────────┐
+#   │  client   │─UDP─→│  server   │─TCP─→│  backend (SSH)  │
+#   │ ztlp conn │      │ ztlp list │      │  openssh-server │
+#   └──────────┘      └──────────┘      └──────────────────┘
+#         │                 │
+#         └────── NS ───────┘   (identity registration + resolution)
+#
+#   ┌──────────┐  ┌──────────┐
+#   │  relay1   │  │  relay2   │   (running, for future relay-mediated tests)
+#   └──────────┘  └──────────┘
+#
+# Data path (tested):
+#   SSH client → TCP → ztlp-client tunnel → ZTLP/UDP → ztlp-server
+#   → TCP → backend SSH server
+#
+# What's tested:
+#   ✅ NS registration + lookup
+#   ✅ Noise_XX handshake
+#   ✅ Three-layer pipeline (magic, sessionID, header auth)
+#   ✅ ZTLP tunnel (TCP over ZTLP over UDP)
+#   ✅ SSH through tunnel
+#   ✅ SCP benchmarks with integrity verification
+#   ✅ Service routing (--forward ssh:backend:22)
+#
+# Usage:
+#   docker-compose -f docker-compose-full-stack.yml up --build
+#   docker-compose -f docker-compose-full-stack.yml logs -f client
+#   docker-compose -f docker-compose-full-stack.yml down -v
+#
+# ─────────────────────────────────────────────────────────────
+
+version: "3.8"
+
+networks:
+  ztlp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  # ── Namespace Server ──────────────────────────────────────
+  ns:
+    build: ./ns
+    container_name: ztlp-ns
+    hostname: ns
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "23096:23096/udp"
+      - "9103:9103"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "100000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "1000"
+      ZTLP_NS_RATE_LIMIT_BURST: "2000"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Relay 1 (primary) ────────────────────────────────────
+  relay1:
+    build: ./relay
+    container_name: ztlp-relay1
+    hostname: relay1
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "23095:23095/udp"
+      - "9105:9101"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "10000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Relay 2 (secondary / mesh) ───────────────────────────
+  relay2:
+    build: ./relay
+    container_name: ztlp-relay2
+    hostname: relay2
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.21
+    ports:
+      - "23098:23095/udp"
+      - "9104:9101"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "10000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Backend SSH Server ───────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: fullstack/Dockerfile.backend
+    container_name: ztlp-backend
+    hostname: backend
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.30
+    restart: unless-stopped
+
+  # ── Server (ztlp listen) ─────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: fullstack/Dockerfile.server
+    container_name: ztlp-server
+    hostname: server
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.40
+    depends_on:
+      ns:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      ZTLP_ZONE: "fullstack.ztlp"
+      ZTLP_SERVER_NAME: "server.fullstack.ztlp"
+      ZTLP_NS_SERVER: "172.28.0.10:23096"
+      ZTLP_BIND_ADDR: "0.0.0.0:23095"
+      ZTLP_BACKEND: "172.28.0.30:22"
+    restart: unless-stopped
+
+  # ── Client (ztlp connect + benchmarks) ───────────────────
+  client:
+    build:
+      context: .
+      dockerfile: fullstack/Dockerfile.client
+    container_name: ztlp-client
+    hostname: client
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.50
+    depends_on:
+      ns:
+        condition: service_healthy
+      server:
+        condition: service_started
+    environment:
+      ZTLP_ZONE: "fullstack.ztlp"
+      ZTLP_CLIENT_NAME: "client.fullstack.ztlp"
+      ZTLP_SERVER_NAME: "server.fullstack.ztlp"
+      ZTLP_NS_SERVER: "172.28.0.10:23096"
+      ZTLP_LOCAL_PORT: "2222"
+      ZTLP_BENCHMARK: "true"
+      SSHPASS: "ztlptest"

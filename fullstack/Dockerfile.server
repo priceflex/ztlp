@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Full-Stack: Server (listener) container
+# Multi-stage: grab the ztlp binary from proto build.
+# Runs `ztlp listen` with service forwarding to backend.
+# ─────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build the Rust CLI ─────────────────────────────
+FROM rust:1.85-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY proto/Cargo.toml proto/Cargo.lock* ./
+RUN mkdir -p src/bin && \
+    echo "fn main() {}" > src/bin/ztlp-cli.rs && \
+    echo "fn main() {}" > src/bin/ztlp-inspect.rs && \
+    echo "fn main() {}" > src/bin/ztlp-load.rs && \
+    echo "fn main() {}" > src/bin/ztlp-fuzz.rs && \
+    echo "fn main() {}" > src/bin/ztlp-throughput.rs && \
+    echo "fn main() {}" > src/bin/ztlp-node.rs && \
+    echo "fn main() {}" > src/bin/ztlp-demo.rs && \
+    echo "fn main() {}" > src/bin/ztlp-relay-demo.rs && \
+    echo "fn main() {}" > src/bin/ztlp-interop-test.rs && \
+    echo "fn main() {}" > src/bin/ztlp-bench.rs && \
+    echo "fn main() {}" > src/bin/ztlp-edge-cases.rs && \
+    echo "fn main() {}" > src/bin/ztlp-gateway-e2e.rs && \
+    echo "fn main() {}" > src/bin/ztlp-handshake-interop.rs && \
+    echo "fn main() {}" > src/bin/ztlp-ns-interop.rs && \
+    echo "fn main() {}" > src/bin/ztlp-pipeline-interop.rs && \
+    echo "fn main() {}" > src/bin/ztlp-rat-interop.rs && \
+    echo "" > src/lib.rs && \
+    cargo build --release 2>/dev/null || true && \
+    rm -rf src
+
+COPY proto/ .
+RUN find src -name '*.rs' -exec touch {} + && \
+    cargo build --release
+
+# ── Stage 2: Runtime ────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/ztlp /usr/local/bin/ztlp
+
+RUN useradd --system --create-home ztlp
+
+COPY fullstack/server-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER ztlp
+WORKDIR /home/ztlp
+
+EXPOSE 23095/udp
+
+ENTRYPOINT ["/entrypoint.sh"]

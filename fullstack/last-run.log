@@ -1,0 +1,92 @@
+═══════════════════════════════════════════════════════
+  ZTLP Client — Full-Stack Test
+═══════════════════════════════════════════════════════
+  Zone:        fullstack.ztlp
+  Client Name: client.fullstack.ztlp
+  Server Name: server.fullstack.ztlp
+  NS Server:   172.28.0.10:23096
+  Local Port:  2222
+  Benchmark:   true
+═══════════════════════════════════════════════════════
+
+→ Generating client identity...
+  ✓ Identity saved to /home/ztlp/.ztlp/client-identity.json
+
+→ Waiting for NS server at 172.28.0.10:23096...
+  ✓ NS server is responding
+
+→ Registering client identity with NS...
+[1mZTLP-NS Registration[0m
+  [36mName:[0m client.fullstack.ztlp
+  [36mZone:[0m fullstack.ztlp
+  [36mNodeID:[0m a2299f7c88277906698fbdc70877d9f6
+  [36mPublic Key:[0m 8adbce861bfda275
+  [36mNS Server:[0m 172.28.0.10:23096
+
+[2m→ Registering KEY record...[0m
+  [32m✓[0m KEY record registered
+
+[2m→ Verifying registration...[0m
+  [32m✓[0m Registration verified — record found in NS
+
+[32m✓ Registration complete![0m
+
+  [2mVerify:[0m ztlp ns lookup client.fullstack.ztlp --ns-server 172.28.0.10:23096
+  [2mConnect:[0m ztlp connect client.fullstack.ztlp --ns-server 172.28.0.10:23096
+
+→ Waiting for server 'server.fullstack.ztlp' to register with NS...
+    NS lookup output: [2mQuerying[0m server.fullstack.ztlp (type 1) at 172.28.0.10:23096
+
+[32m✓ Record found:[0m
+  [36mType:[0m ZTLP_[1mKEY[0m
+  [36mName:[0m [1mserver.fullstack.ztlp[0m
+  ✓ Server KEY found in NS (no SVC record — using Docker hostname)
+
+═══════════════════════════════════════════════════════
+  Connecting to server
+═══════════════════════════════════════════════════════
+
+  Target:     server:23095
+  Local port: 2222 → SSH
+
+→ Waiting for tunnel to establish...
+  ✓ Tunnel is active on localhost:2222
+
+═══════════════════════════════════════════════════════
+  Running Tests
+═══════════════════════════════════════════════════════
+
+→ Test 1: SSH echo through ZTLP tunnel...
+  ✓ SSH echo: PASS
+
+→ Test 2: Remote command through tunnel...
+  ✓ Remote hostname: 'backend' — confirms we're talking to the backend
+
+→ Test 3: Verify tunnel is encrypted (check server identity)...
+  ✓ Remote uname: Linux backend 5.15.0-1093-kvm #98-Ubuntu SMP Fri Feb 13 16:42:29 UTC 2026 x86_64 GNU/Linux
+
+═══════════════════════════════════════════════════════
+  SCP Benchmark (through ZTLP tunnel)
+═══════════════════════════════════════════════════════
+
+→ SCP upload 1MB through ZTLP tunnel...
+  ✓ 1MB: .31s upload (3.2 MB/s) — checksum verified ✓
+→ SCP upload 5MB through ZTLP tunnel...
+  ✓ 5MB: .36s upload (13.6 MB/s) — checksum verified ✓
+→ SCP upload 10MB through ZTLP tunnel...
+  ✓ 10MB: .37s upload (26.6 MB/s) — checksum verified ✓
+→ SCP upload 50MB through ZTLP tunnel...
+  ✓ 50MB: .61s upload (81.5 MB/s) — checksum verified ✓
+
+═══════════════════════════════════════════════════════
+  Benchmark Results: 4 passed, 0 failed
+═══════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════
+  Full-Stack Test Complete
+═══════════════════════════════════════════════════════
+
+  Tunnel still active on localhost:2222
+  To connect manually:
+    docker exec -it ztlp-client sshpass -e ssh -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1
+

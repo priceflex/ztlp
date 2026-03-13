@@ -35,6 +35,7 @@ use super::control::{self, AgentState};
 use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
 use super::proxy;
+use super::tunnel_pool::TunnelPool;
 use super::vip_pool::VipPool;
 
 /// GC interval for expired VIP allocations (60 seconds).
@@ -90,12 +91,17 @@ pub async fn run_daemon(
         upstream_dns: config.dns.upstream.clone(),
     }));
 
+    // Initialize tunnel pool
+    let tunnel_pool = Arc::new(Mutex::new(TunnelPool::new(config.tunnel.max_tunnels)));
+    info!("tunnel pool: max {} tunnels", config.tunnel.max_tunnels);
+
     // Shutdown channel
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
         dns_state: dns_state.clone(),
+        tunnel_pool: tunnel_pool.clone(),
         start_time,
         dns_listen: config.dns.listen.clone(),
         shutdown_tx: shutdown_tx.clone(),

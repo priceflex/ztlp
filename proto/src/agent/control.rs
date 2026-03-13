@@ -112,6 +112,7 @@ pub struct DnsCacheEntry {
 /// Agent state shared between the control socket and other components.
 pub struct AgentState {
     pub dns_state: Arc<Mutex<DnsResolverState>>,
+    pub tunnel_pool: Arc<Mutex<super::tunnel_pool::TunnelPool>>,
     pub start_time: Instant,
     pub dns_listen: String,
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
@@ -187,6 +188,7 @@ pub async fn run_control_socket(
 async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlResponse {
     match cmd.cmd.as_str() {
         "status" => cmd_status(state).await,
+        "tunnels" => cmd_tunnels(state).await,
         "dns_cache" => cmd_dns_cache(state).await,
         "flush_dns" => cmd_flush_dns(state).await,
         "shutdown" => cmd_shutdown(state).await,
@@ -209,6 +211,38 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
     drop(dns);
 
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
+}
+
+async fn cmd_tunnels(state: &AgentState) -> ControlResponse {
+    let pool = state.tunnel_pool.lock().await;
+    let tunnels: Vec<serde_json::Value> = pool
+        .tunnel_info()
+        .into_iter()
+        .map(|t| {
+            let state_str = match &t.state {
+                super::tunnel_pool::TunnelState::Connecting => "Connecting",
+                super::tunnel_pool::TunnelState::Active => "Active",
+                super::tunnel_pool::TunnelState::Reconnecting { .. } => "Reconnecting",
+                super::tunnel_pool::TunnelState::Closed => "Closed",
+            };
+            serde_json::json!({
+                "name": t.name,
+                "peer_addr": t.peer_addr.to_string(),
+                "state": state_str,
+                "age_secs": t.age_secs,
+                "idle_secs": t.idle_secs,
+                "bytes_sent": t.bytes_sent,
+                "bytes_recv": t.bytes_recv,
+            })
+        })
+        .collect();
+    drop(pool);
+
+    ControlResponse::ok(serde_json::json!({
+        "tunnels": tunnels,
+        "active": tunnels.iter().filter(|t| t.get("state").and_then(|v| v.as_str()) == Some("Active")).count(),
+        "total": tunnels.len(),
+    }))
 }
 
 async fn cmd_dns_cache(state: &AgentState) -> ControlResponse {

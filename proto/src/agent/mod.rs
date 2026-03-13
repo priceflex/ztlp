@@ -13,6 +13,8 @@
 //! - **dns** — DNS resolver for `*.ztlp` + custom zones
 //! - **control** — Unix socket control interface
 //! - **daemon** — Agent daemon main loop
+//! - **stream** — Stream multiplexing over ZTLP tunnels
+//! - **tunnel_pool** — Managed tunnel lifecycle with auto-reconnect
 
 pub mod config;
 pub mod control;
@@ -20,4 +22,6 @@ pub mod daemon;
 pub mod dns;
 pub mod domain_map;
 pub mod proxy;
+pub mod stream;
+pub mod tunnel_pool;
 pub mod vip_pool;

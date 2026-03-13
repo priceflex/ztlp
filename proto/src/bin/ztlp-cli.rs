@@ -460,6 +460,10 @@ enum AgentCommands {
     /// Flush the DNS cache
     #[command(after_help = "EXAMPLES:\n  ztlp agent flush-dns")]
     FlushDns,
+
+    /// Show active tunnels
+    #[command(after_help = "EXAMPLES:\n  ztlp agent tunnels")]
+    Tunnels,
 }
 
 #[derive(Subcommand)]
@@ -4544,6 +4548,79 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// `ztlp agent tunnels` — Show active tunnels.
+async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::control;
+
+    let socket_path = control::default_socket_path();
+    let cmd = control::ControlCommand {
+        cmd: "tunnels".to_string(),
+        name: None,
+    };
+
+    match control::send_command(&socket_path, &cmd).await {
+        Ok(resp) if resp.ok => {
+            if let Some(data) = resp.data {
+                if let Some(tunnels) = data.get("tunnels").and_then(|v| v.as_array()) {
+                    if tunnels.is_empty() {
+                        eprintln!("{}", c_dim("No active tunnels"));
+                    } else {
+                        eprintln!(
+                            "{:<35} {:<22} {:<12} {:<8} {:<8} {}",
+                            c_bold("NAME"),
+                            c_bold("PEER"),
+                            c_bold("STATE"),
+                            c_bold("TX"),
+                            c_bold("RX"),
+                            c_bold("AGE"),
+                        );
+                        for t in tunnels {
+                            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let peer = t.get("peer_addr").and_then(|v| v.as_str()).unwrap_or("-");
+                            let state = t.get("state").and_then(|v| v.as_str()).unwrap_or("-");
+                            let tx = t.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let rx = t.get("bytes_recv").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let age = t.get("age_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                            let state_colored = match state {
+                                "Active" => c_green(state),
+                                "Connecting" => c_yellow(state),
+                                "Reconnecting" => c_yellow(state),
+                                _ => c_red(state),
+                            };
+
+                            eprintln!(
+                                "{:<35} {:<22} {:<12} {:<8} {:<8} {}",
+                                name,
+                                peer,
+                                state_colored,
+                                format_bytes(tx as usize),
+                                format_bytes(rx as usize),
+                                format_duration(age),
+                            );
+                        }
+                        eprintln!();
+                        eprintln!("{} tunnels", tunnels.len());
+                    }
+                }
+            }
+            Ok(())
+        }
+        Ok(resp) => {
+            eprintln!(
+                "{} {}",
+                c_red("✗"),
+                resp.error.unwrap_or_else(|| "unknown error".to_string())
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("{} {}", c_red("✗"), e);
+            Ok(())
+        }
+    }
+}
+
 /// Format seconds into human-readable duration.
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
@@ -4732,6 +4809,7 @@ async fn main() {
             AgentCommands::Status => cmd_agent_status().await,
             AgentCommands::Dns => cmd_agent_dns().await,
             AgentCommands::FlushDns => cmd_agent_flush_dns().await,
+            AgentCommands::Tunnels => cmd_agent_tunnels().await,
         },
     };
 

@@ -22,6 +22,7 @@ pub mod daemon;
 pub mod dns;
 pub mod domain_map;
 pub mod proxy;
+pub mod renewal;
 pub mod stream;
 pub mod tunnel_pool;
 pub mod vip_pool;

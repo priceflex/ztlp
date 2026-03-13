@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.6.2 — 2026-03-13
+
+### Features
+- **NS-based identity resolution for policy engine** — `ztlp listen --ns-server` resolves peer X25519 pubkeys to registered NS names via type `0x05` reverse lookup, enabling human-readable policy rules like `allow = ["alice.tunnel.ztlp"]` instead of raw NodeID hex
+- **`HandshakeContext::remote_static_hex()`** — extract peer's X25519 public key from Noise_XX state for identity resolution
+
+### Bug Fixes
+- **Fixed NS query parser truncation flag** — NS amplification prevention inserts a `0x01` flag byte when response exceeds 8× request size; the Rust parser now detects and skips this byte, fixing all NS lookups that were silently returning `None`
+- **Fixed SSH through tunnel with post-quantum KEX** — `sntrup761x25519-sha512` payloads stall with small UDP buffers; demo now forces `curve25519-sha256`
+- **Fixed policy engine identity mismatch** — policy compared raw NodeID hex against NS name strings, always denying; now resolves via NS reverse lookup
+
+### Demo Improvements
+- `--ns-server` flag passed to listener for NS identity resolution in policy checks
+- Auto-grant/revoke `cap_net_raw` on tcpdump for packet capture (no manual sudo needed)
+- Cleanup trap removes capabilities on exit
+
+### Tests
+- 394 Rust lib tests, 0 failures
+- 541 relay + 373 NS + 204 gateway = 1,118 Elixir tests, 0 failures (CI)
+
 ## v0.6.1 — 2026-03-13
 
 ### ZTLP Agent (NEW)

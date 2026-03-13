@@ -36,6 +36,7 @@
 #![deny(unsafe_code)]
 
 pub mod admission;
+pub mod agent;
 pub mod batch;
 pub mod enrollment;
 pub mod error;

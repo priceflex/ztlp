@@ -388,6 +388,52 @@ enum Commands {
         #[arg(short, long)]
         persist: bool,
     },
+
+    /// SSH ProxyCommand — pipe stdin/stdout through a ZTLP tunnel
+    ///
+    /// Resolves a ZTLP name (or custom domain), establishes an encrypted
+    /// Noise_XX tunnel to the target peer, and bidirectionally pipes
+    /// stdin/stdout through it. Designed for use as SSH ProxyCommand.
+    ///
+    /// Supports both native ZTLP names (`*.ztlp`) and custom domain
+    /// mappings configured in `~/.ztlp/agent.toml`.
+    #[command(after_help = "EXAMPLES:\n  \
+            # Direct use:\n  \
+            ztlp proxy fileserver.corp.ztlp 22\n  \
+            ztlp proxy db.corp.ztlp 5432\n  \
+            ztlp proxy server.internal.techrockstars.com 22\n\n  \
+            # In ~/.ssh/config:\n  \
+            Host *.ztlp\n      \
+            ProxyCommand ztlp proxy %h %p\n\n  \
+            Host *.internal.techrockstars.com\n      \
+            ProxyCommand ztlp proxy %h %p")]
+    Proxy {
+        /// Target hostname (ZTLP name or custom domain)
+        hostname: String,
+
+        /// Target TCP port on the remote peer
+        port: u16,
+
+        /// Path to identity key file (default: ~/.ztlp/identity.json)
+        #[arg(short, long)]
+        key: Option<PathBuf>,
+
+        /// NS server address override (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+    },
+
+    /// Manage the ZTLP agent daemon
+    #[command(subcommand)]
+    Agent(AgentCommands),
+}
+
+/// Agent daemon management subcommands.
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Show agent status (tunnels, DNS cache, credentials)
+    #[command(after_help = "EXAMPLES:\n  ztlp agent status")]
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -4195,6 +4241,84 @@ fn format_bytes(bytes: usize) -> String {
     }
 }
 
+// ─── Proxy Command ──────────────────────────────────────────────────────────
+
+/// `ztlp proxy` — SSH ProxyCommand: pipe stdin/stdout through ZTLP tunnel.
+async fn cmd_proxy(
+    hostname: &str,
+    port: u16,
+    key: &Option<PathBuf>,
+    ns_server: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::proxy;
+
+    let key_str = key.as_ref().map(|p| p.to_string_lossy().to_string());
+    let ns_str = ns_server.as_ref().map(|s| s.as_str());
+
+    proxy::run_proxy(
+        hostname,
+        port,
+        key_str.as_deref(),
+        ns_str,
+    )
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+}
+
+/// `ztlp agent status` — Show agent daemon status.
+async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::config::AgentConfig;
+
+    let config = AgentConfig::load();
+
+    eprintln!("ZTLP Agent v{}", ZTLP_VERSION);
+    eprintln!("  {} not running", c_yellow("Status:"));
+    eprintln!();
+    eprintln!("{}", c_dim("Configuration (~/.ztlp/agent.toml):"));
+    eprintln!("  {} {}", c_cyan("Identity:"), config.identity.path);
+    eprintln!("  {} {}", c_cyan("DNS listen:"), config.dns.listen);
+    eprintln!("  {} {}", c_cyan("DNS enabled:"), config.dns.enabled);
+    eprintln!(
+        "  {} {}",
+        c_cyan("NS servers:"),
+        if config.ns.servers.is_empty() {
+            "127.0.0.1:23096 (default)".to_string()
+        } else {
+            config.ns.servers.join(", ")
+        }
+    );
+    eprintln!("  {} {}", c_cyan("VIP range:"), config.dns.vip_range);
+    eprintln!(
+        "  {} {}",
+        c_cyan("Max tunnels:"),
+        config.tunnel.max_tunnels
+    );
+
+    if !config.dns.domain_map.is_empty() {
+        eprintln!();
+        eprintln!("{}", c_dim("Domain mappings:"));
+        for (domain, zone) in &config.dns.domain_map {
+            eprintln!("  {} → {}", domain, zone);
+        }
+    }
+
+    if !config.dns.zones.is_empty() {
+        eprintln!();
+        eprintln!("{}", c_dim("Custom DNS zones:"));
+        for zone in &config.dns.zones {
+            eprintln!("  {}", zone);
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "{}",
+        c_dim("Hint: Agent daemon not yet implemented. Use `ztlp proxy` for SSH ProxyCommand mode.")
+    );
+
+    Ok(())
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -4352,6 +4476,19 @@ async fn main() {
         },
 
         Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),
+
+        Commands::Proxy {
+            hostname,
+            port,
+            key,
+            ns_server,
+        } => {
+            cmd_proxy(hostname, *port, key, ns_server).await
+        }
+
+        Commands::Agent(subcmd) => match subcmd {
+            AgentCommands::Status => cmd_agent_status().await,
+        },
     };
 
     match result {

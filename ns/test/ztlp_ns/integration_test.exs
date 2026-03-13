@@ -105,11 +105,15 @@ defmodule ZtlpNs.IntegrationTest do
       server_port = Server.port()
 
       # Open a client socket and send a query
+      # Pad the query to be large enough for the response (amplification prevention
+      # caps response size to request size for unauthenticated queries)
       {:ok, client} = :gen_udp.open(0, [:binary, {:active, false}])
       name = "udptest.ztlp"
       name_len = byte_size(name)
       # type 1 = KEY
-      query = <<0x01, name_len::16, name::binary, 1::8>>
+      base_query = <<0x01, name_len::16, name::binary, 1::8>>
+      padding = :binary.copy(<<0>>, 512)
+      query = base_query <> padding
       :gen_udp.send(client, {127, 0, 0, 1}, server_port, query)
 
       # Receive response

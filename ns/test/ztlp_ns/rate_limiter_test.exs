@@ -4,27 +4,24 @@ defmodule ZtlpNs.RateLimiterTest do
   alias ZtlpNs.RateLimiter
 
   setup do
-    # Start the RateLimiter GenServer for each test
-    case GenServer.whereis(RateLimiter) do
-      nil -> :ok
-      pid ->
-        GenServer.stop(pid)
-        Process.sleep(10)
-    end
-
     # Set default config
     Application.put_env(:ztlp_ns, :rate_limit_queries_per_second, 100)
     Application.put_env(:ztlp_ns, :rate_limit_burst, 200)
 
-    {:ok, _pid} = RateLimiter.start_link()
+    # Start the RateLimiter GenServer if not already running (may be
+    # started by the supervision tree in full-app test mode)
+    case GenServer.whereis(RateLimiter) do
+      nil ->
+        {:ok, _pid} = RateLimiter.start_link()
+
+      _pid ->
+        # Already running (e.g., from supervision tree) — just reset state
+        :ok
+    end
+
+    RateLimiter.reset()
 
     on_exit(fn ->
-      case GenServer.whereis(RateLimiter) do
-        nil -> :ok
-        p when is_pid(p) ->
-          if Process.alive?(p), do: GenServer.stop(p)
-        _ -> :ok
-      end
       Application.delete_env(:ztlp_ns, :rate_limit_queries_per_second)
       Application.delete_env(:ztlp_ns, :rate_limit_burst)
     end)

@@ -54,9 +54,12 @@ defmodule ZtlpNs.Application do
 
     children = [
       # Order matters: TrustAnchor first, then Store (Mnesia tables),
+      # then RateLimiter (ETS), then QuerySupervisor (worker pool),
       # then AntiEntropy (needs Store), then Server (UDP)
       ZtlpNs.TrustAnchor,
       ZtlpNs.Store,
+      ZtlpNs.RateLimiter,
+      {Task.Supervisor, name: ZtlpNs.QuerySupervisor, max_children: ZtlpNs.Config.worker_pool_size()},
       ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
       ZtlpNs.Server

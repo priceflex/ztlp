@@ -66,7 +66,7 @@ mix compile
 
 ```bash
 mix test
-# 105 tests, 0 failures
+# 371 tests, 0 failures
 ```
 
 ### Start the Server
@@ -151,6 +151,67 @@ Store.insert(signed_revoke)
 ZtlpNs.Bootstrap.set_hardcoded_relays([relay_record])
 {:ok, relays} = ZtlpNs.Bootstrap.discover()
 ```
+
+## Security
+
+ZTLP-NS v0.5.7+ includes comprehensive security hardening:
+
+### Rate Limiting
+Per-IP token bucket rate limiting via `ZtlpNs.RateLimiter`. Configured
+via `rate_limit_queries_per_second` (default: 100) and `rate_limit_burst`
+(default: 200). Rate-limited packets are silently dropped (no error
+response to prevent amplification).
+
+### Registration Authentication
+All registrations (0x09) require:
+- **Ed25519 signature** over the canonical registration form
+- **Public key** of the registrant (appended to wire format)
+- **Zone authorization** — pubkey must be a zone authority, delegated key,
+  or self-registrant (node updating its own KEY/SVC record)
+- **NodeID revocation check** — the NodeID in record data is checked against
+  the revocation table
+
+Legacy v1 registrations (without pubkey) are rejected.
+
+### Packet & Record Size Limits
+- Maximum UDP packet size: 8KB (configurable via `:max_packet_size`)
+- Maximum encoded record size: 4096 bytes (configurable via `:max_record_size`)
+- Oversized packets are silently dropped
+
+### Name Validation
+DNS-compatible name format enforced on registration:
+- Max 253 bytes total, max 63 bytes per label
+- Lowercase alphanumeric + hyphens + dots only
+- No leading/trailing hyphens per label
+
+### Amplification Prevention
+For unauthenticated queries (0x01, 0x05), response size is capped to
+request size. Truncated responses include a truncation flag (0x01 in
+second byte). Clients can pad queries to indicate willingness to receive
+larger responses.
+
+### Worker Pool
+Queries are dispatched to a bounded `Task.Supervisor` (default: 100
+concurrent workers) preventing sequential processing bottlenecks and
+providing crash isolation.
+
+### Pubkey Index
+A reverse index (pubkey → name) in Mnesia provides O(1) public key
+lookups instead of O(n) table scans.
+
+### Audit Logging
+All security-relevant events are logged via `ZtlpNs.StructuredLog`:
+registration accepted/rejected, rate limiting, auth failures, oversized
+packets.
+
+### Default TTLs
+Correct per-type TTLs: KEY=86400, SVC=86400, RELAY=3600, POLICY=3600,
+REVOKE=0 (never expires), BOOTSTRAP=86400.
+
+### Persisted Signing Key
+The NS registration signing key is loaded from file on startup (if
+configured via `:identity_key_file`). If no file exists, a new key is
+generated and saved. Keys survive server restarts.
 
 ## Implementation Details
 

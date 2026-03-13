@@ -13,6 +13,12 @@ defmodule ZtlpNs.Config do
   - `:bootstrap_urls` — List of HTTPS URLs for bootstrap discovery.
   - `:storage_mode` — Mnesia storage mode (`:disc_copies` or `:ram_copies`).
   - `:mnesia_dir` — Directory for Mnesia data files.
+  - `:identity_key_file` — Path for persisted NS signing key.
+  - `:verify_trust_chain` — Enable full trust chain verification for lookups.
+  - `:max_packet_size` — Maximum UDP packet size (default: 8192).
+  - `:max_record_size` — Maximum encoded record size (default: 4096).
+  - `:worker_pool_size` — Max concurrent query workers (default: 100).
+  - `:name_suffix` — Required zone suffix for names (default: nil / no check).
   """
 
   @doc "UDP port for the namespace query server."
@@ -117,5 +123,44 @@ defmodule ZtlpNs.Config do
         |> Enum.map(&String.trim/1)
         |> Enum.map(&String.to_atom/1)
     end
+  end
+
+  @doc "Path for the NS identity signing key file."
+  @spec identity_key_file() :: String.t() | nil
+  def identity_key_file do
+    case System.get_env("ZTLP_NS_IDENTITY_KEY_FILE") do
+      nil -> Application.get_env(:ztlp_ns, :identity_key_file)
+      path -> path
+    end
+  end
+
+  @doc "Whether to verify full trust chains on lookup (default: false)."
+  @spec verify_trust_chain?() :: boolean()
+  def verify_trust_chain? do
+    Application.get_env(:ztlp_ns, :verify_trust_chain, false)
+  end
+
+  @doc "Maximum UDP packet size in bytes (default: 8192)."
+  @spec max_packet_size() :: non_neg_integer()
+  def max_packet_size do
+    Application.get_env(:ztlp_ns, :max_packet_size, 8192)
+  end
+
+  @doc "Maximum encoded record size in bytes (default: 4096)."
+  @spec max_record_size() :: non_neg_integer()
+  def max_record_size do
+    Application.get_env(:ztlp_ns, :max_record_size, 4096)
+  end
+
+  @doc "Maximum concurrent query workers (default: 100)."
+  @spec worker_pool_size() :: non_neg_integer()
+  def worker_pool_size do
+    Application.get_env(:ztlp_ns, :worker_pool_size, 100)
+  end
+
+  @doc "Required zone suffix for names (nil = no suffix check)."
+  @spec name_suffix() :: String.t() | nil
+  def name_suffix do
+    Application.get_env(:ztlp_ns, :name_suffix)
   end
 end

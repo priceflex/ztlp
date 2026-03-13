@@ -1,9 +1,21 @@
 defmodule ZtlpNs.Server do
   @moduledoc """
-  UDP query server for ZTLP-NS.
+  UDP query server for ZTLP-NS with security hardening.
 
   Listens on a UDP port and responds to namespace queries. This is the
   network-facing interface to the record store.
+
+  ## Security Features
+
+  - **Rate limiting** — Per-IP token bucket via `ZtlpNs.RateLimiter`
+  - **Packet size limits** — Max 8KB UDP packets, silent drop for oversized
+  - **Registration authentication** — Ed25519 signature verification + zone auth
+  - **Name validation** — DNS-compatible name format enforcement
+  - **Amplification prevention** — Response size capped to request size for
+    unauthenticated queries
+  - **Worker pool** — `Task.Supervisor` with bounded concurrency
+  - **Audit logging** — Structured logs for all security-relevant events
+  - **Revocation checks** — NodeID checked against revocation table on registration
 
   ## Wire Protocol
 
@@ -18,8 +30,6 @@ defmodule ZtlpNs.Server do
   ```
   <<0x02, record_wire_format::binary>>
   ```
-  The record wire format includes the canonical serialization plus
-  signature and public key (see `Record.encode/1`).
 
   ### Response: Not Found (server → client)
   ```
@@ -36,21 +46,19 @@ defmodule ZtlpNs.Server do
   <<0xFF>>
   ```
 
+  ### Registration (client → server) — v2 with pubkey
+  ```
+  <<0x09, name_len::16, name::binary, type_byte::8, data_len::16, data::binary,
+    sig_len::16, sig::binary, pubkey_len::16, pubkey::binary>>
+  ```
+
   ## Type Bytes
   - 1 = KEY, 2 = SVC, 3 = RELAY, 4 = POLICY, 5 = REVOKE, 6 = BOOTSTRAP, 7 = OPERATOR
-
-  ### Query by Public Key (client → server)
-  ```
-  <<0x05, pubkey_hex_len::16, pubkey_hex::binary-size(pubkey_hex_len)>>
-  ```
-  Scans the store for any `:key` record whose `data.public_key` matches
-  the given hex string. Returns `0x02` (found), `0x03` (not found), or
-  `0x04` (revoked). This is an O(n) scan, acceptable for the prototype.
   """
 
   use GenServer
 
-  alias ZtlpNs.{Enrollment, Query, Record, Store}
+  alias ZtlpNs.{Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -69,12 +77,13 @@ defmodule ZtlpNs.Server do
 
   @impl true
   def init(:ok) do
+    # Persist or load the registration signing key on startup
+    ensure_registration_key()
+
     # Read port at runtime (not compile time) so config changes take effect
     listen_port = ZtlpNs.Config.port()
 
     # Open UDP socket in binary mode with active message delivery.
-    # Active mode means incoming packets arrive as messages to this
-    # GenServer's mailbox — no manual recv() loop needed.
     {:ok, socket} = :gen_udp.open(listen_port, [:binary, {:active, true}])
 
     # Get the actual port (important when configured port is 0)
@@ -90,20 +99,48 @@ defmodule ZtlpNs.Server do
 
   @impl true
   def handle_info({:udp, _socket, ip, port, data}, state) do
-    # Process the query and send the response back to the sender.
-    # We don't spawn a separate process for each query — the GenServer
-    # handles them sequentially. For a production server, you'd want
-    # a worker pool, but for the prototype this is fine.
-    reply = process_query(data)
-    :gen_udp.send(state.socket, ip, port, reply)
+    max_packet = ZtlpNs.Config.max_packet_size()
+
+    cond do
+      # Packet size limit — silent drop for oversized packets
+      byte_size(data) > max_packet ->
+        StructuredLog.warn(:oversized_packet,
+          source_ip: format_ip(ip),
+          packet_size: byte_size(data),
+          max_size: max_packet
+        )
+
+      true ->
+        # Rate limit check
+        case ZtlpNs.RateLimiter.check(ip) do
+          :ok ->
+            # Dispatch to worker pool for concurrent processing
+            socket = state.socket
+            request_size = byte_size(data)
+
+            Task.Supervisor.start_child(ZtlpNs.QuerySupervisor, fn ->
+              reply = process_query(data)
+              # Amplification prevention: for unauthenticated queries (0x01, 0x05),
+              # cap response size to request size
+              reply = maybe_truncate_reply(data, reply, request_size)
+              :gen_udp.send(socket, ip, port, reply)
+            end)
+
+          :rate_limited ->
+            # Silent drop — don't send error response (would aid enumeration)
+            StructuredLog.debug(:rate_limited, source_ip: format_ip(ip))
+        end
+    end
+
     {:noreply, state}
   end
 
   # ── Query Processing ───────────────────────────────────────────────
 
-  # Parse a query packet, look up the record, and build the response.
-  defp process_query(<<0x01, name_len::16, name::binary-size(name_len), type_byte::8>>) do
-    # Convert wire type byte to atom
+  # Standard query (0x01) — look up a record by name and type
+  # Trailing bytes after the query are ignored (allows client padding for
+  # amplification prevention compliance).
+  defp process_query(<<0x01, name_len::16, name::binary-size(name_len), type_byte::8, _rest::binary>>) do
     type =
       try do
         Record.byte_to_type(type_byte)
@@ -116,7 +153,6 @@ defmodule ZtlpNs.Server do
     else
       case Query.lookup(name, type) do
         {:ok, record} ->
-          # Encode the full record (including signature) for the wire
           record_bin = Record.encode(record)
           <<0x02, record_bin::binary>>
 
@@ -132,48 +168,43 @@ defmodule ZtlpNs.Server do
     end
   end
 
-  # Query by public key (0x05) — scans the store for a :key record
-  # whose data.public_key matches the given hex string.
-  defp process_query(<<0x05, pk_hex_len::16, pk_hex::binary-size(pk_hex_len)>>) do
+  # Query by public key (0x05) — uses pubkey index for O(1) lookup
+  # Trailing bytes after the query are ignored (client padding).
+  defp process_query(<<0x05, pk_hex_len::16, pk_hex::binary-size(pk_hex_len), _rest::binary>>) do
     pk_hex_lower = String.downcase(pk_hex)
 
-    # O(n) scan of all records — fine for the prototype
-    result =
-      ZtlpNs.Store.list()
-      |> Enum.find(fn {_name, type, record} ->
-        type == :key and
-          (Map.get(record.data, :public_key) == pk_hex_lower or
-             Map.get(record.data, "public_key") == pk_hex_lower)
-      end)
-
-    case result do
-      {name, _type, record} ->
-        # Check revocation status
-        if ZtlpNs.Store.revoked?(name) do
-          name_bin = name
-          name_len = byte_size(name_bin)
-          <<0x04, name_len::16, name_bin::binary>>
+    # Use the pubkey index for O(1) lookup instead of O(n) scan
+    case Store.lookup_by_pubkey(pk_hex_lower) do
+      {:ok, record} ->
+        if Record.verify(record) do
+          record_bin = Record.encode(record)
+          <<0x02, record_bin::binary>>
         else
-          # Verify signature before returning
-          if Record.verify(record) do
-            record_bin = Record.encode(record)
-            <<0x02, record_bin::binary>>
-          else
-            # Record exists but has invalid signature — treat as not found
-            <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
-          end
+          <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
         end
 
-      nil ->
-        # Not found — return 0x03 with the pubkey hex as the "name"
-        <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
+      :not_found ->
+        # Fallback: scan the store (handles records inserted before index existed)
+        fallback_pubkey_scan(pk_hex_lower, pk_hex_len, pk_hex)
+
+      {:error, :revoked} ->
+        # Look up the name from the index to include in response
+        case :mnesia.dirty_read(:ztlp_ns_pubkey_index, pk_hex_lower) do
+          [{_, _, name}] ->
+            name_len = byte_size(name)
+            <<0x04, name_len::16, name::binary>>
+
+          [] ->
+            <<0x04, pk_hex_len::16, pk_hex::binary>>
+        end
     end
   end
 
-  # Registration (0x09) — insert/update a record in the store
+  # Registration v2 (0x09) with pubkey — verify signature + zone auth
   defp process_query(
          <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
-           data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
+           data_bin::binary-size(data_len), sig_len::16, sig::binary-size(sig_len),
+           pubkey_len::16, pubkey::binary-size(pubkey_len)>>
        ) do
     type =
       try do
@@ -183,46 +214,23 @@ defmodule ZtlpNs.Server do
       end
 
     if type == :unknown do
+      StructuredLog.warn(:registration_rejected,
+        name: name, reason: :unknown_type)
       <<0xFF>>
     else
-      data =
-        case ZtlpNs.Cbor.decode(data_bin) do
-          {:ok, data} -> data
-          {:error, _} -> nil
-        end
-
-      if is_nil(data) do
-        <<0xFF>>
-      else
-        record = %Record{
-          name: name,
-          type: type,
-          data: data,
-          created_at: System.system_time(:second),
-          ttl: 3600,
-          serial: System.system_time(:second),
-          signature: nil,
-          signer_public_key: nil
-        }
-
-        priv = get_registration_key()
-        signed = Record.sign(record, priv)
-
-        case Store.insert(signed) do
-          :ok ->
-            <<0x06>>
-
-          {:error, _} ->
-            bumped = %{signed | serial: signed.serial + 1}
-            bumped2 = Record.sign(bumped, priv)
-
-            case Store.insert(bumped2) do
-              :ok -> <<0x06>>
-              {:error, _} -> <<0xFF>>
-            end
-        end
-      end
+      handle_authenticated_registration(name, type, type_byte, data_bin, data_len, sig, pubkey)
     end
+  end
+
+  # Registration v1 (0x09) without pubkey — legacy format, now rejected
+  defp process_query(
+         <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
+           _data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
+       ) do
+    StructuredLog.warn(:registration_rejected,
+      name: name, reason: :missing_pubkey)
+    # Reject v1 registrations — pubkey is required
+    <<0xFF>>
   end
 
   # Enrollment (0x07) — device enrollment with token
@@ -233,10 +241,195 @@ defmodule ZtlpNs.Server do
   # Malformed query → invalid response
   defp process_query(_), do: <<0xFF>>
 
+  # ── Authenticated Registration ─────────────────────────────────────
+
+  defp handle_authenticated_registration(name, type, _type_byte, data_bin, _data_len, sig, pubkey) do
+    # 1. Validate name format
+    suffix = ZtlpNs.Config.name_suffix()
+
+    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+         # 2. Decode CBOR data
+         {:ok, data} <- decode_data(data_bin),
+         # 3. Verify Ed25519 signature over canonical form
+         canonical <- RegistrationAuth.build_canonical(name, type, data_bin),
+         :ok <- RegistrationAuth.verify_signature(canonical, sig, pubkey),
+         # 4. Check zone authorization
+         :ok <- RegistrationAuth.authorize(pubkey, name, type, data),
+         # 5. Check NodeID revocation
+         :ok <- RegistrationAuth.check_revocation(data) do
+      # Build the record and sign with the NS registration key.
+      # The registrant's identity was verified above (Ed25519 sig + zone auth).
+      # The stored record needs a signature that matches Record.serialize()
+      # for the Store's invariant (Record.verify must pass).
+      # We store the registrant's pubkey as metadata in the data map.
+      server_priv = get_registration_key()
+
+      record = %Record{
+        name: name,
+        type: type,
+        data: Map.put(data, "registered_by", Base.encode16(pubkey, case: :lower)),
+        created_at: System.system_time(:second),
+        ttl: default_ttl(type),
+        serial: System.system_time(:second),
+        signature: nil,
+        signer_public_key: nil
+      }
+
+      signed_record = Record.sign(record, server_priv)
+
+      case Store.insert(signed_record) do
+        :ok ->
+          StructuredLog.info(:registration_accepted,
+            name: name,
+            type: type,
+            signer: Base.encode16(pubkey, case: :lower)
+          )
+
+          <<0x06>>
+
+        {:error, :stale_serial} ->
+          # Bump serial and retry
+          bumped = %{record | serial: record.serial + 1}
+          bumped_signed = Record.sign(bumped, server_priv)
+
+          case Store.insert(bumped_signed) do
+            :ok ->
+              StructuredLog.info(:registration_accepted,
+                name: name, type: type,
+                signer: Base.encode16(pubkey, case: :lower)
+              )
+              <<0x06>>
+
+            {:error, reason} ->
+              StructuredLog.warn(:registration_rejected,
+                name: name, reason: reason)
+              <<0xFF>>
+          end
+
+        {:error, reason} ->
+          StructuredLog.warn(:registration_rejected,
+            name: name, reason: reason)
+          <<0xFF>>
+      end
+    else
+      {:error, reason} ->
+        StructuredLog.warn(:registration_rejected,
+          name: name, reason: reason)
+        <<0xFF>>
+    end
+  end
+
+  # ── Amplification Prevention ───────────────────────────────────────
+
+  # For unauthenticated queries (0x01 lookup, 0x05 pubkey lookup),
+  # cap response size to request size per ZTLP spec §18.2.
+  # Registration responses (0x06, 0xFF) are tiny, no truncation needed.
+  defp maybe_truncate_reply(<<0x01, _::binary>>, reply, request_size) do
+    truncate_if_needed(reply, request_size)
+  end
+
+  defp maybe_truncate_reply(<<0x05, _::binary>>, reply, request_size) do
+    truncate_if_needed(reply, request_size)
+  end
+
+  defp maybe_truncate_reply(_request, reply, _request_size), do: reply
+
+  defp truncate_if_needed(<<0x02, _rest::binary>> = reply, request_size)
+       when byte_size(reply) > request_size do
+    # Only truncate "found" (0x02) responses — not-found/revoked/error are already small.
+    # Response format: <<0x02, 0x01, truncated_data::binary>>
+    # 0x01 in second byte = truncated flag (client should retry over TCP)
+    available = max(request_size - 2, 0)
+    truncated_data = binary_part(reply, 0, min(available, byte_size(reply)))
+    <<0x02, 0x01, truncated_data::binary>>
+  end
+
+  defp truncate_if_needed(reply, _request_size), do: reply
+
+  # ── Helpers ────────────────────────────────────────────────────────
+
+  # Fallback pubkey scan for records not yet in the index
+  defp fallback_pubkey_scan(pk_hex_lower, pk_hex_len, pk_hex) do
+    result =
+      Store.list()
+      |> Enum.find(fn {_name, type, record} ->
+        type == :key and
+          (Map.get(record.data, :public_key) == pk_hex_lower or
+             Map.get(record.data, "public_key") == pk_hex_lower)
+      end)
+
+    case result do
+      {name, _type, record} ->
+        if Store.revoked?(name) do
+          name_len = byte_size(name)
+          <<0x04, name_len::16, name::binary>>
+        else
+          if Record.verify(record) do
+            record_bin = Record.encode(record)
+            <<0x02, record_bin::binary>>
+          else
+            <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
+          end
+        end
+
+      nil ->
+        <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
+    end
+  end
+
+  defp decode_data(data_bin) do
+    case ZtlpNs.Cbor.decode(data_bin) do
+      {:ok, data} -> {:ok, data}
+      {:error, _} -> {:error, :invalid_data}
+    end
+  end
+
+  # Correct default TTLs per record type (ZTLP spec)
+  defp default_ttl(:key), do: 86_400       # 24 hours
+  defp default_ttl(:svc), do: 86_400       # 24 hours
+  defp default_ttl(:relay), do: 3_600      # 1 hour
+  defp default_ttl(:policy), do: 3_600     # 1 hour
+  defp default_ttl(:revoke), do: 0         # Never expires
+  defp default_ttl(:bootstrap), do: 86_400 # 24 hours
+  defp default_ttl(_), do: 3_600           # Default fallback
+
+  # Persist registration signing key on startup.
+  # Loads from file if configured, generates and saves if not found.
+  defp ensure_registration_key do
+    case Application.get_env(:ztlp_ns, :registration_private_key) do
+      nil ->
+        case ZtlpNs.Config.identity_key_file() do
+          nil ->
+            # No file configured — generate ephemeral key
+            {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
+            Application.put_env(:ztlp_ns, :registration_private_key, priv)
+
+          path ->
+            case ZtlpNs.ComponentAuth.load_identity_from_file(path) do
+              {:ok, {_pub, priv}} ->
+                Application.put_env(:ztlp_ns, :registration_private_key, priv)
+
+              {:error, :not_found} ->
+                # Generate and persist
+                keypair = {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
+                ZtlpNs.ComponentAuth.save_identity_to_file(path, keypair)
+                Application.put_env(:ztlp_ns, :registration_private_key, priv)
+
+              {:error, _reason} ->
+                {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
+                Application.put_env(:ztlp_ns, :registration_private_key, priv)
+            end
+        end
+
+      _priv ->
+        :ok
+    end
+  end
+
   defp get_registration_key do
     case Application.get_env(:ztlp_ns, :registration_private_key) do
       nil ->
-        {_pub, priv} = ZtlpNs.Crypto.generate_keypair()
+        {_pub, priv} = Crypto.generate_keypair()
         Application.put_env(:ztlp_ns, :registration_private_key, priv)
         priv
 
@@ -244,4 +437,7 @@ defmodule ZtlpNs.Server do
         priv
     end
   end
+
+  defp format_ip(ip) when is_tuple(ip), do: :inet.ntoa(ip) |> to_string()
+  defp format_ip(ip), do: inspect(ip)
 end

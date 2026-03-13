@@ -142,12 +142,12 @@ defmodule ZtlpNs.RateLimiter do
 
   @doc false
   def queries_per_second do
-    Application.get_env(:ztlp_ns, :rate_limit_queries_per_second, 100)
+    ZtlpNs.Config.rate_limit_queries_per_second()
   end
 
   @doc false
   def burst_size do
-    Application.get_env(:ztlp_ns, :rate_limit_burst, 200)
+    ZtlpNs.Config.rate_limit_burst()
   end
 
   # ── GenServer ─────────────────────────────────────────────────────────

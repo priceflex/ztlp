@@ -923,8 +923,8 @@ async fn resolve_target(
     // Query KEY record (type 1) for NodeID (identity verification)
     let mut resolved_node_id: Option<NodeId> = None;
     if let Ok(Some(raw)) = ns_query_raw(name_part, &ns_server, 1).await {
-        // Extract node_id from ETF-encoded KEY record data
-        if let Some(nid_hex) = etf_extract_string(&raw.data_bytes, "node_id") {
+        // Extract node_id from CBOR-encoded KEY record data
+        if let Some(nid_hex) = cbor_extract_string(&raw.data_bytes, "node_id") {
             if nid_hex.len() == 32 {
                 // NodeID is 128-bit = 16 bytes = 32 hex chars
                 if let Ok(bytes) = hex::decode(&nid_hex) {
@@ -987,118 +987,90 @@ async fn resolve_target(
     Ok((final_addr, resolved_node_id))
 }
 
-/// Extract a string value for a given atom key from ETF-encoded map data.
+/// Extract a string value for a given text key from a CBOR-encoded map.
 ///
-/// Supports the subset of Erlang External Term Format used by ZTLP-NS:
-/// - MAP_EXT (tag 116) with SMALL_ATOM_UTF8_EXT (tag 119) keys and BINARY_EXT (tag 109) values
-/// - Version byte (131) prefix
+/// Supports the subset of RFC 8949 CBOR used by ZTLP-NS:
+/// - Maps (major type 5) with text string keys/values (major type 3)
 ///
 /// Returns None if the key is not found or the format doesn't match.
-fn etf_extract_string(data: &[u8], target_key: &str) -> Option<String> {
+fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
     if data.is_empty() {
         return None;
     }
 
     let mut pos = 0;
 
-    // Skip version byte (131) if present
-    if data[pos] == 131 {
-        pos += 1;
-    }
-
-    // Expect MAP_EXT (116)
-    if pos >= data.len() || data[pos] != 116 {
-        return None;
-    }
+    // Parse initial byte
+    let initial = data[pos];
+    let major = initial >> 5;
+    let additional = initial & 0x1F;
     pos += 1;
 
-    // Map arity (4 bytes big-endian)
-    if pos + 4 > data.len() {
+    // Must be a map (major type 5)
+    if major != 5 {
         return None;
     }
-    let arity =
-        u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-    pos += 4;
+
+    let (arity, new_pos) = cbor_read_uint(additional, data, pos)?;
+    pos = new_pos;
 
     for _ in 0..arity {
-        // Parse key — expect SMALL_ATOM_UTF8_EXT (119)
-        if pos >= data.len() {
-            return None;
-        }
-        let key_name = if data[pos] == 119 {
-            // SMALL_ATOM_UTF8_EXT: <<119, len::8, name>>
-            pos += 1;
-            if pos >= data.len() {
-                return None;
-            }
-            let klen = data[pos] as usize;
-            pos += 1;
-            if pos + klen > data.len() {
-                return None;
-            }
-            let kname = std::str::from_utf8(&data[pos..pos + klen]).ok();
-            pos += klen;
-            kname
-        } else if data[pos] == 100 {
-            // ATOM_EXT: <<100, len::16, name>> (older format)
-            pos += 1;
-            if pos + 2 > data.len() {
-                return None;
-            }
-            let klen = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            if pos + klen > data.len() {
-                return None;
-            }
-            let kname = std::str::from_utf8(&data[pos..pos + klen]).ok();
-            pos += klen;
-            kname
-        } else {
-            // Unknown key type — can't parse further
-            return None;
-        };
+        // Parse key
+        let (key_str, new_pos) = cbor_read_text(data, pos)?;
+        pos = new_pos;
 
-        // Parse value — expect BINARY_EXT (109)
-        if pos >= data.len() {
-            return None;
-        }
-        if data[pos] == 109 {
-            // BINARY_EXT: <<109, len::32, bytes>>
-            pos += 1;
-            if pos + 4 > data.len() {
-                return None;
-            }
-            let vlen = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                as usize;
-            pos += 4;
-            if pos + vlen > data.len() {
-                return None;
-            }
-            let value = std::str::from_utf8(&data[pos..pos + vlen])
-                .ok()
-                .map(|s| s.to_string());
-            pos += vlen;
+        // Parse value
+        let (val_str, new_pos) = cbor_read_text(data, pos)?;
+        pos = new_pos;
 
-            // Check if this is the key we're looking for
-            if key_name == Some(target_key) {
-                return value;
-            }
-        } else {
-            // Unknown value type — skip remaining (can't determine size)
-            return None;
+        if key_str == target_key {
+            return Some(val_str);
         }
     }
 
     None
 }
 
-/// Query result from NS containing the raw ETF data field.
+/// Read a CBOR unsigned integer argument from the additional info byte.
+fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize, usize)> {
+    if additional < 24 {
+        Some((additional as usize, pos))
+    } else if additional == 24 {
+        if pos >= data.len() { return None; }
+        Some((data[pos] as usize, pos + 1))
+    } else if additional == 25 {
+        if pos + 2 > data.len() { return None; }
+        let n = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        Some((n, pos + 2))
+    } else if additional == 26 {
+        if pos + 4 > data.len() { return None; }
+        let n = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        Some((n, pos + 4))
+    } else {
+        None
+    }
+}
+
+/// Read a CBOR text string (major type 3) from data at the given position.
+fn cbor_read_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
+    if pos >= data.len() { return None; }
+    let initial = data[pos];
+    let major = initial >> 5;
+    let additional = initial & 0x1F;
+    if major != 3 { return None; } // Must be text string
+    let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
+    if new_pos + len > data.len() { return None; }
+    let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
+    Some((s.to_string(), new_pos + len))
+}
+
+/// Query result from NS containing the raw CBOR data field.
 struct NsQueryResult {
-    /// Raw ETF-encoded data bytes from the record
+    /// Raw CBOR-encoded data bytes from the record
     data_bytes: Vec<u8>,
 }
 
-/// Perform an NS query for a given record type. Returns the raw ETF data field if found.
+/// Perform an NS query for a given record type. Returns the raw CBOR data field if found.
 async fn ns_query_raw(
     name: &str,
     ns_server: &str,
@@ -1155,7 +1127,7 @@ async fn ns_query_raw(
     }
 }
 
-/// High-level NS query: extract a specific string field from a record's ETF data.
+/// High-level NS query: extract a specific string field from a record's CBOR data.
 async fn ns_query(
     name: &str,
     ns_server: &str,
@@ -1168,9 +1140,9 @@ async fn ns_query(
             // For KEY records, extract "node_id" or "public_key"
             // Try the most useful field based on record type
             let value = match record_type {
-                2 => etf_extract_string(&r.data_bytes, "address"), // SVC → address
-                1 => etf_extract_string(&r.data_bytes, "node_id"), // KEY → node_id
-                3 => etf_extract_string(&r.data_bytes, "endpoints"), // RELAY → endpoints
+                2 => cbor_extract_string(&r.data_bytes, "address"), // SVC → address
+                1 => cbor_extract_string(&r.data_bytes, "node_id"), // KEY → node_id
+                3 => cbor_extract_string(&r.data_bytes, "endpoints"), // RELAY → endpoints
                 _ => {
                     // Fallback: try plain UTF-8
                     std::str::from_utf8(&r.data_bytes)
@@ -2097,44 +2069,53 @@ async fn cmd_ns_pubkey(hex_key: &str, ns_server: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// Encode a string as an Erlang External Term Format (ETF) binary.
-/// Format: <<109, len::32, bytes>> (BINARY_EXT)
-fn etf_binary(s: &str) -> Vec<u8> {
+/// Encode a CBOR text string (major type 3).
+fn cbor_text(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
-    let mut buf = Vec::with_capacity(5 + bytes.len());
-    buf.push(109); // BINARY_EXT
-    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    let mut buf = cbor_head(3, bytes.len() as u64);
     buf.extend_from_slice(bytes);
     buf
 }
 
-/// Encode an atom as ETF SMALL_ATOM_UTF8_EXT.
-/// Format: <<119, len::8, name>> (for atoms with name length < 256)
-fn etf_atom(name: &str) -> Vec<u8> {
-    let bytes = name.as_bytes();
-    let mut buf = Vec::with_capacity(2 + bytes.len());
-    buf.push(119); // SMALL_ATOM_UTF8_EXT
-    buf.push(bytes.len() as u8);
-    buf.extend_from_slice(bytes);
-    buf
+/// Encode a CBOR unsigned integer head (any major type).
+fn cbor_head(major: u8, n: u64) -> Vec<u8> {
+    let mt = major << 5;
+    if n < 24 {
+        vec![mt | (n as u8)]
+    } else if n < 0x100 {
+        vec![mt | 24, n as u8]
+    } else if n < 0x10000 {
+        let mut buf = vec![mt | 25];
+        buf.extend_from_slice(&(n as u16).to_be_bytes());
+        buf
+    } else if n < 0x100000000 {
+        let mut buf = vec![mt | 26];
+        buf.extend_from_slice(&(n as u32).to_be_bytes());
+        buf
+    } else {
+        let mut buf = vec![mt | 27];
+        buf.extend_from_slice(&n.to_be_bytes());
+        buf
+    }
 }
 
-/// Encode a map with string keys (as atoms) and string values (as binaries)
-/// in Erlang External Term Format, matching `:erlang.term_to_binary(map, [:deterministic])`.
-///
-/// Deterministic encoding requires keys sorted by Erlang term ordering.
-/// For atoms, this is alphabetical comparison of their names.
-fn etf_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
-    // Sort by key name (Erlang term ordering for atoms = alphabetical)
-    pairs.sort_by_key(|&(k, _)| k);
+/// Encode a map with string keys and string values in deterministic CBOR
+/// (RFC 8949 §4.2.1 — keys sorted by encoded byte representation,
+/// length-first).
+fn cbor_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
+    // Encode each key first, then sort by (encoded_len, encoded_bytes)
+    let mut encoded_pairs: Vec<(Vec<u8>, Vec<u8>)> = pairs
+        .iter()
+        .map(|&(k, v)| (cbor_text(k), cbor_text(v)))
+        .collect();
+    encoded_pairs.sort_by(|a, b| {
+        a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0))
+    });
 
-    let mut buf = Vec::new();
-    buf.push(131); // VERSION_MAGIC
-    buf.push(116); // MAP_EXT
-    buf.extend_from_slice(&(pairs.len() as u32).to_be_bytes());
-    for &(key, val) in pairs.iter() {
-        buf.extend_from_slice(&etf_atom(key));
-        buf.extend_from_slice(&etf_binary(val));
+    let mut buf = cbor_head(5, encoded_pairs.len() as u64);
+    for (k, v) in &encoded_pairs {
+        buf.extend_from_slice(k);
+        buf.extend_from_slice(v);
     }
     buf
 }
@@ -2143,11 +2124,11 @@ fn etf_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
 ///
 /// Wire format (server expects):
 /// ```
-/// <<0x02, name_len::16, name, type_byte::8, data_len::16, data_bin, sig_len::16, sig>>
+/// <<0x09, name_len::16, name, type_byte::8, data_len::16, data_cbor, sig_len::16, sig>>
 /// ```
 ///
 /// The server ignores the client signature and re-signs with its own key,
-/// so we send a dummy 0-byte signature.
+/// so we send a dummy 0-byte signature. Data is CBOR-encoded per RFC 8949.
 fn build_registration_packet(name: &str, type_byte: u8, data_bin: &[u8]) -> Vec<u8> {
     let name_bytes = name.as_bytes();
     let name_len = name_bytes.len() as u16;
@@ -2155,7 +2136,7 @@ fn build_registration_packet(name: &str, type_byte: u8, data_bin: &[u8]) -> Vec<
     let sig_len: u16 = 0; // Dummy signature — server re-signs
 
     let mut pkt = Vec::with_capacity(1 + 2 + name_bytes.len() + 1 + 2 + data_bin.len() + 2);
-    pkt.push(0x02); // Registration opcode
+    pkt.push(0x09); // Registration opcode (was 0x02 pre-v0.5.1)
     pkt.extend_from_slice(&name_len.to_be_bytes());
     pkt.extend_from_slice(name_bytes);
     pkt.push(type_byte);
@@ -2206,7 +2187,7 @@ async fn cmd_ns_register(
     // ── Step 1: Register KEY record ─────────────────────────────────
     eprintln!("{}", c_dim("→ Registering KEY record..."));
 
-    let key_data_bin = etf_map(&mut vec![
+    let key_data_bin = cbor_map(&mut vec![
         ("algorithm", "Ed25519"),
         ("node_id", &node_id_hex),
         ("public_key", &pubkey_hex),
@@ -2258,7 +2239,7 @@ async fn cmd_ns_register(
 
         eprintln!("{}", c_dim("→ Registering SVC record..."));
 
-        let svc_data_bin = etf_map(&mut vec![
+        let svc_data_bin = cbor_map(&mut vec![
             ("address", addr_str),
             ("node_id", &node_id_hex),
             ("zone", zone),

@@ -66,6 +66,24 @@ defmodule ZtlpNs.Config do
     end
   end
 
+  @doc "Per-IP query rate limit (queries per second)."
+  @spec rate_limit_queries_per_second() :: non_neg_integer()
+  def rate_limit_queries_per_second do
+    case System.get_env("ZTLP_NS_RATE_LIMIT_PER_SEC") do
+      nil -> Application.get_env(:ztlp_ns, :rate_limit_queries_per_second, 100)
+      n -> String.to_integer(n)
+    end
+  end
+
+  @doc "Rate limit burst allowance (max tokens per bucket)."
+  @spec rate_limit_burst() :: non_neg_integer()
+  def rate_limit_burst do
+    case System.get_env("ZTLP_NS_RATE_LIMIT_BURST") do
+      nil -> Application.get_env(:ztlp_ns, :rate_limit_burst, 200)
+      n -> String.to_integer(n)
+    end
+  end
+
   @doc "HTTPS URLs for bootstrap relay discovery (Step 1 of NIP)."
   @spec bootstrap_urls() :: [String.t()]
   def bootstrap_urls do

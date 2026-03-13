@@ -366,6 +366,28 @@ enum Commands {
     /// Admin operations — manage zones and enrollment tokens
     #[command(subcommand)]
     Admin(AdminCommands),
+
+    /// Tune system for optimal ZTLP performance
+    ///
+    /// Checks and optionally applies kernel settings for best tunnel
+    /// throughput. Increases UDP socket buffer limits (rmem_max/wmem_max)
+    /// to 7MB, matching WireGuard's recommended configuration.
+    ///
+    /// Without --apply, shows current settings and recommendations.
+    /// With --apply, writes sysctl values (requires root/sudo).
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp tune                    # Show current settings\n  \
+            sudo ztlp tune --apply       # Apply optimal settings\n  \
+            ztlp tune --apply --persist  # Apply + persist across reboots")]
+    Tune {
+        /// Apply the recommended settings (requires root/sudo)
+        #[arg(short, long)]
+        apply: bool,
+
+        /// Make settings persistent across reboots (writes /etc/sysctl.d/99-ztlp.conf)
+        #[arg(short, long)]
+        persist: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3991,6 +4013,196 @@ fn cmd_admin_enroll(
     Ok(())
 }
 
+// ─── Tune ───────────────────────────────────────────────────────────────────
+
+fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::pacing::TARGET_BUFFER_SIZE;
+
+    let target = TARGET_BUFFER_SIZE;
+    let target_mb = target / (1024 * 1024);
+
+    eprintln!("{}", c_bold("ZTLP System Tuner"));
+    eprintln!();
+
+    // Read current values
+    #[cfg(target_os = "linux")]
+    let (rmem_max, wmem_max) = {
+        let rmem = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+            .unwrap_or_default()
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+        let wmem = std::fs::read_to_string("/proc/sys/net/core/wmem_max")
+            .unwrap_or_default()
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(0);
+        (rmem, wmem)
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (rmem_max, wmem_max) = (0usize, 0usize);
+
+    // Display current state
+    let rmem_ok = rmem_max >= target;
+    let wmem_ok = wmem_max >= target;
+
+    eprintln!(
+        "  {} rmem_max: {} ({})",
+        if rmem_ok {
+            c_green("✓")
+        } else {
+            c_yellow("⚠")
+        },
+        format_bytes(rmem_max),
+        if rmem_ok {
+            "OK".to_string()
+        } else {
+            format!("low — target {}MB", target_mb)
+        },
+    );
+
+    eprintln!(
+        "  {} wmem_max: {} ({})",
+        if wmem_ok {
+            c_green("✓")
+        } else {
+            c_yellow("⚠")
+        },
+        format_bytes(wmem_max),
+        if wmem_ok {
+            "OK".to_string()
+        } else {
+            format!("low — target {}MB", target_mb)
+        },
+    );
+
+    // Check kernel version
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(ver) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+            eprintln!("  {} kernel: {}", c_dim("ℹ"), ver.trim());
+        }
+    }
+
+    eprintln!();
+
+    if rmem_ok && wmem_ok {
+        eprintln!(
+            "  {} System is already tuned for optimal ZTLP performance.",
+            c_green("✓")
+        );
+        eprintln!();
+        return Ok(());
+    }
+
+    if !apply {
+        eprintln!("  To apply optimal settings:");
+        eprintln!("    {} ztlp tune --apply", c_cyan("sudo"));
+        eprintln!();
+        eprintln!("  To apply and persist across reboots:");
+        eprintln!("    {} ztlp tune --apply --persist", c_cyan("sudo"));
+        eprintln!();
+        eprintln!("  Or manually:");
+        eprintln!(
+            "    sudo sysctl -w net.core.rmem_max={} net.core.wmem_max={}",
+            target, target,
+        );
+        eprintln!();
+        return Ok(());
+    }
+
+    // Apply settings
+    #[cfg(target_os = "linux")]
+    {
+        let target_str = target.to_string();
+
+        if !rmem_ok {
+            match std::fs::write("/proc/sys/net/core/rmem_max", &target_str) {
+                Ok(()) => eprintln!("  {} Set rmem_max = {}", c_green("✓"), format_bytes(target)),
+                Err(e) => {
+                    eprintln!(
+                        "  {} Failed to set rmem_max: {} (run with sudo?)",
+                        c_red("✗"),
+                        e
+                    );
+                    return Err("insufficient permissions — run with sudo".into());
+                }
+            }
+        }
+
+        if !wmem_ok {
+            match std::fs::write("/proc/sys/net/core/wmem_max", &target_str) {
+                Ok(()) => eprintln!("  {} Set wmem_max = {}", c_green("✓"), format_bytes(target)),
+                Err(e) => {
+                    eprintln!(
+                        "  {} Failed to set wmem_max: {} (run with sudo?)",
+                        c_red("✗"),
+                        e
+                    );
+                    return Err("insufficient permissions — run with sudo".into());
+                }
+            }
+        }
+
+        // Persist
+        if persist {
+            let sysctl_conf = format!(
+                "# ZTLP — optimal UDP socket buffer sizes ({}MB)\n\
+                 # Applied by: ztlp tune --apply --persist\n\
+                 net.core.rmem_max = {}\n\
+                 net.core.wmem_max = {}\n",
+                target_mb, target, target,
+            );
+
+            let sysctl_path = "/etc/sysctl.d/99-ztlp.conf";
+            match std::fs::write(sysctl_path, &sysctl_conf) {
+                Ok(()) => {
+                    eprintln!("  {} Wrote {}", c_green("✓"), sysctl_path);
+                    eprintln!("  {} Settings will persist across reboots.", c_dim("ℹ"),);
+                }
+                Err(e) => {
+                    eprintln!("  {} Failed to write {}: {}", c_yellow("⚠"), sysctl_path, e);
+                    eprintln!("  {} Settings are applied for this boot only.", c_dim("ℹ"),);
+                }
+            }
+        }
+
+        eprintln!();
+        eprintln!(
+            "  {} System tuned for optimal ZTLP performance.",
+            c_green("✓")
+        );
+        eprintln!();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!(
+            "  {} Automatic tuning is only supported on Linux.",
+            c_yellow("⚠")
+        );
+        eprintln!(
+            "  {} On macOS, increase with: sudo sysctl -w kern.ipc.maxsockbuf={}",
+            c_dim("ℹ"),
+            target * 2,
+        );
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{}MB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{}KB", bytes / 1024)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -4146,6 +4358,8 @@ async fn main() {
                 zone, secret, ns_server, relay, gateway, expires, *max_uses, *count, *qr,
             ),
         },
+
+        Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),
     };
 
     match result {

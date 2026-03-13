@@ -30,7 +30,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tracing::info;
+use tracing::{info, warn};
 
 /// Target socket buffer size: 7MB, matching WireGuard-Go.
 ///
@@ -263,6 +263,23 @@ pub fn detect_system(
         profile.pacing,
         profile.max_sub_batch,
     );
+
+    // Warn if buffers are significantly below target
+    let target_kb = TARGET_BUFFER_SIZE / 1024;
+    if let Some(recv) = recv_buffer_size {
+        if recv < TARGET_BUFFER_SIZE / 2 {
+            warn!(
+                "UDP receive buffer is {}KB (target: {}KB). Throughput may be reduced.",
+                recv / 1024,
+                target_kb,
+            );
+            warn!(
+                "To fix: sudo sysctl -w net.core.rmem_max={} net.core.wmem_max={}",
+                TARGET_BUFFER_SIZE, TARGET_BUFFER_SIZE,
+            );
+            warn!("Or run: ztlp tune (applies optimal kernel settings)");
+        }
+    }
 
     profile
 }

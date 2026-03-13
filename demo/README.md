@@ -86,13 +86,25 @@ allow = ["alice.tunnel.ztlp"]
 | `ZTLP_NS_MAX_RECORDS` | `100000` | Max stored records |
 | `ZTLP_ENROLLMENT_SECRET` | none | 64 hex chars for device enrollment |
 
-### Using Docker (NS + Demo)
+### Using Docker (Easiest — No Elixir Install Needed)
 
 ```bash
-# From the repo root
+# From the repo root — builds and starts NS in one command
+docker build -t ztlp-ns ./ns
+docker run -d --name ztlp-ns -p 23096:23096/udp ztlp-ns
+
+# Or with docker compose (also starts relay + gateway)
 docker compose up ns -d
+
+# Run the demo — it auto-detects the NS on port 23096
 ./demo/ssh-tunnel-demo.sh
+
+# Clean up when done
+docker rm -f ztlp-ns
 ```
+
+The Docker image is ~80MB (multi-stage: OTP 26 build → debian:bookworm-slim
+runtime). No Elixir needed on the host.
 
 ## Demo Acts
 

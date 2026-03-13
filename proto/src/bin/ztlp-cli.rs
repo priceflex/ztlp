@@ -19,7 +19,7 @@
 //! ztlp ping 192.168.1.10:23095 --count 5
 //!
 //! # Look up a name in ZTLP-NS
-//! ztlp ns lookup mynode.office.acme.ztlp --ns-server 127.0.0.1:5353
+//! ztlp ns lookup mynode.office.acme.ztlp --ns-server 127.0.0.1:23096
 //! ```
 
 #![deny(unsafe_code)]
@@ -126,7 +126,7 @@ fn load_config() -> Config {
         ztlp connect 192.168.1.10:23095 --key ~/.ztlp/identity.json\n  \
         ztlp inspect 5a371000000100010000...\n  \
         ztlp ping 10.0.0.1:23095 --count 5\n  \
-        ztlp ns lookup mynode.acme.ztlp --ns-server 127.0.0.1:5353"
+        ztlp ns lookup mynode.acme.ztlp --ns-server 127.0.0.1:23096"
 )]
 struct Cli {
     /// Increase verbosity (-v, -vv, -vvv)
@@ -169,7 +169,7 @@ enum Commands {
             ztlp connect 10.0.0.1:23095 --key ~/.ztlp/identity.json\n  \
             ztlp connect peer.example.com:23095 --relay relay.example.com:23095\n  \
             ztlp connect myserver.clients.techrockstars.ztlp\n  \
-            ztlp connect myserver.clients.techrockstars.ztlp --ns-server 10.0.0.1:5353")]
+            ztlp connect myserver.clients.techrockstars.ztlp --ns-server 10.0.0.1:23096")]
     Connect {
         /// Target address (host:port or ZTLP name, e.g. myserver.clients.techrockstars.ztlp)
         target: String,
@@ -556,7 +556,7 @@ enum NsCommands {
     /// to your NodeID and public key. Requires a signing key.
     #[command(after_help = "EXAMPLES:\n  \
             ztlp ns register --name mynode.office.acme.ztlp --zone office.acme.ztlp \\\n    \
-                --key ~/.ztlp/identity.json --ns-server 127.0.0.1:5353\n  \
+                --key ~/.ztlp/identity.json --ns-server 127.0.0.1:23096\n  \
             ztlp ns register --name mynode.office.acme.ztlp --zone office.acme.ztlp \\\n    \
                 --key ~/.ztlp/identity.json --address 10.42.42.50:23095")]
     Register {
@@ -573,7 +573,7 @@ enum NsCommands {
         key: PathBuf,
 
         /// NS server address (host:port)
-        #[arg(long, default_value = "127.0.0.1:5353")]
+        #[arg(long, default_value = "127.0.0.1:23096")]
         ns_server: String,
 
         /// Endpoint address to register as a SVC record (host:port)
@@ -587,13 +587,13 @@ enum NsCommands {
     /// Returns the NodeID, public key, TTL, and signature status.
     #[command(after_help = "EXAMPLES:\n  \
             ztlp ns lookup mynode.office.acme.ztlp\n  \
-            ztlp ns lookup mynode.acme.ztlp --ns-server 10.0.0.1:5353")]
+            ztlp ns lookup mynode.acme.ztlp --ns-server 10.0.0.1:23096")]
     Lookup {
         /// Name to look up
         name: String,
 
         /// NS server address (host:port)
-        #[arg(long, default_value = "127.0.0.1:5353")]
+        #[arg(long, default_value = "127.0.0.1:23096")]
         ns_server: String,
 
         /// Record type to query (1=KEY, 2=SVC, 3=RELAY, 4=POLICY, 5=REVOKE, 6=BOOTSTRAP)
@@ -606,13 +606,13 @@ enum NsCommands {
     /// Searches the namespace for a KEY record matching the given
     /// public key (hex-encoded). Returns the associated name and metadata.
     #[command(after_help = "EXAMPLES:\n  \
-            ztlp ns pubkey a1b2c3d4... --ns-server 127.0.0.1:5353")]
+            ztlp ns pubkey a1b2c3d4... --ns-server 127.0.0.1:23096")]
     Pubkey {
         /// Public key in hex
         hex: String,
 
         /// NS server address (host:port)
-        #[arg(long, default_value = "127.0.0.1:5353")]
+        #[arg(long, default_value = "127.0.0.1:23096")]
         ns_server: String,
     },
 }
@@ -892,7 +892,7 @@ async fn resolve_target(
     } else {
         let cfg = load_config();
         cfg.ns_server
-            .unwrap_or_else(|| "127.0.0.1:5353".to_string())
+            .unwrap_or_else(|| "127.0.0.1:23096".to_string())
     };
     eprintln!("  {} {}", c_dim("NS server:"), ns_server);
 

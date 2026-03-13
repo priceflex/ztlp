@@ -1,76 +1,155 @@
-# ZTLP Demos
+# ZTLP SSH Tunnel Demo
 
-## SSH Tunnel Demo (Security Showcase)
+Interactive demo showcasing ZTLP's zero-trust network tunnel with
+identity-based access control, encrypted transport, and DDoS-resistant
+packet pipeline.
 
-An interactive demonstration of how ZTLP hides an SSH service behind a single, encrypted port.  The demo walks through cryptographic identity creation, optional ZTLP-NS registration, establishing a ZTLP listener that forwards to a local SSH daemon, opening a client-side tunnel, and finally connecting via SSH.
-
-In addition to the core workflow, the demo includes throughput benchmarking and simulated attacker actions:
-
-- **Throughput Saturation** – SCP file transfers (10/50/100 MB) through the ZTLP tunnel vs direct SSH. Shows Mbps throughput and encryption overhead percentage.
-- **Port Scan** – shows the SSH port is invisible while the ZTLP port is the only exposed service.
-- **UDP Packet Flood** – sends thousands of random UDP packets to the ZTLP port; they are rejected in ~19 ns at L1 (magic‑byte check).
-- **Malformed ZTLP Packets** – packets with a correct magic header but bogus SessionIDs are rejected at L2 (session verification).
-- **tcpdump Capture** – optionally records the traffic on the ZTLP port, demonstrating that payloads are encrypted.
-- **CPU Monitoring** – measures the CPU overhead during the flood, showing the cheap cost of rejection.
-- **Final Summary** – compares traditional SSH exposure versus the ZTLP‑protected setup with statistics from all tests.
-
-### Quick Start
-
-The script automatically finds the `ztlp` binary by checking (in order):
-
-1. `$ZTLP_BIN` environment variable
-2. `ztlp` in your `$PATH`
-3. `./ztlp` in the same directory as the script (`demo/`)
-4. `proto/target/release/ztlp` (cargo release build)
-5. `proto/target/debug/ztlp` (cargo debug build)
-
-If you built from source (`cd proto && cargo build --release`), the script will find it automatically. Otherwise, download a release binary and either put it in your PATH or in the `demo/` directory.
+## Quick Start (No NS)
 
 ```bash
-# Option A: Build from source (binary auto-detected)
-cd proto && cargo build --release
-cd ../demo && ./ssh-tunnel-demo.sh
-
-# Option B: Point to a specific binary
-ZTLP_BIN=/path/to/ztlp ./ssh-tunnel-demo.sh
-
-# Option C: Put binary in demo/ dir
-cp /path/to/ztlp demo/
-cd demo && ./ssh-tunnel-demo.sh
-
-# Skip NS registration (use raw IP instead of name)
-./ssh-tunnel-demo.sh --skip-ns
-
-# Custom settings (override via env vars)
-SSH_USER=steve SSH_PORT=22 LISTEN_PORT=23095 ./ssh-tunnel-demo.sh
-
-# Cleanup demo artifacts
-./ssh-tunnel-demo.sh --cleanup
+./ssh-tunnel-demo.sh
 ```
 
-### What It Does
+Runs the full 13-act demo without a namespace server. Identity matching
+uses NodeID hex strings in the policy file. Works anywhere with just the
+`ztlp` binary and an SSH server.
 
+## Full Demo (With ZTLP-NS)
+
+For the complete experience with human-readable identities
+(`alice.tunnel.ztlp` instead of `f40685...`), run a ZTLP-NS server first.
+
+### 1. Start the NS Server
+
+```bash
+cd ../ns
+ZTLP_NS_PORT=23096 mix run --no-halt
 ```
-┌─────────────┐         ┌────────────────┐         ┌────────────┐
-│   ssh client │  TCP    │    ZTLP tunnel   │  TCP    │  SSH server  │
-│              │───────▶│                  │───────▶│              │
-│ localhost:   │         │  Noise_XX E2E    │         │ localhost:22 │
-│    2222      │         │  ChaCha20-Poly   │         │              │
-└─────────────┘         └────────────────┘         └────────────┘
-                          Port 23095 only
-                          19ns reject for unauthorized packets
+
+Or with custom storage:
+
+```bash
+cd ../ns
+ZTLP_NS_PORT=23096 \
+ZTLP_NS_STORAGE_MODE=ram_copies \
+mix run --no-halt
 ```
 
-### Environment Variables
+The NS server will listen on UDP port 23096.
 
-| Variable   | Default                | Description |
-|------------|------------------------|-------------|
-| `ZTLP_BIN` | `ztlp`                 | Path to the `ztlp` binary |
-| `NS_SERVER`| `127.0.0.1:5353`       | ZTLP-NS server address |
-| `LISTEN_PORT`| `23095`               | ZTLP listener port |
-| `TUNNEL_LOCAL_PORT`| `2222`          | Local port for the SSH tunnel |
-| `SSH_PORT` | `22`                    | Target SSH server port |
-| `SSH_USER` | `$(whoami)`            | Username for SSH connection |
-| `DEMO_DIR` | `/tmp/ztlp-demo`       | Directory for demo artifacts |
+### 2. Run the Demo
 
-The demo is safe to run on a local machine - it never makes destructive changes to the system and all traffic stays on `localhost`.
+```bash
+./ssh-tunnel-demo.sh
+```
+
+The demo auto-detects the NS server on `127.0.0.1:23096`. If it's
+reachable, it registers names for all three identities:
+
+- `demo-server.tunnel.ztlp` (Bob)
+- `alice.tunnel.ztlp` (Alice)
+- `eve.tunnel.ztlp` (Eve)
+
+The policy file then uses friendly names instead of hex NodeIDs:
+
+```toml
+default = "deny"
+
+[[services]]
+name = "ssh"
+allow = ["alice.tunnel.ztlp"]
+```
+
+### NS Server Configuration
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `ZTLP_NS_PORT` | `23096` | UDP listen port |
+| `ZTLP_NS_STORAGE_MODE` | `disc_copies` | `disc_copies` or `ram_copies` |
+| `ZTLP_NS_MNESIA_DIR` | Mnesia default | Directory for persistence |
+| `ZTLP_NS_MAX_RECORDS` | `100000` | Max stored records |
+| `ZTLP_ENROLLMENT_SECRET` | none | 64 hex chars for device enrollment |
+
+### Using Docker (NS + Demo)
+
+```bash
+# From the repo root
+docker compose up ns -d
+./demo/ssh-tunnel-demo.sh
+```
+
+## Demo Acts
+
+| Act | Description |
+|-----|-------------|
+| 1 | Generate 3 identities: Bob (server), Alice (client), Eve (attacker) |
+| 2 | Optional: Register names with ZTLP-NS |
+| 3 | Create zero-trust policy — only Alice allowed for SSH |
+| 4 | Start server with policy enforcement |
+| 5 | **Alice connects — ALLOWED** ✅ |
+| 6 | SSH through Alice's encrypted tunnel |
+| 7 | **Eve connects — DENIED** ❌ (handshake completes, policy rejects) |
+| 8 | SCP throughput test: 10/50/100 MB (ZTLP vs direct SSH) |
+| 9 | Port scan — SSH port invisible, only ZTLP port visible |
+| 10 | UDP packet flood — L1 magic-byte rejection (~19ns each) |
+| 11 | Malformed ZTLP packets — L2 session verification |
+| 12 | tcpdump — payload is encrypted |
+| 13 | CPU monitoring — negligible impact from attacks |
+
+## Customization
+
+```bash
+# Environment variables
+SSH_USER=steve          # SSH username (default: current user)
+SSH_PORT=22             # Local SSH port
+LISTEN_PORT=23095       # ZTLP listener port
+TUNNEL_LOCAL_PORT=2222  # Local tunnel port
+NS_SERVER=10.0.0.5:23096  # Custom NS server
+DEMO_DIR=/tmp/ztlp-demo   # Artifact directory
+```
+
+## Key Concepts Demonstrated
+
+**Authentication ≠ Authorization (Act 7)**
+
+Eve has a valid ZTLP identity. She completes the full Noise_XX handshake —
+proving she IS Eve. But Bob's policy says only Alice can access SSH.
+The handshake is authentication (who are you?). The policy is
+authorization (what can you do?). Both are required.
+
+**Three-Layer Pipeline (Acts 10-11)**
+
+1. **Layer 1 (Magic byte)** — Wrong magic? Dropped in ~19ns. No state.
+2. **Layer 2 (Session ID)** — Unknown session? Dropped. No crypto.
+3. **Layer 3 (Auth tag)** — Bad AEAD tag? Dropped. Crypto verified.
+
+Attackers can't even make the server do expensive work.
+
+## Requirements
+
+Required:
+- `ztlp` binary (build: `cd ../proto && cargo build --release`)
+- SSH server running locally
+
+Optional (for full demo):
+- `nmap` — port scanning
+- `tcpdump` — packet capture
+- `python3` — flood generators
+- `scp` — throughput tests
+- `bc` — calculations
+- Elixir 1.15+ / OTP 26+ — for ZTLP-NS server
+
+## Optimal Performance
+
+For best tunnel throughput, tune your system buffers:
+
+```bash
+sudo ztlp tune --apply --persist
+```
+
+Or manually:
+
+```bash
+sudo sysctl -w net.core.rmem_max=8388608
+sudo sysctl -w net.core.wmem_max=8388608
+```

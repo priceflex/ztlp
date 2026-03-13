@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
 # ================================================================
-# ZTLP SSH Tunnel Demo (Enhanced Security Showcase)
+# ZTLP SSH Tunnel Demo (Zero Trust Security Showcase)
 # ================================================================
-# Demonstrates end‑to‑end: keygen → optional NS register → ZTLP listener
-# with SSH forward → client tunnel → interactive SSH session →
-# simulated attack phases (port scan, packet flood, malformed packets,
-# tcpdump capture, CPU monitoring) and a final security summary.
+# 13-act demo covering identity, policy, tunneling, and attack resilience:
+#
+#   Acts 1-2:  Generate identities (Bob, Alice, Eve) + optional NS register
+#   Act  3:    Create zero-trust access policy (only Alice allowed)
+#   Acts 4-6:  Server with policy → Alice connects → SSH through tunnel
+#   Act  7:    Eve attempts connection → DENIED (authN ≠ authZ)
+#   Acts 8-13: Throughput, port scan, floods, tcpdump, CPU monitoring
 #
 # Requirements:
-#   - ztlp binary (v0.2.1+) in PATH or ./ztlp
+#   - ztlp binary (v0.5.6+) in PATH or ./ztlp
 #   - SSH server on localhost (default 22)
 #   - optional: nmap, tcpdump, python3 (for packet generators)
-#   - Optional ZTLP‑NS server (Elixir) – use --skip-ns to bypass.
+#   - Optional ZTLP‑NS server (Elixir) on port 23096 – auto-detected.
 #
 # Usage examples:
-#   ./ssh-tunnel-demo.sh                     # Full demo with NS
+#   ./ssh-tunnel-demo.sh                     # Full demo (auto-detects NS)
 #   ./ssh-tunnel-demo.sh --skip-ns           # Skip NS registration
 #   ./ssh-tunnel-demo.sh --cleanup           # Remove demo artifacts
 #   SSH_USER=steve SSH_PORT=22 ./ssh-tunnel-demo.sh
+#
+# See README.md for NS server setup and configuration details.
 #
 # -------------------------------------------------------------------
 
@@ -46,7 +51,7 @@ else
 fi
 
 DEMO_DIR="${DEMO_DIR:-/tmp/ztlp-demo}"
-NS_SERVER="${NS_SERVER:-127.0.0.1:5353}"
+NS_SERVER="${NS_SERVER:-127.0.0.1:23096}"
 LISTEN_PORT="${LISTEN_PORT:-23095}"
 TUNNEL_LOCAL_PORT="${TUNNEL_LOCAL_PORT:-2222}"
 SSH_PORT="${SSH_PORT:-22}"

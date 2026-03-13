@@ -52,6 +52,8 @@ TUNNEL_LOCAL_PORT="${TUNNEL_LOCAL_PORT:-2222}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_USER="${SSH_USER:-$(whoami)}"
 DEMO_NAME="${DEMO_NAME:-demo-server.tunnel.ztlp}"
+DEMO_CLIENT="${DEMO_CLIENT:-alice.tunnel.ztlp}"
+DEMO_EVE="${DEMO_EVE:-eve.tunnel.ztlp}"
 DEMO_ZONE="${DEMO_ZONE:-tunnel.ztlp}"
 SKIP_NS="${SKIP_NS:-false}"
 
@@ -177,6 +179,21 @@ step "Client identity (Alice)"
 dimcmd "$ZTLP keygen --output $DEMO_DIR/client.json"
 "$ZTLP" keygen --output "$DEMO_DIR/client.json" | sed 's/^/  /'
 
+step "Attacker identity (Eve)"
+dimcmd "$ZTLP keygen --output $DEMO_DIR/eve.json"
+"$ZTLP" keygen --output "$DEMO_DIR/eve.json" | sed 's/^/  /'
+
+# Extract NodeIDs for policy file (used when NS is not available)
+if [[ "$HAS_PYTHON3" == "true" ]]; then
+    ALICE_NODE_ID=$(python3 -c "import json; print(json.load(open('$DEMO_DIR/client.json'))['node_id'])")
+    EVE_NODE_ID=$(python3 -c "import json; print(json.load(open('$DEMO_DIR/eve.json'))['node_id'])")
+else
+    ALICE_NODE_ID=$(grep -o '"node_id": *"[^"]*"' "$DEMO_DIR/client.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    EVE_NODE_ID=$(grep -o '"node_id": *"[^"]*"' "$DEMO_DIR/eve.json" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+fi
+info "Alice NodeID: $ALICE_NODE_ID"
+info "Eve NodeID:   $EVE_NODE_ID"
+
 success "Identities generated"
 pause
 
@@ -198,68 +215,128 @@ if [[ "$SKIP_NS" != "true" ]]; then
     dimcmd "$ZTLP ns lookup $DEMO_NAME --ns-server $NS_SERVER"
     "$ZTLP" ns lookup "$DEMO_NAME" --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
     
-    success "Name registered"
+    step "Register client name (Alice)"
+    dimcmd "$ZTLP ns register --name $DEMO_CLIENT --zone $DEMO_ZONE --key $DEMO_DIR/client.json --address 127.0.0.1:0 --ns-server $NS_SERVER"
+    "$ZTLP" ns register \
+        --name "$DEMO_CLIENT" \
+        --zone "$DEMO_ZONE" \
+        --key "$DEMO_DIR/client.json" \
+        --address "127.0.0.1:0" \
+        --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
+
+    step "Register attacker name (Eve)"
+    dimcmd "$ZTLP ns register --name $DEMO_EVE --zone $DEMO_ZONE --key $DEMO_DIR/eve.json --address 127.0.0.1:0 --ns-server $NS_SERVER"
+    "$ZTLP" ns register \
+        --name "$DEMO_EVE" \
+        --zone "$DEMO_ZONE" \
+        --key "$DEMO_DIR/eve.json" \
+        --address "127.0.0.1:0" \
+        --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
+
+    success "Names registered"
     CONNECT_TARGET="$DEMO_NAME"
     NS_FLAG="--ns-server $NS_SERVER"
+    # Use human-readable names for policy
+    ALICE_IDENTITY="$DEMO_CLIENT"
+    EVE_IDENTITY="$DEMO_EVE"
     pause
 else
     info "Skipping NS registration"
     CONNECT_TARGET="127.0.0.1:$LISTEN_PORT"
     NS_FLAG=""
+    # Use NodeID hex for policy (no NS names available)
+    ALICE_IDENTITY="$ALICE_NODE_ID"
+    EVE_IDENTITY="$EVE_NODE_ID"
 fi
 
 # -------------------------------------------------------------------
-# ACT 3 – Start ZTLP server with SSH forward
+# ACT 3 – Create Access Policy (Zero Trust)
 # -------------------------------------------------------------------
-banner "Act 3 — Start ZTLP Server (SSH Forward)"
-info "Server will listen on $LISTEN_PORT and forward to local SSH $SSH_PORT"
-step "Launching listener"
-dimcmd "$ZTLP listen --key $DEMO_DIR/server.json --bind 0.0.0.0:$LISTEN_PORT --forward 127.0.0.1:$SSH_PORT"
+banner "Act 3 — Create Access Policy (Zero Trust)"
+info "Bob (server) creates a policy that only allows Alice to access SSH"
+info "Eve (attacker) will be denied even though she has a valid ZTLP identity"
+
+POLICY_FILE="$DEMO_DIR/policy.toml"
+step "Writing policy file"
+cat > "$POLICY_FILE" <<POLICYEOF
+# ZTLP Access Policy — Zero Trust (default deny)
+# Only explicitly listed identities can access services.
+default = "deny"
+
+[[services]]
+name = "ssh"
+allow = ["$ALICE_IDENTITY"]
+POLICYEOF
+
+echo ""
+echo -e "  ${DIM}── $POLICY_FILE ──${RESET}"
+cat "$POLICY_FILE" | sed 's/^/  /'
+echo -e "  ${DIM}────────────────────────${RESET}"
+echo ""
+info "Alice ($ALICE_IDENTITY) → ${GREEN}allowed${RESET} for ssh"
+info "Eve   ($EVE_IDENTITY) → ${RED}denied${RESET}  for ssh"
+success "Policy created — zero trust, default deny"
+pause
+
+# -------------------------------------------------------------------
+# ACT 4 – Start ZTLP server with policy enforcement
+# -------------------------------------------------------------------
+banner "Act 4 — Start ZTLP Server (SSH Forward + Policy)"
+info "Server will listen on $LISTEN_PORT and forward SSH on $SSH_PORT"
+info "Policy enforcement enabled — only Alice can connect"
+step "Launching listener with policy"
+dimcmd "$ZTLP listen --key $DEMO_DIR/server.json --bind 0.0.0.0:$LISTEN_PORT --forward ssh:127.0.0.1:$SSH_PORT --policy $POLICY_FILE --gateway"
 "$ZTLP" listen \
     --key "$DEMO_DIR/server.json" \
     --bind "0.0.0.0:$LISTEN_PORT" \
-    --forward "127.0.0.1:$SSH_PORT" &
+    --forward "ssh:127.0.0.1:$SSH_PORT" \
+    --policy "$POLICY_FILE" \
+    --gateway &
 SERVER_PID=$!
 PIDS+=("$SERVER_PID")
 
 sleep 1
 if kill -0 "$SERVER_PID" 2>/dev/null; then
-    success "Listener active on $LISTEN_PORT → SSH $SSH_PORT"
+    success "Listener active on $LISTEN_PORT → SSH $SSH_PORT (policy enforced)"
 else
     fail "Failed to start listener"
 fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 4 – Open ZTLP tunnel (client side)
+# ACT 5 – Alice connects (ALLOWED)
 # -------------------------------------------------------------------
-banner "Act 4 — Open ZTLP Tunnel"
+banner "Act 5 — Alice Connects (Policy Allowed)"
+info "Alice is in the allow list — she can access the SSH service"
 step "Creating local tunnel on $TUNNEL_LOCAL_PORT"
 if [[ -n "$NS_FLAG" ]]; then
-    dimcmd "$ZTLP connect $CONNECT_TARGET --key $DEMO_DIR/client.json $NS_FLAG -L $TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT"
+    dimcmd "$ZTLP connect $CONNECT_TARGET --key $DEMO_DIR/client.json $NS_FLAG --service ssh -L $TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT"
 else
-    dimcmd "$ZTLP connect $CONNECT_TARGET --key $DEMO_DIR/client.json -L $TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT"
+    dimcmd "$ZTLP connect $CONNECT_TARGET --key $DEMO_DIR/client.json --service ssh -L $TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT"
 fi
 # shellcheck disable=SC2086
 "$ZTLP" connect "$CONNECT_TARGET" \
     --key "$DEMO_DIR/client.json" \
     $NS_FLAG \
+    --service ssh \
     -L "$TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT" &
 CLIENT_PID=$!
 PIDS+=("$CLIENT_PID")
 
 sleep 2
 if kill -0 "$CLIENT_PID" 2>/dev/null; then
-    success "Tunnel established (localhost:$TUNNEL_LOCAL_PORT → SSH)"
+    success "Alice's tunnel established (localhost:$TUNNEL_LOCAL_PORT → SSH)"
+    info "Policy check passed: $ALICE_IDENTITY → ssh ✓"
 else
-    fail "Tunnel failed to start"
+    fail "Alice's tunnel failed to start"
 fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 5 – SSH through the tunnel
+# ACT 6 – SSH through the tunnel
 # -------------------------------------------------------------------
-banner "Act 5 — SSH Through the ZTLP Tunnel"
+banner "Act 6 — SSH Through the ZTLP Tunnel"
+info "Alice can now SSH through her encrypted ZTLP tunnel"
 step "Connecting via SSH"
 dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1"
 ssh -p "$TUNNEL_LOCAL_PORT" \
@@ -271,9 +348,65 @@ ssh -p "$TUNNEL_LOCAL_PORT" \
 pause
 
 # -------------------------------------------------------------------
-# ACT 6 – Throughput Saturation Test (scp)
+# ACT 7 – Eve tries to connect (DENIED)
 # -------------------------------------------------------------------
-banner "Act 6 — Throughput Saturation Test"
+banner "Act 7 — Eve Attempts Connection (Policy Denial)"
+info "Eve has a valid ZTLP identity — she can complete the Noise_XX handshake"
+info "But the policy engine will deny her access to the SSH service"
+echo ""
+
+EVE_LISTEN_PORT=23096
+EVE_TUNNEL_PORT=2223
+EVE_LOG="$DEMO_DIR/eve_server.log"
+
+step "Starting a test listener on port $EVE_LISTEN_PORT (same policy)"
+"$ZTLP" listen \
+    --key "$DEMO_DIR/server.json" \
+    --bind "0.0.0.0:$EVE_LISTEN_PORT" \
+    --forward "ssh:127.0.0.1:$SSH_PORT" \
+    --policy "$POLICY_FILE" > "$EVE_LOG" 2>&1 &
+EVE_SERVER_PID=$!
+PIDS+=("$EVE_SERVER_PID")
+sleep 1
+
+step "Eve connecting to port $EVE_LISTEN_PORT..."
+echo ""
+timeout 8 "$ZTLP" connect "127.0.0.1:$EVE_LISTEN_PORT" \
+    --key "$DEMO_DIR/eve.json" \
+    --service ssh \
+    -L "$EVE_TUNNEL_PORT:127.0.0.1:$SSH_PORT" 2>&1 | sed 's/^/  /'
+EVE_EXIT=$?
+
+echo ""
+if [[ "$EVE_EXIT" -ne 0 ]]; then
+    success "Eve was ${RED}DENIED${RESET}"
+else
+    warn "Eve's connection attempt did not fail as expected"
+fi
+
+# Show the server-side denial
+echo ""
+step "Server-side policy log:"
+if [[ -f "$EVE_LOG" ]]; then
+    grep -E "POLICY DENIED|policy DENY|policy denied|Policy:" "$EVE_LOG" | sed 's/^/  /'
+fi
+
+echo ""
+info "The Noise_XX handshake completed — Eve proved she IS Eve"
+info "But Bob's policy says only Alice can access SSH"
+echo ""
+echo -e "  ${BOLD}This is the key insight: authentication ≠ authorization${RESET}"
+echo -e "  ${DIM}Eve is who she says she is. She's just not allowed in.${RESET}"
+
+# Clean up Eve's listener
+kill "$EVE_SERVER_PID" 2>/dev/null || true
+wait "$EVE_SERVER_PID" 2>/dev/null || true
+pause
+
+# -------------------------------------------------------------------
+# ACT 8 – Throughput Saturation Test (scp)
+# -------------------------------------------------------------------
+banner "Act 8 — Throughput Saturation Test"
 
 if [[ "$HAS_SCP" == "true" ]]; then
     TEST_FILE="$DEMO_DIR/throughput_test.bin"
@@ -334,9 +467,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 7 – Port Scan (optional)
+# ACT 9 – Port Scan (optional)
 # -------------------------------------------------------------------
-banner "Act 7 — Port Scan"
+banner "Act 9 — Port Scan"
 if [[ "$HAS_NMAP" == "true" ]]; then
     step "Scanning host for open ports (nmap)"
     dimcmd "nmap -p $SSH_PORT,$LISTEN_PORT 127.0.0.1"
@@ -348,9 +481,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 8 – Packet Flood
+# ACT 10 – Packet Flood
 # -------------------------------------------------------------------
-banner "Act 8 — UDP Packet Flood"
+banner "Act 10 — UDP Packet Flood"
 if [[ "$HAS_PYTHON3" == "true" ]]; then
     FLOOD_COUNT=20000
     step "Sending $FLOOD_COUNT random UDP packets to ZTLP port $LISTEN_PORT"
@@ -372,9 +505,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 9 – Malformed ZTLP Packets
+# ACT 11 – Malformed ZTLP Packets
 # -------------------------------------------------------------------
-banner "Act 9 — Malformed ZTLP Packets"
+banner "Act 11 — Malformed ZTLP Packets"
 if [[ "$HAS_PYTHON3" == "true" ]]; then
     MAL_COUNT=20000
     step "Sending $MAL_COUNT packets with correct magic (0x5A37) but bogus SessionIDs"
@@ -397,9 +530,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 10 – tcpdump Capture (optional)
+# ACT 12 – tcpdump Capture (optional)
 # -------------------------------------------------------------------
-banner "Act 10 — tcpdump Capture"
+banner "Act 12 — tcpdump Capture"
 if [[ "$HAS_TCPDUMP" == "true" ]]; then
     PCAP="$DEMO_DIR/ztlp_capture.pcap"
     step "Capturing traffic on port $LISTEN_PORT for 5 seconds"
@@ -416,9 +549,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 11 – CPU Monitoring & Final Summary
+# ACT 13 – CPU Monitoring & Final Summary
 # -------------------------------------------------------------------
-banner "Act 11 — CPU Usage and Summary"
+banner "Act 13 — CPU Usage and Summary"
 step "Measuring CPU during a 50,000-packet flood"
 if [[ "$HAS_PYTHON3" == "true" ]]; then
     # Read idle time before
@@ -463,17 +596,19 @@ echo -e "  ${DIM}ztlp.org | Apache 2.0${RESET}\n"
 
 cat <<'EOF'
 What you saw:
-  1. Cryptographic identities (no IP secrets)
+  1. Cryptographic identities for Bob (server), Alice (client), Eve (attacker)
   2. Optional name registration with ZTLP‑NS
-  3. Server listening on a single ZTLP port, forwarding SSH internally
-  4. Client side tunnel creation (Noise_XX handshake)
-  5. Interactive SSH session through the encrypted tunnel
-  6. SCP throughput saturation: ZTLP tunnel vs direct SSH (10/50/100 MB)
-  7. Port scan demonstrates SSH port invisibility
-  8. UDP flood shows nanosecond‑scale rejection at L1
-  9. Malformed packet test shows L2 session verification
- 10. tcpdump confirms payload is encrypted
- 11. CPU impact is negligible – cheap denial of service
+  3. Zero trust policy: Bob allows only Alice to access SSH
+  4. Server listening with policy enforcement enabled
+  5. Alice ALLOWED — policy grants her SSH access
+  6. Interactive SSH session through the encrypted tunnel
+  7. Eve DENIED — valid identity, but not authorized (authN ≠ authZ)
+  8. SCP throughput saturation: ZTLP tunnel vs direct SSH (10/50/100 MB)
+  9. Port scan demonstrates SSH port invisibility
+ 10. UDP flood shows nanosecond‑scale rejection at L1
+ 11. Malformed packet test shows L2 session verification
+ 12. tcpdump confirms payload is encrypted
+ 13. CPU impact is negligible – cheap denial of service
 EOF
 
 echo -e "\n  ${DIM}Demo artifacts stored in $DEMO_DIR${RESET}"

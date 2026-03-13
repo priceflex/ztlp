@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level agent configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     /// Identity settings.
@@ -145,19 +145,6 @@ pub struct LogConfig {
 }
 
 // ── Default implementations ─────────────────────────────────────────────────
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            identity: IdentityConfig::default(),
-            dns: DnsConfig::default(),
-            ns: NsConfig::default(),
-            tunnel: TunnelConfig::default(),
-            renewal: RenewalConfig::default(),
-            log: LogConfig::default(),
-        }
-    }
-}
 
 impl Default for IdentityConfig {
     fn default() -> Self {
@@ -322,7 +309,10 @@ mod tests {
     fn test_expand_tilde() {
         let result = expand_tilde("~/.ztlp/identity.json");
         assert!(!result.starts_with("~"));
-        assert!(result.to_str().unwrap_or("").contains(".ztlp/identity.json"));
+        assert!(result
+            .to_str()
+            .unwrap_or("")
+            .contains(".ztlp/identity.json"));
     }
 
     #[test]

@@ -140,11 +140,7 @@ impl TunnelPool {
     /// Register a new tunnel for the given name.
     ///
     /// Returns an error if max tunnels reached or name already has a tunnel.
-    pub fn register(
-        &mut self,
-        name: &str,
-        peer_addr: SocketAddr,
-    ) -> Result<(), String> {
+    pub fn register(&mut self, name: &str, peer_addr: SocketAddr) -> Result<(), String> {
         if self.tunnels.contains_key(name) {
             return Err(format!("tunnel already exists for '{}'", name));
         }
@@ -225,7 +221,7 @@ impl TunnelPool {
     pub fn is_active(&self, name: &str) -> bool {
         self.tunnels
             .get(name)
-            .map_or(false, |t| t.state == TunnelState::Active)
+            .is_some_and(|t| t.state == TunnelState::Active)
     }
 
     /// Remove a tunnel.
@@ -385,11 +381,8 @@ mod tests {
 
     #[test]
     fn test_touch_resets_idle() {
-        let mut pool = TunnelPool::with_timeouts(
-            256,
-            Duration::from_secs(60),
-            Duration::from_secs(30),
-        );
+        let mut pool =
+            TunnelPool::with_timeouts(256, Duration::from_secs(60), Duration::from_secs(30));
         pool.register("a.ztlp", addr(1)).unwrap();
         pool.mark_active("a.ztlp");
         pool.touch("a.ztlp", 100, 50);
@@ -411,7 +404,10 @@ mod tests {
         pool.mark_reconnecting("a.ztlp");
         let t = pool.get("a.ztlp").unwrap();
         assert_eq!(t.reconnect_attempts, 1);
-        assert!(matches!(t.state, TunnelState::Reconnecting { attempts: 1, .. }));
+        assert!(matches!(
+            t.state,
+            TunnelState::Reconnecting { attempts: 1, .. }
+        ));
 
         pool.mark_reconnecting("a.ztlp");
         let t = pool.get("a.ztlp").unwrap();

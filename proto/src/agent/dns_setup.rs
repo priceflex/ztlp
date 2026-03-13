@@ -173,9 +173,7 @@ fn teardown_systemd_resolved() -> Result<Vec<PathBuf>, Box<dyn std::error::Error
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const RESOLV_BACKUP: &str = "/etc/resolv.conf.ztlp-backup";
 
-fn setup_resolv_conf(
-    listen_addr: &str,
-) -> Result<DnsSetupResult, Box<dyn std::error::Error>> {
+fn setup_resolv_conf(listen_addr: &str) -> Result<DnsSetupResult, Box<dyn std::error::Error>> {
     let (dns_ip, _dns_port) = parse_listen_addr(listen_addr)?;
 
     // Note: resolv.conf doesn't support non-standard ports.
@@ -395,9 +393,7 @@ pub fn generate_launchagent_plist(ztlp_binary: &str) -> String {
 /// Install the ZTLP agent as a system service.
 ///
 /// Returns the path to the installed service file and any instructions.
-pub fn install_service(
-    ztlp_binary: &str,
-) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
+pub fn install_service(ztlp_binary: &str) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
     if cfg!(target_os = "macos") {
         let plist_dir = dirs::home_dir()
             .map(|h| h.join("Library/LaunchAgents"))

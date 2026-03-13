@@ -119,14 +119,20 @@ pub struct DiscoveryCache {
     max_entries: usize,
 }
 
+impl Default for DiscoveryCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiscoveryCache {
     /// Create a new discovery cache with default settings.
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
             negative_cache: HashMap::new(),
-            positive_ttl: Duration::from_secs(3600),     // 1 hour
-            negative_ttl: Duration::from_secs(900),      // 15 min
+            positive_ttl: Duration::from_secs(3600), // 1 hour
+            negative_ttl: Duration::from_secs(900),  // 15 min
             max_entries: 256,
         }
     }
@@ -195,9 +201,8 @@ impl DiscoveryCache {
         self.entries.retain(|_, v| !v.is_expired());
 
         let neg_ttl = self.negative_ttl;
-        self.negative_cache.retain(|_, cached_at| {
-            Instant::now().duration_since(*cached_at) < neg_ttl
-        });
+        self.negative_cache
+            .retain(|_, cached_at| Instant::now().duration_since(*cached_at) < neg_ttl);
 
         let after = self.entries.len() + self.negative_cache.len();
         before - after
@@ -335,10 +340,10 @@ fn build_txt_query(name: &str, id: u16) -> Vec<u8> {
     let mut query = Vec::new();
     query.extend_from_slice(&id.to_be_bytes());
     query.extend_from_slice(&0x0100u16.to_be_bytes()); // Flags: RD=1
-    query.extend_from_slice(&1u16.to_be_bytes());      // QDCOUNT
-    query.extend_from_slice(&0u16.to_be_bytes());      // ANCOUNT
-    query.extend_from_slice(&0u16.to_be_bytes());      // NSCOUNT
-    query.extend_from_slice(&0u16.to_be_bytes());      // ARCOUNT
+    query.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    query.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+    query.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    query.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
     query.extend_from_slice(&encode_dns_name(name));
     query.extend_from_slice(&QTYPE_TXT.to_be_bytes());
     query.extend_from_slice(&QCLASS_IN.to_be_bytes());
@@ -422,7 +427,10 @@ fn parse_txt_response(
 }
 
 /// Skip a DNS name at the given position (handles label encoding + compression pointers).
-fn skip_dns_name(data: &[u8], mut pos: usize) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+fn skip_dns_name(
+    data: &[u8],
+    mut pos: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     loop {
         if pos >= data.len() {
             return Err("name extends past data".into());
@@ -455,7 +463,8 @@ mod tests {
 
     #[test]
     fn test_parse_ztlp_txt_with_strip() {
-        let txt = "v=ztlp1 zone=acme.techrockstars.ztlp ns=10.0.0.1:23096 strip=internal.acmecorp.com";
+        let txt =
+            "v=ztlp1 zone=acme.techrockstars.ztlp ns=10.0.0.1:23096 strip=internal.acmecorp.com";
         let record = parse_ztlp_txt(txt).unwrap();
         assert_eq!(record.zone, "acme.techrockstars.ztlp");
         assert_eq!(record.strip, Some("internal.acmecorp.com".to_string()));
@@ -612,8 +621,8 @@ mod tests {
     #[test]
     fn test_cache_gc() {
         let mut cache = DiscoveryCache::with_ttls(
-            Duration::from_millis(1),  // Very short positive TTL
-            Duration::from_millis(1),  // Very short negative TTL
+            Duration::from_millis(1), // Very short positive TTL
+            Duration::from_millis(1), // Very short negative TTL
             256,
         );
 

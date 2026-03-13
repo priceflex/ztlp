@@ -104,12 +104,9 @@ pub async fn ns_resolve(
     ztlp_name: &str,
     ns_server: &str,
 ) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
-    let ns_addr: SocketAddr = ns_server.parse().map_err(|e| {
-        format!(
-            "invalid NS server address '{}': {}",
-            ns_server, e
-        )
-    })?;
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     let name_bytes = ztlp_name.as_bytes();
@@ -167,9 +164,7 @@ pub async fn ns_resolve(
 }
 
 /// Parse a SVC record response to extract the endpoint address.
-fn parse_svc_response(
-    data: &[u8],
-) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     if data.is_empty() || data[0] != 0x02 {
         return Err("invalid NS response (expected response opcode 0x02)".into());
     }
@@ -201,8 +196,8 @@ fn parse_svc_response(
     let data_bytes = &record[data_start..data_start + data_len];
 
     // Extract "address" field from CBOR
-    let address_str = cbor_extract_string(data_bytes, "address")
-        .ok_or("SVC record missing 'address' field")?;
+    let address_str =
+        cbor_extract_string(data_bytes, "address").ok_or("SVC record missing 'address' field")?;
 
     address_str
         .parse()
@@ -391,10 +386,7 @@ pub async fn run_proxy(
     })?;
 
     if ztlp_name != hostname.to_lowercase() {
-        eprintln!(
-            "[ztlp proxy] {} → {}",
-            hostname, ztlp_name
-        );
+        eprintln!("[ztlp proxy] {} → {}", hostname, ztlp_name);
     }
 
     // ── Resolve via ZTLP-NS ─────────────────────────────────────────────
@@ -402,10 +394,7 @@ pub async fn run_proxy(
         .map(|s| s.to_string())
         .unwrap_or_else(|| config.ns_server().to_string());
 
-    eprintln!(
-        "[ztlp proxy] resolving {} via NS {}",
-        ztlp_name, ns_server
-    );
+    eprintln!("[ztlp proxy] resolving {} via NS {}", ztlp_name, ns_server);
 
     let resolution = ns_resolve(&ztlp_name, &ns_server).await?;
 
@@ -460,11 +449,7 @@ pub async fn run_proxy(
     }
     let recv2_header = HandshakeHeader::deserialize(&recv2)?;
     if recv2_header.msg_type != MsgType::HelloAck {
-        return Err(format!(
-            "expected HELLO_ACK, got {:?}",
-            recv2_header.msg_type
-        )
-        .into());
+        return Err(format!("expected HELLO_ACK, got {:?}", recv2_header.msg_type).into());
     }
 
     let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
@@ -489,8 +474,8 @@ pub async fn run_proxy(
     let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
 
     // Extract crypto keys before moving session into pipeline
-    let send_key_bytes = session.send_key.clone();
-    let recv_key_bytes = session.recv_key.clone();
+    let send_key_bytes = session.send_key;
+    let recv_key_bytes = session.recv_key;
 
     // Register session in pipeline
     {
@@ -563,9 +548,17 @@ async fn run_stdio_bridge(
                         debug!("stdin EOF, sending FIN");
                         let data_seq = seq.fetch_add(1, Ordering::Relaxed);
                         if let Err(e) = send_frame(
-                            &udp, &pl, &send_cipher, session_id, peer_addr,
-                            FRAME_FIN, data_seq, &[],
-                        ).await {
+                            &udp,
+                            &pl,
+                            &send_cipher,
+                            session_id,
+                            peer_addr,
+                            FRAME_FIN,
+                            data_seq,
+                            &[],
+                        )
+                        .await
+                        {
                             debug!("failed to send FIN: {}", e);
                         }
                         return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
@@ -586,9 +579,16 @@ async fn run_stdio_bridge(
                     let data_seq = seq.fetch_add(1, Ordering::Relaxed);
 
                     send_frame(
-                        &udp, &pl, &send_cipher, session_id, peer_addr,
-                        FRAME_DATA, data_seq, chunk,
-                    ).await?;
+                        &udp,
+                        &pl,
+                        &send_cipher,
+                        session_id,
+                        peer_addr,
+                        FRAME_DATA,
+                        data_seq,
+                        chunk,
+                    )
+                    .await?;
 
                     offset = chunk_end;
                 }
@@ -614,10 +614,7 @@ async fn run_stdio_bridge(
 
             loop {
                 // Receive with timeout to periodically send ACKs
-                let recv_result = timeout(
-                    ACK_INTERVAL,
-                    udp.recv_from(&mut recv_buf),
-                ).await;
+                let recv_result = timeout(ACK_INTERVAL, udp.recv_from(&mut recv_buf)).await;
 
                 match recv_result {
                     Ok(Ok((len, _from))) => {
@@ -642,9 +639,7 @@ async fn run_stdio_bridge(
                         // Decrypt payload
                         let ciphertext = &pkt[DATA_HEADER_SIZE..];
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..].copy_from_slice(
-                            &header.packet_seq.to_be_bytes(),
-                        );
+                        nonce_bytes[4..].copy_from_slice(&header.packet_seq.to_be_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
 
                         let plaintext = match recv_cipher.decrypt(nonce, ciphertext) {
@@ -676,7 +671,9 @@ async fn run_stdio_bridge(
                                     // In-order delivery
                                     if let Err(e) = stdout.write_all(payload).await {
                                         debug!("stdout write error: {}", e);
-                                        return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
+                                        return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(
+                                            (),
+                                        );
                                     }
                                     if let Err(e) = stdout.flush().await {
                                         debug!("stdout flush error: {}", e);
@@ -697,10 +694,8 @@ async fn run_stdio_bridge(
                                         return Ok(());
                                     }
 
-                                    delivered.store(
-                                        expected_seq.saturating_sub(1),
-                                        Ordering::Relaxed,
-                                    );
+                                    delivered
+                                        .store(expected_seq.saturating_sub(1), Ordering::Relaxed);
                                 } else if data_seq > expected_seq {
                                     // Out-of-order: buffer it
                                     if reorder_buf.len() < MAX_REORDER_BUFFER {
@@ -789,6 +784,7 @@ async fn run_stdio_bridge(
 }
 
 /// Encrypt and send a framed data packet through the ZTLP tunnel.
+#[allow(clippy::too_many_arguments)]
 async fn send_frame(
     udp: &UdpSocket,
     pipeline: &Mutex<Pipeline>,

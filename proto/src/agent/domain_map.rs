@@ -268,10 +268,7 @@ mod tests {
         // If "corp.example.com" and "example.com" are both mapped,
         // "server.corp.example.com" should match "corp.example.com"
         let mut map = HashMap::new();
-        map.insert(
-            "example.com".to_string(),
-            "example.ztlp".to_string(),
-        );
+        map.insert("example.com".to_string(), "example.ztlp".to_string());
         map.insert(
             "corp.example.com".to_string(),
             "corp.example.ztlp".to_string(),

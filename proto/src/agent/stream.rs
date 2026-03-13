@@ -164,16 +164,12 @@ impl StreamMux {
     ///
     /// Called when we receive a STREAM_OPEN frame from the tunnel.
     /// Returns the stream ID, port, and a receiver for data.
-    pub fn accept_stream(
-        &mut self,
-        id: u32,
-        port: u16,
-    ) -> Result<mpsc::Receiver<Vec<u8>>, String> {
+    pub fn accept_stream(&mut self, id: u32, port: u16) -> Result<mpsc::Receiver<Vec<u8>>, String> {
         if self.streams.contains_key(&id) {
             return Err(format!("duplicate stream ID {}", id));
         }
         if self.streams.len() >= self.max_streams {
-            return Err(format!("max streams exceeded"));
+            return Err("max streams exceeded".to_string());
         }
 
         let (tx, rx) = mpsc::channel(256);
@@ -202,7 +198,10 @@ impl StreamMux {
             .ok_or_else(|| format!("stream {} not found", stream_id))?;
 
         if stream.state != StreamState::Open {
-            return Err(format!("stream {} not open ({:?})", stream_id, stream.state));
+            return Err(format!(
+                "stream {} not open ({:?})",
+                stream_id, stream.state
+            ));
         }
 
         let mut frame = Vec::with_capacity(5 + data.len());

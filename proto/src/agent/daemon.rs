@@ -72,10 +72,13 @@ pub async fn run_daemon(
     );
 
     // Initialize VIP pool
-    let vip_pool = VipPool::new(&config.dns.vip_range).map_err(|e| {
-        format!("invalid VIP range '{}': {}", config.dns.vip_range, e)
-    })?;
-    info!("VIP pool: {} ({} addresses)", config.dns.vip_range, vip_pool.capacity());
+    let vip_pool = VipPool::new(&config.dns.vip_range)
+        .map_err(|e| format!("invalid VIP range '{}': {}", config.dns.vip_range, e))?;
+    info!(
+        "VIP pool: {} ({} addresses)",
+        config.dns.vip_range,
+        vip_pool.capacity()
+    );
 
     // Initialize domain mapper
     let domain_mapper = DomainMapper::new(&config.dns.domain_map);
@@ -165,7 +168,11 @@ pub async fn run_daemon(
     // ── Print startup info ──────────────────────────────────────────────
     if foreground {
         eprintln!("ZTLP Agent v{}", env!("CARGO_PKG_VERSION"));
-        eprintln!("  Identity: {} ({})", identity.node_id, identity_path.display());
+        eprintln!(
+            "  Identity: {} ({})",
+            identity.node_id,
+            identity_path.display()
+        );
         if config.dns.enabled {
             eprintln!("  DNS:      {}", config.dns.listen);
         }
@@ -297,13 +304,19 @@ async fn run_tcp_proxy(
                 tokio::spawn(async move {
                     match TcpListener::bind(addr).await {
                         Ok(listener) => {
-                            debug!("TCP proxy listening on {} for {} (port {})", addr, name, port);
+                            debug!(
+                                "TCP proxy listening on {} for {} (port {})",
+                                addr, name, port
+                            );
                             loop {
                                 match listener.accept().await {
                                     Ok((tcp_stream, client_addr)) => {
                                         info!(
                                             "TCP connection {} → {} ({}:{})",
-                                            client_addr, name, addr.ip(), port
+                                            client_addr,
+                                            name,
+                                            addr.ip(),
+                                            port
                                         );
 
                                         // Increment connection count
@@ -320,14 +333,11 @@ async fn run_tcp_proxy(
 
                                         tokio::spawn(async move {
                                             if let Err(e) = handle_tcp_connection(
-                                                tcp_stream,
-                                                &name,
-                                                port,
-                                                peer,
-                                                &identity,
-                                                &bind,
+                                                tcp_stream, &name, port, peer, &identity, &bind,
                                                 &ns,
-                                            ).await {
+                                            )
+                                            .await
+                                            {
                                                 warn!("tunnel error for {}: {}", name, e);
                                             }
 
@@ -374,7 +384,10 @@ async fn handle_tcp_connection(
         }
     };
 
-    debug!("establishing tunnel to {} ({}) port {}", ztlp_name, peer, port);
+    debug!(
+        "establishing tunnel to {} ({}) port {}",
+        ztlp_name, peer, port
+    );
 
     // Establish ZTLP tunnel
     let node = TransportNode::bind(bind_addr).await?;
@@ -438,7 +451,10 @@ async fn handle_tcp_connection(
         pl.register_session(session);
     }
 
-    info!("tunnel active: {} → {} (session {})", ztlp_name, peer, session_id);
+    info!(
+        "tunnel active: {} → {} (session {})",
+        ztlp_name, peer, session_id
+    );
 
     // Bridge TCP ↔ ZTLP tunnel
     match tunnel::run_bridge(
@@ -447,7 +463,9 @@ async fn handle_tcp_connection(
         node.pipeline.clone(),
         session_id,
         peer,
-    ).await {
+    )
+    .await
+    {
         Ok(_) => {
             debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
         }

@@ -1798,11 +1798,15 @@ async fn cmd_listen(
             let result = if buffered.is_empty() {
                 tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await
             } else {
-                eprintln!("{} injecting {} buffered packets into new bridge",
-                    c_cyan("↻"), buffered.len());
+                eprintln!(
+                    "{} injecting {} buffered packets into new bridge",
+                    c_cyan("↻"),
+                    buffered.len()
+                );
                 tunnel::run_bridge_with_buffered(
                     tcp_stream, udp, pipeline, session_id, from1, buffered,
-                ).await
+                )
+                .await
             };
 
             match result {
@@ -1822,8 +1826,13 @@ async fn cmd_listen(
                     // We use the buffered variant to capture data packets
                     // that arrive during the wait, preventing data loss.
                     match wait_for_reset_buffered(
-                        &node, session_id, from1, Duration::from_secs(300),
-                    ).await {
+                        &node,
+                        session_id,
+                        from1,
+                        Duration::from_secs(300),
+                    )
+                    .await
+                    {
                         Ok(reset_result) if reset_result.reset_received => {
                             eprintln!(
                                 "{} (buffered {} packets)",
@@ -1937,15 +1946,12 @@ async fn wait_for_reset_buffered(
                 if plaintext[0] == 0x04 {
                     // FRAME_RESET received — capture trailing data packets
                     let _ = reset_seen; // suppress unused warning
-                    // Give a short grace period to collect packets that
-                    // may have been sent right after the RESET
-                    let grace_deadline = tokio::time::Instant::now()
-                        + Duration::from_millis(50);
+                                        // Give a short grace period to collect packets that
+                                        // may have been sent right after the RESET
+                    let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
                     loop {
-                        let grace_result = tokio::time::timeout_at(
-                            grace_deadline,
-                            node.recv_raw(),
-                        ).await;
+                        let grace_result =
+                            tokio::time::timeout_at(grace_deadline, node.recv_raw()).await;
                         match grace_result {
                             Err(_) => break, // Grace period expired
                             Ok(Err(_)) => break,
@@ -1974,8 +1980,12 @@ async fn wait_for_reset_buffered(
 
                     // Cap buffer to prevent unbounded growth while waiting
                     if buffered_packets.len() > 4096 {
-                        eprintln!("{}",
-                            c_yellow("⚠ too many buffered packets during reset wait, draining oldest"));
+                        eprintln!(
+                            "{}",
+                            c_yellow(
+                                "⚠ too many buffered packets during reset wait, draining oldest"
+                            )
+                        );
                         buffered_packets.drain(0..1024);
                     }
                 }
@@ -4378,14 +4388,9 @@ async fn cmd_proxy(
     let key_str = key.as_ref().map(|p| p.to_string_lossy().to_string());
     let ns_str = ns_server.as_ref().map(|s| s.as_str());
 
-    proxy::run_proxy(
-        hostname,
-        port,
-        key_str.as_deref(),
-        ns_str,
-    )
-    .await
-    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+    proxy::run_proxy(hostname, port, key_str.as_deref(), ns_str)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
 }
 
 /// `ztlp agent start` — Start the agent daemon.
@@ -4398,11 +4403,7 @@ async fn cmd_agent_start(
 
     // Check if already running
     if let Some(pid) = daemon::get_agent_pid() {
-        eprintln!(
-            "{} Agent already running (PID {})",
-            c_yellow("⚠"),
-            pid
-        );
+        eprintln!("{} Agent already running (PID {})", c_yellow("⚠"), pid);
         return Ok(());
     }
 
@@ -4413,14 +4414,8 @@ async fn cmd_agent_start(
     };
 
     if !foreground {
-        eprintln!(
-            "{} Starting agent daemon...",
-            c_cyan("→")
-        );
-        eprintln!(
-            "  {} Use --foreground to run in foreground",
-            c_dim("Hint:")
-        );
+        eprintln!("{} Starting agent daemon...", c_cyan("→"));
+        eprintln!("  {} Use --foreground to run in foreground", c_dim("Hint:"));
     }
 
     daemon::run_daemon(&config, foreground)
@@ -4488,10 +4483,19 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(ns) = data.get("ns_server").and_then(|v| v.as_str()) {
                     eprintln!("  {} {}", c_cyan("NS:"), ns);
                 }
-                let alloc = data.get("vip_allocated").and_then(|v| v.as_u64()).unwrap_or(0);
-                let cap = data.get("vip_capacity").and_then(|v| v.as_u64()).unwrap_or(0);
+                let alloc = data
+                    .get("vip_allocated")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let cap = data
+                    .get("vip_capacity")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 eprintln!("  {} {}/{}", c_cyan("VIPs:"), alloc, cap);
-                let maps = data.get("domain_mappings").and_then(|v| v.as_u64()).unwrap_or(0);
+                let maps = data
+                    .get("domain_mappings")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 if maps > 0 {
                     eprintln!("  {} {}", c_cyan("Domain maps:"), maps);
                 }
@@ -4502,7 +4506,7 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Daemon not running — show config
-    eprintln!("  {} {}", c_red("●"), "not running");
+    eprintln!("  {} not running", c_red("●"));
 
     let config = AgentConfig::load();
     eprintln!();
@@ -4520,11 +4524,7 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
         }
     );
     eprintln!("  {} {}", c_cyan("VIP range:"), config.dns.vip_range);
-    eprintln!(
-        "  {} {}",
-        c_cyan("Max tunnels:"),
-        config.tunnel.max_tunnels
-    );
+    eprintln!("  {} {}", c_cyan("Max tunnels:"), config.tunnel.max_tunnels);
 
     if !config.dns.domain_map.is_empty() {
         eprintln!();
@@ -4535,10 +4535,7 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!();
-    eprintln!(
-        "  {} ztlp agent start",
-        c_dim("Start with:")
-    );
+    eprintln!("  {} ztlp agent start", c_dim("Start with:"));
 
     Ok(())
 }
@@ -4575,15 +4572,18 @@ async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
                                 .get("peer_addr")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-");
-                            let conn = entry.get("active_connections")
+                            let conn = entry
+                                .get("active_connections")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0);
-                            let age = entry.get("age_secs")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
+                            let age = entry.get("age_secs").and_then(|v| v.as_u64()).unwrap_or(0);
                             eprintln!(
                                 "{:<35} {:<16} {:<22} {:<4} {}",
-                                name, ip, peer, conn, format_duration(age)
+                                name,
+                                ip,
+                                peer,
+                                conn,
+                                format_duration(age)
                             );
                         }
                         eprintln!();
@@ -4620,7 +4620,8 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
 
     match control::send_command(&socket_path, &cmd).await {
         Ok(resp) if resp.ok => {
-            let freed = resp.data
+            let freed = resp
+                .data
                 .and_then(|d| d.get("freed").and_then(|v| v.as_u64()))
                 .unwrap_or(0);
             eprintln!("{} Flushed {} expired entries", c_green("✓"), freed);
@@ -4722,7 +4723,7 @@ async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::
     let config = AgentConfig::load();
 
     let mut zone_list: Vec<String> = config.dns.zones.clone();
-    for (domain, _) in &config.dns.domain_map {
+    for domain in config.dns.domain_map.keys() {
         if !zone_list.contains(domain) {
             zone_list.push(domain.clone());
         }
@@ -4738,7 +4739,7 @@ async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::
 
     match dns_setup::setup_dns(&config.dns.listen, &zone_list) {
         Ok(result) => {
-            eprintln!("{} DNS configured ({})", c_green("✓"), format!("{:?}", result.backend));
+            eprintln!("{} DNS configured ({:?})", c_green("✓"), result.backend);
             for file in &result.files_written {
                 eprintln!("  wrote {}", file.display());
             }
@@ -4757,7 +4758,10 @@ async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::
         Err(e) => {
             eprintln!("{} DNS setup failed: {}", c_red("✗"), e);
             eprintln!();
-            eprintln!("{}",c_dim("Hint: DNS setup usually requires root. Try: sudo ztlp agent dns-setup"));
+            eprintln!(
+                "{}",
+                c_dim("Hint: DNS setup usually requires root. Try: sudo ztlp agent dns-setup")
+            );
         }
     }
 
@@ -4996,9 +5000,7 @@ async fn main() {
             port,
             key,
             ns_server,
-        } => {
-            cmd_proxy(hostname, *port, key, ns_server).await
-        }
+        } => cmd_proxy(hostname, *port, key, ns_server).await,
 
         Commands::Agent(subcmd) => match subcmd {
             AgentCommands::Start { foreground, config } => {

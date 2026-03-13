@@ -272,6 +272,12 @@ pub struct CredentialTracker {
     credentials: Vec<ManagedCredential>,
 }
 
+impl Default for CredentialTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CredentialTracker {
     /// Create a new empty tracker.
     pub fn new() -> Self {
@@ -309,10 +315,7 @@ impl CredentialTracker {
 
     /// Get all expired credentials.
     pub fn expired(&self) -> Vec<&ManagedCredential> {
-        self.credentials
-            .iter()
-            .filter(|c| c.is_expired())
-            .collect()
+        self.credentials.iter().filter(|c| c.is_expired()).collect()
     }
 
     /// Get credential info for all tracked credentials.
@@ -470,11 +473,17 @@ mod tests {
         let mut cred = cert_cred("test.ztlp", 3600);
         cred.mark_failed();
         assert_eq!(cred.consecutive_failures, 1);
-        assert!(matches!(cred.state, RenewalState::Failed { attempts: 1, .. }));
+        assert!(matches!(
+            cred.state,
+            RenewalState::Failed { attempts: 1, .. }
+        ));
 
         cred.mark_failed();
         assert_eq!(cred.consecutive_failures, 2);
-        assert!(matches!(cred.state, RenewalState::Failed { attempts: 2, .. }));
+        assert!(matches!(
+            cred.state,
+            RenewalState::Failed { attempts: 2, .. }
+        ));
     }
 
     #[test]
@@ -501,7 +510,7 @@ mod tests {
             0.0,
         );
         let frac = cred.elapsed_fraction();
-        assert!(frac >= 0.49 && frac <= 0.51, "fraction: {}", frac);
+        assert!((0.49..=0.51).contains(&frac), "fraction: {}", frac);
     }
 
     #[test]

@@ -260,9 +260,7 @@ fn build_a_response(
 }
 
 /// Build an empty response (no answer records) — used for AAAA queries on VIPs.
-fn build_empty_response(
-    query: &[u8],
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn build_empty_response(query: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     if query.len() < DNS_HEADER_SIZE {
         return Err("query too short".into());
     }
@@ -325,7 +323,9 @@ fn build_error_response(
 /// Parse a DNS question section.
 ///
 /// Returns (name, qtype, qclass, bytes_consumed).
-fn parse_question(data: &[u8]) -> Result<(String, u16, u16, usize), Box<dyn std::error::Error + Send + Sync>> {
+fn parse_question(
+    data: &[u8],
+) -> Result<(String, u16, u16, usize), Box<dyn std::error::Error + Send + Sync>> {
     let (name, name_end) = parse_dns_name(data)?;
 
     if data.len() < name_end + 4 {
@@ -341,7 +341,9 @@ fn parse_question(data: &[u8]) -> Result<(String, u16, u16, usize), Box<dyn std:
 /// Parse a DNS label-encoded name.
 ///
 /// Returns (decoded_name, bytes_consumed).
-fn parse_dns_name(data: &[u8]) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+fn parse_dns_name(
+    data: &[u8],
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     let mut labels = Vec::new();
     let mut pos = 0;
 
@@ -448,10 +450,8 @@ mod tests {
         assert_eq!(
             encoded,
             vec![
-                6, b's', b'e', b'r', b'v', b'e', b'r',
-                4, b'c', b'o', b'r', b'p',
-                4, b'z', b't', b'l', b'p',
-                0, // null terminator
+                6, b's', b'e', b'r', b'v', b'e', b'r', 4, b'c', b'o', b'r', b'p', 4, b'z', b't',
+                b'l', b'p', 0, // null terminator
             ]
         );
     }
@@ -468,10 +468,8 @@ mod tests {
     #[test]
     fn test_parse_dns_name() {
         let wire = vec![
-            6, b's', b'e', b'r', b'v', b'e', b'r',
-            4, b'c', b'o', b'r', b'p',
-            4, b'z', b't', b'l', b'p',
-            0,
+            6, b's', b'e', b'r', b'v', b'e', b'r', 4, b'c', b'o', b'r', b'p', 4, b'z', b't', b'l',
+            b'p', 0,
         ];
         let (name, consumed) = parse_dns_name(&wire).unwrap();
         assert_eq!(name, "server.corp.ztlp");

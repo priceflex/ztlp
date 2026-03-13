@@ -284,14 +284,16 @@ pub async fn send_command(
     socket_path: &Path,
     command: &ControlCommand,
 ) -> Result<ControlResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let stream = tokio::net::UnixStream::connect(socket_path).await.map_err(|e| {
-        format!(
-            "cannot connect to agent ({}): {}\n\
+    let stream = tokio::net::UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "cannot connect to agent ({}): {}\n\
              Is the agent running? Start it with: ztlp agent start",
-            socket_path.display(),
-            e
-        )
-    })?;
+                socket_path.display(),
+                e
+            )
+        })?;
 
     let (reader, mut writer) = stream.into_split();
 

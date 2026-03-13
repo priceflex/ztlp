@@ -60,7 +60,10 @@ impl VipPool {
         let (base, prefix_len) = parse_cidr(cidr)?;
 
         if prefix_len > 30 {
-            return Err(format!("prefix length /{} too long (need at least /30)", prefix_len));
+            return Err(format!(
+                "prefix length /{} too long (need at least /30)",
+                prefix_len
+            ));
         }
 
         let host_bits = 32 - prefix_len;
@@ -163,8 +166,7 @@ impl VipPool {
             .name_to_vip
             .iter()
             .filter(|(_, entry)| {
-                entry.active_connections == 0
-                    && entry.expires_at.map_or(false, |exp| now >= exp)
+                entry.active_connections == 0 && entry.expires_at.is_some_and(|exp| now >= exp)
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -361,7 +363,9 @@ mod tests {
     #[test]
     fn test_gc_skips_active_connections() {
         let mut pool = VipPool::new("127.100.0.0/24").unwrap();
-        let ip = pool.allocate("busy.ztlp", Some(Duration::from_millis(0))).unwrap();
+        let ip = pool
+            .allocate("busy.ztlp", Some(Duration::from_millis(0)))
+            .unwrap();
         pool.inc_connections(&ip);
 
         std::thread::sleep(Duration::from_millis(1));

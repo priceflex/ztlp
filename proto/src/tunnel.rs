@@ -725,7 +725,13 @@ pub async fn run_bridge(
     peer_addr: SocketAddr,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     run_bridge_inner(
-        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false, Vec::new(),
+        tcp_stream,
+        udp_socket,
+        pipeline,
+        session_id,
+        peer_addr,
+        false,
+        Vec::new(),
     )
     .await
 }
@@ -739,7 +745,13 @@ pub async fn run_bridge_with_reset(
     peer_addr: SocketAddr,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     run_bridge_inner(
-        tcp_stream, udp_socket, pipeline, session_id, peer_addr, true, Vec::new(),
+        tcp_stream,
+        udp_socket,
+        pipeline,
+        session_id,
+        peer_addr,
+        true,
+        Vec::new(),
     )
     .await
 }
@@ -756,7 +768,13 @@ pub async fn run_bridge_with_buffered(
     buffered_packets: Vec<Vec<u8>>,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     run_bridge_inner(
-        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false, buffered_packets,
+        tcp_stream,
+        udp_socket,
+        pipeline,
+        session_id,
+        peer_addr,
+        false,
+        buffered_packets,
     )
     .await
 }
@@ -1378,7 +1396,10 @@ async fn run_bridge_inner(
     let prefetched = prefetched_packets; // move into the async block
     let ztlp_to_tcp = async move {
         let reset_received = reset_flag_for_rx;
-        info!("ztlp_to_tcp: starting (prefetched_packets={})", prefetched.len());
+        info!(
+            "ztlp_to_tcp: starting (prefetched_packets={})",
+            prefetched.len()
+        );
         // Recv key and ACK key are pre-extracted before select! to avoid lock contention.
         let recv_cipher = ChaCha20Poly1305::new((&recv_key).into());
         let ack_cipher = ChaCha20Poly1305::new((&send_key_for_acks).into());
@@ -1404,7 +1425,10 @@ async fn run_bridge_inner(
         // processed before we start reading new UDP packets to avoid
         // data loss during bridge transitions.
         if !prefetched.is_empty() {
-            info!("processing {} pre-fetched packets from bridge transition", prefetched.len());
+            info!(
+                "processing {} pre-fetched packets from bridge transition",
+                prefetched.len()
+            );
             for pkt_data in &prefetched {
                 if pkt_data.len() < DATA_HEADER_SIZE {
                     continue;
@@ -1438,15 +1462,17 @@ async fn run_bridge_inner(
                         if frame_payload.len() < 8 {
                             continue;
                         }
-                        let data_seq =
-                            u64::from_be_bytes(match frame_payload[..8].try_into() {
-                                Ok(b) => b,
-                                Err(_) => continue,
-                            });
+                        let data_seq = u64::from_be_bytes(match frame_payload[..8].try_into() {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        });
                         let tcp_payload = &frame_payload[8..];
 
                         let reasm = reassembly.get_or_insert_with(|| {
-                            debug!("reassembly: initialized from prefetched with first data_seq {}", data_seq);
+                            debug!(
+                                "reassembly: initialized from prefetched with first data_seq {}",
+                                data_seq
+                            );
                             ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
                         });
 
@@ -3242,10 +3268,7 @@ mod tests {
     fn test_reset_wait_result_with_buffered() {
         let result = ResetWaitResult {
             reset_received: true,
-            buffered_packets: vec![
-                vec![0x5A, 0x01, 0x02, 0x03],
-                vec![0x5A, 0x04, 0x05, 0x06],
-            ],
+            buffered_packets: vec![vec![0x5A, 0x01, 0x02, 0x03], vec![0x5A, 0x04, 0x05, 0x06]],
         };
         assert!(result.reset_received);
         assert_eq!(result.buffered_packets.len(), 2);

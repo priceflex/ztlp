@@ -1020,6 +1020,19 @@ async fn resolve_target(
         }
     }
 
+    // Fallback: some NS versions store address in the KEY record CBOR data.
+    // Try extracting "address" from KEY record if SVC didn't yield one.
+    if resolved_addr.is_none() {
+        if let Ok(Some(raw)) = ns_query_raw(name_part, &ns_server, 1).await {
+            if let Some(addr_str) = cbor_extract_string(&raw.data_bytes, "address") {
+                if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+                    eprintln!("  {} KEY record address → {}", c_green("✓"), addr);
+                    resolved_addr = Some(addr);
+                }
+            }
+        }
+    }
+
     // Query KEY record (type 1) for NodeID (identity verification)
     let mut resolved_node_id: Option<NodeId> = None;
     if let Ok(Some(raw)) = ns_query_raw(name_part, &ns_server, 1).await {
@@ -2377,11 +2390,22 @@ async fn cmd_ns_register(
     // ── Step 1: Register KEY record ─────────────────────────────────
     eprintln!("{}", c_dim("→ Registering KEY record..."));
 
-    let key_data_bin = cbor_map(&mut vec![
-        ("algorithm", "Ed25519"),
-        ("node_id", &node_id_hex),
-        ("public_key", &pubkey_hex),
-    ]);
+    // Include address in KEY record for backward compat with older NS servers
+    // that don't differentiate KEY vs SVC record types.
+    let key_data_bin = if let Some(addr) = address {
+        cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", &node_id_hex),
+            ("public_key", &pubkey_hex),
+            ("address", addr.as_str()),
+        ])
+    } else {
+        cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", &node_id_hex),
+            ("public_key", &pubkey_hex),
+        ])
+    };
 
     let key_pkt = build_registration_packet(name, 1, &key_data_bin); // type 1 = KEY
     sock.send_to(&key_pkt, ns_addr).await?;

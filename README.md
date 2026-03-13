@@ -1208,6 +1208,8 @@ the message type.
 | 0x06 | server → client | REGISTER\_ACK | Registration succeeded. |
 | 0x07 | client → server | ENROLL | Device enrollment request (see Section 10). |
 | 0x08 | server → client | ENROLL\_RESPONSE | Enrollment result. |
+| 0x09 | client → server | RENEW | Certificate renewal request (see Section 16.2.1.2). |
+| 0x0A | server → client | RENEW\_RESPONSE | Certificate renewal result. |
 | 0xFF | server → client | INVALID | Malformed or unrecognized query. |
 
 ### 9.5.2 QUERY (0x01)
@@ -2832,7 +2834,161 @@ The certificate lifecycle is:
 Certificate TTL SHOULD NOT exceed 90 days. Short-lived session tokens
 (issued per-session) SHOULD NOT exceed 24 hours.
 
-### 16.2.1 Certificate Wire Format
+### 16.2.1 Automated Certificate Renewal
+
+ZTLP defines a renewal protocol that allows nodes to obtain fresh
+certificates before expiry without operator intervention. Renewal is
+distinct from re-enrollment: the node's identity (NodeID) is preserved
+and no enrollment token is required. The renewal protocol relies on
+proof-of-possession of the existing private key.
+
+#### 16.2.1.1 Renewal Eligibility
+
+A node is eligible for renewal when ALL of the following conditions are met:
+
+1.  The node holds a valid (non-revoked, non-expired) certificate.
+2.  The node can prove possession of the private key corresponding
+    to the `pubkey_ed25519` in the current certificate.
+3.  The certificate's remaining validity is within the **renewal window**:
+    at least 1/3 of the certificate's total lifetime has elapsed.
+    For example, a 90-day certificate becomes eligible for renewal
+    after day 30.
+4.  The node's NodeID has not been revoked in ZTLP-NS.
+
+Implementations SHOULD begin renewal attempts when 2/3 of the
+certificate's lifetime has elapsed (the "renewal threshold"). For a
+90-day certificate, this is day 60. For a 24-hour certificate, this
+is hour 16.
+
+#### 16.2.1.2 RENEW Wire Message (MsgType = 0x09)
+
+Certificate renewal uses a new wire message type exchanged with the
+ZTLP-NS server over UDP, following the same transport as ENROLL (0x07).
+
+**RENEW Request (node → NS):**
+
+```
+  Offset  Size          Field
+  ──────  ────────────  ─────────────────────────────────
+  0       1             MsgType (0x09)
+  1       1             Version (uint8, current: 0x01)
+  2       16            NodeID (128-bit, big-endian)
+  18      2             Zone name length (uint16, big-endian)
+  20      zone_len      Zone name (UTF-8)
+  20+Z    2             Current certificate serial (uint16, big-endian)
+  22+Z    32            New X25519 public key (optional key rotation;
+                        if unchanged, copy current key)
+  54+Z    8             Timestamp (uint64, Unix epoch seconds)
+  62+Z    64            Ed25519 signature over bytes [0..62+Z)
+                        using the node's current private key
+```
+
+The signature proves the requesting node possesses the private key
+bound to the current certificate. The timestamp prevents replay — the
+NS server MUST reject requests with timestamps more than 300 seconds
+from the server's clock.
+
+**RENEW Response (NS → node):**
+
+```
+  Offset  Size          Field
+  ──────  ────────────  ─────────────────────────────────
+  0       1             MsgType (0x0A)
+  1       1             Result code (uint8)
+  2       var           Payload (depends on result code)
+```
+
+**Result Codes:**
+
+| Code | Name | Payload |
+|------|------|---------|
+| 0x00 | SUCCESS | New signed certificate (Section 16.2.2 wire format) |
+| 0x01 | NOT\_ELIGIBLE | Empty — certificate not yet in renewal window |
+| 0x02 | REVOKED | Empty — NodeID has been revoked |
+| 0x03 | EXPIRED | Empty — current certificate already expired; must re-enroll |
+| 0x04 | BAD\_SIGNATURE | Empty — proof-of-possession failed |
+| 0x05 | CLOCK\_SKEW | 8 bytes: server timestamp (helps node correct clock) |
+| 0x06 | RATE\_LIMITED | 4 bytes: retry-after seconds (uint32) |
+
+On SUCCESS, the NS server:
+
+1.  Verifies the node's signature against its currently registered public key.
+2.  Verifies the NodeID is not revoked.
+3.  Verifies the current certificate is within the renewal window.
+4.  Issues a new certificate with an incremented serial number,
+    fresh `issued_at` / `not_before` / `not_after` timestamps,
+    and the same (or new) X25519 public key.
+5.  Updates the ZTLP\_KEY record in the NS store with the new certificate.
+6.  Returns the signed certificate in the response.
+
+The new certificate's TTL SHOULD match the original certificate's TTL
+unless the Enrollment Authority has configured a different policy. The
+NS server MAY adjust TTLs based on the node's assurance level
+(Section 16.3.2): higher assurance levels MAY receive longer TTLs.
+
+#### 16.2.1.3 Renewal Daemon Behavior
+
+Nodes SHOULD implement an automated renewal daemon that:
+
+1.  Computes the renewal threshold: `not_before + (2/3 × (not_after − not_before))`.
+2.  Schedules a renewal attempt at the threshold time.
+3.  On failure, retries with exponential backoff: 1 minute, 5 minutes,
+    15 minutes, 1 hour, then hourly until expiry or success.
+4.  On SUCCESS, persists the new certificate to disk and updates
+    in-memory state without interrupting active sessions.
+5.  Logs all renewal attempts (success or failure) for audit.
+
+Active sessions are NOT affected by certificate renewal. Sessions use
+ephemeral keys derived during the Noise\_XX handshake. The certificate
+is only verified during session establishment, not during data transfer.
+Renewing a certificate mid-session has no effect on existing sessions.
+
+New sessions established after renewal will use the new certificate
+automatically.
+
+#### 16.2.1.4 NS Record Auto-Refresh
+
+Independent of certificate renewal, nodes MUST refresh their NS records
+(ZTLP\_KEY, ZTLP\_SVC) before the record TTL expires. The recommended
+refresh interval is 75% of the record TTL:
+
+| Record Type | Default TTL | Refresh Interval |
+|-------------|-------------|------------------|
+| ZTLP\_KEY | 86,400s (24h) | Every 18 hours |
+| ZTLP\_SVC | 86,400s (24h) | Every 18 hours |
+| ZTLP\_RELAY | 3,600s (1h) | Every 45 minutes |
+| ZTLP\_BOOTSTRAP | 86,400s (24h) | Every 18 hours |
+
+Implementations SHOULD add jitter (±10% of the refresh interval) to
+prevent thundering herd problems when many nodes refresh simultaneously.
+
+If a refresh fails, the node MUST retry with exponential backoff.
+If a KEY record expires before refresh, the node MUST re-register
+(not re-enroll — the difference is that re-registration reuses the
+existing identity and does not require a token).
+
+#### 16.2.1.5 Key Rotation During Renewal
+
+A node MAY rotate its X25519 static key during certificate renewal by
+including a new public key in the RENEW request. The Ed25519 identity
+key (which defines the NodeID binding) MUST NOT change during renewal.
+To rotate the Ed25519 key, the node must perform a full identity
+rotation (Section 2.4 of KEY-MANAGEMENT.md), which changes the NodeID
+and breaks all trust relationships.
+
+Key rotation during renewal is RECOMMENDED for high-security deployments
+where X25519 keys should have bounded lifetimes. The NS server updates
+the KEY record's X25519 public key upon successful renewal with a new key.
+
+#### 16.2.1.6 Renewal vs. Re-enrollment vs. Re-registration
+
+| Operation | Preserves NodeID | Requires Token | Requires Operator | Use Case |
+|-----------|-----------------|----------------|-------------------|----------|
+| **Renewal** | ✅ Yes | ❌ No | ❌ No | Routine cert refresh before expiry |
+| **Re-registration** | ✅ Yes | ❌ No | ❌ No | NS record expired; re-publish KEY/SVC |
+| **Re-enrollment** | ❌ No (new NodeID) | ✅ Yes | ✅ Yes | New device, lost keys, identity rotation |
+
+### 16.2.2 Certificate Wire Format
 
 ZTLP node certificates are encoded as signed CBOR (RFC 8949) structures.
 The certificate contains the following fields in a CBOR map with

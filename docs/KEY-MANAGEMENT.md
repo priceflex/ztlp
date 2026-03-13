@@ -159,7 +159,39 @@ age -r "$(grep 'public key:' ~/.ztlp/backup-key.txt | cut -d' ' -f4)" \
 age -d -i ~/.ztlp/backup-key.txt ~/ztlp-identity-backup.json.age > ~/.ztlp/identity.json
 ```
 
-### 2.4 Rotation
+### 2.4 Automated Certificate Renewal
+
+ZTLP supports automated certificate renewal via the RENEW wire protocol
+(0x09/0x0A). This is distinct from identity rotation — renewal preserves
+the NodeID and Ed25519 key, only issuing a fresh certificate with a new
+serial number and extended validity period.
+
+> **Full design:** [CREDENTIAL-RENEWAL.md](CREDENTIAL-RENEWAL.md) covers
+> the wire protocol, node agent, bootstrap server integration, failure
+> modes, and monitoring.
+
+**Quick reference:**
+
+```bash
+# One-shot renewal
+ztlp renew --ns-server 10.0.0.5:23096 --zone corp.ztlp
+
+# Daemon mode (auto-renews when 2/3 of cert lifetime has elapsed)
+ztlp agent --config /etc/ztlp/agent.toml
+
+# Check cert status
+ztlp status --cert
+```
+
+Key points:
+- Renewal is proof-of-possession: the node signs the request with its
+  current Ed25519 key. No enrollment token required.
+- The renewal window opens after 1/3 of the cert lifetime has elapsed.
+- The recommended threshold is 2/3 (e.g., day 60 of a 90-day cert).
+- X25519 keys can optionally be rotated during renewal.
+- Active sessions are unaffected (they use ephemeral session keys).
+
+### 2.5 Identity Rotation (Disruptive)
 
 Rotating a node's identity means generating a new keypair and updating all references to the old one. This is a disruptive operation — all active sessions terminate and the node gets a new NodeID.
 
@@ -195,7 +227,7 @@ ztlp ping 127.0.0.1:23095 --key ~/.ztlp/identity.json
 
 > ⚠️ **Identity rotation breaks all active sessions.** Clients connected with the old key must re-handshake. In a production environment, drain the node first (see [OPS-RUNBOOK.md § Graceful Drain](OPS-RUNBOOK.md#graceful-drain-sigusr1)).
 
-### 2.5 Revocation
+### 2.6 Revocation
 
 When an identity key is compromised, revoke it immediately using a ZTLP_REVOKE record. Revocation records have a TTL of 0 (never expire) and propagate across all NS nodes.
 
@@ -219,7 +251,7 @@ The revocation record is signed by the zone authority (not the compromised key) 
 
 All ZTLP components check for revocation records during identity resolution. A revoked NodeID is treated as untrusted even if its cryptographic signatures are valid.
 
-### 2.6 Multiple Identities
+### 2.7 Multiple Identities
 
 You can maintain separate identities for different environments:
 

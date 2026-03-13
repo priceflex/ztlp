@@ -141,6 +141,14 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    # Remove tcpdump cap_net_raw if we set it
+    if [[ "$TCPDUMP_CAP_SET" == "true" ]]; then
+        if sudo -n setcap -r "$TCPDUMP_PATH" 2>/dev/null || sudo setcap -r "$TCPDUMP_PATH" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${RESET} Removed cap_net_raw from tcpdump"
+        else
+            echo -e "  ${YELLOW}⚠${RESET} Could not remove cap_net_raw from tcpdump — run: sudo setcap -r $TCPDUMP_PATH"
+        fi
+    fi
     echo -e "${GREEN}✓${RESET} Demo processes stopped."
 }
 trap cleanup EXIT
@@ -175,7 +183,30 @@ fi
 HAS_NMAP=false; HAS_TCPDUMP=false; HAS_PYTHON3=false; HAS_NC=false; HAS_SCP=false; HAS_BC=false
 
 command -v nmap    >/dev/null 2>&1 && { HAS_NMAP=true;    success "nmap found";       } || warn "nmap not found — port scan act will be skipped"
-command -v tcpdump >/dev/null 2>&1 && { HAS_TCPDUMP=true; success "tcpdump found";    } || warn "tcpdump not found — capture act will be skipped"
+TCPDUMP_CAP_SET=false
+if command -v tcpdump >/dev/null 2>&1; then
+    HAS_TCPDUMP=true
+    success "tcpdump found"
+    # Check if tcpdump can capture without root — if not, try setcap
+    TCPDUMP_PATH="$(which tcpdump)"
+    if ! timeout 2 tcpdump -i lo -c 1 -w /dev/null 2>/dev/null; then
+        info "tcpdump needs cap_net_raw for packet capture"
+        if sudo -n setcap cap_net_raw+ep "$TCPDUMP_PATH" 2>/dev/null; then
+            TCPDUMP_CAP_SET=true
+            success "tcpdump: granted cap_net_raw (will remove at end)"
+        else
+            warn "Cannot grant cap_net_raw automatically — trying sudo setcap..."
+            if sudo setcap cap_net_raw+ep "$TCPDUMP_PATH" 2>/dev/null; then
+                TCPDUMP_CAP_SET=true
+                success "tcpdump: granted cap_net_raw (will remove at end)"
+            else
+                warn "tcpdump capture may fail — run: sudo setcap cap_net_raw+ep $TCPDUMP_PATH"
+            fi
+        fi
+    fi
+else
+    warn "tcpdump not found — capture act will be skipped"
+fi
 command -v python3 >/dev/null 2>&1 && { HAS_PYTHON3=true; success "python3 found";    } || warn "python3 not found — flood/malformed/CPU acts will be skipped"
 command -v nc      >/dev/null 2>&1 && { HAS_NC=true;      success "nc (netcat) found"; } || warn "nc not found — SSH pre-check will use alternate method"
 command -v scp     >/dev/null 2>&1 && { HAS_SCP=true;     success "scp found";        } || warn "scp not found — throughput test will be skipped"

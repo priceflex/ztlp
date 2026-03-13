@@ -132,7 +132,7 @@ defmodule ZtlpNs.RegistrationAuth do
   # Self-registration: for KEY records, the registrant's pubkey must match
   # the public_key field in the record data. For SVC records, the registrant
   # must own the corresponding KEY record for that name.
-  defp check_self_registration(pubkey_hex, name, :key, data) do
+  defp check_self_registration(pubkey_hex, _name, :key, data) do
     record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
 
     if record_pubkey == pubkey_hex do

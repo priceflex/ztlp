@@ -58,7 +58,7 @@ defmodule ZtlpNs.Server do
 
   use GenServer
 
-  alias ZtlpNs.{Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
+  alias ZtlpNs.{Crypto, Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -224,7 +224,7 @@ defmodule ZtlpNs.Server do
 
   # Registration v1 (0x09) without pubkey — legacy format, now rejected
   defp process_query(
-         <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
+         <<0x09, name_len::16, name::binary-size(name_len), _type_byte::8, data_len::16,
            _data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
        ) do
     StructuredLog.warn(:registration_rejected,

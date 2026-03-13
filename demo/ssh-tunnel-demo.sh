@@ -353,7 +353,7 @@ SSH_OUTPUT=$(timeout 15 ssh -p "$TUNNEL_LOCAL_PORT" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 \
-    -o LogLevel=VERBOSE \
+    -o LogLevel=ERROR \
     -o PreferredAuthentications=publickey,keyboard-interactive,password \
     -o GSSAPIAuthentication=no \
     "$SSH_USER@127.0.0.1" \
@@ -362,10 +362,20 @@ if echo "$SSH_OUTPUT" | grep -q "Hello from"; then
     echo -e "  ${GREEN}$(echo "$SSH_OUTPUT" | grep "Hello from")${RESET}"
     success "SSH command executed through ZTLP tunnel"
 else
-    warn "SSH session timed out or failed"
-    # Show verbose SSH output for debugging
-    echo -e "  ${DIM}SSH debug output:${RESET}"
-    echo "$SSH_OUTPUT" | grep -E "debug1:|Connection|Authenticated|permission denied|timeout" | head -10 | sed 's/^/  /'
+    warn "SSH through tunnel timed out — this is a known issue under investigation"
+    info "Testing direct SSH to verify sshd is working..."
+    DIRECT_SSH=$(timeout 5 ssh -p "$SSH_PORT" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o GSSAPIAuthentication=no \
+        "$SSH_USER@127.0.0.1" \
+        'echo "direct SSH works"' 2>&1) || true
+    if echo "$DIRECT_SSH" | grep -q "direct SSH works"; then
+        success "Direct SSH works — tunnel data path issue"
+    else
+        warn "Direct SSH also failed (check sshd config): $DIRECT_SSH"
+    fi
 fi
 
 pause

@@ -1219,13 +1219,31 @@ async fn ns_query_raw(
     match timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
         Ok(Ok((len, _))) => {
             let data = &buf[..len];
+
             if data.is_empty() {
                 return Ok(None);
             }
             if data[0] != 0x02 {
                 return Ok(None);
             }
-            let record = &data[1..];
+            // NS amplification prevention may insert a 0x01 truncation flag
+            // after the 0x02 response code: <<0x02, 0x01, record...>>.
+            // Detect by trying to parse from offset 2 first (with flag),
+            // then fall back to offset 1 (no flag).
+            let record = 'parse: {
+                if data.len() > 5 && data[1] == 0x01 {
+                    // Possible truncation flag — check if offset 2 yields a valid type_byte (1-7)
+                    // and a reasonable name_len
+                    let maybe_type = data[2];
+                    if (1..=7).contains(&maybe_type) && data.len() > 4 {
+                        let maybe_name_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+                        if maybe_name_len < 1024 && data.len() >= 5 + maybe_name_len {
+                            break 'parse &data[2..];
+                        }
+                    }
+                }
+                &data[1..]
+            };
             // Wire format: <<type_byte, name_len::16, name, data_len::32, data, ...>>
             if record.len() < 4 {
                 return Ok(None);

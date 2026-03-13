@@ -145,9 +145,21 @@ defmodule ZtlpRelay.NsClient do
 
     data_bin = ZtlpRelay.Cbor.encode(data)
 
+    # v2 registration: sign with Ed25519 keypair for NS authentication.
+    # Uses ComponentAuth identity key if available, otherwise generates ephemeral.
+    {pubkey, privkey} = get_registration_keypair()
+
+    # Build canonical form: <<type_byte, name_len::16, name, data_bin>>
+    name_len = byte_size(name)
+    canonical = <<@relay_type_byte::8, name_len::16, name::binary, data_bin::binary>>
+
+    # Ed25519 signature over canonical form
+    sig = :crypto.sign(:eddsa, :none, canonical, [privkey, :ed25519])
+
     reg =
-      <<0x09, byte_size(name)::16, name::binary, @relay_type_byte::8, byte_size(data_bin)::16,
-        data_bin::binary, 0::16>>
+      <<0x09, name_len::16, name::binary, @relay_type_byte::8, byte_size(data_bin)::16,
+        data_bin::binary, byte_size(sig)::16, sig::binary,
+        byte_size(pubkey)::16, pubkey::binary>>
 
     case resolve_host(host) do
       {:ok, ip} ->
@@ -245,6 +257,20 @@ defmodule ZtlpRelay.NsClient do
 
   defp get_ns(%{ns_server: ns}) when not is_nil(ns), do: ns
   defp get_ns(_), do: ZtlpRelay.Config.ns_server()
+
+  # Get the Ed25519 keypair for signing registrations.
+  # Tries ComponentAuth identity key first, falls back to ephemeral key.
+  defp get_registration_keypair do
+    case Application.get_env(:ztlp_relay, :registration_keypair) do
+      {pub, priv} when is_binary(pub) and is_binary(priv) ->
+        {pub, priv}
+
+      _ ->
+        {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+        Application.put_env(:ztlp_relay, :registration_keypair, {pub, priv})
+        {pub, priv}
+    end
+  end
 
   defp wrap_discover_result({:ok, rm}), do: {:ok, [rm]}
   defp wrap_discover_result({:error, :not_found}), do: {:ok, []}

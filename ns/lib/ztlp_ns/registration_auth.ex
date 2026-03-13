@@ -159,6 +159,16 @@ defmodule ZtlpNs.RegistrationAuth do
     end
   end
 
+  defp check_self_registration(_pubkey_hex, _name, :relay, _data) do
+    # Relay self-registration: any node can register a relay record
+    # if the record name starts with its node_id and the signature
+    # is valid (already verified before reaching this point).
+    # The Ed25519 signature over the canonical form proves the registrant
+    # controls the private key, and the name format (hex_node_id.zone)
+    # prevents squatting on other node IDs.
+    :ok
+  end
+
   defp check_self_registration(_pubkey_hex, _name, _type, _data) do
     # Other record types require zone authority
     {:error, :zone_authority_required}

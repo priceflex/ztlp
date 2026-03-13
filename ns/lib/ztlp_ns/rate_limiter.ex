@@ -44,6 +44,15 @@ defmodule ZtlpNs.RateLimiter do
   """
   @spec check(tuple()) :: :ok | :rate_limited
   def check(ip) when is_tuple(ip) do
+    # If the ETS table doesn't exist (e.g., RateLimiter not started in test
+    # environments), allow all traffic rather than crashing.
+    case :ets.whereis(@table) do
+      :undefined -> :ok
+      _ -> do_check(ip)
+    end
+  end
+
+  defp do_check(ip) do
     now = System.monotonic_time(:millisecond)
     rate = queries_per_second()
     burst = burst_size()

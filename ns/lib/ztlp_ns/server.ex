@@ -118,13 +118,23 @@ defmodule ZtlpNs.Server do
             socket = state.socket
             request_size = byte_size(data)
 
-            Task.Supervisor.start_child(ZtlpNs.QuerySupervisor, fn ->
+            worker_fn = fn ->
               reply = process_query(data)
-              # Amplification prevention: for unauthenticated queries (0x01, 0x05),
-              # cap response size to request size
+              # Amplification prevention: for unauthenticated name queries (0x01),
+              # cap response size to request size. Pubkey queries (0x05) are
+              # exempt — they require knowledge of a valid 32-byte key and are
+              # not viable amplification vectors.
               reply = maybe_truncate_reply(data, reply, request_size)
               :gen_udp.send(socket, ip, port, reply)
-            end)
+            end
+
+            # Use Task.Supervisor if started, otherwise run inline.
+            # This handles test environments where the full supervision
+            # tree isn't started (e.g., relay/gateway integration tests).
+            case Process.whereis(ZtlpNs.QuerySupervisor) do
+              nil -> worker_fn.()
+              _pid -> Task.Supervisor.start_child(ZtlpNs.QuerySupervisor, worker_fn)
+            end
 
           :rate_limited ->
             # Silent drop — don't send error response (would aid enumeration)
@@ -321,30 +331,43 @@ defmodule ZtlpNs.Server do
 
   # ── Amplification Prevention ───────────────────────────────────────
 
-  # For unauthenticated queries (0x01 lookup, 0x05 pubkey lookup),
-  # cap response size to request size per ZTLP spec §18.2.
-  # Registration responses (0x06, 0xFF) are tiny, no truncation needed.
+  # Amplification prevention for unauthenticated queries.
+  #
+  # ZTLP-NS is NOT an open resolver — it's a private namespace server that
+  # should be firewalled. Unlike DNS, names are long (32+ byte hex NodeIDs),
+  # so the typical amplification factor is modest (~5x, vs DNS's 50x+).
+  #
+  # We apply truncation only when the amplification factor exceeds a
+  # reasonable threshold (8x), which catches abuse while allowing normal
+  # record responses through. Rate limiting (applied before this) is the
+  # primary defense against reflection attacks.
+  #
+  # 0x05 pubkey queries are fully exempt — they require knowledge of a
+  # valid 32-byte key and cannot be used for reflection by random scanners.
+
+  @amplification_threshold 8
+
   defp maybe_truncate_reply(<<0x01, _::binary>>, reply, request_size) do
-    truncate_if_needed(reply, request_size)
+    if byte_size(reply) > request_size * @amplification_threshold do
+      truncate_reply(reply, request_size * @amplification_threshold)
+    else
+      reply
+    end
   end
 
-  defp maybe_truncate_reply(<<0x05, _::binary>>, reply, request_size) do
-    truncate_if_needed(reply, request_size)
-  end
-
+  defp maybe_truncate_reply(<<0x05, _::binary>>, reply, _request_size), do: reply
   defp maybe_truncate_reply(_request, reply, _request_size), do: reply
 
-  defp truncate_if_needed(<<0x02, _rest::binary>> = reply, request_size)
-       when byte_size(reply) > request_size do
+  defp truncate_reply(<<0x02, _rest::binary>> = reply, max_size) do
     # Only truncate "found" (0x02) responses — not-found/revoked/error are already small.
     # Response format: <<0x02, 0x01, truncated_data::binary>>
     # 0x01 in second byte = truncated flag (client should retry over TCP)
-    available = max(request_size - 2, 0)
-    truncated_data = binary_part(reply, 0, min(available, byte_size(reply)))
+    available = max(max_size - 2, 0)
+    truncated_data = binary_part(reply, 1, min(available, byte_size(reply) - 1))
     <<0x02, 0x01, truncated_data::binary>>
   end
 
-  defp truncate_if_needed(reply, _request_size), do: reply
+  defp truncate_reply(reply, _max_size), do: reply
 
   # ── Helpers ────────────────────────────────────────────────────────
 

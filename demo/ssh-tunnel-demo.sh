@@ -347,17 +347,25 @@ banner "Act 6 — SSH Through the ZTLP Tunnel"
 info "Alice can now SSH through her encrypted ZTLP tunnel"
 step "Running command via SSH tunnel"
 dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1 'echo \"Hello from \$(hostname) via ZTLP tunnel! [\$(date)]\"'"
-SSH_OUTPUT=$(timeout 10 ssh -p "$TUNNEL_LOCAL_PORT" \
+# Use BatchMode to avoid interactive password prompts that would hang.
+# If pubkey auth isn't set up, this will fail fast instead of blocking.
+SSH_OUTPUT=$(timeout 15 ssh -p "$TUNNEL_LOCAL_PORT" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
+    -o ConnectTimeout=10 \
+    -o LogLevel=VERBOSE \
+    -o PreferredAuthentications=publickey,keyboard-interactive,password \
+    -o GSSAPIAuthentication=no \
     "$SSH_USER@127.0.0.1" \
     'echo "Hello from $(hostname) via ZTLP tunnel! [$(date)]"' 2>&1) || true
-if [[ -n "$SSH_OUTPUT" ]]; then
-    echo -e "  ${GREEN}$SSH_OUTPUT${RESET}"
+if echo "$SSH_OUTPUT" | grep -q "Hello from"; then
+    echo -e "  ${GREEN}$(echo "$SSH_OUTPUT" | grep "Hello from")${RESET}"
     success "SSH command executed through ZTLP tunnel"
 else
     warn "SSH session timed out or failed"
+    # Show verbose SSH output for debugging
+    echo -e "  ${DIM}SSH debug output:${RESET}"
+    echo "$SSH_OUTPUT" | grep -E "debug1:|Connection|Authenticated|permission denied|timeout" | head -10 | sed 's/^/  /'
 fi
 
 pause

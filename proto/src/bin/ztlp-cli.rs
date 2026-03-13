@@ -1036,15 +1036,22 @@ fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize, usi
     if additional < 24 {
         Some((additional as usize, pos))
     } else if additional == 24 {
-        if pos >= data.len() { return None; }
+        if pos >= data.len() {
+            return None;
+        }
         Some((data[pos] as usize, pos + 1))
     } else if additional == 25 {
-        if pos + 2 > data.len() { return None; }
+        if pos + 2 > data.len() {
+            return None;
+        }
         let n = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         Some((n, pos + 2))
     } else if additional == 26 {
-        if pos + 4 > data.len() { return None; }
-        let n = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let n =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         Some((n, pos + 4))
     } else {
         None
@@ -1053,13 +1060,19 @@ fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize, usi
 
 /// Read a CBOR text string (major type 3) from data at the given position.
 fn cbor_read_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
-    if pos >= data.len() { return None; }
+    if pos >= data.len() {
+        return None;
+    }
     let initial = data[pos];
     let major = initial >> 5;
     let additional = initial & 0x1F;
-    if major != 3 { return None; } // Must be text string
+    if major != 3 {
+        return None;
+    } // Must be text string
     let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
-    if new_pos + len > data.len() { return None; }
+    if new_pos + len > data.len() {
+        return None;
+    }
     let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
     Some((s.to_string(), new_pos + len))
 }
@@ -2108,9 +2121,7 @@ fn cbor_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
         .iter()
         .map(|&(k, v)| (cbor_text(k), cbor_text(v)))
         .collect();
-    encoded_pairs.sort_by(|a, b| {
-        a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0))
-    });
+    encoded_pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
 
     let mut buf = cbor_head(5, encoded_pairs.len() as u64);
     for (k, v) in &encoded_pairs {

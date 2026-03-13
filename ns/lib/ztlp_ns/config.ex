@@ -163,4 +163,24 @@ defmodule ZtlpNs.Config do
   def name_suffix do
     Application.get_env(:ztlp_ns, :name_suffix)
   end
+
+  @doc """
+  Whether to require Ed25519 signatures for registration requests.
+
+  When `false` (dev/demo mode), the NS accepts unsigned registrations
+  where the pubkey in the record data is used for authorization without
+  signature verification. This allows clients with only X25519 keys
+  (no Ed25519 signing keys) to register.
+
+  Default: `true` (require signatures in production).
+  Set `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false` for dev/demo.
+  """
+  @spec require_registration_auth?() :: boolean()
+  def require_registration_auth? do
+    case System.get_env("ZTLP_NS_REQUIRE_REGISTRATION_AUTH") do
+      val when val in ["false", "0", "no"] -> false
+      nil -> Application.get_env(:ztlp_ns, :require_registration_auth, true)
+      _ -> true
+    end
+  end
 end

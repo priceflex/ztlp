@@ -146,6 +146,19 @@ pub enum BridgeOutcome {
     ResetReceived,
 }
 
+/// Result from `wait_for_reset_buffered`: indicates whether a RESET was
+/// received, plus any data packets captured during the wait that must be
+/// fed into the next bridge's receiver.
+#[derive(Debug)]
+pub struct ResetWaitResult {
+    /// Whether a RESET frame was received.
+    pub reset_received: bool,
+    /// Raw encrypted UDP packets received after the RESET (or during the
+    /// wait) that belong to the next bridge cycle. These must be processed
+    /// by the new bridge to avoid data loss.
+    pub buffered_packets: Vec<Vec<u8>>,
+}
+
 // ─── Flow control parameters ────────────────────────────────────────────────
 
 /// Maximum number of unacknowledged packets the sender will keep in flight.
@@ -712,7 +725,7 @@ pub async fn run_bridge(
     peer_addr: SocketAddr,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     run_bridge_inner(
-        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false,
+        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false, Vec::new(),
     )
     .await
 }
@@ -726,7 +739,24 @@ pub async fn run_bridge_with_reset(
     peer_addr: SocketAddr,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     run_bridge_inner(
-        tcp_stream, udp_socket, pipeline, session_id, peer_addr, true,
+        tcp_stream, udp_socket, pipeline, session_id, peer_addr, true, Vec::new(),
+    )
+    .await
+}
+
+/// Like [`run_bridge`] but accepts pre-fetched packets from a prior
+/// `wait_for_reset_buffered` call. These packets arrived during the
+/// inter-bridge gap and must be processed before reading new UDP data.
+pub async fn run_bridge_with_buffered(
+    tcp_stream: TcpStream,
+    udp_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    buffered_packets: Vec<Vec<u8>>,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+    run_bridge_inner(
+        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false, buffered_packets,
     )
     .await
 }
@@ -738,6 +768,7 @@ async fn run_bridge_inner(
     session_id: SessionId,
     peer_addr: SocketAddr,
     send_initial_reset: bool,
+    prefetched_packets: Vec<Vec<u8>>,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     info!(
         "run_bridge: starting for session {} peer={} local_udp={:?}",
@@ -1344,9 +1375,10 @@ async fn run_bridge_inner(
     // ── ZTLP → TCP direction (receiver) ────────────────────────────────
 
     let reset_flag_for_rx = reset_received_rx;
+    let prefetched = prefetched_packets; // move into the async block
     let ztlp_to_tcp = async move {
         let reset_received = reset_flag_for_rx;
-        info!("ztlp_to_tcp: starting");
+        info!("ztlp_to_tcp: starting (prefetched_packets={})", prefetched.len());
         // Recv key and ACK key are pre-extracted before select! to avoid lock contention.
         let recv_cipher = ChaCha20Poly1305::new((&recv_key).into());
         let ack_cipher = ChaCha20Poly1305::new((&send_key_for_acks).into());
@@ -1366,6 +1398,90 @@ async fn run_bridge_inner(
         // whatever the ZTLP session's current send_seq is. The receiver
         // auto-detects the first data seq from the first packet it receives.
         let mut reassembly: Option<ReassemblyBuffer> = None;
+
+        // ── Process pre-fetched packets from the inter-bridge gap ─────
+        // These were captured by wait_for_reset_buffered and must be
+        // processed before we start reading new UDP packets to avoid
+        // data loss during bridge transitions.
+        if !prefetched.is_empty() {
+            info!("processing {} pre-fetched packets from bridge transition", prefetched.len());
+            for pkt_data in &prefetched {
+                if pkt_data.len() < DATA_HEADER_SIZE {
+                    continue;
+                }
+                let header = match DataHeader::deserialize(pkt_data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+                if header.session_id != sid_recv {
+                    continue;
+                }
+
+                // Decrypt
+                let encrypted_payload = &pkt_data[DATA_HEADER_SIZE..];
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                let plaintext = match recv_cipher.decrypt(nonce, encrypted_payload) {
+                    Ok(pt) => pt,
+                    Err(_) => continue,
+                };
+                if plaintext.is_empty() {
+                    continue;
+                }
+
+                let frame_type = plaintext[0];
+                let frame_payload = &plaintext[1..];
+
+                match frame_type {
+                    FRAME_DATA => {
+                        if frame_payload.len() < 8 {
+                            continue;
+                        }
+                        let data_seq =
+                            u64::from_be_bytes(match frame_payload[..8].try_into() {
+                                Ok(b) => b,
+                                Err(_) => continue,
+                            });
+                        let tcp_payload = &frame_payload[8..];
+
+                        let reasm = reassembly.get_or_insert_with(|| {
+                            debug!("reassembly: initialized from prefetched with first data_seq {}", data_seq);
+                            ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
+                        });
+
+                        if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec()) {
+                            for (_seq, payload) in &deliverable {
+                                if let Err(e) = tcp_writer.write_all(payload).await {
+                                    warn!("TCP write error on prefetched data: {}", e);
+                                    return Err(format!("prefetched TCP write: {}", e).into());
+                                }
+                            }
+                        }
+                    }
+                    FRAME_ACK => {
+                        if frame_payload.len() >= 8 {
+                            let acked_seq = u64::from_be_bytes(
+                                frame_payload[..8].try_into().unwrap_or([0u8; 8]),
+                            );
+                            let mut la = last_acked_seq_writer.lock().await;
+                            *la = Some(acked_seq);
+                            ack_notify_writer.notify_one();
+                        }
+                    }
+                    FRAME_RESET => {
+                        info!("received RESET in prefetched packets — unexpected, ignoring");
+                    }
+                    _ => {}
+                }
+            }
+            // Flush any data we wrote to TCP from prefetched packets
+            if let Err(e) = tcp_writer.flush().await {
+                warn!("TCP flush error after prefetched processing: {}", e);
+                return Err(format!("prefetched TCP flush: {}", e).into());
+            }
+            info!("prefetched packet processing complete");
+        }
 
         // ACK tracking: send ACKs periodically
         let mut packets_since_ack: u64 = 0;
@@ -3108,5 +3224,97 @@ mod tests {
         let segments = split_gro_segments(total_with_short, Some(segment_size), addr);
         assert_eq!(segments.len(), 5);
         assert_eq!(segments[4].len, 800); // last segment is shorter
+    }
+
+    // ── ResetWaitResult tests ───────────────────────────────────────
+
+    #[test]
+    fn test_reset_wait_result_empty() {
+        let result = ResetWaitResult {
+            reset_received: false,
+            buffered_packets: Vec::new(),
+        };
+        assert!(!result.reset_received);
+        assert!(result.buffered_packets.is_empty());
+    }
+
+    #[test]
+    fn test_reset_wait_result_with_buffered() {
+        let result = ResetWaitResult {
+            reset_received: true,
+            buffered_packets: vec![
+                vec![0x5A, 0x01, 0x02, 0x03],
+                vec![0x5A, 0x04, 0x05, 0x06],
+            ],
+        };
+        assert!(result.reset_received);
+        assert_eq!(result.buffered_packets.len(), 2);
+    }
+
+    #[test]
+    fn test_reset_wait_result_no_reset_with_packets() {
+        // Packets arrived but no RESET — could happen on timeout
+        let result = ResetWaitResult {
+            reset_received: false,
+            buffered_packets: vec![vec![0xFF; 100]],
+        };
+        assert!(!result.reset_received);
+        assert_eq!(result.buffered_packets.len(), 1);
+    }
+
+    // ── Reassembly across bridge cycles ─────────────────────────────
+
+    #[test]
+    fn test_reassembly_fresh_start_after_reset() {
+        // Simulate what happens when a new bridge starts after RESET:
+        // data_seq restarts from 0, reassembly is fresh.
+        let mut reasm = ReassemblyBuffer::new(0, 256);
+
+        // First bridge cycle data
+        let r = reasm.insert(0, b"hello".to_vec());
+        assert!(r.is_some());
+        let delivered = r.unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].1, b"hello");
+
+        let r = reasm.insert(1, b"world".to_vec());
+        assert!(r.is_some());
+
+        // Second bridge cycle: create new reassembly (simulates bridge restart)
+        let mut reasm2 = ReassemblyBuffer::new(0, 256);
+        let r = reasm2.insert(0, b"new session data".to_vec());
+        assert!(r.is_some());
+        let delivered = r.unwrap();
+        assert_eq!(delivered[0].1, b"new session data");
+    }
+
+    #[test]
+    fn test_reassembly_buffered_out_of_order_from_prefetch() {
+        // Simulate prefetched packets arriving out of order:
+        // data_seq 1 arrives (buffered by wait_for_reset), data_seq 0
+        // arrives in the main recv loop.
+        let mut reasm = ReassemblyBuffer::new(0, 256);
+
+        // Prefetched: data_seq=1 arrives first — buffered (returns empty deliverable)
+        let r = reasm.insert(1, b"second".to_vec());
+        assert!(r.is_some()); // Some(empty vec) — buffered, waiting for seq 0
+        assert_eq!(r.unwrap().len(), 0);
+
+        assert_eq!(reasm.buffered_count(), 1);
+
+        // Main loop: data_seq=0 arrives — triggers delivery of both
+        let r = reasm.insert(0, b"first".to_vec());
+        assert!(r.is_some());
+        let delivered = r.unwrap();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].1, b"first");
+        assert_eq!(delivered[1].1, b"second");
+    }
+
+    #[test]
+    fn test_bridge_outcome_variants() {
+        assert_eq!(BridgeOutcome::Closed, BridgeOutcome::Closed);
+        assert_eq!(BridgeOutcome::ResetReceived, BridgeOutcome::ResetReceived);
+        assert_ne!(BridgeOutcome::Closed, BridgeOutcome::ResetReceived);
     }
 }

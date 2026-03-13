@@ -232,15 +232,34 @@ defmodule ZtlpNs.Server do
     end
   end
 
-  # Registration v1 (0x09) without pubkey — legacy format, now rejected
+  # Registration v1 (0x09) without pubkey — legacy format
+  # Accepted in dev/demo mode (require_registration_auth=false),
+  # rejected in production (default).
   defp process_query(
-         <<0x09, name_len::16, name::binary-size(name_len), _type_byte::8, data_len::16,
-           _data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
+         <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
+           data_bin::binary-size(data_len), sig_len::16, _sig::binary-size(sig_len)>>
        ) do
-    StructuredLog.warn(:registration_rejected,
-      name: name, reason: :missing_pubkey)
-    # Reject v1 registrations — pubkey is required
-    <<0xFF>>
+    if ZtlpNs.Config.require_registration_auth?() do
+      StructuredLog.warn(:registration_rejected,
+        name: name, reason: :missing_pubkey)
+      <<0xFF>>
+    else
+      # Dev/demo mode: accept unsigned registrations
+      type =
+        try do
+          Record.byte_to_type(type_byte)
+        rescue
+          _ -> :unknown
+        end
+
+      if type == :unknown do
+        StructuredLog.warn(:registration_rejected,
+          name: name, reason: :unknown_type)
+        <<0xFF>>
+      else
+        handle_unsigned_registration(name, type, data_bin)
+      end
+    end
   end
 
   # Enrollment (0x07) — device enrollment with token
@@ -325,6 +344,63 @@ defmodule ZtlpNs.Server do
       {:error, reason} ->
         StructuredLog.warn(:registration_rejected,
           name: name, reason: reason)
+        <<0xFF>>
+    end
+  end
+
+  # ── Unsigned Registration (dev/demo mode) ───────────────────────────
+
+  defp handle_unsigned_registration(name, type, data_bin) do
+    suffix = ZtlpNs.Config.name_suffix()
+
+    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+         {:ok, data} <- decode_data(data_bin) do
+      server_priv = get_registration_key()
+
+      record = %Record{
+        name: name,
+        type: type,
+        data: Map.put(data, "registered_unsigned", true),
+        created_at: System.system_time(:second),
+        ttl: default_ttl(type),
+        serial: System.system_time(:second),
+        signature: nil,
+        signer_public_key: nil
+      }
+
+      signed_record = Record.sign(record, server_priv)
+
+      case Store.insert(signed_record) do
+        :ok ->
+          StructuredLog.info(:registration_accepted,
+            name: name, type: type, mode: :unsigned)
+          <<0x06>>
+
+        {:error, :stale_serial} ->
+          bumped = %{record | serial: record.serial + 1}
+          bumped_signed = Record.sign(bumped, server_priv)
+
+          case Store.insert(bumped_signed) do
+            :ok ->
+              StructuredLog.info(:registration_accepted,
+                name: name, type: type, mode: :unsigned)
+              <<0x06>>
+
+            {:error, reason} ->
+              StructuredLog.warn(:registration_rejected,
+                name: name, reason: reason, mode: :unsigned)
+              <<0xFF>>
+          end
+
+        {:error, reason} ->
+          StructuredLog.warn(:registration_rejected,
+            name: name, reason: reason, mode: :unsigned)
+          <<0xFF>>
+      end
+    else
+      {:error, reason} ->
+        StructuredLog.warn(:registration_rejected,
+          name: name, reason: reason, mode: :unsigned)
         <<0xFF>>
     end
   end

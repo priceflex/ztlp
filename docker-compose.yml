@@ -30,6 +30,7 @@ services:
       ZTLP_NS_METRICS_PORT: "9103"
       ZTLP_NS_RATE_LIMIT_PER_SEC: "100"
       ZTLP_NS_RATE_LIMIT_BURST: "200"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"  # Dev/demo mode — remove for production
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 30s

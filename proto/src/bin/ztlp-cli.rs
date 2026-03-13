@@ -1778,6 +1778,11 @@ async fn cmd_listen(
         // After a normal close (FIN from both sides), we wait briefly for
         // a potential RESET frame from the client. If nothing arrives
         // within the idle timeout, the listener exits.
+        //
+        // `pending_packets` carries data packets captured during the
+        // inter-bridge gap (by wait_for_reset_buffered). These are
+        // injected into the next bridge to prevent data loss.
+        let mut pending_packets: Vec<Vec<u8>> = Vec::new();
         loop {
             let tcp_stream = TcpStream::connect(forward_addr)
                 .await
@@ -1787,7 +1792,20 @@ async fn cmd_listen(
             let udp = node.socket.clone();
             let pipeline = node.pipeline.clone();
 
-            match tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await {
+            // Use run_bridge_with_buffered when we have packets from the
+            // previous wait_for_reset_buffered, otherwise plain run_bridge.
+            let buffered = std::mem::take(&mut pending_packets);
+            let result = if buffered.is_empty() {
+                tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await
+            } else {
+                eprintln!("{} injecting {} buffered packets into new bridge",
+                    c_cyan("↻"), buffered.len());
+                tunnel::run_bridge_with_buffered(
+                    tcp_stream, udp, pipeline, session_id, from1, buffered,
+                ).await
+            };
+
+            match result {
                 Ok(tunnel::BridgeOutcome::ResetReceived) => {
                     eprintln!(
                         "{}",
@@ -1801,16 +1819,21 @@ async fn cmd_listen(
                     // Wait for a potential RESET frame from the client.
                     // The client may open another TCP connection and send
                     // RESET, which arrives as an encrypted UDP packet.
-                    // We start a "bare" bridge that only listens for RESET.
-                    match wait_for_reset(&node, session_id, from1, Duration::from_secs(300)).await {
-                        Ok(true) => {
+                    // We use the buffered variant to capture data packets
+                    // that arrive during the wait, preventing data loss.
+                    match wait_for_reset_buffered(
+                        &node, session_id, from1, Duration::from_secs(300),
+                    ).await {
+                        Ok(reset_result) if reset_result.reset_received => {
                             eprintln!(
-                                "{}",
-                                c_cyan("↻ Remote started new TCP stream — reconnecting to backend")
+                                "{} (buffered {} packets)",
+                                c_cyan("↻ Remote started new TCP stream — reconnecting to backend"),
+                                reset_result.buffered_packets.len(),
                             );
+                            pending_packets = reset_result.buffered_packets;
                             continue;
                         }
-                        Ok(false) => {
+                        Ok(_) => {
                             eprintln!("{}", c_dim("idle timeout, listener exiting"));
                             break;
                         }
@@ -1842,12 +1865,12 @@ async fn cmd_listen(
 /// If the client opens another TCP connection on the same ZTLP session, it
 /// will send a RESET frame first. This function waits for that frame and
 /// returns `true` if a RESET is received, or `false` if the timeout expires.
-async fn wait_for_reset(
+async fn wait_for_reset_buffered(
     node: &TransportNode,
     session_id: SessionId,
     from: SocketAddr,
     timeout_duration: Duration,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<tunnel::ResetWaitResult, Box<dyn std::error::Error>> {
     use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
 
     // Extract the recv key from the session for decryption
@@ -1859,12 +1882,17 @@ async fn wait_for_reset(
     let cipher = ChaCha20Poly1305::new((&recv_key).into());
 
     let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut buffered_packets: Vec<Vec<u8>> = Vec::new();
+    let reset_seen = false;
 
     loop {
         match tokio::time::timeout_at(deadline, node.recv_raw()).await {
             Err(_) => {
                 // Timeout expired
-                return Ok(false);
+                return Ok(tunnel::ResetWaitResult {
+                    reset_received: false,
+                    buffered_packets,
+                });
             }
             Ok(Err(e)) => {
                 return Err(format!("recv error: {}", e).into());
@@ -1892,7 +1920,7 @@ async fn wait_for_reset(
                     Err(_) => continue,
                 };
 
-                // Decrypt
+                // Decrypt to check frame type
                 let ciphertext = &data[DATA_HEADER_SIZE..];
                 let mut nonce_bytes = [0u8; 12];
                 nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
@@ -1905,11 +1933,52 @@ async fn wait_for_reset(
                 if plaintext.is_empty() {
                     continue;
                 }
+
                 if plaintext[0] == 0x04 {
-                    // FRAME_RESET received
-                    return Ok(true);
+                    // FRAME_RESET received — capture trailing data packets
+                    let _ = reset_seen; // suppress unused warning
+                    // Give a short grace period to collect packets that
+                    // may have been sent right after the RESET
+                    let grace_deadline = tokio::time::Instant::now()
+                        + Duration::from_millis(50);
+                    loop {
+                        let grace_result = tokio::time::timeout_at(
+                            grace_deadline,
+                            node.recv_raw(),
+                        ).await;
+                        match grace_result {
+                            Err(_) => break, // Grace period expired
+                            Ok(Err(_)) => break,
+                            Ok(Ok((gdata, gaddr))) => {
+                                if gaddr == from && gdata.len() >= DATA_HEADER_SIZE {
+                                    // Buffer the raw packet for the next bridge
+                                    buffered_packets.push(gdata);
+                                }
+                            }
+                        }
+                    }
+                    return Ok(tunnel::ResetWaitResult {
+                        reset_received: true,
+                        buffered_packets,
+                    });
                 }
-                // Ignore other frames (stale ACKs, FIN retransmits, etc.)
+
+                if reset_seen {
+                    // Data packet after RESET — buffer it
+                    buffered_packets.push(data);
+                } else {
+                    // Data packet before RESET — also buffer it!
+                    // The RESET may arrive out of order (UDP has no ordering)
+                    // and these packets belong to the next bridge cycle.
+                    buffered_packets.push(data);
+
+                    // Cap buffer to prevent unbounded growth while waiting
+                    if buffered_packets.len() > 4096 {
+                        eprintln!("{}",
+                            c_yellow("⚠ too many buffered packets during reset wait, draining oldest"));
+                        buffered_packets.drain(0..1024);
+                    }
+                }
             }
         }
     }

@@ -321,6 +321,83 @@ defmodule ZtlpNs.SecurityHardeningTest do
       assert {:ok, stored} = Store.lookup("goodnode.ztlp", :key)
       assert stored.name == "goodnode.ztlp"
     end
+
+    test "v1 registration succeeds in dev mode (require_registration_auth=false)" do
+      # Temporarily disable registration auth
+      original = Application.get_env(:ztlp_ns, :require_registration_auth)
+      Application.put_env(:ztlp_ns, :require_registration_auth, false)
+      # Also set env var for the Config module
+      System.put_env("ZTLP_NS_REQUIRE_REGISTRATION_AUTH", "false")
+
+      on_exit(fn ->
+        if original do
+          Application.put_env(:ztlp_ns, :require_registration_auth, original)
+        else
+          Application.delete_env(:ztlp_ns, :require_registration_auth)
+        end
+        System.delete_env("ZTLP_NS_REQUIRE_REGISTRATION_AUTH")
+      end)
+
+      server_port = Server.port()
+      {:ok, client} = :gen_udp.open(0, [:binary, {:active, false}])
+
+      name = "devnode.ztlp"
+      name_len = byte_size(name)
+      type_byte = 1
+      data = %{"public_key" => "aabbccdd", "node_id" => "11223344", "algorithm" => "Ed25519"}
+      data_bin = ZtlpNs.Cbor.encode(data)
+      data_len = byte_size(data_bin)
+      sig = :crypto.strong_rand_bytes(64)
+      sig_len = byte_size(sig)
+
+      # v1 format: no pubkey field
+      packet =
+        <<0x09, name_len::16, name::binary, type_byte::8, data_len::16, data_bin::binary,
+          sig_len::16, sig::binary>>
+
+      :gen_udp.send(client, {127, 0, 0, 1}, server_port, packet)
+
+      {:ok, {_ip, _port, response}} = :gen_udp.recv(client, 0, 5000)
+      :gen_udp.close(client)
+
+      # Should succeed in dev mode (0x06)
+      assert response == <<0x06>>
+
+      # Verify record was stored
+      assert {:ok, stored} = Store.lookup("devnode.ztlp", :key)
+      assert stored.name == "devnode.ztlp"
+      assert stored.data["registered_unsigned"] == true
+    end
+
+    test "v1 registration still rejected when auth is required (default)" do
+      # Ensure auth is required (default)
+      System.delete_env("ZTLP_NS_REQUIRE_REGISTRATION_AUTH")
+      Application.delete_env(:ztlp_ns, :require_registration_auth)
+
+      server_port = Server.port()
+      {:ok, client} = :gen_udp.open(0, [:binary, {:active, false}])
+
+      name = "should-fail.ztlp"
+      name_len = byte_size(name)
+      type_byte = 1
+      data = %{"public_key" => "aabbccdd", "node_id" => "11223344", "algorithm" => "Ed25519"}
+      data_bin = ZtlpNs.Cbor.encode(data)
+      data_len = byte_size(data_bin)
+      sig = :crypto.strong_rand_bytes(64)
+      sig_len = byte_size(sig)
+
+      packet =
+        <<0x09, name_len::16, name::binary, type_byte::8, data_len::16, data_bin::binary,
+          sig_len::16, sig::binary>>
+
+      :gen_udp.send(client, {127, 0, 0, 1}, server_port, packet)
+
+      {:ok, {_ip, _port, response}} = :gen_udp.recv(client, 0, 5000)
+      :gen_udp.close(client)
+
+      # Should be rejected (0xFF) — default requires auth
+      assert response == <<0xFF>>
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════

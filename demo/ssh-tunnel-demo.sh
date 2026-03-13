@@ -95,6 +95,44 @@ fail()    { echo -e "  ${RED}✗${RESET} $1"; exit 1; }
 dimcmd()  { echo -e "  ${DIM}\$ $1${RESET}"; }
 pause()   { echo -e "\n${DIM}  Press Enter to continue...${RESET}"; read -r; }
 
+# Retry wrapper — runs a command up to N times with delay between attempts.
+# Usage: retry 3 1 command args...
+#   $1 = max attempts, $2 = delay between attempts (sec), $3.. = command
+retry() {
+    local max_attempts=$1
+    local delay=$2
+    shift 2
+    local attempt=1
+    while [[ $attempt -le $max_attempts ]]; do
+        if "$@" 2>/dev/null; then
+            return 0
+        fi
+        if [[ $attempt -lt $max_attempts ]]; then
+            warn "attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+            sleep "$delay"
+        fi
+        ((attempt++))
+    done
+    return 1
+}
+
+# Safe NS registration — retries up to 3 times, doesn't fail the script.
+ns_register() {
+    local name="$1" zone="$2" key="$3" address="$4" ns="$5"
+    if retry 3 2 "$ZTLP" ns register \
+        --name "$name" \
+        --zone "$zone" \
+        --key "$key" \
+        --address "$address" \
+        --ns-server "$ns"; then
+        success "Registered $name"
+        return 0
+    else
+        warn "Failed to register $name after 3 attempts (continuing anyway)"
+        return 1
+    fi
+}
+
 # Track background PIDs for cleanup
 PIDS=()
 cleanup() {
@@ -212,36 +250,29 @@ if [[ "$SKIP_NS" != "true" ]]; then
     banner "Act 2 — Register with ZTLP‑NS"
     step "Register server name"
     dimcmd "$ZTLP ns register --name $DEMO_NAME --zone $DEMO_ZONE --key $DEMO_DIR/server.json --address 127.0.0.1:$LISTEN_PORT --ns-server $NS_SERVER"
-    "$ZTLP" ns register \
-        --name "$DEMO_NAME" \
-        --zone "$DEMO_ZONE" \
-        --key "$DEMO_DIR/server.json" \
-        --address "127.0.0.1:$LISTEN_PORT" \
-        --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
-    
-    step "Verify registration"
-    dimcmd "$ZTLP ns lookup $DEMO_NAME --ns-server $NS_SERVER"
-    "$ZTLP" ns lookup "$DEMO_NAME" --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
-    
+    NS_REG_OK=true
+    ns_register "$DEMO_NAME" "$DEMO_ZONE" "$DEMO_DIR/server.json" "127.0.0.1:$LISTEN_PORT" "$NS_SERVER" || NS_REG_OK=false
+
+    if [[ "$NS_REG_OK" == "true" ]]; then
+        step "Verify registration"
+        dimcmd "$ZTLP ns lookup $DEMO_NAME --ns-server $NS_SERVER"
+        "$ZTLP" ns lookup "$DEMO_NAME" --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /' || warn "Lookup failed"
+    fi
+
     step "Register client name (Alice)"
     dimcmd "$ZTLP ns register --name $DEMO_CLIENT --zone $DEMO_ZONE --key $DEMO_DIR/client.json --address 127.0.0.1:0 --ns-server $NS_SERVER"
-    "$ZTLP" ns register \
-        --name "$DEMO_CLIENT" \
-        --zone "$DEMO_ZONE" \
-        --key "$DEMO_DIR/client.json" \
-        --address "127.0.0.1:0" \
-        --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
+    ns_register "$DEMO_CLIENT" "$DEMO_ZONE" "$DEMO_DIR/client.json" "127.0.0.1:0" "$NS_SERVER" || NS_REG_OK=false
 
     step "Register attacker name (Eve)"
     dimcmd "$ZTLP ns register --name $DEMO_EVE --zone $DEMO_ZONE --key $DEMO_DIR/eve.json --address 127.0.0.1:0 --ns-server $NS_SERVER"
-    "$ZTLP" ns register \
-        --name "$DEMO_EVE" \
-        --zone "$DEMO_ZONE" \
-        --key "$DEMO_DIR/eve.json" \
-        --address "127.0.0.1:0" \
-        --ns-server "$NS_SERVER" 2>/dev/null | sed 's/^/  /'
+    ns_register "$DEMO_EVE" "$DEMO_ZONE" "$DEMO_DIR/eve.json" "127.0.0.1:0" "$NS_SERVER" || NS_REG_OK=false
 
-    success "Names registered"
+    if [[ "$NS_REG_OK" == "true" ]]; then
+        success "All names registered"
+    else
+        warn "Some registrations failed — falling back to NodeID hex for policy"
+        SKIP_NS=true
+    fi
     CONNECT_TARGET="$DEMO_NAME"
     NS_FLAG="--ns-server $NS_SERVER"
     # Use human-readable names for policy

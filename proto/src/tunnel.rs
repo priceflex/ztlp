@@ -96,8 +96,7 @@ pub const DEFAULT_SERVICE: &str = "_default";
 const TCP_READ_BUF: usize = 131072;
 
 /// Default maximum number of packets to send in a single sub-batch.
-/// The actual value is determined at runtime by the pacing module's
-/// `SystemProfile::max_sub_batch`, which adapts based on the detected
+/// The actual value is determined at runtime based on the detected
 /// UDP receive buffer size. This constant serves as the fallback when
 /// system detection is unavailable.
 ///
@@ -747,68 +746,31 @@ async fn run_bridge_inner(
         udp_socket.local_addr()
     );
 
-    // Increase UDP receive buffer to handle burst sends. Default Linux
-    // buffer (208KB) is too small when the sender fires a full window
-    // of 16KB packets in one batch. 4MB accommodates ~250 packets.
-    // On Windows the default buffer is typically larger and the libc
-    // setsockopt API differs, so we only set this on Unix targets.
-    #[cfg(unix)]
-    #[allow(unsafe_code)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let raw_fd = udp_socket.as_raw_fd();
-        let desired_buf: libc::c_int = 4 * 1024 * 1024;
-        // SAFETY: raw_fd is valid, desired_buf is a simple integer value.
-        unsafe {
-            libc::setsockopt(
-                raw_fd,
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &desired_buf as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-        }
-    }
-
-    // ── Detect system capabilities and choose pacing strategy ──────────
-    // This runs once at bridge startup. On older kernels (HZ=250),
-    // std::thread::sleep(10µs) actually sleeps 4ms, which destroys
-    // throughput. The pacing module detects this and adapts.
+    // ── Configure socket buffers and detect system capabilities ───────
+    // Set SO_RCVBUF and SO_SNDBUF to 7MB (matching WireGuard-Go), then
+    // detect the actual buffer sizes to adapt sub-batch sizing.
+    // No HZ detection, no pacing — just big buffers + yield.
     let system_profile = {
         #[cfg(unix)]
         #[allow(unsafe_code)]
-        let udp_std = {
+        let profile = {
             use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
-            // Convert tokio UdpSocket's raw fd to a std UdpSocket reference
-            // for buffer detection. We use from_raw_fd + into_raw_fd to avoid
-            // closing the fd (the tokio socket still owns it).
             let fd = udp_socket.as_raw_fd();
             // SAFETY: fd is a valid open socket, and we immediately convert
             // back via into_raw_fd to prevent the std UdpSocket from closing it.
             let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-            let profile =
+            let p =
                 crate::pacing::detect_system(peer_addr, Some(&std_sock), Duration::from_micros(10));
-            // Don't let std_sock close the fd — it belongs to the tokio socket
             let _ = std_sock.into_raw_fd();
-            profile
+            p
         };
         #[cfg(not(unix))]
-        let udp_std = crate::pacing::detect_system(peer_addr, None, Duration::from_micros(10));
-        udp_std
+        let profile = crate::pacing::detect_system(peer_addr, None, Duration::from_micros(10));
+        profile
     };
 
     let pacing_strategy = system_profile.pacing;
     let adaptive_sub_batch = system_profile.max_sub_batch;
-    info!(
-        "bridge pacing: strategy={}, sub_batch={}, HZ≈{}, recv_buf={}",
-        pacing_strategy,
-        adaptive_sub_batch,
-        system_profile.estimated_hz,
-        system_profile
-            .recv_buffer_size
-            .map(|s| format!("{}KB", s / 1024))
-            .unwrap_or_else(|| "unknown".into()),
-    );
 
     // ── Send RESET frame if this is a subsequent TCP connection ──────
     // The RESET frame tells the remote side to reset its reassembly state
@@ -1332,12 +1294,10 @@ async fn run_bridge_inner(
                 // Reset ACK timeout on progress
                 last_ack_check = Instant::now();
 
-                // Pace between sub-batches to let the receiver drain its
-                // UDP buffer. The pacing strategy was chosen at bridge
-                // startup based on kernel capabilities:
-                // - HZ=1000+: sleep(10µs) → ~65µs (ideal)
-                // - HZ=250:   spin-yield(100µs) (avoids 4ms sleep penalty)
-                // - Loopback + large buffer: no-op (receiver drains fast)
+                // Yield between sub-batches to let the tokio runtime
+                // service the receiver task. With 7MB socket buffers,
+                // there's no need for sleep or spin-yield pacing —
+                // the buffer absorbs the burst.
                 if chunk_idx < num_chunks && send_count > 0 {
                     crate::pacing::pace(&pacing_strategy);
                 }

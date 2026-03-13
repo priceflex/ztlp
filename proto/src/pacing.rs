@@ -1,83 +1,59 @@
-//! Kernel-aware pacing for inter-batch delays.
+//! Universal buffer-based flow control for ZTLP tunnels.
 //!
-//! On modern Linux kernels (6.x+, HZ=1000), `std::thread::sleep(10µs)`
-//! sleeps ~65µs — ideal for pacing UDP bursts between sub-batches.
+//! # Design Philosophy
 //!
-//! On older kernels (5.x, HZ=250), the minimum sleep is **4ms** (one
-//! scheduler tick), which is 60-400× longer than intended. This kills
-//! throughput for bulk transfers: 10 sub-batches × 4ms = 40ms of dead
-//! time per TCP read.
+//! After studying WireGuard-Go, Nebula, and boringtun, the conclusion
+//! is clear: **don't pace, just use large buffers.**
 //!
-//! This module detects the system's actual timer resolution at startup
-//! and chooses the best pacing strategy:
+//! Previous versions of this module tried to detect kernel HZ and choose
+//! between sleep, spin-yield, and no-op strategies. This was fragile:
 //!
-//! - **Spin-yield:** On HZ=250 kernels where sleep granularity exceeds
-//!   the target delay, use `thread::yield_now()` in a tight loop with
-//!   a TSC/Instant check. Burns a core briefly but maintains throughput.
+//! - HZ=1000 (modern): sleep(10µs) → ~65µs. Fine, but unnecessary.
+//! - HZ=300 (Arch default): spin-yield → 100% CPU.
+//! - HZ=250 (KVM/older): spin-yield → 100% CPU.
 //!
-//! - **Sleep:** On HZ=1000+ kernels where sleep granularity is
-//!   acceptable (< 500µs), use `std::thread::sleep()` as before.
+//! WireGuard-Go uses 7MB socket buffers and zero pacing. Nebula uses
+//! `recvmmsg` batching and zero pacing. boringtun uses raw epoll and
+//! zero pacing. They all work on every kernel.
 //!
-//! - **None:** When the peer is on loopback (RTT < 0.5ms) AND the
-//!   receive buffer is large (≥ 2MB), skip pacing entirely — the
-//!   receiver can drain fast enough.
+//! # Current Approach
 //!
-//! ## Detection
+//! 1. **Set SO_RCVBUF and SO_SNDBUF to 7MB** (matching WireGuard-Go).
+//! 2. **No pacing between sub-batches** — just `yield_now()` to let
+//!    the tokio runtime service the receiver task.
+//! 3. **Sub-batch sizing based on buffer capacity** — larger buffers
+//!    allow larger bursts without overflow.
 //!
-//! Timer resolution is measured once by sleeping for 1µs ten times and
-//! taking the median actual elapsed time. This is done at bridge startup,
-//! not on every packet.
+//! This works universally: Linux (any HZ), macOS, Windows, loopback,
+//! remote, any kernel version.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tracing::info;
+
+/// Target socket buffer size: 7MB, matching WireGuard-Go.
+///
+/// This absorbs full-window bursts without needing inter-batch pacing.
+/// On Linux, the kernel may double this value (net.core.rmem_max
+/// permitting). If rmem_max is lower, we get whatever the kernel allows.
+pub const TARGET_BUFFER_SIZE: usize = 7 * 1024 * 1024;
 
 /// The pacing strategy selected for this tunnel session.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PacingStrategy {
-    /// Use `std::thread::sleep()` — kernel timer is precise enough.
-    Sleep(Duration),
-    /// Use a spin-yield loop — kernel timer is too coarse.
-    SpinYield(Duration),
-    /// No pacing needed — loopback with large recv buffer.
+    /// No pacing — just yield between sub-batches.
+    /// This is now the only strategy. The enum is kept for backward
+    /// compatibility with the tunnel code that references it.
     None,
 }
 
 impl std::fmt::Display for PacingStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PacingStrategy::Sleep(d) => write!(f, "sleep({}µs)", d.as_micros()),
-            PacingStrategy::SpinYield(d) => write!(f, "spin-yield({}µs)", d.as_micros()),
-            PacingStrategy::None => write!(f, "none"),
+            PacingStrategy::None => write!(f, "none (buffer-based)"),
         }
     }
-}
-
-/// Measure the actual granularity of `std::thread::sleep()` on this system.
-///
-/// Sleeps for 1µs ten times, collects the actual elapsed durations,
-/// and returns the median. This gives a reliable estimate of the
-/// kernel's minimum sleep granularity.
-///
-/// Typical results:
-/// - HZ=1000 (modern): ~55-80µs
-/// - HZ=250 (older/KVM): ~4000-4200µs
-/// - HZ=100 (very old): ~10000µs
-pub fn measure_sleep_granularity() -> Duration {
-    let mut samples = Vec::with_capacity(10);
-    // Warm up the scheduler — first sleep is often an outlier
-    std::thread::sleep(Duration::from_micros(1));
-
-    for _ in 0..10 {
-        let start = Instant::now();
-        std::thread::sleep(Duration::from_micros(1));
-        samples.push(start.elapsed());
-    }
-
-    samples.sort();
-    // Median (index 5 of 10 sorted samples)
-    samples[5]
 }
 
 /// Detect the UDP receive buffer size for a socket.
@@ -112,6 +88,100 @@ pub fn detect_recv_buffer(_udp: &std::net::UdpSocket) -> Option<usize> {
     None
 }
 
+/// Detect the UDP send buffer size for a socket.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn detect_send_buffer(udp: &std::net::UdpSocket) -> Option<usize> {
+    use std::os::unix::io::AsRawFd;
+    let fd = udp.as_raw_fd();
+    let mut buf_size: libc::c_int = 0;
+    let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: fd is valid, buf_size and opt_len are properly sized stack variables.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut buf_size as *mut _ as *mut libc::c_void,
+            &mut opt_len,
+        )
+    };
+    if ret == 0 {
+        Some(buf_size as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+pub fn detect_send_buffer(_udp: &std::net::UdpSocket) -> Option<usize> {
+    None
+}
+
+/// Set both SO_RCVBUF and SO_SNDBUF to the target size.
+///
+/// On Linux, `setsockopt(SO_RCVBUF)` requests a buffer size, but the
+/// kernel caps it at `net.core.rmem_max` (and doubles the value internally
+/// for bookkeeping overhead). If you have CAP_NET_ADMIN, SO_RCVBUFFORCE
+/// bypasses the cap.
+///
+/// Returns the actual (recv, send) buffer sizes after the attempt.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn set_socket_buffers(udp: &std::net::UdpSocket) -> (Option<usize>, Option<usize>) {
+    use std::os::unix::io::AsRawFd;
+    let fd = udp.as_raw_fd();
+    let desired: libc::c_int = TARGET_BUFFER_SIZE as libc::c_int;
+
+    // SAFETY: fd is valid, desired is a simple integer on the stack.
+    unsafe {
+        // Try SO_RCVBUFFORCE first (bypasses rmem_max, needs CAP_NET_ADMIN)
+        let ret = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUFFORCE,
+            &desired as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            // Fall back to regular SO_RCVBUF (capped by rmem_max)
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &desired as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+
+        // Try SO_SNDBUFFORCE first
+        let ret = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUFFORCE,
+            &desired as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        if ret != 0 {
+            // Fall back to regular SO_SNDBUF
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &desired as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
+    (detect_recv_buffer(udp), detect_send_buffer(udp))
+}
+
+#[cfg(not(unix))]
+pub fn set_socket_buffers(_udp: &std::net::UdpSocket) -> (Option<usize>, Option<usize>) {
+    (None, None)
+}
+
 /// Check if a peer address is loopback.
 fn is_loopback(addr: &SocketAddr) -> bool {
     match addr {
@@ -123,105 +193,72 @@ fn is_loopback(addr: &SocketAddr) -> bool {
 /// System capabilities detected at bridge startup.
 #[derive(Debug, Clone)]
 pub struct SystemProfile {
-    /// Median sleep granularity measured by `measure_sleep_granularity()`.
-    pub sleep_granularity: Duration,
-    /// Kernel HZ estimate derived from sleep granularity.
-    pub estimated_hz: u32,
-    /// Effective UDP receive buffer size (after SO_RCVBUF set), or None.
+    /// Effective UDP receive buffer size, or None.
     pub recv_buffer_size: Option<usize>,
+    /// Effective UDP send buffer size, or None.
+    pub send_buffer_size: Option<usize>,
     /// Whether the peer is on loopback.
     pub is_loopback: bool,
-    /// The chosen pacing strategy.
+    /// The chosen pacing strategy (always None now).
     pub pacing: PacingStrategy,
     /// Recommended MAX_SUB_BATCH for this system.
     pub max_sub_batch: usize,
 }
 
-/// Detect system capabilities and choose the optimal pacing strategy.
+/// Detect system capabilities and configure socket buffers.
 ///
-/// Called once at bridge startup. The `target_pace` is the desired
-/// inter-batch delay (e.g., 10µs for the original pacing).
+/// Called once at bridge startup. Sets socket buffers to 7MB (or as
+/// large as the kernel allows), then determines sub-batch sizing
+/// based on the actual buffer sizes achieved.
 ///
-/// The `peer_addr` is used to detect loopback connections.
-/// The `udp_std` is a reference to the raw std UdpSocket for buffer detection.
+/// No HZ detection. No sleep granularity measurement. No spin-yield.
+/// Just big buffers and let the kernel handle queuing.
 pub fn detect_system(
     peer_addr: SocketAddr,
     udp_std: Option<&std::net::UdpSocket>,
-    target_pace: Duration,
+    _target_pace: Duration, // kept for API compat, ignored
 ) -> SystemProfile {
-    let sleep_granularity = measure_sleep_granularity();
-
-    // Estimate kernel HZ from sleep granularity
-    let granularity_us = sleep_granularity.as_micros() as u32;
-    let estimated_hz = if granularity_us < 200 {
-        1000 // Very precise — likely HZ=1000 or high-res timers
-    } else if granularity_us < 2000 {
-        500 // ~2ms tick
-    } else if granularity_us < 6000 {
-        250 // ~4ms tick (common in KVM/older kernels)
-    } else {
-        100 // ~10ms tick (very old kernels)
-    };
-
     let is_loopback = is_loopback(&peer_addr);
 
-    let recv_buffer_size = udp_std.and_then(detect_recv_buffer);
-
-    // Choose pacing strategy
-    let pacing = if is_loopback && recv_buffer_size.is_some_and(|sz| sz >= 2 * 1024 * 1024) {
-        // Loopback with large recv buffer: no pacing needed.
-        // The receiver drains fast enough on loopback and the buffer
-        // can absorb full-window bursts.
-        PacingStrategy::None
-    } else if sleep_granularity <= target_pace * 50 {
-        // Sleep granularity is within 50× of target — sleep is acceptable.
-        // On HZ=1000, sleep(10µs) → ~65µs, which is 6.5× target. Fine.
-        PacingStrategy::Sleep(target_pace)
-    } else {
-        // Sleep is too coarse (HZ=100-300: 3-10ms per sleep).
-        // Use spin-yield but with a SHORT duration to avoid burning
-        // 100% CPU. The spin only needs to last long enough to let
-        // the receiver's UDP stack drain a sub-batch — not long enough
-        // to visibly affect CPU usage.
-        //
-        // Key insight: on HZ=250/300, we DON'T need 4ms pacing —
-        // we just need a brief ~50-100µs pause. The spin loop provides
-        // this without the kernel timer overhead.
-        //
-        // The spin duration is kept short AND we limit it to only fire
-        // between sub-batches (not per-packet), so total spin time per
-        // window is bounded: 64 sub-batches × 100µs = 6.4ms max.
-        let spin_target = if is_loopback {
-            Duration::from_micros(10) // Loopback: minimal
-        } else {
-            Duration::from_micros(50) // Remote: moderate (was 100µs — halved)
-        };
-        PacingStrategy::SpinYield(spin_target)
+    // Set buffers and read back actual sizes
+    let (recv_buffer_size, send_buffer_size) = match udp_std {
+        Some(sock) => set_socket_buffers(sock),
+        None => (None, None),
     };
 
-    // Adjust sub-batch size based on recv buffer
-    let max_sub_batch = match recv_buffer_size {
-        Some(sz) if sz >= 4 * 1024 * 1024 => 128, // 4MB+ buffer: larger batches OK
-        Some(sz) if sz >= 2 * 1024 * 1024 => 64,  // 2MB+: default
-        Some(sz) if sz >= 512 * 1024 => 32,       // 512KB+: conservative
-        Some(_) => 16,                            // Small buffer: very conservative
-        None => 64,                               // Can't detect: use default
+    // Sub-batch sizing based on recv buffer.
+    // With 7MB buffers, we can afford large batches.
+    // Even if the kernel caps us at a smaller size, we adapt.
+    let effective_recv = recv_buffer_size.unwrap_or(0);
+    let max_sub_batch = if effective_recv >= 4 * 1024 * 1024 {
+        128 // 4MB+: WireGuard-Go style large batches
+    } else if effective_recv >= 2 * 1024 * 1024 {
+        64
+    } else if effective_recv >= 512 * 1024 {
+        32
+    } else {
+        // Small or unknown buffer — still no pacing, but smaller bursts
+        16
     };
 
     let profile = SystemProfile {
-        sleep_granularity,
-        estimated_hz,
         recv_buffer_size,
+        send_buffer_size,
         is_loopback,
-        pacing,
+        pacing: PacingStrategy::None,
         max_sub_batch,
     };
 
     info!(
-        "system profile: HZ≈{}, sleep_granularity={}µs, recv_buf={}, loopback={}, pacing={}, sub_batch={}",
-        profile.estimated_hz,
-        profile.sleep_granularity.as_micros(),
-        profile.recv_buffer_size.map(|s| format!("{}KB", s / 1024)).unwrap_or_else(|| "unknown".into()),
+        "system profile: recv_buf={}, send_buf={}, loopback={}, pacing={}, sub_batch={}",
+        profile
+            .recv_buffer_size
+            .map(|s| format!("{}KB", s / 1024))
+            .unwrap_or_else(|| "unknown".into()),
+        profile
+            .send_buffer_size
+            .map(|s| format!("{}KB", s / 1024))
+            .unwrap_or_else(|| "unknown".into()),
         profile.is_loopback,
         profile.pacing,
         profile.max_sub_batch,
@@ -232,43 +269,21 @@ pub fn detect_system(
 
 /// Execute the chosen pacing delay between sub-batches.
 ///
-/// This is the hot-path replacement for `std::thread::sleep(10µs)`.
-/// On modern kernels it sleeps. On old kernels it spin-yields.
-/// On loopback with large buffers it's a no-op.
+/// With buffer-based flow control, this is always a simple yield.
+/// The yield lets the tokio runtime service the receiver task and
+/// other timers (ACK, NACK, stall detection) between bursts.
 #[inline]
-pub fn pace(strategy: &PacingStrategy) {
-    match strategy {
-        PacingStrategy::None => {
-            // No pacing — just yield to let the tokio runtime service
-            // other tasks (like the receiver).
-            std::thread::yield_now();
-        }
-        PacingStrategy::Sleep(duration) => {
-            std::thread::sleep(*duration);
-        }
-        PacingStrategy::SpinYield(duration) => {
-            let deadline = Instant::now() + *duration;
-            loop {
-                std::thread::yield_now();
-                if Instant::now() >= deadline {
-                    break;
-                }
-            }
-        }
-    }
+pub fn pace(_strategy: &PacingStrategy) {
+    // Just yield to the OS scheduler. This gives the receiver task
+    // a chance to run and drain packets from the socket buffer.
+    // No sleep, no spin — the buffer absorbs the burst.
+    std::thread::yield_now();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_measure_sleep_granularity() {
-        let granularity = measure_sleep_granularity();
-        // Should be at least 1µs and less than 100ms on any reasonable system
-        assert!(granularity >= Duration::from_micros(1));
-        assert!(granularity < Duration::from_millis(100));
-    }
+    use std::time::Instant;
 
     #[test]
     fn test_is_loopback_v4() {
@@ -288,38 +303,17 @@ mod tests {
 
     #[test]
     fn test_pacing_strategy_display() {
-        assert_eq!(
-            format!("{}", PacingStrategy::Sleep(Duration::from_micros(10))),
-            "sleep(10µs)"
-        );
-        assert_eq!(
-            format!("{}", PacingStrategy::SpinYield(Duration::from_micros(100))),
-            "spin-yield(100µs)"
-        );
-        assert_eq!(format!("{}", PacingStrategy::None), "none");
+        assert_eq!(format!("{}", PacingStrategy::None), "none (buffer-based)");
     }
 
     #[test]
-    fn test_pace_none_does_not_block() {
+    fn test_pace_does_not_block() {
         let start = Instant::now();
-        for _ in 0..1000 {
+        for _ in 0..10_000 {
             pace(&PacingStrategy::None);
         }
-        // 1000 yield_now() calls should take well under 100ms
+        // 10,000 yield_now() calls should take well under 100ms
         assert!(start.elapsed() < Duration::from_millis(100));
-    }
-
-    #[test]
-    fn test_pace_spin_yield_approximate_duration() {
-        let strategy = PacingStrategy::SpinYield(Duration::from_micros(100));
-        let start = Instant::now();
-        for _ in 0..10 {
-            pace(&strategy);
-        }
-        let elapsed = start.elapsed();
-        // 10 × 100µs = ~1ms, allow generous bounds (0.5ms to 50ms)
-        assert!(elapsed >= Duration::from_micros(500));
-        assert!(elapsed < Duration::from_millis(50));
     }
 
     #[test]
@@ -327,11 +321,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:23095".parse().expect("valid addr");
         let profile = detect_system(addr, None, Duration::from_micros(10));
         assert!(profile.is_loopback);
-        // Should pick either None or SpinYield for loopback, never Sleep
-        // (because even on HZ=1000, loopback benefits from no-pacing)
-        // Actually, on HZ=1000 with unknown recv buffer it picks Sleep,
-        // which is fine too.
-        assert!(profile.estimated_hz > 0);
+        assert_eq!(profile.pacing, PacingStrategy::None);
     }
 
     #[test]
@@ -339,15 +329,19 @@ mod tests {
         let addr: SocketAddr = "10.0.0.5:23095".parse().expect("valid addr");
         let profile = detect_system(addr, None, Duration::from_micros(10));
         assert!(!profile.is_loopback);
+        assert_eq!(profile.pacing, PacingStrategy::None);
     }
 
     #[test]
-    fn test_sub_batch_sizing() {
-        // Verify the sub-batch scaling logic
+    fn test_sub_batch_default_without_socket() {
         let addr: SocketAddr = "10.0.0.1:23095".parse().expect("valid addr");
-
-        // Without recv buffer info, default to 64
         let profile = detect_system(addr, None, Duration::from_micros(10));
-        assert_eq!(profile.max_sub_batch, 64);
+        // Without recv buffer info, defaults to 16 (conservative)
+        assert_eq!(profile.max_sub_batch, 16);
+    }
+
+    #[test]
+    fn test_target_buffer_size() {
+        assert_eq!(TARGET_BUFFER_SIZE, 7 * 1024 * 1024);
     }
 }

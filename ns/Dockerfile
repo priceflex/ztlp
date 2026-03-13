@@ -7,7 +7,7 @@
 # ─────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build ──────────────────────────────────────────
-FROM elixir:1.12.3-otp-24 AS builder
+FROM elixir:1.15.7-otp-26 AS builder
 
 ENV MIX_ENV=prod
 WORKDIR /build
@@ -32,10 +32,10 @@ RUN mix compile --warnings-as-errors && \
     mix release ztlp_ns
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libncurses6 libtinfo6 libssl1.1 locales \
+    libncurses6 libtinfo6 libssl3 locales \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen

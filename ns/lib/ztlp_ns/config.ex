@@ -45,8 +45,8 @@ defmodule ZtlpNs.Config do
   @spec storage_mode() :: :ram_copies | :disc_copies
   def storage_mode do
     case System.get_env("ZTLP_NS_STORAGE_MODE") do
-      "ram" -> :ram_copies
-      "disc" -> :disc_copies
+      val when val in ["ram", "ram_copies"] -> :ram_copies
+      val when val in ["disc", "disc_copies"] -> :disc_copies
       nil -> Application.get_env(:ztlp_ns, :storage_mode, :disc_copies)
       _ -> :disc_copies
     end

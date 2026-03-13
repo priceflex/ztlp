@@ -465,10 +465,19 @@ impl GroReceiver {
         use std::os::unix::io::AsRawFd;
 
         loop {
-            self.socket.readable().await?;
-
+            // Wait for the socket to become readable, then attempt a
+            // synchronous recvmsg with GRO support. Using try_io()
+            // instead of readable() + raw syscall ensures that tokio
+            // properly clears readiness on WouldBlock, preventing a
+            // busy-loop that would starve timers (NACK, ACK, stall).
             let fd = self.socket.as_raw_fd();
-            match recv_gro_sync(fd, &mut self.buf) {
+            let buf = &mut self.buf;
+
+            let result = self
+                .socket
+                .try_io(tokio::io::Interest::READABLE, || recv_gro_sync(fd, buf));
+
+            match result {
                 Ok((total_len, addr, gso_size)) => {
                     let segments = split_gro_segments(total_len, gso_size, addr);
                     trace!(
@@ -490,7 +499,10 @@ impl GroReceiver {
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Spurious readiness — retry
+                    // Socket not actually ready — wait for readiness.
+                    // try_io already cleared the readiness flag, so
+                    // readable() will properly yield to the runtime.
+                    self.socket.readable().await?;
                     continue;
                 }
                 Err(e) => return Err(e),

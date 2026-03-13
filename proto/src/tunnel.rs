@@ -44,10 +44,11 @@
 //!
 //! | Type | Byte | Payload |
 //! |------|------|---------|
-//! | DATA | 0x00 | 8-byte BE data_seq + raw TCP bytes |
-//! | ACK  | 0x01 | 8-byte BE data_seq: highest delivered data_seq |
-//! | FIN  | 0x02 | 8-byte BE data_seq |
-//! | NACK | 0x03 | 2-byte BE count + N × 8-byte BE missing data_seqs |
+//! | DATA  | 0x00 | 8-byte BE data_seq + raw TCP bytes |
+//! | ACK   | 0x01 | 8-byte BE data_seq: highest delivered data_seq |
+//! | FIN   | 0x02 | 8-byte BE data_seq |
+//! | NACK  | 0x03 | 2-byte BE count + N × 8-byte BE missing data_seqs |
+//! | RESET | 0x04 | (empty) — signals new TCP stream, resets data_seq |
 //!
 //! Two modes of operation:
 //!
@@ -128,6 +129,23 @@ const FRAME_FIN: u8 = 0x02;
 /// Frame type byte: NACK frame listing missing sequence numbers.
 /// Payload: [count: u16 BE] [seq1: u64 BE] [seq2: u64 BE] ...
 const FRAME_NACK: u8 = 0x03;
+
+/// Stream reset: signals the start of a new TCP connection within the same
+/// ZTLP session. The receiver resets its reassembly state (`expected_seq` = 0)
+/// and opens a new backend TCP connection. The RESET frame has no payload
+/// beyond the frame type byte itself.
+const FRAME_RESET: u8 = 0x04;
+
+/// Outcome of a bridge run, distinguishing normal close from a stream reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeOutcome {
+    /// The TCP stream closed normally (FIN from both sides).
+    Closed,
+    /// A RESET frame was received — the remote side is starting a new TCP
+    /// stream on the same ZTLP session. The caller should open a new backend
+    /// TCP connection and start a fresh bridge.
+    ResetReceived,
+}
 
 // ─── Flow control parameters ────────────────────────────────────────────────
 
@@ -390,6 +408,11 @@ impl ReassemblyBuffer {
     /// Mark that a NACK was just sent (for rate limiting).
     pub fn mark_nack_sent(&mut self) {
         self.last_nack_time = Some(Instant::now());
+    }
+
+    /// Whether a gap has been detected.
+    pub fn has_gap(&self) -> bool {
+        self.gap_detected_at.is_some()
     }
 
     /// Check if enough time has passed since the last NACK to send another.
@@ -675,13 +698,48 @@ impl CongestionController {
 /// 4. Both sides know when the stream ends (FIN frames)
 ///
 /// Returns when either side closes or an unrecoverable error occurs.
+/// Run a bidirectional TCP ↔ ZTLP bridge.
+///
+/// If `send_initial_reset` is true, the bridge sends a RESET frame before
+/// any data to signal the remote side that a new TCP stream is starting.
+/// This allows multiple sequential TCP connections to share a single ZTLP
+/// session (e.g., `ztlp connect -L` accepting multiple connections on the
+/// local listener).
 pub async fn run_bridge(
     tcp_stream: TcpStream,
     udp_socket: Arc<UdpSocket>,
     pipeline: Arc<Mutex<Pipeline>>,
     session_id: SessionId,
     peer_addr: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+    run_bridge_inner(
+        tcp_stream, udp_socket, pipeline, session_id, peer_addr, false,
+    )
+    .await
+}
+
+/// Like [`run_bridge`] but sends a RESET frame first to signal a new TCP stream.
+pub async fn run_bridge_with_reset(
+    tcp_stream: TcpStream,
+    udp_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+    run_bridge_inner(
+        tcp_stream, udp_socket, pipeline, session_id, peer_addr, true,
+    )
+    .await
+}
+
+async fn run_bridge_inner(
+    tcp_stream: TcpStream,
+    udp_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    send_initial_reset: bool,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
     info!(
         "run_bridge: starting for session {} peer={} local_udp={:?}",
         session_id,
@@ -752,6 +810,46 @@ pub async fn run_bridge(
             .unwrap_or_else(|| "unknown".into()),
     );
 
+    // ── Send RESET frame if this is a subsequent TCP connection ──────
+    // The RESET frame tells the remote side to reset its reassembly state
+    // and open a new backend TCP connection. The first TCP connection on a
+    // session doesn't need this (the remote side starts fresh).
+    if send_initial_reset {
+        info!(
+            "sending RESET frame for new TCP stream on session {}",
+            session_id
+        );
+        // Allocate a packet_seq and get the send key from the session.
+        let (packet_seq, send_key) = {
+            let mut pl = pipeline.lock().await;
+            let session = pl
+                .get_session_mut(&session_id)
+                .ok_or("session not found for RESET")?;
+            let seq = session.send_seq;
+            session.send_seq += 1;
+            (seq, session.send_key)
+        };
+
+        // Encrypt the RESET frame (single byte: 0x04)
+        let cipher = ChaCha20Poly1305::new((&send_key).into());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let reset_frame = vec![FRAME_RESET];
+        let encrypted = cipher
+            .encrypt(nonce, reset_frame.as_slice())
+            .map_err(|e| format!("RESET encryption error: {:?}", e))?;
+
+        // Build the data header
+        let mut header = DataHeader::new(session_id, packet_seq);
+        let aad = header.aad_bytes();
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+        let mut packet = header.serialize();
+        packet.extend_from_slice(&encrypted);
+        udp_socket.send_to(&packet, peer_addr).await?;
+    }
+
     let (mut tcp_reader, tcp_writer) = tcp_stream.into_split();
 
     let udp_send = udp_socket.clone();
@@ -814,6 +912,12 @@ pub async fn run_bridge(
 
     // Signal from receiver to sender that a FIN was received from the remote.
     let (fin_tx, _fin_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Flag set by the receiver when a RESET frame arrives. The caller
+    // checks this after the bridge exits to decide whether to start a
+    // new TCP stream or shut down entirely.
+    let reset_received = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reset_received_rx = reset_received.clone();
 
     // ── TCP → ZTLP direction (sender) ──────────────────────────────────
 
@@ -908,46 +1012,95 @@ pub async fn run_bridge(
                 }
             }
 
+            // ── Select between TCP data and retransmit requests ───────
+            // The sender must remain responsive to NACK retransmit requests
+            // even while waiting for TCP data. Without this select!, a TCP
+            // flow-control stall (SCP waiting for the receiver to drain)
+            // deadlocks with a missing packet (receiver waiting for retransmit).
             let tcp_read_start = Instant::now();
-            let n = match tcp_reader.read(&mut buf).await {
-                Ok(0) => {
-                    // TCP EOF — send FIN frame to signal stream end to remote.
-                    // FIN carries the current data_seq so the receiver knows
-                    // which data_seq marks the end of the stream.
-                    info!("TCP connection closed (read EOF), sending FIN");
-                    let fin_data_seq = data_seq;
-                    let mut fin_frame = Vec::with_capacity(9);
-                    fin_frame.push(FRAME_FIN);
-                    fin_frame.extend_from_slice(&fin_data_seq.to_be_bytes());
-                    let packet_seq = {
-                        let mut pl = pipeline_send.lock().await;
-                        let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
-                        session.next_send_seq()
-                    };
-                    let mut nonce_bytes = [0u8; 12];
-                    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    let encrypted = cipher
-                        .encrypt(nonce, fin_frame.as_slice())
-                        .map_err(|e| format!("FIN encryption error: {}", e))?;
-                    let mut header = DataHeader::new(sid_send, packet_seq);
-                    let aad = header.aad_bytes();
-                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
-                    let mut packet = header.serialize();
-                    packet.extend_from_slice(&encrypted);
-                    udp_send.send_to(&packet, peer_addr).await?;
-                    debug!(
-                        "sent FIN frame (data_seq {}, packet_seq {})",
-                        fin_data_seq, packet_seq
-                    );
-                    return Ok::<_, Box<dyn std::error::Error>>(());
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    warn!("TCP read error: {}", e);
-                    return Err(e.into());
+            let n = 'tcp_read: loop {
+                tokio::select! {
+                    result = tcp_reader.read(&mut buf) => {
+                        match result {
+                            Ok(n) => break 'tcp_read n,
+                            Err(e) => {
+                                warn!("TCP read error: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                    }
+                    Some(nack_seqs) = retransmit_rx.recv() => {
+                        // Process retransmit while TCP read is stalled.
+                        {
+                            let mut cc = congestion_sender.lock().await;
+                            cc.on_loss();
+                        }
+                        for nack_data_seq in &nack_seqs {
+                            let entry_info = {
+                                let rb = retransmit_buf_sender.lock().await;
+                                rb.get_with_packet_seq(*nack_data_seq)
+                            };
+                            if let Some((plaintext, orig_packet_seq)) = entry_info {
+                                let mut nonce_bytes = [0u8; 12];
+                                nonce_bytes[4..12]
+                                    .copy_from_slice(&orig_packet_seq.to_le_bytes());
+                                let nonce = Nonce::from_slice(&nonce_bytes);
+                                if let Ok(encrypted) =
+                                    cipher.encrypt(nonce, plaintext.as_slice())
+                                {
+                                    let mut header =
+                                        DataHeader::new(sid_send, orig_packet_seq);
+                                    let aad = header.aad_bytes();
+                                    header.header_auth_tag =
+                                        compute_header_auth_tag(&send_key, &aad);
+                                    let mut packet = header.serialize();
+                                    packet.extend_from_slice(&encrypted);
+                                    let _ =
+                                        udp_send.send_to(&packet, peer_addr).await;
+                                    debug!(
+                                        "retransmitted data_seq {} (async NACK, packet_seq {})",
+                                        nack_data_seq, orig_packet_seq
+                                    );
+                                }
+                            }
+                        }
+                        // Loop back to wait for TCP data again
+                        continue;
+                    }
                 }
             };
+            if n == 0 {
+                // TCP EOF — send FIN frame to signal stream end to remote.
+                // FIN carries the current data_seq so the receiver knows
+                // which data_seq marks the end of the stream.
+                info!("TCP connection closed (read EOF), sending FIN");
+                let fin_data_seq = data_seq;
+                let mut fin_frame = Vec::with_capacity(9);
+                fin_frame.push(FRAME_FIN);
+                fin_frame.extend_from_slice(&fin_data_seq.to_be_bytes());
+                let packet_seq = {
+                    let mut pl = pipeline_send.lock().await;
+                    let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
+                    session.next_send_seq()
+                };
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                let encrypted = cipher
+                    .encrypt(nonce, fin_frame.as_slice())
+                    .map_err(|e| format!("FIN encryption error: {}", e))?;
+                let mut header = DataHeader::new(sid_send, packet_seq);
+                let aad = header.aad_bytes();
+                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                let mut packet = header.serialize();
+                packet.extend_from_slice(&encrypted);
+                udp_send.send_to(&packet, peer_addr).await?;
+                debug!(
+                    "sent FIN frame (data_seq {}, packet_seq {})",
+                    fin_data_seq, packet_seq
+                );
+                return Ok::<_, Box<dyn std::error::Error>>(());
+            }
 
             let tcp_read_time = tcp_read_start.elapsed();
             let data = &buf[..n];
@@ -1230,7 +1383,9 @@ pub async fn run_bridge(
 
     // ── ZTLP → TCP direction (receiver) ────────────────────────────────
 
+    let reset_flag_for_rx = reset_received_rx;
     let ztlp_to_tcp = async move {
+        let reset_received = reset_flag_for_rx;
         info!("ztlp_to_tcp: starting");
         // Recv key and ACK key are pre-extracted before select! to avoid lock contention.
         let recv_cipher = ChaCha20Poly1305::new((&recv_key).into());
@@ -1544,6 +1699,19 @@ pub async fn run_bridge(
                                 // close the connection once all data is delivered.
                             }
 
+                            FRAME_RESET => {
+                                // RESET frame: the remote side is starting a new
+                                // TCP stream on the same ZTLP session. Shut down
+                                // the current TCP write half and signal the caller
+                                // to open a new backend connection.
+                                info!("received RESET frame — remote starting new TCP stream");
+                                reset_received.store(true, std::sync::atomic::Ordering::Release);
+                                if let Err(e) = tcp_writer.shutdown().await {
+                                    debug!("TCP shutdown on RESET: {}", e);
+                                }
+                                return Ok(());
+                            }
+
                             _ => {
                                 debug!("unknown frame type 0x{:02x}, ignoring", frame_type);
                             }
@@ -1655,6 +1823,7 @@ pub async fn run_bridge(
                     let cc = congestion_receiver.lock().await;
                     cc.nack_threshold()
                 };
+                // Debug: log when we have a gap but haven't sent a NACK yet
                 if reasm.should_nack(nack_threshold) && reasm.can_send_nack(nack_threshold) {
                     let missing = reasm.missing_seqs(MAX_NACK_SEQS);
                     if !missing.is_empty() {
@@ -1792,7 +1961,11 @@ pub async fn run_bridge(
     }
 
     info!("tunnel bridge terminated for session {}", session_id);
-    Ok(())
+    if reset_received.load(std::sync::atomic::Ordering::Acquire) {
+        Ok(BridgeOutcome::ResetReceived)
+    } else {
+        Ok(BridgeOutcome::Closed)
+    }
 }
 
 /// Send an ACK frame through the ZTLP session.

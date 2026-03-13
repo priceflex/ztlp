@@ -43,6 +43,7 @@ use ztlp_proto::packet::{
     flags, DataHeader, HandshakeHeader, MsgType, SessionId, DATA_HEADER_SIZE,
     HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
+use ztlp_proto::pipeline::AdmissionResult;
 use ztlp_proto::policy::PolicyEngine;
 use ztlp_proto::relay::SimulatedRelay;
 use ztlp_proto::transport::TransportNode;
@@ -1406,6 +1407,7 @@ async fn cmd_connect(
             listen_addr
         );
 
+        let mut first_connection = true;
         loop {
             let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
             eprintln!("{} {} → tunnel", c_cyan("TCP connection from"), tcp_addr);
@@ -1413,13 +1415,25 @@ async fn cmd_connect(
             let udp = node.socket.clone();
             let pipeline = node.pipeline.clone();
 
-            // Run bridge (blocks until TCP connection closes)
-            if let Err(e) =
+            // For subsequent TCP connections (not the first), send a RESET
+            // frame so the remote listener knows to open a new backend
+            // connection and reset its reassembly state.
+            let result = if first_connection {
+                first_connection = false;
                 tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, send_addr).await
-            {
-                eprintln!("{} {}", c_red("✗ tunnel error:"), e);
+            } else {
+                tunnel::run_bridge_with_reset(tcp_stream, udp, pipeline, session_id, send_addr)
+                    .await
+            };
+
+            match result {
+                Ok(_outcome) => {
+                    eprintln!("{} {}", c_dim("TCP connection closed:"), tcp_addr);
+                }
+                Err(e) => {
+                    eprintln!("{} {}", c_red("✗ tunnel error:"), e);
+                }
             }
-            eprintln!("{} {}", c_dim("TCP connection closed:"), tcp_addr);
         }
     } else {
         eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
@@ -1650,18 +1664,60 @@ async fn cmd_listen(
         }
         eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
 
-        // Connect to the local TCP service
-        let tcp_stream = TcpStream::connect(forward_addr)
-            .await
-            .map_err(|e| format!("failed to connect to {}: {}", forward_addr, e))?;
-        eprintln!("{} {}", c_green("✓ Connected to backend"), forward_addr);
+        // Loop: each iteration handles one TCP stream. When the client
+        // sends a RESET frame (new TCP connection on the same ZTLP
+        // session), we open a new backend TCP connection and bridge again.
+        //
+        // After a normal close (FIN from both sides), we wait briefly for
+        // a potential RESET frame from the client. If nothing arrives
+        // within the idle timeout, the listener exits.
+        loop {
+            let tcp_stream = TcpStream::connect(forward_addr)
+                .await
+                .map_err(|e| format!("failed to connect to {}: {}", forward_addr, e))?;
+            eprintln!("{} {}", c_green("✓ Connected to backend"), forward_addr);
 
-        let udp = node.socket.clone();
-        let pipeline = node.pipeline.clone();
+            let udp = node.socket.clone();
+            let pipeline = node.pipeline.clone();
 
-        match tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await {
-            Ok(()) => eprintln!("{}", c_dim("tunnel closed")),
-            Err(e) => eprintln!("{} {}", c_red("✗ tunnel error:"), e),
+            match tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, from1).await {
+                Ok(tunnel::BridgeOutcome::ResetReceived) => {
+                    eprintln!(
+                        "{}",
+                        c_cyan("↻ Remote started new TCP stream — reconnecting to backend")
+                    );
+                    // Continue the loop to open a new backend connection
+                    continue;
+                }
+                Ok(tunnel::BridgeOutcome::Closed) => {
+                    eprintln!("{}", c_dim("tunnel closed, waiting for new streams..."));
+                    // Wait for a potential RESET frame from the client.
+                    // The client may open another TCP connection and send
+                    // RESET, which arrives as an encrypted UDP packet.
+                    // We start a "bare" bridge that only listens for RESET.
+                    match wait_for_reset(&node, session_id, from1, Duration::from_secs(300)).await {
+                        Ok(true) => {
+                            eprintln!(
+                                "{}",
+                                c_cyan("↻ Remote started new TCP stream — reconnecting to backend")
+                            );
+                            continue;
+                        }
+                        Ok(false) => {
+                            eprintln!("{}", c_dim("idle timeout, listener exiting"));
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("{} {}", c_red("✗ error waiting for reset:"), e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} {}", c_red("✗ tunnel error:"), e);
+                    break;
+                }
+            }
         }
     } else {
         eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
@@ -1671,6 +1727,85 @@ async fn cmd_listen(
     }
 
     Ok(())
+}
+
+/// Wait for a RESET frame on the ZTLP session after a bridge closes.
+///
+/// The listener calls this after a normal bridge close (FIN from both sides).
+/// If the client opens another TCP connection on the same ZTLP session, it
+/// will send a RESET frame first. This function waits for that frame and
+/// returns `true` if a RESET is received, or `false` if the timeout expires.
+async fn wait_for_reset(
+    node: &TransportNode,
+    session_id: SessionId,
+    from: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+
+    // Extract the recv key from the session for decryption
+    let recv_key = {
+        let pl = node.pipeline.lock().await;
+        let session = pl.get_session(&session_id).ok_or("session not found")?;
+        session.recv_key
+    };
+    let cipher = ChaCha20Poly1305::new((&recv_key).into());
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+
+    loop {
+        match tokio::time::timeout_at(deadline, node.recv_raw()).await {
+            Err(_) => {
+                // Timeout expired
+                return Ok(false);
+            }
+            Ok(Err(e)) => {
+                return Err(format!("recv error: {}", e).into());
+            }
+            Ok(Ok((data, addr))) => {
+                if addr != from {
+                    continue;
+                }
+
+                // Pipeline admission check
+                {
+                    let pl = node.pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
+                // Parse data header
+                if data.len() < DATA_HEADER_SIZE {
+                    continue;
+                }
+                let header = match DataHeader::deserialize(&data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+
+                // Decrypt
+                let ciphertext = &data[DATA_HEADER_SIZE..];
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                let plaintext = match cipher.decrypt(nonce, ciphertext) {
+                    Ok(pt) => pt,
+                    Err(_) => continue,
+                };
+
+                if plaintext.is_empty() {
+                    continue;
+                }
+                if plaintext[0] == 0x04 {
+                    // FRAME_RESET received
+                    return Ok(true);
+                }
+                // Ignore other frames (stale ACKs, FIN retransmits, etc.)
+            }
+        }
+    }
 }
 
 /// Interactive data exchange loop (shared between connect and listen).

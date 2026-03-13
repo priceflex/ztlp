@@ -21,6 +21,7 @@ pub mod control;
 pub mod daemon;
 pub mod discovery;
 pub mod dns;
+#[cfg(unix)]
 pub mod dns_setup;
 pub mod domain_map;
 pub mod proxy;

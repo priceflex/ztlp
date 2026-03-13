@@ -4716,6 +4716,7 @@ async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `ztlp agent dns-setup` — Configure system DNS.
+#[cfg(unix)]
 async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::dns_setup;
@@ -4769,6 +4770,7 @@ async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::
 }
 
 /// `ztlp agent dns-teardown` — Remove ZTLP DNS configuration.
+#[cfg(unix)]
 async fn cmd_agent_dns_teardown() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::dns_setup;
 
@@ -4792,6 +4794,7 @@ async fn cmd_agent_dns_teardown() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `ztlp agent install` — Install as system service.
+#[cfg(unix)]
 async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::dns_setup;
 
@@ -5011,9 +5014,18 @@ async fn main() {
             AgentCommands::Dns => cmd_agent_dns().await,
             AgentCommands::FlushDns => cmd_agent_flush_dns().await,
             AgentCommands::Tunnels => cmd_agent_tunnels().await,
+            #[cfg(unix)]
             AgentCommands::DnsSetup { zones } => cmd_agent_dns_setup(zones).await,
+            #[cfg(unix)]
             AgentCommands::DnsTeardown => cmd_agent_dns_teardown().await,
+            #[cfg(unix)]
             AgentCommands::Install { binary } => cmd_agent_install(binary).await,
+            #[cfg(not(unix))]
+            AgentCommands::DnsSetup { .. }
+            | AgentCommands::DnsTeardown
+            | AgentCommands::Install { .. } => {
+                Err("dns-setup, dns-teardown, and install are only supported on Unix".into())
+            }
         },
     };
 

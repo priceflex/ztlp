@@ -30,9 +30,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+#[cfg(not(unix))]
+use tracing::warn;
+#[cfg(unix)]
 use tracing::{debug, info, warn};
 
 use super::dns::DnsResolverState;
@@ -122,6 +127,7 @@ pub struct AgentState {
 ///
 /// Listens on the Unix socket and handles commands from the CLI.
 /// This is a long-running task that should be spawned as a tokio task.
+#[cfg(unix)]
 pub async fn run_control_socket(
     socket_path: &Path,
     state: Arc<AgentState>,
@@ -185,6 +191,7 @@ pub async fn run_control_socket(
 }
 
 /// Handle a control command.
+#[cfg(unix)]
 async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlResponse {
     match cmd.cmd.as_str() {
         "status" => cmd_status(state).await,
@@ -196,6 +203,7 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
     }
 }
 
+#[cfg(unix)]
 async fn cmd_status(state: &AgentState) -> ControlResponse {
     let dns = state.dns_state.lock().await;
     let status = StatusInfo {
@@ -213,6 +221,7 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
 }
 
+#[cfg(unix)]
 async fn cmd_tunnels(state: &AgentState) -> ControlResponse {
     let pool = state.tunnel_pool.lock().await;
     let tunnels: Vec<serde_json::Value> = pool
@@ -245,6 +254,7 @@ async fn cmd_tunnels(state: &AgentState) -> ControlResponse {
     }))
 }
 
+#[cfg(unix)]
 async fn cmd_dns_cache(state: &AgentState) -> ControlResponse {
     let dns = state.dns_state.lock().await;
     let entries: Vec<DnsCacheEntry> = dns
@@ -263,6 +273,7 @@ async fn cmd_dns_cache(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::json!({ "entries": entries }))
 }
 
+#[cfg(unix)]
 async fn cmd_flush_dns(state: &AgentState) -> ControlResponse {
     let mut dns = state.dns_state.lock().await;
     let freed = dns.vip_pool.gc_expired();
@@ -271,6 +282,7 @@ async fn cmd_flush_dns(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::json!({ "freed": freed }))
 }
 
+#[cfg(unix)]
 async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     info!("shutdown requested via control socket");
     let _ = state.shutdown_tx.send(());
@@ -280,6 +292,7 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
 // ─── Client side (for CLI commands) ─────────────────────────────────────────
 
 /// Send a command to the running agent and return the response.
+#[cfg(unix)]
 pub async fn send_command(
     socket_path: &Path,
     command: &ControlCommand,
@@ -307,6 +320,27 @@ pub async fn send_command(
 
     let response: ControlResponse = serde_json::from_str(&line)?;
     Ok(response)
+}
+
+/// Stub: control socket not supported on non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn run_control_socket(
+    _socket_path: &Path,
+    _state: Arc<AgentState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    warn!("control socket not supported on this platform");
+    // Block forever (equivalent to no-op server)
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+/// Stub: control socket not supported on non-Unix platforms.
+#[cfg(not(unix))]
+pub async fn send_command(
+    _socket_path: &Path,
+    _command: &ControlCommand,
+) -> Result<ControlResponse, Box<dyn std::error::Error + Send + Sync>> {
+    Err("control socket not supported on this platform".into())
 }
 
 /// Get the default control socket path.

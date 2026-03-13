@@ -1,4 +1,26 @@
-# ZTLP SSH Tunnel Demo
+# ZTLP Demos
+
+Two demos are available:
+
+| Demo | Script | Description |
+|------|--------|-------------|
+| **SSH Tunnel Demo** | `ssh-tunnel-demo.sh` | 13-act interactive demo: identity, policy, tunneling, attack resilience. Runs locally. |
+| **Full-Stack Docker Demo** | `full-stack-demo.sh` | End-to-end Docker Compose demo: 6 containers, NS registration, SSH tunneling, SCP benchmarks. No local toolchains needed. |
+
+## Full-Stack Docker Demo
+
+```bash
+./full-stack-demo.sh              # Build, run, show results, tear down
+./full-stack-demo.sh --keep       # Leave containers running
+./full-stack-demo.sh --skip-build # Use cached images
+./full-stack-demo.sh --cleanup    # Remove containers
+```
+
+Requires only Docker. See [`fullstack/README.md`](../fullstack/README.md) for architecture and details.
+
+---
+
+# SSH Tunnel Demo
 
 Interactive demo showcasing ZTLP's zero-trust network tunnel with
 identity-based access control, encrypted transport, and DDoS-resistant

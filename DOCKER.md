@@ -2,6 +2,32 @@
 
 Run the full ZTLP prototype stack with Docker Compose — no local Elixir/Rust toolchains required. All Elixir services are built as proper OTP releases (small runtime images, health checks, graceful shutdown).
 
+## Full-Stack Integration Test
+
+The full-stack test exercises the complete ZTLP tunnel pipeline in a 6-container Docker topology: NS registration, Noise_XX handshake, SSH tunneling, and SCP benchmarks with integrity verification.
+
+```bash
+# Build and run the full-stack test
+docker compose -f docker-compose-full-stack.yml up --build
+
+# Watch test results
+docker compose -f docker-compose-full-stack.yml logs -f client
+
+# Or use the demo script (colored output, results table)
+./demo/full-stack-demo.sh
+
+# Tear down
+docker compose -f docker-compose-full-stack.yml down -v
+```
+
+**Topology:** NS + 2 relays + backend SSH + server (ztlp listen) + client (ztlp connect)
+
+**What's tested:** NS registration/resolution → Noise_XX handshake → SSH echo/hostname/uname → SCP 1/5/10/50 MB with MD5 verification
+
+**Performance (Docker bridge):** 81.5 MB/s peak (50MB SCP), 0.58ms handshake
+
+See [`fullstack/README.md`](fullstack/README.md) for architecture details, container IPs, environment variables, and troubleshooting.
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) 20.10+

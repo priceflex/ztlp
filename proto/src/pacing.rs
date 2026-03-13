@@ -135,16 +135,24 @@ pub fn set_socket_buffers(udp: &std::net::UdpSocket) -> (Option<usize>, Option<u
 
     // SAFETY: fd is valid, desired is a simple integer on the stack.
     unsafe {
-        // Try SO_RCVBUFFORCE first (bypasses rmem_max, needs CAP_NET_ADMIN)
-        let ret = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUFFORCE,
-            &desired as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            // Fall back to regular SO_RCVBUF (capped by rmem_max)
+        // On Linux, try SO_RCVBUFFORCE first (bypasses rmem_max, needs CAP_NET_ADMIN).
+        // On macOS/BSD, SO_*BUFFORCE doesn't exist — go straight to SO_RCVBUF.
+        #[allow(unused_mut, unused_assignments)]
+        let mut rcv_set = false;
+        #[cfg(target_os = "linux")]
+        {
+            if libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUFFORCE,
+                &desired as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) == 0
+            {
+                rcv_set = true;
+            }
+        }
+        if !rcv_set {
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,
@@ -154,16 +162,22 @@ pub fn set_socket_buffers(udp: &std::net::UdpSocket) -> (Option<usize>, Option<u
             );
         }
 
-        // Try SO_SNDBUFFORCE first
-        let ret = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUFFORCE,
-            &desired as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        );
-        if ret != 0 {
-            // Fall back to regular SO_SNDBUF
+        #[allow(unused_mut, unused_assignments)]
+        let mut snd_set = false;
+        #[cfg(target_os = "linux")]
+        {
+            if libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUFFORCE,
+                &desired as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) == 0
+            {
+                snd_set = true;
+            }
+        }
+        if !snd_set {
             libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,

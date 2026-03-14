@@ -2571,7 +2571,7 @@ async fn handle_new_session(
     );
 
     // Register session in the manager
-    let _rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)> = session_mgr
+    let rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)> = session_mgr
         .register(session_id, from, 1024)
         .await
         .ok_or("failed to register session (at capacity)")?;
@@ -2587,7 +2587,8 @@ async fn handle_new_session(
         // Run the bridge and capture outcome as a string (not Box<dyn Error>)
         // to keep the future Send-safe.
         let err_msg: Option<String> = {
-            match run_session_bridge(udp, pipeline, session_id, from, &forward_addr_owned).await {
+            match run_session_bridge(udp, pipeline, session_id, from, &forward_addr_owned, rx).await
+            {
                 Ok(()) => None,
                 Err(e) => Some(e.to_string()),
             }
@@ -2609,22 +2610,45 @@ async fn handle_new_session(
 
 /// Run the bridge for a single session (called from a spawned task).
 ///
+/// In multi-session mode, the dispatcher routes packets to a per-session
+/// mpsc channel. We create a per-session loopback UDP socket pair and spawn
+/// a forwarder task that drains the channel into the recv socket. The bridge
+/// reads from the recv socket (dedicated to this session) and sends via the
+/// shared socket.
+///
 /// Returns `String` errors (not `Box<dyn Error>`) so the future is `Send`.
 async fn run_session_bridge(
-    udp_socket: Arc<UdpSocket>,
+    udp_send_socket: Arc<UdpSocket>,
     pipeline: Arc<Mutex<Pipeline>>,
     session_id: SessionId,
     peer_addr: SocketAddr,
     forward_addr: &str,
+    mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
 ) -> Result<(), String> {
     use tokio::net::TcpStream;
 
-    // Wait for client to send first data before connecting to backend
-    let initial_packets = tunnel::wait_for_first_data(
-        &udp_socket,
+    // Create a per-session loopback UDP socket pair for demuxed packet delivery.
+    // The forwarder writes to `fwd_socket` → `recv_addr`, and the bridge reads
+    // from `recv_socket`.
+    let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("bind recv socket: {}", e))?;
+    let recv_addr = recv_socket
+        .local_addr()
+        .map_err(|e| format!("recv socket addr: {}", e))?;
+    let fwd_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("bind fwd socket: {}", e))?;
+    let recv_socket = Arc::new(recv_socket);
+
+    // Wait for client to send first data before connecting to backend.
+    // Read from the channel and forward to the recv socket.
+    let _initial_packets = tunnel::wait_for_first_data_channeled(
+        &mut rx,
+        &fwd_socket,
+        recv_addr,
         &pipeline,
         session_id,
-        peer_addr,
         Duration::from_secs(600),
     )
     .await
@@ -2644,14 +2668,26 @@ async fn run_session_bridge(
         forward_addr
     );
 
-    // Run bridge with initial packets
-    let result = tunnel::run_bridge_with_buffered(
+    // Spawn a forwarder task: channel → recv_socket
+    // This runs for the lifetime of this session, forwarding dispatcher
+    // packets into the per-session recv socket so the bridge can read them.
+    let fwd_socket = Arc::new(fwd_socket);
+    let fwd_socket_clone = fwd_socket.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some((data, _addr)) = rx.recv().await {
+            let _ = fwd_socket_clone.send_to(&data, recv_addr).await;
+        }
+    });
+
+    // Run bridge with demuxed sockets (send via shared socket, recv via per-session socket)
+    let result = tunnel::run_bridge_demuxed(
         tcp_stream,
-        udp_socket.clone(),
+        udp_send_socket.clone(),
+        recv_socket.clone(),
         pipeline.clone(),
         session_id,
         peer_addr,
-        initial_packets,
+        Vec::new(), // initial_packets already forwarded to recv_socket
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -2665,12 +2701,14 @@ async fn run_session_bridge(
                     .await
                     .map_err(|e| format!("reconnect to {}: {}", forward_addr, e))?;
 
-                let outcome = tunnel::run_bridge(
+                let outcome = tunnel::run_bridge_demuxed(
                     tcp_stream,
-                    udp_socket.clone(),
+                    udp_send_socket.clone(),
+                    recv_socket.clone(),
                     pipeline.clone(),
                     session_id,
                     peer_addr,
+                    Vec::new(),
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -2683,6 +2721,9 @@ async fn run_session_bridge(
         }
         tunnel::BridgeOutcome::Closed => {}
     }
+
+    // Stop the forwarder
+    forwarder.abort();
 
     Ok(())
 }

@@ -37,6 +37,7 @@
 
 pub mod admission;
 pub mod agent;
+pub mod anti_replay;
 pub mod batch;
 pub mod congestion;
 pub mod enrollment;
@@ -54,9 +55,11 @@ pub mod nat;
 pub mod pacing;
 pub mod packet;
 pub mod pipeline;
+pub mod pmtu;
 pub mod policy;
 pub mod punch;
 pub mod reject;
+pub mod rekey;
 pub mod relay;
 pub mod relay_pool;
 pub mod roaming;

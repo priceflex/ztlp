@@ -869,6 +869,81 @@ pub async fn wait_for_first_data(
     }
 }
 
+/// Like [`wait_for_first_data`] but reads from an mpsc channel instead of a
+/// raw UDP socket. Used in the multi-session listener where the dispatcher
+/// routes demuxed packets to per-session channels.
+///
+/// The received packets are forwarded to the per-session `recv_socket` so the
+/// bridge can read from it normally. Returns the forwarded packets for pre-fetch.
+pub async fn wait_for_first_data_channeled(
+    rx: &mut tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
+    recv_socket: &tokio::net::UdpSocket,
+    recv_target: std::net::SocketAddr,
+    pipeline: &Mutex<Pipeline>,
+    session_id: SessionId,
+    timeout_duration: Duration,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    use crate::pipeline::AdmissionResult;
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut buffered_packets: Vec<Vec<u8>> = Vec::new();
+
+    loop {
+        let recv_result = tokio::time::timeout_at(deadline, rx.recv()).await;
+        match recv_result {
+            Err(_) => {
+                return Err("timeout waiting for first data from client (channeled)".into());
+            }
+            Ok(None) => {
+                return Err("channel closed while waiting for first data".into());
+            }
+            Ok(Some((data, _addr))) => {
+                // Pipeline admission check
+                {
+                    let pl = pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
+                // Must be a data packet for our session
+                if data.len() < DATA_HEADER_SIZE {
+                    continue;
+                }
+                let header = match DataHeader::deserialize(&data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+                if header.session_id != session_id {
+                    continue;
+                }
+
+                // Forward to the recv socket so the bridge can read it
+                let _ = recv_socket.send_to(&data, recv_target).await;
+                buffered_packets.push(data);
+
+                // Collect any additional packets in a short grace window
+                let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+                loop {
+                    let grace_result = tokio::time::timeout_at(grace_deadline, rx.recv()).await;
+                    match grace_result {
+                        Err(_) => break,
+                        Ok(None) => break,
+                        Ok(Some((gdata, _gaddr))) => {
+                            if gdata.len() >= DATA_HEADER_SIZE {
+                                let _ = recv_socket.send_to(&gdata, recv_target).await;
+                                buffered_packets.push(gdata);
+                            }
+                        }
+                    }
+                }
+                return Ok(buffered_packets);
+            }
+        }
+    }
+}
+
 // ─── Bridge ─────────────────────────────────────────────────────────────────
 
 /// Run the bidirectional TCP ↔ ZTLP bridge with reliable ordered delivery.
@@ -900,6 +975,7 @@ pub async fn run_bridge(
     run_bridge_inner(
         tcp_stream,
         udp_socket,
+        None,
         pipeline,
         session_id,
         peer_addr,
@@ -920,6 +996,7 @@ pub async fn run_bridge_with_reset(
     run_bridge_inner(
         tcp_stream,
         udp_socket,
+        None,
         pipeline,
         session_id,
         peer_addr,
@@ -943,6 +1020,7 @@ pub async fn run_bridge_with_buffered(
     run_bridge_inner(
         tcp_stream,
         udp_socket,
+        None,
         pipeline,
         session_id,
         peer_addr,
@@ -952,9 +1030,36 @@ pub async fn run_bridge_with_buffered(
     .await
 }
 
+/// Like [`run_bridge_with_buffered`] but uses a dedicated receive socket for
+/// demultiplexed packet delivery. Used by the multi-session listener where
+/// a dispatcher routes packets to per-session sockets.
+pub async fn run_bridge_demuxed(
+    tcp_stream: TcpStream,
+    udp_send_socket: Arc<UdpSocket>,
+    udp_recv_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    buffered_packets: Vec<Vec<u8>>,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+    run_bridge_inner(
+        tcp_stream,
+        udp_send_socket,
+        Some(udp_recv_socket),
+        pipeline,
+        session_id,
+        peer_addr,
+        false,
+        buffered_packets,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_bridge_inner(
     tcp_stream: TcpStream,
     udp_socket: Arc<UdpSocket>,
+    udp_recv_override: Option<Arc<UdpSocket>>,
     pipeline: Arc<Mutex<Pipeline>>,
     session_id: SessionId,
     peer_addr: SocketAddr,
@@ -1037,7 +1142,9 @@ async fn run_bridge_inner(
     let (mut tcp_reader, tcp_writer) = tcp_stream.into_split();
 
     let udp_send = udp_socket.clone();
-    let udp_recv = udp_socket;
+    // For sending ACKs/NACKs back to the peer, always use the shared socket.
+    let udp_ack_send = udp_socket.clone();
+    let udp_recv = udp_recv_override.unwrap_or(udp_socket);
     let pipeline_send = pipeline.clone();
     let pipeline_recv = pipeline;
     let sid_send = session_id;
@@ -1567,6 +1674,7 @@ async fn run_bridge_inner(
 
     let reset_flag_for_rx = reset_received_rx;
     let prefetched = prefetched_packets; // move into the async block
+    let udp_ack_sender = udp_ack_send; // for sending ACKs/NACKs to peer
     let ztlp_to_tcp = async move {
         let reset_received = reset_flag_for_rx;
         info!(
@@ -2177,7 +2285,7 @@ async fn run_bridge_inner(
                                             &ack_cipher,
                                             &send_key_for_acks,
                                             sid_recv,
-                                            &udp_recv,
+                                            &udp_ack_sender,
                                             peer_addr,
                                             delivered_seq,
                                         )
@@ -2195,7 +2303,7 @@ async fn run_bridge_inner(
                                             &ack_cipher,
                                             &send_key_for_acks,
                                             sid_recv,
-                                            &udp_recv,
+                                            &udp_ack_sender,
                                             peer_addr,
                                             delivered_seq,
                                             sack_state.ranges(),
@@ -2237,7 +2345,7 @@ async fn run_bridge_inner(
                                     &ack_cipher,
                                     &send_key_for_acks,
                                     sid_recv,
-                                    &udp_recv,
+                                    &udp_ack_sender,
                                     peer_addr,
                                     delivered_seq,
                                 )
@@ -2250,7 +2358,7 @@ async fn run_bridge_inner(
                                     &ack_cipher,
                                     &send_key_for_acks,
                                     sid_recv,
-                                    &udp_recv,
+                                    &udp_ack_sender,
                                     peer_addr,
                                     delivered_seq,
                                     sack_state.ranges(),
@@ -2307,7 +2415,7 @@ async fn run_bridge_inner(
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
-                        udp_recv.send_to(&packet, peer_addr).await?;
+                        udp_ack_sender.send_to(&packet, peer_addr).await?;
                         reasm.mark_nack_sent();
                     }
                 }

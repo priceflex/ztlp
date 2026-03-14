@@ -14,9 +14,11 @@ RUN apk add --no-cache \
     curl \
     iputils \
     procps \
-    bind-tools
+    bind-tools \
+    python3
 
 COPY impairment-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY impairment-proxy.py /usr/local/bin/impairment-proxy
+RUN chmod +x /entrypoint.sh /usr/local/bin/impairment-proxy
 
 ENTRYPOINT ["/entrypoint.sh"]

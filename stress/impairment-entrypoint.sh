@@ -11,9 +11,13 @@ echo "════════════════════════�
 echo "  ZTLP Impairment Node"
 echo "═══════════════════════════════════════════════════════"
 
-# Enable IP forwarding
-echo 1 > /proc/sys/net/ipv4/ip_forward
-echo "  ✓ IP forwarding enabled"
+# Enable IP forwarding (may already be set via Docker sysctls)
+echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ]; then
+    echo "  ✓ IP forwarding enabled"
+else
+    echo "  ⚠ Could not enable IP forwarding — check container sysctls"
+fi
 
 # Discover interfaces by subnet
 CLIENT_IFACE=""
@@ -56,11 +60,25 @@ echo "  ✓ iptables forwarding rules set"
 iperf3 -s -D --logfile /tmp/iperf3.log 2>/dev/null || true
 echo "  ✓ iperf3 server running"
 
+# Write default impairment config (passthrough)
+echo '{"enabled": false}' > /tmp/impairment.json
+
+# Start the userspace impairment proxy
+# Client connects to us on :23095, we forward to server at 172.30.2.40:23095
+echo "  → Starting impairment proxy..."
+python3 /usr/local/bin/impairment-proxy \
+    --port 23095 \
+    --server-addr 172.30.2.40 \
+    --server-port 23095 &
+PROXY_PID=$!
+echo "  ✓ Impairment proxy started (PID $PROXY_PID)"
+
 echo ""
-echo "  Impairment node ready — waiting for tc commands"
+echo "  Impairment node ready"
 echo "  Client iface: $CLIENT_IFACE"
 echo "  Server iface: $SERVER_IFACE"
+echo "  Proxy: :23095 → 172.30.2.40:23095"
 echo "═══════════════════════════════════════════════════════"
 
-# Keep alive
-exec sleep infinity
+# Keep alive via proxy
+wait $PROXY_PID

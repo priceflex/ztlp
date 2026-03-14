@@ -95,13 +95,13 @@ cd "$REPO_DIR"
 
 if [ "$SKIP_BUILD" = false ]; then
     echo -e "${BOLD}━━━ Building Docker images...${NC}"
-    docker compose -f "$COMPOSE_FILE" build 2>&1 | tail -5
+    docker-compose -f "$COMPOSE_FILE" build 2>&1 | tail -5
     echo -e "  ${GREEN}✓${NC} Build complete"
     echo ""
 fi
 
 echo -e "${BOLD}━━━ Starting environment...${NC}"
-docker compose -f "$COMPOSE_FILE" up -d 2>&1
+docker-compose -f "$COMPOSE_FILE" up -d 2>&1
 echo -e "  ${GREEN}✓${NC} Containers started"
 
 # Wait for NS healthcheck
@@ -224,11 +224,11 @@ echo ""
 if [ "$KEEP" = false ]; then
     echo -e "${BOLD}━━━ Stopping environment...${NC}"
     cd "$REPO_DIR"
-    docker compose -f "$COMPOSE_FILE" down -v 2>&1
+    docker-compose -f "$COMPOSE_FILE" down -v 2>&1
     echo -e "  ${GREEN}✓${NC} Environment stopped"
 else
     echo -e "${YELLOW}  --keep specified: containers still running${NC}"
-    echo -e "  Stop with: docker compose -f $COMPOSE_FILE down -v"
+    echo -e "  Stop with: docker-compose -f $COMPOSE_FILE down -v"
 fi
 
 echo ""

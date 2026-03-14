@@ -696,6 +696,109 @@ impl CongestionController {
     }
 }
 
+// ─── Lazy Connect ───────────────────────────────────────────────────────────
+
+/// Wait for the first ZTLP data packet on a session before connecting to the
+/// backend service. This implements "lazy connect" for the listener side.
+///
+/// Without this, the listener immediately TCP-connects to the backend (e.g.,
+/// sshd) after the Noise_XX handshake. The backend sends its protocol banner
+/// (SSH version string), which gets bridged over ZTLP. But if the client
+/// hasn't accepted a TCP connection on its local port yet (e.g., the user
+/// is presenting a demo and hasn't SSH'd yet), nobody reads the UDP socket
+/// on the client side, no ACKs are sent, and the listener's sender hits the
+/// 30-second `SENDER_ACK_TIMEOUT` — killing the tunnel.
+///
+/// This function blocks until valid ZTLP data arrives from the peer,
+/// buffers the initial packets (with a 50ms grace window for bursts),
+/// and returns them for injection into the bridge via
+/// [`run_bridge_with_buffered`].
+///
+/// # Arguments
+/// * `udp_socket` — The bound UDP socket for this session
+/// * `pipeline` — Pipeline for admission checks
+/// * `session_id` — The established session ID
+/// * `peer_addr` — Expected peer address
+/// * `timeout_duration` — Maximum time to wait for first data
+///
+/// # Returns
+/// A vector of raw UDP packets (including headers) to inject into the bridge.
+pub async fn wait_for_first_data(
+    udp_socket: &tokio::net::UdpSocket,
+    pipeline: &Mutex<Pipeline>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    use crate::pipeline::AdmissionResult;
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut buffered_packets: Vec<Vec<u8>> = Vec::new();
+    let mut buf = vec![0u8; 65535];
+
+    loop {
+        let recv_result = tokio::time::timeout_at(deadline, udp_socket.recv_from(&mut buf)).await;
+        match recv_result {
+            Err(_) => {
+                return Err("timeout waiting for first data from client".into());
+            }
+            Ok(Err(e)) => {
+                return Err(format!("recv error while waiting for first data: {}", e).into());
+            }
+            Ok(Ok((len, addr))) => {
+                if addr != peer_addr {
+                    continue;
+                }
+
+                let data = buf[..len].to_vec();
+
+                // Pipeline admission check
+                {
+                    let pl = pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
+                // Must be a data packet for our session
+                if data.len() < DATA_HEADER_SIZE {
+                    continue;
+                }
+                let header = match DataHeader::deserialize(&data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+                if header.session_id != session_id {
+                    continue;
+                }
+
+                // Got a valid data packet — buffer it
+                buffered_packets.push(data);
+
+                // Collect any additional packets that arrive in a short
+                // grace window (the client likely sent a burst)
+                let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+                loop {
+                    let grace_result =
+                        tokio::time::timeout_at(grace_deadline, udp_socket.recv_from(&mut buf))
+                            .await;
+                    match grace_result {
+                        Err(_) => break, // Grace period expired
+                        Ok(Err(_)) => break,
+                        Ok(Ok((glen, gaddr))) => {
+                            if gaddr == peer_addr && glen >= DATA_HEADER_SIZE {
+                                buffered_packets.push(buf[..glen].to_vec());
+                            }
+                        }
+                    }
+                }
+                return Ok(buffered_packets);
+            }
+        }
+    }
+}
+
 // ─── Bridge ─────────────────────────────────────────────────────────────────
 
 /// Run the bidirectional TCP ↔ ZTLP bridge with reliable ordered delivery.
@@ -3339,5 +3442,298 @@ mod tests {
         assert_eq!(BridgeOutcome::Closed, BridgeOutcome::Closed);
         assert_eq!(BridgeOutcome::ResetReceived, BridgeOutcome::ResetReceived);
         assert_ne!(BridgeOutcome::Closed, BridgeOutcome::ResetReceived);
+    }
+
+    // ── wait_for_first_data tests ───────────────────────────────────────
+
+    use crate::identity::NodeIdentity;
+    use crate::pipeline::compute_header_auth_tag;
+    use crate::session::SessionState;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+
+    /// Helper: set up two UDP sockets with an established session pipeline.
+    async fn setup_lazy_connect_pair() -> (
+        Arc<tokio::net::UdpSocket>,
+        Arc<tokio::net::UdpSocket>,
+        Arc<Mutex<Pipeline>>,
+        SessionId,
+        SocketAddr, // client_addr
+        SocketAddr, // server_addr
+        [u8; 32],   // send_key (client→server)
+    ) {
+        let _id_server = NodeIdentity::generate().unwrap();
+        let id_client = NodeIdentity::generate().unwrap();
+
+        let server_sock = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client_sock = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_addr = server_sock.local_addr().unwrap();
+        let client_addr = client_sock.local_addr().unwrap();
+
+        let session_id = SessionId::generate();
+        let send_key = [0x42u8; 32]; // client→server send key
+        let recv_key = [0x43u8; 32]; // unused in these tests
+
+        // Register session on the server side (where wait_for_first_data runs)
+        let server_session = SessionState::new(
+            session_id,
+            id_client.node_id,
+            recv_key, // server's "send" key (unused here)
+            send_key, // server's "recv" key = client's send key
+            false,
+        );
+
+        let _ = recv_key; // suppress unused warning
+
+        let mut pipeline = Pipeline::new();
+        pipeline.register_session(server_session);
+        let pipeline = Arc::new(Mutex::new(pipeline));
+
+        (
+            server_sock,
+            client_sock,
+            pipeline,
+            session_id,
+            client_addr,
+            server_addr,
+            send_key,
+        )
+    }
+
+    /// Build a valid encrypted data packet from client to server.
+    fn build_data_packet(
+        session_id: SessionId,
+        send_key: &[u8; 32],
+        data_seq: u64,
+        packet_seq: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let cipher = ChaCha20Poly1305::new(send_key.into());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // DATA frame: 0x00 + 8-byte data_seq + payload
+        let mut plaintext = vec![FRAME_DATA];
+        plaintext.extend_from_slice(&data_seq.to_be_bytes());
+        plaintext.extend_from_slice(payload);
+
+        let encrypted = cipher.encrypt(nonce, plaintext.as_slice()).unwrap();
+
+        let mut header = DataHeader::new(session_id, packet_seq);
+        let aad = header.aad_bytes();
+        header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+
+        let mut packet = header.serialize();
+        packet.extend_from_slice(&encrypted);
+        packet
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_receives_valid_packet() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        // Client sends a valid data packet after a short delay
+        let client_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let pkt = build_data_packet(session_id, &send_key, 0, 0, b"hello");
+            client_sock.send_to(&pkt, server_addr).await.unwrap();
+        });
+
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(
+            result.is_ok(),
+            "should receive first data: {:?}",
+            result.err()
+        );
+        let packets = result.unwrap();
+        assert!(!packets.is_empty(), "should have at least one packet");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_timeout() {
+        let (server_sock, _client_sock, pipeline, session_id, client_addr, _server_addr, _send_key) =
+            setup_lazy_connect_pair().await;
+
+        // Nobody sends anything — should timeout
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_millis(200),
+        )
+        .await;
+
+        assert!(result.is_err(), "should timeout when no data arrives");
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("timeout"),
+            "error should mention timeout, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_ignores_wrong_session() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        // Client sends a packet with a DIFFERENT session ID, then the correct one
+        let wrong_session = SessionId::generate();
+        let client_task = tokio::spawn(async move {
+            // Wrong session (should be ignored)
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let bad_pkt = build_data_packet(wrong_session, &send_key, 0, 0, b"wrong");
+            client_sock.send_to(&bad_pkt, server_addr).await.unwrap();
+
+            // Correct session (should be captured)
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let good_pkt = build_data_packet(session_id, &send_key, 0, 0, b"right");
+            client_sock.send_to(&good_pkt, server_addr).await.unwrap();
+        });
+
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(result.is_ok());
+        let packets = result.unwrap();
+        assert_eq!(
+            packets.len(),
+            1,
+            "should only capture the correct session packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_ignores_wrong_peer() {
+        let (server_sock, _client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        // A different "attacker" socket sends from a different address
+        let attacker_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let client_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Attacker sends a valid-looking packet from wrong address
+            let pkt = build_data_packet(session_id, &send_key, 0, 0, b"evil");
+            attacker_sock.send_to(&pkt, server_addr).await.unwrap();
+        });
+
+        // Should timeout because attacker's address doesn't match client_addr
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_millis(300),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(
+            result.is_err(),
+            "should timeout — attacker's address doesn't match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_ignores_garbage() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        let client_task = tokio::spawn(async move {
+            // Send garbage (too short, wrong magic, etc.)
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client_sock
+                .send_to(&[0xFFu8; 10], server_addr)
+                .await
+                .unwrap();
+
+            // Send slightly longer garbage (passes size check but fails pipeline)
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client_sock
+                .send_to(&[0x00u8; 64], server_addr)
+                .await
+                .unwrap();
+
+            // Send valid packet
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let pkt = build_data_packet(session_id, &send_key, 0, 0, b"finally");
+            client_sock.send_to(&pkt, server_addr).await.unwrap();
+        });
+
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(result.is_ok());
+        let packets = result.unwrap();
+        assert!(
+            !packets.is_empty(),
+            "should capture the valid packet after garbage"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_captures_burst() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        // Client sends a burst of 5 packets with no delay between them
+        let client_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            for i in 0..5u64 {
+                let pkt = build_data_packet(session_id, &send_key, i, i, &[i as u8; 100]);
+                client_sock.send_to(&pkt, server_addr).await.unwrap();
+            }
+        });
+
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(result.is_ok());
+        let packets = result.unwrap();
+        // The grace window should capture multiple packets from the burst.
+        // On localhost, all 5 should arrive within 50ms.
+        assert!(
+            packets.len() >= 2,
+            "grace window should capture multiple burst packets, got {}",
+            packets.len()
+        );
     }
 }

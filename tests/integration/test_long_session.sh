@@ -33,8 +33,8 @@ trap cleanup EXIT
 LISTENER_PID=""
 CLIENT_PID=""
 
-ok() { ((PASS++)); echo "  ✓ $1"; }
-fail() { ((FAIL++)); echo "  ✗ $1"; }
+ok() { PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 
 get_rss_kb() {
     local pid=$1
@@ -129,7 +129,7 @@ while true; do
     fi
 
     # Send a message
-    ((SEND_COUNT++))
+    SEND_COUNT=$((SEND_COUNT+1))
     echo "keepalive-${SEND_COUNT}-$(date +%s)" >&3 2>/dev/null || {
         fail "Failed to write to client pipe at ${ELAPSED}s"
         break

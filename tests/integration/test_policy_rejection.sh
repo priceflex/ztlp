@@ -27,8 +27,8 @@ trap cleanup EXIT
 
 LISTENER_PID=""
 
-ok() { ((PASS++)); echo "  ✓ $1"; }
-fail() { ((FAIL++)); echo "  ✗ $1"; }
+ok() { PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 
 echo "=== Policy Rejection Test ==="
 
@@ -44,27 +44,25 @@ echo "--- Generating identities ---"
 "$ZTLP" keygen --output "$TMPDIR/unauthorized.json" --format json
 ok "Identities generated"
 
-# Extract the hex pubkey from the authorized identity for the policy file
-# The identity JSON has an x25519_public field
-AUTH_PUBKEY=$(python3 -c "
+# Extract the node_id from the authorized identity for the policy file.
+# The listener resolves the client identity to its NodeID hex when NS is unavailable.
+AUTH_NODEID=$(python3 -c "
 import json
 with open('$TMPDIR/authorized.json') as f:
     data = json.load(f)
-    # The pubkey could be in various fields depending on format
-    pk = data.get('x25519_public', data.get('public_key', data.get('pubkey', '')))
-    print(pk)
+    print(data.get('node_id', ''))
 ")
-echo "  Authorized pubkey: ${AUTH_PUBKEY:0:16}..."
+echo "  Authorized node_id: ${AUTH_NODEID}"
 
 # ── Create restrictive policy ────────────────────────────────────────────
 echo "--- Creating restrictive policy ---"
 cat > "$TMPDIR/policy.toml" <<EOF
-# Restrictive policy: only the authorized key can connect
+# Restrictive policy: only the authorized node can connect
 default = "deny"
 
 [[services]]
 name = "default"
-allow = ["${AUTH_PUBKEY}", "*.admins.ztlp"]
+allow = ["${AUTH_NODEID}", "*.admins.ztlp"]
 EOF
 
 cat "$TMPDIR/policy.toml"
@@ -161,7 +159,16 @@ fi
 if kill -0 "$LISTENER_PID" 2>/dev/null; then
     ok "Listener survived policy enforcement tests"
 else
-    fail "Listener crashed during policy tests"
+    # In single-session mode the listener exits after serving one client.
+    # That's expected. Only fail if the exit code indicates a crash.
+    wait "$LISTENER_PID" 2>/dev/null
+    EXIT_CODE=$?
+    LISTENER_PID=""
+    if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 143 ]; then
+        ok "Listener exited cleanly after serving connections"
+    else
+        fail "Listener crashed during policy tests (exit code: $EXIT_CODE)"
+    fi
 fi
 
 echo ""

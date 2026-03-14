@@ -34,8 +34,8 @@ trap cleanup EXIT
 
 LISTENER_PID=""
 
-ok() { ((PASS++)); echo "  ✓ $1"; }
-fail() { ((FAIL++)); echo "  ✗ $1"; }
+ok() { PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 
 echo "=== Multi-Session Stress Test ==="
 
@@ -145,12 +145,12 @@ for i in $(seq 1 50); do
     if [ -f "$STATUS_FILE" ]; then
         STATUS=$(cat "$STATUS_FILE")
         if [ "$STATUS" = "OK" ]; then
-            ((SUCCESS++))
+            SUCCESS=$((SUCCESS+1))
         else
-            ((FAILURES++))
+            FAILURES=$((FAILURES+1))
         fi
     else
-        ((FAILURES++))
+        FAILURES=$((FAILURES+1))
     fi
 done
 

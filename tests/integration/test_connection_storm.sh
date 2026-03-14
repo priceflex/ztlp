@@ -34,8 +34,8 @@ trap cleanup EXIT
 
 LISTENER_PID=""
 
-ok() { ((PASS++)); echo "  ✓ $1"; }
-fail() { ((FAIL++)); echo "  ✗ $1"; }
+ok() { PASS=$((PASS+1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL+1)); echo "  ✗ $1"; }
 
 echo "=== Connection Storm Test ==="
 
@@ -145,14 +145,14 @@ for i in $(seq 1 100); do
     if [ -f "$STATUS_FILE" ]; then
         STATUS=$(cat "$STATUS_FILE")
         case "$STATUS" in
-            CONNECTED) ((CONNECTED++)) ;;
-            REJECTED) ((REJECTED++)) ;;
-            TIMEOUT) ((TIMEOUT_COUNT++)) ;;
-            ERROR:*) ((ERROR_COUNT++)) ;;
-            *) ((ERROR_COUNT++)) ;;
+            CONNECTED) CONNECTED=$((CONNECTED+1)) ;;
+            REJECTED) REJECTED=$((REJECTED+1)) ;;
+            TIMEOUT) TIMEOUT_COUNT=$((TIMEOUT_COUNT+1)) ;;
+            ERROR:*) ERROR_COUNT=$((ERROR_COUNT+1)) ;;
+            *) ERROR_COUNT=$((ERROR_COUNT+1)) ;;
         esac
     else
-        ((TIMEOUT_COUNT++))
+        TIMEOUT_COUNT=$((TIMEOUT_COUNT+1))
     fi
 done
 

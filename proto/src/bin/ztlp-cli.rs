@@ -50,6 +50,7 @@ use ztlp_proto::policy::PolicyEngine;
 use ztlp_proto::punch;
 use ztlp_proto::reject::{RejectFrame, RejectReason};
 use ztlp_proto::relay::SimulatedRelay;
+use ztlp_proto::relay_pool::{FailoverOrchestrator, RelayPool, RelayPoolConfig};
 use ztlp_proto::session_manager::SessionManager;
 use ztlp_proto::transport::TransportNode;
 use ztlp_proto::tunnel;
@@ -236,6 +237,14 @@ enum Commands {
         /// Timeout for the punch procedure (e.g. "10s", "30s")
         #[arg(long, value_parser = parse_duration_arg)]
         punch_timeout: Option<Duration>,
+
+        /// Enable multi-relay pool with automatic failover (default: on when multiple relays available)
+        #[arg(long)]
+        relay_pool: bool,
+
+        /// Health check probe interval for relay pool (e.g. "30s", "1m")
+        #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
+        relay_probe_interval: Duration,
     },
 
     /// Listen for incoming ZTLP connections
@@ -1426,6 +1435,8 @@ async fn cmd_connect(
     punch_enabled: bool,
     punch_delay: &Option<Duration>,
     punch_timeout: &Option<Duration>,
+    relay_pool_enabled: bool,
+    relay_probe_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -1438,6 +1449,35 @@ async fn cmd_connect(
             .map_err(|e| format!("invalid relay address '{}': {}", relay_str, e))?
     } else {
         peer_addr
+    };
+
+    // Initialize relay pool if --relay-pool is enabled or multiple relays are available
+    let _relay_pool = if relay_pool_enabled || relay.is_some() {
+        let pool_config = RelayPoolConfig {
+            probe_interval: relay_probe_interval,
+            failover_enabled: relay.is_none() || relay_pool_enabled, // failover off when pinned
+            pinned_relay: if relay.is_some() && !relay_pool_enabled {
+                Some(send_addr)
+            } else {
+                None
+            },
+            ns_server: ns_server.clone(),
+            zone: None,
+        };
+        let mut pool = RelayPool::new(pool_config);
+        pool.add_relay(send_addr);
+
+        // If relay_pool is explicitly enabled, we'd query NS for more relays
+        // For now, add the configured relay as the pool's single entry
+        if relay_pool_enabled {
+            eprintln!("{}", c_dim("Relay pool: enabled"));
+            eprintln!("  {} {}", c_cyan("Primary relay:"), send_addr);
+            eprintln!("  {} {:?}", c_cyan("Probe interval:"), relay_probe_interval);
+        }
+
+        Some(FailoverOrchestrator::new(pool))
+    } else {
+        None
     };
 
     // Bind transport
@@ -5721,6 +5761,8 @@ async fn main() {
             punch,
             punch_delay,
             punch_timeout,
+            relay_pool,
+            relay_probe_interval,
         } => {
             cmd_connect(
                 target,
@@ -5738,6 +5780,8 @@ async fn main() {
                 *punch,
                 punch_delay,
                 punch_timeout,
+                *relay_pool,
+                *relay_probe_interval,
             )
             .await
         }

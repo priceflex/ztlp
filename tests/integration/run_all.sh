@@ -22,11 +22,11 @@ run_test() {
     local script="$2"
     local skip_in_quick="${3:-no}"
 
-    ((TOTAL++))
+    TOTAL=$((TOTAL+1))
 
     if [ "$MODE" = "quick" ] && [ "$skip_in_quick" = "yes" ]; then
         echo "⏭  SKIP: $name (quick mode)"
-        ((SKIPPED++))
+        SKIPPED=$((SKIPPED+1))
         RESULTS+=("SKIP  $name")
         return
     fi
@@ -41,13 +41,13 @@ run_test() {
         END=$(date +%s%N)
         ELAPSED_MS=$(( (END - START) / 1000000 ))
         echo "✅ PASS: $name (${ELAPSED_MS}ms)"
-        ((PASSED++))
+        PASSED=$((PASSED+1))
         RESULTS+=("PASS  $name (${ELAPSED_MS}ms)")
     else
         END=$(date +%s%N)
         ELAPSED_MS=$(( (END - START) / 1000000 ))
         echo "❌ FAIL: $name (${ELAPSED_MS}ms)"
-        ((FAILED++))
+        FAILED=$((FAILED+1))
         RESULTS+=("FAIL  $name (${ELAPSED_MS}ms)")
     fi
 }

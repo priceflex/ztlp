@@ -60,6 +60,7 @@ defmodule ZtlpNs.Application do
       ZtlpNs.Store,
       ZtlpNs.RateLimiter,
       {Task.Supervisor, name: ZtlpNs.QuerySupervisor, max_children: ZtlpNs.Config.worker_pool_size()},
+      ZtlpNs.EndpointStore,
       ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
       ZtlpNs.Server

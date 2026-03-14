@@ -39,12 +39,14 @@ use ztlp_proto::admission::{HandshakeExtension, RelayAdmissionToken, EXT_TYPE_RA
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::nat;
+use ztlp_proto::punch;
 use ztlp_proto::packet::{
     flags, DataHeader, HandshakeHeader, MsgType, SessionId, DATA_HEADER_SIZE,
     HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
 use ztlp_proto::pipeline::AdmissionResult;
 use ztlp_proto::policy::PolicyEngine;
+use ztlp_proto::reject::{RejectFrame, RejectReason};
 use ztlp_proto::relay::SimulatedRelay;
 use ztlp_proto::transport::TransportNode;
 use ztlp_proto::tunnel;
@@ -219,6 +221,18 @@ enum Commands {
         /// Fail instead of falling back to relay when hole punch fails
         #[arg(long)]
         no_relay_fallback: bool,
+
+        /// Enable NS-coordinated hole punching (Nebula-style)
+        #[arg(long)]
+        punch: bool,
+
+        /// Delay before sending punch packets (e.g. "100ms", "1s")
+        #[arg(long, value_parser = parse_duration_arg)]
+        punch_delay: Option<Duration>,
+
+        /// Timeout for the punch procedure (e.g. "10s", "30s")
+        #[arg(long, value_parser = parse_duration_arg)]
+        punch_timeout: Option<Duration>,
     },
 
     /// Listen for incoming ZTLP connections
@@ -265,6 +279,10 @@ enum Commands {
         /// Enable NAT traversal (register with relay for rendezvous)
         #[arg(long)]
         nat_assist: bool,
+
+        /// Maximum number of concurrent sessions (default 100)
+        #[arg(long, default_value = "100")]
+        max_sessions: usize,
     },
 
     /// Manage ZTLP relay nodes
@@ -760,6 +778,32 @@ enum KeygenFormat {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// Load an identity from a key file, or generate an ephemeral one.
+/// Parse a duration string like "100ms", "1s", "10s", "5m"
+fn parse_duration_arg(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    if let Some(ms_str) = s.strip_suffix("ms") {
+        ms_str
+            .parse::<u64>()
+            .map(Duration::from_millis)
+            .map_err(|e| format!("invalid milliseconds '{}': {}", ms_str, e))
+    } else if let Some(s_str) = s.strip_suffix('s') {
+        s_str
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|e| format!("invalid seconds '{}': {}", s_str, e))
+    } else if let Some(m_str) = s.strip_suffix('m') {
+        m_str
+            .parse::<u64>()
+            .map(|m| Duration::from_secs(m * 60))
+            .map_err(|e| format!("invalid minutes '{}': {}", m_str, e))
+    } else {
+        // Default to seconds
+        s.parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|e| format!("invalid duration '{}': {}", s, e))
+    }
+}
+
 fn load_or_generate_identity(
     key_path: &Option<PathBuf>,
 ) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
@@ -1376,13 +1420,16 @@ async fn cmd_connect(
     stun_server: &Option<String>,
     nat_assist: bool,
     no_relay_fallback: bool,
+    punch_enabled: bool,
+    punch_delay: &Option<Duration>,
+    punch_timeout: &Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
     // Resolve target: raw ip:port or ZTLP-NS name
     let (peer_addr, _resolved_node_id) = resolve_target(target, ns_server).await?;
 
-    let send_addr = if let Some(relay_str) = relay {
+    let mut send_addr = if let Some(relay_str) = relay {
         relay_str
             .parse()
             .map_err(|e| format!("invalid relay address '{}': {}", relay_str, e))?
@@ -1486,6 +1533,78 @@ async fn cmd_connect(
                         }
                     }
                 }
+            }
+        }
+        eprintln!();
+    }
+
+    // NS-coordinated hole punching (if --punch)
+    if punch_enabled {
+        let ns_addr_str = ns_server
+            .as_deref()
+            .ok_or("--punch requires --ns-server")?;
+        let ns_addr: SocketAddr = ns_addr_str
+            .parse()
+            .map_err(|e| format!("invalid --ns-server '{}': {}", ns_addr_str, e))?;
+
+        let peer_node_id = _resolved_node_id.unwrap_or_else(NodeId::zero);
+
+        eprintln!(
+            "\n{}",
+            c_dim("Hole punching enabled — coordinating via NS...")
+        );
+
+        let mut punch_config = punch::PunchConfig::default();
+        if let Some(d) = punch_delay {
+            punch_config.punch_delay = *d;
+        }
+        if let Some(t) = punch_timeout {
+            punch_config.punch_timeout = *t;
+        }
+
+        let our_endpoints: Vec<SocketAddr> = vec![node.local_addr];
+
+        match punch::execute_punch(
+            &node.socket,
+            ns_addr,
+            &identity.node_id,
+            &peer_node_id,
+            &our_endpoints,
+            &punch_config,
+        )
+        .await
+        {
+            Ok(punch::PunchResult::Success { peer_addr: punched_addr }) => {
+                eprintln!(
+                    "{} Direct connection via hole punch to {}",
+                    c_green("✓"),
+                    punched_addr
+                );
+                send_addr = punched_addr;
+            }
+            Ok(punch::PunchResult::TimedOut) => {
+                if no_relay_fallback {
+                    return Err("hole punch timed out and --no-relay-fallback was specified".into());
+                }
+                eprintln!(
+                    "{} Hole punch timed out — {}",
+                    c_yellow("⚠"),
+                    if relay.is_some() {
+                        "falling back to relay"
+                    } else {
+                        "continuing with direct connection attempt"
+                    }
+                );
+            }
+            Err(e) => {
+                if no_relay_fallback {
+                    return Err(format!("punch failed: {}", e).into());
+                }
+                eprintln!(
+                    "{} Punch failed: {} — continuing with fallback",
+                    c_yellow("⚠"),
+                    e
+                );
             }
         }
         eprintln!();
@@ -1656,6 +1775,7 @@ async fn cmd_listen(
     ns_server: &Option<String>,
     stun_server: &Option<String>,
     nat_assist: bool,
+    max_sessions: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -1833,8 +1953,10 @@ async fn cmd_listen(
         let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
 
         // Resolve which backend this client wants
-        let (svc_name, forward_addr) =
-            registry.resolve(&recv1_header.dst_svc_id).ok_or_else(|| {
+        let resolve_result = registry.resolve(&recv1_header.dst_svc_id);
+        let (svc_name, forward_addr) = match resolve_result {
+            Some(pair) => pair,
+            None => {
                 let requested = String::from_utf8_lossy(
                     &recv1_header.dst_svc_id[..recv1_header
                         .dst_svc_id
@@ -1844,7 +1966,7 @@ async fn cmd_listen(
                         .unwrap_or(0)],
                 )
                 .to_string();
-                if requested.is_empty() {
+                let msg = if requested.is_empty() {
                     "client requested default service but no unnamed --forward was configured"
                         .to_string()
                 } else {
@@ -1853,8 +1975,25 @@ async fn cmd_listen(
                         requested,
                         registry.services.keys().collect::<Vec<_>>()
                     )
+                };
+
+                // Send REJECT frame: SERVICE_UNAVAILABLE
+                let reject = RejectFrame::new(RejectReason::ServiceUnavailable, &msg);
+                if let Err(e) = tunnel::send_reject(
+                    &node.socket,
+                    &node.pipeline,
+                    session_id,
+                    from1,
+                    &reject.encode(),
+                )
+                .await
+                {
+                    eprintln!("{} failed to send REJECT frame: {}", c_red("✗"), e);
                 }
-            })?;
+
+                return Err(msg.into());
+            }
+        };
 
         // Policy check
         if !policy.authorize(&client_identity, svc_name) {
@@ -1864,6 +2003,26 @@ async fn cmd_listen(
                 client_identity,
                 svc_name
             );
+
+            // Send REJECT frame to client before closing
+            let reject = RejectFrame::new(
+                RejectReason::PolicyDenied,
+                format!("{} is not authorized for service '{}'", client_identity, svc_name),
+            );
+            if let Err(e) = tunnel::send_reject(
+                &node.socket,
+                &node.pipeline,
+                session_id,
+                from1,
+                &reject.encode(),
+            )
+            .await
+            {
+                eprintln!("{} failed to send REJECT frame: {}", c_red("✗"), e);
+            } else {
+                eprintln!("{} REJECT frame sent to client", c_dim("→"));
+            }
+
             return Err(format!(
                 "policy denied: {} is not authorized for service '{}'",
                 client_identity, svc_name
@@ -2185,6 +2344,20 @@ async fn interactive_data_loop(
             result = node.recv_data() => {
                 match result {
                     Ok(Some((plaintext, from))) => {
+                        // Check for REJECT frame
+                        if RejectFrame::is_reject(&plaintext) {
+                            if let Some(reject) = RejectFrame::decode(&plaintext) {
+                                eprintln!(
+                                    "\n{} {}",
+                                    c_red("✗ Server rejected connection:"),
+                                    reject.message
+                                );
+                                return Err(format!(
+                                    "server rejected: {} ({})",
+                                    reject.message, reject.reason
+                                ).into());
+                            }
+                        }
                         let text = String::from_utf8_lossy(&plaintext);
                         println!("{} {}", c_cyan(&format!("[{}]", from)), text);
                     }
@@ -3490,6 +3663,36 @@ async fn cmd_status(target: &str) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  {} {:.2}ms", c_cyan("RTT:"), rtt);
             eprintln!("  {} {} bytes", c_cyan("Response:"), len);
             eprintln!("  {} {}", c_cyan("CLI Version:"), ZTLP_VERSION);
+
+            // NAT detection via STUN
+            {
+                let stun_timeout = Duration::from_secs(3);
+                let mut nat_detected = false;
+                for server_str in nat::DEFAULT_STUN_SERVERS.iter() {
+                    if let Ok(addr) = server_str.parse::<SocketAddr>() {
+                        match nat::StunClient::discover_endpoint(&sock, addr, stun_timeout).await {
+                            Ok(endpoint) => {
+                                eprintln!(
+                                    "  {} {} (NAT: {:?})",
+                                    c_cyan("Public endpoint:"),
+                                    endpoint.address,
+                                    endpoint.nat_type
+                                );
+                                nat_detected = true;
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                }
+                if !nat_detected {
+                    eprintln!(
+                        "  {} {}",
+                        c_cyan("NAT type:"),
+                        c_dim("unknown (STUN unavailable)")
+                    );
+                }
+            }
 
             // Try to identify what responded
             if len >= 4 {
@@ -5048,6 +5251,9 @@ async fn main() {
             stun_server,
             nat_assist,
             no_relay_fallback,
+            punch,
+            punch_delay,
+            punch_timeout,
         } => {
             cmd_connect(
                 target,
@@ -5062,6 +5268,9 @@ async fn main() {
                 stun_server,
                 *nat_assist,
                 *no_relay_fallback,
+                *punch,
+                punch_delay,
+                punch_timeout,
             )
             .await
         }
@@ -5075,6 +5284,7 @@ async fn main() {
             ns_server,
             stun_server,
             nat_assist,
+            max_sessions,
         } => {
             cmd_listen(
                 bind,
@@ -5085,6 +5295,7 @@ async fn main() {
                 ns_server,
                 stun_server,
                 *nat_assist,
+                *max_sessions,
             )
             .await
         }

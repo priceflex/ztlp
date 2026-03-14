@@ -2636,7 +2636,7 @@ async fn wait_for_reset_on_socket(
 
     loop {
         match tokio::time::timeout_at(deadline, recv_socket.recv_from(&mut buf)).await {
-            Err(_) => return false, // Timeout
+            Err(_) => return false,     // Timeout
             Ok(Err(_)) => return false, // Socket error
             Ok(Ok((len, _addr))) => {
                 let data = &buf[..len];

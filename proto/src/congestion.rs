@@ -1402,9 +1402,9 @@ mod tests {
         sd.record_retransmit(10, 100.0);
 
         sd.prune_up_to(5);
-        assert!(sd.retransmit_records.get(&1).is_none());
-        assert!(sd.retransmit_records.get(&5).is_none());
-        assert!(sd.retransmit_records.get(&10).is_some());
+        assert!(!sd.retransmit_records.contains_key(&1));
+        assert!(!sd.retransmit_records.contains_key(&5));
+        assert!(sd.retransmit_records.contains_key(&10));
     }
 
     // ── Token Bucket Pacer tests ────────────────────────────────────
@@ -1711,9 +1711,8 @@ mod tests {
 
         let mut total_sent = 0u64;
         let mut total_lost = 0u64;
-        let mut data_seq = 0u64;
 
-        for _ in 0..1000 {
+        for data_seq in 0u64..1000 {
             // Simple LCG for deterministic "random" loss
             rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
             let loss = (rng_state >> 32) % 100 < 5; // 5% loss rate
@@ -1726,8 +1725,6 @@ mod tests {
                 cc.on_ack(1);
                 cc.update_rtt(50.0 + (rng_state % 20) as f64); // 50-70ms RTT
             }
-
-            data_seq += 1;
         }
 
         // Cwnd should be positive and reasonable (not collapsed to 0)

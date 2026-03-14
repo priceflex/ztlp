@@ -271,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cleanup_half_open_expired() {
-        let mgr = SessionManager::new(100);
+        let _mgr = SessionManager::new(100);
         // Override timeout to 0 for testing
         let mgr = SessionManager {
             half_open_timeout: Duration::from_millis(1),

@@ -104,7 +104,7 @@ fn test_reassembly_20_percent_loss() {
 
     let missing = reasm.missing_seqs(64);
     assert!(
-        missing.len() > 0,
+        !missing.is_empty(),
         "should detect many missing seqs at 20% loss"
     );
 
@@ -465,7 +465,7 @@ fn test_sack_retransmit_recovers_all_data() {
 
     // Phase 2: check SACK state
     let missing = reasm.missing_seqs(64);
-    assert!(missing.len() > 0, "should have missing seqs");
+    assert!(!missing.is_empty(), "should have missing seqs");
 
     // Phase 3: retransmit dropped packets (simulating SACK-triggered retransmit)
     let mut retransmitted = 0;
@@ -600,8 +600,8 @@ async fn test_encrypted_burst_500_packets() {
             match timeout(Duration::from_millis(500), node_b.recv_data()).await {
                 Ok(Ok(Some((data, _from)))) => {
                     let msg = String::from_utf8_lossy(&data);
-                    if msg.starts_with("stress-") {
-                        if let Ok(idx) = msg[7..].parse::<usize>() {
+                    if let Some(suffix) = msg.strip_prefix("stress-") {
+                        if let Ok(idx) = suffix.parse::<usize>() {
                             let mut r = received_clone.lock().await;
                             r.insert(idx);
                         }

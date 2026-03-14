@@ -873,7 +873,7 @@ mod tests {
 
         // Feed it errors to prevent convergence
         for _ in 0..MAX_PROBE_ROUNDS {
-            if let Some(d) = sched.next_probe() {
+            if let Some(_d) = sched.next_probe() {
                 sched.record_result(ProbeResult::Error("test".to_string()));
             }
         }

@@ -414,7 +414,7 @@ mod tests {
             PmtuAction::SendProbe(s) => s,
             other => panic!("expected SendProbe, got {:?}", other),
         };
-        let action = p.probe_acked(probe_size);
+        let _action = p.probe_acked(probe_size);
         // May not be converged yet, but low bound should have moved up
         assert!(p.current_pmtu() >= DEFAULT_PMTU);
     }

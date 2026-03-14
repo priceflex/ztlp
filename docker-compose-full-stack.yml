@@ -16,11 +16,13 @@
 #   └──────────┘  └──────────┘
 #
 # Usage:
-#   docker compose -f docker-compose-full-stack.yml up --build 2>&1 | tee fullstack.log
-#   docker compose -f docker-compose-full-stack.yml logs -f client
-#   docker compose -f docker-compose-full-stack.yml down -v
+#   docker-compose -f docker-compose-full-stack.yml up --build 2>&1 | tee fullstack.log
+#   docker-compose -f docker-compose-full-stack.yml logs -f client
+#   docker-compose -f docker-compose-full-stack.yml down -v
 #
 # ─────────────────────────────────────────────────────────────
+
+version: "3.8"
 
 networks:
   ztlp-net:

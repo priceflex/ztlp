@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Extreme Network Stress Test Environment
+# ─────────────────────────────────────────────────────────────
+#
+# Topology:
+#
+#                    ┌─────────────────────┐
+#                    │   NS (172.30.0.10)  │
+#                    │   ZTLP-NS server    │
+#                    └─────────┬───────────┘
+#                              │ infra-net
+#   ┌──────────────────────────┼──────────────────────────────┐
+#   │                          │                              │
+#   │  client-net         ┌────┴─────┐          server-net    │
+#   │                     │IMPAIRMENT│                        │
+#   │  172.30.1.0/24      │  NODE    │       172.30.2.0/24    │
+#   │                     │(bridge)  │                        │
+#   │  ┌────────┐         └──┬───┬──┘            ┌─────────┐ │
+#   │  │ CLIENT │            │   │               │ SERVER  │ │
+#   │  │ .1.50  ├────────────┘   └───────────────┤ .2.40   │ │
+#   │  └────────┘                                └────┬────┘ │
+#   │                                                 │      │
+#   │                                            ┌────┴────┐ │
+#   │                                            │ BACKEND │ │
+#   │                                            │ .2.30   │ │
+#   │                                            └─────────┘ │
+#   └─────────────────────────────────────────────────────────┘
+#
+# The impairment node bridges client-net and server-net.
+# Client routes to server-net through the impairment node.
+# Server routes to client-net through the impairment node.
+# tc netem rules on the impairment node affect all tunnel traffic.
+#
+# Usage:
+#   docker compose -f stress/docker-compose.yml up --build -d
+#   ./stress/run-stress-tests.sh
+#   docker compose -f stress/docker-compose.yml down -v
+#
+# ─────────────────────────────────────────────────────────────
+
+networks:
+  infra-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  client-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
+  server-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.2.0/24
+
+services:
+  # ── Namespace Server ────────────────────────────────────────
+  ns:
+    build: ../ns
+    container_name: stress-ns
+    hostname: ns
+    networks:
+      infra-net:
+        ipv4_address: 172.30.0.10
+      client-net:
+        ipv4_address: 172.30.1.10
+      server-net:
+        ipv4_address: 172.30.2.10
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "100000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "1000"
+      ZTLP_NS_RATE_LIMIT_BURST: "2000"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Backend SSH Server ──────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: fullstack/Dockerfile.backend
+    container_name: stress-backend
+    hostname: backend
+    networks:
+      server-net:
+        ipv4_address: 172.30.2.30
+    restart: unless-stopped
+
+  # ── Server (ztlp listen) ───────────────────────────────────
+  server:
+    build:
+      context: ..
+      dockerfile: fullstack/Dockerfile.server
+    container_name: stress-server
+    hostname: server
+    networks:
+      server-net:
+        ipv4_address: 172.30.2.40
+    depends_on:
+      ns:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      ZTLP_ZONE: "stress.ztlp"
+      ZTLP_SERVER_NAME: "server.stress.ztlp"
+      ZTLP_NS_SERVER: "172.30.2.10:23096"
+      ZTLP_BIND_ADDR: "0.0.0.0:23095"
+      ZTLP_BACKEND: "172.30.2.30:22"
+      RUST_LOG: "info,ztlp_proto=info"
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  # ── Impairment Node ────────────────────────────────────────
+  impairment:
+    build:
+      context: .
+      dockerfile: Dockerfile.impairment
+    container_name: stress-impairment
+    hostname: impairment
+    networks:
+      client-net:
+        ipv4_address: 172.30.1.100
+      server-net:
+        ipv4_address: 172.30.2.100
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+    restart: unless-stopped
+
+  # ── Client (ztlp connect + stress test runner) ─────────────
+  client:
+    build:
+      context: ..
+      dockerfile: stress/Dockerfile.stresstest
+    container_name: stress-client
+    hostname: client
+    networks:
+      client-net:
+        ipv4_address: 172.30.1.50
+    depends_on:
+      ns:
+        condition: service_healthy
+      server:
+        condition: service_started
+      impairment:
+        condition: service_started
+    environment:
+      ZTLP_ZONE: "stress.ztlp"
+      ZTLP_CLIENT_NAME: "client.stress.ztlp"
+      ZTLP_SERVER_NAME: "server.stress.ztlp"
+      ZTLP_NS_SERVER: "172.30.1.10:23096"
+      ZTLP_LOCAL_PORT: "2222"
+      SSHPASS: "ztlptest"
+      RUST_LOG: "info,ztlp_proto=info"
+      # Server address (routed through impairment node)
+      ZTLP_SERVER_ADDR: "172.30.2.40:23095"
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped

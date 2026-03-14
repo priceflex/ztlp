@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Stress Test: Impairment Node
+# Alpine with iproute2, iptables, iperf3 — bridges client-net
+# and server-net so traffic passes through tc netem rules.
+# ─────────────────────────────────────────────────────────────
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+    iproute2 \
+    iptables \
+    iperf3 \
+    bridge-utils \
+    bash \
+    curl \
+    iputils \
+    procps \
+    bind-tools
+
+COPY impairment-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

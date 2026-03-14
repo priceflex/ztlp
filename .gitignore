@@ -32,3 +32,6 @@ erl_crash.dump
 relay/erl_crash.dump
 bench/latest-perf-gate.json
 demo/ztlp
+
+# Stress test results
+stress/results/

@@ -58,6 +58,7 @@ pub mod policy;
 pub mod punch;
 pub mod reject;
 pub mod relay;
+pub mod roaming;
 pub mod security;
 pub mod session;
 pub mod session_manager;

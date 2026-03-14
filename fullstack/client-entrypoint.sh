@@ -1,10 +1,15 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────
-# ZTLP Full-Stack: Client entrypoint
+# ZTLP Full-Stack: Client entrypoint (DEBUG MODE)
 # Generates identity, registers with NS, resolves the server
 # via NS, connects through ZTLP tunnel, runs SSH + SCP tests.
 # ─────────────────────────────────────────────────────────────
-set -e
+set -eo pipefail
+
+# ── Verbose debug logging ───────────────────────────────────
+ts() { date "+%H:%M:%S.%3N"; }
+log() { echo "[$(ts)] [client] $*"; }
+dbg() { echo "[$(ts)] [client] [DEBUG] $*"; }
 
 ZONE="${ZTLP_ZONE:-fullstack.ztlp}"
 CLIENT_NAME="${ZTLP_CLIENT_NAME:-client.${ZONE}}"
@@ -15,190 +20,207 @@ KEY_FILE="${KEY_DIR}/client-identity.json"
 LOCAL_PORT="${ZTLP_LOCAL_PORT:-2222}"
 BENCHMARK="${ZTLP_BENCHMARK:-true}"
 
-echo "═══════════════════════════════════════════════════════"
-echo "  ZTLP Client — Full-Stack Test"
-echo "═══════════════════════════════════════════════════════"
-echo "  Zone:        ${ZONE}"
-echo "  Client Name: ${CLIENT_NAME}"
-echo "  Server Name: ${SERVER_NAME}"
-echo "  NS Server:   ${NS_SERVER}"
-echo "  Local Port:  ${LOCAL_PORT}"
-echo "  Benchmark:   ${BENCHMARK}"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+log "═══════════════════════════════════════════════════════"
+log "  ZTLP Client — Full-Stack Test (DEBUG MODE)"
+log "═══════════════════════════════════════════════════════"
+log "  Version:     $(ztlp --version 2>&1 || echo 'unknown')"
+log "  Zone:        ${ZONE}"
+log "  Client Name: ${CLIENT_NAME}"
+log "  Server Name: ${SERVER_NAME}"
+log "  NS Server:   ${NS_SERVER}"
+log "  Local Port:  ${LOCAL_PORT}"
+log "  Benchmark:   ${BENCHMARK}"
+log "  RUST_LOG:    ${RUST_LOG:-not set}"
+log "═══════════════════════════════════════════════════════"
 
 # ── Step 1: Generate identity ───────────────────────────────
 mkdir -p "${KEY_DIR}"
 if [ ! -f "${KEY_FILE}" ]; then
-    echo "→ Generating client identity..."
-    ztlp keygen --output "${KEY_FILE}"
-    echo "  ✓ Identity saved to ${KEY_FILE}"
+    log "→ Generating client identity..."
+    ztlp keygen --output "${KEY_FILE}" 2>&1
+    log "  ✓ Identity saved to ${KEY_FILE}"
 else
-    echo "→ Using existing identity: ${KEY_FILE}"
+    log "→ Using existing identity: ${KEY_FILE}"
 fi
-echo ""
+dbg "Identity file:"
+cat "${KEY_FILE}" 2>&1 | head -5
 
 # ── Step 2: Wait for NS ────────────────────────────────────
-echo "→ Waiting for NS server at ${NS_SERVER}..."
+log "→ Waiting for NS server at ${NS_SERVER}..."
 MAX_WAIT=60
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-    if timeout 2 ztlp ns lookup "test.${ZONE}" --ns-server "${NS_SERVER}" 2>&1 | grep -qiE "not found|found|KEY|SVC|record|No records"; then
-        echo "  ✓ NS server is responding"
+    dbg "  NS probe attempt at ${WAITED}s..."
+    NS_RESULT=$(timeout 3 ztlp ns lookup "test.${ZONE}" --ns-server "${NS_SERVER}" 2>&1) || true
+    dbg "  NS response: ${NS_RESULT}"
+    if echo "${NS_RESULT}" | grep -qiE "not found|found|KEY|SVC|record|No records"; then
+        log "  ✓ NS server is responding (${WAITED}s)"
         break
     fi
     sleep 2
     WAITED=$((WAITED + 2))
-    echo "    waiting... (${WAITED}s)"
 done
-echo ""
+
+if [ $WAITED -ge $MAX_WAIT ]; then
+    log "  ⚠ NS server not responding after ${MAX_WAIT}s"
+fi
 
 # ── Step 3: Register client with NS ────────────────────────
-echo "→ Registering client identity with NS..."
-ztlp ns register \
+log "→ Registering client identity with NS..."
+REG_OUTPUT=$(ztlp ns register \
     --name "${CLIENT_NAME}" \
     --zone "${ZONE}" \
     --key "${KEY_FILE}" \
     --ns-server "${NS_SERVER}" \
-    2>&1 || echo "  ⚠ Registration may have failed — continuing anyway"
-echo ""
+    2>&1) || true
+log "  Registration output: ${REG_OUTPUT}"
 
 # ── Step 4: Wait for server to register and resolve it ──────
-echo "→ Waiting for server '${SERVER_NAME}' to register with NS..."
+log "→ Waiting for server '${SERVER_NAME}' to register with NS..."
 SERVER_ADDR=""
 MAX_WAIT=120
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-    # Try to resolve the server's SVC record from NS
-    NS_OUTPUT=$(ztlp ns lookup "${SERVER_NAME}" --ns-server "${NS_SERVER}" 2>&1) || true
-    echo "    NS lookup output: ${NS_OUTPUT}" | head -5
+    NS_OUTPUT=$(timeout 3 ztlp ns lookup "${SERVER_NAME}" --ns-server "${NS_SERVER}" 2>&1) || true
+    dbg "  NS lookup for ${SERVER_NAME}: ${NS_OUTPUT}"
 
     # Look for SVC record with an address
     if echo "${NS_OUTPUT}" | grep -qiE "SVC|address"; then
-        # Extract the address (ip:port) from the output
         SERVER_ADDR=$(echo "${NS_OUTPUT}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | head -1)
         if [ -n "${SERVER_ADDR}" ]; then
-            echo "  ✓ Server resolved: ${SERVER_ADDR}"
+            log "  ✓ Server resolved via SVC: ${SERVER_ADDR}"
             break
         fi
     fi
 
-    # Also check for KEY record (server is registered but maybe no SVC)
+    # Check for KEY record (server registered but no SVC)
     if echo "${NS_OUTPUT}" | grep -qiE "KEY|key.*record|Ed25519"; then
-        echo "  ✓ Server KEY found in NS (no SVC record — using Docker hostname)"
+        log "  ✓ Server KEY found in NS (no SVC record — using Docker hostname)"
         SERVER_ADDR="server:23095"
         break
     fi
 
     sleep 3
     WAITED=$((WAITED + 3))
-    echo "    waiting for server registration... (${WAITED}s)"
+    dbg "  waiting for server registration... (${WAITED}s/${MAX_WAIT}s)"
 done
 
 if [ -z "${SERVER_ADDR}" ]; then
-    echo "  ⚠ Could not resolve server from NS — falling back to Docker hostname"
+    log "  ⚠ Could not resolve server from NS — falling back to Docker hostname"
     SERVER_ADDR="server:23095"
 fi
-echo ""
 
 # ── Step 5: Connect to server via ZTLP ──────────────────────
-echo "═══════════════════════════════════════════════════════"
-echo "  Connecting to server"
-echo "═══════════════════════════════════════════════════════"
-echo ""
-echo "  Target:     ${SERVER_ADDR}"
-echo "  Local port: ${LOCAL_PORT} → SSH"
-echo ""
+log "═══════════════════════════════════════════════════════"
+log "  Connecting to server"
+log "═══════════════════════════════════════════════════════"
+log "  Target:     ${SERVER_ADDR}"
+log "  Local port: ${LOCAL_PORT} → SSH"
+log "  Command: ztlp connect ${SERVER_ADDR} --key ${KEY_FILE} --service ssh -L ${LOCAL_PORT}:127.0.0.1:22 -vv"
 
-# Start the tunnel in the background
+# Start the tunnel in the background, capture stderr for debug
 ztlp connect "${SERVER_ADDR}" \
     --key "${KEY_FILE}" \
     --service ssh \
     -L "${LOCAL_PORT}:127.0.0.1:22" \
-    &
+    -vv \
+    2>&1 | while IFS= read -r line; do
+        echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"
+    done &
 TUNNEL_PID=$!
+dbg "Tunnel started as PID ${TUNNEL_PID}"
 
-# Wait for the tunnel to be ready (TCP listener on local port)
-echo "→ Waiting for tunnel to establish..."
+# Wait for the tunnel to be ready
+log "→ Waiting for tunnel to establish (TCP listener on :${LOCAL_PORT})..."
 MAX_WAIT=30
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
     if ss -tlnp 2>/dev/null | grep -q ":${LOCAL_PORT}" || \
        netstat -tlnp 2>/dev/null | grep -q ":${LOCAL_PORT}"; then
-        echo "  ✓ Tunnel is active on localhost:${LOCAL_PORT}"
+        log "  ✓ Tunnel is active on localhost:${LOCAL_PORT} (${WAITED}s)"
         break
     fi
     # Check if tunnel process died
     if ! kill -0 $TUNNEL_PID 2>/dev/null; then
-        echo "  ✗ Tunnel process exited unexpectedly"
-        wait $TUNNEL_PID 2>/dev/null || true
+        log "  ✗ Tunnel process (PID ${TUNNEL_PID}) exited unexpectedly!"
+        dbg "  Attempting to get exit code..."
+        wait $TUNNEL_PID 2>/dev/null
+        EXIT_CODE=$?
+        log "  ✗ Tunnel exit code: ${EXIT_CODE}"
         exit 1
     fi
     sleep 1
     WAITED=$((WAITED + 1))
+    if [ $((WAITED % 5)) -eq 0 ]; then
+        dbg "  Still waiting for port ${LOCAL_PORT}... (${WAITED}s)"
+        dbg "  ss -tlnp output: $(ss -tlnp 2>/dev/null | grep -E '${LOCAL_PORT}|LISTEN' | head -3)"
+        dbg "  Tunnel PID ${TUNNEL_PID} alive: $(kill -0 $TUNNEL_PID 2>/dev/null && echo 'yes' || echo 'no')"
+    fi
 done
 
 if [ $WAITED -ge $MAX_WAIT ]; then
-    echo "  ✗ Tunnel didn't establish within ${MAX_WAIT}s"
+    log "  ✗ Tunnel didn't establish within ${MAX_WAIT}s"
+    dbg "  Final ss output: $(ss -tlnp 2>/dev/null)"
+    dbg "  Final process check: $(ps aux | grep ztlp | head -5)"
     kill $TUNNEL_PID 2>/dev/null || true
     exit 1
 fi
-echo ""
 
 # Give the tunnel a moment to stabilize
-sleep 1
+sleep 2
+log ""
 
 # ── Step 6: Run tests ───────────────────────────────────────
-echo "═══════════════════════════════════════════════════════"
-echo "  Running Tests"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+log "═══════════════════════════════════════════════════════"
+log "  Running Tests"
+log "═══════════════════════════════════════════════════════"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o KexAlgorithms=curve25519-sha256 -p ${LOCAL_PORT}"
 SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o KexAlgorithms=curve25519-sha256 -P ${LOCAL_PORT}"
 
 # Test 1: SSH echo
-echo "→ Test 1: SSH echo through ZTLP tunnel..."
-RESULT=$(sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 "echo ZTLP_OK" 2>/dev/null) || true
-if [ "$RESULT" = "ZTLP_OK" ]; then
-    echo "  ✓ SSH echo: PASS"
+log "→ Test 1: SSH echo through ZTLP tunnel..."
+dbg "  Running: sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 'echo ZTLP_OK'"
+RESULT=$(sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 "echo ZTLP_OK" 2>&1) || true
+dbg "  Raw result: '${RESULT}'"
+if echo "${RESULT}" | grep -q "ZTLP_OK"; then
+    log "  ✓ SSH echo: PASS"
 else
-    echo "  ✗ SSH echo: FAIL (got: '${RESULT}')"
-    echo ""
-    echo "  Debug: trying verbose SSH..."
-    sshpass -e ssh -v ${SSH_OPTS} testuser@127.0.0.1 "echo ZTLP_OK" 2>&1 | tail -30
-    echo ""
-    echo "  Debug: tunnel process status..."
-    kill -0 $TUNNEL_PID 2>/dev/null && echo "  Tunnel PID $TUNNEL_PID is alive" || echo "  Tunnel PID $TUNNEL_PID is DEAD"
+    log "  ✗ SSH echo: FAIL (got: '${RESULT}')"
+    log ""
+    log "  Debug: trying verbose SSH..."
+    sshpass -e ssh -vvv ${SSH_OPTS} testuser@127.0.0.1 "echo ZTLP_OK" 2>&1 | tail -40
+    log ""
+    log "  Debug: tunnel process status..."
+    kill -0 $TUNNEL_PID 2>/dev/null && log "  Tunnel PID $TUNNEL_PID is alive" || log "  Tunnel PID $TUNNEL_PID is DEAD"
+    dbg "  Port status: $(ss -tlnp 2>/dev/null | grep ${LOCAL_PORT})"
 fi
-echo ""
 
 # Test 2: Remote command execution
-echo "→ Test 2: Remote command through tunnel..."
+log "→ Test 2: Remote hostname through tunnel..."
 HOSTNAME_RESULT=$(sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 "hostname" 2>/dev/null) || true
+dbg "  Raw result: '${HOSTNAME_RESULT}'"
 if [ "$HOSTNAME_RESULT" = "backend" ]; then
-    echo "  ✓ Remote hostname: '${HOSTNAME_RESULT}' — confirms we're talking to the backend"
+    log "  ✓ Remote hostname: '${HOSTNAME_RESULT}' — confirmed backend"
 else
-    echo "  ⚠ Remote hostname: '${HOSTNAME_RESULT}' (expected 'backend')"
+    log "  ⚠ Remote hostname: '${HOSTNAME_RESULT}' (expected 'backend')"
 fi
-echo ""
 
-# Test 3: Verify the ZTLP pipeline (server identity + crypto)
-echo "→ Test 3: Verify tunnel is encrypted (check server identity)..."
+# Test 3: Verify tunnel crypto
+log "→ Test 3: Remote uname through tunnel..."
 UNAME_RESULT=$(sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 "uname -a" 2>/dev/null) || true
 if [ -n "$UNAME_RESULT" ]; then
-    echo "  ✓ Remote uname: ${UNAME_RESULT}"
+    log "  ✓ Remote uname: ${UNAME_RESULT}"
 else
-    echo "  ✗ Could not execute remote command"
+    log "  ✗ Could not execute remote command"
 fi
-echo ""
 
 # ── Step 7: SCP Benchmarks ──────────────────────────────────
 if [ "${BENCHMARK}" = "true" ]; then
-    echo "═══════════════════════════════════════════════════════"
-    echo "  SCP Benchmark (through ZTLP tunnel)"
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
+    log ""
+    log "═══════════════════════════════════════════════════════"
+    log "  SCP Benchmark (through ZTLP tunnel)"
+    log "═══════════════════════════════════════════════════════"
 
     mkdir -p /tmp/ztlp-bench
 
@@ -210,62 +232,68 @@ if [ "${BENCHMARK}" = "true" ]; then
         dd if=/dev/urandom of="${FILE}" bs=1M count=${SIZE} 2>/dev/null
         MD5_ORIG=$(md5sum "${FILE}" | awk '{print $1}')
 
-        echo "→ SCP upload ${SIZE}MB through ZTLP tunnel..."
+        log "→ SCP round-trip ${SIZE}MB through ZTLP tunnel..."
+        dbg "  Upload starting..."
         START=$(date +%s%N)
         if sshpass -e scp ${SCP_OPTS} "${FILE}" testuser@127.0.0.1:/tmp/test-recv.bin 2>/dev/null; then
-            END=$(date +%s%N)
+            UPLOAD_END=$(date +%s%N)
+            dbg "  Upload done, downloading back..."
 
-            # Download back and verify integrity
             if sshpass -e scp ${SCP_OPTS} testuser@127.0.0.1:/tmp/test-recv.bin /tmp/ztlp-bench/test-recv.bin 2>/dev/null; then
+                END=$(date +%s%N)
                 MD5_RECV=$(md5sum /tmp/ztlp-bench/test-recv.bin | awk '{print $1}')
 
-                ELAPSED_MS=$(( (END - START) / 1000000 ))
-                if [ $ELAPSED_MS -gt 0 ]; then
-                    ELAPSED_S=$(echo "scale=2; ${ELAPSED_MS}/1000" | bc 2>/dev/null || echo "${ELAPSED_MS}ms")
-                    THROUGHPUT=$(echo "scale=1; ${SIZE}*1000/${ELAPSED_MS}" | bc 2>/dev/null || echo "?")
+                UPLOAD_MS=$(( (UPLOAD_END - START) / 1000000 ))
+                TOTAL_MS=$(( (END - START) / 1000000 ))
+                if [ $UPLOAD_MS -gt 0 ]; then
+                    UPLOAD_SPEED=$(echo "scale=1; ${SIZE}*1000/${UPLOAD_MS}" | bc 2>/dev/null || echo "?")
                 else
-                    ELAPSED_S="<1ms"
-                    THROUGHPUT="∞"
+                    UPLOAD_SPEED="∞"
+                fi
+                if [ $TOTAL_MS -gt 0 ]; then
+                    TOTAL_S=$(echo "scale=2; ${TOTAL_MS}/1000" | bc 2>/dev/null || echo "${TOTAL_MS}ms")
+                else
+                    TOTAL_S="<1ms"
                 fi
 
                 if [ "${MD5_ORIG}" = "${MD5_RECV}" ]; then
-                    echo "  ✓ ${SIZE}MB: ${ELAPSED_S}s upload (${THROUGHPUT} MB/s) — checksum verified ✓"
+                    log "  ✓ ${SIZE}MB: upload ${UPLOAD_MS}ms (${UPLOAD_SPEED} MB/s), round-trip ${TOTAL_S}s — checksum ✓"
                     PASS=$((PASS + 1))
                 else
-                    echo "  ✗ ${SIZE}MB: ${ELAPSED_S}s — CHECKSUM MISMATCH!"
-                    echo "    sent:     ${MD5_ORIG}"
-                    echo "    received: ${MD5_RECV}"
+                    log "  ✗ ${SIZE}MB: CHECKSUM MISMATCH!"
+                    log "    sent:     ${MD5_ORIG}"
+                    log "    received: ${MD5_RECV}"
                     FAIL=$((FAIL + 1))
                 fi
             else
-                echo "  ✗ ${SIZE}MB: upload succeeded but download failed"
+                log "  ✗ ${SIZE}MB: upload OK but download failed"
                 FAIL=$((FAIL + 1))
             fi
         else
-            echo "  ✗ ${SIZE}MB: SCP upload failed"
+            log "  ✗ ${SIZE}MB: SCP upload failed"
+            dbg "  Tunnel alive: $(kill -0 $TUNNEL_PID 2>/dev/null && echo 'yes' || echo 'no')"
             FAIL=$((FAIL + 1))
         fi
 
-        # Clean up remote file
+        # Clean up
         sshpass -e ssh ${SSH_OPTS} testuser@127.0.0.1 "rm -f /tmp/test-recv.bin" 2>/dev/null || true
         rm -f /tmp/ztlp-bench/test-recv.bin
     done
 
-    echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "  Benchmark Results: ${PASS} passed, ${FAIL} failed"
-    echo "═══════════════════════════════════════════════════════"
+    log ""
+    log "═══════════════════════════════════════════════════════"
+    log "  Benchmark Results: ${PASS} passed, ${FAIL} failed"
+    log "═══════════════════════════════════════════════════════"
 fi
 
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Full-Stack Test Complete"
-echo "═══════════════════════════════════════════════════════"
-echo ""
-echo "  Tunnel still active on localhost:${LOCAL_PORT}"
-echo "  To connect manually:"
-echo "    docker exec -it ztlp-client sshpass -e ssh -p ${LOCAL_PORT} -o StrictHostKeyChecking=no testuser@127.0.0.1"
-echo ""
+log ""
+log "═══════════════════════════════════════════════════════"
+log "  Full-Stack Test Complete"
+log "═══════════════════════════════════════════════════════"
+log ""
+log "  Tunnel still active on localhost:${LOCAL_PORT}"
+log "  To connect manually:"
+log "    docker exec -it ztlp-client sshpass -e ssh -p ${LOCAL_PORT} -o StrictHostKeyChecking=no testuser@127.0.0.1"
 
 # Keep tunnel running for manual testing
 wait $TUNNEL_PID

@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# ZTLP Full-Stack Integration Test
+# ZTLP Full-Stack Integration Test (DEBUG MODE)
 # ─────────────────────────────────────────────────────────────
 #
 # Topology:
@@ -15,27 +15,12 @@
 #   │  relay1   │  │  relay2   │   (running, for future relay-mediated tests)
 #   └──────────┘  └──────────┘
 #
-# Data path (tested):
-#   SSH client → TCP → ztlp-client tunnel → ZTLP/UDP → ztlp-server
-#   → TCP → backend SSH server
-#
-# What's tested:
-#   ✅ NS registration + lookup
-#   ✅ Noise_XX handshake
-#   ✅ Three-layer pipeline (magic, sessionID, header auth)
-#   ✅ ZTLP tunnel (TCP over ZTLP over UDP)
-#   ✅ SSH through tunnel
-#   ✅ SCP benchmarks with integrity verification
-#   ✅ Service routing (--forward ssh:backend:22)
-#
 # Usage:
-#   docker-compose -f docker-compose-full-stack.yml up --build
-#   docker-compose -f docker-compose-full-stack.yml logs -f client
-#   docker-compose -f docker-compose-full-stack.yml down -v
+#   docker compose -f docker-compose-full-stack.yml up --build 2>&1 | tee fullstack.log
+#   docker compose -f docker-compose-full-stack.yml logs -f client
+#   docker compose -f docker-compose-full-stack.yml down -v
 #
 # ─────────────────────────────────────────────────────────────
-
-version: "3.8"
 
 networks:
   ztlp-net:
@@ -62,7 +47,7 @@ services:
       ZTLP_NS_STORAGE_MODE: "ram_copies"
       ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
       ZTLP_LOG_FORMAT: "json"
-      ZTLP_LOG_LEVEL: "info"
+      ZTLP_LOG_LEVEL: "debug"
       ZTLP_NS_METRICS_ENABLED: "true"
       ZTLP_NS_METRICS_PORT: "9103"
       ZTLP_NS_RATE_LIMIT_PER_SEC: "1000"
@@ -91,7 +76,7 @@ services:
       ZTLP_RELAY_MAX_SESSIONS: "10000"
       ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
       ZTLP_LOG_FORMAT: "json"
-      ZTLP_LOG_LEVEL: "info"
+      ZTLP_LOG_LEVEL: "debug"
       ZTLP_RELAY_METRICS_ENABLED: "true"
       ZTLP_RELAY_METRICS_PORT: "9101"
     healthcheck:
@@ -118,7 +103,7 @@ services:
       ZTLP_RELAY_MAX_SESSIONS: "10000"
       ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
       ZTLP_LOG_FORMAT: "json"
-      ZTLP_LOG_LEVEL: "info"
+      ZTLP_LOG_LEVEL: "debug"
       ZTLP_RELAY_METRICS_ENABLED: "true"
       ZTLP_RELAY_METRICS_PORT: "9101"
     healthcheck:
@@ -162,6 +147,7 @@ services:
       ZTLP_NS_SERVER: "172.28.0.10:23096"
       ZTLP_BIND_ADDR: "0.0.0.0:23095"
       ZTLP_BACKEND: "172.28.0.30:22"
+      RUST_LOG: "debug,ztlp_proto=debug"
     restart: unless-stopped
 
   # ── Client (ztlp connect + benchmarks) ───────────────────
@@ -187,3 +173,4 @@ services:
       ZTLP_LOCAL_PORT: "2222"
       ZTLP_BENCHMARK: "true"
       SSHPASS: "ztlptest"
+      RUST_LOG: "debug,ztlp_proto=debug"

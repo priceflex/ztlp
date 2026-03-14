@@ -4,7 +4,12 @@
 # Generates identity, registers with NS, then listens for
 # incoming ZTLP connections and forwards to backend SSH.
 # ─────────────────────────────────────────────────────────────
-set -e
+set -eo pipefail
+
+# ── Verbose debug logging ───────────────────────────────────
+ts() { date "+%H:%M:%S.%3N"; }
+log() { echo "[$(ts)] [server] $*"; }
+dbg() { echo "[$(ts)] [server] [DEBUG] $*"; }
 
 ZONE="${ZTLP_ZONE:-fullstack.ztlp}"
 SERVER_NAME="${ZTLP_SERVER_NAME:-server.${ZONE}}"
@@ -14,78 +19,86 @@ BACKEND="${ZTLP_BACKEND:-backend:22}"
 KEY_DIR="/home/ztlp/.ztlp"
 KEY_FILE="${KEY_DIR}/server-identity.json"
 
-echo "═══════════════════════════════════════════════════════"
-echo "  ZTLP Server — Full-Stack Test"
-echo "═══════════════════════════════════════════════════════"
-echo "  Zone:       ${ZONE}"
-echo "  Name:       ${SERVER_NAME}"
-echo "  NS Server:  ${NS_SERVER}"
-echo "  Bind:       ${BIND_ADDR}"
-echo "  Backend:    ssh://${BACKEND}"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+log "═══════════════════════════════════════════════════════"
+log "  ZTLP Server — Full-Stack Test (DEBUG MODE)"
+log "═══════════════════════════════════════════════════════"
+log "  Version:    $(ztlp --version 2>&1 || echo 'unknown')"
+log "  Zone:       ${ZONE}"
+log "  Name:       ${SERVER_NAME}"
+log "  NS Server:  ${NS_SERVER}"
+log "  Bind:       ${BIND_ADDR}"
+log "  Backend:    ssh://${BACKEND}"
+log "  RUST_LOG:   ${RUST_LOG:-not set}"
+log "═══════════════════════════════════════════════════════"
 
-# ── Step 1: Generate identity (if not already present) ──────
+# ── Step 1: Generate identity ───────────────────────────────
 mkdir -p "${KEY_DIR}"
 if [ ! -f "${KEY_FILE}" ]; then
-    echo "→ Generating server identity..."
-    ztlp keygen --output "${KEY_FILE}"
-    echo "  ✓ Identity saved to ${KEY_FILE}"
+    log "→ Generating server identity..."
+    ztlp keygen --output "${KEY_FILE}" 2>&1
+    log "  ✓ Identity saved to ${KEY_FILE}"
 else
-    echo "→ Using existing identity: ${KEY_FILE}"
+    log "→ Using existing identity: ${KEY_FILE}"
 fi
-echo ""
+
+# Show identity info
+dbg "Identity file contents:"
+cat "${KEY_FILE}" 2>&1 | head -5
 
 # ── Step 2: Wait for NS to be ready ────────────────────────
-echo "→ Waiting for NS server at ${NS_SERVER}..."
+log "→ Waiting for NS server at ${NS_SERVER}..."
 MAX_WAIT=60
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-    # Send a dummy lookup — any response (including "not found") means NS is alive
-    if timeout 2 ztlp ns lookup "test.${ZONE}" --ns-server "${NS_SERVER}" 2>&1 | grep -qiE "not found|found|KEY|SVC|record|error|No records"; then
-        echo "  ✓ NS server is responding"
+    dbg "  NS probe attempt at ${WAITED}s..."
+    NS_RESULT=$(timeout 3 ztlp ns lookup "test.${ZONE}" --ns-server "${NS_SERVER}" 2>&1) || true
+    dbg "  NS response: ${NS_RESULT}"
+
+    if echo "${NS_RESULT}" | grep -qiE "not found|found|KEY|SVC|record|error|No records"; then
+        log "  ✓ NS server is responding (${WAITED}s)"
         break
     fi
     sleep 2
     WAITED=$((WAITED + 2))
-    echo "    waiting... (${WAITED}s)"
 done
 
 if [ $WAITED -ge $MAX_WAIT ]; then
-    echo "  ⚠ NS server not responding after ${MAX_WAIT}s — proceeding anyway"
+    log "  ⚠ NS server not responding after ${MAX_WAIT}s — proceeding anyway"
 fi
-echo ""
 
 # ── Step 3: Register with NS ───────────────────────────────
-echo "→ Registering server identity with NS..."
-# Register KEY + SVC records. The SVC address tells clients how to reach us.
-# We advertise our Docker IP so the client can connect directly.
 OUR_IP=$(hostname -i 2>/dev/null || echo "0.0.0.0")
 SVC_ADDR="${OUR_IP}:23095"
+log "→ Registering server identity with NS..."
+dbg "  Our IP: ${OUR_IP}, SVC address: ${SVC_ADDR}"
 
-ztlp ns register \
+REG_OUTPUT=$(ztlp ns register \
     --name "${SERVER_NAME}" \
     --zone "${ZONE}" \
     --key "${KEY_FILE}" \
     --ns-server "${NS_SERVER}" \
     --address "${SVC_ADDR}" \
-    2>&1 || echo "  ⚠ Registration may have failed — continuing anyway"
-echo ""
+    2>&1) || true
+log "  Registration output: ${REG_OUTPUT}"
+
+# Verify registration
+dbg "→ Verifying registration..."
+VERIFY=$(timeout 3 ztlp ns lookup "${SERVER_NAME}" --ns-server "${NS_SERVER}" 2>&1) || true
+dbg "  Lookup result: ${VERIFY}"
 
 # ── Step 4: Start listening ─────────────────────────────────
-echo "→ Starting ZTLP listener..."
-echo "  Forwarding service 'ssh' → ${BACKEND}"
-echo "  Listening on ${BIND_ADDR}"
-echo "  Advertised address: ${SVC_ADDR}"
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Server is LIVE — waiting for client connections"
-echo "═══════════════════════════════════════════════════════"
-echo ""
+log "→ Starting ZTLP listener with DEBUG output..."
+log "  Command: ztlp listen --bind ${BIND_ADDR} --key ${KEY_FILE} --forward ssh:${BACKEND} --ns-server ${NS_SERVER} --gateway -vv"
+log ""
+log "═══════════════════════════════════════════════════════"
+log "  Server is LIVE — waiting for client connections"
+log "═══════════════════════════════════════════════════════"
+log ""
 
 exec ztlp listen \
     --bind "${BIND_ADDR}" \
     --key "${KEY_FILE}" \
     --forward "ssh:${BACKEND}" \
     --ns-server "${NS_SERVER}" \
-    --gateway
+    --gateway \
+    -vv

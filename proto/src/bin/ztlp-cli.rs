@@ -2621,7 +2621,6 @@ async fn wait_for_reset_on_socket(
     timeout_duration: Duration,
 ) -> bool {
     use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
-    use crate::packet::DataHeader;
 
     let recv_key = {
         let pl = pipeline.lock().await;
@@ -2646,12 +2645,12 @@ async fn wait_for_reset_on_socket(
                 {
                     let pl = pipeline.lock().await;
                     let result = pl.process(data);
-                    if !matches!(result, crate::pipeline::AdmissionResult::Pass) {
+                    if !matches!(result, AdmissionResult::Pass) {
                         continue;
                     }
                 }
 
-                if data.len() < crate::packet::DATA_HEADER_SIZE {
+                if data.len() < DATA_HEADER_SIZE {
                     continue;
                 }
 
@@ -2665,7 +2664,7 @@ async fn wait_for_reset_on_socket(
                 }
 
                 // Try to decrypt and check for RESET frame
-                let ciphertext = &data[crate::packet::DATA_HEADER_SIZE..];
+                let ciphertext = &data[DATA_HEADER_SIZE..];
                 let mut nonce_bytes = [0u8; 12];
                 nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
                 let nonce = Nonce::from_slice(&nonce_bytes);

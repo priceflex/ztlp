@@ -31,7 +31,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use std::sync::Arc;
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -44,10 +46,11 @@ use ztlp_proto::packet::{
     flags, DataHeader, HandshakeHeader, MsgType, SessionId, DATA_HEADER_SIZE,
     HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
-use ztlp_proto::pipeline::AdmissionResult;
+use ztlp_proto::pipeline::{AdmissionResult, Pipeline};
 use ztlp_proto::policy::PolicyEngine;
 use ztlp_proto::reject::{RejectFrame, RejectReason};
 use ztlp_proto::relay::SimulatedRelay;
+use ztlp_proto::session_manager::SessionManager;
 use ztlp_proto::transport::TransportNode;
 use ztlp_proto::tunnel;
 
@@ -1830,6 +1833,37 @@ async fn cmd_listen(
         eprintln!();
     }
 
+    // Load policy engine (needed for both single and multi-session modes)
+    let policy = if let Some(path) = policy_path {
+        eprintln!("  {} {}", c_cyan("Policy:"), path.display());
+        PolicyEngine::from_file(path)?
+    } else {
+        let default_path = dirs::home_dir().map(|h| h.join(".ztlp").join("policy.toml"));
+        if let Some(ref p) = default_path {
+            if p.exists() {
+                eprintln!("  {} {} (auto-detected)", c_cyan("Policy:"), p.display());
+                PolicyEngine::from_file(p)?
+            } else {
+                PolicyEngine::allow_all()
+            }
+        } else {
+            PolicyEngine::allow_all()
+        }
+    };
+
+    // Multi-session mode: when --forward is set and max_sessions > 1
+    if !forward.is_empty() && max_sessions > 1 {
+        return cmd_listen_multi_session(
+            &node,
+            &identity,
+            forward,
+            &policy,
+            ns_server,
+            max_sessions,
+        )
+        .await;
+    }
+
     eprintln!("{}", c_dim("Waiting for incoming HELLO...\n"));
 
     let mut ctx = HandshakeContext::new_responder(&identity)?;
@@ -1927,26 +1961,6 @@ async fn cmd_listen(
     eprintln!("  {} {}", c_cyan("Remote NodeID:"), peer_node_id);
     eprintln!("  {} {}", c_cyan("Session ID:"), session_id);
     eprintln!();
-
-    // Load policy engine
-    let policy = if let Some(path) = policy_path {
-        eprintln!("  {} {}", c_cyan("Policy:"), path.display());
-        PolicyEngine::from_file(path)?
-    } else {
-        // Check default location ~/.ztlp/policy.toml
-        let default_path = dirs::home_dir().map(|h| h.join(".ztlp").join("policy.toml"));
-        if let Some(ref p) = default_path {
-            if p.exists() {
-                eprintln!("  {} {} (auto-detected)", c_cyan("Policy:"), p.display());
-                PolicyEngine::from_file(p)?
-            } else {
-                // No policy file — allow all (backward compatible)
-                PolicyEngine::allow_all()
-            }
-        } else {
-            PolicyEngine::allow_all()
-        }
-    };
 
     // Branch: tunnel mode or interactive mode
     if !forward.is_empty() {
@@ -2175,6 +2189,477 @@ async fn cmd_listen(
         eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
 
         interactive_data_loop(&node, session_id, from1).await?;
+    }
+
+    Ok(())
+}
+
+/// Multi-session listener: handles concurrent ZTLP sessions.
+///
+/// Runs a packet dispatcher loop that:
+/// 1. Receives all UDP packets on the shared socket
+/// 2. Routes HELLO packets → handshake handler → new session
+/// 3. Routes data packets → per-session channel → bridge task
+/// 4. Enforces max_sessions with REJECT(CAPACITY_FULL)
+/// 5. Cleans up half-open and idle sessions
+#[allow(clippy::too_many_arguments)]
+async fn cmd_listen_multi_session(
+    node: &TransportNode,
+    identity: &NodeIdentity,
+    forward: &[String],
+    policy: &PolicyEngine,
+    ns_server: &Option<String>,
+    max_sessions: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
+    let session_mgr = Arc::new(SessionManager::new(max_sessions));
+
+    eprintln!("--- {} ---", c_bold("ZTLP multi-session listener"));
+    eprintln!("  {} {}", c_cyan("Max sessions:"), max_sessions);
+    eprintln!("  {} {}", c_cyan("Services:"), forward.join(", "));
+    eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+    // Spawn cleanup task for expired half-open / idle sessions
+    let cleanup_mgr = session_mgr.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let expired: Vec<SessionId> = cleanup_mgr.cleanup_expired().await;
+            for sid in &expired {
+                debug!("cleaned up expired session {}", sid);
+            }
+            if !expired.is_empty() {
+                eprintln!(
+                    "{} cleaned up {} expired session(s) [{} active]",
+                    c_dim("♻"),
+                    expired.len(),
+                    cleanup_mgr.count()
+                );
+            }
+        }
+    });
+
+    // Main packet dispatch loop
+    loop {
+        let (data, from) = node.recv_raw().await?;
+
+        // Try to parse as a handshake header first
+        if data.len() >= HANDSHAKE_HEADER_SIZE {
+            if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                if hdr.msg_type == MsgType::Hello {
+                    // New session request
+                    let session_id = hdr.session_id;
+
+                    // Check if this session already exists (duplicate HELLO)
+                    if session_mgr.has_session(&session_id).await {
+                        debug!("duplicate HELLO for session {} from {}", session_id, from);
+                        continue;
+                    }
+
+                    // Check capacity
+                    if !session_mgr.can_accept() {
+                        eprintln!(
+                            "{} at max sessions ({}), rejecting {} from {}",
+                            c_yellow("⚠"),
+                            max_sessions,
+                            session_id,
+                            from
+                        );
+
+                        // We can't send an encrypted REJECT yet because we haven't
+                        // done the handshake. We'll complete the handshake first,
+                        // then send REJECT.
+                        match complete_handshake_for_reject(node, identity, &data, from).await {
+                            Ok((sid, _peer_node_id)) => {
+                                let reject = RejectFrame::from_reason(RejectReason::CapacityFull);
+                                let _ = tunnel::send_reject(
+                                    &node.socket,
+                                    &node.pipeline,
+                                    sid,
+                                    from,
+                                    &reject.encode(),
+                                )
+                                .await;
+                                // Unregister the temporary session
+                                let mut pipeline = node.pipeline.lock().await;
+                                pipeline.remove_session(&sid);
+                            }
+                            Err(e) => {
+                                debug!("failed to complete handshake for reject: {}", e);
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Perform handshake for this new session
+                    eprintln!(
+                        "{} new connection from {} (session {}) [{}/{}]",
+                        c_cyan("←"),
+                        from,
+                        session_id,
+                        session_mgr.count() + 1,
+                        max_sessions
+                    );
+
+                    match handle_new_session(
+                        node,
+                        identity,
+                        &data,
+                        from,
+                        &registry,
+                        policy,
+                        ns_server,
+                        &session_mgr,
+                    )
+                    .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            eprintln!("{} session setup failed: {}", c_red("✗"), e);
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // Not a HELLO — try to route to an existing session
+        if data.len() >= DATA_HEADER_SIZE {
+            if let Ok(hdr) = DataHeader::deserialize(&data) {
+                let sid = hdr.session_id;
+                session_mgr.touch(&sid).await;
+                if !session_mgr.route_packet(&sid, data, from).await {
+                    // Unknown session — silently drop (normal after session close)
+                    debug!("dropping packet for unknown session {}", sid);
+                }
+                continue;
+            }
+        }
+
+        // Unrecognized packet — also try to route handshake packets to
+        // existing sessions (e.g., message 3 of the handshake in flight)
+        if data.len() >= HANDSHAKE_HEADER_SIZE {
+            if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                let sid = hdr.session_id;
+                if session_mgr.route_packet(&sid, data, from).await {
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+/// Complete a Noise_XX handshake just to send a REJECT frame.
+///
+/// Used when we need to reject a client (e.g., capacity full) but still
+/// need an encrypted channel to send the rejection reason.
+async fn complete_handshake_for_reject(
+    node: &TransportNode,
+    identity: &NodeIdentity,
+    hello_data: &[u8],
+    from: SocketAddr,
+) -> Result<(SessionId, NodeId), Box<dyn std::error::Error>> {
+    let recv1_header = HandshakeHeader::deserialize(hello_data)?;
+    let session_id = recv1_header.session_id;
+    let noise_payload1 = &hello_data[HANDSHAKE_HEADER_SIZE..];
+
+    let mut ctx = HandshakeContext::new_responder(identity)?;
+    ctx.read_message(noise_payload1)?;
+
+    // Send HELLO_ACK
+    let msg2 = ctx.write_message(&[])?;
+    let mut ack_hdr = HandshakeHeader::new(MsgType::HelloAck);
+    ack_hdr.session_id = session_id;
+    ack_hdr.src_node_id = *identity.node_id.as_bytes();
+    ack_hdr.payload_len = msg2.len() as u16;
+    let mut pkt2 = ack_hdr.serialize();
+    pkt2.extend_from_slice(&msg2);
+    node.send_raw(&pkt2, from).await?;
+
+    // Wait for message 3
+    let (recv3, _) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
+        .await
+        .map_err(|_| "timeout waiting for message 3 in reject handshake")??;
+
+    if recv3.len() < HANDSHAKE_HEADER_SIZE {
+        return Err("message 3 too short".into());
+    }
+    let noise_payload3 = &recv3[HANDSHAKE_HEADER_SIZE..];
+    ctx.read_message(noise_payload3)?;
+
+    if !ctx.is_finished() {
+        return Err("handshake did not complete".into());
+    }
+
+    let peer_node_id = NodeId::from_bytes(recv1_header.src_node_id);
+    let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
+
+    let session_id = session.session_id;
+    {
+        let mut pipeline = node.pipeline.lock().await;
+        pipeline.register_session(session);
+    }
+
+    Ok((session_id, peer_node_id))
+}
+
+/// Handle a new incoming session: handshake, policy check, spawn bridge task.
+#[allow(clippy::too_many_arguments)]
+async fn handle_new_session(
+    node: &TransportNode,
+    identity: &NodeIdentity,
+    hello_data: &[u8],
+    from: SocketAddr,
+    registry: &tunnel::ServiceRegistry,
+    policy: &PolicyEngine,
+    ns_server: &Option<String>,
+    session_mgr: &Arc<SessionManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recv1_header = HandshakeHeader::deserialize(hello_data)?;
+    let session_id = recv1_header.session_id;
+    let noise_payload1 = &hello_data[HANDSHAKE_HEADER_SIZE..];
+
+    // Start Noise_XX handshake (responder)
+    let mut ctx = HandshakeContext::new_responder(identity)?;
+    ctx.read_message(noise_payload1)?;
+
+    // Send HELLO_ACK
+    let msg2 = ctx.write_message(&[])?;
+    let mut ack_hdr = HandshakeHeader::new(MsgType::HelloAck);
+    ack_hdr.session_id = session_id;
+    ack_hdr.src_node_id = *identity.node_id.as_bytes();
+    ack_hdr.payload_len = msg2.len() as u16;
+    let mut pkt2 = ack_hdr.serialize();
+    pkt2.extend_from_slice(&msg2);
+    node.send_raw(&pkt2, from).await?;
+
+    // Wait for message 3
+    let (recv3, _) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
+        .await
+        .map_err(|_| "timeout waiting for message 3")??;
+
+    if recv3.len() < HANDSHAKE_HEADER_SIZE {
+        return Err("message 3 too short".into());
+    }
+    let noise_payload3 = &recv3[HANDSHAKE_HEADER_SIZE..];
+    ctx.read_message(noise_payload3)?;
+
+    if !ctx.is_finished() {
+        return Err("handshake did not complete".into());
+    }
+
+    let peer_node_id = NodeId::from_bytes(recv1_header.src_node_id);
+    let peer_pubkey_hex = ctx.remote_static_hex();
+    let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
+
+    let session_id = session.session_id;
+    {
+        let mut pipeline = node.pipeline.lock().await;
+        pipeline.register_session(session);
+    }
+
+    // Resolve client identity for policy
+    let client_identity = if let (Some(ns), Some(pk_hex)) = (ns_server.as_ref(), &peer_pubkey_hex) {
+        match ns_pubkey_lookup(pk_hex, ns).await {
+            Ok(Some(name)) => name,
+            _ => format!("{}", peer_node_id),
+        }
+    } else {
+        format!("{}", peer_node_id)
+    };
+
+    // Resolve service
+    let resolve_result = registry.resolve(&recv1_header.dst_svc_id);
+    let (svc_name, forward_addr) = match resolve_result {
+        Some(pair) => pair,
+        None => {
+            let requested = String::from_utf8_lossy(
+                &recv1_header.dst_svc_id[..recv1_header
+                    .dst_svc_id
+                    .iter()
+                    .rposition(|&b| b != 0)
+                    .map(|i| i + 1)
+                    .unwrap_or(0)],
+            )
+            .to_string();
+            let msg = if requested.is_empty() {
+                "no unnamed --forward configured".to_string()
+            } else {
+                format!("unknown service '{}'", requested)
+            };
+
+            let reject = RejectFrame::new(RejectReason::ServiceUnavailable, &msg);
+            let _ = tunnel::send_reject(
+                &node.socket,
+                &node.pipeline,
+                session_id,
+                from,
+                &reject.encode(),
+            )
+            .await;
+            return Err(msg.into());
+        }
+    };
+
+    // Policy check
+    if !policy.authorize(&client_identity, svc_name) {
+        let msg = format!("{} denied for service '{}'", client_identity, svc_name);
+        eprintln!("{} {}", c_red("✗ POLICY DENIED:"), msg);
+
+        let reject = RejectFrame::new(RejectReason::PolicyDenied, &msg);
+        let _ = tunnel::send_reject(
+            &node.socket,
+            &node.pipeline,
+            session_id,
+            from,
+            &reject.encode(),
+        )
+        .await;
+        return Err(msg.into());
+    }
+
+    eprintln!(
+        "{} handshake complete: {} → {} [{}/{}]",
+        c_green("✓"),
+        client_identity,
+        svc_name,
+        session_mgr.count() + 1,
+        session_mgr.max_sessions
+    );
+
+    // Register session in the manager
+    let _rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)> = session_mgr
+        .register(session_id, from, 1024)
+        .await
+        .ok_or("failed to register session (at capacity)")?;
+    session_mgr.set_established(&session_id).await;
+
+    // Spawn a bridge task for this session
+    let udp = node.socket.clone();
+    let pipeline = node.pipeline.clone();
+    let forward_addr_owned = forward_addr.to_string();
+    let mgr_clone = session_mgr.clone();
+
+    tokio::spawn(async move {
+        // Run the bridge and capture outcome as a string (not Box<dyn Error>)
+        // to keep the future Send-safe.
+        let err_msg: Option<String> = {
+            match run_session_bridge(
+                udp,
+                pipeline,
+                session_id,
+                from,
+                &forward_addr_owned,
+            )
+            .await
+            {
+                Ok(()) => None,
+                Err(e) => Some(e.to_string()),
+            }
+        };
+
+        if let Some(msg) = &err_msg {
+            eprintln!(
+                "{} session {} error: {}",
+                c_red("✗"),
+                session_id,
+                msg
+            );
+        } else {
+            eprintln!(
+                "{} session {} closed normally",
+                c_dim("•"),
+                session_id
+            );
+        }
+
+        // Cleanup
+        mgr_clone.remove(&session_id).await;
+        eprintln!(
+            "{} [{} active session(s)]",
+            c_dim("  "),
+            mgr_clone.count()
+        );
+    });
+
+    Ok(())
+}
+
+/// Run the bridge for a single session (called from a spawned task).
+///
+/// Returns `String` errors (not `Box<dyn Error>`) so the future is `Send`.
+async fn run_session_bridge(
+    udp_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    forward_addr: &str,
+) -> Result<(), String> {
+    use tokio::net::TcpStream;
+
+    // Wait for client to send first data before connecting to backend
+    let initial_packets = tunnel::wait_for_first_data(
+        &udp_socket,
+        &pipeline,
+        session_id,
+        peer_addr,
+        Duration::from_secs(600),
+    )
+    .await
+    .map_err(|e| format!("timeout waiting for first data: {}", e))?;
+
+    // Connect to backend
+    let forward_sock: SocketAddr =
+        tunnel::parse_forward_target(forward_addr).map_err(|e| e.to_string())?;
+    let tcp_stream = TcpStream::connect(forward_sock)
+        .await
+        .map_err(|e| format!("failed to connect to {}: {}", forward_addr, e))?;
+
+    eprintln!(
+        "{} session {} connected to backend {}",
+        c_green("✓"),
+        session_id,
+        forward_addr
+    );
+
+    // Run bridge with initial packets
+    let result = tunnel::run_bridge_with_buffered(
+        tcp_stream,
+        udp_socket.clone(),
+        pipeline.clone(),
+        session_id,
+        peer_addr,
+        initial_packets,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Handle RESET (multiple TCP streams on same ZTLP session)
+    match result {
+        tunnel::BridgeOutcome::ResetReceived => {
+            // For multi-session, we simply reconnect to backend
+            loop {
+                let tcp_stream = TcpStream::connect(forward_sock)
+                    .await
+                    .map_err(|e| format!("reconnect to {}: {}", forward_addr, e))?;
+
+                let outcome = tunnel::run_bridge(
+                    tcp_stream,
+                    udp_socket.clone(),
+                    pipeline.clone(),
+                    session_id,
+                    peer_addr,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                match outcome {
+                    tunnel::BridgeOutcome::ResetReceived => continue,
+                    tunnel::BridgeOutcome::Closed => break,
+                }
+            }
+        }
+        tunnel::BridgeOutcome::Closed => {}
     }
 
     Ok(())

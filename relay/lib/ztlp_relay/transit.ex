@@ -12,6 +12,13 @@ defmodule ZtlpRelay.Transit do
   establishes the session locally. Packets with neither a session nor a
   valid RAT are dropped.
 
+  ## Session State Machine
+
+  When the first HELLO arrives with a valid RAT, the session is created
+  in HALF_OPEN state with only peer_a known. When a second peer sends
+  a packet on the same session (different source address), the session
+  transitions to ESTABLISHED and peer_b is recorded.
+
   ## RAT in Extension Area
 
   For handshake packets, the RAT is embedded in the payload when `ext_len > 0`.
@@ -19,7 +26,9 @@ defmodule ZtlpRelay.Transit do
   The RAT (93 bytes) is placed at the start of the extension area.
   """
 
-  alias ZtlpRelay.{AdmissionToken, Config, Packet, SessionRegistry}
+  alias ZtlpRelay.{AdmissionToken, Config, Packet, Session, SessionRegistry}
+
+  require Logger
 
   @rat_size 93
 
@@ -28,6 +37,7 @@ defmodule ZtlpRelay.Transit do
   @type accept_result ::
           {:accept, :existing_session}
           | {:accept, :new_session, binary()}
+          | {:accept, :peer_b_learned}
           | :drop
 
   @doc """
@@ -47,25 +57,50 @@ defmodule ZtlpRelay.Transit do
 
     - `{:accept, :existing_session}` — packet belongs to a known session
     - `{:accept, :new_session, rat}` — packet has valid RAT, session created
+    - `{:accept, :peer_b_learned}` — second peer discovered, session now ESTABLISHED
     - `:drop` — no session, no valid RAT
   """
   @spec accept_packet?(Packet.parsed_packet(), sender(), keyword()) :: accept_result()
   def accept_packet?(packet, sender, opts \\ []) do
     session_id = packet.session_id
 
-    if SessionRegistry.session_exists?(session_id) do
-      {:accept, :existing_session}
-    else
-      # No existing session — check for RAT in extension area
-      case extract_and_verify_rat(packet, opts) do
-        {:ok, rat_binary} ->
-          # Valid RAT — establish session locally
-          establish_session(session_id, sender)
-          {:accept, :new_session, rat_binary}
+    case SessionRegistry.lookup_session(session_id) do
+      {:ok, {peer_a, peer_b, pid}} ->
+        cond do
+          # Known peer — existing session
+          sender == peer_a or sender == peer_b ->
+            {:accept, :existing_session}
 
-        :no_rat ->
-          :drop
-      end
+          # peer_b is nil (half-open) — this is the second peer
+          peer_b == nil and is_pid(pid) ->
+            case Session.set_peer_b(pid, sender) do
+              :ok ->
+                Logger.debug(
+                  "Transit: learned peer_b #{inspect(sender)} for session #{Base.encode16(session_id)}"
+                )
+
+                {:accept, :peer_b_learned}
+
+              {:error, _} ->
+                {:accept, :existing_session}
+            end
+
+          # Unknown sender on established session — could be NAT rebinding
+          true ->
+            {:accept, :existing_session}
+        end
+
+      :error ->
+        # No existing session — check for RAT in extension area
+        case extract_and_verify_rat(packet, opts) do
+          {:ok, rat_binary} ->
+            # Valid RAT — establish session locally (half-open)
+            establish_session(session_id, sender, opts)
+            {:accept, :new_session, rat_binary}
+
+          :no_rat ->
+            :drop
+        end
     end
   end
 
@@ -111,10 +146,26 @@ defmodule ZtlpRelay.Transit do
     end
   end
 
-  defp establish_session(session_id, sender) do
-    # For transit relay, we register with the sender as peer_a
-    # and a placeholder for peer_b (will be updated when the other side responds)
-    placeholder = {{0, 0, 0, 0}, 0}
-    SessionRegistry.register_session(session_id, sender, placeholder)
+  defp establish_session(session_id, sender, opts) do
+    # Register as half-open: peer_a known, peer_b nil
+    SessionRegistry.register_session(session_id, sender, nil)
+
+    # Start a Session GenServer for state tracking
+    half_open_timeout = Keyword.get(opts, :half_open_timeout_ms, 30_000)
+    timeout = Keyword.get(opts, :timeout_ms, Config.session_timeout_ms())
+
+    case Session.start_link(
+           session_id: session_id,
+           peer_a: sender,
+           peer_b: nil,
+           timeout_ms: timeout,
+           half_open_timeout_ms: half_open_timeout
+         ) do
+      {:ok, pid} ->
+        SessionRegistry.update_session_pid(session_id, pid)
+
+      {:error, reason} ->
+        Logger.error("Failed to start session GenServer: #{inspect(reason)}")
+    end
   end
 end

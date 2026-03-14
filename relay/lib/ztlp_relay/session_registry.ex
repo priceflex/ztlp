@@ -30,10 +30,11 @@ defmodule ZtlpRelay.SessionRegistry do
   Register a session mapping SessionID to two peers.
 
   `session_id` is a 12-byte binary.
-  `peer_a` and `peer_b` are `{ip, port}` tuples.
+  `peer_a` is an `{ip, port}` tuple.
+  `peer_b` is an `{ip, port}` tuple or nil for half-open sessions.
   `session_pid` is the PID of the Session GenServer (or nil for pending).
   """
-  @spec register_session(binary(), peer_addr(), peer_addr(), pid() | nil) :: :ok
+  @spec register_session(binary(), peer_addr(), peer_addr() | nil, pid() | nil) :: :ok
   def register_session(session_id, peer_a, peer_b, session_pid \\ nil)
       when byte_size(session_id) == 12 do
     :ets.insert(@table_name, {session_id, peer_a, peer_b, session_pid})
@@ -77,15 +78,16 @@ defmodule ZtlpRelay.SessionRegistry do
   Look up the other peer's address given a SessionID and the sender's address.
 
   If `sender` matches `peer_a`, returns `{:ok, peer_b}` and vice versa.
-  Returns `:error` if the session doesn't exist or the sender isn't a known peer.
+  Returns `:error` if the session doesn't exist, the sender isn't a known peer,
+  or peer_b is nil (half-open session).
   """
   @spec lookup_peer(binary(), peer_addr()) :: {:ok, peer_addr()} | :error
   def lookup_peer(session_id, sender) when byte_size(session_id) == 12 do
     case lookup_session(session_id) do
       {:ok, {peer_a, peer_b, _pid}} ->
         cond do
-          sender == peer_a -> {:ok, peer_b}
-          sender == peer_b -> {:ok, peer_a}
+          sender == peer_a and peer_b != nil -> {:ok, peer_b}
+          sender == peer_b and peer_b != nil -> {:ok, peer_a}
           true -> :error
         end
 
@@ -101,6 +103,22 @@ defmodule ZtlpRelay.SessionRegistry do
   def update_session_pid(session_id, pid) when byte_size(session_id) == 12 do
     case lookup_session(session_id) do
       {:ok, {peer_a, peer_b, _old_pid}} ->
+        :ets.insert(@table_name, {session_id, peer_a, peer_b, pid})
+        :ok
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc """
+  Update peer_b for an existing session (used when transitioning from
+  HALF_OPEN to ESTABLISHED).
+  """
+  @spec update_peer_b(binary(), peer_addr()) :: :ok | :error
+  def update_peer_b(session_id, peer_b) when byte_size(session_id) == 12 do
+    case lookup_session(session_id) do
+      {:ok, {peer_a, _old_peer_b, pid}} ->
         :ets.insert(@table_name, {session_id, peer_a, peer_b, pid})
         :ok
 

@@ -58,6 +58,7 @@ pub mod pipeline;
 pub mod policy;
 pub mod reject;
 pub mod relay;
+pub mod session_manager;
 pub mod security;
 pub mod session;
 pub mod stats;

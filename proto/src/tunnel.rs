@@ -140,6 +140,10 @@ const FRAME_RESET: u8 = 0x04;
 /// Payload: [cumulative_ack: u64 BE] [count: u16 BE] [(start: u64 BE, end: u64 BE) × count]
 const FRAME_SACK: u8 = 0x05;
 
+/// Frame type byte: REJECT frame — server denying access after handshake.
+/// Payload: [reason_code: 1B] [message: UTF-8 remaining bytes]
+const FRAME_REJECT: u8 = 0x08;
+
 /// Outcome of a bridge run, distinguishing normal close from a stream reset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeOutcome {
@@ -754,28 +758,24 @@ pub async fn send_reject(
     };
     let cipher = ChaCha20Poly1305::new((&send_key).into());
 
-    // Build a data header with seq=0
-    let mut header = DataHeader::new(session_id, 0);
-    header.payload_len = (reject_frame.len() + 16) as u16; // plaintext + AEAD tag
+    // Use packet_seq = 0 for the reject packet
+    let packet_seq: u64 = 0;
 
-    // Generate nonce from packet_seq
+    // Generate nonce from packet_seq (little-endian, matching run_bridge_inner receiver)
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
+    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    // Serialize header for AAD and compute auth tag
-    let header_bytes = header.serialize();
-    let aad = header.aad_bytes();
-    let auth_tag = compute_header_auth_tag(&send_key, &aad);
-
-    // Encrypt the reject payload
+    // Encrypt the reject payload (no AAD — matches normal sender/receiver flow)
     let ciphertext = cipher
-        .encrypt(nonce, chacha20poly1305::aead::Payload { msg: reject_frame, aad: &auth_tag })
+        .encrypt(nonce, reject_frame)
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
 
-    // Set header auth tag
-    header.header_auth_tag = auth_tag;
-    let _ = header_bytes;
+    // Build the data header
+    let mut header = DataHeader::new(session_id, packet_seq);
+    let aad = header.aad_bytes();
+    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+    header.payload_len = ciphertext.len() as u16;
 
     // Build final packet
     let mut packet = header.serialize();
@@ -1671,6 +1671,21 @@ async fn run_bridge_inner(
                     FRAME_RESET => {
                         info!("received RESET in prefetched packets — unexpected, ignoring");
                     }
+                    FRAME_REJECT => {
+                        // REJECT in prefetched — server denied access
+                        use crate::reject::RejectFrame;
+                        if let Some(reject) = RejectFrame::decode(&plaintext) {
+                            warn!(
+                                "received REJECT frame in prefetched packets: {} — {}",
+                                reject.reason, reject.message
+                            );
+                            return Err(format!(
+                                "server rejected connection: {} ({})",
+                                reject.message, reject.reason
+                            )
+                            .into());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2084,6 +2099,27 @@ async fn run_bridge_inner(
                                     debug!("TCP shutdown on RESET: {}", e);
                                 }
                                 return Ok(());
+                            }
+
+                            FRAME_REJECT => {
+                                // REJECT frame: server denied access after handshake.
+                                // Parse the reason and message, then return an error.
+                                use crate::reject::RejectFrame;
+                                if let Some(reject) = RejectFrame::decode(&plaintext) {
+                                    warn!(
+                                        "received REJECT frame: {} — {}",
+                                        reject.reason, reject.message
+                                    );
+                                    if let Err(e) = tcp_writer.shutdown().await {
+                                        debug!("TCP shutdown on REJECT: {}", e);
+                                    }
+                                    return Err(format!(
+                                        "server rejected connection: {} ({})",
+                                        reject.message, reject.reason
+                                    )
+                                    .into());
+                                }
+                                warn!("received malformed REJECT frame");
                             }
 
                             _ => {

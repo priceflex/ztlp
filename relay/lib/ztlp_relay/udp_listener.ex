@@ -245,30 +245,123 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   # HELLO packets — first message of a new handshake.
-  # In production, the relay would begin tracking this as a pending
-  # session and wait for the HELLO_ACK from the responder.  For the
-  # prototype, we just log it — sessions are pre-registered externally.
+  # Creates a HALF_OPEN session with peer_a = sender.
+  # When the second peer sends a packet (HELLO_ACK or DATA), the session
+  # transitions to ESTABLISHED.
   defp handle_admitted_packet(
-         %{type: :handshake, msg_type: :hello} = _parsed,
-         _data,
+         %{type: :handshake, msg_type: :hello} = parsed,
+         data,
          sender,
-         _state
+         state
        ) do
-    Logger.debug("Received HELLO from #{inspect(sender)}")
-    :ok
+    session_id = parsed.session_id
+
+    case SessionRegistry.lookup_session(session_id) do
+      {:ok, {peer_a, peer_b, pid}} ->
+        cond do
+          # Known peer — forward normally
+          sender == peer_a or sender == peer_b ->
+            Logger.debug("Received HELLO from known peer #{inspect(sender)}")
+            :ok
+
+          # Half-open session, this is the second peer
+          peer_b == nil and is_pid(pid) ->
+            case Session.set_peer_b(pid, sender) do
+              :ok ->
+                Logger.debug(
+                  "HELLO from second peer #{inspect(sender)} — session #{Base.encode16(session_id)} now ESTABLISHED"
+                )
+
+                # Forward this HELLO to peer_a
+                {dest_ip, dest_port} = peer_a
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+
+              {:error, _} ->
+                Logger.debug("Received HELLO from #{inspect(sender)} but session already established")
+            end
+
+          true ->
+            Logger.debug("Received HELLO from unknown peer #{inspect(sender)} on existing session")
+        end
+
+      :error ->
+        # New session — create HALF_OPEN
+        Logger.debug("New session #{Base.encode16(session_id)} from #{inspect(sender)}")
+
+        SessionRegistry.register_session(session_id, sender, nil)
+
+        case Session.start_link(
+               session_id: session_id,
+               peer_a: sender,
+               peer_b: nil,
+               timeout_ms: Config.session_timeout_ms(),
+               half_open_timeout_ms: 30_000
+             ) do
+          {:ok, pid} ->
+            SessionRegistry.update_session_pid(session_id, pid)
+
+          {:error, reason} ->
+            Logger.error("Failed to start session: #{inspect(reason)}")
+        end
+    end
   end
 
   # HELLO_ACK packets — second message, completing the relay's view
-  # of the session.  In production, this would pair the two peers
-  # and register the session in the SessionRegistry.
+  # of the session. If the session is HALF_OPEN, this learns peer_b
+  # and transitions to ESTABLISHED.
   defp handle_admitted_packet(
-         %{type: :handshake, msg_type: :hello_ack} = _parsed,
-         _data,
+         %{type: :handshake, msg_type: :hello_ack} = parsed,
+         data,
          sender,
-         _state
+         state
        ) do
-    Logger.debug("Received HELLO_ACK from #{inspect(sender)}")
-    :ok
+    session_id = parsed.session_id
+
+    case SessionRegistry.lookup_session(session_id) do
+      {:ok, {peer_a, peer_b, pid}} ->
+        cond do
+          # Known peer — forward to the other
+          sender == peer_a ->
+            if peer_b != nil do
+              {dest_ip, dest_port} = peer_b
+              :gen_udp.send(state.socket, dest_ip, dest_port, data)
+              Stats.increment(:forwarded)
+
+              if is_pid(pid), do: Session.forward(pid)
+            end
+
+          sender == peer_b ->
+            {dest_ip, dest_port} = peer_a
+            :gen_udp.send(state.socket, dest_ip, dest_port, data)
+            Stats.increment(:forwarded)
+
+            if is_pid(pid), do: Session.forward(pid)
+
+          # Half-open session, this is the second peer
+          peer_b == nil and is_pid(pid) ->
+            case Session.set_peer_b(pid, sender) do
+              :ok ->
+                Logger.debug(
+                  "HELLO_ACK from second peer #{inspect(sender)} — session #{Base.encode16(session_id)} now ESTABLISHED"
+                )
+
+                # Forward HELLO_ACK to peer_a
+                {dest_ip, dest_port} = peer_a
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+
+              {:error, _} ->
+                Logger.debug("Received HELLO_ACK from #{inspect(sender)} but session not half-open")
+            end
+
+          true ->
+            Logger.debug("Received HELLO_ACK from unknown peer #{inspect(sender)}")
+        end
+
+      :error ->
+        Logger.debug("Received HELLO_ACK for unknown session from #{inspect(sender)}")
+    end
   end
 
   # All other packets (data, rekey, close, ping/pong, non-HELLO handshake).
@@ -279,20 +372,59 @@ defmodule ZtlpRelay.UdpListener do
   defp handle_admitted_packet(parsed, data, sender, state) do
     session_id = parsed.session_id
 
-    case SessionRegistry.lookup_peer(session_id, sender) do
-      {:ok, {dest_ip, dest_port}} ->
-        # Forward the raw packet to the other peer — unchanged, byte-for-byte
-        :gen_udp.send(state.socket, dest_ip, dest_port, data)
-        Stats.increment(:forwarded)
+    case SessionRegistry.lookup_session(session_id) do
+      {:ok, {peer_a, peer_b, pid}} ->
+        cond do
+          # Known peer_a — forward to peer_b
+          sender == peer_a and peer_b != nil ->
+            {dest_ip, dest_port} = peer_b
+            :gen_udp.send(state.socket, dest_ip, dest_port, data)
+            Stats.increment(:forwarded)
+            if is_pid(pid), do: Session.forward(pid)
 
-        # Notify the session GenServer so it can reset its inactivity timer.
-        # If the session has no associated GenServer (pid=nil), skip silently.
-        case SessionRegistry.lookup_session(session_id) do
-          {:ok, {_a, _b, pid}} when is_pid(pid) ->
-            Session.forward(pid)
+          # Known peer_b — forward to peer_a
+          sender == peer_b ->
+            {dest_ip, dest_port} = peer_a
+            :gen_udp.send(state.socket, dest_ip, dest_port, data)
+            Stats.increment(:forwarded)
+            if is_pid(pid), do: Session.forward(pid)
 
-          _ ->
+          # Half-open session, new sender is peer_b
+          peer_b == nil and sender != peer_a and is_pid(pid) ->
+            case Session.set_peer_b(pid, sender) do
+              :ok ->
+                Logger.debug(
+                  "Learned peer_b #{inspect(sender)} from data packet — session #{Base.encode16(session_id)} now ESTABLISHED"
+                )
+
+                # Forward this packet to peer_a
+                {dest_ip, dest_port} = peer_a
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+
+              {:error, _} ->
+                :ok
+            end
+
+          # peer_a sent but peer_b not yet known — buffer situation
+          sender == peer_a and peer_b == nil ->
+            Logger.debug(
+              "Packet from peer_a but peer_b unknown for session #{Base.encode16(session_id)} — dropping"
+            )
+
             :ok
+
+          # Unknown sender on existing session — drop or mesh route
+          true ->
+            if state.mesh_enabled do
+              mesh_route_packet(session_id, data, sender, state)
+            else
+              Logger.debug(
+                "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)}"
+              )
+
+              :ok
+            end
         end
 
       :error ->
@@ -300,7 +432,7 @@ defmodule ZtlpRelay.UdpListener do
         if state.mesh_enabled do
           mesh_route_packet(session_id, data, sender, state)
         else
-          Logger.debug("No peer found for session #{inspect(session_id)} from #{inspect(sender)}")
+          Logger.debug("No session found for #{Base.encode16(session_id)} from #{inspect(sender)}")
           :ok
         end
     end

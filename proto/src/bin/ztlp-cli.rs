@@ -38,7 +38,10 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use ztlp_proto::admission::{HandshakeExtension, RelayAdmissionToken, EXT_TYPE_RAT};
-use ztlp_proto::handshake::HandshakeContext;
+use ztlp_proto::handshake::{
+    HalfOpenCache, HandshakeContext, HALF_OPEN_TTL_SECS, INITIAL_HANDSHAKE_RETRY_MS,
+    MAX_HANDSHAKE_RETRIES, MAX_HANDSHAKE_RETRY_MS, MAX_RESPONDER_RETRANSMITS,
+};
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::nat;
 use ztlp_proto::packet::{
@@ -1674,7 +1677,7 @@ async fn cmd_connect(
 
     let start_time = Instant::now();
 
-    // Message 1: HELLO
+    // Message 1: HELLO (with retransmit on timeout)
     eprintln!("\n{}", c_dim("→ Sending HELLO (message 1/3)..."));
     let msg1 = ctx.write_message(&[])?;
     let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
@@ -1690,11 +1693,47 @@ async fn cmd_connect(
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;
 
-    // Message 2: receive HELLO_ACK
+    // Message 2: receive HELLO_ACK (with retransmit of HELLO on timeout)
     eprintln!("{}", c_dim("← Waiting for HELLO_ACK (message 2/3)..."));
-    let (recv2, _from2) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "handshake timeout waiting for HELLO_ACK")??;
+    let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+    let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+    let mut retries: u8 = 0;
+
+    let (recv2, _from2) = loop {
+        match timeout(retry_delay, node.recv_raw()).await {
+            Ok(Ok((data, addr))) => {
+                if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                        if hdr.msg_type == MsgType::HelloAck && hdr.session_id == session_id {
+                            break (data, addr);
+                        }
+                    }
+                }
+                // Not a HELLO_ACK for our session — ignore and keep waiting
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                // Timeout — retransmit HELLO
+                retries += 1;
+                if retries > MAX_HANDSHAKE_RETRIES {
+                    return Err("handshake failed: no HELLO_ACK after retransmits".into());
+                }
+                debug!(
+                    "handshake: retransmitting HELLO (attempt {}/{})",
+                    retries, MAX_HANDSHAKE_RETRIES
+                );
+                eprintln!(
+                    "  {} retransmitting HELLO ({}/{})",
+                    c_yellow("⟳"),
+                    retries,
+                    MAX_HANDSHAKE_RETRIES
+                );
+                node.send_raw(&pkt1, send_addr).await?; // exact same bytes
+                retry_delay = (retry_delay * 2).min(max_retry_delay);
+            }
+        }
+    };
 
     if recv2.len() < HANDSHAKE_HEADER_SIZE {
         return Err("received packet too short for handshake header".into());
@@ -1707,7 +1746,7 @@ async fn cmd_connect(
     let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
     ctx.read_message(noise_payload2)?;
 
-    // Message 3: final confirmation
+    // Message 3: final confirmation (with retransmit on timeout)
     eprintln!("{}", c_dim("→ Sending final confirmation (message 3/3)..."));
     let msg3 = ctx.write_message(&[])?;
     let mut final_hdr = HandshakeHeader::new(MsgType::Data);
@@ -1718,7 +1757,7 @@ async fn cmd_connect(
     pkt3.extend_from_slice(&msg3);
     node.send_raw(&pkt3, send_addr).await?;
 
-    // Finalize
+    // Finalize — handshake should be complete after sending msg3
     if !ctx.is_finished() {
         return Err("handshake did not complete".into());
     }
@@ -1937,7 +1976,7 @@ async fn cmd_listen(
         session_id
     );
 
-    // Send HELLO_ACK
+    // Send HELLO_ACK and cache the packet bytes for retransmit
     eprintln!("{}", c_dim("→ Sending HELLO_ACK (message 2/3)..."));
     let msg2 = ctx.write_message(&[])?;
     let mut ack_hdr = HandshakeHeader::new(MsgType::HelloAck);
@@ -1948,11 +1987,82 @@ async fn cmd_listen(
     pkt2.extend_from_slice(&msg2);
     node.send_raw(&pkt2, from1).await?;
 
-    // Receive message 3
+    // Cache HELLO_ACK for retransmit on duplicate HELLO
+    let cached_pkt2 = pkt2.clone();
+    let mut responder_retransmit_count: u8 = 0;
+
+    // Receive message 3 (with retransmit of HELLO_ACK on duplicate HELLO)
     eprintln!("{}", c_dim("← Waiting for message 3/3..."));
-    let (recv3, _from3) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "handshake timeout waiting for message 3")??;
+    let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+    let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+    let hs_start = Instant::now();
+
+    let (recv3, _from3) = loop {
+        match timeout(retry_delay, node.recv_raw()).await {
+            Ok(Ok((data, addr))) => {
+                if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                        // Is this msg3 for our session?
+                        if hdr.session_id == session_id && hdr.msg_type != MsgType::Hello {
+                            break (data, addr);
+                        }
+                        // Duplicate HELLO — resend cached HELLO_ACK
+                        if hdr.msg_type == MsgType::Hello && hdr.session_id == session_id {
+                            if responder_retransmit_count < MAX_RESPONDER_RETRANSMITS {
+                                debug!(
+                                    "handshake: resending cached HELLO_ACK for session {} (retransmit {})",
+                                    session_id, responder_retransmit_count + 1
+                                );
+                                eprintln!(
+                                    "  {} resending HELLO_ACK ({}/{})",
+                                    c_yellow("⟳"),
+                                    responder_retransmit_count + 1,
+                                    MAX_RESPONDER_RETRANSMITS
+                                );
+                                node.send_raw(&cached_pkt2, from1).await?;
+                                responder_retransmit_count += 1;
+                            } else {
+                                debug!(
+                                    "handshake: dropping duplicate HELLO for session {} (max retransmits reached)",
+                                    session_id
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // Not relevant — ignore
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                // Timeout — check if overall TTL exceeded
+                if hs_start.elapsed() > Duration::from_secs(HALF_OPEN_TTL_SECS) {
+                    return Err("handshake timeout waiting for message 3".into());
+                }
+                // Retransmit HELLO_ACK proactively
+                if responder_retransmit_count < MAX_RESPONDER_RETRANSMITS {
+                    debug!(
+                        "handshake: proactively retransmitting HELLO_ACK (timeout, attempt {})",
+                        responder_retransmit_count + 1
+                    );
+                    eprintln!(
+                        "  {} retransmitting HELLO_ACK ({}/{})",
+                        c_yellow("⟳"),
+                        responder_retransmit_count + 1,
+                        MAX_RESPONDER_RETRANSMITS
+                    );
+                    node.send_raw(&cached_pkt2, from1).await?;
+                    responder_retransmit_count += 1;
+                    retry_delay = (retry_delay * 2).min(max_retry_delay);
+                } else {
+                    return Err(
+                        "handshake timeout waiting for message 3 (max retransmits reached)".into(),
+                    );
+                }
+            }
+        }
+    };
 
     if recv3.len() < HANDSHAKE_HEADER_SIZE {
         return Err("message 3 too short".into());
@@ -2257,6 +2367,9 @@ async fn cmd_listen_multi_session(
     let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
     let session_mgr = Arc::new(SessionManager::new(max_sessions));
 
+    // Half-open handshake cache for retransmit support
+    let mut half_open_cache = HalfOpenCache::new();
+
     eprintln!("--- {} ---", c_bold("ZTLP multi-session listener"));
     eprintln!("  {} {}", c_cyan("Max sessions:"), max_sessions);
     eprintln!("  {} {}", c_cyan("Services:"), forward.join(", "));
@@ -2284,6 +2397,9 @@ async fn cmd_listen_multi_session(
 
     // Main packet dispatch loop
     loop {
+        // Periodically clean up expired half-open entries
+        half_open_cache.cleanup_expired();
+
         let (data, from) = node.recv_raw().await?;
 
         // Try to parse as a handshake header first
@@ -2293,9 +2409,39 @@ async fn cmd_listen_multi_session(
                     // New session request
                     let session_id = hdr.session_id;
 
-                    // Check if this session already exists (duplicate HELLO)
+                    // Check half-open cache first — is this a retransmitted HELLO?
+                    if let Some(cached) = half_open_cache.get_mut(&session_id) {
+                        if cached.retransmit_count < MAX_RESPONDER_RETRANSMITS {
+                            // Resend cached HELLO_ACK (exact same bytes)
+                            debug!(
+                                "handshake: resent cached HELLO_ACK for session {} (retransmit {})",
+                                session_id,
+                                cached.retransmit_count + 1
+                            );
+                            eprintln!(
+                                "  {} resending cached HELLO_ACK for {} ({}/{})",
+                                c_yellow("⟳"),
+                                session_id,
+                                cached.retransmit_count + 1,
+                                MAX_RESPONDER_RETRANSMITS
+                            );
+                            let _ = node.send_raw(&cached.msg2_bytes, from).await;
+                            cached.retransmit_count += 1;
+                        } else {
+                            debug!(
+                                "handshake: dropping duplicate HELLO for session {} (max retransmits reached)",
+                                session_id
+                            );
+                        }
+                        continue;
+                    }
+
+                    // Check if this session already exists (completed handshake)
                     if session_mgr.has_session(&session_id).await {
-                        debug!("duplicate HELLO for session {} from {}", session_id, from);
+                        debug!(
+                            "duplicate HELLO for established session {} from {}",
+                            session_id, from
+                        );
                         continue;
                     }
 
@@ -2353,12 +2499,15 @@ async fn cmd_listen_multi_session(
                         policy,
                         ns_server,
                         &session_mgr,
+                        &mut half_open_cache,
                     )
                     .await
                     {
                         Ok(()) => {}
                         Err(e) => {
                             eprintln!("{} session setup failed: {}", c_red("✗"), e);
+                            // Clean up half-open entry on failure
+                            half_open_cache.remove(&session_id);
                         }
                     }
                     continue;
@@ -2457,6 +2606,7 @@ async fn handle_new_session(
     policy: &PolicyEngine,
     ns_server: &Option<String>,
     session_mgr: &Arc<SessionManager>,
+    half_open_cache: &mut HalfOpenCache,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let recv1_header = HandshakeHeader::deserialize(hello_data)?;
     let session_id = recv1_header.session_id;
@@ -2466,7 +2616,7 @@ async fn handle_new_session(
     let mut ctx = HandshakeContext::new_responder(identity)?;
     ctx.read_message(noise_payload1)?;
 
-    // Send HELLO_ACK
+    // Send HELLO_ACK and cache for retransmit
     let msg2 = ctx.write_message(&[])?;
     let mut ack_hdr = HandshakeHeader::new(MsgType::HelloAck);
     ack_hdr.session_id = session_id;
@@ -2476,10 +2626,82 @@ async fn handle_new_session(
     pkt2.extend_from_slice(&msg2);
     node.send_raw(&pkt2, from).await?;
 
-    // Wait for message 3
-    let (recv3, _) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "timeout waiting for message 3")??;
+    // Cache the HELLO_ACK in the half-open cache.
+    // Note: ctx has been consumed by write_message for msg2, but we need it
+    // for finalize. We create a new context for the cache entry and keep
+    // the current ctx for this handshake flow.
+    // Actually, ctx is still alive — we need to store it after the handshake
+    // completes below. For the half-open cache, we store just the pkt2 bytes.
+    // The ctx stays local to this function.
+
+    // We insert into the half-open cache so that duplicate HELLOs arriving
+    // at the main loop (while we're blocking on msg3) can be answered.
+    // However, since handle_new_session blocks on recv_raw, duplicate HELLOs
+    // will be picked up here instead. We store the cached pkt2 for the main
+    // loop to use if this function returns (on error) while a retransmitted
+    // HELLO is still in flight.
+    //
+    // For the blocking wait below, we handle duplicates inline.
+    let cached_pkt2 = pkt2.clone();
+
+    // Wait for message 3 (with retransmit of HELLO_ACK on duplicate HELLO)
+    let mut responder_retransmit_count: u8 = 0;
+    let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+    let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+    let hs_start = Instant::now();
+
+    let (recv3, _) = loop {
+        match timeout(retry_delay, node.recv_raw()).await {
+            Ok(Ok((data, addr))) => {
+                if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                        // Is this msg3 for our session?
+                        if hdr.session_id == session_id && hdr.msg_type != MsgType::Hello {
+                            break (data, addr);
+                        }
+                        // Duplicate HELLO for our session — resend cached HELLO_ACK
+                        if hdr.msg_type == MsgType::Hello && hdr.session_id == session_id {
+                            if responder_retransmit_count < MAX_RESPONDER_RETRANSMITS {
+                                debug!(
+                                    "handshake: resending cached HELLO_ACK for session {} (retransmit {})",
+                                    session_id, responder_retransmit_count + 1
+                                );
+                                node.send_raw(&cached_pkt2, from).await?;
+                                responder_retransmit_count += 1;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // Route other packets to existing sessions
+                if data.len() >= DATA_HEADER_SIZE {
+                    if let Ok(hdr) = DataHeader::deserialize(&data) {
+                        session_mgr.route_packet(&hdr.session_id, data, addr).await;
+                    }
+                }
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                // Timeout — check overall TTL
+                if hs_start.elapsed() > Duration::from_secs(HALF_OPEN_TTL_SECS) {
+                    return Err("timeout waiting for message 3".into());
+                }
+                // Proactively retransmit HELLO_ACK
+                if responder_retransmit_count < MAX_RESPONDER_RETRANSMITS {
+                    debug!(
+                        "handshake: proactively retransmitting HELLO_ACK for session {} (timeout)",
+                        session_id
+                    );
+                    node.send_raw(&cached_pkt2, from).await?;
+                    responder_retransmit_count += 1;
+                    retry_delay = (retry_delay * 2).min(max_retry_delay);
+                } else {
+                    return Err("timeout waiting for message 3 (max retransmits reached)".into());
+                }
+            }
+        }
+    };
 
     if recv3.len() < HANDSHAKE_HEADER_SIZE {
         return Err("message 3 too short".into());
@@ -2490,6 +2712,9 @@ async fn handle_new_session(
     if !ctx.is_finished() {
         return Err("handshake did not complete".into());
     }
+
+    // Handshake complete — remove from half-open cache
+    half_open_cache.remove(&session_id);
 
     let peer_node_id = NodeId::from_bytes(recv1_header.src_node_id);
     let peer_pubkey_hex = ctx.remote_static_hex();

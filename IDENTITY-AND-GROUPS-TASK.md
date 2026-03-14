@@ -272,6 +272,210 @@ networks:
 
 ---
 
+## Phase 5: Bootstrap Rails App Integration (~3-4 hours)
+
+### Goal
+Wire the new identity/group/admin features into the Bootstrap Rails app (`priceflex/ztlp-bootstrap`) so MSPs manage everything through a web UI instead of CLI.
+
+### Context
+- **Repo:** `priceflex/ztlp-bootstrap` (separate from ztlp monorepo)
+- **Stack:** Ruby on Rails + SQLite + Hotwire/Turbo + net-ssh gem
+- **How it works:** The Rails app SSHes into target machines and runs `ztlp` CLI commands. The Docker image ships with the `ztlp` Rust CLI binary.
+- **Existing flow:** Create network → add machines (SSH creds) → assign roles (NS/Relay/Gateway) → deploy via SSH → enroll devices → monitor health
+
+### New Models
+
+```ruby
+# Device — mirrors NS DEVICE record
+class Device < ApplicationRecord
+  belongs_to :network
+  belongs_to :user, optional: true  # linked owner
+  belongs_to :machine               # which physical machine it's on
+
+  # name, node_id, pubkey, hardware_id, status (enrolled/revoked)
+  # enrolled_at, revoked_at, revocation_reason
+end
+
+# User — mirrors NS USER record
+class User < ApplicationRecord
+  belongs_to :network
+  has_many :devices
+  has_many :group_memberships
+  has_many :groups, through: :group_memberships
+
+  # name (e.g. "steve@techrockstars.ztlp"), email, role, pubkey
+  # status (active/revoked)
+end
+
+# Group — mirrors NS GROUP record
+class Group < ApplicationRecord
+  belongs_to :network
+  has_many :group_memberships
+  has_many :users, through: :group_memberships
+
+  # name (e.g. "admins@techrockstars.ztlp"), description
+end
+
+# GroupMembership — join table
+class GroupMembership < ApplicationRecord
+  belongs_to :group
+  belongs_to :user
+end
+
+# AuditLog — tracks all identity operations
+class AuditLog < ApplicationRecord
+  belongs_to :network
+  belongs_to :actor, class_name: "User", optional: true
+
+  # action (enrolled/revoked/group_add/group_remove/key_rotated)
+  # target_type, target_name, details (JSON), performed_at
+end
+```
+
+### New Pages (Hotwire/Turbo)
+
+```
+/networks/:id/users           — List users, create new, bulk invite
+/networks/:id/users/:id       — User detail: linked devices, group memberships, revoke button
+/networks/:id/devices         — List devices, filter by user/machine/status
+/networks/:id/devices/:id     — Device detail: owner, machine, status, revoke button
+/networks/:id/groups          — List groups, create new
+/networks/:id/groups/:id      — Group detail: member list, add/remove members (Turbo Frame)
+/networks/:id/enrollment      — Generate tokens, show QR codes, track token usage
+/networks/:id/audit           — Audit log with filters (action, date range, actor)
+```
+
+### SSH Command Wrappers
+
+The Bootstrap app executes `ztlp` CLI commands on the NS server via SSH. New service methods:
+
+```ruby
+class ZtlpAdmin
+  def initialize(network)
+    @ssh = SshConnection.new(network.ns_machine)
+  end
+
+  # Users
+  def create_user(name, role:, email: nil)
+    @ssh.exec("ztlp admin create-user #{name} --role #{role} #{email ? "--email #{email}" : ""}")
+  end
+
+  def revoke_user(name, reason:)
+    @ssh.exec("ztlp admin revoke #{name} --reason '#{reason}'")
+  end
+
+  # Devices
+  def enroll_device(name, owner: nil)
+    @ssh.exec("ztlp setup --type device #{owner ? "--owner #{owner}" : ""}")
+  end
+
+  def link_device(device_name, owner:)
+    @ssh.exec("ztlp admin link-device #{device_name} --owner #{owner}")
+  end
+
+  def revoke_device(name, reason:)
+    @ssh.exec("ztlp admin revoke #{name} --reason '#{reason}'")
+  end
+
+  # Groups
+  def create_group(name, description: nil)
+    @ssh.exec("ztlp admin create-group #{name} #{description ? "--description '#{description}'" : ""}")
+  end
+
+  def group_add(group, user)
+    @ssh.exec("ztlp admin group add #{group} #{user}")
+  end
+
+  def group_remove(group, user)
+    @ssh.exec("ztlp admin group remove #{group} #{user}")
+  end
+
+  # Queries
+  def list_entities(type: nil)
+    @ssh.exec("ztlp admin ls #{type ? "--type #{type}" : ""} --json")
+  end
+
+  def audit_log(since: "24h")
+    @ssh.exec("ztlp admin audit --since #{since} --json")
+  end
+end
+```
+
+**Key design:** All CLI commands support `--json` output so the Rails app can parse responses reliably (not scrape human-readable tables).
+
+### Enrollment Web Flow
+
+1. Admin clicks "Enroll Device" on web UI
+2. Rails generates enrollment token via SSH: `ztlp admin enroll --zone techrockstars.ztlp --max-uses 1 --ttl 3600 --json`
+3. Token displayed as:
+   - Copyable `ztlp://enroll/...` URI
+   - QR code (generated client-side with a JS library or server-side with `rqrcode` gem)
+   - One-click "Send via email" (if email configured)
+4. User runs `ztlp setup --token <token>` on their machine (or scans QR)
+5. Bootstrap polls `ztlp admin ls --type device --json` to detect new enrollments
+6. New device appears in web UI (Turbo Stream update)
+
+### Dashboard Enhancements
+
+Existing dashboard gets new widgets:
+- **Identity summary:** X users, Y devices, Z groups, N revoked
+- **Recent activity:** Last 10 audit log entries (Turbo Frame, auto-refresh)
+- **Enrollment status:** Pending tokens, recent enrollments
+
+### CLI `--json` Output Requirement
+
+For Bootstrap integration, all `ztlp admin` commands MUST support `--json` flag:
+
+```bash
+$ ztlp admin ls --type user --json
+[
+  {"name": "steve@techrockstars.ztlp", "role": "admin", "devices": 2, "groups": ["admins"], "status": "active"},
+  {"name": "alice@techrockstars.ztlp", "role": "tech", "devices": 1, "groups": ["techs"], "status": "active"}
+]
+
+$ ztlp admin group members admins@techrockstars.ztlp --json
+{"group": "admins@techrockstars.ztlp", "members": ["steve@techrockstars.ztlp"]}
+```
+
+### Tests
+- Model validations and associations
+- ZtlpAdmin service: mock SSH, verify correct commands generated
+- Controller tests for all new pages
+- Turbo Stream updates for enrollment detection
+- Audit log creation on every identity operation
+- JSON parsing of CLI output
+
+### Files (in ztlp-bootstrap repo)
+
+```
+app/models/device.rb
+app/models/user.rb          # ZTLP user (not the Rails admin user)
+app/models/group.rb
+app/models/group_membership.rb
+app/models/audit_log.rb
+app/services/ztlp_admin.rb
+app/controllers/users_controller.rb
+app/controllers/devices_controller.rb
+app/controllers/groups_controller.rb
+app/controllers/enrollment_controller.rb
+app/controllers/audit_controller.rb
+app/views/users/
+app/views/devices/
+app/views/groups/
+app/views/enrollment/
+app/views/audit/
+db/migrate/xxx_create_devices.rb
+db/migrate/xxx_create_ztlp_users.rb
+db/migrate/xxx_create_groups.rb
+db/migrate/xxx_create_group_memberships.rb
+db/migrate/xxx_create_audit_logs.rb
+test/models/
+test/services/ztlp_admin_test.rb
+test/controllers/
+```
+
+---
+
 ## Wire Protocol Summary
 
 | Type | Byte | Description |
@@ -322,13 +526,26 @@ networks:
 - Tests must pass with `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false` (dev mode)
 
 ## Success Criteria
+
+### Phases 1-4 (CLI + Core)
 - [ ] `ztlp setup --type device` enrolls a device linked to a user
 - [ ] `ztlp admin create-user` creates user identity in NS
 - [ ] `ztlp admin create-group` + `group add` manages group membership
 - [ ] Gateway policy engine evaluates group membership for access decisions
 - [ ] `ztlp admin revoke` immediately blocks access (gateway rejects)
 - [ ] `ztlp admin ls` shows all enrolled entities
+- [ ] All `ztlp admin` commands support `--json` output (required for Bootstrap)
 - [ ] Key overwrite protection prevents unauthorized re-registration
 - [ ] DEPLOYMENT.md walks through protecting a web app end-to-end
 - [ ] All existing tests still pass (backward compatibility)
 - [ ] 100+ new tests across NS, gateway, and CLI
+
+### Phase 5 (Bootstrap Rails App)
+- [ ] Web UI for user CRUD (create, view, revoke)
+- [ ] Web UI for device listing, linking to users, revoking
+- [ ] Web UI for group management (create, add/remove members)
+- [ ] Enrollment page generates tokens, displays QR codes
+- [ ] Audit log page with filtering
+- [ ] Dashboard widgets for identity summary + recent activity
+- [ ] All operations execute via SSH → `ztlp admin --json` commands
+- [ ] Rails model tests + controller tests + service tests

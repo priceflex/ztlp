@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.3 — 2026-03-14
+
+### Bug Fixes
+- **Fixed tunnel timeout during demo pauses** — Listener now uses "lazy connect" to defer backend TCP connection until client sends first data packet. Previously, sshd sent its SSH banner immediately after handshake, which was bridged over ZTLP to a client that hadn't accepted any TCP connections yet. With no bridge running on the client side, no ACKs were sent, and the listener hit the 30-second SENDER_ACK_TIMEOUT — killing the tunnel before the user could SSH through it.
+
+### Demo Improvements
+- **Act 9 — Port Visibility Analysis:** Explains what attackers see on the network (SSH hidden behind ZTLP identity layer), replaces bare nmap scan
+- **Act 10 — L1 DDoS Defense:** 50K packet flood with inline CPU measurement, detailed explanation of magic byte rejection (~19ns/pkt)
+- **Act 11 — L2 SessionID Defense:** Three-layer pipeline overview (L1 ~19ns, L2 ~50ns, L3 ~200ns), CPU measurement, 50K crafted packets
+- **Act 12 — Encrypted Payload Verification:** Captures live SSH traffic, searches for plaintext in pcap, hex dumps ciphertext to prove encryption
+- **Act 13 — Security Summary:** Formatted defense cost table (layer/cost/what it blocks) replaces standalone CPU test
+
 ## v0.6.2 — 2026-03-13
 
 ### Features

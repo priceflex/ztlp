@@ -546,7 +546,7 @@ mod tests {
         let max_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
 
         let mut delay = initial;
-        let expected_delays = vec![
+        let expected_delays = [
             Duration::from_millis(500),
             Duration::from_millis(1000),
             Duration::from_millis(2000),

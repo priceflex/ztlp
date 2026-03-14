@@ -48,6 +48,7 @@
 //! | ACK   | 0x01 | 8-byte BE data_seq: highest delivered data_seq |
 //! | FIN   | 0x02 | 8-byte BE data_seq |
 //! | NACK  | 0x03 | 2-byte BE count + N × 8-byte BE missing data_seqs |
+//! | SACK  | 0x05 | 8-byte cumulative_ack + 2-byte count + N × (start, end) ranges |
 //! | RESET | 0x04 | (empty) — signals new TCP stream, resets data_seq |
 //!
 //! Two modes of operation:
@@ -135,6 +136,10 @@ const FRAME_NACK: u8 = 0x03;
 /// beyond the frame type byte itself.
 const FRAME_RESET: u8 = 0x04;
 
+/// Frame type byte: SACK frame with cumulative ACK + received ranges.
+/// Payload: [cumulative_ack: u64 BE] [count: u16 BE] [(start: u64 BE, end: u64 BE) × count]
+const FRAME_SACK: u8 = 0x05;
+
 /// Outcome of a bridge run, distinguishing normal close from a stream reset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeOutcome {
@@ -163,7 +168,7 @@ pub struct ResetWaitResult {
 
 /// Maximum number of unacknowledged packets the sender will keep in flight.
 /// At ~16KB per packet, 2048 packets ≈ 32MB of in-flight data.
-const SEND_WINDOW: u64 = 2048;
+pub const SEND_WINDOW: u64 = 2048;
 
 /// The receiver sends an ACK after this many packets have been delivered
 /// to TCP, or when the ACK timer fires — whichever comes first.
@@ -433,6 +438,12 @@ impl ReassemblyBuffer {
             Some(last) => last.elapsed() >= min_interval,
             None => true,
         }
+    }
+
+    /// Get all buffered (out-of-order) sequence numbers, sorted.
+    /// Used by the receiver to build SACK ranges.
+    pub fn buffered_seqs(&self) -> Vec<u64> {
+        self.buffer.keys().copied().collect()
     }
 }
 
@@ -716,6 +727,65 @@ impl CongestionController {
 ///
 /// # Arguments
 /// * `udp_socket` — The bound UDP socket for this session
+///
+/// Send a REJECT frame to a peer over an established ZTLP session.
+///
+/// This encrypts the reject frame as a DATA packet and sends it to the peer.
+/// Used by the server after handshake when policy denies the client.
+///
+/// # Arguments
+/// * `udp_socket` — UDP socket for sending
+/// * `pipeline` — Pipeline containing session keys
+/// * `session_id` — The established session ID
+/// * `peer_addr` — Peer address to send to
+/// * `reject_frame` — The encoded REJECT frame payload
+pub async fn send_reject(
+    udp_socket: &tokio::net::UdpSocket,
+    pipeline: &Mutex<Pipeline>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    reject_frame: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Extract send key from session
+    let send_key = {
+        let pl = pipeline.lock().await;
+        let session = pl.get_session(&session_id).ok_or("session not found")?;
+        session.send_key
+    };
+    let cipher = ChaCha20Poly1305::new((&send_key).into());
+
+    // Build a data header with seq=0
+    let mut header = DataHeader::new(session_id, 0);
+    header.payload_len = (reject_frame.len() + 16) as u16; // plaintext + AEAD tag
+
+    // Generate nonce from packet_seq
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_be_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    // Serialize header for AAD and compute auth tag
+    let header_bytes = header.serialize();
+    let aad = header.aad_bytes();
+    let auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+    // Encrypt the reject payload
+    let ciphertext = cipher
+        .encrypt(nonce, chacha20poly1305::aead::Payload { msg: reject_frame, aad: &auth_tag })
+        .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
+
+    // Set header auth tag
+    header.header_auth_tag = auth_tag;
+    let _ = header_bytes;
+
+    // Build final packet
+    let mut packet = header.serialize();
+    packet.extend_from_slice(&ciphertext);
+
+    udp_socket.send_to(&packet, peer_addr).await?;
+
+    Ok(())
+}
+
 /// * `pipeline` — Pipeline for admission checks
 /// * `session_id` — The established session ID
 /// * `peer_addr` — Expected peer address
@@ -1870,6 +1940,105 @@ async fn run_bridge_inner(
                                 }
                             }
 
+                            FRAME_SACK => {
+                                // SACK frame from the remote receiver: contains cumulative ACK
+                                // plus non-contiguous received ranges.
+                                if let Some((sack_cum_ack, sack_ranges)) =
+                                    crate::congestion::decode_sack_payload(frame_payload)
+                                {
+                                    debug!(
+                                        "received SACK: cumulative_ack={}, {} ranges",
+                                        sack_cum_ack,
+                                        sack_ranges.len()
+                                    );
+
+                                    // Treat cumulative_ack like a regular ACK
+                                    let prev_acked = {
+                                        let guard = last_acked_seq_writer.lock().await;
+                                        *guard
+                                    };
+                                    let newly_acked = match prev_acked {
+                                        Some(prev) if sack_cum_ack > prev => {
+                                            sack_cum_ack - prev
+                                        }
+                                        None => sack_cum_ack + 1,
+                                        _ => 0,
+                                    };
+
+                                    // Update shared acked seq
+                                    {
+                                        let mut guard = last_acked_seq_writer.lock().await;
+                                        match *guard {
+                                            Some(prev) if sack_cum_ack > prev => {
+                                                *guard = Some(sack_cum_ack)
+                                            }
+                                            None => *guard = Some(sack_cum_ack),
+                                            _ => {}
+                                        }
+                                    }
+
+                                    // Wake the sender
+                                    ack_notify_writer.notify_one();
+
+                                    // RTT measurement + congestion control
+                                    {
+                                        let rb = retransmit_buf_ack.lock().await;
+                                        if let Some(send_time) = rb.send_time(sack_cum_ack) {
+                                            let rtt_sample =
+                                                send_time.elapsed().as_secs_f64() * 1000.0;
+                                            let mut cc = congestion_receiver.lock().await;
+                                            cc.update_rtt(rtt_sample);
+                                            if newly_acked > 0 {
+                                                cc.on_ack(newly_acked);
+                                            }
+                                        } else if newly_acked > 0 {
+                                            let mut cc = congestion_receiver.lock().await;
+                                            cc.on_ack(newly_acked);
+                                        }
+                                    }
+
+                                    // Prune retransmit buffer up to cumulative_ack
+                                    {
+                                        let mut rb = retransmit_buf_ack.lock().await;
+                                        rb.prune_up_to(sack_cum_ack);
+                                    }
+
+                                    // SACK ranges tell us which out-of-order seqs the
+                                    // receiver has, enabling selective retransmission of
+                                    // only the gaps. Forward to sender via retransmit_tx
+                                    // with the computed missing sequences.
+                                    if !sack_ranges.is_empty() {
+                                        // Compute missing seqs from SACK ranges
+                                        let mut missing_seqs = Vec::new();
+                                        let mut seq = sack_cum_ack + 1;
+                                        for range in &sack_ranges {
+                                            while seq < range.start
+                                                && missing_seqs.len() < MAX_NACK_SEQS
+                                            {
+                                                missing_seqs.push(seq);
+                                                seq += 1;
+                                            }
+                                            seq = seq.max(range.end + 1);
+                                        }
+                                        if !missing_seqs.is_empty() {
+                                            debug!(
+                                                "SACK gap: {} missing seqs: {:?}",
+                                                missing_seqs.len(),
+                                                &missing_seqs[..missing_seqs.len().min(5)]
+                                            );
+                                            if let Err(e) = retransmit_tx.send(missing_seqs) {
+                                                warn!(
+                                                    "failed to forward SACK gaps to sender: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    debug!("malformed SACK frame, ignoring");
+                                }
+                            }
+
                             FRAME_FIN => {
                                 // FIN frame: [0x02] [data_seq: 8B BE]
                                 // Remote side signaled TCP EOF. The data_seq in
@@ -1954,9 +2123,11 @@ async fn run_bridge_inner(
                         stats_rx.maybe_report(cwnd, ssthresh, srtt, rto);
                     }
 
-                    // ── Periodic ACK sending (once per recv call, after all segments) ──
+                    // ── Periodic ACK/SACK sending (once per recv call, after all segments) ──
                     // Send an ACK when we've delivered enough packets or enough
                     // time has passed. This lets the sender's flow control advance.
+                    // When there are buffered out-of-order packets, send SACK
+                    // instead of plain ACK to give the sender selective info.
                     if packets_since_ack >= ACK_EVERY_PACKETS
                         || last_ack_time.elapsed() >= ACK_INTERVAL
                     {
@@ -1964,16 +2135,38 @@ async fn run_bridge_inner(
                             if let Some(delivered_seq) = reasm.last_delivered_seq() {
                                 // Only send if we have new progress to report
                                 if last_acked_value.is_none_or(|prev| delivered_seq > prev) {
-                                    send_ack(
-                                        &pipeline_recv,
-                                        &ack_cipher,
-                                        &send_key_for_acks,
-                                        sid_recv,
-                                        &udp_recv,
-                                        peer_addr,
-                                        delivered_seq,
-                                    )
-                                    .await?;
+                                    let buffered = reasm.buffered_seqs();
+                                    if buffered.is_empty() {
+                                        // No gaps — plain ACK is sufficient
+                                        send_ack(
+                                            &pipeline_recv,
+                                            &ack_cipher,
+                                            &send_key_for_acks,
+                                            sid_recv,
+                                            &udp_recv,
+                                            peer_addr,
+                                            delivered_seq,
+                                        )
+                                        .await?;
+                                    } else {
+                                        // Has gaps — send SACK with received ranges
+                                        let mut sack_state = crate::congestion::ReceiverSackState::new();
+                                        sack_state.update_from_reassembly(
+                                            reasm.expected_seq(),
+                                            &buffered,
+                                        );
+                                        send_sack(
+                                            &pipeline_recv,
+                                            &ack_cipher,
+                                            &send_key_for_acks,
+                                            sid_recv,
+                                            &udp_recv,
+                                            peer_addr,
+                                            delivered_seq,
+                                            sack_state.ranges(),
+                                        )
+                                        .await?;
+                                    }
                                     last_acked_value = Some(delivered_seq);
                                     packets_since_ack = 0;
                                     last_ack_time = Instant::now();
@@ -1997,21 +2190,41 @@ async fn run_bridge_inner(
 
             // ── Periodic maintenance (runs on timeout and after each packet) ──
 
-            // Send ACK if we have unsent progress
+            // Send ACK/SACK if we have unsent progress
             if packets_since_ack > 0 || last_ack_time.elapsed() >= ACK_INTERVAL {
                 if let Some(ref reasm) = reassembly {
                     if let Some(delivered_seq) = reasm.last_delivered_seq() {
                         if last_acked_value.is_none_or(|prev| delivered_seq > prev) {
-                            send_ack(
-                                &pipeline_recv,
-                                &ack_cipher,
-                                &send_key_for_acks,
-                                sid_recv,
-                                &udp_recv,
-                                peer_addr,
-                                delivered_seq,
-                            )
-                            .await?;
+                            let buffered = reasm.buffered_seqs();
+                            if buffered.is_empty() {
+                                send_ack(
+                                    &pipeline_recv,
+                                    &ack_cipher,
+                                    &send_key_for_acks,
+                                    sid_recv,
+                                    &udp_recv,
+                                    peer_addr,
+                                    delivered_seq,
+                                )
+                                .await?;
+                            } else {
+                                let mut sack_state = crate::congestion::ReceiverSackState::new();
+                                sack_state.update_from_reassembly(
+                                    reasm.expected_seq(),
+                                    &buffered,
+                                );
+                                send_sack(
+                                    &pipeline_recv,
+                                    &ack_cipher,
+                                    &send_key_for_acks,
+                                    sid_recv,
+                                    &udp_recv,
+                                    peer_addr,
+                                    delivered_seq,
+                                    sack_state.ranges(),
+                                )
+                                .await?;
+                            }
                             last_acked_value = Some(delivered_seq);
                             packets_since_ack = 0;
                             last_ack_time = Instant::now();
@@ -2221,6 +2434,62 @@ async fn send_ack(
     debug!(
         "sent ACK for delivered_seq {} (packet seq {})",
         delivered_seq, seq
+    );
+
+    Ok(())
+}
+
+/// Send a SACK frame through the ZTLP session.
+///
+/// The SACK contains the cumulative ACK (highest contiguous seq delivered)
+/// plus additional non-contiguous received ranges from the reassembly buffer.
+/// This gives the sender precise knowledge of what the receiver has,
+/// enabling efficient selective retransmission.
+#[allow(clippy::too_many_arguments)]
+async fn send_sack(
+    pipeline: &Arc<Mutex<Pipeline>>,
+    cipher: &ChaCha20Poly1305,
+    send_key: &[u8; 32],
+    session_id: SessionId,
+    udp: &UdpSocket,
+    peer_addr: SocketAddr,
+    cumulative_ack: u64,
+    sack_ranges: &[crate::congestion::SackRange],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Build SACK frame
+    let sack_frame = crate::congestion::encode_sack_frame(cumulative_ack, sack_ranges);
+
+    // Get next send sequence number
+    let seq = {
+        let mut pl = pipeline.lock().await;
+        let session = pl
+            .get_session_mut(&session_id)
+            .ok_or("session not found for SACK send")?;
+        session.next_send_seq()
+    };
+
+    // Encrypt
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let encrypted = cipher
+        .encrypt(nonce, sack_frame.as_slice())
+        .map_err(|e| format!("SACK encryption error: {}", e))?;
+
+    // Build header
+    let mut header = DataHeader::new(session_id, seq);
+    let aad = header.aad_bytes();
+    header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+
+    // Send
+    let mut packet = header.serialize();
+    packet.extend_from_slice(&encrypted);
+    udp.send_to(&packet, peer_addr).await?;
+    debug!(
+        "sent SACK (cumulative_ack={}, {} ranges, packet_seq={})",
+        cumulative_ack,
+        sack_ranges.len(),
+        seq
     );
 
     Ok(())

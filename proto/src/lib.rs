@@ -38,6 +38,7 @@
 pub mod admission;
 pub mod agent;
 pub mod batch;
+pub mod congestion;
 pub mod enrollment;
 pub mod error;
 #[allow(unsafe_code)]
@@ -51,9 +52,11 @@ pub mod mobile;
 pub mod nat;
 #[allow(unsafe_code)]
 pub mod pacing;
+pub mod punch;
 pub mod packet;
 pub mod pipeline;
 pub mod policy;
+pub mod reject;
 pub mod relay;
 pub mod security;
 pub mod session;

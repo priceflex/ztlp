@@ -43,7 +43,7 @@ defmodule ZtlpNs.Record do
   @enforce_keys [:name, :type, :data, :created_at, :ttl, :serial]
   defstruct [:name, :type, :data, :signature, :signer_public_key, :created_at, :ttl, :serial]
 
-  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator | :device | :user
+  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator | :device | :user | :group
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -61,8 +61,8 @@ defmodule ZtlpNs.Record do
   # serialization. They MUST NOT change without a protocol version bump.
   # Types 0x10-0x12 are reserved for identity/group records (Phase 1+).
 
-  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7, device: 0x10, user: 0x11}
-  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user}
+  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7, device: 0x10, user: 0x11, group: 0x12}
+  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user, 0x12 => :group}
 
   @doc "Convert a record type atom to its wire format byte."
   @spec type_to_byte(record_type()) :: non_neg_integer()
@@ -426,6 +426,49 @@ defmodule ZtlpNs.Record do
     cond do
       is_nil(pubkey) or pubkey == "" -> {:error, :missing_public_key}
       not is_nil(role) and role not in ["user", "tech", "admin"] -> {:error, :invalid_role}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Create a ZTLP_GROUP record (group membership record).
+
+  Fields:
+  - `name` — group FQDN like "admins@techrockstars.ztlp"
+  - `members` — list of user names (e.g., ["steve@techrockstars.ztlp"])
+  - `opts` — keyword list with optional `:description`, `:created_at`, `:ttl`, `:serial`
+
+  Groups can ONLY be created/modified by zone signing key (not self-registration).
+  Nested groups are NOT supported — members must be user names, not group names.
+  """
+  @spec new_group(String.t(), [String.t()], keyword()) :: t()
+  def new_group(name, members, opts \\ []) do
+    %__MODULE__{
+      name: name,
+      type: :group,
+      data: %{
+        members: members,
+        description: opts[:description] || ""
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 86400,
+      serial: opts[:serial] || 1
+    }
+  end
+
+  @doc """
+  Validate a GROUP record's data fields.
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  @spec validate_group(map()) :: :ok | {:error, atom()}
+  def validate_group(data) do
+    members = Map.get(data, :members) || Map.get(data, "members")
+
+    cond do
+      is_nil(members) -> {:error, :missing_members}
+      not is_list(members) -> {:error, :invalid_members}
+      length(members) > 255 -> {:error, :too_many_members}
       true -> :ok
     end
   end

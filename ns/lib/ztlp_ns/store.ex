@@ -35,6 +35,7 @@ defmodule ZtlpNs.Store do
   @revoked_table :ztlp_ns_revoked
   @pubkey_index_table :ztlp_ns_pubkey_index
   @device_index_table :ztlp_ns_device_index
+  @group_index_table :ztlp_ns_group_index
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -85,6 +86,9 @@ defmodule ZtlpNs.Store do
 
             # Maintain device-owner index for DEVICE records
             index_device_owner(record)
+
+            # Maintain group membership index for GROUP records
+            index_group_members(record)
 
             # Trigger eager replication unless this record came from a peer
             unless opts[:replicated] do
@@ -246,6 +250,50 @@ defmodule ZtlpNs.Store do
     end
   end
 
+  @doc """
+  Look up all groups that a user is a member of.
+
+  Returns a list of group names.
+  Uses the group membership index for O(1) lookups.
+  """
+  @spec groups_for_user(String.t()) :: [String.t()]
+  def groups_for_user(user_name) when is_binary(user_name) do
+    try do
+      :mnesia.dirty_read(@group_index_table, user_name)
+      |> Enum.map(fn {@group_index_table, _user, group_name} -> group_name end)
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+  end
+
+  @doc """
+  Look up all members of a group.
+
+  Returns a list of user/member names from the group record's data.
+  """
+  @spec members_of_group(String.t()) :: [String.t()]
+  def members_of_group(group_name) when is_binary(group_name) do
+    case lookup(group_name, :group) do
+      {:ok, record} ->
+        Map.get(record.data, :members) || Map.get(record.data, "members") || []
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
+  Check if a user is a member of a group.
+
+  Returns `true` if the user is listed in the group's members.
+  """
+  @spec is_member?(String.t(), String.t()) :: boolean()
+  def is_member?(group_name, user_name) when is_binary(group_name) and is_binary(user_name) do
+    user_name in members_of_group(group_name)
+  end
+
   @doc "List all revoked IDs."
   @spec list_revoked() :: [String.t()]
   def list_revoked do
@@ -273,6 +321,12 @@ defmodule ZtlpNs.Store do
     # Clear device-owner index if it exists
     try do
       {:atomic, :ok} = :mnesia.clear_table(@device_index_table)
+    rescue
+      _ -> :ok
+    end
+    # Clear group membership index if it exists
+    try do
+      {:atomic, :ok} = :mnesia.clear_table(@group_index_table)
     rescue
       _ -> :ok
     end
@@ -317,8 +371,15 @@ defmodule ZtlpNs.Store do
       [{:attributes, [:owner, :device_name]}, {:type, :bag}, {storage_mode, [node()]}]
     )
 
+    # Group membership index: maps user_name → group_name for group-by-user lookups
+    # Uses :bag type because one user can be in multiple groups
+    create_table(
+      @group_index_table,
+      [{:attributes, [:user, :group_name]}, {:type, :bag}, {storage_mode, [node()]}]
+    )
+
     # Wait for tables to be loaded (important on restart with disc_copies)
-    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table, @pubkey_index_table, @device_index_table], 10_000)
+    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table, @pubkey_index_table, @device_index_table, @group_index_table], 10_000)
   end
 
   defp create_table(name, opts) do
@@ -390,4 +451,32 @@ defmodule ZtlpNs.Store do
   end
 
   defp index_device_owner(_), do: :ok
+
+  # Maintain group membership index on insert of GROUP records.
+  # Maps user → group_name for group-by-user lookups.
+  # Rebuilds the index for this group on each update (handles member changes).
+  defp index_group_members(%Record{type: :group, name: group_name, data: data}) do
+    members = Map.get(data, :members) || Map.get(data, "members") || []
+
+    try do
+      # Remove stale index entries for this group
+      # (in case members changed on update)
+      all_entries = :mnesia.dirty_match_object({@group_index_table, :_, group_name})
+
+      Enum.each(all_entries, fn entry ->
+        :mnesia.dirty_delete_object(entry)
+      end)
+
+      # Add new index entries for each member
+      Enum.each(members, fn member ->
+        :mnesia.dirty_write({@group_index_table, member, group_name})
+      end)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  defp index_group_members(_), do: :ok
 end

@@ -527,6 +527,7 @@ defmodule ZtlpNs.Server do
   # Validate type-specific record data fields
   defp validate_record_data(:device, data), do: Record.validate_device(data)
   defp validate_record_data(:user, data), do: Record.validate_user(data)
+  defp validate_record_data(:group, data), do: Record.validate_group(data)
   defp validate_record_data(_type, _data), do: :ok
 
   defp decode_data(data_bin) do
@@ -545,6 +546,7 @@ defmodule ZtlpNs.Server do
   defp default_ttl(:bootstrap), do: 86_400 # 24 hours
   defp default_ttl(:device), do: 86_400    # 24 hours
   defp default_ttl(:user), do: 86_400      # 24 hours
+  defp default_ttl(:group), do: 86_400     # 24 hours
   defp default_ttl(_), do: 3_600           # Default fallback
 
   # Persist registration signing key on startup.

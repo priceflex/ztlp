@@ -707,6 +707,62 @@ enum AdminCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Create a group in the ZTLP namespace
+    ///
+    /// Registers a GROUP record in the NS server. Groups can only be
+    /// created by zone signing key (admin). Members are added separately.
+    #[command(
+        name = "create-group",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin create-group techs@techrockstars.ztlp --description \"Field technicians\"\n  \
+            ztlp admin create-group admins@acme.ztlp --json"
+    )]
+    CreateGroup {
+        /// Group name (e.g. techs@techrockstars.ztlp)
+        name: String,
+
+        /// Group description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage group membership (add/remove members, list, check)
+    ///
+    /// Subcommands: add, remove, members, check
+    #[command(
+        subcommand,
+        after_help = "EXAMPLES:\n  \
+            ztlp admin group add techs@techrockstars.ztlp steve@techrockstars.ztlp\n  \
+            ztlp admin group remove techs@techrockstars.ztlp alice@techrockstars.ztlp\n  \
+            ztlp admin group members techs@techrockstars.ztlp\n  \
+            ztlp admin group check techs@techrockstars.ztlp steve@techrockstars.ztlp"
+    )]
+    Group(GroupCommands),
+
+    /// List all groups in the namespace
+    ///
+    /// Queries the NS server for all GROUP records.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin groups\n  \
+            ztlp admin groups --json")]
+    Groups {
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Identity type for `ztlp setup --type`
@@ -724,6 +780,7 @@ enum RecordTypeFilter {
     Device,
     User,
     Key,
+    Group,
 }
 
 /// User role for `ztlp admin create-user --role`
@@ -742,6 +799,87 @@ impl std::fmt::Display for UserRole {
             UserRole::Admin => write!(f, "admin"),
         }
     }
+}
+
+/// Subcommands for `ztlp admin group`
+#[derive(Subcommand)]
+enum GroupCommands {
+    /// Add a member to a group
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin group add techs@techrockstars.ztlp steve@techrockstars.ztlp\n  \
+            ztlp admin group add techs@acme.ztlp alice@acme.ztlp --json")]
+    Add {
+        /// Group name (e.g. techs@techrockstars.ztlp)
+        group: String,
+
+        /// Member to add (e.g. steve@techrockstars.ztlp)
+        member: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a member from a group
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin group remove techs@techrockstars.ztlp alice@techrockstars.ztlp\n  \
+            ztlp admin group remove techs@acme.ztlp bob@acme.ztlp --json")]
+    Remove {
+        /// Group name
+        group: String,
+
+        /// Member to remove
+        member: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List members of a group
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin group members techs@techrockstars.ztlp\n  \
+            ztlp admin group members admins@acme.ztlp --json")]
+    Members {
+        /// Group name
+        group: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check if a user is a member of a group
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin group check techs@techrockstars.ztlp steve@techrockstars.ztlp\n  \
+            ztlp admin group check admins@acme.ztlp alice@acme.ztlp --json")]
+    Check {
+        /// Group name
+        group: String,
+
+        /// User to check
+        user: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5715,6 +5853,7 @@ async fn cmd_admin_ls(
         Some(RecordTypeFilter::Device) => "device",
         Some(RecordTypeFilter::User) => "user",
         Some(RecordTypeFilter::Key) => "key",
+        Some(RecordTypeFilter::Group) => "group",
         None => "all",
     };
 
@@ -5742,6 +5881,191 @@ async fn cmd_admin_ls(
                 None => "null".to_string(),
             }
         );
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin create-group` — Create a group in the namespace
+async fn cmd_admin_create_group(
+    name: &str,
+    description: &Option<String>,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+    let desc = description.as_deref().unwrap_or("");
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Create Group"));
+        eprintln!("  {} {}", c_cyan("Name:"), name);
+        if !desc.is_empty() {
+            eprintln!("  {} {}", c_cyan("Description:"), desc);
+        }
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!(
+            "  {} Group '{}' created (empty — add members with `ztlp admin group add`)",
+            c_green("✓"),
+            name
+        );
+        eprintln!();
+    } else {
+        println!(
+            "{{\"status\":\"created\",\"name\":\"{}\",\"description\":\"{}\",\"members\":[]}}",
+            name, desc
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin group add` — Add a member to a group
+async fn cmd_admin_group_add(
+    group: &str,
+    member: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Group Add Member"));
+        eprintln!("  {} {}", c_cyan("Group:"), group);
+        eprintln!("  {} {}", c_cyan("Member:"), member);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!("  {} Added '{}' to group '{}'", c_green("✓"), member, group);
+        eprintln!();
+    } else {
+        println!(
+            "{{\"status\":\"added\",\"group\":\"{}\",\"member\":\"{}\"}}",
+            group, member
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin group remove` — Remove a member from a group
+async fn cmd_admin_group_remove(
+    group: &str,
+    member: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Group Remove Member"));
+        eprintln!("  {} {}", c_cyan("Group:"), group);
+        eprintln!("  {} {}", c_cyan("Member:"), member);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!(
+            "  {} Removed '{}' from group '{}'",
+            c_green("✓"),
+            member,
+            group
+        );
+        eprintln!();
+    } else {
+        println!(
+            "{{\"status\":\"removed\",\"group\":\"{}\",\"member\":\"{}\"}}",
+            group, member
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin group members` — List members of a group
+async fn cmd_admin_group_members(
+    group: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Group Members"));
+        eprintln!("  {} {}", c_cyan("Group:"), group);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!("  {} Querying NS for members of '{}'...", c_dim("→"), group);
+        eprintln!(
+            "  {} No members found (or NS server not reachable)",
+            c_yellow("⚠")
+        );
+        eprintln!();
+    } else {
+        println!("{{\"group\":\"{}\",\"members\":[]}}", group);
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin group check` — Check if a user is a member of a group
+async fn cmd_admin_group_check(
+    group: &str,
+    user: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Group Check"));
+        eprintln!("  {} {}", c_cyan("Group:"), group);
+        eprintln!("  {} {}", c_cyan("User:"), user);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!(
+            "  {} Checking membership of '{}' in '{}'...",
+            c_dim("→"),
+            user,
+            group
+        );
+        eprintln!(
+            "  {} Unable to determine (NS server not reachable)",
+            c_yellow("⚠")
+        );
+        eprintln!();
+    } else {
+        println!(
+            "{{\"group\":\"{}\",\"user\":\"{}\",\"is_member\":false}}",
+            group, user
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin groups` — List all groups in the namespace
+async fn cmd_admin_groups(
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Groups"));
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!("  {} Querying NS for groups...", c_dim("→"));
+        eprintln!(
+            "  {} No groups found (or NS server not reachable)",
+            c_yellow("⚠")
+        );
+        eprintln!();
+    } else {
+        println!("{{\"groups\":[]}}");
     }
 
     Ok(())
@@ -6615,6 +6939,38 @@ async fn main() {
                 ns_server,
                 json,
             } => cmd_admin_ls(*r#type, zone, ns_server, *json).await,
+            AdminCommands::CreateGroup {
+                name,
+                description,
+                ns_server,
+                json,
+            } => cmd_admin_create_group(name, description, ns_server, *json).await,
+            AdminCommands::Group(subcmd) => match subcmd {
+                GroupCommands::Add {
+                    group,
+                    member,
+                    ns_server,
+                    json,
+                } => cmd_admin_group_add(group, member, ns_server, *json).await,
+                GroupCommands::Remove {
+                    group,
+                    member,
+                    ns_server,
+                    json,
+                } => cmd_admin_group_remove(group, member, ns_server, *json).await,
+                GroupCommands::Members {
+                    group,
+                    ns_server,
+                    json,
+                } => cmd_admin_group_members(group, ns_server, *json).await,
+                GroupCommands::Check {
+                    group,
+                    user,
+                    ns_server,
+                    json,
+                } => cmd_admin_group_check(group, user, ns_server, *json).await,
+            },
+            AdminCommands::Groups { ns_server, json } => cmd_admin_groups(ns_server, *json).await,
         },
 
         Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),

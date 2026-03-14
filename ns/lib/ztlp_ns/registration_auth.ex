@@ -230,6 +230,12 @@ defmodule ZtlpNs.RegistrationAuth do
     end
   end
 
+  # GROUP records do NOT support self-registration.
+  # Only zone signing key (zone authority) can create/modify groups.
+  defp check_self_registration(_pubkey_hex, _name, :group, _data) do
+    {:error, :zone_authority_required}
+  end
+
   defp check_self_registration(_pubkey_hex, _name, _type, _data) do
     # Other record types require zone authority
     {:error, :zone_authority_required}

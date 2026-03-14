@@ -46,6 +46,8 @@ defmodule ZtlpGateway.NsClient do
   alias ZtlpGateway.{Config, Crypto}
 
   @ns_cache :ztlp_gateway_ns_cache
+  @group_cache :ztlp_gateway_group_cache
+  @user_cache :ztlp_gateway_user_cache
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -108,6 +110,73 @@ defmodule ZtlpGateway.NsClient do
     GenServer.call(__MODULE__, :clear_trust_anchors)
   end
 
+  @doc """
+  Query ZTLP-NS for a GROUP record by name.
+
+  Returns `{:ok, record_map}` or `{:error, reason}`.
+  Results are cached with TTL.
+  """
+  @spec query_group(String.t()) :: {:ok, map()} | {:error, atom()}
+  def query_group(group_name) when is_binary(group_name) do
+    case group_cache_lookup(group_name) do
+      {:ok, _} = hit -> hit
+      :miss -> GenServer.call(__MODULE__, {:query_group, group_name}, 10_000)
+    end
+  end
+
+  @doc """
+  Query ZTLP-NS for a USER record by name.
+
+  Returns `{:ok, record_map}` or `{:error, reason}`.
+  Results are cached with TTL.
+  """
+  @spec query_user(String.t()) :: {:ok, map()} | {:error, atom()}
+  def query_user(user_name) when is_binary(user_name) do
+    case user_cache_lookup(user_name) do
+      {:ok, _} = hit -> hit
+      :miss -> GenServer.call(__MODULE__, {:query_user, user_name}, 10_000)
+    end
+  end
+
+  @doc """
+  Check if a user is a member of a group.
+
+  Queries the GROUP record from NS and checks the members list.
+  Results are cached.
+  """
+  @spec is_group_member?(String.t(), String.t()) :: boolean()
+  def is_group_member?(group_name, user_name) do
+    case query_group(group_name) do
+      {:ok, record_map} ->
+        members = Map.get(record_map, :members) ||
+                  Map.get(record_map, "members") ||
+                  get_in(record_map, [:data, "members"]) ||
+                  get_in(record_map, [:data, :members]) ||
+                  []
+        user_name in members
+      _ ->
+        false
+    end
+  end
+
+  @doc """
+  Get the role of a user from their USER record.
+
+  Returns the role string (e.g., "admin", "tech", "user") or nil.
+  """
+  @spec user_role(String.t()) :: String.t() | nil
+  def user_role(user_name) do
+    case query_user(user_name) do
+      {:ok, record_map} ->
+        Map.get(record_map, :role) ||
+          Map.get(record_map, "role") ||
+          get_in(record_map, [:data, "role"]) ||
+          get_in(record_map, [:data, :role])
+      _ ->
+        nil
+    end
+  end
+
   # ── GenServer Callbacks ────────────────────────────────────────────
 
   @impl true
@@ -115,9 +184,17 @@ defmodule ZtlpGateway.NsClient do
     # Open a UDP socket for sending queries (port 0 = OS-assigned)
     case :gen_udp.open(0, [:binary, {:active, false}]) do
       {:ok, socket} ->
-        # Create cache table
+        # Create cache tables
         if :ets.whereis(@ns_cache) == :undefined do
           :ets.new(@ns_cache, [:named_table, :set, :public, read_concurrency: true])
+        end
+
+        if :ets.whereis(@group_cache) == :undefined do
+          :ets.new(@group_cache, [:named_table, :set, :public, read_concurrency: true])
+        end
+
+        if :ets.whereis(@user_cache) == :undefined do
+          :ets.new(@user_cache, [:named_table, :set, :public, read_concurrency: true])
         end
 
         {:ok, %{socket: socket, trust_anchors: %{}}}
@@ -168,9 +245,61 @@ defmodule ZtlpGateway.NsClient do
     {:reply, Map.to_list(state.trust_anchors), state}
   end
 
+  def handle_call({:query_group, group_name}, _from, state) do
+    case group_cache_lookup(group_name) do
+      {:ok, _} = hit ->
+        {:reply, hit, state}
+
+      :miss ->
+        result = do_name_query(state.socket, group_name, 0x12, state.trust_anchors)
+
+        case result do
+          {:ok, record_map} ->
+            ttl = Map.get(record_map, :ttl, 86400)
+            expires_at = System.system_time(:second) + ttl
+            :ets.insert(@group_cache, {group_name, {record_map, expires_at}})
+
+          _ ->
+            :ok
+        end
+
+        {:reply, result, state}
+    end
+  end
+
+  def handle_call({:query_user, user_name}, _from, state) do
+    case user_cache_lookup(user_name) do
+      {:ok, _} = hit ->
+        {:reply, hit, state}
+
+      :miss ->
+        result = do_name_query(state.socket, user_name, 0x11, state.trust_anchors)
+
+        case result do
+          {:ok, record_map} ->
+            ttl = Map.get(record_map, :ttl, 86400)
+            expires_at = System.system_time(:second) + ttl
+            :ets.insert(@user_cache, {user_name, {record_map, expires_at}})
+
+          _ ->
+            :ok
+        end
+
+        {:reply, result, state}
+    end
+  end
+
   def handle_call(:clear_cache, _from, state) do
     if :ets.whereis(@ns_cache) != :undefined do
       :ets.delete_all_objects(@ns_cache)
+    end
+
+    if :ets.whereis(@group_cache) != :undefined do
+      :ets.delete_all_objects(@group_cache)
+    end
+
+    if :ets.whereis(@user_cache) != :undefined do
+      :ets.delete_all_objects(@user_cache)
     end
 
     {:reply, :ok, state}
@@ -188,7 +317,36 @@ defmodule ZtlpGateway.NsClient do
 
   def terminate(_reason, _state), do: :ok
 
-  # ── Private: Query Execution ───────────────────────────────────────
+  # ── Private: Name-based Query (0x01) ────────────────────────────────
+
+  defp do_name_query(nil, _name, _type_byte, _trust_anchors) do
+    {:error, :no_socket}
+  end
+
+  defp do_name_query(socket, name, type_byte, trust_anchors) do
+    host = Config.get(:ns_server_host)
+    port = Config.get(:ns_server_port)
+    timeout = Config.get(:ns_query_timeout_ms)
+
+    # Build a 0x01 query: <<0x01, name_len::16, name::binary, type_byte::8>>
+    name_len = byte_size(name)
+    query = <<0x01, name_len::16, name::binary, type_byte::8>>
+
+    :gen_udp.send(socket, host, port, query)
+
+    case :gen_udp.recv(socket, 0, timeout) do
+      {:ok, {_ip, _port, response}} ->
+        parse_response(response, trust_anchors)
+
+      {:error, :timeout} ->
+        {:error, :timeout}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ── Private: Pubkey Query Execution (0x05) ─────────────────────────
 
   defp do_query(socket, pubkey_hex, trust_anchors) do
     host = Config.get(:ns_server_host)
@@ -254,7 +412,7 @@ defmodule ZtlpGateway.NsClient do
   #   sig_len::16, signature::binary-size(sig_len),
   #   pub_len::16, public_key::binary-size(pub_len)>>
 
-  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator}
+  @type_map %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user, 0x12 => :group}
 
   defp decode_record(data) when is_binary(data) do
     <<type_byte::8, name_len::16, rest::binary>> = data
@@ -337,6 +495,40 @@ defmodule ZtlpGateway.NsClient do
     end
   rescue
     # Table might not exist yet
+    ArgumentError -> :miss
+  end
+
+  defp group_cache_lookup(group_name) do
+    case :ets.lookup(@group_cache, group_name) do
+      [{^group_name, {record_map, expires_at}}] ->
+        if System.system_time(:second) < expires_at do
+          {:ok, record_map}
+        else
+          :ets.delete(@group_cache, group_name)
+          :miss
+        end
+
+      [] ->
+        :miss
+    end
+  rescue
+    ArgumentError -> :miss
+  end
+
+  defp user_cache_lookup(user_name) do
+    case :ets.lookup(@user_cache, user_name) do
+      [{^user_name, {record_map, expires_at}}] ->
+        if System.system_time(:second) < expires_at do
+          {:ok, record_map}
+        else
+          :ets.delete(@user_cache, user_name)
+          :miss
+        end
+
+      [] ->
+        :miss
+    end
+  rescue
     ArgumentError -> :miss
   end
 end

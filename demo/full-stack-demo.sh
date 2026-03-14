@@ -281,6 +281,17 @@ banner "Act 4 — SSH Tests Through ZTLP Tunnel"
 info "Data path: SSH → TCP → ztlp-client → ZTLP/UDP → ztlp-server → TCP → backend"
 echo ""
 
+# Wait for client tests to complete (look for end marker)
+step "Waiting for client test suite to finish..."
+for _i in $(seq 1 120); do
+    if docker logs ztlp-client 2>&1 | grep -q "Full-Stack Test Complete"; then
+        break
+    fi
+    sleep 2
+done
+success "Client tests finished"
+echo ""
+
 # Extract test results from client logs
 CLIENT_LOGS=$(docker logs ztlp-client 2>&1)
 

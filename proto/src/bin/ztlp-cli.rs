@@ -2608,6 +2608,80 @@ async fn handle_new_session(
     Ok(())
 }
 
+/// Wait for a RESET frame on a per-session recv socket (used in gateway mode).
+///
+/// After a bridge closes normally, the client may send a RESET frame to open
+/// a new TCP connection on the same ZTLP session. This reads from the dedicated
+/// recv socket (which receives from the forwarder) and returns true if a RESET
+/// frame is detected.
+async fn wait_for_reset_on_socket(
+    recv_socket: &tokio::net::UdpSocket,
+    pipeline: &Mutex<Pipeline>,
+    session_id: SessionId,
+    timeout_duration: Duration,
+) -> bool {
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit, Nonce};
+    use crate::packet::DataHeader;
+
+    let recv_key = {
+        let pl = pipeline.lock().await;
+        match pl.get_session(&session_id) {
+            Some(session) => session.recv_key,
+            None => return false,
+        }
+    };
+    let cipher = ChaCha20Poly1305::new((&recv_key).into());
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut buf = [0u8; 65535];
+
+    loop {
+        match tokio::time::timeout_at(deadline, recv_socket.recv_from(&mut buf)).await {
+            Err(_) => return false, // Timeout
+            Ok(Err(_)) => return false, // Socket error
+            Ok(Ok((len, _addr))) => {
+                let data = &buf[..len];
+
+                // Check pipeline admission
+                {
+                    let pl = pipeline.lock().await;
+                    let result = pl.process(data);
+                    if !matches!(result, crate::pipeline::AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
+                if data.len() < crate::packet::DATA_HEADER_SIZE {
+                    continue;
+                }
+
+                let header = match DataHeader::deserialize(data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+
+                if header.session_id != session_id {
+                    continue;
+                }
+
+                // Try to decrypt and check for RESET frame
+                let ciphertext = &data[crate::packet::DATA_HEADER_SIZE..];
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
+
+                if let Ok(plaintext) = cipher.decrypt(nonce, ciphertext) {
+                    // Check if it's a RESET frame (first byte = 0x04 for RESET)
+                    if !plaintext.is_empty() && plaintext[0] == 0x04 {
+                        return true;
+                    }
+                }
+                // Not a RESET — could be retransmitted data; keep waiting
+            }
+        }
+    }
+}
+
 /// Run the bridge for a single session (called from a spawned task).
 ///
 /// In multi-session mode, the dispatcher routes packets to a per-session
@@ -2692,34 +2766,55 @@ async fn run_session_bridge(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Handle RESET (multiple TCP streams on same ZTLP session)
-    match result {
-        tunnel::BridgeOutcome::ResetReceived => {
-            // For multi-session, we simply reconnect to backend
-            loop {
-                let tcp_stream = TcpStream::connect(forward_sock)
-                    .await
-                    .map_err(|e| format!("reconnect to {}: {}", forward_addr, e))?;
-
-                let outcome = tunnel::run_bridge_demuxed(
-                    tcp_stream,
-                    udp_send_socket.clone(),
-                    recv_socket.clone(),
-                    pipeline.clone(),
+    // Handle multiple TCP connections on the same ZTLP session.
+    // The client sends RESET frames to signal new TCP connections.
+    // After each bridge closes (either ResetReceived or Closed), we
+    // wait for a new RESET to potentially start another bridge.
+    let mut last_outcome = result;
+    loop {
+        match last_outcome {
+            tunnel::BridgeOutcome::ResetReceived => {
+                // Immediately reconnect to backend
+            }
+            tunnel::BridgeOutcome::Closed => {
+                // Bridge closed normally (TCP FIN). Wait for a potential RESET
+                // from the client indicating a new TCP connection.
+                let reset = wait_for_reset_on_socket(
+                    &recv_socket,
+                    &pipeline,
                     session_id,
-                    peer_addr,
-                    Vec::new(),
+                    Duration::from_secs(300), // 5 min idle timeout
                 )
-                .await
-                .map_err(|e| e.to_string())?;
-
-                match outcome {
-                    tunnel::BridgeOutcome::ResetReceived => continue,
-                    tunnel::BridgeOutcome::Closed => break,
+                .await;
+                if !reset {
+                    break; // No RESET received — session is truly done
                 }
+                // RESET received — continue to reconnect
             }
         }
-        tunnel::BridgeOutcome::Closed => {}
+
+        let tcp_stream = TcpStream::connect(forward_sock)
+            .await
+            .map_err(|e| format!("reconnect to {}: {}", forward_addr, e))?;
+
+        eprintln!(
+            "{} session {} reconnected to backend {}",
+            c_green("✓"),
+            session_id,
+            forward_addr
+        );
+
+        last_outcome = tunnel::run_bridge_demuxed(
+            tcp_stream,
+            udp_send_socket.clone(),
+            recv_socket.clone(),
+            pipeline.clone(),
+            session_id,
+            peer_addr,
+            Vec::new(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
     // Stop the forwarder

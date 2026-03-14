@@ -186,13 +186,20 @@ defmodule ZtlpNs.Store do
   def lookup_by_pubkey(pubkey_hex) when is_binary(pubkey_hex) do
     pk_lower = String.downcase(pubkey_hex)
 
-    case :mnesia.dirty_read(@pubkey_index_table, pk_lower) do
-      [{@pubkey_index_table, _pk, name}] ->
-        # Found in index — now look up the actual record
-        lookup(name, :key)
+    try do
+      case :mnesia.dirty_read(@pubkey_index_table, pk_lower) do
+        [{@pubkey_index_table, _pk, name}] ->
+          # Found in index — now look up the actual record
+          lookup(name, :key)
 
-      [] ->
-        :not_found
+        [] ->
+          :not_found
+      end
+    rescue
+      # Table may not exist yet if Store hasn't fully initialized
+      ArgumentError -> :not_found
+    catch
+      :exit, {:aborted, {:no_exists, _}} -> :not_found
     end
   end
 

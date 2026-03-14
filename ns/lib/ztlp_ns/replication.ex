@@ -88,7 +88,12 @@ defmodule ZtlpNs.Replication do
 
   defp increment_metric(key) do
     ensure_metrics_table()
-    :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+
+    try do
+      :ets.update_counter(@metrics_table, key, {2, 1}, {key, 0})
+    rescue
+      ArgumentError -> :ok
+    end
   end
 
   defp ensure_metrics_table do

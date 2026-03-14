@@ -25,10 +25,27 @@ defmodule ZtlpNs.SecurityHardeningTest do
   }
 
   setup do
+    # Ensure Mnesia tables exist (they may be missing if Store was restarted
+    # by another test module's side effects, e.g., cluster tests)
+    ensure_pubkey_index_table()
     Store.clear()
     TrustAnchor.clear()
     RateLimiter.reset()
     :ok
+  end
+
+  defp ensure_pubkey_index_table do
+    storage_mode = ZtlpNs.Config.storage_mode()
+
+    case :mnesia.create_table(:ztlp_ns_pubkey_index, [
+           {:attributes, [:pubkey_hex, :name]},
+           {:type, :set},
+           {storage_mode, [node()]}
+         ]) do
+      {:atomic, :ok} -> :ok
+      {:aborted, {:already_exists, :ztlp_ns_pubkey_index}} -> :ok
+      {:aborted, _reason} -> :ok
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════

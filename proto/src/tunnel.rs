@@ -206,8 +206,6 @@ const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// Minimum retransmission timeout in milliseconds.
 const MIN_RTO_MS: f64 = 200.0;
 
-
-
 /// Maximum number of missing sequence numbers in a single NACK frame.
 const MAX_NACK_SEQS: usize = 64;
 
@@ -1136,7 +1134,10 @@ async fn run_bridge_inner(
                     {
                         let cc = congestion_sender.lock().await;
                         if cc.scoreboard.is_acked(*nack_data_seq) {
-                            debug!("skipping retransmit for data_seq {} (SACK'd)", nack_data_seq);
+                            debug!(
+                                "skipping retransmit for data_seq {} (SACK'd)",
+                                nack_data_seq
+                            );
                             continue;
                         }
                     }
@@ -1441,7 +1442,10 @@ async fn run_bridge_inner(
                             {
                                 let cc = congestion_sender.lock().await;
                                 if cc.scoreboard.is_acked(*nack_data_seq) {
-                                    debug!("skipping retransmit for data_seq {} (SACK'd)", nack_data_seq);
+                                    debug!(
+                                        "skipping retransmit for data_seq {} (SACK'd)",
+                                        nack_data_seq
+                                    );
                                     continue;
                                 }
                             }
@@ -3286,8 +3290,8 @@ mod tests {
         cc.phase = CongestionPhase::SlowStart;
 
         cc.on_loss(None);
-        assert_eq!(cc.ssthresh, 50.0); // cwnd/2
-        // Advanced CC keeps cwnd at old value during Recovery (PRR manages it)
+        // ssthresh = cwnd/2, but cwnd stays at pre-loss value (PRR manages it)
+        assert_eq!(cc.ssthresh, 50.0);
         assert_eq!(cc.cwnd, 100.0);
         assert_eq!(cc.phase, CongestionPhase::Recovery);
     }

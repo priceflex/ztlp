@@ -158,26 +158,26 @@ impl RekeyManager {
 
         let elapsed = Instant::now().duration_since(self.key_installed_at);
 
-        // Hard limits — must stop
+        // Hard limits — must stop sending until rekey completes
         if self.bytes_encrypted >= MAX_BYTES_PER_KEY
             || self.packets_encrypted >= MAX_PACKETS_PER_KEY
         {
             return RekeyAction::HardLimit;
         }
 
-        // Urgent — approaching limits
+        // Time limit reached — initiate rekey
+        if elapsed >= MAX_TIME_PER_KEY {
+            return RekeyAction::InitiateRekey {
+                counter: self.rekey_counter + 1,
+            };
+        }
+
+        // Approaching limits — urgent rekey (before hard limit)
         if self.bytes_encrypted as f64 >= MAX_BYTES_PER_KEY as f64 * WARN_THRESHOLD
             || self.packets_encrypted as f64 >= MAX_PACKETS_PER_KEY as f64 * WARN_THRESHOLD
             || elapsed.as_secs_f64() >= MAX_TIME_PER_KEY.as_secs_f64() * WARN_THRESHOLD
         {
             return RekeyAction::UrgentRekey {
-                counter: self.rekey_counter + 1,
-            };
-        }
-
-        // Time-based rekey
-        if elapsed >= MAX_TIME_PER_KEY {
-            return RekeyAction::InitiateRekey {
                 counter: self.rekey_counter + 1,
             };
         }

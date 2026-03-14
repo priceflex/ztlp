@@ -24,14 +24,12 @@
 
 #![deny(unsafe_code)]
 
-use std::fmt;
-
 /// Default window size in bits. Must be a multiple of 64.
 /// 256 bits tracks the last 256 sequence numbers — matches the ZTLP spec.
-const DEFAULT_WINDOW_SIZE: usize = 256;
+const WINDOW_SIZE: u64 = 256;
 
 /// Number of u64 blocks needed for the window bitmap.
-const BITMAP_BLOCKS: usize = DEFAULT_WINDOW_SIZE / 64;
+const BITMAP_BLOCKS: usize = (WINDOW_SIZE / 64) as usize;
 
 /// Result of checking a sequence number against the replay window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +49,11 @@ pub enum ReplayCheck {
 #[derive(Clone)]
 pub struct ReplayWindow {
     /// Bitmap tracking seen sequence numbers within the window.
-    /// Bit i corresponds to sequence number (max_seq - i).
     bitmap: [u64; BITMAP_BLOCKS],
-    /// Highest accepted sequence number. 0 means no packets accepted yet.
+    /// Highest accepted sequence number. Starts at 0.
     max_seq: u64,
+    /// Whether any packet has been accepted yet.
+    initialized: bool,
     /// Total number of packets checked.
     total_checked: u64,
     /// Total number of accepted packets.
@@ -69,6 +68,7 @@ impl ReplayWindow {
         Self {
             bitmap: [0u64; BITMAP_BLOCKS],
             max_seq: 0,
+            initialized: false,
             total_checked: 0,
             total_accepted: 0,
             total_rejected: 0,
@@ -86,9 +86,11 @@ impl ReplayWindow {
     pub fn check_and_update(&mut self, seq: u64) -> ReplayCheck {
         self.total_checked += 1;
 
-        // Special case: first packet ever
-        if self.max_seq == 0 && self.total_accepted == 0 {
+        // First packet ever
+        if !self.initialized {
+            self.initialized = true;
             self.max_seq = seq;
+            self.bitmap = [0u64; BITMAP_BLOCKS];
             self.set_bit(0);
             self.total_accepted += 1;
             return ReplayCheck::Ok;
@@ -99,7 +101,7 @@ impl ReplayWindow {
             let advance = seq - self.max_seq;
             self.advance_window(advance);
             self.max_seq = seq;
-            self.set_bit(0);
+            self.set_bit(0); // Mark current max_seq position as seen
             self.total_accepted += 1;
             ReplayCheck::Ok
         } else if seq == self.max_seq {
@@ -108,7 +110,7 @@ impl ReplayWindow {
             ReplayCheck::Duplicate
         } else {
             let delta = self.max_seq - seq;
-            if delta >= DEFAULT_WINDOW_SIZE as u64 {
+            if delta >= WINDOW_SIZE {
                 // Too old — outside the window
                 self.total_rejected += 1;
                 ReplayCheck::TooOld
@@ -127,7 +129,7 @@ impl ReplayWindow {
 
     /// Check without updating (read-only peek).
     pub fn check(&self, seq: u64) -> ReplayCheck {
-        if self.max_seq == 0 && self.total_accepted == 0 {
+        if !self.initialized {
             return ReplayCheck::Ok;
         }
 
@@ -137,7 +139,7 @@ impl ReplayWindow {
             ReplayCheck::Duplicate
         } else {
             let delta = self.max_seq - seq;
-            if delta >= DEFAULT_WINDOW_SIZE as u64 {
+            if delta >= WINDOW_SIZE {
                 ReplayCheck::TooOld
             } else if self.get_bit(delta as usize) {
                 ReplayCheck::Duplicate
@@ -166,12 +168,13 @@ impl ReplayWindow {
     pub fn reset(&mut self) {
         self.bitmap = [0u64; BITMAP_BLOCKS];
         self.max_seq = 0;
+        self.initialized = false;
         // Keep stats across resets for diagnostic visibility
     }
 
     // ── Internal bitmap operations ──────────────────────────────────
 
-    /// Set bit at position `pos` (0 = most recent, i.e., max_seq).
+    /// Set bit at position `pos` (0 = most recent = max_seq).
     fn set_bit(&mut self, pos: usize) {
         let block = pos / 64;
         let bit = pos % 64;
@@ -193,9 +196,9 @@ impl ReplayWindow {
 
     /// Advance the window by `count` positions.
     ///
-    /// Shifts the bitmap right by `count` bits, zeroing the new positions.
+    /// Shifts the bitmap to make room for `count` new positions at the front.
     fn advance_window(&mut self, count: u64) {
-        if count >= DEFAULT_WINDOW_SIZE as u64 {
+        if count >= WINDOW_SIZE {
             // Complete reset — everything in old window is now too old
             self.bitmap = [0u64; BITMAP_BLOCKS];
             return;
@@ -205,31 +208,29 @@ impl ReplayWindow {
         let block_shift = count / 64;
         let bit_shift = count % 64;
 
+        // Shift whole blocks first (from high to low to avoid clobbering)
         if block_shift > 0 {
-            // Shift whole blocks
             for i in (0..BITMAP_BLOCKS).rev() {
-                if i >= block_shift {
-                    self.bitmap[i] = self.bitmap[i - block_shift];
+                self.bitmap[i] = if i >= block_shift {
+                    self.bitmap[i - block_shift]
                 } else {
-                    self.bitmap[i] = 0;
-                }
+                    0
+                };
             }
         }
 
+        // Shift bits within blocks
         if bit_shift > 0 {
-            // Shift individual bits within blocks
             for i in (0..BITMAP_BLOCKS).rev() {
-                let current = self.bitmap[i];
-                self.bitmap[i] = current >> bit_shift;
+                self.bitmap[i] <<= bit_shift;
                 if i > 0 {
-                    // Carry bits from the next lower block
-                    let carry = self.bitmap[i - 1] << (64 - bit_shift);
-                    self.bitmap[i] |= carry;
+                    // Carry high bits from the block below
+                    self.bitmap[i] |= self.bitmap[i - 1] >> (64 - bit_shift);
                 }
             }
+            // Zero out the bits that shouldn't carry in the lowest block
+            // (already handled by the shift)
         }
-
-        // Zero out the new bits at the front (position 0 will be set by caller)
     }
 }
 
@@ -239,8 +240,8 @@ impl Default for ReplayWindow {
     }
 }
 
-impl fmt::Debug for ReplayWindow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for ReplayWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReplayWindow")
             .field("max_seq", &self.max_seq)
             .field("accepted", &self.total_accepted)
@@ -307,7 +308,7 @@ mod tests {
     fn test_too_old_rejected() {
         let mut w = ReplayWindow::new();
         assert_eq!(w.check_and_update(500), ReplayCheck::Ok);
-        // 500 - 256 = 244, anything <= 244 is too old
+        // 500 - 256 = 244, anything with delta >= 256 is too old
         assert_eq!(w.check_and_update(200), ReplayCheck::TooOld);
         assert_eq!(w.check_and_update(1), ReplayCheck::TooOld);
     }
@@ -316,10 +317,10 @@ mod tests {
     fn test_window_boundary_exact() {
         let mut w = ReplayWindow::new();
         assert_eq!(w.check_and_update(256), ReplayCheck::Ok);
-        // Exactly at window boundary: 256 - 256 = 0 → TooOld (delta >= WINDOW_SIZE)
-        // Seq 1 is delta=255, which is within window
+        // delta = 256 - 1 = 255, which is < 256, so within window
         assert_eq!(w.check_and_update(1), ReplayCheck::Ok);
-        // But seq 0 would be delta=256 → TooOld. Actually seq 0 doesn't exist in practice.
+        // delta = 256 - 0 = 256, which is >= 256, so too old
+        assert_eq!(w.check_and_update(0), ReplayCheck::TooOld);
     }
 
     #[test]
@@ -386,7 +387,7 @@ mod tests {
         let mut w = ReplayWindow::new();
         w.check_and_update(1); // accepted
         w.check_and_update(2); // accepted
-        w.check_and_update(1); // rejected (duplicate)
+        w.check_and_update(1); // rejected (duplicate, within window, delta=1)
         w.check_and_update(3); // accepted
 
         let stats = w.stats();
@@ -398,8 +399,9 @@ mod tests {
     #[test]
     fn test_window_fills_completely() {
         let mut w = ReplayWindow::new();
-        // Fill the entire window with non-sequential packets
+        // First, set max_seq to 256
         assert_eq!(w.check_and_update(256), ReplayCheck::Ok);
+        // Then fill in all gaps from 1 to 255 (all within window)
         for seq in 1..256 {
             assert_eq!(
                 w.check_and_update(seq),
@@ -408,7 +410,6 @@ mod tests {
                 seq
             );
         }
-        // All should be seen now
         let stats = w.stats();
         assert_eq!(stats.total_accepted, 256);
     }
@@ -447,7 +448,9 @@ mod tests {
     #[test]
     fn test_realistic_packet_loss_scenario() {
         let mut w = ReplayWindow::new();
-        // Simulate: packets 1-100 arrive, but 30% are lost and retransmitted later
+        // Simulate: packets arrive, some are lost and retransmitted later
+        // Arrivals: 1, 2, 4, 5, 7, 8, ...
+        // Retransmissions: 3, 6, 9, ...
         let arrival_order: Vec<u64> = vec![
             1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 19, 20, 22, 23, 25, 26, 28, 29, 31, 32, 34,
             35, 37, 38, 40, // Now "retransmissions" of lost packets
@@ -463,12 +466,8 @@ mod tests {
         }
         // Replaying any of them should fail
         for seq in &arrival_order {
-            assert_ne!(
-                w.check_and_update(*seq),
-                ReplayCheck::Ok,
-                "replay of {} should fail",
-                seq
-            );
+            let result = w.check_and_update(*seq);
+            assert_ne!(result, ReplayCheck::Ok, "replay of {} should fail", seq);
         }
     }
 
@@ -488,7 +487,7 @@ mod tests {
                 seq
             );
         }
-        // Attacker replays very old packet
+        // Attacker replays very old packet (seq 1 is within window since max=50, delta=49)
         assert_eq!(w.check_and_update(1), ReplayCheck::Duplicate);
     }
 
@@ -501,9 +500,9 @@ mod tests {
         }
         // Big gap: jump to 500
         assert_eq!(w.check_and_update(500), ReplayCheck::Ok);
-        // Packets from first burst are now too old
+        // Packets from first burst are now too old (delta >= 256)
         assert_eq!(w.check_and_update(50), ReplayCheck::TooOld);
-        // But near-500 packets work
+        // But near-500 packets work (delta=100 < 256)
         assert_eq!(w.check_and_update(400), ReplayCheck::Ok);
         // Second burst: 501-600
         for seq in 501..=600 {
@@ -535,7 +534,7 @@ mod tests {
         for i in 0..20u64 {
             let new_seq = (i + 1) * 300; // Each jump is 300, outside window
             assert_eq!(w.check_and_update(new_seq), ReplayCheck::Ok);
-            // Previous jump is now too old
+            // Previous jump is now too old (delta=300 >= 256)
             if i > 0 {
                 let old_seq = i * 300;
                 assert_eq!(w.check_and_update(old_seq), ReplayCheck::TooOld);
@@ -556,5 +555,44 @@ mod tests {
         let debug = format!("{:?}", w);
         assert!(debug.contains("max_seq: 42"));
         assert!(debug.contains("accepted: 1"));
+    }
+
+    #[test]
+    fn test_advance_by_one() {
+        let mut w = ReplayWindow::new();
+        // Seq 5, then 6 — should shift by 1
+        assert_eq!(w.check_and_update(5), ReplayCheck::Ok);
+        assert_eq!(w.check_and_update(6), ReplayCheck::Ok);
+        // 5 should still be in window (delta=1)
+        assert_eq!(w.check_and_update(5), ReplayCheck::Duplicate);
+    }
+
+    #[test]
+    fn test_advance_by_64_exactly() {
+        let mut w = ReplayWindow::new();
+        assert_eq!(w.check_and_update(1), ReplayCheck::Ok);
+        assert_eq!(w.check_and_update(65), ReplayCheck::Ok);
+        // 1 is still in window (delta=64 < 256)
+        assert_eq!(w.check_and_update(1), ReplayCheck::Duplicate);
+    }
+
+    #[test]
+    fn test_advance_crosses_block_boundary() {
+        let mut w = ReplayWindow::new();
+        // Set some bits in the first block
+        for seq in 1..=10 {
+            w.check_and_update(seq);
+        }
+        // Jump to 70 (crosses first u64 block boundary)
+        assert_eq!(w.check_and_update(70), ReplayCheck::Ok);
+        // Old packets should still be tracked (delta < 256)
+        for seq in 1..=10 {
+            assert_eq!(
+                w.check_and_update(seq),
+                ReplayCheck::Duplicate,
+                "seq {} should be dup",
+                seq
+            );
+        }
     }
 }

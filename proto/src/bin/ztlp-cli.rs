@@ -1896,8 +1896,40 @@ async fn cmd_listen(
         // `pending_packets` carries data packets captured during the
         // inter-bridge gap (by wait_for_reset_buffered). These are
         // injected into the next bridge to prevent data loss.
+        //
+        // LAZY CONNECT: On the first iteration (no pending packets),
+        // we wait for the first ZTLP data packet before connecting to
+        // the backend. This prevents sshd from sending its banner into
+        // a void when the client hasn't connected yet (e.g., during a
+        // demo presentation pause between handshake and SSH usage).
         let mut pending_packets: Vec<Vec<u8>> = Vec::new();
+        let mut first_iteration = true;
         loop {
+            // On the first iteration with no pending data, wait for the
+            // client to actually send data before connecting to the backend.
+            // This avoids the race where sshd sends its SSH banner, the
+            // listener bridges it over ZTLP, but the client has no TCP
+            // connection yet to receive ACKs, causing a 30s ACK timeout.
+            if first_iteration && pending_packets.is_empty() {
+                first_iteration = false;
+                eprintln!("{}", c_dim("Waiting for client to start sending data..."));
+                match wait_for_first_data(&node, session_id, from1, Duration::from_secs(600)).await
+                {
+                    Ok(initial_packets) => {
+                        eprintln!(
+                            "{} received {} initial packet(s) from client",
+                            c_cyan("↓"),
+                            initial_packets.len()
+                        );
+                        pending_packets = initial_packets;
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", c_red("✗ timeout waiting for client data:"), e);
+                        break;
+                    }
+                }
+            }
+
             let tcp_stream = TcpStream::connect(forward_addr)
                 .await
                 .map_err(|e| format!("failed to connect to {}: {}", forward_addr, e))?;
@@ -2103,6 +2135,88 @@ async fn wait_for_reset_buffered(
                         buffered_packets.drain(0..1024);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Wait for the first ZTLP data packet from the client before connecting to
+/// the backend service. This implements "lazy connect" — the listener defers
+/// the TCP connection to the backend until the client actually starts sending
+/// data.
+///
+/// Without this, the listener immediately connects to the backend (e.g., sshd)
+/// after the handshake. sshd sends its SSH banner, the listener bridges it
+/// over ZTLP, but the client hasn't accepted a TCP connection on its local
+/// port yet. Nobody reads from the client's UDP socket, no ACKs are sent,
+/// and the listener's sender hits the 30-second ACK timeout — killing the
+/// tunnel before the user even tries to SSH.
+///
+/// Returns the raw packets received (to be injected into the bridge via
+/// `run_bridge_with_buffered`). Also captures a short grace window of
+/// additional packets that arrive immediately after the first one.
+async fn wait_for_first_data(
+    node: &TransportNode,
+    session_id: SessionId,
+    from: SocketAddr,
+    timeout_duration: Duration,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut buffered_packets: Vec<Vec<u8>> = Vec::new();
+
+    loop {
+        match tokio::time::timeout_at(deadline, node.recv_raw()).await {
+            Err(_) => {
+                // Timeout expired with no data from client
+                return Err("timeout waiting for first data from client".into());
+            }
+            Ok(Err(e)) => {
+                return Err(format!("recv error while waiting for first data: {}", e).into());
+            }
+            Ok(Ok((data, addr))) => {
+                if addr != from {
+                    continue;
+                }
+
+                // Pipeline admission check
+                {
+                    let pl = node.pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
+                // Must be a data packet for our session
+                if data.len() < DATA_HEADER_SIZE {
+                    continue;
+                }
+                let header = match DataHeader::deserialize(&data) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+                if header.session_id != session_id {
+                    continue;
+                }
+
+                // Got a valid data packet — buffer it
+                buffered_packets.push(data);
+
+                // Collect any additional packets that arrive in a short
+                // grace window (the client likely sent a burst)
+                let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+                loop {
+                    match tokio::time::timeout_at(grace_deadline, node.recv_raw()).await {
+                        Err(_) => break, // Grace period expired
+                        Ok(Err(_)) => break,
+                        Ok(Ok((gdata, gaddr))) => {
+                            if gaddr == from && gdata.len() >= DATA_HEADER_SIZE {
+                                buffered_packets.push(gdata);
+                            }
+                        }
+                    }
+                }
+                return Ok(buffered_packets);
             }
         }
     }

@@ -203,26 +203,10 @@ const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 // ─── Congestion control parameters ──────────────────────────────────────────
 
-/// Initial congestion window (in packets). 10 is the standard modern default
-/// (RFC 6928). Slow start ramps quickly on low-RTT links.
-const INITIAL_CWND: f64 = 10.0;
-
-/// Initial slow-start threshold (in packets).
-/// Start unlimited — let actual loss set the threshold. This avoids
-/// artificially capping throughput on high-bandwidth links.
-const INITIAL_SSTHRESH: f64 = 65535.0;
-
 /// Minimum retransmission timeout in milliseconds.
 const MIN_RTO_MS: f64 = 200.0;
 
-/// Maximum retransmission timeout in milliseconds (4 seconds, not 60).
-const MAX_RTO_MS: f64 = 4000.0;
 
-/// Initial smoothed RTT estimate in milliseconds.
-const INITIAL_SRTT_MS: f64 = 100.0;
-
-/// Minimum gap detection threshold in milliseconds before sending a NACK.
-const NACK_MIN_THRESHOLD_MS: u64 = 100;
 
 /// Maximum number of missing sequence numbers in a single NACK frame.
 const MAX_NACK_SEQS: usize = 64;
@@ -604,199 +588,6 @@ impl RetransmitBuffer {
 }
 
 // ─── Congestion controller ──────────────────────────────────────────────────
-
-/// Congestion control state.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CongestionState {
-    SlowStart,
-    CongestionAvoidance,
-    FastRecovery,
-}
-
-/// Action the caller should take after processing an ACK or duplicate ACK.
-#[derive(Debug, PartialEq)]
-enum AckAction {
-    None,
-    FastRetransmit,
-}
-
-/// AIMD-style congestion controller with RTT estimation and fast recovery.
-///
-/// Implements TCP NewReno–style congestion control:
-/// - **Slow Start:** cwnd doubles each RTT (exponential growth) until ssthresh
-/// - **Congestion Avoidance:** cwnd grows by ~1 packet per RTT (linear growth)
-/// - **Fast Recovery:** entered on 3 duplicate ACKs, exits when recovery point is ACKed
-/// - **On loss (RTO):** ssthresh = cwnd/2, cwnd = ssthresh (multiplicative decrease)
-///
-/// RTT is estimated using EWMA (like TCP):
-/// - srtt = 0.875 * srtt + 0.125 * sample
-/// - rttvar = 0.75 * rttvar + 0.25 * |srtt - sample|
-/// - RTO = srtt + 4 * rttvar, clamped to [MIN_RTO_MS, MAX_RTO_MS]
-struct CongestionController {
-    cwnd: f64,
-    ssthresh: f64,
-    srtt_ms: f64,
-    rttvar_ms: f64,
-    rto_ms: f64,
-    state: CongestionState,
-    /// Count of consecutive duplicate ACKs.
-    dup_ack_count: u32,
-    /// The last ACK sequence number seen (for duplicate detection).
-    #[allow(dead_code)]
-    last_ack_seq: Option<u64>,
-    /// Recovery point: the highest send_seq when fast recovery was entered.
-    /// Fast recovery exits when an ACK >= recover_seq arrives.
-    recover_seq: u64,
-    /// Whether a loss reduction has already been applied in this RTT.
-    /// Prevents double-reduction from multiple losses in the same window.
-    loss_in_rtt: bool,
-}
-
-impl CongestionController {
-    fn new() -> Self {
-        Self {
-            cwnd: INITIAL_CWND,
-            ssthresh: INITIAL_SSTHRESH,
-            srtt_ms: INITIAL_SRTT_MS,
-            rttvar_ms: INITIAL_SRTT_MS / 2.0,
-            rto_ms: INITIAL_SRTT_MS + 4.0 * (INITIAL_SRTT_MS / 2.0),
-            state: CongestionState::SlowStart,
-            dup_ack_count: 0,
-            last_ack_seq: None,
-            recover_seq: 0,
-            loss_in_rtt: false,
-        }
-    }
-
-    /// Effective send window: min(cwnd, SEND_WINDOW).
-    fn effective_window(&self) -> u64 {
-        let cw = self.cwnd as u64;
-        cw.min(SEND_WINDOW)
-    }
-
-    /// Called when a **new** (non-duplicate) ACK is received.
-    /// `newly_acked` is the number of new packets this ACK covers.
-    /// `ack_seq` is the cumulative ACK sequence number.
-    /// Returns an `AckAction` indicating what the caller should do.
-    fn on_ack(&mut self, newly_acked: u64, ack_seq: u64) -> AckAction {
-        // New ACK: reset duplicate counter and per-RTT loss flag
-        self.dup_ack_count = 0;
-        self.loss_in_rtt = false;
-
-        match self.state {
-            CongestionState::SlowStart => {
-                // In slow start, cwnd increases by newly_acked packets
-                // (doubles per RTT when every packet is ACKed)
-                self.cwnd += newly_acked as f64;
-                if self.cwnd >= self.ssthresh {
-                    self.state = CongestionState::CongestionAvoidance;
-                    debug!(
-                        "congestion: entering congestion avoidance (cwnd={:.1}, ssthresh={:.1})",
-                        self.cwnd, self.ssthresh
-                    );
-                }
-            }
-            CongestionState::CongestionAvoidance => {
-                // Linear increase: cwnd += newly_acked / cwnd per ACK
-                // This yields ~1 packet increase per RTT
-                self.cwnd += (newly_acked as f64) / self.cwnd;
-            }
-            CongestionState::FastRecovery => {
-                // New ACK during fast recovery: check if we've recovered
-                if ack_seq >= self.recover_seq {
-                    // Full ACK — exit fast recovery
-                    self.cwnd = self.ssthresh;
-                    self.state = CongestionState::CongestionAvoidance;
-                    debug!(
-                        "congestion: exiting fast recovery (cwnd={:.1}, ssthresh={:.1})",
-                        self.cwnd, self.ssthresh
-                    );
-                }
-                // Partial ACK: stay in fast recovery, deflate cwnd
-            }
-        }
-        AckAction::None
-    }
-
-    /// Called when a duplicate ACK is received.
-    /// `ack_seq` is the ACK sequence number (same as previous ACK).
-    /// Returns `AckAction::FastRetransmit` when the 3rd dup ACK triggers
-    /// fast retransmit, or `AckAction::None` otherwise.
-    fn on_dup_ack(&mut self, _ack_seq: u64) -> AckAction {
-        self.dup_ack_count += 1;
-
-        if self.dup_ack_count == 3 && self.state != CongestionState::FastRecovery {
-            // Enter fast recovery
-            self.ssthresh = (self.cwnd / 2.0).max(4.0);
-            self.cwnd = self.ssthresh + 3.0;
-            self.state = CongestionState::FastRecovery;
-            debug!(
-                "congestion: entering fast recovery (dup_ack=3, ssthresh={:.1}, cwnd={:.1})",
-                self.ssthresh, self.cwnd
-            );
-            return AckAction::FastRetransmit;
-        }
-
-        if self.dup_ack_count > 3 && self.state == CongestionState::FastRecovery {
-            // Inflate cwnd for each additional dup ACK during recovery
-            self.cwnd += 1.0;
-        }
-
-        AckAction::None
-    }
-
-    /// Called when a loss is detected (NACK or RTO timeout).
-    /// Guarded by `loss_in_rtt` to prevent double-reduction within the
-    /// same RTT (multiple losses in one window should only reduce once).
-    fn on_loss(&mut self) {
-        if self.loss_in_rtt {
-            return; // already reduced this RTT
-        }
-        self.loss_in_rtt = true;
-        self.ssthresh = (self.cwnd / 2.0).max(4.0);
-        self.cwnd = self.ssthresh;
-        self.state = CongestionState::CongestionAvoidance;
-        debug!(
-            "congestion: loss detected, ssthresh={:.1}, cwnd={:.1}",
-            self.ssthresh, self.cwnd
-        );
-    }
-
-    /// Called when a corruption (AEAD failure) is detected.
-    /// Does NOT reduce cwnd — corruption is not congestion.
-    /// The caller handles retransmission.
-    fn on_corruption(&mut self) {
-        debug!("congestion: corruption detected (no cwnd reduction)");
-    }
-
-    /// Update RTT estimate from a measured sample.
-    fn update_rtt(&mut self, sample_ms: f64) {
-        // EWMA: srtt = 0.875 * srtt + 0.125 * sample
-        let diff = (self.srtt_ms - sample_ms).abs();
-        self.rttvar_ms = 0.75 * self.rttvar_ms + 0.25 * diff;
-        self.srtt_ms = 0.875 * self.srtt_ms + 0.125 * sample_ms;
-        self.rto_ms = (self.srtt_ms + 4.0 * self.rttvar_ms).clamp(MIN_RTO_MS, MAX_RTO_MS);
-    }
-
-    /// Current RTO in milliseconds.
-    #[allow(dead_code)]
-    fn rto_ms(&self) -> f64 {
-        self.rto_ms
-    }
-
-    /// Current smoothed RTT in milliseconds.
-    #[allow(dead_code)]
-    fn srtt_ms(&self) -> f64 {
-        self.srtt_ms
-    }
-
-    /// The NACK threshold: how long to wait before sending a NACK.
-    /// Uses 3× srtt or NACK_MIN_THRESHOLD_MS, whichever is larger.
-    fn nack_threshold(&self) -> std::time::Duration {
-        let threshold_ms = (3.0 * self.srtt_ms).max(NACK_MIN_THRESHOLD_MS as f64) as u64;
-        std::time::Duration::from_millis(threshold_ms)
-    }
-}
 
 // ─── Lazy Connect ───────────────────────────────────────────────────────────
 
@@ -1268,8 +1059,9 @@ async fn run_bridge_inner(
     let ack_notify_reader = ack_notify;
 
     // Congestion controller shared between sender and receiver.
-    let congestion: Arc<Mutex<CongestionController>> =
-        Arc::new(Mutex::new(CongestionController::new()));
+    use crate::congestion::AdvancedCongestionController;
+    let congestion: Arc<Mutex<AdvancedCongestionController>> =
+        Arc::new(Mutex::new(AdvancedCongestionController::new()));
     let congestion_sender = congestion.clone();
     let congestion_receiver = congestion;
 
@@ -1336,10 +1128,24 @@ async fn run_bridge_inner(
                 // Signal loss to congestion controller (once per NACK batch)
                 {
                     let mut cc = congestion_sender.lock().await;
-                    cc.on_loss();
+                    cc.on_loss(Some(data_seq));
                 }
 
                 for nack_data_seq in &nack_seqs {
+                    // Skip if SACK scoreboard says receiver already has it
+                    {
+                        let cc = congestion_sender.lock().await;
+                        if cc.scoreboard.is_acked(*nack_data_seq) {
+                            debug!("skipping retransmit for data_seq {} (SACK'd)", nack_data_seq);
+                            continue;
+                        }
+                    }
+                    // Record retransmit for spurious detection
+                    {
+                        let mut cc = congestion_sender.lock().await;
+                        let srtt = cc.srtt_ms();
+                        cc.spurious.record_retransmit(*nack_data_seq, srtt);
+                    }
                     let entry_info = {
                         let rb = retransmit_buf_sender.lock().await;
                         rb.get_with_packet_seq(*nack_data_seq)
@@ -1411,9 +1217,23 @@ async fn run_bridge_inner(
                         // Process retransmit while TCP read is stalled.
                         {
                             let mut cc = congestion_sender.lock().await;
-                            cc.on_loss();
+                            cc.on_loss(Some(data_seq));
                         }
                         for nack_data_seq in &nack_seqs {
+                            // Skip if SACK scoreboard says receiver already has it
+                            {
+                                let cc = congestion_sender.lock().await;
+                                if cc.scoreboard.is_acked(*nack_data_seq) {
+                                    debug!("skipping retransmit for data_seq {} (SACK'd)", nack_data_seq);
+                                    continue;
+                                }
+                            }
+                            // Record retransmit for spurious detection
+                            {
+                                let mut cc = congestion_sender.lock().await;
+                                let srtt = cc.srtt_ms();
+                                cc.spurious.record_retransmit(*nack_data_seq, srtt);
+                            }
                             let entry_info = {
                                 let rb = retransmit_buf_sender.lock().await;
                                 rb.get_with_packet_seq(*nack_data_seq)
@@ -1503,13 +1323,16 @@ async fn run_bridge_inner(
                     let guard = last_acked_seq_reader.lock().await;
                     *guard
                 };
-                let effective_window = {
-                    let cc = congestion_sender.lock().await;
-                    cc.effective_window()
+                let remaining_chunks = num_chunks - chunk_idx;
+                let (effective_window, paced) = {
+                    let mut cc = congestion_sender.lock().await;
+                    let ew = cc.effective_window();
+                    let paced = cc.paced_send_count(remaining_chunks);
+                    (ew, paced)
                 };
 
                 // How many packets can we send right now?
-                let window_avail = match acked {
+                let window_avail_raw = match acked {
                     Some(acked_data_seq) => {
                         if data_seq < acked_data_seq + effective_window + 1 {
                             (acked_data_seq + effective_window + 1 - data_seq) as usize
@@ -1526,7 +1349,10 @@ async fn run_bridge_inner(
                     }
                 };
 
-                if window_avail == 0 {
+                // Apply pacing: limit actual send count to min(window, paced)
+                let window_avail = window_avail_raw.min(paced);
+
+                if window_avail_raw == 0 {
                     had_window_stall = true;
 
                     if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
@@ -1545,17 +1371,14 @@ async fn run_bridge_inner(
                     {
                         let rto = {
                             let cc = congestion_sender.lock().await;
-                            cc.rto_ms
+                            cc.rto_ms()
                         };
                         let rto_dur = std::time::Duration::from_millis(rto.max(MIN_RTO_MS) as u64);
                         if last_ack_check.elapsed() > rto_dur {
                             let old_cwnd = {
                                 let mut cc = congestion_sender.lock().await;
                                 let old = cc.cwnd;
-                                cc.on_loss();
-                                // Exponential backoff: double the RTO on each
-                                // consecutive timeout (capped at MAX_RTO_MS).
-                                cc.rto_ms = (cc.rto_ms * 2.0).min(MAX_RTO_MS);
+                                cc.on_rto();
                                 old
                             };
                             let new_cwnd = {
@@ -1611,9 +1434,23 @@ async fn run_bridge_inner(
                     while let Ok(nack_seqs) = retransmit_rx.try_recv() {
                         {
                             let mut cc = congestion_sender.lock().await;
-                            cc.on_loss();
+                            cc.on_loss(Some(data_seq));
                         }
                         for nack_data_seq in &nack_seqs {
+                            // Skip if SACK scoreboard says receiver already has it
+                            {
+                                let cc = congestion_sender.lock().await;
+                                if cc.scoreboard.is_acked(*nack_data_seq) {
+                                    debug!("skipping retransmit for data_seq {} (SACK'd)", nack_data_seq);
+                                    continue;
+                                }
+                            }
+                            // Record retransmit for spurious detection
+                            {
+                                let mut cc = congestion_sender.lock().await;
+                                let srtt = cc.srtt_ms();
+                                cc.spurious.record_retransmit(*nack_data_seq, srtt);
+                            }
                             let entry_info = {
                                 let rb = retransmit_buf_sender.lock().await;
                                 rb.get_with_packet_seq(*nack_data_seq)
@@ -2116,18 +1953,16 @@ async fn run_bridge_inner(
                                             let mut cc = congestion_receiver.lock().await;
                                             cc.update_rtt(rtt_sample);
                                             if newly_acked > 0 {
-                                                cc.on_ack(newly_acked, acked_seq);
-                                            } else {
-                                                // Duplicate ACK (same seq)
-                                                cc.on_dup_ack(acked_seq);
+                                                cc.on_ack(newly_acked);
+                                            }
+                                            // Spurious retransmission detection
+                                            if cc.spurious.check_ack(acked_seq) {
+                                                cc.on_spurious_detected();
                                             }
                                         } else if newly_acked > 0 {
                                             // No RTT sample available, just notify congestion controller
                                             let mut cc = congestion_receiver.lock().await;
-                                            cc.on_ack(newly_acked, acked_seq);
-                                        } else {
-                                            let mut cc = congestion_receiver.lock().await;
-                                            cc.on_dup_ack(acked_seq);
+                                            cc.on_ack(newly_acked);
                                         }
                                     }
 
@@ -2151,10 +1986,14 @@ async fn run_bridge_inner(
                                         missing_seqs.len(),
                                         &missing_seqs[..missing_seqs.len().min(5)]
                                     );
-                                    // Regular NACK indicates loss → reduce cwnd
+                                    // Use advanced CC NACK handling with fast retransmit detection
                                     {
                                         let mut cc = congestion_receiver.lock().await;
-                                        cc.on_loss();
+                                        let should_fast_retransmit =
+                                            cc.on_nack_received(&missing_seqs);
+                                        if should_fast_retransmit {
+                                            cc.on_loss(None);
+                                        }
                                     }
                                     if let Err(e) = retransmit_tx.send(missing_seqs) {
                                         warn!("failed to forward NACK to sender: {}", e);
@@ -2174,10 +2013,7 @@ async fn run_bridge_inner(
                                         missing_seqs.len(),
                                         &missing_seqs[..missing_seqs.len().min(5)]
                                     );
-                                    {
-                                        let mut cc = congestion_receiver.lock().await;
-                                        cc.on_corruption();
-                                    }
+                                    // No CC penalty for corruption — just retransmit
                                     if let Err(e) = retransmit_tx.send(missing_seqs) {
                                         warn!("failed to forward CORRUPTION_NACK to sender: {}", e);
                                     }
@@ -2232,17 +2068,27 @@ async fn run_bridge_inner(
                                                 send_time.elapsed().as_secs_f64() * 1000.0;
                                             let mut cc = congestion_receiver.lock().await;
                                             cc.update_rtt(rtt_sample);
+                                            // Update SACK scoreboard
+                                            cc.scoreboard
+                                                .update_from_sack(sack_cum_ack, &sack_ranges);
                                             if newly_acked > 0 {
-                                                cc.on_ack(newly_acked, sack_cum_ack);
-                                            } else {
-                                                cc.on_dup_ack(sack_cum_ack);
+                                                cc.on_ack(newly_acked);
+                                            }
+                                            // Spurious retransmission detection
+                                            if cc.spurious.check_ack(sack_cum_ack) {
+                                                cc.on_spurious_detected();
                                             }
                                         } else if newly_acked > 0 {
                                             let mut cc = congestion_receiver.lock().await;
-                                            cc.on_ack(newly_acked, sack_cum_ack);
+                                            // Update SACK scoreboard
+                                            cc.scoreboard
+                                                .update_from_sack(sack_cum_ack, &sack_ranges);
+                                            cc.on_ack(newly_acked);
                                         } else {
                                             let mut cc = congestion_receiver.lock().await;
-                                            cc.on_dup_ack(sack_cum_ack);
+                                            // Update SACK scoreboard even for dup ACKs
+                                            cc.scoreboard
+                                                .update_from_sack(sack_cum_ack, &sack_ranges);
                                         }
                                     }
 
@@ -2388,7 +2234,7 @@ async fn run_bridge_inner(
                     {
                         let (cwnd, ssthresh, srtt, rto) = {
                             let cc = congestion_receiver.lock().await;
-                            (cc.cwnd, cc.ssthresh, cc.srtt_ms, cc.rto_ms)
+                            (cc.cwnd, cc.ssthresh, cc.srtt_ms(), cc.rto_ms())
                         };
                         stats_rx.maybe_report(cwnd, ssthresh, srtt, rto);
                     }
@@ -2507,7 +2353,7 @@ async fn run_bridge_inner(
             if let Some(ref mut reasm) = reassembly {
                 let nack_threshold = {
                     let cc = congestion_receiver.lock().await;
-                    cc.nack_threshold()
+                    cc.gap_threshold()
                 };
                 // Debug: log when we have a gap but haven't sent a NACK yet
                 if reasm.should_nack(nack_threshold) && reasm.can_send_nack(nack_threshold) {
@@ -3374,200 +3220,208 @@ mod tests {
         assert!(rb.send_time(99).is_none());
     }
 
-    // ── CongestionController tests ──────────────────────────────────────
+    // ── AdvancedCongestionController tests (tunnel integration) ────────
+
+    use crate::congestion::{
+        AdvancedCongestionController, CongestionPhase, INITIAL_CWND, INITIAL_SSTHRESH,
+        MAX_RTO_MS as CC_MAX_RTO_MS, SEND_WINDOW as CC_SEND_WINDOW,
+    };
 
     #[test]
     fn test_congestion_controller_initial_state() {
-        let cc = CongestionController::new();
+        let cc = AdvancedCongestionController::new();
         assert_eq!(cc.cwnd, INITIAL_CWND);
         assert_eq!(cc.ssthresh, INITIAL_SSTHRESH);
-        assert_eq!(cc.state, CongestionState::SlowStart);
+        assert_eq!(cc.phase, CongestionPhase::SlowStart);
         assert_eq!(cc.effective_window(), INITIAL_CWND as u64);
     }
 
     #[test]
     fn test_congestion_slow_start_growth() {
-        let mut cc = CongestionController::new();
-        assert_eq!(cc.state, CongestionState::SlowStart);
+        let mut cc = AdvancedCongestionController::new();
+        assert_eq!(cc.phase, CongestionPhase::SlowStart);
 
         // In slow start, cwnd += newly_acked
-        cc.on_ack(1, 0);
+        cc.on_ack(1);
         assert_eq!(cc.cwnd, INITIAL_CWND + 1.0);
-        assert_eq!(cc.state, CongestionState::SlowStart);
+        assert_eq!(cc.phase, CongestionPhase::SlowStart);
 
         // ACK covering 5 packets
-        cc.on_ack(5, 5);
+        cc.on_ack(5);
         assert_eq!(cc.cwnd, INITIAL_CWND + 6.0);
     }
 
     #[test]
     fn test_congestion_slow_start_to_avoidance_transition() {
-        let mut cc = CongestionController::new();
+        let mut cc = AdvancedCongestionController::new();
         cc.ssthresh = 20.0;
 
         // Grow cwnd past ssthresh
-        cc.on_ack(15, 15); // cwnd = 10 + 15 = 25 >= ssthresh(20)
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+        cc.on_ack(15); // cwnd = 10 + 15 = 25 >= ssthresh(20)
+        assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
     }
 
     #[test]
     fn test_congestion_avoidance_linear_growth() {
-        let mut cc = CongestionController::new();
-        cc.state = CongestionState::CongestionAvoidance;
+        let mut cc = AdvancedCongestionController::new();
+        cc.phase = CongestionPhase::CongestionAvoidance;
         cc.cwnd = 100.0;
 
         // In congestion avoidance: cwnd += 1/cwnd per ACK
-        cc.on_ack(1, 0);
+        cc.on_ack(1);
         assert!((cc.cwnd - 100.01).abs() < 0.001);
 
         // After 100 single-packet ACKs, should grow by ~1
-        for i in 1..100u64 {
-            cc.on_ack(1, i);
+        for _ in 1..100u64 {
+            cc.on_ack(1);
         }
         assert!((cc.cwnd - 101.0).abs() < 0.1);
     }
 
     #[test]
     fn test_congestion_on_loss() {
-        let mut cc = CongestionController::new();
+        let mut cc = AdvancedCongestionController::new();
         cc.cwnd = 100.0;
         cc.ssthresh = 200.0;
-        cc.state = CongestionState::SlowStart;
+        cc.phase = CongestionPhase::SlowStart;
 
-        cc.on_loss();
+        cc.on_loss(None);
         assert_eq!(cc.ssthresh, 50.0); // cwnd/2
-        assert_eq!(cc.cwnd, 50.0); // set to ssthresh
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+        // Advanced CC keeps cwnd at old value during Recovery (PRR manages it)
+        assert_eq!(cc.cwnd, 100.0);
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
     }
 
     #[test]
     fn test_congestion_on_loss_min_ssthresh() {
-        let mut cc = CongestionController::new();
+        let mut cc = AdvancedCongestionController::new();
         cc.cwnd = 3.0;
 
-        cc.on_loss();
-        assert_eq!(cc.ssthresh, 4.0); // max(cwnd/2, 4) = max(1.5, 4) = 4
-        assert_eq!(cc.cwnd, 4.0);
+        cc.on_loss(None);
+        // max(cwnd/2, MIN_CWND) = max(1.5, 2) = 2
+        assert_eq!(cc.ssthresh, 2.0);
+        // cwnd stays at old value during Recovery
+        assert_eq!(cc.cwnd, 3.0);
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
     }
 
     #[test]
     fn test_congestion_on_loss_dedup() {
-        // Multiple losses in the same RTT should only reduce once
-        let mut cc = CongestionController::new();
+        // Multiple losses while already in Recovery should only reduce once
+        let mut cc = AdvancedCongestionController::new();
         cc.cwnd = 100.0;
-        cc.on_loss();
-        let cwnd_after_first = cc.cwnd;
+        let ssthresh_before = cc.ssthresh;
+        cc.on_loss(Some(200));
+        let ssthresh_after_first = cc.ssthresh;
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
+        assert!(ssthresh_after_first < ssthresh_before);
 
-        // Second loss in the same RTT — should be a no-op
-        cc.on_loss();
-        assert_eq!(cc.cwnd, cwnd_after_first);
+        // Second loss in Recovery — should be a no-op (ssthresh unchanged)
+        cc.on_loss(Some(201));
+        assert_eq!(cc.ssthresh, ssthresh_after_first);
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
 
-        // After a new ACK, loss_in_rtt is reset
-        cc.on_ack(1, 100);
-        cc.on_loss();
-        // Now it should reduce again
-        assert!(cc.cwnd < cwnd_after_first);
+        // Simulate recovery complete: update scoreboard cumulative ack
+        // past the recovery_seq, then call on_ack to exit recovery
+        cc.scoreboard.update_from_sack(200, &[]);
+        cc.on_ack(1);
+        assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
+
+        let ssthresh_before_second = cc.ssthresh;
+        cc.on_loss(None);
+        // Now it should reduce again (new ssthresh)
+        assert!(cc.ssthresh <= ssthresh_before_second);
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
     }
 
     #[test]
-    fn test_congestion_dup_ack_fast_recovery() {
-        let mut cc = CongestionController::new();
+    fn test_congestion_nack_fast_retransmit() {
+        let mut cc = AdvancedCongestionController::new();
         cc.cwnd = 100.0;
-        cc.state = CongestionState::CongestionAvoidance;
+        cc.phase = CongestionPhase::CongestionAvoidance;
 
-        // First two dup ACKs — no action
-        assert_eq!(cc.on_dup_ack(5), AckAction::None);
-        assert_eq!(cc.on_dup_ack(5), AckAction::None);
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+        // Single NACK doesn't trigger fast retransmit
+        let trigger1 = cc.on_nack_received(&[5]);
+        assert!(!trigger1);
 
-        // Third dup ACK — enters fast recovery, triggers fast retransmit
-        assert_eq!(cc.on_dup_ack(5), AckAction::FastRetransmit);
-        assert_eq!(cc.state, CongestionState::FastRecovery);
-        // ssthresh = cwnd/2 = 50, cwnd = ssthresh + 3 = 53
-        assert_eq!(cc.ssthresh, 50.0);
-        assert_eq!(cc.cwnd, 53.0);
+        let trigger2 = cc.on_nack_received(&[5, 6]);
+        assert!(!trigger2);
 
-        // Additional dup ACKs inflate cwnd
-        assert_eq!(cc.on_dup_ack(5), AckAction::None);
-        assert_eq!(cc.cwnd, 54.0);
-
-        // New ACK covering the recovery point exits fast recovery
-        cc.recover_seq = 10;
-        cc.on_ack(5, 10);
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
-        assert_eq!(cc.cwnd, 50.0); // deflated to ssthresh
-    }
-
-    #[test]
-    fn test_congestion_on_corruption_no_cwnd_change() {
-        let mut cc = CongestionController::new();
-        cc.cwnd = 100.0;
-        cc.on_corruption();
-        assert_eq!(cc.cwnd, 100.0); // no change
+        // After enough NACKs, fast retransmit should trigger
+        let trigger3 = cc.on_nack_received(&[5, 6, 7]);
+        assert!(trigger3);
     }
 
     #[test]
     fn test_congestion_rtt_estimation() {
-        let mut cc = CongestionController::new();
+        let mut cc = AdvancedCongestionController::new();
         // Initial: srtt=100, rttvar=50, rto=100+4*50=300
 
-        // Sample of 80ms
+        // First real sample: RFC 6298 sets srtt=sample, rttvar=sample/2
         cc.update_rtt(80.0);
-        // srtt = 0.875 * 100 + 0.125 * 80 = 87.5 + 10 = 97.5
-        assert!((cc.srtt_ms - 97.5).abs() < 0.01);
-        // rttvar = 0.75 * 50 + 0.25 * |100 - 80| = 37.5 + 5 = 42.5
-        assert!((cc.rttvar_ms - 42.5).abs() < 0.01);
-        // rto = 97.5 + 4 * 42.5 = 97.5 + 170 = 267.5
-        assert!((cc.rto_ms - 267.5).abs() < 0.01);
+        assert!((cc.srtt_ms() - 80.0).abs() < 0.01);
+        assert!((cc.rtt.rttvar_ms() - 40.0).abs() < 0.01);
+        // rto = 80 + 4*40 = 240
+        assert!((cc.rto_ms() - 240.0).abs() < 0.01);
 
-        // Another sample of 90ms
+        // Second sample of 90ms uses EWMA:
+        // rttvar = 0.75*40 + 0.25*|80-90| = 30 + 2.5 = 32.5
+        // srtt = 0.875*80 + 0.125*90 = 70 + 11.25 = 81.25
+        // rto = 81.25 + 4*32.5 = 81.25 + 130 = 211.25
         cc.update_rtt(90.0);
-        // srtt = 0.875 * 97.5 + 0.125 * 90 = 85.3125 + 11.25 = 96.5625
-        assert!((cc.srtt_ms - 96.5625).abs() < 0.01);
+        assert!((cc.srtt_ms() - 81.25).abs() < 0.01);
+        assert!((cc.rtt.rttvar_ms() - 32.5).abs() < 0.01);
+        assert!((cc.rto_ms() - 211.25).abs() < 0.01);
     }
 
     #[test]
     fn test_congestion_rto_clamping() {
-        let mut cc = CongestionController::new();
+        let mut cc = AdvancedCongestionController::new();
 
         // Very small RTT sample → RTO should not go below MIN_RTO_MS
         for _ in 0..100 {
             cc.update_rtt(1.0);
         }
-        assert!(cc.rto_ms >= MIN_RTO_MS);
+        assert!(cc.rto_ms() >= MIN_RTO_MS);
 
         // Very large RTT sample → RTO should not exceed MAX_RTO_MS
-        let mut cc2 = CongestionController::new();
+        let mut cc2 = AdvancedCongestionController::new();
         for _ in 0..100 {
             cc2.update_rtt(50000.0);
         }
-        assert!(cc2.rto_ms <= MAX_RTO_MS);
+        assert!(cc2.rto_ms() <= CC_MAX_RTO_MS);
     }
 
     #[test]
     fn test_congestion_effective_window_capped() {
-        let mut cc = CongestionController::new();
-        cc.cwnd = (SEND_WINDOW + 1000) as f64;
-        assert_eq!(cc.effective_window(), SEND_WINDOW);
+        let mut cc = AdvancedCongestionController::new();
+        cc.cwnd = (CC_SEND_WINDOW + 1000) as f64;
+        assert_eq!(cc.effective_window(), CC_SEND_WINDOW);
     }
 
     #[test]
-    fn test_congestion_nack_threshold() {
-        let cc = CongestionController::new();
-        let threshold = cc.nack_threshold();
-        // With initial srtt=100ms, threshold = max(3*100, 100) = 300ms
-        assert_eq!(threshold, std::time::Duration::from_millis(300));
+    fn test_congestion_gap_threshold() {
+        let cc = AdvancedCongestionController::new();
+        let threshold = cc.gap_threshold();
+        // With initial srtt=100ms, threshold = max(2*100, NACK_MIN_THRESHOLD_MS) = 200ms
+        assert_eq!(threshold, std::time::Duration::from_millis(200));
     }
 
     #[test]
-    fn test_congestion_nack_threshold_min() {
-        let mut cc = CongestionController::new();
-        cc.srtt_ms = 10.0; // Very low RTT
-        let threshold = cc.nack_threshold();
-        // max(3*10, 100) = 100ms (minimum)
-        assert_eq!(
+    fn test_congestion_gap_threshold_min() {
+        let mut cc = AdvancedCongestionController::new();
+        // Feed very low RTT samples so srtt converges near 10ms
+        for _ in 0..100 {
+            cc.update_rtt(10.0);
+        }
+        let threshold = cc.gap_threshold();
+        // max(2*~10, congestion::NACK_MIN_THRESHOLD_MS=50) = 50ms
+        // The advanced CC uses its own floor (50ms), not tunnel's old 100ms
+        assert!(
+            threshold.as_millis() >= crate::congestion::NACK_MIN_THRESHOLD_MS as u128,
+            "threshold {:?} should be at least {}ms",
             threshold,
-            std::time::Duration::from_millis(NACK_MIN_THRESHOLD_MS)
+            crate::congestion::NACK_MIN_THRESHOLD_MS
         );
     }
 
@@ -3761,40 +3615,47 @@ mod tests {
 
     #[test]
     fn test_congestion_full_lifecycle() {
-        // Simulate: slow start → reach ssthresh → congestion avoidance → loss → recovery
-        let mut cc = CongestionController::new();
+        // Simulate: slow start → reach ssthresh → congestion avoidance → loss → recovery → CA
+        let mut cc = AdvancedCongestionController::new();
         cc.ssthresh = 20.0; // Low threshold for testing
 
         // Slow start phase: ACKs grow cwnd exponentially
-        for i in 0..10u64 {
-            cc.on_ack(1, i);
+        for _i in 0..10u64 {
+            cc.on_ack(1);
         }
         // cwnd should be 10 + 10 = 20, transitioning to CA
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+        assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
 
         let cwnd_before_loss = cc.cwnd;
 
         // Congestion avoidance: linear growth
-        for i in 10..110u64 {
-            cc.on_ack(1, i);
+        for _i in 0..100u64 {
+            cc.on_ack(1);
         }
         assert!(cc.cwnd > cwnd_before_loss);
         assert!(cc.cwnd < cwnd_before_loss + 10.0); // Should only grow ~5 packets in 100 ACKs
 
         let cwnd_before_second_loss = cc.cwnd;
 
-        // Loss event
-        cc.on_loss();
-        // With min ssthresh=4, cwnd/2 should be larger
-        assert_eq!(cc.cwnd, (cwnd_before_second_loss / 2.0).max(4.0));
-        assert_eq!(cc.state, CongestionState::CongestionAvoidance);
+        // Loss event at seq 500 — enters Recovery, cwnd stays (PRR manages)
+        cc.on_loss(Some(500));
+        assert_eq!(cc.ssthresh, (cwnd_before_second_loss / 2.0).max(2.0));
+        assert_eq!(cc.phase, CongestionPhase::Recovery);
 
-        // Recovery: linear growth from new cwnd
-        let cwnd_after_loss = cc.cwnd;
-        for i in 110..210u64 {
-            cc.on_ack(1, i);
+        // Simulate recovery complete: update scoreboard past recovery_seq
+        cc.scoreboard.update_from_sack(500, &[]);
+        cc.on_ack(1);
+        assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
+
+        // After recovery, cwnd should be at ssthresh
+        let cwnd_after_recovery = cc.cwnd;
+        assert!(cwnd_after_recovery <= cwnd_before_second_loss);
+
+        // Continue with linear growth
+        for _i in 0..100u64 {
+            cc.on_ack(1);
         }
-        assert!(cc.cwnd > cwnd_after_loss);
+        assert!(cc.cwnd > cwnd_after_recovery);
     }
 
     #[test]

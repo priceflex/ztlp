@@ -18,17 +18,18 @@ use tracing::debug;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/// Initial congestion window (in packets). RFC 6928 standard.
-pub const INITIAL_CWND: f64 = 64.0;
+/// Initial congestion window (in packets). RFC 6928 IW10.
+pub const INITIAL_CWND: f64 = 10.0;
 
-/// Initial slow-start threshold. Large enough to avoid artificial limits.
-pub const INITIAL_SSTHRESH: f64 = 256.0;
+/// Initial slow-start threshold. Start unlimited — let actual loss set the
+/// threshold. This avoids artificially capping throughput on high-bandwidth links.
+pub const INITIAL_SSTHRESH: f64 = 65535.0;
 
 /// Minimum retransmission timeout in milliseconds.
 pub const MIN_RTO_MS: f64 = 200.0;
 
-/// Maximum retransmission timeout in milliseconds.
-pub const MAX_RTO_MS: f64 = 60000.0;
+/// Maximum retransmission timeout in milliseconds (4 seconds, not 60).
+pub const MAX_RTO_MS: f64 = 4000.0;
 
 /// Initial smoothed RTT estimate in milliseconds.
 pub const INITIAL_SRTT_MS: f64 = 100.0;
@@ -48,11 +49,11 @@ pub const MAX_NACK_SEQS: usize = 64;
 /// Minimum gap detection threshold in milliseconds.
 pub const NACK_MIN_THRESHOLD_MS: u64 = 50;
 
-/// Maximum entries in the retransmit buffer.
-pub const RETRANSMIT_BUF_MAX: usize = 4096;
+/// Maximum entries in the retransmit buffer (matches send window).
+pub const RETRANSMIT_BUF_MAX: usize = 65536;
 
 /// Maximum send window (in packets). Matches tunnel::SEND_WINDOW.
-pub const SEND_WINDOW: u64 = 2048;
+pub const SEND_WINDOW: u64 = 65535;
 
 /// Token bucket refill happens per-RTT. This is the minimum pacing interval.
 const MIN_PACING_INTERVAL_US: u64 = 100;
@@ -1498,10 +1499,10 @@ mod tests {
     #[test]
     fn test_acc_slow_start_to_congestion_avoidance() {
         let mut cc = AdvancedCongestionController::new();
-        cc.ssthresh = 80.0;
+        cc.ssthresh = 15.0; // Low enough that INITIAL_CWND(10) + 10 acks = 20 >= 15
 
         // Grow past ssthresh
-        cc.on_ack(20);
+        cc.on_ack(10);
         assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
         assert!(cc.pacer.is_enabled());
     }
@@ -1624,12 +1625,13 @@ mod tests {
     #[test]
     fn test_acc_full_lifecycle() {
         let mut cc = AdvancedCongestionController::new();
-        cc.ssthresh = 80.0;
+        cc.ssthresh = 20.0; // Low enough for INITIAL_CWND(10) + 10 acks = 20
 
         // 1. Slow start: grow to ssthresh
-        for _ in 0..20 {
+        for _ in 0..10 {
             cc.on_ack(1);
         }
+        // cwnd = 10 + 10 = 20 >= ssthresh(20)
         assert_eq!(cc.phase, CongestionPhase::CongestionAvoidance);
 
         // 2. Congestion avoidance: linear growth

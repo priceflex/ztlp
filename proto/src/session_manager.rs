@@ -127,7 +127,12 @@ impl SessionManager {
     /// Route a packet to the correct session.
     ///
     /// Returns `true` if the packet was delivered, `false` if no session found.
-    pub async fn route_packet(&self, session_id: &SessionId, data: Vec<u8>, from: SocketAddr) -> bool {
+    pub async fn route_packet(
+        &self,
+        session_id: &SessionId,
+        data: Vec<u8>,
+        from: SocketAddr,
+    ) -> bool {
         let sessions = self.sessions.lock().await;
         if let Some(entry) = sessions.get(session_id) {
             // Try send; if the channel is full, the session is overwhelmed — drop
@@ -310,7 +315,9 @@ mod tests {
         let mgr = SessionManager::new(1);
         assert!(mgr.can_accept());
 
-        let _rx = mgr.register(SessionId::generate(), test_addr(5000), 32).await;
+        let _rx = mgr
+            .register(SessionId::generate(), test_addr(5000), 32)
+            .await;
         assert!(!mgr.can_accept());
     }
 
@@ -360,7 +367,10 @@ mod tests {
         // Route packets to each session
         for (i, sid) in sids.iter().enumerate() {
             let data = vec![i as u8; 10];
-            assert!(mgr.route_packet(sid, data, test_addr(6000 + i as u16)).await);
+            assert!(
+                mgr.route_packet(sid, data, test_addr(6000 + i as u16))
+                    .await
+            );
         }
 
         // Verify each session received its own packet

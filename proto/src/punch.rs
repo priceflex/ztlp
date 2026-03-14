@@ -165,10 +165,7 @@ pub fn encode_peer_endpoints_request(
 /// [reported_count: 1B]       number of reported endpoints
 /// [reported_addrs...]        our endpoints
 /// ```
-pub fn encode_punch_report(
-    our_node_id: &NodeId,
-    our_endpoints: &[SocketAddr],
-) -> Vec<u8> {
+pub fn encode_punch_report(our_node_id: &NodeId, our_endpoints: &[SocketAddr]) -> Vec<u8> {
     let count = our_endpoints.len().min(255) as u8;
     let mut pkt = Vec::with_capacity(1 + 16 + 1 + count as usize * 7);
 
@@ -244,9 +241,7 @@ pub fn decode_punch_notify(data: &[u8]) -> Result<(NodeId, Vec<PeerEndpoint>), P
 
     if data.len() < 18 {
         // 1 (type) + 16 (node_id) + 1 (count) = 18
-        return Err(PunchError::NsError(
-            "PUNCH_NOTIFY too short".to_string(),
-        ));
+        return Err(PunchError::NsError("PUNCH_NOTIFY too short".to_string()));
     }
 
     let mut node_id_bytes = [0u8; 16];
@@ -342,7 +337,10 @@ pub async fn execute_punch(
     let target_addrs: Vec<SocketAddr> = if config.punch_all_addresses {
         peer_endpoints.iter().map(|e| e.addr).collect()
     } else {
-        peer_endpoints.first().map(|e| vec![e.addr]).unwrap_or_default()
+        peer_endpoints
+            .first()
+            .map(|e| vec![e.addr])
+            .unwrap_or_default()
     };
 
     info!("punch: targeting {} peer endpoints", target_addrs.len());
@@ -352,7 +350,10 @@ pub async fn execute_punch(
 
     // Step 2: Wait for punch_delay
     if !config.punch_delay.is_zero() {
-        debug!("punch: waiting {:?} for PUNCH_NOTIFY propagation", config.punch_delay);
+        debug!(
+            "punch: waiting {:?} for PUNCH_NOTIFY propagation",
+            config.punch_delay
+        );
         sleep(config.punch_delay).await;
     }
 
@@ -596,7 +597,7 @@ mod tests {
 
         assert_eq!(pkt[0], NS_PEER_ENDPOINTS);
         assert_eq!(pkt[33], 2); // 2 reported endpoints
-        // Each IPv4 addr = 7 bytes (1 family + 4 addr + 2 port)
+                                // Each IPv4 addr = 7 bytes (1 family + 4 addr + 2 port)
         assert_eq!(pkt.len(), 34 + 14);
     }
 
@@ -612,7 +613,7 @@ mod tests {
     #[test]
     fn test_decode_peer_endpoints_response_ipv4() {
         let mut data = vec![0x0A, 0x01]; // 1 endpoint
-        // IPv4: 203.0.113.42:3478
+                                         // IPv4: 203.0.113.42:3478
         data.push(4);
         data.extend_from_slice(&[203, 0, 113, 42]);
         data.extend_from_slice(&3478u16.to_be_bytes());
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn test_decode_peer_endpoints_response_ipv6() {
         let mut data = vec![0x0A, 0x01]; // 1 endpoint
-        // IPv6: [2001:db8::1]:19302
+                                         // IPv6: [2001:db8::1]:19302
         let addr: SocketAddr = "[2001:db8::1]:19302".parse().unwrap();
         data.push(6);
         if let IpAddr::V6(v6) = addr.ip() {
@@ -644,7 +645,7 @@ mod tests {
     #[test]
     fn test_decode_peer_endpoints_response_multiple() {
         let mut data = vec![0x0A, 0x02]; // 2 endpoints
-        // Endpoint 1: 1.2.3.4:5000
+                                         // Endpoint 1: 1.2.3.4:5000
         data.push(4);
         data.extend_from_slice(&[1, 2, 3, 4]);
         data.extend_from_slice(&5000u16.to_be_bytes());
@@ -655,8 +656,14 @@ mod tests {
 
         let result = decode_peer_endpoints_response(&data).unwrap();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].addr, "1.2.3.4:5000".parse::<SocketAddr>().unwrap());
-        assert_eq!(result[1].addr, "10.0.0.1:6000".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            result[0].addr,
+            "1.2.3.4:5000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            result[1].addr,
+            "10.0.0.1:6000".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -681,7 +688,7 @@ mod tests {
         let mut data = vec![0x0B];
         data.extend_from_slice(&node_id);
         data.push(1); // 1 endpoint
-        // IPv4: 198.51.100.25:19302
+                      // IPv4: 198.51.100.25:19302
         data.push(4);
         data.extend_from_slice(&[198, 51, 100, 25]);
         data.extend_from_slice(&19302u16.to_be_bytes());
@@ -727,7 +734,7 @@ mod tests {
         let mut data = vec![0x0B];
         data.extend_from_slice(&node_id);
         data.push(3); // 3 endpoints
-        // Endpoint 1: 1.1.1.1:100
+                      // Endpoint 1: 1.1.1.1:100
         data.push(4);
         data.extend_from_slice(&[1, 1, 1, 1]);
         data.extend_from_slice(&100u16.to_be_bytes());
@@ -743,9 +750,18 @@ mod tests {
         let (decoded_id, endpoints) = decode_punch_notify(&data).unwrap();
         assert_eq!(decoded_id.0, node_id);
         assert_eq!(endpoints.len(), 3);
-        assert_eq!(endpoints[0].addr, "1.1.1.1:100".parse::<SocketAddr>().unwrap());
-        assert_eq!(endpoints[1].addr, "2.2.2.2:200".parse::<SocketAddr>().unwrap());
-        assert_eq!(endpoints[2].addr, "3.3.3.3:300".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            endpoints[0].addr,
+            "1.1.1.1:100".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            endpoints[1].addr,
+            "2.2.2.2:200".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            endpoints[2].addr,
+            "3.3.3.3:300".parse::<SocketAddr>().unwrap()
+        );
     }
 
     // ── PUNCH_REPORT Encoding ───────────────────────────────────────
@@ -991,8 +1007,7 @@ mod tests {
             }
         });
 
-        let result =
-            execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
+        let result = execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
 
         match result {
             Ok(PunchResult::Success { peer_addr }) => {

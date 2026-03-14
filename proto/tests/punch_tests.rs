@@ -11,8 +11,8 @@ use tokio::net::UdpSocket;
 use ztlp_proto::identity::NodeId;
 use ztlp_proto::punch::{
     self, decode_peer_endpoints_response, decode_punch_notify, encode_peer_endpoints_request,
-    encode_punch_report, is_punch_notify, is_punch_packet, KeepaliveTracker,
-    PunchConfig, PunchResult, PUNCH_BYTE, NS_PEER_ENDPOINTS, NS_PUNCH_NOTIFY,
+    encode_punch_report, is_punch_notify, is_punch_packet, KeepaliveTracker, PunchConfig,
+    PunchResult, NS_PEER_ENDPOINTS, NS_PUNCH_NOTIFY, PUNCH_BYTE,
 };
 
 // ─── Wire Protocol Roundtrip Tests ──────────────────────────────────
@@ -120,7 +120,7 @@ fn test_punch_report_encoding() {
     assert_eq!(pkt[0], 0x0C); // PUNCH_REPORT
     assert_eq!(&pkt[1..17], &[0xBB; 16]);
     assert_eq!(pkt[17], 2); // 2 endpoints
-    // Total: 1 + 16 + 1 + 14 = 32
+                            // Total: 1 + 16 + 1 + 14 = 32
     assert_eq!(pkt.len(), 32);
 }
 
@@ -260,8 +260,7 @@ async fn test_full_punch_flow_with_fake_ns() {
         keepalive_interval: Duration::from_secs(25),
     };
 
-    let result =
-        punch::execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
+    let result = punch::execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
 
     match result {
         Ok(PunchResult::Success { peer_addr }) => {
@@ -304,8 +303,7 @@ async fn test_punch_timeout_with_unreachable_peer() {
     };
 
     let start = Instant::now();
-    let result =
-        punch::execute_punch(&client, ns_addr, &node_a, &node_b, &[], &config).await;
+    let result = punch::execute_punch(&client, ns_addr, &node_a, &node_b, &[], &config).await;
     let elapsed = start.elapsed();
 
     match result {
@@ -416,24 +414,18 @@ async fn test_simultaneous_punch_both_sides() {
     // Both should receive at least one punch
     let mut buf = [0u8; 10];
 
-    let (len, from) = tokio::time::timeout(
-        Duration::from_secs(2),
-        socket_a.recv_from(&mut buf),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (len, from) = tokio::time::timeout(Duration::from_secs(2), socket_a.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(len, 1);
     assert!(is_punch_packet(&buf[..len]));
     assert_eq!(from, addr_b);
 
-    let (len, from) = tokio::time::timeout(
-        Duration::from_secs(2),
-        socket_b.recv_from(&mut buf),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (len, from) = tokio::time::timeout(Duration::from_secs(2), socket_b.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(len, 1);
     assert!(is_punch_packet(&buf[..len]));
     assert_eq!(from, addr_a);

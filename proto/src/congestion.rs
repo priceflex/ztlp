@@ -283,8 +283,7 @@ impl SpuriousDetector {
 
     /// Prune records for sequences that have been fully acknowledged.
     pub fn prune_up_to(&mut self, acked_seq: u64) {
-        self.retransmit_records
-            .retain(|&seq, _| seq > acked_seq);
+        self.retransmit_records.retain(|&seq, _| seq > acked_seq);
     }
 }
 
@@ -694,8 +693,7 @@ impl RetransmitTracker {
 
     /// Prune entries for sequences that have been fully acknowledged.
     pub fn prune_up_to(&mut self, acked_seq: u64) {
-        self.last_retransmit
-            .retain(|&seq, _| seq > acked_seq);
+        self.last_retransmit.retain(|&seq, _| seq > acked_seq);
     }
 }
 
@@ -816,10 +814,7 @@ impl AdvancedCongestionController {
                             self.phase = CongestionPhase::CongestionAvoidance;
                             self.cwnd = self.ssthresh;
                             self.recovery_seq = None;
-                            debug!(
-                                "congestion: Recovery complete, cwnd={:.1}",
-                                self.cwnd
-                            );
+                            debug!("congestion: Recovery complete, cwnd={:.1}", self.cwnd);
                         }
                     }
                 }
@@ -941,10 +936,7 @@ impl AdvancedCongestionController {
             self.phase = CongestionPhase::CongestionAvoidance;
             self.recovery_seq = None;
 
-            debug!(
-                "spurious recovery: restoring cwnd to {:.1}",
-                self.cwnd
-            );
+            debug!("spurious recovery: restoring cwnd to {:.1}", self.cwnd);
         }
     }
 
@@ -1097,7 +1089,7 @@ mod tests {
         assert!(rtt.has_sample);
         assert_eq!(rtt.srtt_ms(), 50.0);
         assert_eq!(rtt.rttvar_ms(), 25.0); // sample / 2
-        // RTO = 50 + 4*25 = 150, but clamped to MIN_RTO_MS
+                                           // RTO = 50 + 4*25 = 150, but clamped to MIN_RTO_MS
         assert!((rtt.rto_ms() - MIN_RTO_MS).abs() < 0.01);
     }
 

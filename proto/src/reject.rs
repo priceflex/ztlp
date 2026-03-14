@@ -216,10 +216,7 @@ mod tests {
 
     #[test]
     fn test_reject_frame_with_utf8_message() {
-        let frame = RejectFrame::new(
-            RejectReason::PolicyDenied,
-            "accès refusé — доступ запрещён",
-        );
+        let frame = RejectFrame::new(RejectReason::PolicyDenied, "accès refusé — доступ запрещён");
         let encoded = frame.encode();
         let decoded = RejectFrame::decode(&encoded).expect("should decode");
         assert_eq!(decoded.message, "accès refusé — доступ запрещён");

@@ -1973,9 +1973,7 @@ async fn run_bridge_inner(
                                         *guard
                                     };
                                     let newly_acked = match prev_acked {
-                                        Some(prev) if sack_cum_ack > prev => {
-                                            sack_cum_ack - prev
-                                        }
+                                        Some(prev) if sack_cum_ack > prev => sack_cum_ack - prev,
                                         None => sack_cum_ack + 1,
                                         _ => 0,
                                     };
@@ -2186,7 +2184,8 @@ async fn run_bridge_inner(
                                         .await?;
                                     } else {
                                         // Has gaps — send SACK with received ranges
-                                        let mut sack_state = crate::congestion::ReceiverSackState::new();
+                                        let mut sack_state =
+                                            crate::congestion::ReceiverSackState::new();
                                         sack_state.update_from_reassembly(
                                             reasm.expected_seq(),
                                             &buffered,
@@ -2245,10 +2244,7 @@ async fn run_bridge_inner(
                                 .await?;
                             } else {
                                 let mut sack_state = crate::congestion::ReceiverSackState::new();
-                                sack_state.update_from_reassembly(
-                                    reasm.expected_seq(),
-                                    &buffered,
-                                );
+                                sack_state.update_from_reassembly(reasm.expected_seq(), &buffered);
                                 send_sack(
                                     &pipeline_recv,
                                     &ack_cipher,

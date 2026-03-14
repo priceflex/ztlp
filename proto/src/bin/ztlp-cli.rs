@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -41,13 +41,13 @@ use ztlp_proto::admission::{HandshakeExtension, RelayAdmissionToken, EXT_TYPE_RA
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::nat;
-use ztlp_proto::punch;
 use ztlp_proto::packet::{
     flags, DataHeader, HandshakeHeader, MsgType, SessionId, DATA_HEADER_SIZE,
     HANDSHAKE_HEADER_SIZE, MAGIC, VERSION,
 };
 use ztlp_proto::pipeline::{AdmissionResult, Pipeline};
 use ztlp_proto::policy::PolicyEngine;
+use ztlp_proto::punch;
 use ztlp_proto::reject::{RejectFrame, RejectReason};
 use ztlp_proto::relay::SimulatedRelay;
 use ztlp_proto::session_manager::SessionManager;
@@ -1543,9 +1543,7 @@ async fn cmd_connect(
 
     // NS-coordinated hole punching (if --punch)
     if punch_enabled {
-        let ns_addr_str = ns_server
-            .as_deref()
-            .ok_or("--punch requires --ns-server")?;
+        let ns_addr_str = ns_server.as_deref().ok_or("--punch requires --ns-server")?;
         let ns_addr: SocketAddr = ns_addr_str
             .parse()
             .map_err(|e| format!("invalid --ns-server '{}': {}", ns_addr_str, e))?;
@@ -1577,7 +1575,9 @@ async fn cmd_connect(
         )
         .await
         {
-            Ok(punch::PunchResult::Success { peer_addr: punched_addr }) => {
+            Ok(punch::PunchResult::Success {
+                peer_addr: punched_addr,
+            }) => {
                 eprintln!(
                     "{} Direct connection via hole punch to {}",
                     c_green("✓"),
@@ -2021,7 +2021,10 @@ async fn cmd_listen(
             // Send REJECT frame to client before closing
             let reject = RejectFrame::new(
                 RejectReason::PolicyDenied,
-                format!("{} is not authorized for service '{}'", client_identity, svc_name),
+                format!(
+                    "{} is not authorized for service '{}'",
+                    client_identity, svc_name
+                ),
             );
             if let Err(e) = tunnel::send_reject(
                 &node.socket,
@@ -2544,42 +2547,21 @@ async fn handle_new_session(
         // Run the bridge and capture outcome as a string (not Box<dyn Error>)
         // to keep the future Send-safe.
         let err_msg: Option<String> = {
-            match run_session_bridge(
-                udp,
-                pipeline,
-                session_id,
-                from,
-                &forward_addr_owned,
-            )
-            .await
-            {
+            match run_session_bridge(udp, pipeline, session_id, from, &forward_addr_owned).await {
                 Ok(()) => None,
                 Err(e) => Some(e.to_string()),
             }
         };
 
         if let Some(msg) = &err_msg {
-            eprintln!(
-                "{} session {} error: {}",
-                c_red("✗"),
-                session_id,
-                msg
-            );
+            eprintln!("{} session {} error: {}", c_red("✗"), session_id, msg);
         } else {
-            eprintln!(
-                "{} session {} closed normally",
-                c_dim("•"),
-                session_id
-            );
+            eprintln!("{} session {} closed normally", c_dim("•"), session_id);
         }
 
         // Cleanup
         mgr_clone.remove(&session_id).await;
-        eprintln!(
-            "{} [{} active session(s)]",
-            c_dim("  "),
-            mgr_clone.count()
-        );
+        eprintln!("{} [{} active session(s)]", c_dim("  "), mgr_clone.count());
     });
 
     Ok(())

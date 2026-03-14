@@ -43,7 +43,7 @@ defmodule ZtlpNs.Record do
   @enforce_keys [:name, :type, :data, :created_at, :ttl, :serial]
   defstruct [:name, :type, :data, :signature, :signer_public_key, :created_at, :ttl, :serial]
 
-  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator
+  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator | :device | :user
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -59,16 +59,17 @@ defmodule ZtlpNs.Record do
   # ── Type byte mapping ──────────────────────────────────────────────
   # These byte values appear in both the wire format and the canonical
   # serialization. They MUST NOT change without a protocol version bump.
+  # Types 0x10-0x12 are reserved for identity/group records (Phase 1+).
 
-  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7}
-  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator}
+  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7, device: 0x10, user: 0x11}
+  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user}
 
   @doc "Convert a record type atom to its wire format byte."
-  @spec type_to_byte(record_type()) :: 1..7
+  @spec type_to_byte(record_type()) :: non_neg_integer()
   def type_to_byte(type), do: Map.fetch!(@type_bytes, type)
 
   @doc "Convert a wire format byte to a record type atom."
-  @spec byte_to_type(1..7) :: record_type()
+  @spec byte_to_type(non_neg_integer()) :: record_type()
   def byte_to_type(byte), do: Map.fetch!(@byte_types, byte)
 
   # ── Canonical Serialization ────────────────────────────────────────
@@ -340,6 +341,93 @@ defmodule ZtlpNs.Record do
       ttl: opts[:ttl] || 86400,
       serial: opts[:serial] || 1
     }
+  end
+
+  @doc """
+  Create a ZTLP_DEVICE record (device identity bound to hardware/machine).
+
+  Fields:
+  - `name` — FQDN like "laptop-01.techrockstars.ztlp"
+  - `node_id` — 128-bit hardware-bound identifier (16 bytes)
+  - `pubkey` — X25519 device key (32 bytes, hex-encoded in data)
+  - `opts` — keyword list with optional `:owner`, `:hardware_id`, `:created_at`, `:ttl`, `:serial`
+  """
+  @spec new_device(String.t(), binary(), binary(), keyword()) :: t()
+  def new_device(name, node_id, pubkey, opts \\ []) do
+    %__MODULE__{
+      name: name,
+      type: :device,
+      data: %{
+        node_id: Base.encode16(node_id, case: :lower),
+        public_key: Base.encode16(pubkey, case: :lower),
+        owner: opts[:owner] || "",
+        hardware_id: opts[:hardware_id] || ""
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 86400,
+      serial: opts[:serial] || 1
+    }
+  end
+
+  @doc """
+  Create a ZTLP_USER record (user identity bound to a person).
+
+  Fields:
+  - `name` — email-style FQDN like "steve@techrockstars.ztlp"
+  - `pubkey` — Ed25519 user signing key (32 bytes, hex-encoded in data)
+  - `opts` — keyword list with optional `:devices`, `:email`, `:role`, `:created_at`, `:ttl`, `:serial`
+
+  Role values: "user" (default), "tech", "admin"
+  """
+  @spec new_user(String.t(), binary(), keyword()) :: t()
+  def new_user(name, pubkey, opts \\ []) do
+    %__MODULE__{
+      name: name,
+      type: :user,
+      data: %{
+        public_key: Base.encode16(pubkey, case: :lower),
+        devices: opts[:devices] || [],
+        email: opts[:email] || "",
+        role: opts[:role] || "user"
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 86400,
+      serial: opts[:serial] || 1
+    }
+  end
+
+  @doc """
+  Validate a DEVICE record's data fields.
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  @spec validate_device(map()) :: :ok | {:error, atom()}
+  def validate_device(data) do
+    node_id = Map.get(data, :node_id) || Map.get(data, "node_id")
+    pubkey = Map.get(data, :public_key) || Map.get(data, "public_key")
+
+    cond do
+      is_nil(node_id) or node_id == "" -> {:error, :missing_node_id}
+      is_nil(pubkey) or pubkey == "" -> {:error, :missing_public_key}
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Validate a USER record's data fields.
+
+  Returns `:ok` or `{:error, reason}`.
+  """
+  @spec validate_user(map()) :: :ok | {:error, atom()}
+  def validate_user(data) do
+    pubkey = Map.get(data, :public_key) || Map.get(data, "public_key")
+    role = Map.get(data, :role) || Map.get(data, "role")
+
+    cond do
+      is_nil(pubkey) or pubkey == "" -> {:error, :missing_public_key}
+      not is_nil(role) and role not in ["user", "tech", "admin"] -> {:error, :invalid_role}
+      true -> :ok
+    end
   end
 
   @doc """

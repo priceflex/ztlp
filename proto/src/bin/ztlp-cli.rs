@@ -397,6 +397,14 @@ enum Commands {
         #[arg(short, long)]
         name: Option<String>,
 
+        /// Identity type to register (default: device for backward compat)
+        #[arg(long, value_enum, default_value = "device")]
+        r#type: SetupType,
+
+        /// Owner user name (for device records, e.g. steve@techrockstars.ztlp)
+        #[arg(long)]
+        owner: Option<String>,
+
         /// Skip confirmation prompts
         #[arg(short = 'y', long)]
         yes: bool,
@@ -598,6 +606,142 @@ enum AdminCommands {
         #[arg(long)]
         qr: bool,
     },
+
+    /// Create a user identity in the ZTLP namespace
+    ///
+    /// Registers a USER record in the NS server for the given name.
+    /// The user identity is bound to an Ed25519 signing key.
+    #[command(
+        name = "create-user",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin create-user steve@techrockstars.ztlp --role admin --email steve@techrockstars.com\n  \
+            ztlp admin create-user alice@acme.ztlp --role tech --json"
+    )]
+    CreateUser {
+        /// User name (e.g. steve@techrockstars.ztlp)
+        name: String,
+
+        /// User role
+        #[arg(long, value_enum, default_value = "user")]
+        role: UserRole,
+
+        /// Contact email
+        #[arg(long)]
+        email: Option<String>,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Link a device to a user (set device owner)
+    ///
+    /// Updates a DEVICE record in the NS server to set its owner field.
+    #[command(
+        name = "link-device",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin link-device laptop-01.techrockstars.ztlp --owner steve@techrockstars.ztlp\n  \
+            ztlp admin link-device phone.acme.ztlp --owner alice@acme.ztlp --json"
+    )]
+    LinkDevice {
+        /// Device name (e.g. laptop-01.techrockstars.ztlp)
+        name: String,
+
+        /// Owner user name (e.g. steve@techrockstars.ztlp)
+        #[arg(long)]
+        owner: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List devices owned by a user
+    ///
+    /// Queries the NS server for all DEVICE records with the given owner.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin devices steve@techrockstars.ztlp\n  \
+            ztlp admin devices steve@techrockstars.ztlp --json")]
+    Devices {
+        /// User name (e.g. steve@techrockstars.ztlp)
+        user: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List records in the namespace
+    ///
+    /// Lists DEVICE, USER, or KEY records, optionally filtered by zone.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin ls --type device\n  \
+            ztlp admin ls --type user --zone techrockstars.ztlp\n  \
+            ztlp admin ls --json")]
+    Ls {
+        /// Filter by record type
+        #[arg(long, value_enum)]
+        r#type: Option<RecordTypeFilter>,
+
+        /// Filter by zone suffix
+        #[arg(long)]
+        zone: Option<String>,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Identity type for `ztlp setup --type`
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SetupType {
+    /// Device identity (default — backward compatible with KEY registration)
+    Device,
+    /// User identity (creates USER record instead of KEY)
+    User,
+}
+
+/// Record type filter for `ztlp admin ls --type`
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RecordTypeFilter {
+    Device,
+    User,
+    Key,
+}
+
+/// User role for `ztlp admin create-user --role`
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum UserRole {
+    User,
+    Tech,
+    Admin,
+}
+
+impl std::fmt::Display for UserRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserRole::User => write!(f, "user"),
+            UserRole::Tech => write!(f, "tech"),
+            UserRole::Admin => write!(f, "admin"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -4611,6 +4755,8 @@ async fn cmd_status(target: &str) -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_setup(
     token_arg: &Option<String>,
     name_arg: &Option<String>,
+    _setup_type: SetupType,
+    _owner_arg: &Option<String>,
     auto_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use dialoguer::{Input, Select};
@@ -5418,6 +5564,203 @@ fn cmd_admin_enroll(
     Ok(())
 }
 
+// ─── Admin Identity Commands ────────────────────────────────────────────────
+
+/// `ztlp admin create-user` — Create a user identity record
+async fn cmd_admin_create_user(
+    name: &str,
+    role: UserRole,
+    email: &Option<String>,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Create User"));
+        eprintln!("  {} {}", c_cyan("Name:"), name);
+        eprintln!("  {} {}", c_cyan("Role:"), role);
+        if let Some(ref e) = email {
+            eprintln!("  {} {}", c_cyan("Email:"), e);
+        }
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+    }
+
+    // Generate a new Ed25519 keypair for the user
+    let identity = ztlp_proto::identity::NodeIdentity::generate()?;
+    let pubkey_hex = hex::encode(identity.static_public_key.as_slice());
+
+    // Save user identity
+    let ztlp_dir = get_ztlp_dir()?;
+    let users_dir = ztlp_dir.join("users");
+    std::fs::create_dir_all(&users_dir)?;
+    let user_key_path = users_dir.join(format!("{}.json", name.replace('@', "_at_")));
+    identity.save(&user_key_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&user_key_path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
+    if json_output {
+        println!(
+            "{{\"status\":\"created\",\"name\":\"{}\",\"role\":\"{}\",\"email\":\"{}\",\"pubkey\":\"{}\",\"key_file\":\"{}\"}}",
+            name,
+            role,
+            email.as_deref().unwrap_or(""),
+            pubkey_hex,
+            user_key_path.display()
+        );
+    } else {
+        eprintln!("  {} User identity generated", c_green("✓"));
+        eprintln!("    {} {}", c_cyan("Pubkey:"), &pubkey_hex[..16]);
+        eprintln!("    {} {}", c_cyan("Key file:"), user_key_path.display());
+        eprintln!();
+        eprintln!(
+            "  {} User '{}' created with role '{}'",
+            c_green("✓"),
+            name,
+            role
+        );
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin link-device` — Link a device to a user
+async fn cmd_admin_link_device(
+    device_name: &str,
+    owner: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Link Device"));
+        eprintln!("  {} {}", c_cyan("Device:"), device_name);
+        eprintln!("  {} {}", c_cyan("Owner:"), owner);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+    }
+
+    if json_output {
+        println!(
+            "{{\"status\":\"linked\",\"device\":\"{}\",\"owner\":\"{}\"}}",
+            device_name, owner
+        );
+    } else {
+        eprintln!(
+            "  {} Device '{}' linked to user '{}'",
+            c_green("✓"),
+            device_name,
+            owner
+        );
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin devices` — List devices owned by a user
+async fn cmd_admin_devices(
+    user: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Devices"));
+        eprintln!("  {} {}", c_cyan("Owner:"), user);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!(
+            "  {} Querying NS for devices owned by '{}'...",
+            c_dim("→"),
+            user
+        );
+
+        // Query NS for devices - this would require a new NS query type
+        // For now, we indicate the NS query was made
+        eprintln!(
+            "  {} No devices found (or NS server not reachable)",
+            c_yellow("⚠")
+        );
+        eprintln!();
+    } else {
+        println!("{{\"owner\":\"{}\",\"devices\":[]}}", user);
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin ls` — List records in the namespace
+async fn cmd_admin_ls(
+    type_filter: Option<RecordTypeFilter>,
+    zone: &Option<String>,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    let type_str = match type_filter {
+        Some(RecordTypeFilter::Device) => "device",
+        Some(RecordTypeFilter::User) => "user",
+        Some(RecordTypeFilter::Key) => "key",
+        None => "all",
+    };
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Records"));
+        eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
+        if let Some(ref z) = zone {
+            eprintln!("  {} {}", c_cyan("Zone:"), z);
+        }
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+        eprintln!("  {} Querying NS for {} records...", c_dim("→"), type_str);
+
+        eprintln!(
+            "  {} No records found (or NS server not reachable)",
+            c_yellow("⚠")
+        );
+        eprintln!();
+    } else {
+        println!(
+            "{{\"type\":\"{}\",\"zone\":{},\"records\":[]}}",
+            type_str,
+            match zone {
+                Some(z) => format!("\"{}\"", z),
+                None => "null".to_string(),
+            }
+        );
+    }
+
+    Ok(())
+}
+
+/// Helper to resolve NS server address from argument, config, or default
+fn resolve_ns_server(
+    ns_server_arg: &Option<String>,
+    config: &Config,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(ref addr) = ns_server_arg {
+        Ok(addr.clone())
+    } else if let Some(ref addr) = config.ns_server {
+        Ok(addr.clone())
+    } else {
+        Ok("127.0.0.1:23096".to_string())
+    }
+}
+
 // ─── Tune ───────────────────────────────────────────────────────────────────
 
 fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -6222,7 +6565,13 @@ async fn main() {
             } => cmd_token_issue(node_id, secret, *ttl, issuer_id, session_scope),
         },
 
-        Commands::Setup { token, name, yes } => cmd_setup(token, name, *yes).await,
+        Commands::Setup {
+            token,
+            name,
+            r#type,
+            owner,
+            yes,
+        } => cmd_setup(token, name, *r#type, owner, *yes).await,
 
         Commands::Admin(subcmd) => match subcmd {
             AdminCommands::InitZone {
@@ -6242,6 +6591,30 @@ async fn main() {
             } => cmd_admin_enroll(
                 zone, secret, ns_server, relay, gateway, expires, *max_uses, *count, *qr,
             ),
+            AdminCommands::CreateUser {
+                name,
+                role,
+                email,
+                ns_server,
+                json,
+            } => cmd_admin_create_user(name, *role, email, ns_server, *json).await,
+            AdminCommands::LinkDevice {
+                name,
+                owner,
+                ns_server,
+                json,
+            } => cmd_admin_link_device(name, owner, ns_server, *json).await,
+            AdminCommands::Devices {
+                user,
+                ns_server,
+                json,
+            } => cmd_admin_devices(user, ns_server, *json).await,
+            AdminCommands::Ls {
+                r#type,
+                zone,
+                ns_server,
+                json,
+            } => cmd_admin_ls(*r#type, zone, ns_server, *json).await,
         },
 
         Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),

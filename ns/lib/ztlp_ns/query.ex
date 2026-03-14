@@ -90,7 +90,7 @@ defmodule ZtlpNs.Query do
   """
   @spec resolve_all(String.t()) :: [{Record.record_type(), Record.t()}]
   def resolve_all(name) do
-    [:key, :svc, :relay, :policy, :revoke, :bootstrap]
+    [:key, :svc, :relay, :policy, :revoke, :bootstrap, :device, :user]
     |> Enum.reduce([], fn type, acc ->
       case lookup(name, type) do
         {:ok, record} -> [{type, record} | acc]

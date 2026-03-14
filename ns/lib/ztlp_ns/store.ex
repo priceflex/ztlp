@@ -34,6 +34,7 @@ defmodule ZtlpNs.Store do
   @records_table :ztlp_ns_records
   @revoked_table :ztlp_ns_revoked
   @pubkey_index_table :ztlp_ns_pubkey_index
+  @device_index_table :ztlp_ns_device_index
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -81,6 +82,9 @@ defmodule ZtlpNs.Store do
           :ok ->
             # Maintain pubkey index for KEY records
             index_pubkey(record)
+
+            # Maintain device-owner index for DEVICE records
+            index_device_owner(record)
 
             # Trigger eager replication unless this record came from a peer
             unless opts[:replicated] do
@@ -203,6 +207,45 @@ defmodule ZtlpNs.Store do
     end
   end
 
+  @doc """
+  Look up all devices owned by a user.
+
+  Returns a list of device names linked to the given user name.
+  Uses the device-by-owner index for O(1) lookups.
+  """
+  @spec lookup_devices_for_user(String.t()) :: [String.t()]
+  def lookup_devices_for_user(user_name) when is_binary(user_name) do
+    try do
+      :mnesia.dirty_read(@device_index_table, user_name)
+      |> Enum.map(fn {@device_index_table, _owner, device_name} -> device_name end)
+    rescue
+      _ -> []
+    catch
+      :exit, _ -> []
+    end
+  end
+
+  @doc """
+  Look up the user (owner) for a device.
+
+  Returns `{:ok, user_name}` or `:not_found`.
+  Reads the owner field from the device's record data.
+  """
+  @spec lookup_user_for_device(String.t()) :: {:ok, String.t()} | :not_found
+  def lookup_user_for_device(device_name) when is_binary(device_name) do
+    case lookup(device_name, :device) do
+      {:ok, record} ->
+        owner = Map.get(record.data, :owner) || Map.get(record.data, "owner")
+        if owner && owner != "" do
+          {:ok, owner}
+        else
+          :not_found
+        end
+      _ ->
+        :not_found
+    end
+  end
+
   @doc "List all revoked IDs."
   @spec list_revoked() :: [String.t()]
   def list_revoked do
@@ -216,7 +259,7 @@ defmodule ZtlpNs.Store do
     :mnesia.table_info(@records_table, :size)
   end
 
-  @doc "Remove all records, revocations, and pubkey index (useful for testing)."
+  @doc "Remove all records, revocations, pubkey index, and device index (useful for testing)."
   @spec clear() :: :ok
   def clear do
     {:atomic, :ok} = :mnesia.clear_table(@records_table)
@@ -224,6 +267,12 @@ defmodule ZtlpNs.Store do
     # Clear pubkey index if it exists
     try do
       {:atomic, :ok} = :mnesia.clear_table(@pubkey_index_table)
+    rescue
+      _ -> :ok
+    end
+    # Clear device-owner index if it exists
+    try do
+      {:atomic, :ok} = :mnesia.clear_table(@device_index_table)
     rescue
       _ -> :ok
     end
@@ -261,8 +310,15 @@ defmodule ZtlpNs.Store do
       [{:attributes, [:pubkey_hex, :name]}, {:type, :set}, {storage_mode, [node()]}]
     )
 
+    # Device-owner index: maps owner_name → device_name for device-by-user lookups
+    # Uses :bag type because one owner can have multiple devices
+    create_table(
+      @device_index_table,
+      [{:attributes, [:owner, :device_name]}, {:type, :bag}, {storage_mode, [node()]}]
+    )
+
     # Wait for tables to be loaded (important on restart with disc_copies)
-    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table, @pubkey_index_table], 10_000)
+    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table, @pubkey_index_table, @device_index_table], 10_000)
   end
 
   defp create_table(name, opts) do
@@ -307,4 +363,31 @@ defmodule ZtlpNs.Store do
   end
 
   defp index_revocations(_), do: :ok
+
+  # Maintain device-owner index on insert of DEVICE records.
+  # Maps owner → device_name for device-by-user lookups.
+  # If the device has no owner (empty string), skip indexing.
+  defp index_device_owner(%Record{type: :device, name: device_name, data: data}) do
+    owner = Map.get(data, :owner) || Map.get(data, "owner")
+
+    if owner && owner != "" do
+      try do
+        # Remove any stale index entries for this device
+        # (in case the owner changed)
+        existing = :mnesia.dirty_match_object({@device_index_table, :_, device_name})
+
+        Enum.each(existing, fn entry ->
+          :mnesia.dirty_delete_object(entry)
+        end)
+
+        :mnesia.dirty_write({@device_index_table, owner, device_name})
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  defp index_device_owner(_), do: :ok
 end

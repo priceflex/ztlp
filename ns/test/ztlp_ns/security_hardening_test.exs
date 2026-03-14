@@ -596,7 +596,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
     end
 
     test "special characters" do
-      assert {:error, :invalid_characters} = NameValidator.validate("no@de.ztlp")
+      # @ is allowed (ZTLP user identity names, e.g. steve@zone.ztlp)
+      assert :ok = NameValidator.validate("user@zone.ztlp")
       assert {:error, :invalid_characters} = NameValidator.validate("no de.ztlp")
       assert {:error, :invalid_characters} = NameValidator.validate("no/de.ztlp")
     end

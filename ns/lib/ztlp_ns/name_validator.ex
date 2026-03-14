@@ -20,8 +20,9 @@ defmodule ZtlpNs.NameValidator do
 
   @max_name_length 253
   @max_label_length 63
-  # Matches a single DNS-compatible label: starts and ends with alnum, hyphens allowed in middle
-  @label_pattern ~r/^[a-z0-9]([a-z0-9\-]*[a-z0-9])?$/
+  # Matches a single DNS-compatible label: starts and ends with alnum, hyphens allowed in middle.
+  # The `@` character is also permitted to support ZTLP identity names (e.g., steve@zone.ztlp).
+  @label_pattern ~r/^[a-z0-9@]([a-z0-9\-@]*[a-z0-9@])?$/
 
   @doc """
   Validate a name for use in ZTLP-NS registration.

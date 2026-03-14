@@ -323,12 +323,16 @@ defmodule ZtlpNs.Server do
     with :ok <- NameValidator.validate_with_suffix(name, suffix),
          # 2. Decode CBOR data
          {:ok, data} <- decode_data(data_bin),
+         # 2b. Validate record type-specific fields
+         :ok <- validate_record_data(type, data),
          # 3. Verify Ed25519 signature over canonical form
          canonical <- RegistrationAuth.build_canonical(name, type, data_bin),
          :ok <- RegistrationAuth.verify_signature(canonical, sig, pubkey),
          # 4. Check zone authorization
          :ok <- RegistrationAuth.authorize(pubkey, name, type, data),
-         # 5. Check NodeID revocation
+         # 5. Check key overwrite protection (DEVICE/USER records)
+         :ok <- RegistrationAuth.check_key_overwrite(pubkey, name, type, data),
+         # 6. Check NodeID revocation
          :ok <- RegistrationAuth.check_revocation(data) do
       # Build the record and sign with the NS registration key.
       # The registrant's identity was verified above (Ed25519 sig + zone auth).
@@ -520,6 +524,11 @@ defmodule ZtlpNs.Server do
     end
   end
 
+  # Validate type-specific record data fields
+  defp validate_record_data(:device, data), do: Record.validate_device(data)
+  defp validate_record_data(:user, data), do: Record.validate_user(data)
+  defp validate_record_data(_type, _data), do: :ok
+
   defp decode_data(data_bin) do
     case ZtlpNs.Cbor.decode(data_bin) do
       {:ok, data} -> {:ok, data}
@@ -534,6 +543,8 @@ defmodule ZtlpNs.Server do
   defp default_ttl(:policy), do: 3_600     # 1 hour
   defp default_ttl(:revoke), do: 0         # Never expires
   defp default_ttl(:bootstrap), do: 86_400 # 24 hours
+  defp default_ttl(:device), do: 86_400    # 24 hours
+  defp default_ttl(:user), do: 86_400      # 24 hours
   defp default_ttl(_), do: 3_600           # Default fallback
 
   # Persist registration signing key on startup.

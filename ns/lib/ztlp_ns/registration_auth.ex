@@ -89,6 +89,43 @@ defmodule ZtlpNs.RegistrationAuth do
   end
 
   @doc """
+  Check key overwrite protection.
+
+  For DEVICE and USER records, reject registration if the name already
+  exists with a different public key — unless the registrant is a zone
+  authority (admin with overwrite privileges).
+
+  Returns `:ok` or `{:error, :key_overwrite_rejected}`.
+  """
+  @spec check_key_overwrite(binary(), String.t(), atom(), map()) :: :ok | {:error, :key_overwrite_rejected}
+  def check_key_overwrite(pubkey, name, type, data) when type in [:device, :user] do
+    pubkey_hex = Base.encode16(pubkey, case: :lower)
+    new_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
+
+    case Store.lookup(name, type) do
+      {:ok, existing_record} ->
+        existing_pubkey = Map.get(existing_record.data, "public_key") || Map.get(existing_record.data, :public_key)
+
+        if existing_pubkey == new_pubkey do
+          # Same key — this is an update, allow it
+          :ok
+        else
+          # Different key — check if registrant is a zone authority
+          case check_zone_authority(pubkey_hex, name) do
+            :ok -> :ok  # Zone admin can overwrite
+            {:error, _} -> {:error, :key_overwrite_rejected}
+          end
+        end
+
+      _ ->
+        # No existing record — no overwrite concern
+        :ok
+    end
+  end
+
+  def check_key_overwrite(_pubkey, _name, _type, _data), do: :ok
+
+  @doc """
   Check if a NodeID from record data has been revoked.
 
   Extracts the node_id from the record data map and checks the
@@ -167,6 +204,30 @@ defmodule ZtlpNs.RegistrationAuth do
     # controls the private key, and the name format (hex_node_id.zone)
     # prevents squatting on other node IDs.
     :ok
+  end
+
+  # DEVICE self-registration: a device can register itself if the
+  # registrant's pubkey matches the public_key in the record data.
+  defp check_self_registration(pubkey_hex, _name, :device, data) do
+    record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
+
+    if record_pubkey == pubkey_hex do
+      :ok
+    else
+      {:error, :not_self_registration}
+    end
+  end
+
+  # USER self-registration: a user can register themselves if the
+  # registrant's pubkey matches the public_key in the record data.
+  defp check_self_registration(pubkey_hex, _name, :user, data) do
+    record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
+
+    if record_pubkey == pubkey_hex do
+      :ok
+    else
+      {:error, :not_self_registration}
+    end
   end
 
   defp check_self_registration(_pubkey_hex, _name, _type, _data) do

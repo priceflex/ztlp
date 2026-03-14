@@ -154,8 +154,8 @@ echo "  Running Tests"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -p ${LOCAL_PORT}"
-SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -P ${LOCAL_PORT}"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o KexAlgorithms=curve25519-sha256 -p ${LOCAL_PORT}"
+SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o KexAlgorithms=curve25519-sha256 -P ${LOCAL_PORT}"
 
 # Test 1: SSH echo
 echo "→ Test 1: SSH echo through ZTLP tunnel..."

@@ -87,4 +87,5 @@ exec ztlp listen \
     --bind "${BIND_ADDR}" \
     --key "${KEY_FILE}" \
     --forward "ssh:${BACKEND}" \
+    --ns-server "${NS_SERVER}" \
     --gateway

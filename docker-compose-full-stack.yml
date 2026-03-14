@@ -60,6 +60,7 @@ services:
       ZTLP_NS_PORT: "23096"
       ZTLP_NS_MAX_RECORDS: "100000"
       ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
       ZTLP_NS_METRICS_ENABLED: "true"

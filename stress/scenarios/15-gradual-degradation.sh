@@ -24,6 +24,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-15.txt"
 echo "━━━ Scenario 15: Gradual Degradation (60s ramp) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=15
 netem_reset
 
 write_scenario_header "$RESULT_FILE" 15 "gradual-degradation" "Network degrades from clean to 500ms/25% loss over 60 seconds"
@@ -75,6 +76,9 @@ else
     recovery=$(measure_recovery 30)
     echo "recovery_time_ms=$recovery" >> "$RESULT_FILE"
 fi
+
+# Collect debug logs for analysis
+collect_scenario_logs 15 "$RESULTS_DIR"
 
 netem_reset
 

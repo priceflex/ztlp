@@ -17,6 +17,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-01.txt"
 echo "━━━ Scenario 01: Baseline (no impairment) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=1
 
 # Ensure clean slate
 netem_reset

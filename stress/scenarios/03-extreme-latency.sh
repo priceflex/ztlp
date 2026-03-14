@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-03.txt"
 echo "━━━ Scenario 03: Extreme Latency (2000ms RTT) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=3
 netem_reset
 
 # 1000ms each direction = 2000ms RTT

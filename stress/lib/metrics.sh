@@ -9,6 +9,7 @@
 # Source this: source "$(dirname "$0")/../lib/metrics.sh"
 
 CLIENT_CONTAINER="${CLIENT_CONTAINER:-stress-client}"
+SERVER_CONTAINER="${SERVER_CONTAINER:-stress-server}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o KexAlgorithms=curve25519-sha256 -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 LOCAL_PORT="${ZTLP_LOCAL_PORT:-2222}"
 
@@ -206,6 +207,93 @@ count_retransmits() {
     echo "$count"
 }
 
+# ── Log Collection ───────────────────────────────────────────
+
+# Collect all logs for a scenario and save to results directory
+# Usage: collect_scenario_logs <scenario_id> <results_dir>
+collect_scenario_logs() {
+    local scenario_id="$1"
+    local results_dir="${2:-${RESULTS_DIR:-.}}"
+    local log_dir="${results_dir}/logs/scenario-${scenario_id}"
+
+    mkdir -p "$log_dir"
+
+    # Client tunnel log (ZTLP debug output — handshake, congestion, retransmit, SACK, etc.)
+    docker exec "$CLIENT_CONTAINER" cat /tmp/tunnel.log > "${log_dir}/client-tunnel.log" 2>/dev/null || true
+
+    # Server container logs (ZTLP listener debug output)
+    docker logs "$SERVER_CONTAINER" > "${log_dir}/server.log" 2>&1 || true
+
+    # NS container logs
+    docker logs stress-ns > "${log_dir}/ns.log" 2>&1 || true
+
+    # Impairment node state (tc rules + iptables at time of collection)
+    docker exec stress-impairment bash -c '
+        echo "=== tc qdisc ==="
+        tc qdisc show 2>/dev/null
+        echo ""
+        echo "=== tc -s qdisc ==="
+        tc -s qdisc show 2>/dev/null
+        echo ""
+        echo "=== iptables ==="
+        iptables -L -n -v 2>/dev/null
+        echo ""
+        echo "=== ip route ==="
+        ip route show 2>/dev/null
+    ' > "${log_dir}/impairment-state.log" 2>/dev/null || true
+
+    # Extract key metrics from client tunnel log for quick analysis
+    if [ -f "${log_dir}/client-tunnel.log" ]; then
+        {
+            echo "=== Handshake Events ==="
+            grep -iE "handshake|noise|initiator|responder" "${log_dir}/client-tunnel.log" | head -50
+
+            echo ""
+            echo "=== Congestion Control ==="
+            grep -iE "congestion|cwnd|window|backoff|rtt|srtt" "${log_dir}/client-tunnel.log" | head -100
+
+            echo ""
+            echo "=== Retransmissions ==="
+            grep -iE "retransmit|resend|retry|re-send|nack|timeout" "${log_dir}/client-tunnel.log" | head -100
+
+            echo ""
+            echo "=== SACK ==="
+            grep -iE "sack|selective.ack|gap|missing" "${log_dir}/client-tunnel.log" | head -50
+
+            echo ""
+            echo "=== Anti-Replay ==="
+            grep -iE "replay|duplicate|anti.replay|window.*shift" "${log_dir}/client-tunnel.log" | head -50
+
+            echo ""
+            echo "=== PMTU ==="
+            grep -iE "pmtu|mtu|fragment|too.large" "${log_dir}/client-tunnel.log" | head -50
+
+            echo ""
+            echo "=== Rekey ==="
+            grep -iE "rekey|rotate|new.key|session.key" "${log_dir}/client-tunnel.log" | head -50
+
+            echo ""
+            echo "=== Errors/Warnings ==="
+            grep -iE "error|warn|fail|drop|reject|corrupt" "${log_dir}/client-tunnel.log" | head -100
+
+            echo ""
+            echo "=== Summary Stats ==="
+            echo "Total log lines: $(wc -l < "${log_dir}/client-tunnel.log")"
+            echo "Handshake events: $(grep -ciE "handshake|noise" "${log_dir}/client-tunnel.log" || echo 0)"
+            echo "Retransmissions: $(grep -ciE "retransmit|resend|retry" "${log_dir}/client-tunnel.log" || echo 0)"
+            echo "SACK events: $(grep -ciE "sack|selective" "${log_dir}/client-tunnel.log" || echo 0)"
+            echo "Anti-replay drops: $(grep -ciE "replay|duplicate" "${log_dir}/client-tunnel.log" || echo 0)"
+            echo "Errors: $(grep -ciE "error|fail" "${log_dir}/client-tunnel.log" || echo 0)"
+        } > "${log_dir}/analysis-summary.txt" 2>/dev/null || true
+    fi
+}
+
+# Collect tc statistics from impairment node (packet counts, drops, etc.)
+# Usage: collect_tc_stats
+collect_tc_stats() {
+    docker exec stress-impairment tc -s qdisc show 2>/dev/null || true
+}
+
 # ── Full Scenario Runner ─────────────────────────────────────
 
 # Run a complete scenario test cycle:
@@ -250,4 +338,9 @@ run_scenario_tests() {
     done
 
     echo "retransmit_count=$(count_retransmits)"
+
+    # Collect debug logs for post-mortem analysis
+    if [ -n "${CURRENT_SCENARIO_ID:-}" ]; then
+        collect_scenario_logs "$CURRENT_SCENARIO_ID" "${RESULTS_DIR:-.}"
+    fi
 }

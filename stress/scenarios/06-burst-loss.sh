@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-06.txt"
 echo "━━━ Scenario 06: Burst Loss (10% + 25% correlation) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=6
 netem_reset
 
 # 10% loss with 25% correlation (Gilbert-Elliott model)

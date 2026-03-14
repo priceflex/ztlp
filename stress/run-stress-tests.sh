@@ -197,7 +197,26 @@ print_summary_table "$RESULTS_DIR"
 generate_json "$RESULTS_DIR" "$RESULTS_DIR/results.json"
 
 echo -e "  ${GREEN}✓${NC} Results written to: $RESULTS_DIR/results.json"
+echo -e "  ${GREEN}✓${NC} Debug logs saved to: $RESULTS_DIR/logs/"
 echo -e "  ${BOLD}Total time:${NC} $((TOTAL_ELAPSED / 60))m $((TOTAL_ELAPSED % 60))s"
+
+# Log collection summary
+if [ -d "$RESULTS_DIR/logs" ]; then
+    LOG_COUNT=$(find "$RESULTS_DIR/logs" -name "*.log" 2>/dev/null | wc -l)
+    ANALYSIS_COUNT=$(find "$RESULTS_DIR/logs" -name "analysis-summary.txt" 2>/dev/null | wc -l)
+    echo -e "  ${BOLD}Logs:${NC} ${LOG_COUNT} log files, ${ANALYSIS_COUNT} analysis summaries"
+    echo ""
+    echo -e "  ${BOLD}Per-scenario log analysis:${NC}"
+    for summary in "$RESULTS_DIR/logs"/scenario-*/analysis-summary.txt; do
+        [ -f "$summary" ] || continue
+        SCENARIO_DIR=$(dirname "$summary")
+        SCENARIO_NAME=$(basename "$SCENARIO_DIR")
+        RETRANSMITS=$(grep "Retransmissions:" "$summary" 2>/dev/null | awk '{print $NF}')
+        ERRORS=$(grep "Errors:" "$summary" 2>/dev/null | awk '{print $NF}')
+        REPLAYS=$(grep "Anti-replay drops:" "$summary" 2>/dev/null | awk '{print $NF}')
+        echo -e "    ${SCENARIO_NAME}: retransmits=${RETRANSMITS:-0} errors=${ERRORS:-0} replay_drops=${REPLAYS:-0}"
+    done
+fi
 echo ""
 
 # ── Cleanup ──────────────────────────────────────────────────

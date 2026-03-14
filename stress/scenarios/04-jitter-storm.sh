@@ -17,6 +17,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-04.txt"
 echo "━━━ Scenario 04: Jitter Storm (50ms ±200ms) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=4
 netem_reset
 
 # 50ms base delay with ±200ms jitter, normal distribution

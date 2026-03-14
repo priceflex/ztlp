@@ -19,6 +19,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-13.txt"
 echo "━━━ Scenario 13: Asymmetric Impairment ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=13
 netem_reset
 
 # Server-facing interface: affects client→server traffic

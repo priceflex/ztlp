@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-08.txt"
 echo "━━━ Scenario 08: Reordering (25% reorder) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=8
 netem_reset
 
 # 25% reorder with 50% correlation, 10ms delay on reordered packets

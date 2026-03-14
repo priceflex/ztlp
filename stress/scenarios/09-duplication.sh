@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-09.txt"
 echo "━━━ Scenario 09: Duplication (10% duplicate) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=9
 netem_reset
 
 # 10% packet duplication

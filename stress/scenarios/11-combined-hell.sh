@@ -19,6 +19,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-11.txt"
 echo "━━━ Scenario 11: Combined Hell ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=11
 netem_reset
 
 # 200ms delay ±50ms jitter + 10% loss + 5% corruption

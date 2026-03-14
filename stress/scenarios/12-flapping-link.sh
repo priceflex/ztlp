@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-12.txt"
 echo "━━━ Scenario 12: Flapping Link (5s up/down) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=12
 netem_reset
 
 write_scenario_header "$RESULT_FILE" 12 "flapping-link" "Link up/down every 5 seconds via iptables FORWARD DROP toggle"
@@ -70,6 +71,9 @@ else
 
     netem_stop_flapping
 fi
+
+# Collect debug logs for analysis
+collect_scenario_logs 12 "$RESULTS_DIR"
 
 netem_reset
 

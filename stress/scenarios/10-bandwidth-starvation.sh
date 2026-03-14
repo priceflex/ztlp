@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-10.txt"
 echo "━━━ Scenario 10: Bandwidth Starvation ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=10
 netem_reset
 
 write_scenario_header "$RESULT_FILE" 10 "bandwidth-starvation" "Bandwidth limiting: 56kbps, 256kbps, 1Mbps"

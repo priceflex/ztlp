@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-14.txt"
 echo "━━━ Scenario 14: Traffic Flood (iperf3 background) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=14
 netem_reset
 
 write_scenario_header "$RESULT_FILE" 14 "traffic-flood" "iperf3 background traffic flood competing for bandwidth"
@@ -66,6 +67,9 @@ else
 
     netem_stop_flood
 fi
+
+# Collect debug logs for analysis
+collect_scenario_logs 14 "$RESULTS_DIR"
 
 netem_reset
 

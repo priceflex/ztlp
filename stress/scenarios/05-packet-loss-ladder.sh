@@ -17,6 +17,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-05.txt"
 echo "━━━ Scenario 05: Packet Loss Ladder ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=5
 netem_reset
 
 write_scenario_header "$RESULT_FILE" 5 "packet-loss-ladder" "Progressive packet loss: 1%, 5%, 10%, 25%, 50%"

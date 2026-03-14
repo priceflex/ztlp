@@ -18,6 +18,7 @@ RESULT_FILE="${RESULTS_DIR}/scenario-07.txt"
 echo "━━━ Scenario 07: Corruption (5% bit corruption) ━━━"
 
 START=$(date +%s)
+export CURRENT_SCENARIO_ID=7
 netem_reset
 
 # 5% bit-level corruption

@@ -795,43 +795,73 @@ if [[ "$HAS_PYTHON3" == "true" ]]; then
 
     step "Flooding $FLOOD_COUNT random UDP packets at ZTLP port $LISTEN_PORT"
 
-    # Measure CPU before
-    read -r _ _ _ _ IDLE_BEFORE _ < /proc/stat
-    TOTAL_BEFORE=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)
+    # Find the ZTLP listener PID for per-process CPU measurement
+    LISTENER_PID=$(pgrep -f "ztlp.*listen" 2>/dev/null | head -1)
+
+    # Capture listener CPU ticks before (utime + stime from /proc/PID/stat)
+    if [[ -n "$LISTENER_PID" && -f "/proc/$LISTENER_PID/stat" ]]; then
+        DEF_BEFORE=$(awk '{print $14+$15}' "/proc/$LISTENER_PID/stat" 2>/dev/null || echo "")
+    fi
     TS_BEFORE=$(date +%s%N)
 
     python3 -c "
-import socket, os, time
+import socket, os, time, resource
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 count = ${FLOOD_COUNT}
+ru_before = resource.getrusage(resource.RUSAGE_SELF)
 start = time.time()
 for i in range(count):
     sock.sendto(os.urandom(64), ('127.0.0.1', ${LISTEN_PORT}))
 elapsed = time.time() - start
+ru_after = resource.getrusage(resource.RUSAGE_SELF)
+atk_user = ru_after.ru_utime - ru_before.ru_utime
+atk_sys  = ru_after.ru_stime - ru_before.ru_stime
+atk_total = atk_user + atk_sys
 rate = count / elapsed if elapsed > 0 else 0
-print(f'  Sent {count:,} packets in {elapsed:.3f}s ({rate:,.0f} pkt/s)')
-" 2>&1 | sed 's/^/  /'
+print(f'SENT {count} {elapsed:.3f} {rate:.0f} {atk_total:.3f}')
+" 2>&1 | while read -r line; do
+        if [[ "$line" == SENT* ]]; then
+            read -r _ SENT_COUNT ELAPSED RATE ATK_CPU <<< "$line"
+            echo "$SENT_COUNT $ELAPSED $RATE $ATK_CPU" > /tmp/ztlp-flood-result
+            info "  Sent $(printf "%'d" "$SENT_COUNT") packets in ${ELAPSED}s ($(printf "%'d" "$RATE") pkt/s)"
+        else
+            echo "  $line"
+        fi
+    done
 
-    # Measure CPU after
-    read -r _ _ _ _ IDLE_AFTER _ < /proc/stat
-    TOTAL_AFTER=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)
     TS_AFTER=$(date +%s%N)
-
-    TOTAL_DELTA=$((TOTAL_AFTER - TOTAL_BEFORE))
-    IDLE_DELTA=$((IDLE_AFTER - IDLE_BEFORE))
     WALL_MS=$(( (TS_AFTER - TS_BEFORE) / 1000000 ))
 
-    echo ""
-    if [[ "$HAS_BC" == "true" && "$TOTAL_DELTA" -gt 0 ]]; then
-        CPU_PCT=$(echo "scale=1; 100 * ($TOTAL_DELTA - $IDLE_DELTA) / $TOTAL_DELTA" | bc 2>/dev/null || echo "N/A")
-        info "${BOLD}Results:${RESET}"
-        info "  Wall time:     ${WALL_MS}ms for ${FLOOD_COUNT} packets"
-        info "  CPU impact:    ${CPU_PCT}% (entire system, all cores)"
-        info "  Cost per pkt:  ~19ns (eBPF/XDP) or ~89ns (userspace Elixir)"
-    else
-        info "${BOLD}Results:${RESET}"
-        info "  Wall time:     ${WALL_MS}ms for ${FLOOD_COUNT} packets"
+    # Read attacker CPU from Python's resource.getrusage
+    ATK_CPU="N/A"
+    if [[ -f /tmp/ztlp-flood-result ]]; then
+        ATK_CPU=$(awk '{print $4}' /tmp/ztlp-flood-result)
+        rm -f /tmp/ztlp-flood-result
     fi
+
+    # Capture listener CPU ticks after and compute delta
+    DEF_CPU_MS="N/A"
+    if [[ -n "$LISTENER_PID" && -f "/proc/$LISTENER_PID/stat" && -n "$DEF_BEFORE" ]]; then
+        DEF_AFTER=$(awk '{print $14+$15}' "/proc/$LISTENER_PID/stat" 2>/dev/null || echo "")
+        if [[ -n "$DEF_AFTER" && -n "$DEF_BEFORE" ]]; then
+            CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
+            DEF_TICKS=$((DEF_AFTER - DEF_BEFORE))
+            if [[ "$HAS_BC" == "true" ]]; then
+                DEF_CPU_MS=$(echo "scale=1; $DEF_TICKS * 1000 / $CLK_TCK" | bc 2>/dev/null || echo "N/A")
+            fi
+        fi
+    fi
+
+    echo ""
+    info "${BOLD}Results:${RESET}"
+    info "  Wall time:     ${WALL_MS}ms for ${FLOOD_COUNT} packets"
+    if [[ "$ATK_CPU" != "N/A" ]]; then
+        info "  Attacker CPU:  ${ATK_CPU}s (Python sendto loop)"
+    fi
+    if [[ "$DEF_CPU_MS" != "N/A" ]]; then
+        info "  Defender CPU:  ${DEF_CPU_MS}ms (ZTLP listener — magic byte check only)"
+    fi
+    info "  Cost per pkt:  ~19ns (eBPF/XDP) or ~89ns (userspace)"
     echo ""
     info "The ZTLP listener didn't break a sweat. Alice's SSH session is unaffected."
     info "No crypto was performed — invalid packets never reach the session layer."
@@ -866,42 +896,72 @@ if [[ "$HAS_PYTHON3" == "true" ]]; then
 
     step "Flooding $MAL_COUNT packets with correct magic but fake SessionIDs"
 
-    # Measure CPU before
-    read -r _ _ _ _ IDLE_BEFORE _ < /proc/stat
-    TOTAL_BEFORE=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)
+    # Find the ZTLP listener PID for per-process CPU measurement
+    LISTENER_PID=$(pgrep -f "ztlp.*listen" 2>/dev/null | head -1)
+
+    # Capture listener CPU ticks before
+    if [[ -n "$LISTENER_PID" && -f "/proc/$LISTENER_PID/stat" ]]; then
+        DEF_BEFORE=$(awk '{print $14+$15}' "/proc/$LISTENER_PID/stat" 2>/dev/null || echo "")
+    fi
     TS_BEFORE=$(date +%s%N)
 
     python3 -c "
-import socket, struct, os, time
+import socket, struct, os, time, resource
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 count = ${MAL_COUNT}
+ru_before = resource.getrusage(resource.RUSAGE_SELF)
 start = time.time()
 for i in range(count):
     pkt = struct.pack('>H', 0x5A37) + os.urandom(40)
     sock.sendto(pkt, ('127.0.0.1', ${LISTEN_PORT}))
 elapsed = time.time() - start
+ru_after = resource.getrusage(resource.RUSAGE_SELF)
+atk_user = ru_after.ru_utime - ru_before.ru_utime
+atk_sys  = ru_after.ru_stime - ru_before.ru_stime
+atk_total = atk_user + atk_sys
 rate = count / elapsed if elapsed > 0 else 0
-print(f'  Sent {count:,} packets in {elapsed:.3f}s ({rate:,.0f} pkt/s)')
-" 2>&1 | sed 's/^/  /'
+print(f'SENT {count} {elapsed:.3f} {rate:.0f} {atk_total:.3f}')
+" 2>&1 | while read -r line; do
+        if [[ "$line" == SENT* ]]; then
+            read -r _ SENT_COUNT ELAPSED RATE ATK_CPU <<< "$line"
+            echo "$SENT_COUNT $ELAPSED $RATE $ATK_CPU" > /tmp/ztlp-flood-result
+            info "  Sent $(printf "%'d" "$SENT_COUNT") packets in ${ELAPSED}s ($(printf "%'d" "$RATE") pkt/s)"
+        else
+            echo "  $line"
+        fi
+    done
 
-    # Measure CPU after
-    read -r _ _ _ _ IDLE_AFTER _ < /proc/stat
-    TOTAL_AFTER=$(awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8+$9}' /proc/stat)
     TS_AFTER=$(date +%s%N)
-
-    TOTAL_DELTA=$((TOTAL_AFTER - TOTAL_BEFORE))
-    IDLE_DELTA=$((IDLE_AFTER - IDLE_BEFORE))
     WALL_MS=$(( (TS_AFTER - TS_BEFORE) / 1000000 ))
 
+    # Read attacker CPU from Python's resource.getrusage
+    ATK_CPU="N/A"
+    if [[ -f /tmp/ztlp-flood-result ]]; then
+        ATK_CPU=$(awk '{print $4}' /tmp/ztlp-flood-result)
+        rm -f /tmp/ztlp-flood-result
+    fi
+
+    # Capture listener CPU ticks after and compute delta
+    DEF_CPU_MS="N/A"
+    if [[ -n "$LISTENER_PID" && -f "/proc/$LISTENER_PID/stat" && -n "$DEF_BEFORE" ]]; then
+        DEF_AFTER=$(awk '{print $14+$15}' "/proc/$LISTENER_PID/stat" 2>/dev/null || echo "")
+        if [[ -n "$DEF_AFTER" && -n "$DEF_BEFORE" ]]; then
+            CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
+            DEF_TICKS=$((DEF_AFTER - DEF_BEFORE))
+            if [[ "$HAS_BC" == "true" ]]; then
+                DEF_CPU_MS=$(echo "scale=1; $DEF_TICKS * 1000 / $CLK_TCK" | bc 2>/dev/null || echo "N/A")
+            fi
+        fi
+    fi
+
     echo ""
-    if [[ "$HAS_BC" == "true" && "$TOTAL_DELTA" -gt 0 ]]; then
-        CPU_PCT=$(echo "scale=1; 100 * ($TOTAL_DELTA - $IDLE_DELTA) / $TOTAL_DELTA" | bc 2>/dev/null || echo "N/A")
-        info "${BOLD}Results:${RESET}"
-        info "  Wall time:     ${WALL_MS}ms for ${MAL_COUNT} packets"
-        info "  CPU impact:    ${CPU_PCT}% (entire system, all cores)"
-    else
-        info "${BOLD}Results:${RESET}"
-        info "  Wall time:     ${WALL_MS}ms for ${MAL_COUNT} packets"
+    info "${BOLD}Results:${RESET}"
+    info "  Wall time:     ${WALL_MS}ms for ${MAL_COUNT} packets"
+    if [[ "$ATK_CPU" != "N/A" ]]; then
+        info "  Attacker CPU:  ${ATK_CPU}s (Python craft + send loop)"
+    fi
+    if [[ "$DEF_CPU_MS" != "N/A" ]]; then
+        info "  Defender CPU:  ${DEF_CPU_MS}ms (ZTLP listener — magic + SessionID check)"
     fi
     echo ""
     info "Even with correct magic bytes, the attacker can't disrupt the tunnel."

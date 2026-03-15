@@ -323,13 +323,12 @@ defmodule ZtlpNs.Store do
   """
   @spec groups_for_user(String.t()) :: [String.t()]
   def groups_for_user(user_name) when is_binary(user_name) do
-    try do
-      :mnesia.dirty_read(@group_index_table, user_name)
+    case :mnesia.transaction(fn ->
+      :mnesia.read(@group_index_table, user_name)
       |> Enum.map(fn {@group_index_table, _user, group_name} -> group_name end)
-    rescue
-      _ -> []
-    catch
-      :exit, _ -> []
+    end) do
+      {:atomic, groups} -> groups
+      {:aborted, _} -> []
     end
   end
 
@@ -523,23 +522,25 @@ defmodule ZtlpNs.Store do
   defp index_group_members(%Record{type: :group, name: group_name, data: data}) do
     members = Map.get(data, :members) || Map.get(data, "members") || []
 
-    try do
-      # Remove stale index entries for this group
-      # (in case members changed on update)
-      all_entries = :mnesia.dirty_match_object({@group_index_table, :_, group_name})
+    # Remove stale index entries for this group
+    # (in case members changed on update)
+    case :mnesia.transaction(fn ->
+      all_entries = :mnesia.match_object({@group_index_table, :_, group_name})
 
       Enum.each(all_entries, fn entry ->
-        :mnesia.dirty_delete_object(entry)
+        :mnesia.delete_object(@group_index_table, entry, :write)
       end)
 
       # Add new index entries for each member
       Enum.each(members, fn member ->
-        :mnesia.dirty_write({@group_index_table, member, group_name})
+        :mnesia.write({@group_index_table, member, group_name})
       end)
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
+    end) do
+      {:atomic, :ok} -> :ok
+      {:aborted, reason} ->
+        require Logger
+        Logger.warning("[ztlp-ns] Failed to index group members for #{group_name}: #{inspect(reason)}")
+        :ok
     end
   end
 

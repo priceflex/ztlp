@@ -5236,7 +5236,7 @@ async fn cmd_scan(
     include_udp: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcp_ports: Vec<u16> = if let Some(p) = ports_arg {
-        p.split(',').filter_map(|s| s.trim().parse().ok()).collect()
+        p.split(',').filter_map(|s| s.trim().parse::<u16>().ok()).collect()
     } else {
         let mut v: Vec<u16> = SCAN_DEFAULT_PORTS.to_vec();
         if !v.contains(&ztlp_port) {
@@ -7830,6 +7830,7 @@ fn resolve_ns_server(
 
 // ─── Tune ───────────────────────────────────────────────────────────────────
 
+#[allow(unused_variables)]
 fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::pacing::TARGET_BUFFER_SIZE;
 

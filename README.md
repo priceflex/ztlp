@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/priceflex/ztlp/actions/workflows/ci.yml/badge.svg)](https://github.com/priceflex/ztlp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Spec: v0.5.1](https://img.shields.io/badge/Spec-v0.5.1-green.svg)](https://ztlp.org)
+[![Spec: v0.9.0](https://img.shields.io/badge/Spec-v0.9.0-green.svg)](https://ztlp.org)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](proto/)
 [![Elixir](https://img.shields.io/badge/Elixir-1.15%2B-purple.svg)](relay/)
 
-**Version 0.5.1 | Experimental / Informational**
+**Version 0.9.0 | Experimental / Informational**
 
 > 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
 
@@ -57,6 +57,10 @@ deployed today over the existing Internet.
 
 View the full documentation — including quick start guides, architecture deep dive, component guides, deployment instructions, and API reference — by opening `docs/index.html` in your browser, or visit [docs.ztlp.org](https://docs.ztlp.org) (coming soon).
 
+Additional documentation:
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — Comprehensive deployment guide covering Docker, federation, monitoring, and production hardening.
+- **[IDENTITY.md](IDENTITY.md)** — Detailed design document for the v0.9.0 identity model (DEVICE, USER, GROUP records and group-based policy).
+
 ## Table of Contents
 
 | # | Section |
@@ -75,8 +79,11 @@ View the full documentation — including quick start guides, architecture deep 
 |   | 8.4 Extension TLVs (Optional) |
 |   | 8.5 Payload |
 | 9 | ZTLP-NS — Distributed Trust Namespace |
+|   | 9.6 Identity Model (DEVICE, USER, GROUP) |
+|   | 9.7 Admin Wire Protocol (ADMIN\_QUERY) |
 | 10 | Node Initialization and Bootstrap Procedure |
 | 11 | Handshake and Session Establishment |
+|   | 11.3.1 Group-Based Policy Evaluation |
 | 12 | **Relay Node Architecture** |
 |   | 12.4 Ingress Admission Domains and Relay Admission Tokens |
 |   | 12.5 Authenticated Relay Federation and Capacity Classes |
@@ -90,6 +97,8 @@ View the full documentation — including quick start guides, architecture deep 
 | 18 | Security Considerations |
 | 19 | Privacy Considerations |
 | 20 | Operational Tooling |
+|   | 20.1 Identity and Zone Administration CLI |
+|   | 20.2 Developer SDKs and Integration Libraries |
 | 21 | Open Issues and Future Work |
 | 22 | References |
 | 23 | Trust and Authority Model |
@@ -1163,6 +1172,9 @@ graph TD
 | `ZTLP_REVOKE` | Revocation notice for a Node ID or Token ID. | revoke.acmedental.ztlp → revoked IDs + timestamp |
 | `ZTLP_BOOTSTRAP` | Signed list of relay nodes for initial discovery. | bootstrap.ztlp → signed relay list |
 | `ZTLP_OPERATOR` | Relay operator identity and federation membership. Contains operator NodeID, organization name, federation membership proof, and capacity class. | operator.relay-corp.ztlp → OperatorID + org + federation |
+| `ZTLP_DEVICE` | Device identity: NodeID, public key, and optional owner binding to a USER. | laptop.office.ztlp → NodeID + pubkey + owner |
+| `ZTLP_USER` | Human identity: display name, email, and role (user/tech/admin). | steve@office.ztlp → display\_name + role |
+| `ZTLP_GROUP` | Named set of users and/or devices for group-based policy. | techs@office.ztlp → member list |
 
 ## 9.4 Federated Trust Roots
 
@@ -1210,6 +1222,8 @@ the message type.
 | 0x08 | server → client | ENROLL\_RESPONSE | Enrollment result. |
 | 0x09 | client → server | RENEW | Certificate renewal request (see Section 16.2.1.2). |
 | 0x0A | server → client | RENEW\_RESPONSE | Certificate renewal result. |
+| 0x13 | client → server | ADMIN\_QUERY | Administrative query (list records, audit log). See Section 9.7. |
+| 0x14 | server → client | ADMIN\_RESPONSE | Administrative query response. See Section 9.7. |
 | 0xFF | server → client | INVALID | Malformed or unrecognized query. |
 
 ### 9.5.2 QUERY (0x01)
@@ -1234,6 +1248,9 @@ the message type.
 | 5 | ZTLP\_REVOKE |
 | 6 | ZTLP\_BOOTSTRAP |
 | 7 | ZTLP\_OPERATOR |
+| 0x10 | ZTLP\_DEVICE |
+| 0x11 | ZTLP\_USER |
+| 0x12 | ZTLP\_GROUP |
 
 ### 9.5.3 RESPONSE\_FOUND (0x02)
 
@@ -1341,7 +1358,7 @@ signature verification across different implementations and platforms.
 ```
   Offset  Size        Field
   ──────  ──────────  ─────────────────────────────────
-  0       1           Record type byte (1=KEY, 2=SVC, ..., 6=BOOTSTRAP)
+  0       1           Record type byte (1=KEY, 2=SVC, ..., 6=BOOTSTRAP, 0x10=DEVICE, 0x11=USER, 0x12=GROUP)
   1       2           Name length (uint16, big-endian)
   3       name_len    Name (UTF-8 FQDN)
   3+N     4           Data length (uint32, big-endian)
@@ -1387,6 +1404,9 @@ MUST NOT be used for wire encoding.
 | POLICY | `allowed_node_ids` (list of hex), `allowed_services` (list of FQDN), `deny_node_ids` (list of hex) | `%{allowed_node_ids: [...], allowed_services: ["rdp.acme.ztlp"], deny_node_ids: []}` |
 | REVOKE | `revoked_ids` (list of hex), `reason` (string), `effective_at` (ISO 8601 string) | `%{revoked_ids: ["ab01..."], reason: "key compromise", effective_at: "2026-03-01T00:00:00Z"}` |
 | BOOTSTRAP | `relays` (list of relay objects) | `%{relays: [%{node_id: "...", endpoint: "..."}]}` |
+| DEVICE | `node_id` (hex), `public_key` (hex), `owner` (FQDN, optional), `algorithm` ("Ed25519") | `%{node_id: "ab01...", public_key: "cd02...", owner: "steve@office.ztlp", algorithm: "Ed25519"}` |
+| USER | `display_name` (text), `email` (text, optional), `role` (text: "user"/"tech"/"admin") | `%{display_name: "Steve", email: "steve@example.com", role: "admin"}` |
+| GROUP | `members` (list of FQDN), `description` (text, optional) | `%{members: ["steve@office.ztlp", "laptop.office.ztlp"], description: "Tech team"}` |
 
 Individual ZTLP-NS records MUST NOT exceed 4,096 bytes in total wire format size (including canonical form, signature, and public key). Implementations MUST reject records exceeding this limit to prevent amplification attacks and resource exhaustion. The 4 KB limit accommodates all standard record types with generous headroom.
 
@@ -1407,6 +1427,172 @@ ZTLP-NS uses a native binary protocol rather than DNS or HTTPS because:
 Implementations MAY additionally expose an HTTPS/JSON interface for
 management and debugging, but the UDP binary protocol is the normative
 query interface.
+
+## 9.6 Identity Model
+
+ZTLP v0.9.0 introduces a structured identity model that extends the
+namespace with first-class representations of devices, human users, and
+groups. These identity record types occupy the 0x10+ namespace range,
+intentionally separated from the core protocol record types (0x01–0x07)
+to distinguish identity-layer concerns from network-layer concerns.
+
+### 9.6.1 Identity Record Types
+
+Three new record types are defined for identity management:
+
+| Record Type | Wire Byte | Description |
+|-------------|-----------|-------------|
+| `ZTLP_DEVICE` | 0x10 | Device identity. Like KEY but with optional owner binding to a USER record. |
+| `ZTLP_USER` | 0x11 | Human identity. Not a network node — represents a person with a role. |
+| `ZTLP_GROUP` | 0x12 | Named set of users and/or devices. Used for group-based policy. |
+
+### 9.6.2 Device Records (ZTLP\_DEVICE)
+
+A DEVICE record binds a NodeID and public key to a named device identity,
+with an optional `owner` field pointing to a USER FQDN. The `owner`
+field enables revocation cascade (Section 9.6.7) and group-based policy
+resolution.
+
+**Required fields:** `node_id` (hex), `public_key` (hex), `algorithm` ("Ed25519").
+
+**Optional fields:** `owner` (FQDN of a USER record).
+
+A DEVICE record without an `owner` field operates identically to a
+legacy KEY record. Implementations MUST accept DEVICE records with or
+without the `owner` field.
+
+### 9.6.3 User Records (ZTLP\_USER)
+
+A USER record represents a human identity within a ZTLP zone. Users are
+not network nodes — they do not have NodeIDs or participate in the
+handshake protocol directly. Instead, users own devices, belong to
+groups, and carry roles that influence policy decisions.
+
+**Required fields:** `display_name` (text), `role` (text: "user", "tech", or "admin").
+
+**Optional fields:** `email` (text).
+
+**Role system:** Roles are encoded as integer bytes in the wire format
+and as text strings in the CBOR data encoding:
+
+| Role | Wire Byte | Description |
+|------|-----------|-------------|
+| user | 0x00 | Standard user. Default role for self-registration. |
+| tech | 0x01 | Technician. Elevated operational access. |
+| admin | 0x02 | Administrator. Full zone management privileges. |
+
+Role assignment during self-registration MUST default to "user" (0x00).
+Elevation to "tech" or "admin" roles MUST require authorization from
+a zone signing key.
+
+### 9.6.4 Group Records (ZTLP\_GROUP)
+
+A GROUP record defines a named set of members (users and/or devices)
+for use in group-based policy evaluation. Groups are flat — nesting
+(groups containing other groups) is NOT supported. This constraint
+simplifies policy evaluation and prevents circular membership loops.
+
+**Required fields:** `members` (list of FQDN strings).
+
+**Optional fields:** `description` (text).
+
+GROUP records MUST be signed by the zone authority. Self-registration
+of GROUP records is NOT permitted — only entities possessing the zone
+signing key MAY create or modify groups. Group membership changes
+(adding or removing members) constitute a new record version and MUST
+increment the serial number.
+
+### 9.6.5 Identity Naming
+
+Identity records use the standard ZTLP-NS FQDN format. The `@`
+character is permitted in identity names to support human-readable user
+identifiers:
+
+```
+  steve@office.ztlp          — USER record
+  laptop.office.ztlp         — DEVICE record
+  techs@office.ztlp          — GROUP record
+  printer.lab.office.ztlp    — DEVICE record (nested zone)
+```
+
+Identity names MUST conform to the same validation rules as standard
+ZTLP-NS names (Section 9.2), with the additional allowance of `@` in
+the leftmost label. The `@` character MUST NOT appear in zone labels
+(only in the identity label).
+
+### 9.6.6 Registration Rules
+
+USER and DEVICE records support self-registration via the standard
+REGISTER message (0x09, Section 9.5.7). Self-registered USER records
+MUST have the role set to "user" (0x00). GROUP records require zone
+signing key authorization and MUST NOT be self-registered.
+
+**Rate limiting:** To prevent registration abuse, implementations MUST
+enforce a rate limit of one registration per identity name per hour.
+Zone authorities (entities possessing the zone signing key) bypass
+this rate limit. Implementations SHOULD return RATE\_LIMITED (0x02)
+when the limit is exceeded.
+
+### 9.6.7 Revocation Cascade
+
+When a USER record is revoked (via a ZTLP\_REVOKE record targeting the
+user's FQDN), all DEVICE records whose `owner` field references that
+user MUST be treated as implicitly revoked. Implementations MUST check
+the revocation status of a device's owner (if the `owner` field is
+present) during policy evaluation and session establishment.
+
+The revocation cascade is one level deep: revoking a user revokes their
+devices. Revoking a group does NOT revoke its members — it only removes
+the group from policy evaluation.
+
+## 9.7 Admin Wire Protocol (ADMIN\_QUERY, 0x13)
+
+The ADMIN\_QUERY message type (0x13) provides administrative query
+capabilities for zone management and audit operations. This message
+type is used by CLI tooling (`ztlp admin` commands) and is NOT
+intended for general client use.
+
+### 9.7.1 ADMIN\_QUERY Wire Format
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Message type (0x13)
+  1       1       Sub-type
+  2       var     Sub-type-specific payload
+```
+
+**Sub-types:**
+
+| Sub-type | Name | Description |
+|----------|------|-------------|
+| 0x01 | LIST\_RECORDS | List records by type, with optional name filter. |
+| 0x02 | AUDIT\_SINCE | Retrieve audit log entries since a given timestamp. |
+| 0x03 | AUDIT\_PATTERN | Retrieve audit log entries matching a name pattern. |
+
+### 9.7.2 ADMIN\_RESPONSE Wire Format
+
+```
+  Offset  Size    Field
+  ──────  ──────  ─────────────────────────────────
+  0       1       Message type (0x14)
+  1       4       Entry count (uint32, big-endian)
+  5       var     CBOR-encoded list of result entries
+```
+
+### 9.7.3 Audit Log
+
+Implementations MUST maintain a bounded audit log of identity and record
+operations. The reference implementation uses an ETS ring buffer with a
+maximum capacity of 10,000 entries. When the buffer is full, the oldest
+entries are evicted. Each audit entry records the operation type, target
+name, timestamp, and the identity of the actor who performed the
+operation.
+
+ADMIN\_QUERY requests MUST be authenticated. Only entities with the
+"admin" role (0x02) or zone signing key holders MAY issue ADMIN\_QUERY
+messages. Unauthorized requests MUST be rejected with POLICY\_DENIED
+(0x04).
 
 # 10. Node Initialization and Bootstrap Procedure
 
@@ -1702,6 +1888,41 @@ The Responder MUST perform the following checks before issuing
 
 5.  Reject with ERROR if any check fails. No state is allocated on
     failure.
+
+### 11.3.1 Group-Based Policy Evaluation
+
+When identity records (Section 9.6) are available, policy evaluation
+MUST follow this resolution order:
+
+1.  **Device NodeID check** — Match the Initiator's NodeID against
+    explicit `allowed_node_ids` in the ZTLP\_POLICY record.
+
+2.  **Owner resolution** — If the Initiator's DEVICE record contains an
+    `owner` field, resolve the referenced USER record. If the owner USER
+    is revoked, REJECT with REVOKED (0x05). This implements revocation
+    cascade (Section 9.6.7).
+
+3.  **Group membership check** — Resolve all GROUP records that include
+    the Initiator's device FQDN or the owner's user FQDN in their
+    `members` list.
+
+4.  **Policy rule matching** — Match resolved identities against policy
+    rules. Policy rules support the following patterns:
+
+    | Pattern | Example | Semantics |
+    |---------|---------|-----------|
+    | `group:<fqdn>` | `group:techs@office.ztlp` | Allow members of the specified group. |
+    | `role:<role>` | `role:admin` | Allow any user with the specified role. |
+    | Exact FQDN | `admin.office.ztlp` | Allow a specific identity (existing behavior). |
+    | Wildcard | `*.office.ztlp` | Allow any identity in the zone (existing behavior). |
+    | `:all` | — | Allow any authenticated identity (existing behavior). |
+
+5.  If no policy rule matches, REJECT with POLICY\_DENIED (0x04).
+
+Implementations SHOULD cache group membership lookups for the duration
+of a session to avoid repeated NS queries during rekeying. Group
+membership changes take effect on the next session establishment, not
+during an active session.
 
 ## 11.4 Key Rotation
 
@@ -3527,7 +3748,30 @@ tools are defined as part of the ZTLP operational suite:
 | ztlp-ns-lookup | Resolve ZTLP-NS records for a name. | dig / nslookup |
 | ztlp-revoke-check | Verify revocation status of a Node ID. | OCSP check |
 
-## 20.1 Developer SDKs and Integration Libraries
+## 20.1 Identity and Zone Administration CLI
+
+The `ztlp admin` subcommand provides identity management and zone
+administration capabilities. All admin commands require authentication
+as an entity with the "admin" role or possession of the zone signing key.
+All commands support `--json` for machine-readable output.
+
+| Command | Description |
+|---------|-------------|
+| `ztlp admin create-user <name> --role <role> --email <email>` | Create a USER identity record. Role MUST be "user", "tech", or "admin". |
+| `ztlp admin create-group <name> --members <list>` | Create a GROUP record with initial members (comma-separated FQDNs). |
+| `ztlp admin link-device <device> --owner <user>` | Set the `owner` field of an existing DEVICE record to a USER FQDN. |
+| `ztlp admin devices [--owner <user>]` | List DEVICE records, optionally filtered by owner. |
+| `ztlp admin ls [--type device\|user\|group]` | List identity records, optionally filtered by type. |
+| `ztlp admin revoke <name> --reason <reason>` | Revoke an identity. For USER records, triggers revocation cascade to owned devices. |
+| `ztlp admin audit --since <timestamp> [--name <pattern>]` | Query the audit log for operations since a timestamp, with optional name pattern filter. |
+| `ztlp admin group add <group> <member>` | Add a member to an existing group. |
+| `ztlp admin group remove <group> <member>` | Remove a member from a group. |
+| `ztlp admin group members <group>` | List members of a group. |
+| `ztlp admin group check <group> <identity>` | Check whether an identity is a member of a group. |
+| `ztlp admin rotate-zone-key` | Generate a new zone signing key and re-sign all zone records. |
+| `ztlp admin export-zone-key` | Export the current zone public key for trust anchor distribution. |
+
+## 20.2 Developer SDKs and Integration Libraries
 
 Protocol adoption depends not only on operational tooling but on the
 availability of developer-facing integration libraries. ZTLP SHOULD
@@ -3535,7 +3779,7 @@ provide official SDK implementations in major programming languages to
 enable application developers to integrate ZTLP-secured transport
 without requiring deep protocol knowledge.
 
-### 20.1.1 SDK Design Goals
+### 20.2.1 SDK Design Goals
 
 ZTLP SDKs SHOULD expose a minimal, high-level API surface that abstracts
 session establishment, identity management, and relay selection. Target
@@ -3556,7 +3800,7 @@ This surface is deliberately analogous to standard TCP socket APIs,
 minimizing the learning curve for developers familiar with conventional
 network programming.
 
-### 20.1.2 Priority Language Targets
+### 20.2.2 Priority Language Targets
 
 Initial SDK development SHOULD prioritize: Go (primary systems and
 infrastructure tooling language), Rust (high-performance and
@@ -3565,7 +3809,7 @@ rapid integration). Subsequent targets SHOULD include TypeScript/Node.js
 for server-side JavaScript environments and C/C++ for embedded and
 constrained device use.
 
-### 20.1.3 Installation and Deployment Experience
+### 20.2.3 Installation and Deployment Experience
 
 ZTLP client and relay software SHOULD be deployable with minimal
 friction. Deployment tooling SHOULD support single-command installation
@@ -3576,7 +3820,7 @@ discovery without requiring manual protocol configuration. The goal is
 that a developer or operator with no prior ZTLP experience can reach a
 working, authenticated session within minutes of initial installation.
 
-### 20.1.4 Relationship to Tailscale and Teleport Deployment Models
+### 20.2.4 Relationship to Tailscale and Teleport Deployment Models
 
 Systems such as Tailscale and Teleport demonstrated that deployment
 simplicity is a primary adoption driver for secure networking
@@ -6259,6 +6503,6 @@ Tech Rockstar Academy is a research and development initiative focused on advanc
 
 ---
 
-*End of ZTLP Specification — Version 0.5.1*
+*End of ZTLP Specification — Version 0.9.0*
 
 **ZTLP.org — 2026**

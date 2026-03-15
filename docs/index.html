@@ -667,6 +667,15 @@
   </div>
 
   <div class="sidebar-group">
+    <div class="sidebar-label">Identity</div>
+    <a class="sidebar-link" href="#identity" data-page="identity">Identity &amp; Access</a>
+    <a class="sidebar-link sub" href="#id-record-types" data-page="identity">Record Types</a>
+    <a class="sidebar-link sub" href="#id-roles" data-page="identity">Roles &amp; Groups</a>
+    <a class="sidebar-link sub" href="#id-policy" data-page="identity">Group-Based Policy</a>
+    <a class="sidebar-link sub" href="#id-cli" data-page="identity">CLI Quickstart</a>
+  </div>
+
+  <div class="sidebar-group">
     <div class="sidebar-label">Operations</div>
     <a class="sidebar-link" href="#deployment" data-page="deployment">Deployment</a>
     <a class="sidebar-link" href="#security" data-page="security">Security Model</a>
@@ -692,7 +701,7 @@
 
   <div class="callout">
     <div class="callout-title">🔬 Prototype Status</div>
-    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 366 passing tests across Rust, Elixir, and C.</p>
+    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,000+ passing tests across Rust, Elixir, and C — including the v0.9.0 identity model.</p>
   </div>
 
   <h2>What is ZTLP?</h2>
@@ -720,6 +729,11 @@
       <div class="card-icon">🌐</div>
       <div class="card-title">Overlay Architecture</div>
       <div class="card-desc">Rides over existing IPv4/IPv6 as UDP. No BGP changes, no router upgrades. Deploy today on any infrastructure.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">👥</div>
+      <div class="card-title">User, Device &amp; Group Identity</div>
+      <div class="card-desc">First-class DEVICE, USER, and GROUP record types with role-based access, group policy, and revocation cascade.</div>
     </div>
   </div>
 
@@ -880,8 +894,8 @@ cd gateway && mix test && cd ..
 bash interop/run_test.sh</code></pre></div>
 
   <div class="callout success">
-    <div class="callout-title">✅ 366 tests, 0 failures</div>
-    <p>The full test suite covers packet serialization, pipeline admission, Noise_XX handshake, edge cases, integration tests, and cross-language interop.</p>
+    <div class="callout-title">✅ 2,000+ tests, 0 failures</div>
+    <p>The full test suite covers packet serialization, pipeline admission, Noise_XX handshake, identity model, group-based policy, edge cases, integration tests, and cross-language interop.</p>
   </div>
 </section>
 
@@ -1368,6 +1382,9 @@ graph TB
       <tr><td><code>ZTLP_POLICY</code></td><td>0x04</td><td>Access control rules</td></tr>
       <tr><td><code>ZTLP_REVOKE</code></td><td>0x05</td><td>Revocation notice (highest priority)</td></tr>
       <tr><td><code>ZTLP_BOOTSTRAP</code></td><td>0x06</td><td>Signed relay list for node discovery</td></tr>
+      <tr><td><code>ZTLP_DEVICE</code></td><td>0x10</td><td>Device identity with optional user owner binding</td></tr>
+      <tr><td><code>ZTLP_USER</code></td><td>0x11</td><td>Human identity — display name, email, role</td></tr>
+      <tr><td><code>ZTLP_GROUP</code></td><td>0x12</td><td>Named set of users/devices for group-based policy</td></tr>
     </tbody>
   </table>
 
@@ -1484,6 +1501,8 @@ config :ztlp_gateway, :max_sessions, 10_000</code></pre></div>
       <tr><td><code>allow: :all</code></td><td>Any authenticated node</td><td>All Noise-authenticated clients can access</td></tr>
       <tr><td><code>allow: ["exact.name"]</code></td><td>Specific identity</td><td>Only nodes with this exact identity name</td></tr>
       <tr><td><code>allow: ["*.zone.ztlp"]</code></td><td>Wildcard zone</td><td>Any node in the zone</td></tr>
+      <tr><td><code>allow: ["group:techs@zone.ztlp"]</code></td><td>Group-based</td><td>Allow members of the specified group</td></tr>
+      <tr><td><code>allow: ["role:admin"]</code></td><td>Role-based</td><td>Allow any user with the admin role</td></tr>
       <tr><td>(no rule)</td><td>Default deny</td><td>Services without policy deny all access</td></tr>
     </tbody>
   </table>
@@ -1605,6 +1624,195 @@ sudo ./ztlp-xdp-loader eth0 --detach</code></pre></div>
       <tr><td><code>Makefile</code></td><td>Build system — clang for BPF, gcc for loader</td></tr>
     </tbody>
   </table>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════
+     PAGE: Identity & Access Control
+     ═══════════════════════════════════════════════════════ -->
+<section class="page-section" id="identity" data-search-title="Identity & Access Control — Users, Devices, Groups">
+  <h1>Identity &amp; Access Control</h1>
+  <p class="page-subtitle">First-class user, device, and group identity with role-based access and revocation cascade.</p>
+
+  <div class="callout">
+    <div class="callout-title">🆕 New in v0.9.0</div>
+    <p>The identity model adds three new record types (DEVICE, USER, GROUP) to ZTLP-NS, enabling group-based policy, role-based access control, and device-user ownership binding.</p>
+  </div>
+
+  <h2>Overview</h2>
+  <p>ZTLP's identity model extends the namespace with structured representations of the entities that participate in a network. While the core protocol identifies nodes by cryptographic NodeID, the identity model adds human-meaningful layers: <strong>users</strong> who own <strong>devices</strong>, organized into <strong>groups</strong> for scalable policy management.</p>
+
+  <div class="mermaid-wrapper">
+    <div class="mermaid">
+graph LR
+    U["👤 USER<br/><code>steve@office.ztlp</code><br/>role: admin"] -->|owns| D1["💻 DEVICE<br/><code>laptop.office.ztlp</code>"]
+    U -->|owns| D2["📱 DEVICE<br/><code>phone.office.ztlp</code>"]
+    G["👥 GROUP<br/><code>techs@office.ztlp</code>"] -->|contains| U
+    G -->|contains| D3["🖥️ DEVICE<br/><code>server.office.ztlp</code>"]
+    P["📋 POLICY<br/><code>allow: group:techs@office.ztlp</code>"] -->|references| G
+    style U fill:#dbeafe,stroke:#2563eb,color:#1e40af
+    style D1 fill:#d1fae5,stroke:#059669,color:#065f46
+    style D2 fill:#d1fae5,stroke:#059669,color:#065f46
+    style D3 fill:#d1fae5,stroke:#059669,color:#065f46
+    style G fill:#fef3c7,stroke:#d97706,color:#92400e
+    style P fill:#ede9fe,stroke:#7c3aed,color:#5b21b6
+    </div>
+  </div>
+
+  <h2 id="id-record-types">Identity Record Types</h2>
+  <p>Identity records occupy the <code>0x10+</code> namespace range, intentionally separated from core protocol record types (0x01–0x07).</p>
+
+  <table>
+    <thead><tr><th>Record Type</th><th>Wire Byte</th><th>Description</th><th>Key Fields</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>ZTLP_DEVICE</code></td>
+        <td>0x10</td>
+        <td>Device identity with optional owner binding</td>
+        <td><code>node_id</code>, <code>public_key</code>, <code>owner</code> (optional FQDN), <code>algorithm</code></td>
+      </tr>
+      <tr>
+        <td><code>ZTLP_USER</code></td>
+        <td>0x11</td>
+        <td>Human identity — not a network node</td>
+        <td><code>display_name</code>, <code>email</code> (optional), <code>role</code></td>
+      </tr>
+      <tr>
+        <td><code>ZTLP_GROUP</code></td>
+        <td>0x12</td>
+        <td>Named set for group-based policy</td>
+        <td><code>members</code> (list of FQDN), <code>description</code> (optional)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Device-User Binding</h3>
+  <p>DEVICE records may include an <code>owner</code> field that points to a USER FQDN. This binding enables:</p>
+  <ul>
+    <li><strong>Revocation cascade</strong> — revoking a user automatically blocks all their devices</li>
+    <li><strong>Policy resolution</strong> — a device inherits its owner's group memberships and role for policy evaluation</li>
+    <li><strong>Audit trail</strong> — device actions can be attributed to a human identity</li>
+  </ul>
+  <p>A DEVICE without an <code>owner</code> field operates identically to a legacy KEY record.</p>
+
+  <h2 id="id-roles">Role System</h2>
+  <p>USER records carry a role that determines administrative privileges and can be used in role-based policy rules.</p>
+
+  <table>
+    <thead><tr><th>Role</th><th>Wire Byte</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><strong>user</strong></td><td>0x00</td><td>Standard user. Default for self-registration.</td></tr>
+      <tr><td><strong>tech</strong></td><td>0x01</td><td>Technician. Elevated operational access.</td></tr>
+      <tr><td><strong>admin</strong></td><td>0x02</td><td>Administrator. Full zone management privileges.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Group Membership</h3>
+  <p>Groups are <strong>flat</strong> — nesting (groups containing groups) is not supported. This prevents circular membership and simplifies policy evaluation. Groups can contain both users and devices.</p>
+
+  <h3>Identity Naming</h3>
+  <p>Identity records use standard ZTLP-NS FQDN format. The <code>@</code> character is allowed in the leftmost label for human-readable user identifiers:</p>
+  <div class="code-block-wrapper"><pre><code class="language-bash">steve@office.ztlp          # USER record
+laptop.office.ztlp         # DEVICE record
+techs@office.ztlp          # GROUP record
+printer.lab.office.ztlp    # DEVICE (nested zone)</code></pre></div>
+
+  <h2 id="id-policy">Group-Based Policy</h2>
+  <p>Policy rules can reference groups and roles in addition to explicit node identities and wildcard zones:</p>
+
+  <table>
+    <thead><tr><th>Pattern</th><th>Example</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>group:&lt;fqdn&gt;</code></td><td><code>group:techs@office.ztlp</code></td><td>Allow members of the specified group</td></tr>
+      <tr><td><code>role:&lt;role&gt;</code></td><td><code>role:admin</code></td><td>Allow any user with the specified role</td></tr>
+      <tr><td>Exact FQDN</td><td><code>admin.office.ztlp</code></td><td>Allow a specific identity</td></tr>
+      <tr><td>Wildcard</td><td><code>*.office.ztlp</code></td><td>Allow any identity in the zone</td></tr>
+      <tr><td><code>:all</code></td><td>—</td><td>Allow any authenticated identity</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Policy Evaluation Order</h3>
+  <ol>
+    <li><strong>Device NodeID check</strong> — Match the device's NodeID against explicit allow lists</li>
+    <li><strong>Owner resolution</strong> — If the device has an <code>owner</code>, resolve the USER record. If the owner is revoked, deny immediately.</li>
+    <li><strong>Group membership</strong> — Resolve all groups containing the device or its owner</li>
+    <li><strong>Rule matching</strong> — Match resolved identities against policy rules (group:, role:, FQDN, wildcard)</li>
+    <li><strong>Default deny</strong> — If no rule matches, access is denied</li>
+  </ol>
+
+  <h3>Revocation Cascade</h3>
+  <div class="callout warning">
+    <div class="callout-title">⚠️ Cascading Revocation</div>
+    <p>Revoking a <strong>USER</strong> record automatically blocks <strong>all devices</strong> owned by that user. This is enforced by checking the owner's revocation status during policy evaluation. Revoking a <strong>GROUP</strong> removes it from policy evaluation but does <em>not</em> revoke its members.</p>
+  </div>
+
+  <h3>Gateway Configuration Example</h3>
+  <div class="code-block-wrapper"><pre><code class="language-elixir">config :ztlp_gateway, :policies, [
+  %{service: "web", allow: :all},                                   # Any authenticated node
+  %{service: "ssh", allow: ["admin.office.ztlp"]},                  # Specific identity
+  %{service: "monitoring", allow: ["group:techs@office.ztlp"]},     # Group-based
+  %{service: "admin-panel", allow: ["role:admin"]},                  # Role-based
+  %{service: "internal", allow: ["*.office.ztlp"]}                  # Wildcard zone
+]</code></pre></div>
+
+  <h2 id="id-cli">CLI Quickstart</h2>
+  <p>The <code>ztlp admin</code> subcommand provides identity management. All commands support <code>--json</code> for machine-readable output.</p>
+
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Create a user
+ztlp admin create-user steve@office.ztlp --role admin --email steve@example.com
+
+# Create a device and link it to the user
+ztlp setup --type device --name laptop.office.ztlp
+ztlp admin link-device laptop.office.ztlp --owner steve@office.ztlp
+
+# Create a group and add members
+ztlp admin create-group techs@office.ztlp
+ztlp admin group add techs@office.ztlp steve@office.ztlp
+
+# List identity records
+ztlp admin ls --type user
+ztlp admin ls --type group --json
+
+# Check group membership
+ztlp admin group members techs@office.ztlp
+ztlp admin group check techs@office.ztlp steve@office.ztlp
+
+# Use group-based policy in a gateway
+ztlp listen 0.0.0.0:23095 ... --policy 'allow = ["group:techs@office.ztlp"]'
+
+# Revoke a user (cascades to their devices)
+ztlp admin revoke steve@office.ztlp --reason "departed"
+
+# Query the audit log
+ztlp admin audit --since 2026-03-01T00:00:00Z
+ztlp admin audit --name "*.office.ztlp" --json
+
+# Zone key management
+ztlp admin rotate-zone-key
+ztlp admin export-zone-key</code></pre></div>
+
+  <h3>Admin Commands Reference</h3>
+  <table>
+    <thead><tr><th>Command</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><code>ztlp admin create-user &lt;name&gt; --role &lt;role&gt;</code></td><td>Create a USER identity</td></tr>
+      <tr><td><code>ztlp admin create-group &lt;name&gt;</code></td><td>Create a GROUP record</td></tr>
+      <tr><td><code>ztlp admin link-device &lt;device&gt; --owner &lt;user&gt;</code></td><td>Bind a device to a user</td></tr>
+      <tr><td><code>ztlp admin devices [--owner &lt;user&gt;]</code></td><td>List devices</td></tr>
+      <tr><td><code>ztlp admin ls [--type device|user|group]</code></td><td>List identity records</td></tr>
+      <tr><td><code>ztlp admin revoke &lt;name&gt; --reason &lt;reason&gt;</code></td><td>Revoke (cascading for users)</td></tr>
+      <tr><td><code>ztlp admin audit --since &lt;ts&gt;</code></td><td>Query audit log</td></tr>
+      <tr><td><code>ztlp admin group add|remove|members|check</code></td><td>Group membership operations</td></tr>
+      <tr><td><code>ztlp admin rotate-zone-key</code></td><td>Rotate the zone signing key</td></tr>
+      <tr><td><code>ztlp admin export-zone-key</code></td><td>Export zone public key</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Registration Rules</h3>
+  <ul>
+    <li><strong>USER and DEVICE</strong> — support self-registration via the standard REGISTER message. Self-registered users default to the "user" role.</li>
+    <li><strong>GROUP</strong> — requires zone signing key authorization. Cannot be self-registered.</li>
+    <li><strong>Rate limiting</strong> — 1 registration per identity name per hour. Zone authorities bypass this limit.</li>
+  </ul>
 </section>
 
 <!-- ═══════════════════════════════════════════════════════

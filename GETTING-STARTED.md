@@ -170,6 +170,35 @@ ztlp status
 ztlp ping a1b2c3d4e5f6...
 ```
 
+## Identity Model
+
+ZTLP v0.9.0 introduces first-class identity records for users, devices, and groups. This enables group-based policy, role-based access control, and device-user ownership binding.
+
+```bash
+# Create a user
+ztlp admin create-user steve@office.ztlp --role admin --email steve@example.com
+
+# Create a device and link it to the user
+ztlp setup --type device --name laptop.office.ztlp
+ztlp admin link-device laptop.office.ztlp --owner steve@office.ztlp
+
+# Create a group and add members
+ztlp admin create-group techs@office.ztlp
+ztlp admin group add techs@office.ztlp steve@office.ztlp
+
+# Use group-based policy
+ztlp listen 0.0.0.0:23095 ... --policy 'allow = ["group:techs@office.ztlp"]'
+```
+
+Key concepts:
+- **DEVICE** records (0x10) bind a NodeID to a named device, with an optional `owner` pointing to a USER
+- **USER** records (0x11) represent humans with roles: user, tech, or admin
+- **GROUP** records (0x12) are flat sets of users/devices used in policy rules
+- **Revocation cascade** — revoking a user automatically blocks all their devices
+- **Self-registration** — USER and DEVICE support self-registration; GROUP requires zone authority
+
+See [IDENTITY.md](IDENTITY.md) for the full design document.
+
 ## What's Next?
 
 You've seen the basics — identity generation, authenticated connections, relay forwarding, and packet inspection. Here's where to go from here:

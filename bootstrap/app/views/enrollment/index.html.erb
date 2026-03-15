@@ -8,7 +8,11 @@
       <h1 class="text-2xl font-bold text-gray-900">Enrollment</h1>
       <p class="mt-1 text-sm text-gray-500">Generate and manage enrollment tokens for <%= @network.zone %></p>
     </div>
-    <div class="mt-4 sm:mt-0">
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <% if @network.identity_providers.enabled.any? %>
+        <%= link_to "🌐 Self-Service Enroll", network_enroll_path(@network),
+            class: "rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
+      <% end %>
       <%= button_to "Generate Token", network_enrollment_index_path(@network),
           class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
     </div>

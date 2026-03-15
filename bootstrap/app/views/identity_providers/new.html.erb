@@ -1,0 +1,13 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Identity Providers", network_identity_providers_path(@network), class: "hover:text-gray-700" %> /
+    <span class="text-gray-700">New</span>
+  </nav>
+  <h1 class="text-2xl font-bold text-gray-900">Add Identity Provider</h1>
+  <p class="mt-1 text-sm text-gray-500">Configure an OIDC provider for self-service enrollment on <%= @network.zone %></p>
+</div>
+
+<div class="bg-white shadow rounded-lg p-6">
+  <%= render "form" %>
+</div>

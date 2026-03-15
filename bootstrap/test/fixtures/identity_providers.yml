@@ -1,0 +1,40 @@
+google_idp:
+  network: office
+  name: Google Workspace
+  provider_type: google_oauth2
+  client_id: google-client-id-123
+  client_secret_ciphertext: google-secret-encrypted
+  allowed_domains: "example.com,acme.com"
+  auto_create_users: true
+  role_default: user
+  enabled: true
+
+oidc_idp:
+  network: office
+  name: Azure AD
+  provider_type: openid_connect
+  client_id: azure-client-id-456
+  client_secret_ciphertext: azure-secret-encrypted
+  issuer_url: "https://login.microsoftonline.com/tenant-id/v2.0"
+  allowed_domains: "acme.com"
+  auto_create_users: false
+  role_default: user
+  enabled: true
+
+disabled_idp:
+  network: office
+  name: Disabled Provider
+  provider_type: google_oauth2
+  client_id: disabled-client-id
+  client_secret_ciphertext: disabled-secret
+  enabled: false
+
+prod_idp:
+  network: production
+  name: Prod Google
+  provider_type: google_oauth2
+  client_id: prod-client-id
+  client_secret_ciphertext: prod-secret
+  auto_create_users: true
+  role_default: user
+  enabled: true

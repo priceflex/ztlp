@@ -1,0 +1,62 @@
+<div class="max-w-lg mx-auto mt-10">
+  <div class="text-center mb-8">
+    <span class="text-4xl">✅</span>
+    <h1 class="mt-4 text-2xl font-bold text-gray-900">Enrollment Ready</h1>
+    <p class="mt-2 text-sm text-gray-500">
+      Welcome, <strong><%= @user.name %></strong>! Use the token below to enroll your device.
+    </p>
+  </div>
+
+  <div class="bg-white shadow rounded-lg p-6 mb-6">
+    <h2 class="text-lg font-medium text-gray-900 mb-4">Your Enrollment Token</h2>
+
+    <!-- Token ID -->
+    <div class="bg-gray-50 rounded-md p-4 mb-4">
+      <p class="text-xs text-gray-500 mb-1">Token</p>
+      <p class="text-lg font-mono font-bold text-gray-900 select-all"><%= @token.token_id %></p>
+    </div>
+
+    <!-- CLI Command -->
+    <div class="bg-gray-900 rounded-md p-4 mb-4">
+      <p class="text-xs text-gray-400 mb-1">Run this on your device:</p>
+      <code class="text-sm text-green-400 font-mono select-all">ztlp setup --token <%= @token.token_id %></code>
+    </div>
+
+    <!-- Token URI -->
+    <% if @token.token_uri.present? %>
+      <div class="bg-gray-50 rounded-md p-4 mb-4">
+        <p class="text-xs text-gray-500 mb-1">Full enrollment URI</p>
+        <code class="text-xs text-gray-700 font-mono break-all select-all"><%= @token.token_uri %></code>
+      </div>
+    <% end %>
+
+    <!-- QR Code -->
+    <% if @token.qr_svg.present? %>
+      <div class="flex justify-center mt-4">
+        <div style="max-width: 200px;">
+          <%= @token.qr_svg.html_safe %>
+        </div>
+      </div>
+      <p class="text-center text-xs text-gray-400 mt-2">Scan with the ZTLP app to enroll</p>
+    <% end %>
+
+    <!-- Token Details -->
+    <div class="mt-6 border-t pt-4">
+      <dl class="grid grid-cols-2 gap-2 text-sm">
+        <dt class="text-gray-500">Network</dt>
+        <dd class="font-medium"><%= @network.zone %></dd>
+        <dt class="text-gray-500">User</dt>
+        <dd class="font-medium"><%= @user.name %> (<%= @user.role %>)</dd>
+        <dt class="text-gray-500">Expires</dt>
+        <dd class="font-medium"><%= @token.expires_at.strftime("%b %d, %Y %H:%M UTC") %></dd>
+        <dt class="text-gray-500">Uses</dt>
+        <dd class="font-medium">Single-use</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="text-center">
+    <p class="text-xs text-gray-400 mb-2">This token expires in 1 hour and can only be used once.</p>
+    <%= link_to "← Back to #{@network.name}", @network, class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+  </div>
+</div>

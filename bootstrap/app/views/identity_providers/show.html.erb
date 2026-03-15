@@ -1,0 +1,71 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Identity Providers", network_identity_providers_path(@network), class: "hover:text-gray-700" %> /
+    <span class="text-gray-700"><%= @identity_provider.name %></span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @identity_provider.name %></h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @identity_provider.display_type %></p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to "Edit", edit_network_identity_provider_path(@network, @identity_provider),
+          class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= button_to "Delete", network_identity_provider_path(@network, @identity_provider),
+          method: :delete,
+          class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500",
+          data: { turbo_confirm: "Delete this identity provider?" } %>
+    </div>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg">
+  <div class="px-6 py-5">
+    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Provider Type</dt>
+        <dd class="mt-1 text-sm text-gray-900"><%= @identity_provider.display_type %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Status</dt>
+        <dd class="mt-1"><%= status_badge(@identity_provider.enabled? ? "active" : "disabled") %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Client ID</dt>
+        <dd class="mt-1 text-sm text-gray-900 font-mono"><%= @identity_provider.client_id %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Client Secret</dt>
+        <dd class="mt-1 text-sm text-gray-500">•••••••• (encrypted)</dd>
+      </div>
+      <% if @identity_provider.issuer_url.present? %>
+        <div class="sm:col-span-2">
+          <dt class="text-sm font-medium text-gray-500">Issuer URL</dt>
+          <dd class="mt-1 text-sm text-gray-900 font-mono"><%= @identity_provider.issuer_url %></dd>
+        </div>
+      <% end %>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Allowed Domains</dt>
+        <dd class="mt-1 text-sm text-gray-900"><%= @identity_provider.allowed_domains.presence || "Any domain" %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Auto-Create Users</dt>
+        <dd class="mt-1 text-sm text-gray-900">
+          <% if @identity_provider.auto_create_users %>
+            ✓ Yes (default role: <strong><%= @identity_provider.role_default %></strong>)
+          <% else %>
+            ✗ No
+          <% end %>
+        </dd>
+      </div>
+    </dl>
+  </div>
+</div>
+
+<div class="mt-6 bg-blue-50 rounded-lg p-4">
+  <h3 class="text-sm font-medium text-blue-800">Self-Service Enrollment URL</h3>
+  <p class="mt-1 text-sm text-blue-700">
+    <code class="bg-blue-100 px-2 py-0.5 rounded font-mono text-xs"><%= network_enroll_url(@network) %></code>
+  </p>
+</div>

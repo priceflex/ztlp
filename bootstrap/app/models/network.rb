@@ -9,6 +9,7 @@ class Network < ApplicationRecord
   has_many :deployments, through: :machines
   has_many :health_checks, through: :machines
   has_many :alerts, dependent: :destroy
+  has_many :identity_providers, dependent: :destroy
 
   encrypts :enrollment_secret_ciphertext
   encrypts :zone_key_ciphertext

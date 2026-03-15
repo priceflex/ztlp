@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_15_010003) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_15_020001) do
   create_table "alerts", force: :cascade do |t|
     t.integer "network_id", null: false
     t.integer "machine_id", null: false
@@ -108,6 +108,23 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_15_010003) do
     t.index ["status"], name: "index_health_checks_on_status"
   end
 
+  create_table "identity_providers", force: :cascade do |t|
+    t.integer "network_id", null: false
+    t.string "name", null: false
+    t.string "provider_type", null: false
+    t.string "client_id", null: false
+    t.text "client_secret_ciphertext"
+    t.string "issuer_url"
+    t.string "allowed_domains"
+    t.boolean "auto_create_users", default: false, null: false
+    t.string "role_default", default: "user", null: false
+    t.boolean "enabled", default: true, null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["network_id", "provider_type"], name: "index_identity_providers_on_network_and_type"
+    t.index ["network_id"], name: "index_identity_providers_on_network_id"
+  end
+
   create_table "machines", force: :cascade do |t|
     t.integer "network_id", null: false
     t.string "hostname", null: false
@@ -183,6 +200,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_15_010003) do
     t.string "revocation_reason"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "external_id"
+    t.string "idp_issuer"
+    t.datetime "last_login_at"
+    t.index ["network_id", "external_id", "idp_issuer"], name: "index_ztlp_users_on_network_external_idp", unique: true, where: "external_id IS NOT NULL"
     t.index ["network_id", "name"], name: "index_ztlp_users_on_network_id_and_name", unique: true
     t.index ["network_id"], name: "index_ztlp_users_on_network_id"
   end
@@ -194,6 +215,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_15_010003) do
   add_foreign_key "group_memberships", "ztlp_groups"
   add_foreign_key "group_memberships", "ztlp_users"
   add_foreign_key "health_checks", "machines"
+  add_foreign_key "identity_providers", "networks"
   add_foreign_key "machines", "networks"
   add_foreign_key "ztlp_devices", "machines"
   add_foreign_key "ztlp_devices", "networks"

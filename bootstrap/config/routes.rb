@@ -37,7 +37,16 @@ Rails.application.routes.draw do
       end
     end
     resources :enrollment, only: [:index, :create]
+    resources :identity_providers, path: "idp"
   end
+
+  # Self-service enrollment via IdP
+  get "networks/:network_id/enroll", to: "idp_enrollment#new", as: :network_enroll
+
+  # OmniAuth callbacks
+  get  "/auth/:provider/callback", to: "idp_enrollment#callback"
+  post "/auth/:provider/callback", to: "idp_enrollment#callback"
+  get  "/auth/failure",            to: "idp_enrollment#failure"
 
   resources :deployments, only: [:index, :show]
   resources :audit_logs, only: [:index]

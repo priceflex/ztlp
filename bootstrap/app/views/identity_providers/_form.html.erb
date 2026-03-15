@@ -1,0 +1,78 @@
+<%= form_with(model: [@network, @identity_provider], class: "space-y-6") do |f| %>
+  <% if @identity_provider.errors.any? %>
+    <div class="rounded-md bg-red-50 p-4">
+      <h3 class="text-sm font-medium text-red-800"><%= pluralize(@identity_provider.errors.count, "error") %> prevented saving:</h3>
+      <ul class="mt-2 text-sm text-red-700 list-disc list-inside">
+        <% @identity_provider.errors.full_messages.each do |msg| %>
+          <li><%= msg %></li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+  <div>
+    <%= f.label :name, "Display Name", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.text_field :name, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border",
+        placeholder: "e.g., Google Workspace, Azure AD" %>
+  </div>
+
+  <div>
+    <%= f.label :provider_type, "Provider Type", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.select :provider_type,
+        [["Google OAuth2", "google_oauth2"], ["OpenID Connect (Azure AD, Okta, etc.)", "openid_connect"]],
+        {}, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border" %>
+  </div>
+
+  <div>
+    <%= f.label :client_id, "Client ID", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.text_field :client_id, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border font-mono" %>
+  </div>
+
+  <div>
+    <%= f.label :client_secret, "Client Secret", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.password_field :client_secret, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border font-mono",
+        placeholder: @identity_provider.persisted? ? "••••••••• (leave blank to keep current)" : "" %>
+    <% if @identity_provider.persisted? %>
+      <p class="mt-1 text-xs text-gray-500">Leave blank to keep the existing secret.</p>
+    <% end %>
+  </div>
+
+  <div>
+    <%= f.label :issuer_url, "Issuer URL", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.text_field :issuer_url, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border font-mono",
+        placeholder: "https://login.microsoftonline.com/{tenant}/v2.0" %>
+    <p class="mt-1 text-xs text-gray-500">Required for OpenID Connect. For Google, leave blank (auto-detected).</p>
+  </div>
+
+  <div>
+    <%= f.label :allowed_domains, "Allowed Email Domains", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.text_field :allowed_domains, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border",
+        placeholder: "techrockstars.com, example.com" %>
+    <p class="mt-1 text-xs text-gray-500">Comma-separated. Leave blank to allow any domain.</p>
+  </div>
+
+  <div class="flex items-center space-x-6">
+    <div class="flex items-center">
+      <%= f.check_box :auto_create_users, class: "h-4 w-4 rounded border-gray-300 text-ztlp-600 focus:ring-ztlp-500" %>
+      <%= f.label :auto_create_users, "Auto-create users on first sign-in", class: "ml-2 text-sm text-gray-700" %>
+    </div>
+    <div class="flex items-center">
+      <%= f.check_box :enabled, class: "h-4 w-4 rounded border-gray-300 text-ztlp-600 focus:ring-ztlp-500" %>
+      <%= f.label :enabled, "Enabled", class: "ml-2 text-sm text-gray-700" %>
+    </div>
+  </div>
+
+  <div>
+    <%= f.label :role_default, "Default Role (for auto-created users)", class: "block text-sm font-medium text-gray-700" %>
+    <%= f.select :role_default,
+        [["User", "user"], ["Tech", "tech"], ["Admin", "admin"]],
+        {}, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm px-3 py-2 border" %>
+  </div>
+
+  <div class="flex justify-end space-x-3 pt-4">
+    <%= link_to "Cancel", network_identity_providers_path(@network),
+        class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+    <%= f.submit @identity_provider.persisted? ? "Update Provider" : "Create Provider",
+        class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+  </div>
+<% end %>

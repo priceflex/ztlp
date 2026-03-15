@@ -33,6 +33,14 @@
     <%= link_to network_enrollment_index_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
       <span>🎫</span><span>Enrollment</span>
     <% end %>
+    <%= link_to network_identity_providers_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+      <span>🔑</span><span>IdP (<%= @network.identity_providers.count %>)</span>
+    <% end %>
+    <% if @network.identity_providers.enabled.any? %>
+      <%= link_to network_enroll_path(@network), class: "text-sm font-medium text-green-600 hover:text-green-500 flex items-center space-x-1" do %>
+        <span>🌐</span><span>Self-Service Enroll</span>
+      <% end %>
+    <% end %>
   </div>
 </div>
 

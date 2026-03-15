@@ -284,16 +284,25 @@ use std::pin::Pin;
 pub trait NsResolver: Send + Sync {
     /// Get the members of a group by name (e.g., "techs@tunnel.ztlp").
     /// Returns a list of user names, or empty vec on error/not found.
-    fn group_members(&self, group_name: &str) -> Pin<Box<dyn Future<Output = Vec<String>> + Send + '_>>;
+    fn group_members(
+        &self,
+        group_name: &str,
+    ) -> Pin<Box<dyn Future<Output = Vec<String>> + Send + '_>>;
 
     /// Get the role of a user by name (e.g., "alice@tunnel.ztlp").
     /// Returns the role string (e.g., "admin", "tech", "user") or None.
-    fn user_role(&self, user_name: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
+    fn user_role(
+        &self,
+        user_name: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
 
     /// Resolve a device/KEY name to its owning user name.
     /// E.g., "alice.tunnel.ztlp" → "alice@tunnel.ztlp"
     /// Returns None if no DEVICE record exists or no owner is set.
-    fn device_owner(&self, device_name: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
+    fn device_owner(
+        &self,
+        device_name: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
 }
 
 /// Check if an identity matches a pattern.
@@ -338,7 +347,10 @@ async fn matches_pattern_async(identity: &str, pattern: &str, resolver: &dyn NsR
         // Check 1: Is the identity itself in the members list?
         // (handles case where identity IS a user name, e.g., "alice@tunnel.ztlp")
         if members.iter().any(|m| m == identity) {
-            debug!("identity '{}' is directly a member of '{}'", identity, group_name);
+            debug!(
+                "identity '{}' is directly a member of '{}'",
+                identity, group_name
+            );
             return true;
         }
 
@@ -353,7 +365,10 @@ async fn matches_pattern_async(identity: &str, pattern: &str, resolver: &dyn NsR
             }
         }
 
-        debug!("identity '{}' is NOT a member of '{}'", identity, group_name);
+        debug!(
+            "identity '{}' is NOT a member of '{}'",
+            identity, group_name
+        );
         false
     } else if let Some(required_role) = pattern.strip_prefix("role:") {
         // Check 1: Try the identity as a user name directly
@@ -377,7 +392,10 @@ async fn matches_pattern_async(identity: &str, pattern: &str, resolver: &dyn NsR
             }
         }
 
-        debug!("identity '{}' does NOT have role '{}'", identity, required_role);
+        debug!(
+            "identity '{}' does NOT have role '{}'",
+            identity, required_role
+        );
         false
     } else {
         false
@@ -601,7 +619,7 @@ allow = ["role:admin"]
     /// Mock NS resolver for testing group/role policy evaluation.
     struct MockResolver {
         groups: HashMap<String, Vec<String>>,
-        users: HashMap<String, String>,  // user_name → role
+        users: HashMap<String, String>,   // user_name → role
         devices: HashMap<String, String>, // device_name → owner
     }
 
@@ -616,17 +634,26 @@ allow = ["role:admin"]
     }
 
     impl NsResolver for MockResolver {
-        fn group_members(&self, group_name: &str) -> Pin<Box<dyn Future<Output = Vec<String>> + Send + '_>> {
+        fn group_members(
+            &self,
+            group_name: &str,
+        ) -> Pin<Box<dyn Future<Output = Vec<String>> + Send + '_>> {
             let result = self.groups.get(group_name).cloned().unwrap_or_default();
             Box::pin(async move { result })
         }
 
-        fn user_role(&self, user_name: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        fn user_role(
+            &self,
+            user_name: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
             let result = self.users.get(user_name).cloned();
             Box::pin(async move { result })
         }
 
-        fn device_owner(&self, device_name: &str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        fn device_owner(
+            &self,
+            device_name: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
             let result = self.devices.get(device_name).cloned();
             Box::pin(async move { result })
         }
@@ -645,12 +672,23 @@ allow = ["group:techs@tunnel.ztlp"]
         let mut resolver = MockResolver::new();
         resolver.groups.insert(
             "techs@tunnel.ztlp".to_string(),
-            vec!["alice@tunnel.ztlp".to_string(), "bob@tunnel.ztlp".to_string()],
+            vec![
+                "alice@tunnel.ztlp".to_string(),
+                "bob@tunnel.ztlp".to_string(),
+            ],
         );
 
         // User identity directly in group
-        assert!(engine.authorize_async("alice@tunnel.ztlp", "ssh", &resolver).await);
-        assert!(!engine.authorize_async("eve@tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("alice@tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_async("eve@tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -674,15 +712,22 @@ allow = ["group:techs@tunnel.ztlp"]
             "alice@tunnel.ztlp".to_string(),
         );
         // Eve's device
-        resolver.devices.insert(
-            "eve.tunnel.ztlp".to_string(),
-            "eve@tunnel.ztlp".to_string(),
-        );
+        resolver
+            .devices
+            .insert("eve.tunnel.ztlp".to_string(), "eve@tunnel.ztlp".to_string());
 
         // Device resolves to owner who IS in the group
-        assert!(engine.authorize_async("alice.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("alice.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
         // Device resolves to owner who is NOT in the group
-        assert!(!engine.authorize_async("eve.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            !engine
+                .authorize_async("eve.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -700,20 +745,47 @@ allow = ["role:tech", "role:admin"]
 "#;
         let engine = PolicyEngine::from_toml(toml).unwrap();
         let mut resolver = MockResolver::new();
-        resolver.users.insert("bob@tunnel.ztlp".to_string(), "admin".to_string());
-        resolver.users.insert("alice@tunnel.ztlp".to_string(), "tech".to_string());
-        resolver.users.insert("eve@tunnel.ztlp".to_string(), "user".to_string());
+        resolver
+            .users
+            .insert("bob@tunnel.ztlp".to_string(), "admin".to_string());
+        resolver
+            .users
+            .insert("alice@tunnel.ztlp".to_string(), "tech".to_string());
+        resolver
+            .users
+            .insert("eve@tunnel.ztlp".to_string(), "user".to_string());
         // Device mappings
-        resolver.devices.insert("alice.tunnel.ztlp".to_string(), "alice@tunnel.ztlp".to_string());
-        resolver.devices.insert("eve.tunnel.ztlp".to_string(), "eve@tunnel.ztlp".to_string());
+        resolver.devices.insert(
+            "alice.tunnel.ztlp".to_string(),
+            "alice@tunnel.ztlp".to_string(),
+        );
+        resolver
+            .devices
+            .insert("eve.tunnel.ztlp".to_string(), "eve@tunnel.ztlp".to_string());
 
         // Admin service: only admin role
-        assert!(engine.authorize_async("bob@tunnel.ztlp", "admin", &resolver).await);
-        assert!(!engine.authorize_async("alice@tunnel.ztlp", "admin", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("bob@tunnel.ztlp", "admin", &resolver)
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_async("alice@tunnel.ztlp", "admin", &resolver)
+                .await
+        );
 
         // SSH service: tech or admin
-        assert!(engine.authorize_async("alice.tunnel.ztlp", "ssh", &resolver).await);
-        assert!(!engine.authorize_async("eve.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("alice.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_async("eve.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -731,14 +803,29 @@ allow = ["group:techs@tunnel.ztlp", "bob.tunnel.ztlp"]
             "techs@tunnel.ztlp".to_string(),
             vec!["alice@tunnel.ztlp".to_string()],
         );
-        resolver.devices.insert("alice.tunnel.ztlp".to_string(), "alice@tunnel.ztlp".to_string());
+        resolver.devices.insert(
+            "alice.tunnel.ztlp".to_string(),
+            "alice@tunnel.ztlp".to_string(),
+        );
 
         // bob.tunnel.ztlp matches exact pattern
-        assert!(engine.authorize_async("bob.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("bob.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
         // alice.tunnel.ztlp matches via group (device → owner → group member)
-        assert!(engine.authorize_async("alice.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            engine
+                .authorize_async("alice.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
         // eve matches nothing
-        assert!(!engine.authorize_async("eve.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            !engine
+                .authorize_async("eve.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -753,7 +840,11 @@ allow = ["group:nonexistent@tunnel.ztlp"]
         let engine = PolicyEngine::from_toml(toml).unwrap();
         let resolver = MockResolver::new(); // Empty — no groups
 
-        assert!(!engine.authorize_async("alice.tunnel.ztlp", "ssh", &resolver).await);
+        assert!(
+            !engine
+                .authorize_async("alice.tunnel.ztlp", "ssh", &resolver)
+                .await
+        );
     }
 
     #[tokio::test]

@@ -1844,9 +1844,7 @@ impl NsResolver for UdpNsResolver {
         Box::pin(async move {
             // Query USER record (type 0x11)
             match ns_query_raw(&user, &ns, 0x11).await {
-                Ok(Some(result)) => {
-                    cbor_extract_string(&result.data_bytes, "role")
-                }
+                Ok(Some(result)) => cbor_extract_string(&result.data_bytes, "role"),
                 _ => None,
             }
         })
@@ -1861,9 +1859,7 @@ impl NsResolver for UdpNsResolver {
         Box::pin(async move {
             // Query DEVICE record (type 0x10)
             match ns_query_raw(&device, &ns, 0x10).await {
-                Ok(Some(result)) => {
-                    cbor_extract_string(&result.data_bytes, "owner")
-                }
+                Ok(Some(result)) => cbor_extract_string(&result.data_bytes, "owner"),
                 _ => None,
             }
         })
@@ -2633,7 +2629,9 @@ async fn cmd_listen(
         let policy_allowed = if policy.has_identity_patterns() {
             if let Some(ns) = ns_server.as_ref() {
                 let resolver = UdpNsResolver::new(ns);
-                policy.authorize_async(&client_identity, svc_name, &resolver).await
+                policy
+                    .authorize_async(&client_identity, svc_name, &resolver)
+                    .await
             } else {
                 policy.authorize(&client_identity, svc_name)
             }
@@ -3253,7 +3251,9 @@ async fn handle_new_session(
     let policy_allowed = if policy.has_identity_patterns() {
         if let Some(ns) = ns_server.as_ref() {
             let resolver = UdpNsResolver::new(ns);
-            policy.authorize_async(&client_identity, svc_name, &resolver).await
+            policy
+                .authorize_async(&client_identity, svc_name, &resolver)
+                .await
         } else {
             policy.authorize(&client_identity, svc_name)
         }
@@ -4009,10 +4009,7 @@ fn cbor_encode_group(description: &str, members: &[&str]) -> Vec<u8> {
     }
 
     // Encode as a 2-entry map, keys sorted by (len, bytes)
-    let mut encoded_pairs = vec![
-        (key_desc, val_desc),
-        (key_members, val_members),
-    ];
+    let mut encoded_pairs = vec![(key_desc, val_desc), (key_members, val_members)];
     encoded_pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
 
     let mut buf = cbor_head(5, encoded_pairs.len() as u64);
@@ -6184,7 +6181,11 @@ async fn cmd_admin_devices(
                 if json_output {
                     let device_names: Vec<String> = devices
                         .iter()
-                        .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(|s| format!("\"{}\"", s)))
+                        .filter_map(|d| {
+                            d.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| format!("\"{}\"", s))
+                        })
                         .collect();
                     println!(
                         "{{\"owner\":\"{}\",\"devices\":[{}]}}",
@@ -6209,7 +6210,10 @@ async fn cmd_admin_devices(
                     eprintln!();
                 }
             } else if json_output {
-                println!("{{\"owner\":\"{}\",\"devices\":[],\"error\":\"failed to decode response\"}}", user);
+                println!(
+                    "{{\"owner\":\"{}\",\"devices\":[],\"error\":\"failed to decode response\"}}",
+                    user
+                );
             } else {
                 eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
                 eprintln!();
@@ -6432,7 +6436,8 @@ async fn cmd_admin_create_group(
         println!(
             "{{\"status\":\"{}\",\"name\":\"{}\",\"description\":\"{}\",\"members\":[]}}",
             if ns_ok { "created" } else { "create_failed" },
-            name, desc
+            name,
+            desc
         );
     } else if ns_ok {
         eprintln!(
@@ -6556,11 +6561,7 @@ async fn cmd_admin_group_remove(
                     group, member
                 );
             } else {
-                eprintln!(
-                    "  {} Group '{}' not found in NS",
-                    c_red("✗"),
-                    group
-                );
+                eprintln!("  {} Group '{}' not found in NS", c_red("✗"), group);
                 eprintln!();
             }
             return Ok(());
@@ -6647,7 +6648,8 @@ async fn cmd_admin_group_members(
             let description = cbor_extract_string(&result.data_bytes, "description");
 
             if json_output {
-                let members_json: Vec<String> = members.iter().map(|m| format!("\"{}\"", m)).collect();
+                let members_json: Vec<String> =
+                    members.iter().map(|m| format!("\"{}\"", m)).collect();
                 println!(
                     "{{\"group\":\"{}\",\"members\":[{}]}}",
                     group,
@@ -6673,7 +6675,10 @@ async fn cmd_admin_group_members(
         }
         _ => {
             if json_output {
-                println!("{{\"group\":\"{}\",\"members\":[],\"error\":\"not found or NS unreachable\"}}", group);
+                println!(
+                    "{{\"group\":\"{}\",\"members\":[],\"error\":\"not found or NS unreachable\"}}",
+                    group
+                );
             } else {
                 eprintln!(
                     "  {} Group not found (or NS server not reachable)",
@@ -6808,7 +6813,10 @@ async fn cmd_admin_groups(
                                 })
                             })
                             .collect();
-                        println!("{}", serde_json::to_string(&serde_json::json!({"groups": groups}))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({"groups": groups}))?
+                        );
                     } else if records.is_empty() {
                         eprintln!("  {} No groups found", c_dim("(empty)"));
                         eprintln!();
@@ -6834,7 +6842,8 @@ async fn cmd_admin_groups(
                                 format!(" — {}", desc)
                             };
                             eprintln!(
-                                "  {} {} ({} member{}){}", c_dim("•"),
+                                "  {} {} ({} member{}){}",
+                                c_dim("•"),
                                 c_yellow(name),
                                 member_count,
                                 if member_count == 1 { "" } else { "s" },

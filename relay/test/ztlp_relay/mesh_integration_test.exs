@@ -989,7 +989,8 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       })
 
       {:ok, before_info} = RelayRegistry.lookup(node_id)
-      Process.sleep(10)
+      # 50ms sleep to ensure monotonic_time(:millisecond) advances on busy CI runners
+      Process.sleep(50)
 
       RelayRegistry.update_metrics(node_id, %{rtt_ms: 42})
 

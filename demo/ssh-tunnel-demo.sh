@@ -73,7 +73,13 @@ SKIP_NS="${SKIP_NS:-false}"
 for arg in "$@"; do
     case "$arg" in
         --skip-ns) SKIP_NS=true ;;
-        --cleanup) rm -rf "$DEMO_DIR" && echo "✓ Cleaned up $DEMO_DIR" && exit 0 ;;
+        --cleanup)
+            # Remove demo SSH key from authorized_keys
+            if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
+                grep -v "ztlp-demo-temp" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null || true
+                mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+            fi
+            rm -rf "$DEMO_DIR" && echo "✓ Cleaned up $DEMO_DIR" && exit 0 ;;
         --help|-h)
             sed -n '2,/^# ==/p' "$0" | head -n -1 | sed 's/^# //'
             exit 0 ;;
@@ -153,6 +159,12 @@ cleanup() {
         else
             echo -e "  ${YELLOW}⚠${RESET} Could not remove cap_net_raw from tcpdump — run: sudo setcap -r $TCPDUMP_PATH"
         fi
+    fi
+    # Remove demo SSH key from authorized_keys
+    if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
+        grep -v "ztlp-demo-temp" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null || true
+        mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+        echo -e "  ${GREEN}✓${RESET} Removed demo SSH key from authorized_keys"
     fi
     echo -e "${GREEN}✓${RESET} Demo processes stopped."
 }
@@ -248,6 +260,27 @@ fi
 
 mkdir -p "$DEMO_DIR"
 success "Demo directory: $DEMO_DIR"
+
+# Generate a temporary SSH keypair for the demo so tunnel SSH/SCP works
+# without requiring pre-existing key auth or password prompts.
+DEMO_SSH_KEY="$DEMO_DIR/demo_ssh_key"
+if [[ ! -f "$DEMO_SSH_KEY" ]]; then
+    ssh-keygen -t ed25519 -f "$DEMO_SSH_KEY" -N "" -q -C "ztlp-demo-temp"
+    success "Generated temporary SSH keypair for demo"
+fi
+
+# Add the demo key to authorized_keys (idempotent — skip if already present)
+DEMO_SSH_PUBKEY=$(cat "$DEMO_SSH_KEY.pub")
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
+if ! grep -qF "ztlp-demo-temp" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+    echo "$DEMO_SSH_PUBKEY" >> "$HOME/.ssh/authorized_keys"
+    success "Added demo key to ~/.ssh/authorized_keys"
+else
+    success "Demo key already in ~/.ssh/authorized_keys"
+fi
 
 # -------------------------------------------------------------------
 # ACT 1 – Generate Identities
@@ -541,15 +574,14 @@ pause
 banner "Act 7 — SSH Through the ZTLP Tunnel"
 info "Alice can now SSH through her encrypted ZTLP tunnel"
 step "Running command via SSH tunnel"
-dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1 'echo \"Hello from \$(hostname) via ZTLP tunnel! [\$(date)]\"'"
-# Use BatchMode to avoid interactive password prompts that would hang.
-# If pubkey auth isn't set up, this will fail fast instead of blocking.
+dimcmd "ssh -p $TUNNEL_LOCAL_PORT -i $DEMO_SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1 'echo \"Hello from \$(hostname) via ZTLP tunnel! [\$(date)]\"'"
 SSH_OUTPUT=$(timeout 15 ssh -p "$TUNNEL_LOCAL_PORT" \
+    -i "$DEMO_SSH_KEY" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 \
     -o LogLevel=ERROR \
-    -o PreferredAuthentications=publickey,keyboard-interactive,password \
+    -o PreferredAuthentications=publickey \
     -o GSSAPIAuthentication=no \
     -o KexAlgorithms=curve25519-sha256 \
     "$SSH_USER@127.0.0.1" \
@@ -561,6 +593,7 @@ else
     warn "SSH through tunnel timed out — this is a known issue under investigation"
     info "Testing direct SSH to verify sshd is working..."
     DIRECT_SSH=$(timeout 5 ssh -p "$SSH_PORT" \
+        -i "$DEMO_SSH_KEY" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR \
@@ -641,7 +674,7 @@ banner "Act 9 — Throughput Saturation Test"
 
 if [[ "$HAS_SCP" == "true" ]]; then
     TEST_FILE="$DEMO_DIR/throughput_test.bin"
-    SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    SCP_OPTS="-i $DEMO_SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
     # Generate test files of increasing size
     for SIZE_MB in 10 50 100; do
@@ -884,6 +917,7 @@ if [[ "$HAS_TCPDUMP" == "true" ]]; then
 
     # Run an SSH command through the tunnel to generate traffic
     timeout 10 ssh -p "$TUNNEL_LOCAL_PORT" \
+        -i "$DEMO_SSH_KEY" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR \

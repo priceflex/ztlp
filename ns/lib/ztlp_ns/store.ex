@@ -374,6 +374,11 @@ defmodule ZtlpNs.Store do
   @doc "Remove all records, revocations, pubkey index, and device index (useful for testing)."
   @spec clear() :: :ok
   def clear do
+    # Ensure all tables exist before clearing (handles test ordering where
+    # clear() is called before the Store GenServer has started or before
+    # ensure_tables() ran for this node).
+    ensure_tables()
+
     {:atomic, :ok} = :mnesia.clear_table(@records_table)
     {:atomic, :ok} = :mnesia.clear_table(@revoked_table)
     # Clear pubkey index if it exists

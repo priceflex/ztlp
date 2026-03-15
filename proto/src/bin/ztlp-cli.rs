@@ -6091,10 +6091,7 @@ async fn cmd_admin_link_device(
     sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     sock.send_to(&pkt, addr)?;
     let mut buf = [0u8; 65535];
-    let ns_ok = match sock.recv(&mut buf) {
-        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
-        _ => false,
-    };
+    let ns_ok = matches!(sock.recv(&mut buf), Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02));
 
     if json_output {
         println!(
@@ -6427,10 +6424,7 @@ async fn cmd_admin_create_group(
     sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     sock.send_to(&pkt, addr)?;
     let mut buf = [0u8; 65535];
-    let ns_ok = match sock.recv(&mut buf) {
-        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
-        _ => false,
-    };
+    let ns_ok = matches!(sock.recv(&mut buf), Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02));
 
     if json_output {
         println!(
@@ -6501,10 +6495,7 @@ async fn cmd_admin_group_add(
     sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     sock.send_to(&pkt, addr)?;
     let mut buf = [0u8; 65535];
-    let ns_ok = match sock.recv(&mut buf) {
-        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
-        _ => false,
-    };
+    let ns_ok = matches!(sock.recv(&mut buf), Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02));
 
     if json_output {
         println!(
@@ -6583,10 +6574,7 @@ async fn cmd_admin_group_remove(
     sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     sock.send_to(&pkt, addr)?;
     let mut buf = [0u8; 65535];
-    let ns_ok = match sock.recv(&mut buf) {
-        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
-        _ => false,
-    };
+    let ns_ok = matches!(sock.recv(&mut buf), Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02));
 
     if json_output {
         println!(
@@ -6798,7 +6786,7 @@ async fn cmd_admin_groups(
                                     .get("data")
                                     .and_then(|d| d.get("members"))
                                     .and_then(|m| m.as_array())
-                                    .map(|arr| arr.clone())
+                                    .cloned()
                                     .unwrap_or_default();
                                 let desc = r
                                     .get("data")

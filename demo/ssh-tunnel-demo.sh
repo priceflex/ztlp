@@ -292,6 +292,16 @@ else
     success "Demo key already in ~/.ssh/authorized_keys"
 fi
 
+# ⚠ Security warning — the demo key grants SSH access to this machine.
+# The EXIT trap removes it automatically, but if the script is killed
+# with SIGKILL (kill -9) or the system crashes, the key will persist.
+warn "${BOLD}⚠ SECURITY:${RESET} A temporary SSH key is now in ~/.ssh/authorized_keys."
+warn "  It will be auto-removed when the demo ends (EXIT trap)."
+warn "  If the script crashes or is killed with kill -9, run:"
+warn "    ${CYAN}$0 --cleanup${RESET}"
+warn "  or manually: ${CYAN}grep -v ztlp-demo-temp ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys${RESET}"
+echo ""
+
 # -------------------------------------------------------------------
 # ACT 1 – Generate Identities
 # -------------------------------------------------------------------

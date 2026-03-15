@@ -1,10 +1,12 @@
 # Feature: Device + User Identity Binding
 
-**Status:** Proposed
+**Status:** ✅ Complete (v0.9.0)
 **Author:** Steven Price
 **Date:** 2026-03-12
 **Depends on:** ZTLP-NS (Phase 4), Enrollment (Phase 10), Gateway Policy Engine (Phase 5)
 **Natural home:** Bootstrap Server (ztlp-bootstrap)
+
+> **Implementation note:** This feature was implemented in v0.9.0 using DEVICE (0x10), USER (0x11), and GROUP (0x12) NS record types rather than the `ZTLP_USER` record type originally proposed here. See `IDENTITY-AND-GROUPS-TASK.md` for the actual implementation spec.
 
 ---
 
@@ -27,10 +29,13 @@ The spec mentions user nodes (Section 25.2) and enterprise directory integration
 | Device enrollment (tokens, QR, CLI wizard) | ✅ Complete |
 | ZTLP-NS record types (KEY, SVC, ATTEST, OPERATOR) | ✅ Complete |
 | Gateway policy engine (NodeID-level) | ✅ Complete |
-| User identity | ❌ Not started |
-| User↔device binding | ❌ Not started |
-| User-level policy | ❌ Not started |
-| External IdP integration | ❌ Not started |
+| User identity (USER 0x11 record type) | ✅ Complete (v0.9.0) |
+| User↔device binding (DEVICE 0x10 with owner field) | ✅ Complete (v0.9.0) |
+| User-level policy (group-based gateway policy) | ✅ Complete (v0.9.0) |
+| Group membership (GROUP 0x12 record type) | ✅ Complete (v0.9.0) |
+| Admin controls (audit, revoke cascade, key mgmt) | ✅ Complete (v0.9.0) |
+| Bootstrap Server web UI integration | ✅ Complete (v0.9.0) |
+| External IdP integration (OIDC/SAML/LDAP) | ❌ Future work |
 
 ## Design
 
@@ -119,35 +124,34 @@ This keeps the ZTLP protocol layer clean — IdP complexity lives in the Bootstr
 
 ## Implementation Phases
 
-### Phase A — NS Record + CLI (Quick Win)
-- Add `ZTLP_USER` record type to NS store
-- Add `ztlp admin create-user` and `ztlp admin list-devices` CLI commands
-- Manual user↔device binding (admin explicitly links them)
-- ~1-2 days
+### Phase A — NS Record + CLI (Quick Win) ✅ Complete (v0.9.0)
+- ✅ DEVICE (0x10) and USER (0x11) record types in NS store
+- ✅ `ztlp admin create-user` and `ztlp admin devices` CLI commands
+- ✅ Device↔user binding via owner field
+- Implemented as Phase 1 of `IDENTITY-AND-GROUPS-TASK.md` (`7f7095b`)
 
-### Phase B — Enrollment Binding (Core Feature)
-- Extend enrollment token wire format with optional UserID
-- NS enrollment handler auto-creates/updates `ZTLP_USER` records
-- CLI shows "Enrolled as device X, bound to user Y"
-- ~2-3 days
+### Phase B — Enrollment Binding (Core Feature) ✅ Complete (v0.9.0)
+- ✅ `ztlp setup --type device --owner <user>` enrollment with user binding
+- ✅ NS enrollment handler creates DEVICE record with owner link
+- Implemented as part of Phase 1
 
-### Phase C — User-Level Policy (Unlocks Real Value)
-- Gateway resolves UserID from NodeID via NS
-- Policy engine evaluates `allowed_user_ids`
-- Cache with TTL + revocation check
-- ~2-3 days
+### Phase C — User-Level Policy (Unlocks Real Value) ✅ Complete (v0.9.0)
+- ✅ Gateway resolves user/group from device via NS
+- ✅ Policy engine evaluates group membership
+- ✅ Cache with TTL + revocation check
+- Implemented as Phase 2 (`ccf66d0`)
 
-### Phase D — Bootstrap Server Integration
-- Web UI for user management (create, list devices, revoke)
-- IdP integration (OIDC at minimum, SAML/LDAP stretch)
-- Self-service device enrollment (user logs in → gets token → enrolls device)
-- ~1-2 weeks (part of the Bootstrap Server project)
+### Phase D — Bootstrap Server Integration ✅ Complete (v0.9.0)
+- ✅ Web UI for user management (create, list devices, revoke)
+- ✅ Self-service device enrollment with QR codes
+- ❌ IdP integration (OIDC/SAML/LDAP) — future work
+- Implemented as Phase 5 (`373976b`)
 
-### Phase E — Group Policy (Future)
-- `ZTLP_GROUP` record type
-- Group membership in policy evaluation
-- Directory sync (Azure AD groups, Google Workspace OUs)
-- Scope TBD
+### Phase E — Group Policy ✅ Complete (v0.9.0)
+- ✅ GROUP (0x12) record type
+- ✅ Group membership in policy evaluation
+- ❌ Directory sync (Azure AD groups, Google Workspace OUs) — future work
+- Implemented as Phase 2 (`ccf66d0`)
 
 ## Security Considerations
 

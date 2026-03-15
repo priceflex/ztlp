@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.9.0 — 2026-03-15
+
+### Identity Model & Groups
+- **DEVICE (0x10) record type** — hardware-bound identity with owner linking, pubkey, optional hardware ID
+- **USER (0x11) record type** — person-bound identity with role (admin/tech/user), device list, email
+- **GROUP (0x12) record type** — named groups with flat membership for access control
+- **Gateway group-based policy** — policy engine resolves group membership at connection time with cached TTL
+- **Admin controls** — `ztlp admin create-user`, `create-group`, `group add/remove`, `ls`, `revoke`, `audit` with `--json` output
+- **Revoke cascade** — revoking a user revokes all linked devices; gateway checks revocation on every connection
+- **Key overwrite protection** — reject registration for existing names with different pubkey unless admin force flag
+
+### Deployment & Documentation
+- **MSP Deployment Guide** (`DEPLOYMENT.md`) — step-by-step guide for protecting web apps behind ZTLP
+- **Identity Model Reference** (`IDENTITY.md`) — DEVICE/USER/GROUP record type documentation
+
+### Bootstrap Rails Web UI (ztlp-bootstrap)
+- User CRUD (create, view, revoke) with SSH → `ztlp admin --json` backend
+- Device listing, user linking, revocation
+- Group management (create, add/remove members via Turbo Frames)
+- Enrollment page with token generation and QR codes
+- Audit log with action/date/actor filters
+- Dashboard widgets: identity summary + recent activity
+
+### Demo Improvements
+- Both demos updated with v0.9.0 identity model acts (USER, DEVICE, GROUP creation and policy)
+
+### Bug Fixes
+- Mnesia transactions for group membership index (fix race condition)
+
+## v0.8.0 — 2026-03-14
+
+### Tunnel Reliability
+- **Advanced Congestion Controller** — PRR (Proportional Rate Reduction), SACK scoreboard, token bucket pacing, Eifel spurious detection, Jacobson/Karels RTT estimation
+- **Handshake retransmit** — exponential backoff (500ms–5s), half-open cache (64 entries, 15s TTL), amplification limit (3 retransmits per session)
+- **Fast retransmit + corruption NACK** — v0.8 reliability with bounded RTO (4s cap)
+- **Stress test infrastructure** — userspace impairment proxy (loss, delay, reorder, corruption), 11 extreme network scenarios, per-scenario log collection
+
+### Bug Fixes
+- Clippy `useless_vec` lint on Rust 1.94
+- NS `pubkey_index` table race condition on CI
+- Docker full-stack test with verbose debug logging
+
+### Tests
+- Comprehensive stress test report with analysis
+- All Rust + Elixir tests passing
+
+## v0.7.0 — 2026-03-14
+
+### Features
+- **Congestion control** — SACK-based selective retransmission, advanced congestion control module
+- **NAT traversal** — Nebula-style hole punching, NAT timeout auto-detection, roaming support, tunnel health monitor
+- **Relay data path** — wired relay forwarding + multi-session listener + client rejection
+- **Relay failover** — client-side relay pool with automatic failover
+
+### v0.7.1 — Hardening
+- Anti-replay window sliding + rekey trigger ordering
+- PMTU discovery
+- Session rekeying
+- Gateway per-session bridge socket routing
+- Integration stress tests + Docker test scenarios
+
+### Tests
+- Interop test suite (Rust ↔ Elixir)
+- Docker integration test scenarios
+
 ## v0.6.3 — 2026-03-14
 
 ### Bug Fixes

@@ -4,6 +4,8 @@
 **Author:** Steven Price  
 **Date:** 2026-03-14  
 
+> **Note:** Device + User identity binding was implemented in v0.9.0 via NS record types (DEVICE 0x10, USER 0x11, GROUP 0x12). This spec covers additional **application-layer** user authentication for shared-device scenarios (OIDC/SAML token injection at the tunnel level), which is separate from the NS-layer identity model.
+
 ## Problem
 
 ZTLP authenticates **devices/nodes** (Ed25519 keypair → NodeID), not **users**. For shared platforms where multiple users access a service through ZTLP, the backend service has no way to know *which human* is on the other end of the tunnel.

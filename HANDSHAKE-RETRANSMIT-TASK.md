@@ -1,5 +1,7 @@
 # Handshake Retransmit Implementation
 
+**Status:** ✅ Complete (v0.8.0, commit `287ae2e`)
+
 ## Security Requirements
 
 ### MUST

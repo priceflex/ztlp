@@ -1,7 +1,7 @@
 # ZTLP Identity Model & Group Access Control
 
-**Version:** v0.9.0 target  
-**Prerequisite:** v0.8.0 (current)  
+**Version:** v0.9.0 ✅ Complete  
+**Prerequisite:** v0.8.0  
 **Branch:** `main`
 
 ---
@@ -14,7 +14,7 @@ Once complete, the MSP deployment guide can be written against the real identity
 
 ---
 
-## Phase 1: Device + User Identity in NS (~2-3 hours)
+## Phase 1: Device + User Identity in NS ✅ Complete (`7f7095b`)
 
 ### Goal
 Two distinct identity types in NS: **DEVICE** (bound to hardware/machine) and **USER** (bound to a person). A user can be enrolled on multiple devices.
@@ -79,7 +79,7 @@ New: `ztlp setup` → asks "Device or User?" → generates keypair → registers
 
 ---
 
-## Phase 2: Groups & Roles in NS (~2-3 hours)
+## Phase 2: Groups & Roles in NS ✅ Complete (`ccf66d0`)
 
 ### Goal
 Named groups that contain users. Gateway policy engine checks group membership for access decisions.
@@ -162,7 +162,7 @@ ztlp admin group check techs@techrockstars.ztlp steve@techrockstars.ztlp
 
 ---
 
-## Phase 3: Admin Controls (~1-2 hours)
+## Phase 3: Admin Controls ✅ Complete (`a0516d8`)
 
 ### Goal
 CLI commands for zone administrators to manage identities, revoke access, and audit the namespace.
@@ -217,7 +217,7 @@ Extend:
 
 ---
 
-## Phase 4: MSP Deployment Guide (~2-3 hours)
+## Phase 4: MSP Deployment Guide ✅ Complete (`8905594`)
 
 ### Goal
 Step-by-step guide for an MSP to deploy ZTLP to protect any internally-hosted web application.
@@ -263,16 +263,16 @@ networks:
 ```
 
 ### Security Checklist
-- [ ] NS server not exposed to public internet (or behind its own ZTLP gateway)
-- [ ] Zone signing key stored securely (not in Docker image)
-- [ ] Gateway policy is default-deny
-- [ ] Enrollment tokens are single-use with short TTL
-- [ ] All records signed with zone key (registration auth enabled)
-- [ ] Revocation checked on every connection
+- [x] NS server not exposed to public internet (or behind its own ZTLP gateway) _(operational — depends on deployment)_
+- [x] Zone signing key stored securely (not in Docker image) _(operational — depends on deployment)_
+- [x] Gateway policy is default-deny _(implemented in policy engine)_
+- [x] Enrollment tokens are single-use with short TTL _(implemented in enrollment system)_
+- [x] All records signed with zone key (registration auth enabled) _(implemented in v0.6.0)_
+- [x] Revocation checked on every connection _(implemented in gateway)_
 
 ---
 
-## Phase 5: Bootstrap Rails App Integration (~3-4 hours)
+## Phase 5: Bootstrap Rails App Integration ✅ Complete (`373976b`)
 
 ### Goal
 Wire the new identity/group/admin features into the Bootstrap Rails app (`priceflex/ztlp-bootstrap`) so MSPs manage everything through a web UI instead of CLI.
@@ -527,25 +527,25 @@ test/controllers/
 
 ## Success Criteria
 
-### Phases 1-4 (CLI + Core)
-- [ ] `ztlp setup --type device` enrolls a device linked to a user
-- [ ] `ztlp admin create-user` creates user identity in NS
-- [ ] `ztlp admin create-group` + `group add` manages group membership
-- [ ] Gateway policy engine evaluates group membership for access decisions
-- [ ] `ztlp admin revoke` immediately blocks access (gateway rejects)
-- [ ] `ztlp admin ls` shows all enrolled entities
-- [ ] All `ztlp admin` commands support `--json` output (required for Bootstrap)
-- [ ] Key overwrite protection prevents unauthorized re-registration
-- [ ] DEPLOYMENT.md walks through protecting a web app end-to-end
-- [ ] All existing tests still pass (backward compatibility)
-- [ ] 100+ new tests across NS, gateway, and CLI
+### Phases 1-4 (CLI + Core) ✅ Complete
+- [x] `ztlp setup --type device` enrolls a device linked to a user
+- [x] `ztlp admin create-user` creates user identity in NS
+- [x] `ztlp admin create-group` + `group add` manages group membership
+- [x] Gateway policy engine evaluates group membership for access decisions
+- [x] `ztlp admin revoke` immediately blocks access (gateway rejects)
+- [x] `ztlp admin ls` shows all enrolled entities
+- [x] All `ztlp admin` commands support `--json` output (required for Bootstrap)
+- [x] Key overwrite protection prevents unauthorized re-registration
+- [x] DEPLOYMENT.md walks through protecting a web app end-to-end
+- [x] All existing tests still pass (backward compatibility)
+- [x] 100+ new tests across NS, gateway, and CLI
 
-### Phase 5 (Bootstrap Rails App)
-- [ ] Web UI for user CRUD (create, view, revoke)
-- [ ] Web UI for device listing, linking to users, revoking
-- [ ] Web UI for group management (create, add/remove members)
-- [ ] Enrollment page generates tokens, displays QR codes
-- [ ] Audit log page with filtering
-- [ ] Dashboard widgets for identity summary + recent activity
-- [ ] All operations execute via SSH → `ztlp admin --json` commands
-- [ ] Rails model tests + controller tests + service tests
+### Phase 5 (Bootstrap Rails App) ✅ Complete
+- [x] Web UI for user CRUD (create, view, revoke)
+- [x] Web UI for device listing, linking to users, revoking
+- [x] Web UI for group management (create, add/remove members)
+- [x] Enrollment page generates tokens, displays QR codes
+- [x] Audit log page with filtering
+- [x] Dashboard widgets for identity summary + recent activity
+- [x] All operations execute via SSH → `ztlp admin --json` commands
+- [x] Rails model tests + controller tests + service tests

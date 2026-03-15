@@ -1,5 +1,7 @@
 # Wire In AdvancedCongestionController — Task Specification
 
+**Status:** ✅ Complete (v0.8.0, commit `167c971`)
+
 ## Overview
 
 Replace the simple `CongestionController` in `tunnel.rs` with the `AdvancedCongestionController` from `congestion.rs`. The advanced controller provides PRR (Proportional Rate Reduction), SACK scoreboard, token bucket pacing, Eifel spurious detection, and proper Jacobson/Karels RTT — all of which are needed to handle high-loss scenarios.

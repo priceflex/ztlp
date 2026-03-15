@@ -1,7 +1,7 @@
 # ZTLP-NS Security Hardening — Implementation Plan
 
 **Date:** 2026-03-13
-**Status:** Ready for implementation
+**Status:** ✅ Complete (v0.6.0, commit `5ef8954`)
 **Scope:** Fix all security gaps in `ns/lib/ztlp_ns/server.ex` and related modules
 
 > All security modules (RateLimiter, ComponentAuth, TlsConfig, ZoneAuthority,
@@ -611,12 +611,12 @@ re-registers KEY and SVC records at 75% of TTL with ±10% jitter.
 ### Security Hardening Tests (ns/test/)
 
 ```
-[ ] test/ztlp_ns/rate_limiter_integration_test.exs
+[x] test/ztlp_ns/rate_limiter_integration_test.exs
     - Queries rate limited at server level
     - Rate limited queries get no response (silent drop)
     - Legitimate queries still work after rate limit expires
 
-[ ] test/ztlp_ns/registration_auth_test.exs
+[x] test/ztlp_ns/registration_auth_test.exs
     - Valid zone authority signature → accepted
     - Wrong zone key → rejected
     - Forged signature → rejected
@@ -625,21 +625,21 @@ re-registers KEY and SVC records at 75% of TTL with ±10% jitter.
     - Cross-zone registration → rejected
     - Revoked NodeID registration → rejected
 
-[ ] test/ztlp_ns/packet_limits_test.exs
+[x] test/ztlp_ns/packet_limits_test.exs
     - Oversized packet → dropped
     - Record >4096 bytes → rejected
     - Name >253 bytes → rejected
     - Invalid name chars → rejected
 
-[ ] test/ztlp_ns/amplification_test.exs
+[x] test/ztlp_ns/amplification_test.exs
     - Response ≤ request for unauthenticated queries
     - Truncation flag set when response truncated
 
-[ ] test/ztlp_ns/pubkey_index_test.exs
+[x] test/ztlp_ns/pubkey_index_test.exs
     - O(1) pubkey lookup
     - Index maintained on insert/delete
 
-[ ] test/ztlp_ns/audit_log_test.exs
+[x] test/ztlp_ns/audit_log_test.exs
     - Registration events logged
     - Rate limit events logged
     - Auth failure events logged
@@ -648,7 +648,7 @@ re-registers KEY and SVC records at 75% of TTL with ±10% jitter.
 ### Certificate Renewal Tests
 
 ```
-[ ] test/ztlp_ns/renewal_test.exs
+[x] test/ztlp_ns/renewal_test.exs
     - Renewal within window → new cert issued
     - Renewal before window → NOT_ELIGIBLE
     - Renewal after expiry → EXPIRED
@@ -660,7 +660,7 @@ re-registers KEY and SVC records at 75% of TTL with ±10% jitter.
     - X25519 key rotation during renewal
     - New cert TTL matches original
 
-[ ] proto/tests/renewal_test.rs
+[x] proto/tests/renewal_test.rs
     - Build and parse RENEW message
     - Build and parse RENEW_RESPONSE
     - Signature verification

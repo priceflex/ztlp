@@ -1,7 +1,7 @@
 # ZTLP Agent — Design Document
 
 **Date:** 2026-03-13
-**Status:** Ready for implementation
+**Status:** ✅ Complete (v0.6.1)
 **Scope:** Background daemon with DNS resolver, TCP proxy, SSH integration, credential renewal
 
 ---
@@ -761,15 +761,15 @@ Commands (JSON over Unix socket):
 
 ## 13. Implementation Phases
 
-### Phase A — SSH ProxyCommand + NS Resolution (MVP)
+### Phase A — SSH ProxyCommand + NS Resolution (MVP) ✅ Complete
 **Estimated: 1-2 days**
 
 Smallest useful thing: `ztlp proxy` command that makes SSH work with ZTLP names.
 
-- [ ] `ztlp proxy <name> <port>` — stdin/stdout proxy
-- [ ] NS resolution with caching (reuse existing NsClient code)
-- [ ] Custom domain → ZTLP zone mapping (static config)
-- [ ] SSH config example in docs
+- [x] `ztlp proxy <name> <port>` — stdin/stdout proxy
+- [x] NS resolution with caching (reuse existing NsClient code)
+- [x] Custom domain → ZTLP zone mapping (static config)
+- [x] SSH config example in docs
 
 **After this phase:**
 ```bash
@@ -777,17 +777,17 @@ Smallest useful thing: `ztlp proxy` command that makes SSH work with ZTLP names.
 ssh -o ProxyCommand="ztlp proxy %h %p" user@server.corp.ztlp
 ```
 
-### Phase B — Agent Daemon + DNS Resolver
+### Phase B — Agent Daemon + DNS Resolver ✅ Complete
 **Estimated: 2-3 days**
 
 Background daemon with DNS resolution → virtual IP → TCP proxy.
 
-- [ ] Agent daemon (start/stop/status, PID file, Unix control socket)
-- [ ] DNS resolver (UDP, `*.ztlp` + custom zones)
-- [ ] Virtual IP allocator (127.100.0.0/16 pool)
-- [ ] TCP proxy (per-VIP listeners, forward through tunnel)
-- [ ] System DNS configuration (systemd-resolved, /etc/resolv.conf, macOS /etc/resolver)
-- [ ] `ztlp agent start/stop/status/dns-setup/dns-teardown`
+- [x] Agent daemon (start/stop/status, PID file, Unix control socket)
+- [x] DNS resolver (UDP, `*.ztlp` + custom zones)
+- [x] Virtual IP allocator (127.100.0.0/16 pool)
+- [x] TCP proxy (per-VIP listeners, forward through tunnel)
+- [x] System DNS configuration (systemd-resolved, /etc/resolv.conf, macOS /etc/resolver)
+- [x] `ztlp agent start/stop/status/dns-setup/dns-teardown`
 
 **After this phase:**
 ```bash
@@ -797,43 +797,43 @@ psql -h db.corp.ztlp               # Just works
 curl https://app.corp.ztlp         # Just works
 ```
 
-### Phase C — Tunnel Management + Auto-Reconnect
+### Phase C — Tunnel Management + Auto-Reconnect ✅ Complete
 **Estimated: 2-3 days**
 
 Production-grade tunnel lifecycle.
 
-- [ ] Connection pooling (multiple streams per tunnel)
-- [ ] Stream multiplexing (STREAM_OPEN/DATA/CLOSE wire types)
-- [ ] Idle timeout + cleanup
-- [ ] Auto-reconnect with exponential backoff
-- [ ] Keepalive pings + dead tunnel detection
-- [ ] Relay fallback when direct fails
-- [ ] `ztlp agent tunnels` command
+- [x] Connection pooling (multiple streams per tunnel)
+- [x] Stream multiplexing (STREAM_OPEN/DATA/CLOSE wire types)
+- [x] Idle timeout + cleanup
+- [x] Auto-reconnect with exponential backoff
+- [x] Keepalive pings + dead tunnel detection
+- [x] Relay fallback when direct fails
+- [x] `ztlp agent tunnels` command
 
-### Phase D — Credential Renewal + Health
+### Phase D — Credential Renewal + Health ✅ Complete
 **Estimated: 1-2 days**
 
 Automatic credential lifecycle.
 
-- [ ] Certificate expiry monitoring + RENEW
-- [ ] NS record auto-refresh (KEY + SVC at 75% TTL)
-- [ ] Config hot-reload (watch agent.toml)
-- [ ] Health reporting to bootstrap server (optional)
-- [ ] `ztlp agent logs` command
+- [x] Certificate expiry monitoring + RENEW
+- [x] NS record auto-refresh (KEY + SVC at 75% TTL)
+- [x] Config hot-reload (watch agent.toml)
+- [x] Health reporting to bootstrap server (optional)
+- [x] `ztlp agent logs` command
 
-### Phase E — DNS TXT Discovery + Systemd + Polish
+### Phase E — DNS TXT Discovery + Systemd + Polish ✅ Complete
 **Estimated: 1-2 days**
 
 Enterprise features and packaging.
 
-- [ ] `_ztlp` TXT record auto-discovery
-- [ ] Systemd unit + `ztlp agent install`
-- [ ] macOS LaunchAgent support
-- [ ] DNS cache flush command
-- [ ] Agent-aware `ztlp proxy` (reuse tunnels)
-- [ ] Comprehensive tests
+- [x] `_ztlp` TXT record auto-discovery
+- [x] Systemd unit + `ztlp agent install`
+- [x] macOS LaunchAgent support
+- [x] DNS cache flush command
+- [x] Agent-aware `ztlp proxy` (reuse tunnels)
+- [x] Comprehensive tests
 
-### Total: ~7-12 days
+### Total: ~7-12 days (all phases completed in v0.6.1)
 
 ---
 

@@ -1,0 +1,77 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Devices", network_ztlp_devices_path(@network), class: "hover:text-gray-700" %> /
+    <span class="text-gray-700"><%= @device.name %></span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @device.name %></h1>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <% if @device.enrolled? %>
+        <%= button_to "Revoke Device", network_ztlp_device_path(@network, @device), method: :delete,
+            class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500",
+            data: { turbo_confirm: "Revoke device '#{@device.name}'? This cannot be undone." } %>
+      <% end %>
+    </div>
+  </div>
+  <div class="mt-2">
+    <%= status_badge(@device.status) %>
+  </div>
+</div>
+
+<% if @device.revoked? %>
+  <div class="rounded-md bg-red-50 p-4 mb-6">
+    <p class="text-sm text-red-800">
+      <strong>Revoked</strong> <%= time_ago_short(@device.revoked_at) %>
+      <% if @device.revocation_reason.present? %>
+        — <%= @device.revocation_reason %>
+      <% end %>
+    </p>
+  </div>
+<% end %>
+
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Device Details</h3>
+  </div>
+  <dl class="divide-y divide-gray-200">
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Owner</dt>
+      <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0">
+        <% if @device.ztlp_user %>
+          <%= link_to @device.ztlp_user.name, network_ztlp_user_path(@network, @device.ztlp_user), class: "text-ztlp-600 hover:text-ztlp-500" %>
+        <% else %>
+          <span class="text-gray-400">Unassigned</span>
+        <% end %>
+      </dd>
+    </div>
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Machine</dt>
+      <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0">
+        <% if @device.machine %>
+          <%= link_to @device.machine.hostname, network_machine_path(@network, @device.machine), class: "text-ztlp-600 hover:text-ztlp-500" %>
+        <% else %>
+          <span class="text-gray-400">—</span>
+        <% end %>
+      </dd>
+    </div>
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Node ID</dt>
+      <dd class="mt-1 text-sm text-gray-900 font-mono sm:col-span-2 sm:mt-0"><%= @device.node_id || "—" %></dd>
+    </div>
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Hardware ID</dt>
+      <dd class="mt-1 text-sm text-gray-900 font-mono sm:col-span-2 sm:mt-0"><%= @device.hardware_id || "—" %></dd>
+    </div>
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Public Key</dt>
+      <dd class="mt-1 text-sm text-gray-900 font-mono sm:col-span-2 sm:mt-0 break-all"><%= @device.pubkey.present? ? @device.pubkey.truncate(80) : "—" %></dd>
+    </div>
+    <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+      <dt class="text-sm font-medium text-gray-500">Enrolled</dt>
+      <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0"><%= @device.enrolled_at ? @device.enrolled_at.strftime("%b %d, %Y %H:%M") : "—" %></dd>
+    </div>
+  </dl>
+</div>

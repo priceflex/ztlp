@@ -1,0 +1,33 @@
+alice:
+  name: alice
+  network: office
+  email: alice@example.com
+  role: admin
+  status: active
+
+bob:
+  name: bob
+  network: office
+  email: bob@example.com
+  role: user
+  status: active
+
+charlie:
+  name: charlie
+  network: office
+  role: tech
+  status: active
+
+revoked_user:
+  name: dave
+  network: office
+  role: user
+  status: revoked
+  revoked_at: <%= Time.current %>
+  revocation_reason: "Left the company"
+
+other_network_user:
+  name: eve
+  network: production
+  role: user
+  status: active

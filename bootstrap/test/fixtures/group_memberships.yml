@@ -1,0 +1,11 @@
+alice_engineering:
+  ztlp_group: engineering
+  ztlp_user: alice
+
+bob_engineering:
+  ztlp_group: engineering
+  ztlp_user: bob
+
+alice_ops:
+  ztlp_group: ops
+  ztlp_user: alice

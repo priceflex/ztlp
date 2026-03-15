@@ -1,0 +1,41 @@
+alice_laptop:
+  name: alice-laptop
+  network: office
+  ztlp_user: alice
+  machine: ns1
+  node_id: node-001
+  hardware_id: hw-laptop-001
+  status: enrolled
+  enrolled_at: <%= 1.day.ago %>
+
+alice_phone:
+  name: alice-phone
+  network: office
+  ztlp_user: alice
+  node_id: node-002
+  hardware_id: hw-phone-001
+  status: enrolled
+  enrolled_at: <%= 2.days.ago %>
+
+bob_desktop:
+  name: bob-desktop
+  network: office
+  ztlp_user: bob
+  node_id: node-003
+  status: enrolled
+  enrolled_at: <%= 3.days.ago %>
+
+revoked_device:
+  name: old-server
+  network: office
+  node_id: node-004
+  status: revoked
+  revoked_at: <%= Time.current %>
+  revocation_reason: "Decommissioned"
+
+unassigned_device:
+  name: spare-device
+  network: office
+  node_id: node-005
+  status: enrolled
+  enrolled_at: <%= 1.day.ago %>

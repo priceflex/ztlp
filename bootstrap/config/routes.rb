@@ -27,6 +27,16 @@ Rails.application.routes.draw do
         post :revoke
       end
     end
+
+    resources :ztlp_users, path: "users"
+    resources :ztlp_devices, path: "devices", only: [:index, :show, :destroy]
+    resources :ztlp_groups, path: "groups" do
+      member do
+        post :add_member
+        delete :remove_member
+      end
+    end
+    resources :enrollment, only: [:index, :create]
   end
 
   resources :deployments, only: [:index, :show]

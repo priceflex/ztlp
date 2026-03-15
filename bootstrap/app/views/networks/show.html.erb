@@ -17,6 +17,25 @@
   <% end %>
 </div>
 
+<!-- Identity & Groups Navigation -->
+<div class="bg-white shadow rounded-lg mb-8 px-4 py-4">
+  <div class="flex items-center space-x-6">
+    <span class="text-sm font-medium text-gray-500">Identity:</span>
+    <%= link_to network_ztlp_users_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+      <span>👤</span><span>Users (<%= @network.ztlp_users.count %>)</span>
+    <% end %>
+    <%= link_to network_ztlp_devices_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+      <span>💻</span><span>Devices (<%= @network.ztlp_devices.count %>)</span>
+    <% end %>
+    <%= link_to network_ztlp_groups_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+      <span>👥</span><span>Groups (<%= @network.ztlp_groups.count %>)</span>
+    <% end %>
+    <%= link_to network_enrollment_index_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+      <span>🎫</span><span>Enrollment</span>
+    <% end %>
+  </div>
+</div>
+
 <!-- Machines -->
 <div class="bg-white shadow rounded-lg mb-8">
   <div class="px-4 py-5 sm:px-6 flex justify-between items-center">

@@ -1,0 +1,64 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <span class="text-gray-700">Devices</span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Devices</h1>
+      <p class="mt-1 text-sm text-gray-500">ZTLP enrolled devices on <%= @network.zone %></p>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="mt-4 flex space-x-4">
+    <%= link_to "All", network_ztlp_devices_path(@network),
+        class: "text-sm #{params[:status].blank? ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+    <%= link_to "Enrolled", network_ztlp_devices_path(@network, status: "enrolled"),
+        class: "text-sm #{params[:status] == 'enrolled' ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+    <%= link_to "Revoked", network_ztlp_devices_path(@network, status: "revoked"),
+        class: "text-sm #{params[:status] == 'revoked' ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Owner</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machine</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Enrolled</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @devices.each do |device| %>
+        <tr>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <%= link_to device.name, network_ztlp_device_path(@network, device), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+            <% if device.ztlp_user %>
+              <%= link_to device.ztlp_user.name, network_ztlp_user_path(@network, device.ztlp_user), class: "text-ztlp-600 hover:text-ztlp-500" %>
+            <% else %>
+              <span class="text-gray-400">Unassigned</span>
+            <% end %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= device.machine&.hostname || "—" %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(device.status) %></td>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+            <%= link_to "View", network_ztlp_device_path(@network, device), class: "text-ztlp-600 hover:text-ztlp-500" %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+  <% if @devices.empty? %>
+    <div class="px-6 py-8 text-center text-gray-500">
+      No devices found.
+    </div>
+  <% end %>
+</div>

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_12_030001) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_15_010003) do
   create_table "alerts", force: :cascade do |t|
     t.integer "network_id", null: false
     t.integer "machine_id", null: false
@@ -80,6 +80,16 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_12_030001) do
     t.index ["token_id"], name: "index_enrollment_tokens_on_token_id", unique: true
   end
 
+  create_table "group_memberships", force: :cascade do |t|
+    t.integer "ztlp_group_id", null: false
+    t.integer "ztlp_user_id", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["ztlp_group_id", "ztlp_user_id"], name: "index_group_memberships_on_ztlp_group_id_and_ztlp_user_id", unique: true
+    t.index ["ztlp_group_id"], name: "index_group_memberships_on_ztlp_group_id"
+    t.index ["ztlp_user_id"], name: "index_group_memberships_on_ztlp_user_id"
+  end
+
   create_table "health_checks", force: :cascade do |t|
     t.integer "machine_id", null: false
     t.string "component", null: false
@@ -132,10 +142,62 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_12_030001) do
     t.index ["zone"], name: "index_networks_on_zone", unique: true
   end
 
+  create_table "ztlp_devices", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "network_id", null: false
+    t.integer "ztlp_user_id"
+    t.integer "machine_id"
+    t.string "node_id"
+    t.text "pubkey"
+    t.string "hardware_id"
+    t.string "status", default: "enrolled", null: false
+    t.datetime "enrolled_at"
+    t.datetime "revoked_at"
+    t.string "revocation_reason"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["machine_id"], name: "index_ztlp_devices_on_machine_id"
+    t.index ["network_id", "name"], name: "index_ztlp_devices_on_network_id_and_name", unique: true
+    t.index ["network_id"], name: "index_ztlp_devices_on_network_id"
+    t.index ["ztlp_user_id"], name: "index_ztlp_devices_on_ztlp_user_id"
+  end
+
+  create_table "ztlp_groups", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "network_id", null: false
+    t.text "description"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["network_id", "name"], name: "index_ztlp_groups_on_network_id_and_name", unique: true
+    t.index ["network_id"], name: "index_ztlp_groups_on_network_id"
+  end
+
+  create_table "ztlp_users", force: :cascade do |t|
+    t.string "name", null: false
+    t.integer "network_id", null: false
+    t.text "pubkey"
+    t.string "email"
+    t.string "role", default: "user", null: false
+    t.string "status", default: "active", null: false
+    t.datetime "revoked_at"
+    t.string "revocation_reason"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["network_id", "name"], name: "index_ztlp_users_on_network_id_and_name", unique: true
+    t.index ["network_id"], name: "index_ztlp_users_on_network_id"
+  end
+
   add_foreign_key "alerts", "machines"
   add_foreign_key "alerts", "networks"
   add_foreign_key "deployments", "machines"
   add_foreign_key "enrollment_tokens", "networks"
+  add_foreign_key "group_memberships", "ztlp_groups"
+  add_foreign_key "group_memberships", "ztlp_users"
   add_foreign_key "health_checks", "machines"
   add_foreign_key "machines", "networks"
+  add_foreign_key "ztlp_devices", "machines"
+  add_foreign_key "ztlp_devices", "networks"
+  add_foreign_key "ztlp_devices", "ztlp_users"
+  add_foreign_key "ztlp_groups", "networks"
+  add_foreign_key "ztlp_users", "networks"
 end

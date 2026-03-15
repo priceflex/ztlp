@@ -1,0 +1,13 @@
+engineering:
+  name: engineering
+  network: office
+  description: "Engineering team"
+
+ops:
+  name: ops
+  network: office
+  description: "Operations team"
+
+empty_group:
+  name: empty-group
+  network: office

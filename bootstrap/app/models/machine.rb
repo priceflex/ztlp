@@ -3,6 +3,7 @@ class Machine < ApplicationRecord
   has_many :deployments, dependent: :destroy
   has_many :health_checks, dependent: :destroy
   has_many :alerts, dependent: :destroy
+  has_many :ztlp_devices, dependent: :nullify
 
   encrypts :ssh_private_key_ciphertext
   encrypts :ssh_password_ciphertext

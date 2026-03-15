@@ -83,6 +83,58 @@
 </div>
 <% end %>
 
+<!-- Identity Summary -->
+<div class="mb-8">
+  <h2 class="text-lg font-medium text-gray-900 mb-4">🔐 Identity & Enrollment</h2>
+  <div class="grid grid-cols-1 gap-5 sm:grid-cols-5 mb-4">
+    <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-gray-500">👤 Users</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900"><%= @identity_stats[:users_active] %></dd>
+      <% if @identity_stats[:revoked_users] > 0 %>
+        <dd class="text-xs text-red-500"><%= @identity_stats[:revoked_users] %> revoked</dd>
+      <% end %>
+    </div>
+    <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-gray-500">💻 Devices</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900"><%= @identity_stats[:devices_enrolled] %></dd>
+      <% if @identity_stats[:revoked_devices] > 0 %>
+        <dd class="text-xs text-red-500"><%= @identity_stats[:revoked_devices] %> revoked</dd>
+      <% end %>
+    </div>
+    <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-gray-500">👥 Groups</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900"><%= @identity_stats[:groups] %></dd>
+    </div>
+    <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-gray-500">🎫 Pending Tokens</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-ztlp-600"><%= @pending_tokens %></dd>
+    </div>
+    <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-gray-500">🚫 Revoked</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-red-600"><%= @identity_stats[:revoked_users] + @identity_stats[:revoked_devices] %></dd>
+    </div>
+  </div>
+
+  <% if @recent_enrollments.any? %>
+    <div class="bg-white shadow rounded-lg">
+      <div class="px-4 py-3 sm:px-6">
+        <h4 class="text-sm font-medium text-gray-900">Recent Enrollments</h4>
+      </div>
+      <ul class="divide-y divide-gray-200">
+        <% @recent_enrollments.each do |device| %>
+          <li class="px-4 py-3 sm:px-6 flex items-center justify-between">
+            <div>
+              <span class="text-sm font-medium text-gray-900"><%= device.name %></span>
+              <span class="text-xs text-gray-500 ml-2"><%= device.owner_name %></span>
+            </div>
+            <span class="text-xs text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></span>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+</div>
+
 <div class="grid grid-cols-1 gap-8 lg:grid-cols-2">
   <!-- Networks -->
   <div class="bg-white shadow rounded-lg">

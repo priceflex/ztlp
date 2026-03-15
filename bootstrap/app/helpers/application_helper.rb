@@ -23,7 +23,8 @@ module ApplicationHelper
       "offline"      => "bg-gray-100 text-gray-800",
       "expired"      => "bg-gray-100 text-gray-800",
       "exhausted"    => "bg-gray-100 text-gray-800",
-      "revoked"      => "bg-red-100 text-red-800"
+      "revoked"      => "bg-red-100 text-red-800",
+      "enrolled"     => "bg-green-100 text-green-800"
     }
     color = colors[status] || "bg-gray-100 text-gray-800"
     content_tag(:span, status, class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium #{color}")

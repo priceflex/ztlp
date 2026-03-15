@@ -1,0 +1,124 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <span class="text-gray-700">Enrollment</span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Enrollment</h1>
+      <p class="mt-1 text-sm text-gray-500">Generate and manage enrollment tokens for <%= @network.zone %></p>
+    </div>
+    <div class="mt-4 sm:mt-0">
+      <%= button_to "Generate Token", network_enrollment_index_path(@network),
+          class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
+    </div>
+  </div>
+</div>
+
+<!-- Active Tokens -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Active Tokens (<%= @active_tokens.count %>)</h3>
+  </div>
+  <% if @active_tokens.any? %>
+    <div class="divide-y divide-gray-200">
+      <% @active_tokens.each do |token| %>
+        <div class="px-6 py-4">
+          <div class="flex justify-between items-start">
+            <div>
+              <p class="text-sm font-mono text-gray-900"><%= token.token_id %></p>
+              <p class="text-xs text-gray-500 mt-1">
+                Uses: <%= token.current_uses %>/<%= token.max_uses %> ·
+                Expires: <%= token.expires_at.strftime("%b %d, %Y %H:%M") %>
+                (<%= time_ago_short(token.expires_at) %>)
+              </p>
+              <% if token.notes.present? %>
+                <p class="text-xs text-gray-500 mt-1"><%= token.notes %></p>
+              <% end %>
+            </div>
+            <div class="flex items-center space-x-2">
+              <%= status_badge(token.status) %>
+              <% if token.qr_svg.present? %>
+                <button onclick="toggleQR('qr-<%= token.id %>')" class="text-xs text-ztlp-600 hover:text-ztlp-500">Show QR</button>
+              <% end %>
+            </div>
+          </div>
+          <% if token.token_uri.present? %>
+            <div class="mt-2">
+              <code class="text-xs bg-gray-100 px-2 py-1 rounded font-mono break-all"><%= token.token_uri %></code>
+            </div>
+          <% end %>
+          <% if token.qr_svg.present? %>
+            <div id="qr-<%= token.id %>" class="mt-3 hidden" style="max-width: 200px;">
+              <%= token.qr_svg.html_safe %>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="px-6 py-4 text-sm text-gray-500">No active tokens.</div>
+  <% end %>
+</div>
+
+<!-- All Tokens -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">All Tokens (<%= @tokens.count %>)</h3>
+  </div>
+  <% if @tokens.any? %>
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Token ID</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Uses</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Expires</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @tokens.each do |token| %>
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900"><%= token.token_id %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= token.current_uses %>/<%= token.max_uses %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= token.expires_at.strftime("%b %d %H:%M") %></td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(token.status) %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= time_ago_short(token.created_at) %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <div class="px-6 py-4 text-sm text-gray-500">No tokens generated yet.</div>
+  <% end %>
+</div>
+
+<!-- Recent Enrollments -->
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6">
+    <h3 class="text-lg font-medium text-gray-900">Recent Enrollments</h3>
+  </div>
+  <% if @recent_devices.any? %>
+    <ul class="divide-y divide-gray-200">
+      <% @recent_devices.each do |device| %>
+        <li class="px-6 py-4 flex items-center justify-between">
+          <div>
+            <%= link_to device.name, network_ztlp_device_path(@network, device), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+            <span class="text-xs text-gray-500 ml-2"><%= device.owner_name %></span>
+          </div>
+          <span class="text-xs text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></span>
+        </li>
+      <% end %>
+    </ul>
+  <% else %>
+    <div class="px-6 py-4 text-sm text-gray-500">No recent enrollments.</div>
+  <% end %>
+</div>
+
+<script>
+  function toggleQR(id) {
+    var el = document.getElementById(id);
+    el.classList.toggle('hidden');
+  }
+</script>

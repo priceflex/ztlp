@@ -1,4 +1,9 @@
 class Network < ApplicationRecord
+  # Order matters for cascading deletes: destroy ztlp_devices before machines
+  # since ztlp_devices has a FK to machines
+  has_many :ztlp_devices, dependent: :destroy
+  has_many :ztlp_users, dependent: :destroy
+  has_many :ztlp_groups, dependent: :destroy
   has_many :machines, dependent: :destroy
   has_many :enrollment_tokens, dependent: :destroy
   has_many :deployments, through: :machines

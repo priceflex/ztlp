@@ -301,6 +301,8 @@ warn "  If the script crashes or is killed with kill -9, run:"
 warn "    ${CYAN}$0 --cleanup${RESET}"
 warn "  or manually: ${CYAN}grep -v ztlp-demo-temp ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys${RESET}"
 echo ""
+read -rp "Press Enter to continue..."
+echo ""
 
 # -------------------------------------------------------------------
 # ACT 1 – Generate Identities

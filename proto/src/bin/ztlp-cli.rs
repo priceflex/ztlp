@@ -1629,6 +1629,13 @@ struct NsQueryResult {
     data_bytes: Vec<u8>,
 }
 
+/// Check if a byte is a valid ZTLP-NS record type byte.
+/// Core types: 1-7 (KEY, SVC, RELAY, POLICY, REVOKE, BOOTSTRAP, OPERATOR)
+/// Identity types: 0x10-0x12 (DEVICE, USER, GROUP)
+fn is_valid_record_type(type_byte: u8) -> bool {
+    (1..=7).contains(&type_byte) || (0x10..=0x12).contains(&type_byte)
+}
+
 /// Perform an NS query for a given record type. Returns the raw CBOR data field if found.
 async fn ns_query_raw(
     name: &str,
@@ -1665,10 +1672,11 @@ async fn ns_query_raw(
             // then fall back to offset 1 (no flag).
             let record = 'parse: {
                 if data.len() > 5 && data[1] == 0x01 {
-                    // Possible truncation flag — check if offset 2 yields a valid type_byte (1-7)
+                    // Possible truncation flag — check if offset 2 yields a valid type_byte
+                    // (1-7 for core types, 0x10-0x12 for identity types)
                     // and a reasonable name_len
                     let maybe_type = data[2];
-                    if (1..=7).contains(&maybe_type) && data.len() > 4 {
+                    if is_valid_record_type(maybe_type) && data.len() > 4 {
                         let maybe_name_len = u16::from_be_bytes([data[3], data[4]]) as usize;
                         if maybe_name_len < 1024 && data.len() >= 5 + maybe_name_len {
                             break 'parse &data[2..];
@@ -1762,7 +1770,7 @@ async fn ns_pubkey_lookup(
             let record = 'parse: {
                 if data.len() > 5 && data[1] == 0x01 {
                     let maybe_type = data[2];
-                    if (1..=7).contains(&maybe_type) && data.len() > 4 {
+                    if is_valid_record_type(maybe_type) && data.len() > 4 {
                         let maybe_name_len = u16::from_be_bytes([data[3], data[4]]) as usize;
                         if maybe_name_len < 1024 && data.len() >= 5 + maybe_name_len {
                             break 'parse &data[2..];
@@ -1785,6 +1793,100 @@ async fn ns_pubkey_lookup(
             Ok(name)
         }
         _ => Ok(None),
+    }
+}
+
+// ── NS Resolver for Policy Engine ────────────────────────────────────────
+//
+// Queries ZTLP-NS for GROUP, USER, and DEVICE records to support
+// group: and role: patterns in the policy engine.
+
+use ztlp_proto::policy::NsResolver;
+
+/// Real NS resolver that queries a ZTLP-NS server over UDP.
+struct UdpNsResolver {
+    ns_server: String,
+}
+
+impl UdpNsResolver {
+    fn new(ns_server: &str) -> Self {
+        Self {
+            ns_server: ns_server.to_string(),
+        }
+    }
+}
+
+impl NsResolver for UdpNsResolver {
+    fn group_members(
+        &self,
+        group_name: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + '_>> {
+        let group = group_name.to_string();
+        let ns = self.ns_server.clone();
+        Box::pin(async move {
+            // Query GROUP record (type 0x12)
+            match ns_query_raw(&group, &ns, 0x12).await {
+                Ok(Some(result)) => {
+                    // Extract "members" field from CBOR as a string array
+                    cbor_extract_string_array(&result.data_bytes, "members")
+                }
+                _ => vec![],
+            }
+        })
+    }
+
+    fn user_role(
+        &self,
+        user_name: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        let user = user_name.to_string();
+        let ns = self.ns_server.clone();
+        Box::pin(async move {
+            // Query USER record (type 0x11)
+            match ns_query_raw(&user, &ns, 0x11).await {
+                Ok(Some(result)) => {
+                    cbor_extract_string(&result.data_bytes, "role")
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn device_owner(
+        &self,
+        device_name: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        let device = device_name.to_string();
+        let ns = self.ns_server.clone();
+        Box::pin(async move {
+            // Query DEVICE record (type 0x10)
+            match ns_query_raw(&device, &ns, 0x10).await {
+                Ok(Some(result)) => {
+                    cbor_extract_string(&result.data_bytes, "owner")
+                }
+                _ => None,
+            }
+        })
+    }
+}
+
+/// Extract a string array from a CBOR map for a given key.
+///
+/// Parses the CBOR data (expected to be a map) and extracts the value
+/// for `target_key` as a list of strings.
+fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
+    // Use our full CBOR-to-JSON decoder, then extract from the JSON
+    match cbor_decode_to_json(data) {
+        Some(val) => {
+            if let Some(arr) = val.get(target_key).and_then(|v| v.as_array()) {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+        None => vec![],
     }
 }
 
@@ -2527,8 +2629,18 @@ async fn cmd_listen(
             }
         };
 
-        // Policy check
-        if !policy.authorize(&client_identity, svc_name) {
+        // Policy check — use async resolver for group:/role: patterns
+        let policy_allowed = if policy.has_identity_patterns() {
+            if let Some(ns) = ns_server.as_ref() {
+                let resolver = UdpNsResolver::new(ns);
+                policy.authorize_async(&client_identity, svc_name, &resolver).await
+            } else {
+                policy.authorize(&client_identity, svc_name)
+            }
+        } else {
+            policy.authorize(&client_identity, svc_name)
+        };
+        if !policy_allowed {
             eprintln!(
                 "{} {} denied access to service '{}'",
                 c_red("✗ POLICY DENIED:"),
@@ -3137,8 +3249,18 @@ async fn handle_new_session(
         }
     };
 
-    // Policy check
-    if !policy.authorize(&client_identity, svc_name) {
+    // Policy check — use async resolver for group:/role: patterns
+    let policy_allowed = if policy.has_identity_patterns() {
+        if let Some(ns) = ns_server.as_ref() {
+            let resolver = UdpNsResolver::new(ns);
+            policy.authorize_async(&client_identity, svc_name, &resolver).await
+        } else {
+            policy.authorize(&client_identity, svc_name)
+        }
+    } else {
+        policy.authorize(&client_identity, svc_name)
+    };
+    if !policy_allowed {
         let msg = format!("{} denied for service '{}'", client_identity, svc_name);
         eprintln!("{} {}", c_red("✗ POLICY DENIED:"), msg);
 
@@ -3861,6 +3983,36 @@ fn cbor_map(pairs: &mut Vec<(&str, &str)>) -> Vec<u8> {
         .iter()
         .map(|&(k, v)| (cbor_text(k), cbor_text(v)))
         .collect();
+    encoded_pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+
+    let mut buf = cbor_head(5, encoded_pairs.len() as u64);
+    for (k, v) in &encoded_pairs {
+        buf.extend_from_slice(k);
+        buf.extend_from_slice(v);
+    }
+    buf
+}
+
+/// Encode a GROUP record's data as CBOR.
+///
+/// Produces a CBOR map: {"description": <str>, "members": [<str>, ...]}
+fn cbor_encode_group(description: &str, members: &[&str]) -> Vec<u8> {
+    // We need a map with 2 entries: "description" (text) and "members" (array of text)
+    let key_desc = cbor_text("description");
+    let val_desc = cbor_text(description);
+    let key_members = cbor_text("members");
+
+    // Encode the members array
+    let mut val_members = cbor_head(4, members.len() as u64); // major type 4 = array
+    for m in members {
+        val_members.extend_from_slice(&cbor_text(m));
+    }
+
+    // Encode as a 2-entry map, keys sorted by (len, bytes)
+    let mut encoded_pairs = vec![
+        (key_desc, val_desc),
+        (key_members, val_members),
+    ];
     encoded_pairs.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
 
     let mut buf = cbor_head(5, encoded_pairs.len() as u64);
@@ -5790,7 +5942,7 @@ fn cmd_admin_enroll(
 
 // ─── Admin Identity Commands ────────────────────────────────────────────────
 
-/// `ztlp admin create-user` — Create a user identity record
+/// `ztlp admin create-user` — Create a user identity record and register with NS
 async fn cmd_admin_create_user(
     name: &str,
     role: UserRole,
@@ -5829,12 +5981,37 @@ async fn cmd_admin_create_user(
         std::fs::set_permissions(&user_key_path, std::fs::Permissions::from_mode(0o600)).ok();
     }
 
+    // Register USER record (type 0x11) with NS
+    let mut data_pairs = vec![
+        ("public_key", pubkey_hex.as_str()),
+        ("role", role_to_str(&role)),
+    ];
+    let email_str = email.as_deref().unwrap_or("");
+    if !email_str.is_empty() {
+        data_pairs.push(("email", email_str));
+    }
+    let data_bin = cbor_map(&mut data_pairs.iter().map(|(k, v)| (*k, *v)).collect());
+    let pkt = build_registration_packet(name, 0x11, &data_bin);
+
+    // Send to NS
+    let addr: SocketAddr = ns_addr.parse()?;
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, addr)?;
+    let mut buf = [0u8; 65535];
+    let ns_ok = match sock.recv(&mut buf) {
+        Ok(n) if n > 0 && buf[0] == 0x06 => true, // ACK
+        Ok(n) if n > 0 && buf[0] == 0x02 => true, // Record response (also success)
+        _ => false,
+    };
+
     if json_output {
         println!(
-            "{{\"status\":\"created\",\"name\":\"{}\",\"role\":\"{}\",\"email\":\"{}\",\"pubkey\":\"{}\",\"key_file\":\"{}\"}}",
+            "{{\"status\":\"{}\",\"name\":\"{}\",\"role\":\"{}\",\"email\":\"{}\",\"pubkey\":\"{}\",\"key_file\":\"{}\"}}",
+            if ns_ok { "created" } else { "created_local_only" },
             name,
             role,
-            email.as_deref().unwrap_or(""),
+            email_str,
             pubkey_hex,
             user_key_path.display()
         );
@@ -5843,19 +6020,37 @@ async fn cmd_admin_create_user(
         eprintln!("    {} {}", c_cyan("Pubkey:"), &pubkey_hex[..16]);
         eprintln!("    {} {}", c_cyan("Key file:"), user_key_path.display());
         eprintln!();
-        eprintln!(
-            "  {} User '{}' created with role '{}'",
-            c_green("✓"),
-            name,
-            role
-        );
+        if ns_ok {
+            eprintln!(
+                "  {} User '{}' created with role '{}' (registered in NS)",
+                c_green("✓"),
+                name,
+                role
+            );
+        } else {
+            eprintln!(
+                "  {} User '{}' created with role '{}' (NS registration failed — local key saved)",
+                c_yellow("⚠"),
+                name,
+                role
+            );
+        }
         eprintln!();
     }
 
     Ok(())
 }
 
-/// `ztlp admin link-device` — Link a device to a user
+/// Convert UserRole enum to string for CBOR data.
+fn role_to_str(role: &UserRole) -> &'static str {
+    match role {
+        UserRole::Admin => "admin",
+        UserRole::Tech => "tech",
+        UserRole::User => "user",
+    }
+}
+
+/// `ztlp admin link-device` — Link a device to a user by registering a DEVICE record in NS
 async fn cmd_admin_link_device(
     device_name: &str,
     owner: &str,
@@ -5873,15 +6068,56 @@ async fn cmd_admin_link_device(
         eprintln!();
     }
 
+    // Look up the existing KEY record for this device to get its node_id and pubkey
+    let (node_id_hex, pubkey_hex) = match ns_query_raw(device_name, &ns_addr, 1).await {
+        Ok(Some(result)) => {
+            let nid = cbor_extract_string(&result.data_bytes, "node_id").unwrap_or_default();
+            let pk = cbor_extract_string(&result.data_bytes, "public_key").unwrap_or_default();
+            (nid, pk)
+        }
+        _ => (String::new(), String::new()),
+    };
+
+    // Register DEVICE record (type 0x10) with NS
+    let mut pairs: Vec<(&str, &str)> = vec![("owner", owner)];
+    if !node_id_hex.is_empty() {
+        pairs.push(("node_id", &node_id_hex));
+    }
+    if !pubkey_hex.is_empty() {
+        pairs.push(("public_key", &pubkey_hex));
+    }
+    let data_bin = cbor_map(&mut pairs.iter().map(|(k, v)| (*k, *v)).collect());
+    let pkt = build_registration_packet(device_name, 0x10, &data_bin);
+
+    let addr: SocketAddr = ns_addr.parse()?;
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, addr)?;
+    let mut buf = [0u8; 65535];
+    let ns_ok = match sock.recv(&mut buf) {
+        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
+        _ => false,
+    };
+
     if json_output {
         println!(
-            "{{\"status\":\"linked\",\"device\":\"{}\",\"owner\":\"{}\"}}",
-            device_name, owner
+            "{{\"status\":\"{}\",\"device\":\"{}\",\"owner\":\"{}\"}}",
+            if ns_ok { "linked" } else { "link_failed" },
+            device_name,
+            owner
         );
-    } else {
+    } else if ns_ok {
         eprintln!(
             "  {} Device '{}' linked to user '{}'",
             c_green("✓"),
+            device_name,
+            owner
+        );
+        eprintln!();
+    } else {
+        eprintln!(
+            "  {} Failed to link device '{}' to user '{}' (NS registration failed)",
+            c_red("✗"),
             device_name,
             owner
         );
@@ -5910,16 +6146,86 @@ async fn cmd_admin_devices(
             c_dim("→"),
             user
         );
+    }
 
-        // Query NS for devices - this would require a new NS query type
-        // For now, we indicate the NS query was made
-        eprintln!(
-            "  {} No devices found (or NS server not reachable)",
-            c_yellow("⚠")
-        );
-        eprintln!();
-    } else {
-        println!("{{\"owner\":\"{}\",\"devices\":[]}}", user);
+    // List all DEVICE records (type 0x10) and filter by owner
+    let addr: std::net::SocketAddr = ns_addr.parse()?;
+    let mut pkt = Vec::new();
+    pkt.push(0x13); // Admin query
+    pkt.push(0x01); // List records
+    pkt.push(0x10); // DEVICE type
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // empty zone filter
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    socket.send_to(&pkt, addr)?;
+
+    let mut buf = [0u8; 65535];
+    match socket.recv(&mut buf) {
+        Ok(n) if n > 1 && buf[0] == 0x13 => {
+            let cbor_data = &buf[1..n];
+            if let Some(json_val) = cbor_decode_to_json(cbor_data) {
+                let devices: Vec<&serde_json::Value> = json_val
+                    .get("records")
+                    .and_then(|r| r.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|record| {
+                                record
+                                    .get("data")
+                                    .and_then(|d| d.get("owner"))
+                                    .and_then(|o| o.as_str())
+                                    .map(|o| o == user)
+                                    .unwrap_or(false)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if json_output {
+                    let device_names: Vec<String> = devices
+                        .iter()
+                        .filter_map(|d| d.get("name").and_then(|n| n.as_str()).map(|s| format!("\"{}\"", s)))
+                        .collect();
+                    println!(
+                        "{{\"owner\":\"{}\",\"devices\":[{}]}}",
+                        user,
+                        device_names.join(",")
+                    );
+                } else if devices.is_empty() {
+                    eprintln!("  {} No devices found for '{}'", c_yellow("⚠"), user);
+                    eprintln!();
+                } else {
+                    eprintln!("  Found {} device(s):", devices.len());
+                    eprintln!();
+                    for device in &devices {
+                        let name = device.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                        let node_id = device
+                            .get("data")
+                            .and_then(|d| d.get("node_id"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("?");
+                        eprintln!("  {} {} (NodeID: {})", c_dim("•"), name, node_id);
+                    }
+                    eprintln!();
+                }
+            } else if json_output {
+                println!("{{\"owner\":\"{}\",\"devices\":[],\"error\":\"failed to decode response\"}}", user);
+            } else {
+                eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
+                eprintln!();
+            }
+        }
+        _ => {
+            if json_output {
+                println!("{{\"owner\":\"{}\",\"devices\":[]}}", user);
+            } else {
+                eprintln!(
+                    "  {} No devices found (or NS server not reachable)",
+                    c_yellow("⚠")
+                );
+                eprintln!();
+            }
+        }
     }
 
     Ok(())
@@ -6087,7 +6393,7 @@ fn print_record_list(json_val: &serde_json::Value) {
     eprintln!();
 }
 
-/// `ztlp admin create-group` — Create a group in the namespace
+/// `ztlp admin create-group` — Create a group in the namespace (registers GROUP record with NS)
 async fn cmd_admin_create_group(
     name: &str,
     description: &Option<String>,
@@ -6106,6 +6412,29 @@ async fn cmd_admin_create_group(
         }
         eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
+    }
+
+    // Register GROUP record (type 0x12) with empty members list
+    let data_bin = cbor_encode_group(desc, &[]);
+    let pkt = build_registration_packet(name, 0x12, &data_bin);
+
+    let addr: SocketAddr = ns_addr.parse()?;
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, addr)?;
+    let mut buf = [0u8; 65535];
+    let ns_ok = match sock.recv(&mut buf) {
+        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
+        _ => false,
+    };
+
+    if json_output {
+        println!(
+            "{{\"status\":\"{}\",\"name\":\"{}\",\"description\":\"{}\",\"members\":[]}}",
+            if ns_ok { "created" } else { "create_failed" },
+            name, desc
+        );
+    } else if ns_ok {
         eprintln!(
             "  {} Group '{}' created (empty — add members with `ztlp admin group add`)",
             c_green("✓"),
@@ -6113,16 +6442,18 @@ async fn cmd_admin_create_group(
         );
         eprintln!();
     } else {
-        println!(
-            "{{\"status\":\"created\",\"name\":\"{}\",\"description\":\"{}\",\"members\":[]}}",
-            name, desc
+        eprintln!(
+            "  {} Failed to create group '{}' (NS registration failed)",
+            c_red("✗"),
+            name
         );
+        eprintln!();
     }
 
     Ok(())
 }
 
-/// `ztlp admin group add` — Add a member to a group
+/// `ztlp admin group add` — Add a member to a group (read-modify-write GROUP record)
 async fn cmd_admin_group_add(
     group: &str,
     member: &str,
@@ -6138,19 +6469,62 @@ async fn cmd_admin_group_add(
         eprintln!("  {} {}", c_cyan("Member:"), member);
         eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
+    }
+
+    // Read current group record to get existing members
+    let (mut members, description) = match ns_query_raw(group, &ns_addr, 0x12).await {
+        Ok(Some(result)) => {
+            let m = cbor_extract_string_array(&result.data_bytes, "members");
+            let d = cbor_extract_string(&result.data_bytes, "description").unwrap_or_default();
+            (m, d)
+        }
+        _ => (vec![], String::new()),
+    };
+
+    // Add the new member if not already present
+    if !members.iter().any(|m| m == member) {
+        members.push(member.to_string());
+    }
+
+    // Re-register the GROUP record with updated members
+    let member_strs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+    let data_bin = cbor_encode_group(&description, &member_strs);
+    let pkt = build_registration_packet(group, 0x12, &data_bin);
+
+    let addr: SocketAddr = ns_addr.parse()?;
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, addr)?;
+    let mut buf = [0u8; 65535];
+    let ns_ok = match sock.recv(&mut buf) {
+        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
+        _ => false,
+    };
+
+    if json_output {
+        println!(
+            "{{\"status\":\"{}\",\"group\":\"{}\",\"member\":\"{}\"}}",
+            if ns_ok { "added" } else { "add_failed" },
+            group,
+            member
+        );
+    } else if ns_ok {
         eprintln!("  {} Added '{}' to group '{}'", c_green("✓"), member, group);
         eprintln!();
     } else {
-        println!(
-            "{{\"status\":\"added\",\"group\":\"{}\",\"member\":\"{}\"}}",
-            group, member
+        eprintln!(
+            "  {} Failed to add '{}' to group '{}' (NS write failed)",
+            c_red("✗"),
+            member,
+            group
         );
+        eprintln!();
     }
 
     Ok(())
 }
 
-/// `ztlp admin group remove` — Remove a member from a group
+/// `ztlp admin group remove` — Remove a member from a group (read-modify-write GROUP record)
 async fn cmd_admin_group_remove(
     group: &str,
     member: &str,
@@ -6166,6 +6540,62 @@ async fn cmd_admin_group_remove(
         eprintln!("  {} {}", c_cyan("Member:"), member);
         eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
+    }
+
+    // Read current group record
+    let (mut members, description) = match ns_query_raw(group, &ns_addr, 0x12).await {
+        Ok(Some(result)) => {
+            let m = cbor_extract_string_array(&result.data_bytes, "members");
+            let d = cbor_extract_string(&result.data_bytes, "description").unwrap_or_default();
+            (m, d)
+        }
+        _ => {
+            if json_output {
+                println!(
+                    "{{\"status\":\"error\",\"group\":\"{}\",\"member\":\"{}\",\"error\":\"group not found\"}}",
+                    group, member
+                );
+            } else {
+                eprintln!(
+                    "  {} Group '{}' not found in NS",
+                    c_red("✗"),
+                    group
+                );
+                eprintln!();
+            }
+            return Ok(());
+        }
+    };
+
+    // Remove the member
+    let orig_len = members.len();
+    members.retain(|m| m != member);
+    let removed = members.len() < orig_len;
+
+    // Re-register with updated members
+    let member_strs: Vec<&str> = members.iter().map(|s| s.as_str()).collect();
+    let data_bin = cbor_encode_group(&description, &member_strs);
+    let pkt = build_registration_packet(group, 0x12, &data_bin);
+
+    let addr: SocketAddr = ns_addr.parse()?;
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    sock.send_to(&pkt, addr)?;
+    let mut buf = [0u8; 65535];
+    let ns_ok = match sock.recv(&mut buf) {
+        Ok(n) if n > 0 && (buf[0] == 0x06 || buf[0] == 0x02) => true,
+        _ => false,
+    };
+
+    if json_output {
+        println!(
+            "{{\"status\":\"{}\",\"group\":\"{}\",\"member\":\"{}\",\"was_member\":{}}}",
+            if ns_ok { "removed" } else { "remove_failed" },
+            group,
+            member,
+            removed
+        );
+    } else if ns_ok && removed {
         eprintln!(
             "  {} Removed '{}' from group '{}'",
             c_green("✓"),
@@ -6173,11 +6603,21 @@ async fn cmd_admin_group_remove(
             group
         );
         eprintln!();
-    } else {
-        println!(
-            "{{\"status\":\"removed\",\"group\":\"{}\",\"member\":\"{}\"}}",
-            group, member
+    } else if ns_ok {
+        eprintln!(
+            "  {} '{}' was not a member of '{}'",
+            c_yellow("⚠"),
+            member,
+            group
         );
+        eprintln!();
+    } else {
+        eprintln!(
+            "  {} Failed to update group '{}' (NS write failed)",
+            c_red("✗"),
+            group
+        );
+        eprintln!();
     }
 
     Ok(())
@@ -6198,13 +6638,50 @@ async fn cmd_admin_group_members(
         eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
         eprintln!("  {} Querying NS for members of '{}'...", c_dim("→"), group);
-        eprintln!(
-            "  {} No members found (or NS server not reachable)",
-            c_yellow("⚠")
-        );
-        eprintln!();
-    } else {
-        println!("{{\"group\":\"{}\",\"members\":[]}}", group);
+    }
+
+    // Query GROUP record (type 0x12) from NS
+    match ns_query_raw(group, &ns_addr, 0x12).await {
+        Ok(Some(result)) => {
+            let members = cbor_extract_string_array(&result.data_bytes, "members");
+            let description = cbor_extract_string(&result.data_bytes, "description");
+
+            if json_output {
+                let members_json: Vec<String> = members.iter().map(|m| format!("\"{}\"", m)).collect();
+                println!(
+                    "{{\"group\":\"{}\",\"members\":[{}]}}",
+                    group,
+                    members_json.join(",")
+                );
+            } else {
+                if let Some(desc) = description {
+                    if !desc.is_empty() {
+                        eprintln!("  {} {}", c_cyan("Description:"), desc);
+                    }
+                }
+                if members.is_empty() {
+                    eprintln!("  {} Group has no members", c_yellow("⚠"));
+                } else {
+                    eprintln!("  Found {} member(s):", members.len());
+                    eprintln!();
+                    for member in &members {
+                        eprintln!("  {} {}", c_dim("•"), member);
+                    }
+                }
+                eprintln!();
+            }
+        }
+        _ => {
+            if json_output {
+                println!("{{\"group\":\"{}\",\"members\":[],\"error\":\"not found or NS unreachable\"}}", group);
+            } else {
+                eprintln!(
+                    "  {} Group not found (or NS server not reachable)",
+                    c_yellow("⚠")
+                );
+                eprintln!();
+            }
+        }
     }
 
     Ok(())
@@ -6232,16 +6709,44 @@ async fn cmd_admin_group_check(
             user,
             group
         );
-        eprintln!(
-            "  {} Unable to determine (NS server not reachable)",
-            c_yellow("⚠")
-        );
-        eprintln!();
-    } else {
-        println!(
-            "{{\"group\":\"{}\",\"user\":\"{}\",\"is_member\":false}}",
-            group, user
-        );
+    }
+
+    // Query GROUP record (type 0x12) from NS
+    match ns_query_raw(group, &ns_addr, 0x12).await {
+        Ok(Some(result)) => {
+            let members = cbor_extract_string_array(&result.data_bytes, "members");
+            let is_member = members.iter().any(|m| m == user);
+
+            if json_output {
+                println!(
+                    "{{\"group\":\"{}\",\"user\":\"{}\",\"is_member\":{}}}",
+                    group, user, is_member
+                );
+            } else if is_member {
+                eprintln!("  {} '{}' IS a member of '{}'", c_green("✓"), user, group);
+                eprintln!();
+            } else {
+                eprintln!("  {} '{}' is NOT a member of '{}'", c_red("✗"), user, group);
+                if !members.is_empty() {
+                    eprintln!("  {} Current members: {}", c_dim("ℹ"), members.join(", "));
+                }
+                eprintln!();
+            }
+        }
+        _ => {
+            if json_output {
+                println!(
+                    "{{\"group\":\"{}\",\"user\":\"{}\",\"is_member\":false,\"error\":\"group not found or NS unreachable\"}}",
+                    group, user
+                );
+            } else {
+                eprintln!(
+                    "  {} Group not found (or NS server not reachable)",
+                    c_yellow("⚠")
+                );
+                eprintln!();
+            }
+        }
     }
 
     Ok(())
@@ -6260,13 +6765,110 @@ async fn cmd_admin_groups(
         eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
         eprintln!("  {} Querying NS for groups...", c_dim("→"));
-        eprintln!(
-            "  {} No groups found (or NS server not reachable)",
-            c_yellow("⚠")
-        );
-        eprintln!();
-    } else {
-        println!("{{\"groups\":[]}}");
+    }
+
+    // List GROUP records (type 0x12) via admin query
+    let addr: std::net::SocketAddr = ns_addr.parse()?;
+    let mut pkt = Vec::new();
+    pkt.push(0x13); // Admin query
+    pkt.push(0x01); // List records
+    pkt.push(0x12); // GROUP type
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // empty zone filter
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    socket.send_to(&pkt, addr)?;
+
+    let mut buf = [0u8; 65535];
+    match socket.recv(&mut buf) {
+        Ok(n) if n > 1 && buf[0] == 0x13 => {
+            let cbor_data = &buf[1..n];
+            if let Some(json_val) = cbor_decode_to_json(cbor_data) {
+                if let Some(records) = json_val.get("records").and_then(|r| r.as_array()) {
+                    if json_output {
+                        let groups: Vec<serde_json::Value> = records
+                            .iter()
+                            .map(|r| {
+                                let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                                let members = r
+                                    .get("data")
+                                    .and_then(|d| d.get("members"))
+                                    .and_then(|m| m.as_array())
+                                    .map(|arr| arr.clone())
+                                    .unwrap_or_default();
+                                let desc = r
+                                    .get("data")
+                                    .and_then(|d| d.get("description"))
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("");
+                                serde_json::json!({
+                                    "name": name,
+                                    "description": desc,
+                                    "members": members,
+                                    "member_count": members.len()
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string(&serde_json::json!({"groups": groups}))?);
+                    } else if records.is_empty() {
+                        eprintln!("  {} No groups found", c_dim("(empty)"));
+                        eprintln!();
+                    } else {
+                        eprintln!("  Found {} group(s):", records.len());
+                        eprintln!();
+                        for record in records {
+                            let name = record.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            let desc = record
+                                .get("data")
+                                .and_then(|d| d.get("description"))
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("");
+                            let member_count = record
+                                .get("data")
+                                .and_then(|d| d.get("members"))
+                                .and_then(|m| m.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            let desc_str = if desc.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", desc)
+                            };
+                            eprintln!(
+                                "  {} {} ({} member{}){}", c_dim("•"),
+                                c_yellow(name),
+                                member_count,
+                                if member_count == 1 { "" } else { "s" },
+                                desc_str
+                            );
+                        }
+                        eprintln!();
+                    }
+                } else {
+                    if json_output {
+                        println!("{{\"groups\":[]}}");
+                    } else {
+                        eprintln!("  {} No groups found", c_dim("(empty)"));
+                        eprintln!();
+                    }
+                }
+            } else if json_output {
+                println!("{{\"groups\":[],\"error\":\"failed to decode response\"}}");
+            } else {
+                eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
+                eprintln!();
+            }
+        }
+        _ => {
+            if json_output {
+                println!("{{\"groups\":[]}}");
+            } else {
+                eprintln!(
+                    "  {} No groups found (or NS server not reachable)",
+                    c_yellow("⚠")
+                );
+                eprintln!();
+            }
+        }
     }
 
     Ok(())

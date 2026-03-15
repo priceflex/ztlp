@@ -4,8 +4,24 @@ Two demos are available:
 
 | Demo | Script | Description |
 |------|--------|-------------|
-| **SSH Tunnel Demo** | `ssh-tunnel-demo.sh` | 13-act interactive demo: identity, policy, tunneling, attack resilience. Runs locally. |
-| **Full-Stack Docker Demo** | `full-stack-demo.sh` | End-to-end Docker Compose demo: 6 containers, NS registration, SSH tunneling, SCP benchmarks. No local toolchains needed. |
+| **SSH Tunnel Demo** | `ssh-tunnel-demo.sh` | 14-act interactive demo: identity model (USER/DEVICE/GROUP), policy, tunneling, attack resilience. Runs locally. |
+| **Full-Stack Docker Demo** | `full-stack-demo.sh` | End-to-end Docker Compose demo: 6 containers, identity model, NS registration, SSH tunneling, SCP benchmarks. No local toolchains needed. |
+
+## Identity Model (v0.9.0)
+
+Both demos now showcase ZTLP's identity model:
+
+- **USER records** — represent people with roles (`admin`, `tech`, `user`)
+- **DEVICE records** — represent machines, linked to their USER owners
+- **GROUP records** — named collections of users for access control
+
+When NS is available, the demos create users, link devices to them,
+create groups, and demonstrate **group-based access policy** — e.g.,
+`allow = ["group:techs@tunnel.ztlp"]` grants SSH access to anyone in the
+techs group. No gateway restart needed when group membership changes.
+
+Without NS (`--skip-ns`), the demos fall back to NodeID-based policy (the
+pre-v0.9.0 behavior) and skip the identity model acts.
 
 ## Full-Stack Docker Demo
 
@@ -82,20 +98,21 @@ will compile (takes ~10s) — subsequent starts are instant.
 ```
 
 The demo auto-detects the NS server on `127.0.0.1:23096`. If it's
-reachable, it registers names for all three identities:
+reachable, it registers names and creates the full identity model:
 
-- `demo-server.tunnel.ztlp` (Bob)
-- `alice.tunnel.ztlp` (Alice)
-- `eve.tunnel.ztlp` (Eve)
+- `demo-server.tunnel.ztlp` (Bob) → USER `bob@tunnel.ztlp` (admin)
+- `alice.tunnel.ztlp` (Alice) → USER `alice@tunnel.ztlp` (tech)
+- `eve.tunnel.ztlp` (Eve) → USER `eve@tunnel.ztlp` (user)
+- Groups: `techs@tunnel.ztlp` (Alice), `admins@tunnel.ztlp` (Bob)
 
-The policy file then uses friendly names instead of hex NodeIDs:
+The policy file uses **group-based access control** instead of hex NodeIDs:
 
 ```toml
 default = "deny"
 
 [[services]]
 name = "ssh"
-allow = ["alice.tunnel.ztlp"]
+allow = ["group:techs@tunnel.ztlp", "group:admins@tunnel.ztlp"]
 ```
 
 ### NS Server Configuration
@@ -132,19 +149,20 @@ runtime). No Elixir needed on the host.
 
 | Act | Description |
 |-----|-------------|
-| 1 | Generate 3 identities: Bob (server), Alice (client), Eve (attacker) |
-| 2 | Optional: Register names with ZTLP-NS |
-| 3 | Create zero-trust policy — only Alice allowed for SSH |
-| 4 | Start server with policy enforcement |
-| 5 | **Alice connects — ALLOWED** ✅ |
-| 6 | SSH through Alice's encrypted tunnel |
-| 7 | **Eve connects — DENIED** ❌ (handshake completes, policy rejects) |
-| 8 | SCP throughput test: 10/50/100 MB (ZTLP vs direct SSH) |
-| 9 | Port scan — SSH port invisible, only ZTLP port visible |
-| 10 | UDP packet flood — L1 magic-byte rejection (~19ns each) |
-| 11 | Malformed ZTLP packets — L2 session verification |
-| 12 | tcpdump — payload is encrypted |
-| 13 | CPU monitoring — negligible impact from attacks |
+| 1 | Generate 3 identities: Bob (server), Alice (client), Eve (attacker) + USER records |
+| 2 | Register names with ZTLP-NS + link devices to users |
+| 3 | Identity model: groups (`techs`, `admins`), membership, `ztlp admin ls` |
+| 4 | Create zero-trust policy — group-based (`group:techs@`) or identity-based |
+| 5 | Start server with policy enforcement |
+| 6 | **Alice connects — ALLOWED** ✅ (group membership grants access) |
+| 7 | SSH through Alice's encrypted tunnel |
+| 8 | **Eve connects — DENIED** ❌ (valid identity, not in any group) |
+| 9 | SCP throughput test: 10/50/100 MB (ZTLP vs direct SSH) |
+| 10 | Port scan — SSH port invisible, only ZTLP port visible |
+| 11 | UDP packet flood — L1 magic-byte rejection (~19ns each) |
+| 12 | Malformed ZTLP packets — L2 session verification |
+| 13 | tcpdump — payload is encrypted |
+| 14 | Security summary + three-layer defense cost table |
 
 ## Customization
 
@@ -160,14 +178,25 @@ DEMO_DIR=/tmp/ztlp-demo   # Artifact directory
 
 ## Key Concepts Demonstrated
 
-**Authentication ≠ Authorization (Act 7)**
+**Identity Model — Users, Devices, Groups (Act 3)**
+
+ZTLP v0.9.0 separates identity into three record types:
+- **USER** — a person (e.g., `alice@tunnel.ztlp`) with a role (admin/tech/user)
+- **DEVICE** — a machine (e.g., `alice.tunnel.ztlp`) linked to its USER owner
+- **GROUP** — a named set of users (e.g., `techs@tunnel.ztlp`) for policy
+
+Policy can reference groups (`group:techs@tunnel.ztlp`) instead of listing
+individual identities. Add a user to a group → they get access. No gateway
+restart needed.
+
+**Authentication ≠ Authorization (Act 8)**
 
 Eve has a valid ZTLP identity. She completes the full Noise_XX handshake —
-proving she IS Eve. But Bob's policy says only Alice can access SSH.
-The handshake is authentication (who are you?). The policy is
-authorization (what can you do?). Both are required.
+proving she IS Eve. But Bob's policy says only the `techs` group (or only
+Alice) can access SSH. The handshake is authentication (who are you?).
+The policy is authorization (what can you do?). Both are required.
 
-**Three-Layer Pipeline (Acts 10-11)**
+**Three-Layer Pipeline (Acts 11-12)**
 
 1. **Layer 1 (Magic byte)** — Wrong magic? Dropped in ~19ns. No state.
 2. **Layer 2 (Session ID)** — Unknown session? Dropped. No crypto.

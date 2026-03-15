@@ -135,6 +135,11 @@ cat <<'ARCH'
   Data path: SSH client → TCP → ztlp-client tunnel
              → ZTLP/UDP (Noise_XX encrypted) → ztlp-server
              → TCP → backend openssh-server
+
+  Identity:  Server = admin@fullstack.ztlp (DEVICE + USER)
+             Client = alice@fullstack.ztlp (DEVICE + USER)
+  Groups:    operators@fullstack.ztlp → {admin}
+             clients@fullstack.ztlp   → {alice}
 ARCH
 echo ""
 
@@ -271,6 +276,49 @@ if [[ -n "$HANDSHAKE_LINE" ]]; then
     LATENCY=$(echo "$HANDSHAKE_LINE" | grep -oE '[0-9]+\.[0-9]+ms')
     success "Noise_XX handshake completed in ${LATENCY:-<1ms}"
 fi
+echo ""
+
+# --- Identity Model (v0.9.0) ---
+step "Identity model: creating USER and DEVICE records"
+info "ZTLP v0.9.0 adds USER, DEVICE, and GROUP records for richer access control"
+echo ""
+
+# Create user records via the server container (which has the ztlp binary and NS access)
+dimcmd "docker exec ztlp-server ztlp admin create-user admin@fullstack.ztlp --role admin --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin create-user "admin@fullstack.ztlp" --role admin --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "create-user admin failed (continuing)"
+
+dimcmd "docker exec ztlp-server ztlp admin create-user alice@fullstack.ztlp --role tech --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin create-user "alice@fullstack.ztlp" --role tech --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "create-user alice failed (continuing)"
+
+# Link devices to users
+dimcmd "docker exec ztlp-server ztlp admin link-device server.fullstack.ztlp --owner admin@fullstack.ztlp --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin link-device "server.fullstack.ztlp" --owner "admin@fullstack.ztlp" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "link-device server failed"
+
+dimcmd "docker exec ztlp-client ztlp admin link-device client.fullstack.ztlp --owner alice@fullstack.ztlp --ns-server 172.28.0.10:23096"
+docker exec ztlp-client ztlp admin link-device "client.fullstack.ztlp" --owner "alice@fullstack.ztlp" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "link-device client failed"
+echo ""
+
+# Create groups
+step "Creating groups for access control"
+dimcmd "docker exec ztlp-server ztlp admin create-group operators@fullstack.ztlp --description \"Server operators\" --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin create-group "operators@fullstack.ztlp" --description "Server operators" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "create-group operators failed"
+
+dimcmd "docker exec ztlp-server ztlp admin create-group clients@fullstack.ztlp --description \"Authorized clients\" --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin create-group "clients@fullstack.ztlp" --description "Authorized clients" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "create-group clients failed"
+
+dimcmd "docker exec ztlp-server ztlp admin group add operators@fullstack.ztlp admin@fullstack.ztlp --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin group add "operators@fullstack.ztlp" "admin@fullstack.ztlp" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "group add admin failed"
+
+dimcmd "docker exec ztlp-server ztlp admin group add clients@fullstack.ztlp alice@fullstack.ztlp --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin group add "clients@fullstack.ztlp" "alice@fullstack.ztlp" --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "group add alice failed"
+echo ""
+
+# List all identities
+step "Listing identity records from NS"
+dimcmd "docker exec ztlp-server ztlp admin ls --ns-server 172.28.0.10:23096"
+docker exec ztlp-server ztlp admin ls --ns-server "172.28.0.10:23096" 2>&1 | sed 's/^/  /' || warn "admin ls failed"
+echo ""
+success "Identity model: users, devices, groups registered in NS"
 echo ""
 
 # ===================================================================
@@ -423,6 +471,8 @@ cat <<EOF
   What was demonstrated:
     ✓ Cryptographic identity generation (Ed25519 keypairs)
     ✓ Name registration with ZTLP-NS (decentralized DNS)
+    ✓ Identity model: USER + DEVICE records with ownership linking
+    ✓ Group-based access control (operators, clients groups)
     ✓ Noise_XX authenticated key exchange (<1ms handshake)
     ✓ SSH tunneling through ZTLP encrypted transport
     ✓ SCP file transfer with integrity verification
@@ -430,6 +480,8 @@ cat <<EOF
     ✓ Service discovery (client resolves server via NS)
 
   Architecture: Client → ZTLP/UDP (encrypted) → Server → Backend SSH
+  Identity:     admin@fullstack.ztlp (server), alice@fullstack.ztlp (client)
+  Groups:       operators → {admin}, clients → {alice}
   Transport:    Noise_XX → ChaCha20-Poly1305 → Three-layer pipeline
   Network:      Docker bridge (172.28.0.0/24) — all traffic containerized
 EOF

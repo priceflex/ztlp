@@ -2,17 +2,18 @@
 # ================================================================
 # ZTLP SSH Tunnel Demo (Zero Trust Security Showcase)
 # ================================================================
-# 13-act demo covering identity, policy, tunneling, and attack resilience:
+# 14-act demo covering identity, policy, tunneling, and attack resilience:
 #
 #   Acts 1-2:  Generate identities (Bob, Alice, Eve) + optional NS register
-#   Act  3:    Create zero-trust access policy (only Alice allowed)
-#   Acts 4-6:  Server with policy → Alice connects → SSH through tunnel
-#   Act  7:    Eve attempts connection → DENIED (authN ≠ authZ)
-#   Act  8:    SCP throughput saturation (tunnel vs direct SSH)
-#   Act  9:    Port visibility analysis (SSH hidden behind ZTLP)
-#   Acts 10-11: DDoS defense layers (L1 magic byte + L2 SessionID)
-#   Act  12:   Encrypted payload verification (tcpdump)
-#   Act  13:   Security summary + three-layer defense cost table
+#   Act  3:    Identity model — USER, DEVICE, GROUP records + group policy
+#   Act  4:    Create zero-trust access policy (only Alice allowed)
+#   Acts 5-7:  Server with policy → Alice connects → SSH through tunnel
+#   Act  8:    Eve attempts connection → DENIED (authN ≠ authZ)
+#   Act  9:    SCP throughput saturation (tunnel vs direct SSH)
+#   Act  10:   Port visibility analysis (SSH hidden behind ZTLP)
+#   Acts 11-12: DDoS defense layers (L1 magic byte + L2 SessionID)
+#   Act  13:   Encrypted payload verification (tcpdump)
+#   Act  14:   Security summary + three-layer defense cost table
 #
 # Requirements:
 #   - ztlp binary (v0.5.6+) in PATH or ./ztlp
@@ -275,7 +276,26 @@ fi
 info "Alice NodeID: $ALICE_NODE_ID"
 info "Eve NodeID:   $EVE_NODE_ID"
 
-success "Identities generated"
+success "Keypairs generated (Ed25519 + X25519)"
+
+# If NS is available, also create USER and DEVICE identities
+if [[ "$SKIP_NS" != "true" ]]; then
+    echo ""
+    step "Creating USER identities (v0.9.0 identity model)"
+    info "Users represent people — they have roles and own devices"
+
+    dimcmd "$ZTLP admin create-user bob@$DEMO_ZONE --role admin --ns-server $NS_SERVER"
+    "$ZTLP" admin create-user "bob@$DEMO_ZONE" --role admin --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "create-user bob failed (continuing)"
+
+    dimcmd "$ZTLP admin create-user alice@$DEMO_ZONE --role tech --ns-server $NS_SERVER"
+    "$ZTLP" admin create-user "alice@$DEMO_ZONE" --role tech --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "create-user alice failed (continuing)"
+
+    dimcmd "$ZTLP admin create-user eve@$DEMO_ZONE --role user --ns-server $NS_SERVER"
+    "$ZTLP" admin create-user "eve@$DEMO_ZONE" --role user --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "create-user eve failed (continuing)"
+
+    success "USER records created: bob (admin), alice (tech), eve (user)"
+fi
+
 pause
 
 # -------------------------------------------------------------------
@@ -303,7 +323,31 @@ if [[ "$SKIP_NS" != "true" ]]; then
     ns_register "$DEMO_EVE" "$DEMO_ZONE" "$DEMO_DIR/eve.json" "127.0.0.1:0" "$NS_SERVER" || NS_REG_OK=false
 
     if [[ "$NS_REG_OK" == "true" ]]; then
-        success "All names registered"
+        success "All names registered (KEY records in NS)"
+
+        # Link devices to users
+        echo ""
+        step "Linking devices to user identities"
+        info "Each KEY record is a device — linking them to their USER owners"
+
+        dimcmd "$ZTLP admin link-device $DEMO_NAME --owner bob@$DEMO_ZONE --ns-server $NS_SERVER"
+        "$ZTLP" admin link-device "$DEMO_NAME" --owner "bob@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "link-device server failed"
+
+        dimcmd "$ZTLP admin link-device $DEMO_CLIENT --owner alice@$DEMO_ZONE --ns-server $NS_SERVER"
+        "$ZTLP" admin link-device "$DEMO_CLIENT" --owner "alice@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "link-device alice failed"
+
+        dimcmd "$ZTLP admin link-device $DEMO_EVE --owner eve@$DEMO_ZONE --ns-server $NS_SERVER"
+        "$ZTLP" admin link-device "$DEMO_EVE" --owner "eve@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "link-device eve failed"
+
+        success "Devices linked to users"
+
+        # Show user→device relationship
+        echo ""
+        step "Verify device ownership"
+        dimcmd "$ZTLP admin devices bob@$DEMO_ZONE --ns-server $NS_SERVER"
+        "$ZTLP" admin devices "bob@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || true
+        dimcmd "$ZTLP admin devices alice@$DEMO_ZONE --ns-server $NS_SERVER"
+        "$ZTLP" admin devices "alice@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || true
     else
         warn "Some registrations failed — falling back to NodeID hex for policy"
         SKIP_NS=true
@@ -324,15 +368,85 @@ else
 fi
 
 # -------------------------------------------------------------------
-# ACT 3 – Create Access Policy (Zero Trust)
+# ACT 3 – Identity Model (USER, DEVICE, GROUP)
 # -------------------------------------------------------------------
-banner "Act 3 — Create Access Policy (Zero Trust)"
+if [[ "$SKIP_NS" != "true" ]]; then
+    banner "Act 3 — Identity Model (Users, Devices, Groups)"
+    info "ZTLP v0.9.0 introduces a rich identity model beyond raw keypairs."
+    info "Users are people. Devices are machines. Groups control access."
+    echo ""
+
+    step "Create a group for field technicians"
+    dimcmd "$ZTLP admin create-group techs@$DEMO_ZONE --description \"Field technicians\" --ns-server $NS_SERVER"
+    "$ZTLP" admin create-group "techs@$DEMO_ZONE" --description "Field technicians" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "create-group techs failed"
+
+    step "Create an admin group"
+    dimcmd "$ZTLP admin create-group admins@$DEMO_ZONE --description \"Administrators\" --ns-server $NS_SERVER"
+    "$ZTLP" admin create-group "admins@$DEMO_ZONE" --description "Administrators" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "create-group admins failed"
+
+    echo ""
+    step "Add Alice to the techs group"
+    dimcmd "$ZTLP admin group add techs@$DEMO_ZONE alice@$DEMO_ZONE --ns-server $NS_SERVER"
+    "$ZTLP" admin group add "techs@$DEMO_ZONE" "alice@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "group add alice failed"
+
+    step "Add Bob to the admins group"
+    dimcmd "$ZTLP admin group add admins@$DEMO_ZONE bob@$DEMO_ZONE --ns-server $NS_SERVER"
+    "$ZTLP" admin group add "admins@$DEMO_ZONE" "bob@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "group add bob failed"
+
+    echo ""
+    step "List all users in the zone"
+    dimcmd "$ZTLP admin ls --type user --ns-server $NS_SERVER"
+    "$ZTLP" admin ls --type user --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "ls users failed"
+
+    echo ""
+    step "List all groups in the zone"
+    dimcmd "$ZTLP admin ls --type group --ns-server $NS_SERVER"
+    "$ZTLP" admin ls --type group --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "ls groups failed"
+
+    echo ""
+    step "Check group membership"
+    dimcmd "$ZTLP admin group check techs@$DEMO_ZONE alice@$DEMO_ZONE --ns-server $NS_SERVER"
+    "$ZTLP" admin group check "techs@$DEMO_ZONE" "alice@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "group check failed"
+
+    dimcmd "$ZTLP admin group check techs@$DEMO_ZONE eve@$DEMO_ZONE --ns-server $NS_SERVER"
+    "$ZTLP" admin group check "techs@$DEMO_ZONE" "eve@$DEMO_ZONE" --ns-server "$NS_SERVER" 2>&1 | sed 's/^/  /' || warn "group check failed"
+
+    echo ""
+    success "Identity model demonstrated: Users → Groups → Policy"
+    info "Alice is a tech in the 'techs' group — she'll get SSH access via group policy"
+    info "Eve has a valid identity but is NOT in any group — she'll be denied"
+    pause
+else
+    info "Skipping Act 3 (Identity Model) — requires NS server"
+fi
+
+# -------------------------------------------------------------------
+# ACT 4 – Create Access Policy (Zero Trust)
+# -------------------------------------------------------------------
+banner "Act 4 — Create Access Policy (Zero Trust)"
 info "Bob (server) creates a policy that only allows Alice to access SSH"
 info "Eve (attacker) will be denied even though she has a valid ZTLP identity"
 
 POLICY_FILE="$DEMO_DIR/policy.toml"
 step "Writing policy file"
-cat > "$POLICY_FILE" <<POLICYEOF
+
+if [[ "$SKIP_NS" != "true" ]]; then
+    # Group-based policy (v0.9.0) — allows anyone in the techs group
+    cat > "$POLICY_FILE" <<POLICYEOF
+# ZTLP Access Policy — Zero Trust (default deny)
+# Group-based access control (v0.9.0 identity model)
+# Anyone in the "techs" group can access SSH.
+default = "deny"
+
+[[services]]
+name = "ssh"
+allow = ["group:techs@$DEMO_ZONE", "group:admins@$DEMO_ZONE"]
+# Alternative: allow by individual identity name (pre-v0.9.0 style):
+#   allow = ["$ALICE_IDENTITY"]
+POLICYEOF
+else
+    # Fallback: identity-based policy (no NS, no groups)
+    cat > "$POLICY_FILE" <<POLICYEOF
 # ZTLP Access Policy — Zero Trust (default deny)
 # Only explicitly listed identities can access services.
 default = "deny"
@@ -341,21 +455,32 @@ default = "deny"
 name = "ssh"
 allow = ["$ALICE_IDENTITY"]
 POLICYEOF
+fi
 
 echo ""
 echo -e "  ${DIM}── $POLICY_FILE ──${RESET}"
 cat "$POLICY_FILE" | sed 's/^/  /'
 echo -e "  ${DIM}────────────────────────${RESET}"
 echo ""
-info "Alice ($ALICE_IDENTITY) → ${GREEN}allowed${RESET} for ssh"
+
+if [[ "$SKIP_NS" != "true" ]]; then
+    info "techs group (alice) → ${GREEN}allowed${RESET} for ssh"
+    info "admins group (bob) → ${GREEN}allowed${RESET} for ssh"
+    info "Eve (no group)     → ${RED}denied${RESET}  for ssh"
+    echo ""
+    info "Policy uses ${BOLD}group:techs@$DEMO_ZONE${RESET} — anyone added to the group gets access."
+    info "No gateway restart needed when group membership changes."
+else
+    info "Alice ($ALICE_IDENTITY) → ${GREEN}allowed${RESET} for ssh"
+fi
 info "Eve   ($EVE_IDENTITY) → ${RED}denied${RESET}  for ssh"
 success "Policy created — zero trust, default deny"
 pause
 
 # -------------------------------------------------------------------
-# ACT 4 – Start ZTLP server with policy enforcement
+# ACT 5 – Start ZTLP server with policy enforcement
 # -------------------------------------------------------------------
-banner "Act 4 — Start ZTLP Server (SSH Forward + Policy)"
+banner "Act 5 — Start ZTLP Server (SSH Forward + Policy)"
 info "Server will listen on $LISTEN_PORT and forward SSH on $SSH_PORT"
 info "Policy enforcement enabled — only Alice can connect"
 step "Launching listener with policy"
@@ -382,9 +507,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 5 – Alice connects (ALLOWED)
+# ACT 6 – Alice connects (ALLOWED)
 # -------------------------------------------------------------------
-banner "Act 5 — Alice Connects (Policy Allowed)"
+banner "Act 6 — Alice Connects (Policy Allowed)"
 info "Alice is in the allow list — she can access the SSH service"
 step "Creating local tunnel on $TUNNEL_LOCAL_PORT"
 if [[ -n "$NS_FLAG" ]]; then
@@ -411,9 +536,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 6 – SSH through the tunnel
+# ACT 7 – SSH through the tunnel
 # -------------------------------------------------------------------
-banner "Act 6 — SSH Through the ZTLP Tunnel"
+banner "Act 7 — SSH Through the ZTLP Tunnel"
 info "Alice can now SSH through her encrypted ZTLP tunnel"
 step "Running command via SSH tunnel"
 dimcmd "ssh -p $TUNNEL_LOCAL_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_USER@127.0.0.1 'echo \"Hello from \$(hostname) via ZTLP tunnel! [\$(date)]\"'"
@@ -452,9 +577,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 7 – Eve tries to connect (DENIED)
+# ACT 8 – Eve tries to connect (DENIED)
 # -------------------------------------------------------------------
-banner "Act 7 — Eve Attempts Connection (Policy Denial)"
+banner "Act 8 — Eve Attempts Connection (Policy Denial)"
 info "Eve has a valid ZTLP identity — she can complete the Noise_XX handshake"
 info "But the policy engine will deny her access to the SSH service"
 echo ""
@@ -510,9 +635,9 @@ wait "$EVE_SERVER_PID" 2>/dev/null || true
 pause
 
 # -------------------------------------------------------------------
-# ACT 8 – Throughput Saturation Test (scp)
+# ACT 9 – Throughput Saturation Test (scp)
 # -------------------------------------------------------------------
-banner "Act 8 — Throughput Saturation Test"
+banner "Act 9 — Throughput Saturation Test"
 
 if [[ "$HAS_SCP" == "true" ]]; then
     TEST_FILE="$DEMO_DIR/throughput_test.bin"
@@ -573,9 +698,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 9 – Port Visibility Analysis
+# ACT 10 – Port Visibility Analysis
 # -------------------------------------------------------------------
-banner "Act 9 — Port Visibility Analysis"
+banner "Act 10 — Port Visibility Analysis"
 step "Understanding what an attacker sees on the network"
 echo ""
 info "Right now, Alice is connected to Bob's SSH service through ZTLP."
@@ -605,9 +730,9 @@ success "Key takeaway: ZTLP turns SSH into an invisible service"
 pause
 
 # -------------------------------------------------------------------
-# ACT 10 – UDP Packet Flood (Layer 1 DDoS Defense)
+# ACT 11 – UDP Packet Flood (Layer 1 DDoS Defense)
 # -------------------------------------------------------------------
-banner "Act 10 — UDP Packet Flood (L1 Defense)"
+banner "Act 11 — UDP Packet Flood (L1 Defense)"
 if [[ "$HAS_PYTHON3" == "true" ]]; then
     FLOOD_COUNT=50000
     echo ""
@@ -670,9 +795,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 11 – Malformed ZTLP Packets (Layer 2 Defense)
+# ACT 12 – Malformed ZTLP Packets (Layer 2 Defense)
 # -------------------------------------------------------------------
-banner "Act 11 — Malformed ZTLP Packets (L2 Defense)"
+banner "Act 12 — Malformed ZTLP Packets (L2 Defense)"
 if [[ "$HAS_PYTHON3" == "true" ]]; then
     MAL_COUNT=50000
     echo ""
@@ -741,9 +866,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 12 – Encrypted Payload Verification (tcpdump)
+# ACT 13 – Encrypted Payload Verification (tcpdump)
 # -------------------------------------------------------------------
-banner "Act 12 — Encrypted Payload Verification"
+banner "Act 13 — Encrypted Payload Verification"
 if [[ "$HAS_TCPDUMP" == "true" ]]; then
     PCAP="$DEMO_DIR/ztlp_capture.pcap"
     echo ""
@@ -798,9 +923,9 @@ fi
 pause
 
 # -------------------------------------------------------------------
-# ACT 13 – Security Summary
+# ACT 14 – Security Summary
 # -------------------------------------------------------------------
-banner "Act 13 — Security Summary"
+banner "Act 14 — Security Summary"
 echo ""
 info "${BOLD}Defense cost summary (from Acts 10-12):${RESET}"
 echo ""
@@ -831,18 +956,20 @@ echo -e "  ${DIM}ztlp.org | Apache 2.0${RESET}\n"
 cat <<'EOF'
 What you saw:
   1. Cryptographic identities for Bob (server), Alice (client), Eve (attacker)
-  2. Optional name registration with ZTLP‑NS
-  3. Zero trust policy: Bob allows only Alice to access SSH
-  4. Server listening with policy enforcement enabled
-  5. Alice ALLOWED — policy grants her SSH access
-  6. Interactive SSH session through the encrypted tunnel
-  7. Eve DENIED — valid identity, not authorized (authN ≠ authZ)
-  8. SCP throughput: ZTLP tunnel vs direct SSH (10/50/100 MB)
-  9. Port visibility: SSH hidden behind ZTLP identity layer
- 10. L1 DDoS defense: 50K random packets rejected at ~19ns each
- 11. L2 defense: crafted magic-byte packets stopped by SessionID check
- 12. Encrypted payload: captured traffic shows no plaintext
- 13. Three-layer pipeline costs nothing to defend, everything to attack
+     + USER records with roles (admin, tech, user) when NS available
+  2. Name registration with ZTLP‑NS + device-to-user linking
+  3. Identity model: groups (techs, admins), membership, group-based policy
+  4. Zero trust policy using group:techs@ (or identity name without NS)
+  5. Server listening with policy enforcement enabled
+  6. Alice ALLOWED — group membership grants her SSH access
+  7. Interactive SSH session through the encrypted tunnel
+  8. Eve DENIED — valid identity, not in any group (authN ≠ authZ)
+  9. SCP throughput: ZTLP tunnel vs direct SSH (10/50/100 MB)
+ 10. Port visibility: SSH hidden behind ZTLP identity layer
+ 11. L1 DDoS defense: 50K random packets rejected at ~19ns each
+ 12. L2 defense: crafted magic-byte packets stopped by SessionID check
+ 13. Encrypted payload: captured traffic shows no plaintext
+ 14. Three-layer pipeline costs nothing to defend, everything to attack
 EOF
 
 echo -e "\n  ${DIM}Demo artifacts stored in $DEMO_DIR${RESET}"

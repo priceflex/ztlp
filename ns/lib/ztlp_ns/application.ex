@@ -41,6 +41,9 @@ defmodule ZtlpNs.Application do
     # Initialize enrollment token tracking table
     ZtlpNs.Enrollment.init()
 
+    # Initialize rate-limiting ETS table for registration auth
+    ZtlpNs.RegistrationAuth.init_rate_limit()
+
     # Load enrollment secret from env if provided
     case System.get_env("ZTLP_ENROLLMENT_SECRET") do
       nil -> :ok
@@ -61,6 +64,7 @@ defmodule ZtlpNs.Application do
       ZtlpNs.RateLimiter,
       {Task.Supervisor, name: ZtlpNs.QuerySupervisor, max_children: ZtlpNs.Config.worker_pool_size()},
       ZtlpNs.EndpointStore,
+      ZtlpNs.Audit,
       ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
       ZtlpNs.Server

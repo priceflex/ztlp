@@ -33,6 +33,8 @@ pub enum RejectReason {
     ServiceUnavailable = 0x03,
     /// Too many connection attempts from this client.
     RateLimited = 0x04,
+    /// Identity has been revoked.
+    Revoked = 0x05,
 }
 
 impl RejectReason {
@@ -43,6 +45,7 @@ impl RejectReason {
             0x02 => Some(Self::CapacityFull),
             0x03 => Some(Self::ServiceUnavailable),
             0x04 => Some(Self::RateLimited),
+            0x05 => Some(Self::Revoked),
             _ => None,
         }
     }
@@ -54,6 +57,7 @@ impl RejectReason {
             Self::CapacityFull => "server at maximum session capacity",
             Self::ServiceUnavailable => "requested service not available",
             Self::RateLimited => "rate limited: too many connection attempts",
+            Self::Revoked => "identity has been revoked",
         }
     }
 }
@@ -136,6 +140,7 @@ mod tests {
             RejectReason::CapacityFull,
             RejectReason::ServiceUnavailable,
             RejectReason::RateLimited,
+            RejectReason::Revoked,
         ];
         for reason in &reasons {
             let byte = *reason as u8;
@@ -146,7 +151,7 @@ mod tests {
     #[test]
     fn test_reject_reason_invalid() {
         assert_eq!(RejectReason::from_u8(0x00), None);
-        assert_eq!(RejectReason::from_u8(0x05), None);
+        assert_eq!(RejectReason::from_u8(0x06), None);
         assert_eq!(RejectReason::from_u8(0xFF), None);
     }
 
@@ -215,6 +220,32 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_reason_revoked() {
+        assert_eq!(RejectReason::from_u8(0x05), Some(RejectReason::Revoked));
+        let frame = RejectFrame::from_reason(RejectReason::Revoked);
+        assert_eq!(frame.reason, RejectReason::Revoked);
+        assert_eq!(frame.message, "identity has been revoked");
+
+        let encoded = frame.encode();
+        assert_eq!(encoded[0], FRAME_REJECT);
+        assert_eq!(encoded[1], 0x05);
+        let decoded = RejectFrame::decode(&encoded).expect("should decode");
+        assert_eq!(decoded.reason, RejectReason::Revoked);
+    }
+
+    #[test]
+    fn test_reject_reason_revoked_with_message() {
+        let frame = RejectFrame::new(
+            RejectReason::Revoked,
+            "user steve@zone.ztlp has been revoked",
+        );
+        let encoded = frame.encode();
+        let decoded = RejectFrame::decode(&encoded).expect("should decode");
+        assert_eq!(decoded.reason, RejectReason::Revoked);
+        assert_eq!(decoded.message, "user steve@zone.ztlp has been revoked");
+    }
+
+    #[test]
     fn test_reject_frame_with_utf8_message() {
         let frame = RejectFrame::new(RejectReason::PolicyDenied, "accès refusé — доступ запрещён");
         let encoded = frame.encode();
@@ -229,6 +260,7 @@ mod tests {
             RejectReason::CapacityFull,
             RejectReason::ServiceUnavailable,
             RejectReason::RateLimited,
+            RejectReason::Revoked,
         ];
         for reason in &reasons {
             assert!(!reason.description().is_empty());

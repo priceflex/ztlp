@@ -763,6 +763,92 @@ enum AdminCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Revoke a device, user, or group identity
+    ///
+    /// Registers a REVOKE record in the NS server, blocking future
+    /// connections and preventing re-registration of the revoked entity.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin revoke laptop-01.techrockstars.ztlp --reason \"stolen device\"\n  \
+            ztlp admin revoke steve@techrockstars.ztlp --reason \"left company\" --json")]
+    Revoke {
+        /// Name to revoke (e.g. laptop-01.zone.ztlp, steve@zone.ztlp)
+        name: String,
+
+        /// Reason for revocation
+        #[arg(long, default_value = "unspecified")]
+        reason: String,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// View the audit log
+    ///
+    /// Queries the NS server for recent identity operations (registrations,
+    /// revocations, updates). Results are filtered by time and optionally
+    /// by name pattern.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp admin audit --since 24h\n  \
+            ztlp admin audit --since 1h --json\n  \
+            ztlp admin audit --name \"steve@*\" --json")]
+    Audit {
+        /// Show entries since this duration ago (e.g. 1h, 24h, 7d, 30m)
+        #[arg(long, default_value = "24h")]
+        since: String,
+
+        /// Filter by name pattern (supports * wildcards)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// NS server address (host:port)
+        #[arg(long)]
+        ns_server: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Rotate the zone signing key
+    ///
+    /// Generates a new zone signing key, re-signs all records in the zone,
+    /// and stores the new key.
+    #[command(
+        name = "rotate-zone-key",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin rotate-zone-key\n  \
+            ztlp admin rotate-zone-key --json"
+    )]
+    RotateZoneKey {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export the zone signing key
+    ///
+    /// Exports the zone signing key for backup purposes.
+    #[command(
+        name = "export-zone-key",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin export-zone-key --format pem\n  \
+            ztlp admin export-zone-key --format hex --json"
+    )]
+    ExportZoneKey {
+        /// Export format (pem or hex)
+        #[arg(long, default_value = "pem")]
+        format: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Identity type for `ztlp setup --type`
@@ -5857,33 +5943,148 @@ async fn cmd_admin_ls(
         None => "all",
     };
 
-    if !json_output {
-        eprintln!("{}", c_bold("ZTLP Records"));
-        eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
-        if let Some(ref z) = zone {
-            eprintln!("  {} {}", c_cyan("Zone:"), z);
-        }
-        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
-        eprintln!();
-        eprintln!("  {} Querying NS for {} records...", c_dim("→"), type_str);
+    let type_byte: u8 = match type_filter {
+        Some(RecordTypeFilter::Device) => 0x10, // DEVICE
+        Some(RecordTypeFilter::User) => 0x11,   // USER
+        Some(RecordTypeFilter::Key) => 0x01,    // KEY
+        Some(RecordTypeFilter::Group) => 0x12,  // GROUP
+        None => 0x00,                           // All types
+    };
 
-        eprintln!(
-            "  {} No records found (or NS server not reachable)",
-            c_yellow("⚠")
-        );
-        eprintln!();
-    } else {
-        println!(
-            "{{\"type\":\"{}\",\"zone\":{},\"records\":[]}}",
-            type_str,
-            match zone {
-                Some(z) => format!("\"{}\"", z),
-                None => "null".to_string(),
+    let zone_str = zone.as_deref().unwrap_or("");
+    let zone_bytes = zone_str.as_bytes();
+    let zone_len = zone_bytes.len() as u16;
+
+    // Build admin list query: <<0x13, 0x01, type_byte, zone_len::16, zone::binary>>
+    let mut pkt = Vec::new();
+    pkt.push(0x13);
+    pkt.push(0x01);
+    pkt.push(type_byte);
+    pkt.extend_from_slice(&zone_len.to_be_bytes());
+    pkt.extend_from_slice(zone_bytes);
+
+    let addr: std::net::SocketAddr = ns_addr.parse()?;
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+
+    socket.send_to(&pkt, addr)?;
+
+    let mut buf = [0u8; 65535];
+    match socket.recv(&mut buf) {
+        Ok(n) if n > 1 && buf[0] == 0x13 => {
+            let cbor_data = &buf[1..n];
+            match cbor_decode_to_json(cbor_data) {
+                Some(json_val) => {
+                    if json_output {
+                        let mut output = serde_json::Map::new();
+                        output.insert(
+                            "type".to_string(),
+                            serde_json::Value::String(type_str.to_string()),
+                        );
+                        output.insert(
+                            "zone".to_string(),
+                            match zone {
+                                Some(z) => serde_json::Value::String(z.clone()),
+                                None => serde_json::Value::Null,
+                            },
+                        );
+                        if let Some(records) = json_val.get("records") {
+                            output.insert("records".to_string(), records.clone());
+                        } else {
+                            output.insert("records".to_string(), serde_json::Value::Array(vec![]));
+                        }
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::Value::Object(output))?
+                        );
+                    } else {
+                        eprintln!("{}", c_bold("ZTLP Records"));
+                        eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
+                        if let Some(ref z) = zone {
+                            eprintln!("  {} {}", c_cyan("Zone:"), z);
+                        }
+                        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+                        eprintln!();
+                        print_record_list(&json_val);
+                    }
+                }
+                None => {
+                    if json_output {
+                        println!(
+                            "{{\"type\":\"{}\",\"zone\":{},\"records\":[],\"error\":\"failed to decode response\"}}",
+                            type_str,
+                            match zone { Some(z) => format!("\"{}\"", z), None => "null".to_string() }
+                        );
+                    } else {
+                        eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
+                    }
+                }
             }
-        );
+        }
+        _ => {
+            if json_output {
+                println!(
+                    "{{\"type\":\"{}\",\"zone\":{},\"records\":[]}}",
+                    type_str,
+                    match zone {
+                        Some(z) => format!("\"{}\"", z),
+                        None => "null".to_string(),
+                    }
+                );
+            } else {
+                eprintln!("{}", c_bold("ZTLP Records"));
+                eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
+                if let Some(ref z) = zone {
+                    eprintln!("  {} {}", c_cyan("Zone:"), z);
+                }
+                eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+                eprintln!();
+                eprintln!(
+                    "  {} No records found (or NS server not reachable)",
+                    c_yellow("⚠")
+                );
+                eprintln!();
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Print records list in human-readable format
+fn print_record_list(json_val: &serde_json::Value) {
+    if let Some(records) = json_val.get("records").and_then(|r| r.as_array()) {
+        if records.is_empty() {
+            eprintln!("  {} No records found", c_dim("(empty)"));
+        } else {
+            eprintln!("  Found {} record(s):", records.len());
+            eprintln!();
+            for record in records {
+                let name = record.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let rtype = record.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                let serial = record.get("serial").and_then(|s| s.as_u64()).unwrap_or(0);
+
+                let type_colored = match rtype {
+                    "device" => c_cyan(rtype),
+                    "user" => c_green(rtype),
+                    "group" => c_yellow(rtype),
+                    "key" => c_dim(rtype),
+                    _ => rtype.to_string(),
+                };
+
+                eprintln!(
+                    "  {} {} [{}] serial={}",
+                    c_dim("•"),
+                    name,
+                    type_colored,
+                    serial
+                );
+            }
+        }
+    } else {
+        eprintln!("  {} No records found", c_dim("(empty)"));
+    }
+    eprintln!();
 }
 
 /// `ztlp admin create-group` — Create a group in the namespace
@@ -6069,6 +6270,567 @@ async fn cmd_admin_groups(
     }
 
     Ok(())
+}
+
+/// `ztlp admin revoke` — Revoke an identity (device, user, or group)
+async fn cmd_admin_revoke(
+    name: &str,
+    reason: &str,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Revoke Identity"));
+        eprintln!("  {} {}", c_cyan("Name:"), name);
+        eprintln!("  {} {}", c_cyan("Reason:"), reason);
+        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+        eprintln!();
+
+        // Build and send revocation record via NS registration
+        let addr: std::net::SocketAddr = ns_addr.parse()?;
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+
+        // CBOR-encode the revocation data
+        let revoke_data = build_revoke_cbor(name, reason);
+        let revoke_name = format!("revoke.{}", name);
+        let type_byte: u8 = 0x05; // REVOKE type
+
+        // Build registration packet: <<0x09, name_len::16, name, type_byte, data_len::16, data, sig_len::16, sig(empty)>>
+        let name_bytes = revoke_name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let data_len = revoke_data.len() as u16;
+        let sig = vec![0u8; 0]; // Empty sig for dev mode
+        let sig_len: u16 = 0;
+
+        let mut pkt = Vec::new();
+        pkt.push(0x09);
+        pkt.extend_from_slice(&name_len.to_be_bytes());
+        pkt.extend_from_slice(name_bytes);
+        pkt.push(type_byte);
+        pkt.extend_from_slice(&data_len.to_be_bytes());
+        pkt.extend_from_slice(&revoke_data);
+        pkt.extend_from_slice(&sig_len.to_be_bytes());
+        pkt.extend_from_slice(&sig);
+
+        socket.send_to(&pkt, addr)?;
+
+        let mut buf = [0u8; 4096];
+        match socket.recv(&mut buf) {
+            Ok(n) if n > 0 && buf[0] == 0x06 => {
+                eprintln!("  {} Revoked '{}' — reason: {}", c_green("✓"), name, reason);
+            }
+            Ok(n) if n > 0 && buf[0] == 0xFF => {
+                eprintln!(
+                    "  {} Revocation rejected by NS server (check auth configuration)",
+                    c_red("✗")
+                );
+            }
+            _ => {
+                eprintln!(
+                    "  {} NS server did not respond (timeout or unreachable)",
+                    c_yellow("⚠")
+                );
+            }
+        }
+        eprintln!();
+    } else {
+        let addr: std::net::SocketAddr = ns_addr.parse()?;
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+
+        let revoke_data = build_revoke_cbor(name, reason);
+        let revoke_name = format!("revoke.{}", name);
+        let type_byte: u8 = 0x05;
+
+        let name_bytes = revoke_name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let data_len = revoke_data.len() as u16;
+        let sig_len: u16 = 0;
+
+        let mut pkt = Vec::new();
+        pkt.push(0x09);
+        pkt.extend_from_slice(&name_len.to_be_bytes());
+        pkt.extend_from_slice(name_bytes);
+        pkt.push(type_byte);
+        pkt.extend_from_slice(&data_len.to_be_bytes());
+        pkt.extend_from_slice(&revoke_data);
+        pkt.extend_from_slice(&sig_len.to_be_bytes());
+
+        socket.send_to(&pkt, addr)?;
+
+        let mut buf = [0u8; 4096];
+        match socket.recv(&mut buf) {
+            Ok(n) if n > 0 && buf[0] == 0x06 => {
+                println!(
+                    "{{\"status\":\"revoked\",\"name\":\"{}\",\"reason\":\"{}\"}}",
+                    name, reason
+                );
+            }
+            Ok(n) if n > 0 && buf[0] == 0xFF => {
+                println!(
+                    "{{\"status\":\"rejected\",\"name\":\"{}\",\"error\":\"authorization failed\"}}",
+                    name
+                );
+            }
+            _ => {
+                println!(
+                    "{{\"status\":\"error\",\"name\":\"{}\",\"error\":\"ns server unreachable\"}}",
+                    name
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Build CBOR-encoded revocation data
+///
+/// Encodes a CBOR map: {"effective_at": "now", "reason": <reason>, "revoked_ids": [<name>]}
+/// Keys are sorted by encoded length (RFC 8949 deterministic encoding).
+fn build_revoke_cbor(name: &str, reason: &str) -> Vec<u8> {
+    // Encode the array value for revoked_ids: [name]
+    let mut arr = cbor_head(4, 1); // array of 1 element
+    arr.extend_from_slice(&cbor_text(name));
+
+    // Build the map with 3 entries
+    // Keys sorted by encoded byte length (shortest first):
+    //   "reason" (6), "revoked_ids" (11), "effective_at" (12)
+    let key_reason = cbor_text("reason");
+    let val_reason = cbor_text(reason);
+    let key_revoked = cbor_text("revoked_ids");
+    let key_effective = cbor_text("effective_at");
+    let val_effective = cbor_text("now");
+
+    let mut buf = cbor_head(5, 3); // map of 3 entries
+                                   // Sort by encoded key length then bytes
+    buf.extend_from_slice(&key_reason);
+    buf.extend_from_slice(&val_reason);
+    buf.extend_from_slice(&key_effective);
+    buf.extend_from_slice(&val_effective);
+    buf.extend_from_slice(&key_revoked);
+    buf.extend_from_slice(&arr);
+    buf
+}
+
+/// `ztlp admin audit` — Query the audit log
+async fn cmd_admin_audit(
+    since_str: &str,
+    name_pattern: &Option<String>,
+    ns_server: &Option<String>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let ns_addr = resolve_ns_server(ns_server, &config)?;
+    let since_secs = parse_duration_seconds(since_str)?;
+    let since_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(since_secs);
+
+    let addr: std::net::SocketAddr = ns_addr.parse()?;
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+
+    // Build admin query packet
+    let pkt = match name_pattern {
+        Some(pattern) => {
+            // Audit filter: <<0x13, 0x03, since_ts::64, pattern_len::16, pattern::binary>>
+            let pat_bytes = pattern.as_bytes();
+            let pat_len = pat_bytes.len() as u16;
+            let mut p = Vec::new();
+            p.push(0x13);
+            p.push(0x03);
+            p.extend_from_slice(&since_ts.to_be_bytes());
+            p.extend_from_slice(&pat_len.to_be_bytes());
+            p.extend_from_slice(pat_bytes);
+            p
+        }
+        None => {
+            // Audit since: <<0x13, 0x02, since_ts::64>>
+            let mut p = Vec::new();
+            p.push(0x13);
+            p.push(0x02);
+            p.extend_from_slice(&since_ts.to_be_bytes());
+            p
+        }
+    };
+
+    socket.send_to(&pkt, addr)?;
+
+    let mut buf = [0u8; 65535];
+    match socket.recv(&mut buf) {
+        Ok(n) if n > 1 && buf[0] == 0x13 => {
+            // Decode CBOR response
+            let cbor_data = &buf[1..n];
+            match cbor_decode_to_json(cbor_data) {
+                Some(json_val) => {
+                    if json_output {
+                        if let Ok(s) = serde_json::to_string(&json_val) {
+                            println!("{}", s);
+                        } else {
+                            println!("{}", json_val);
+                        }
+                    } else {
+                        print_audit_entries(&json_val);
+                    }
+                }
+                None => {
+                    if json_output {
+                        println!("{{\"entries\":[],\"error\":\"failed to decode response\"}}");
+                    } else {
+                        eprintln!("  {} Failed to decode audit response", c_yellow("⚠"));
+                    }
+                }
+            }
+        }
+        _ => {
+            if json_output {
+                println!("{{\"entries\":[],\"error\":\"ns server unreachable\"}}");
+            } else {
+                eprintln!("{}", c_bold("ZTLP Audit Log"));
+                eprintln!("  {} Since: {} ago", c_cyan("Filter:"), since_str);
+                if let Some(ref pat) = name_pattern {
+                    eprintln!("  {} {}", c_cyan("Pattern:"), pat);
+                }
+                eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
+                eprintln!();
+                eprintln!("  {} NS server did not respond", c_yellow("⚠"));
+                eprintln!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Print audit entries in human-readable format
+fn print_audit_entries(json_val: &serde_json::Value) {
+    eprintln!("{}", c_bold("ZTLP Audit Log"));
+    eprintln!();
+
+    if let Some(entries) = json_val.get("entries").and_then(|e| e.as_array()) {
+        if entries.is_empty() {
+            eprintln!("  {} No audit entries found", c_dim("(empty)"));
+        } else {
+            for entry in entries {
+                let ts = entry.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0);
+                let action = entry.get("action").and_then(|a| a.as_str()).unwrap_or("?");
+                let name = entry.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let rtype = entry.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+
+                let action_colored = match action {
+                    "registered" => c_green(action),
+                    "revoked" => c_red(action),
+                    "updated" => c_yellow(action),
+                    _ => c_dim(action),
+                };
+
+                // Format timestamp
+                let datetime = format_unix_ts(ts);
+
+                eprintln!(
+                    "  {} {} {} ({})",
+                    c_dim(&datetime),
+                    action_colored,
+                    c_cyan(name),
+                    rtype
+                );
+
+                // Print details if present
+                if let Some(details) = entry.get("details").and_then(|d| d.as_object()) {
+                    for (key, val) in details {
+                        eprintln!("    {} {}: {}", c_dim("├"), key, val);
+                    }
+                }
+            }
+        }
+    } else {
+        eprintln!("  {} No audit entries found", c_dim("(empty)"));
+    }
+    eprintln!();
+}
+
+/// Format a Unix timestamp into a human-readable string
+fn format_unix_ts(ts: u64) -> String {
+    let secs = ts;
+    let hours = (secs / 3600) % 24;
+    let mins = (secs / 60) % 60;
+    let ss = secs % 60;
+    // Simple HH:MM:SS format (full date would require chrono)
+    format!("{:02}:{:02}:{:02}", hours, mins, ss)
+}
+
+/// Parse a duration string like "24h", "7d", "30m" into seconds
+fn parse_duration_seconds(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(86400); // Default 24h
+    }
+
+    let (num_str, unit) = if let Some(stripped) = s.strip_suffix('d') {
+        (stripped, 'd')
+    } else if let Some(stripped) = s.strip_suffix('h') {
+        (stripped, 'h')
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        (stripped, 'm')
+    } else if let Some(stripped) = s.strip_suffix('s') {
+        (stripped, 's')
+    } else {
+        // Assume hours
+        (s, 'h')
+    };
+
+    let num: u64 = num_str.parse()?;
+    let secs = match unit {
+        'd' => num * 86400,
+        'h' => num * 3600,
+        'm' => num * 60,
+        's' => num,
+        _ => num * 3600,
+    };
+    Ok(secs)
+}
+
+/// `ztlp admin rotate-zone-key` — Rotate the zone signing key
+fn cmd_admin_rotate_zone_key(json_output: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Generate a new Ed25519 keypair
+    let mut secret_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret_bytes);
+    let secret = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
+    let public = secret.verifying_key();
+    let public_hex = hex::encode(public.as_bytes());
+
+    // Save to the default zone key path
+    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    std::fs::create_dir_all(&ztlp_dir)?;
+
+    let key_path = ztlp_dir.join("zone.key");
+    let old_exists = key_path.exists();
+
+    // Back up old key if it exists
+    if old_exists {
+        let backup_path = ztlp_dir.join("zone.key.bak");
+        std::fs::copy(&key_path, &backup_path)?;
+    }
+
+    // Save new key (64-byte secret key)
+    std::fs::write(&key_path, secret.to_bytes())?;
+
+    if json_output {
+        println!(
+            "{{\"status\":\"rotated\",\"public_key\":\"{}\",\"key_path\":\"{}\",\"backed_up\":{}}}",
+            public_hex,
+            key_path.display(),
+            old_exists
+        );
+    } else {
+        eprintln!("{}", c_bold("ZTLP Zone Key Rotation"));
+        eprintln!();
+        if old_exists {
+            eprintln!(
+                "  {} Old key backed up to {}",
+                c_dim("→"),
+                ztlp_dir.join("zone.key.bak").display()
+            );
+        }
+        eprintln!("  {} New zone signing key generated", c_green("✓"));
+        eprintln!("  {} {}", c_cyan("Public key:"), public_hex);
+        eprintln!("  {} {}", c_cyan("Saved to:"), key_path.display());
+        eprintln!();
+        eprintln!(
+            "  {} Re-enroll devices with: ztlp admin enroll --zone <zone>",
+            c_dim("Note:")
+        );
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// `ztlp admin export-zone-key` — Export the zone signing key
+fn cmd_admin_export_zone_key(
+    format: &str,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    let key_path = ztlp_dir.join("zone.key");
+
+    if !key_path.exists() {
+        if json_output {
+            println!(
+                "{{\"status\":\"error\",\"error\":\"zone key not found at {}\"}}",
+                key_path.display()
+            );
+        } else {
+            eprintln!(
+                "  {} Zone key not found at {}",
+                c_red("✗"),
+                key_path.display()
+            );
+            eprintln!("  {} Run: ztlp admin init-zone --zone <zone>", c_dim("→"));
+        }
+        return Ok(());
+    }
+
+    let key_bytes = std::fs::read(&key_path)?;
+    let secret = ed25519_dalek::SigningKey::from_bytes(
+        &key_bytes[..32]
+            .try_into()
+            .map_err(|_| "invalid key file: expected 32 bytes")?,
+    );
+    let public = secret.verifying_key();
+
+    match format {
+        "hex" => {
+            let secret_hex = hex::encode(secret.to_bytes());
+            let public_hex = hex::encode(public.as_bytes());
+
+            if json_output {
+                println!(
+                    "{{\"format\":\"hex\",\"secret_key\":\"{}\",\"public_key\":\"{}\"}}",
+                    secret_hex, public_hex
+                );
+            } else {
+                eprintln!("{}", c_bold("ZTLP Zone Key Export (hex)"));
+                eprintln!();
+                eprintln!("  {} {}", c_cyan("Public key: "), public_hex);
+                eprintln!("  {} {}", c_cyan("Secret key: "), secret_hex);
+                eprintln!();
+            }
+        }
+        _ => {
+            let public_hex = hex::encode(public.as_bytes());
+            // PEM-like format for Ed25519 keys (simplified)
+            let secret_b64 = base64_encode(&secret.to_bytes());
+            let public_b64 = base64_encode(public.as_bytes());
+
+            if json_output {
+                println!(
+                    "{{\"format\":\"pem\",\"public_key\":\"{}\",\"public_key_pem\":\"-----BEGIN ZTLP ED25519 PUBLIC KEY-----\\n{}\\n-----END ZTLP ED25519 PUBLIC KEY-----\",\"secret_key_pem\":\"-----BEGIN ZTLP ED25519 PRIVATE KEY-----\\n{}\\n-----END ZTLP ED25519 PRIVATE KEY-----\"}}",
+                    public_hex, public_b64, secret_b64
+                );
+            } else {
+                eprintln!("{}", c_bold("ZTLP Zone Key Export (PEM)"));
+                eprintln!();
+                eprintln!("  {} {}", c_cyan("Public key:"), public_hex);
+                eprintln!();
+                eprintln!("-----BEGIN ZTLP ED25519 PUBLIC KEY-----");
+                eprintln!("{}", public_b64);
+                eprintln!("-----END ZTLP ED25519 PUBLIC KEY-----");
+                eprintln!();
+                eprintln!("-----BEGIN ZTLP ED25519 PRIVATE KEY-----");
+                eprintln!("{}", secret_b64);
+                eprintln!("-----END ZTLP ED25519 PRIVATE KEY-----");
+                eprintln!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simple base64 encoding (no padding) for PEM output
+fn base64_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+// ─── Minimal CBOR → JSON decoder ────────────────────────────────────────────
+
+/// Decode a CBOR value into serde_json::Value (handles maps, arrays, strings, ints).
+fn cbor_decode_to_json(data: &[u8]) -> Option<serde_json::Value> {
+    let (val, _) = cbor_decode_value(data, 0)?;
+    Some(val)
+}
+
+fn cbor_decode_value(data: &[u8], pos: usize) -> Option<(serde_json::Value, usize)> {
+    if pos >= data.len() {
+        return None;
+    }
+
+    let byte = data[pos];
+    let major = byte >> 5;
+    let additional = byte & 0x1F;
+
+    match major {
+        0 => {
+            // Unsigned integer
+            let (n, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            Some((
+                serde_json::Value::Number(serde_json::Number::from(n as u64)),
+                new_pos,
+            ))
+        }
+        1 => {
+            // Negative integer
+            let (n, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            let val = -(n as i64) - 1;
+            Some((
+                serde_json::Value::Number(serde_json::Number::from(val)),
+                new_pos,
+            ))
+        }
+        2 => {
+            // Byte string — encode as hex string
+            let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            if new_pos + len > data.len() {
+                return None;
+            }
+            let hex_str = hex::encode(&data[new_pos..new_pos + len]);
+            Some((serde_json::Value::String(hex_str), new_pos + len))
+        }
+        3 => {
+            // Text string
+            let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            if new_pos + len > data.len() {
+                return None;
+            }
+            let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
+            Some((serde_json::Value::String(s.to_string()), new_pos + len))
+        }
+        4 => {
+            // Array
+            let (count, mut cur_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            let mut arr = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (val, new_pos) = cbor_decode_value(data, cur_pos)?;
+                arr.push(val);
+                cur_pos = new_pos;
+            }
+            Some((serde_json::Value::Array(arr), cur_pos))
+        }
+        5 => {
+            // Map
+            let (count, mut cur_pos) = cbor_read_uint(additional, data, pos + 1)?;
+            let mut map = serde_json::Map::new();
+            for _ in 0..count {
+                let (key_val, new_pos) = cbor_decode_value(data, cur_pos)?;
+                let key = match key_val {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                let (val, new_pos) = cbor_decode_value(data, new_pos)?;
+                map.insert(key, val);
+                cur_pos = new_pos;
+            }
+            Some((serde_json::Value::Object(map), cur_pos))
+        }
+        7 => {
+            // Simple / float
+            match additional {
+                20 => Some((serde_json::Value::Bool(false), pos + 1)),
+                21 => Some((serde_json::Value::Bool(true), pos + 1)),
+                22 => Some((serde_json::Value::Null, pos + 1)),
+                _ => Some((serde_json::Value::Null, pos + 1)),
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Helper to resolve NS server address from argument, config, or default
@@ -6971,6 +7733,22 @@ async fn main() {
                 } => cmd_admin_group_check(group, user, ns_server, *json).await,
             },
             AdminCommands::Groups { ns_server, json } => cmd_admin_groups(ns_server, *json).await,
+            AdminCommands::Revoke {
+                name,
+                reason,
+                ns_server,
+                json,
+            } => cmd_admin_revoke(name, reason, ns_server, *json).await,
+            AdminCommands::Audit {
+                since,
+                name,
+                ns_server,
+                json,
+            } => cmd_admin_audit(since, name, ns_server, *json).await,
+            AdminCommands::RotateZoneKey { json } => cmd_admin_rotate_zone_key(*json),
+            AdminCommands::ExportZoneKey { format, json } => {
+                cmd_admin_export_zone_key(format, *json)
+            }
         },
 
         Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),

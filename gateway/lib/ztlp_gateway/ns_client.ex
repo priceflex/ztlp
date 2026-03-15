@@ -48,6 +48,8 @@ defmodule ZtlpGateway.NsClient do
   @ns_cache :ztlp_gateway_ns_cache
   @group_cache :ztlp_gateway_group_cache
   @user_cache :ztlp_gateway_user_cache
+  @revocation_cache :ztlp_gateway_revocation_cache
+  @revocation_cache_ttl 300  # 5 minutes TTL for revocation status cache
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -160,6 +162,64 @@ defmodule ZtlpGateway.NsClient do
   end
 
   @doc """
+  Check if a name (device, user, or group) has been revoked in NS.
+
+  Results are cached with a short TTL (5 minutes) to avoid hitting NS
+  on every connection while still detecting revocations promptly.
+
+  Returns `true` if revoked, `false` otherwise.
+  """
+  @spec is_revoked?(String.t()) :: boolean()
+  def is_revoked?(name) when is_binary(name) do
+    case revocation_cache_lookup(name) do
+      {:ok, result} -> result
+      :miss -> GenServer.call(__MODULE__, {:check_revoked, name}, 10_000)
+    end
+  end
+
+  @doc """
+  Check if a device's owner (user) has been revoked.
+
+  For revocation cascading: when a device connects, check if the device
+  itself is revoked OR if the device's owner is revoked. Returns `true`
+  if either the device or its owner is revoked.
+  """
+  @spec is_identity_revoked?(String.t()) :: boolean()
+  def is_identity_revoked?(name) when is_binary(name) do
+    # Check if the name itself is revoked
+    if is_revoked?(name) do
+      true
+    else
+      # If it's a device, also check the owner
+      case query_device_owner(name) do
+        {:ok, owner} when is_binary(owner) and owner != "" ->
+          is_revoked?(owner)
+        _ ->
+          false
+      end
+    end
+  end
+
+  @doc """
+  Query the owner of a device from NS.
+
+  Returns `{:ok, owner_name}` or `{:error, reason}`.
+  """
+  @spec query_device_owner(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def query_device_owner(device_name) when is_binary(device_name) do
+    case do_name_query_direct(device_name, 0x10) do
+      {:ok, record_map} ->
+        owner = get_in(record_map, [:data, "owner"]) ||
+                get_in(record_map, [:data, :owner]) ||
+                Map.get(record_map, :owner) ||
+                Map.get(record_map, "owner")
+        if owner, do: {:ok, owner}, else: {:error, :no_owner}
+      error ->
+        error
+    end
+  end
+
+  @doc """
   Get the role of a user from their USER record.
 
   Returns the role string (e.g., "admin", "tech", "user") or nil.
@@ -195,6 +255,10 @@ defmodule ZtlpGateway.NsClient do
 
         if :ets.whereis(@user_cache) == :undefined do
           :ets.new(@user_cache, [:named_table, :set, :public, read_concurrency: true])
+        end
+
+        if :ets.whereis(@revocation_cache) == :undefined do
+          :ets.new(@revocation_cache, [:named_table, :set, :public, read_concurrency: true])
         end
 
         {:ok, %{socket: socket, trust_anchors: %{}}}
@@ -267,6 +331,31 @@ defmodule ZtlpGateway.NsClient do
     end
   end
 
+  def handle_call({:check_revoked, name}, _from, state) do
+    case revocation_cache_lookup(name) do
+      {:ok, result} ->
+        {:reply, result, state}
+
+      :miss ->
+        # Query NS for any record type — if we get :revoked back, it's revoked
+        # We try the name as a generic query; the NS response code 0x04 means revoked
+        result = do_revocation_check(state.socket, name)
+
+        # Cache the result
+        expires_at = System.system_time(:second) + @revocation_cache_ttl
+        if :ets.whereis(@revocation_cache) != :undefined do
+          :ets.insert(@revocation_cache, {name, {result, expires_at}})
+        end
+
+        {:reply, result, state}
+    end
+  end
+
+  def handle_call({:query_name_direct, name, type_byte}, _from, state) do
+    result = do_name_query(state.socket, name, type_byte, state.trust_anchors)
+    {:reply, result, state}
+  end
+
   def handle_call({:query_user, user_name}, _from, state) do
     case user_cache_lookup(user_name) do
       {:ok, _} = hit ->
@@ -302,6 +391,10 @@ defmodule ZtlpGateway.NsClient do
       :ets.delete_all_objects(@user_cache)
     end
 
+    if :ets.whereis(@revocation_cache) != :undefined do
+      :ets.delete_all_objects(@revocation_cache)
+    end
+
     {:reply, :ok, state}
   end
 
@@ -316,6 +409,56 @@ defmodule ZtlpGateway.NsClient do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  # ── Private: Revocation Check ────────────────────────────────────────
+
+  # Check if a name is revoked by querying NS.
+  # We query for a KEY record (type 0x01) — if NS responds with 0x04,
+  # the name is revoked regardless of record type.
+  defp do_revocation_check(nil, _name), do: false
+
+  defp do_revocation_check(socket, name) do
+    host = Config.get(:ns_server_host)
+    port = Config.get(:ns_server_port)
+    timeout = Config.get(:ns_query_timeout_ms)
+
+    # Query for KEY type — but we only care about the response code
+    name_len = byte_size(name)
+    query = <<0x01, name_len::16, name::binary, 0x01::8>>
+
+    :gen_udp.send(socket, host, port, query)
+
+    case :gen_udp.recv(socket, 0, timeout) do
+      {:ok, {_ip, _port, <<0x04, _rest::binary>>}} -> true
+      _ -> false
+    end
+  end
+
+  defp revocation_cache_lookup(name) do
+    case :ets.lookup(@revocation_cache, name) do
+      [{^name, {result, expires_at}}] ->
+        if System.system_time(:second) < expires_at do
+          {:ok, result}
+        else
+          :ets.delete(@revocation_cache, name)
+          :miss
+        end
+
+      [] ->
+        :miss
+    end
+  rescue
+    ArgumentError -> :miss
+  end
+
+  # Direct name query without caching (used internally for device owner lookups)
+  defp do_name_query_direct(name, type_byte) do
+    GenServer.call(__MODULE__, {:query_name_direct, name, type_byte}, 10_000)
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
 
   # ── Private: Name-based Query (0x01) ────────────────────────────────
 

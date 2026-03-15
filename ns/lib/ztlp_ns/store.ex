@@ -185,6 +185,71 @@ defmodule ZtlpNs.Store do
   end
 
   @doc """
+  List all records filtered by type.
+
+  Returns `{name, type, record}` tuples for the given record type.
+  Excludes expired records.
+  """
+  @spec list_by_type(Record.record_type()) :: [{String.t(), Record.record_type(), Record.t()}]
+  def list_by_type(type) when is_atom(type) do
+    list()
+    |> Enum.filter(fn {_name, t, record} ->
+      t == type and not Record.expired?(record)
+    end)
+  end
+
+  @doc """
+  List all records filtered by zone suffix.
+
+  Returns `{name, type, record}` tuples for names ending with the given zone.
+  Excludes expired records.
+  """
+  @spec list_by_zone(String.t()) :: [{String.t(), Record.record_type(), Record.t()}]
+  def list_by_zone(zone) when is_binary(zone) do
+    dot_suffix = if String.starts_with?(zone, "."), do: zone, else: "." <> zone
+    at_suffix = "@" <> zone
+
+    list()
+    |> Enum.filter(fn {name, _type, record} ->
+      (String.ends_with?(name, dot_suffix) or
+       String.ends_with?(name, at_suffix) or
+       name == zone) and not Record.expired?(record)
+    end)
+  end
+
+  @doc """
+  List all records, optionally filtered by type and/or zone.
+
+  This combines type and zone filtering in a single pass.
+  Excludes expired records.
+  """
+  @spec list_filtered(keyword()) :: [{String.t(), Record.record_type(), Record.t()}]
+  def list_filtered(opts \\ []) do
+    type_filter = Keyword.get(opts, :type)
+    zone_filter = Keyword.get(opts, :zone)
+
+    {dot_suffix, at_suffix} =
+      case zone_filter do
+        nil -> {nil, nil}
+        zone ->
+          dot = if String.starts_with?(zone, "."), do: zone, else: "." <> zone
+          at = "@" <> zone
+          {dot, at}
+      end
+
+    list()
+    |> Enum.filter(fn {name, type, record} ->
+      type_ok = is_nil(type_filter) or type == type_filter
+      zone_ok = is_nil(dot_suffix) or
+                String.ends_with?(name, dot_suffix) or
+                String.ends_with?(name, at_suffix) or
+                name == zone_filter
+      not_expired = not Record.expired?(record)
+      type_ok and zone_ok and not_expired
+    end)
+  end
+
+  @doc """
   Look up a record name by public key hex string.
 
   Uses the pubkey index table for O(1) lookups instead of scanning

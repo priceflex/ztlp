@@ -25,6 +25,78 @@ defmodule ZtlpNs.RegistrationAuth do
 
   alias ZtlpNs.{Record, Store, Zone}
 
+  @rate_limit_table :ztlp_ns_registration_rate_limit
+  @rate_limit_window 3600  # 1 hour in seconds
+
+  @doc """
+  Initialize the rate-limiting ETS table.
+
+  Called once during application startup. If the table already exists
+  (e.g., in tests that restart components), this is a no-op.
+  """
+  @spec init_rate_limit() :: :ok
+  def init_rate_limit do
+    if :ets.whereis(@rate_limit_table) == :undefined do
+      :ets.new(@rate_limit_table, [:named_table, :set, :public, write_concurrency: true])
+    end
+    :ok
+  end
+
+  @doc """
+  Check rate limiting for identity registration.
+
+  Enforces max 1 registration per name per hour to prevent key-rotation abuse.
+  Zone authorities (admins) bypass this limit.
+
+  Returns `:ok` or `{:error, :rate_limited}`.
+  """
+  @spec check_rate_limit(String.t(), binary()) :: :ok | {:error, :rate_limited}
+  def check_rate_limit(name, pubkey) do
+    # Zone authorities bypass rate limiting
+    pubkey_hex = Base.encode16(pubkey, case: :lower)
+    case check_zone_authority(pubkey_hex, name) do
+      :ok -> :ok
+      {:error, _} -> do_check_rate_limit(name)
+    end
+  end
+
+  defp do_check_rate_limit(name) do
+    now = System.system_time(:second)
+
+    case :ets.lookup(@rate_limit_table, name) do
+      [{^name, last_registered_at}] ->
+        if now - last_registered_at < @rate_limit_window do
+          {:error, :rate_limited}
+        else
+          :ets.insert(@rate_limit_table, {name, now})
+          :ok
+        end
+
+      [] ->
+        :ets.insert(@rate_limit_table, {name, now})
+        :ok
+    end
+  rescue
+    # Table might not exist in tests
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  @doc """
+  Check if a name has been revoked before allowing re-registration.
+
+  Revoked entities cannot re-register. Returns `:ok` or `{:error, :revoked}`.
+  """
+  @spec check_name_revocation(String.t()) :: :ok | {:error, :revoked}
+  def check_name_revocation(name) do
+    if Store.revoked?(name) do
+      {:error, :revoked}
+    else
+      :ok
+    end
+  end
+
   @doc """
   Verify an Ed25519 signature over the canonical form of a record.
 

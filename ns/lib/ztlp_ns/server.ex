@@ -58,7 +58,7 @@ defmodule ZtlpNs.Server do
 
   use GenServer
 
-  alias ZtlpNs.{Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
+  alias ZtlpNs.{Audit, Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -250,6 +250,48 @@ defmodule ZtlpNs.Server do
     <<0x06>>  # ACK
   end
 
+  # Admin query (0x13) — list records or query audit log
+  #
+  # Wire format variants:
+  #   List records:  <<0x13, 0x01, type_byte::8, zone_len::16, zone::binary>>
+  #     type_byte 0x00 = all types
+  #   Audit since:   <<0x13, 0x02, since_ts::64>>
+  #   Audit filter:  <<0x13, 0x03, since_ts::64, pattern_len::16, pattern::binary>>
+  #
+  # Response: <<0x13, cbor_payload::binary>>
+  defp process_query(<<0x13, 0x01, type_byte::8, zone_len::16, zone::binary-size(zone_len)>>, _source) do
+    type_filter = if type_byte == 0x00, do: nil, else: (try do Record.byte_to_type(type_byte) rescue _ -> nil end)
+    zone_filter = if zone == "", do: nil, else: zone
+
+    records = Store.list_filtered(type: type_filter, zone: zone_filter)
+
+    entries = Enum.map(records, fn {name, type, record} ->
+      %{
+        "name" => name,
+        "type" => Atom.to_string(type),
+        "created_at" => record.created_at,
+        "ttl" => record.ttl,
+        "serial" => record.serial,
+        "data" => record.data
+      }
+    end)
+
+    payload = ZtlpNs.Cbor.encode(%{"records" => entries})
+    <<0x13, payload::binary>>
+  end
+
+  defp process_query(<<0x13, 0x02, since_ts::unsigned-big-64>>, _source) do
+    entries = Audit.since(since_ts)
+    payload = encode_audit_entries(entries)
+    <<0x13, payload::binary>>
+  end
+
+  defp process_query(<<0x13, 0x03, since_ts::unsigned-big-64, pattern_len::16, pattern::binary-size(pattern_len)>>, _source) do
+    entries = Audit.filter_since(pattern, since_ts)
+    payload = encode_audit_entries(entries)
+    <<0x13, payload::binary>>
+  end
+
   # Registration v2 (0x09) with pubkey — verify signature + zone auth
   defp process_query(
          <<0x09, name_len::16, name::binary-size(name_len), type_byte::8, data_len::16,
@@ -333,7 +375,11 @@ defmodule ZtlpNs.Server do
          # 5. Check key overwrite protection (DEVICE/USER records)
          :ok <- RegistrationAuth.check_key_overwrite(pubkey, name, type, data),
          # 6. Check NodeID revocation
-         :ok <- RegistrationAuth.check_revocation(data) do
+         :ok <- RegistrationAuth.check_revocation(data),
+         # 7. Check name revocation (revoked entities cannot re-register)
+         :ok <- RegistrationAuth.check_name_revocation(name),
+         # 8. Check rate limiting (max 1 registration per name per hour)
+         :ok <- RegistrationAuth.check_rate_limit(name, pubkey) do
       # Build the record and sign with the NS registration key.
       # The registrant's identity was verified above (Ed25519 sig + zone auth).
       # The stored record needs a signature that matches Record.serialize()
@@ -362,6 +408,15 @@ defmodule ZtlpNs.Server do
             signer: Base.encode16(pubkey, case: :lower)
           )
 
+          Audit.log(:registered, name, type, %{
+            signer: Base.encode16(pubkey, case: :lower)
+          })
+
+          # If this is a revocation, log revocation events and clean up indexes
+          if type == :revoke do
+            handle_revocation_side_effects(data, name)
+          end
+
           <<0x06>>
 
         {:error, :stale_serial} ->
@@ -375,6 +430,17 @@ defmodule ZtlpNs.Server do
                 name: name, type: type,
                 signer: Base.encode16(pubkey, case: :lower)
               )
+
+              Audit.log(:updated, name, type, %{
+                signer: Base.encode16(pubkey, case: :lower),
+                note: "serial bumped"
+              })
+
+              # If this is a revocation, log revocation events and clean up indexes
+              if type == :revoke do
+                handle_revocation_side_effects(data, name)
+              end
+
               <<0x06>>
 
             {:error, reason} ->
@@ -422,6 +488,14 @@ defmodule ZtlpNs.Server do
         :ok ->
           StructuredLog.info(:registration_accepted,
             name: name, type: type, mode: :unsigned)
+
+          Audit.log(:registered, name, type, %{mode: :unsigned})
+
+          # If this is a revocation, log revocation events and clean up indexes
+          if type == :revoke do
+            handle_revocation_side_effects(data, name)
+          end
+
           <<0x06>>
 
         {:error, :stale_serial} ->
@@ -432,6 +506,14 @@ defmodule ZtlpNs.Server do
             :ok ->
               StructuredLog.info(:registration_accepted,
                 name: name, type: type, mode: :unsigned)
+
+              Audit.log(:updated, name, type, %{mode: :unsigned, note: "serial bumped"})
+
+              # If this is a revocation, log revocation events and clean up indexes
+              if type == :revoke do
+                handle_revocation_side_effects(data, name)
+              end
+
               <<0x06>>
 
             {:error, reason} ->
@@ -521,6 +603,52 @@ defmodule ZtlpNs.Server do
 
       nil ->
         <<0x03, pk_hex_len::16, pk_hex::binary, 0x00::8>>
+    end
+  end
+
+  # ── Revocation Side Effects ──────────────────────────────────────────
+
+  # When a revocation is registered, log individual revoked entities
+  # and clean up related indexes (remove from device-owner, group membership).
+  defp handle_revocation_side_effects(data, revoke_record_name) do
+    revoked_ids = Map.get(data, "revoked_ids") || Map.get(data, :revoked_ids) || []
+    reason = Map.get(data, "reason") || Map.get(data, :reason) || "unspecified"
+
+    Enum.each(revoked_ids, fn id ->
+      Audit.log(:revoked, id, :revoke, %{
+        reason: reason,
+        revocation_record: revoke_record_name
+      })
+
+      # Clean up device-owner index for revoked devices
+      cleanup_device_index(id)
+
+      # Clean up group membership index for revoked users
+      cleanup_group_index(id)
+    end)
+  end
+
+  # Remove a revoked device from the device-owner index
+  defp cleanup_device_index(device_name) do
+    try do
+      existing = :mnesia.dirty_match_object({:ztlp_ns_device_index, :_, device_name})
+      Enum.each(existing, fn entry -> :mnesia.dirty_delete_object(entry) end)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  # Remove a revoked user from all group membership indexes
+  defp cleanup_group_index(user_name) do
+    try do
+      existing = :mnesia.dirty_match_object({:ztlp_ns_group_index, user_name, :_})
+      Enum.each(existing, fn entry -> :mnesia.dirty_delete_object(entry) end)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
   end
 
@@ -729,4 +857,30 @@ defmodule ZtlpNs.Server do
   defp encode_addr({a, b, c, d, e, f, g, h}, port) do
     <<6::8, a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16, port::16>>
   end
+
+  # Encode audit entries as CBOR for the admin query response
+  defp encode_audit_entries(entries) do
+    formatted = Enum.map(entries, fn {ts, action, name, type, details} ->
+      %{
+        "timestamp" => ts,
+        "action" => Atom.to_string(action),
+        "name" => name,
+        "type" => Atom.to_string(type),
+        "details" => stringify_map(details)
+      }
+    end)
+
+    ZtlpNs.Cbor.encode(%{"entries" => formatted})
+  end
+
+  # Ensure all map keys/values are strings for CBOR encoding
+  defp stringify_map(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_value(v)}
+      {k, v} -> {k, stringify_value(v)}
+    end)
+  end
+
+  defp stringify_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp stringify_value(v), do: v
 end

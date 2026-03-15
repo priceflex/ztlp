@@ -18,7 +18,7 @@
 # Requirements:
 #   - ztlp binary (v0.9.1+) in PATH or ./ztlp
 #   - SSH server on localhost (default 22)
-#   - optional: nmap, tcpdump, python3 (for packet generators)
+#   - optional: tcpdump, python3 (for packet generators)
 #   - Optional ZTLP‑NS server (Elixir) on port 23096 – auto-detected.
 #
 # Usage examples:
@@ -753,9 +753,9 @@ echo ""
 info "Right now, Alice is connected to Bob's SSH service through ZTLP."
 info "But what does the network actually expose?"
 echo ""
-info "  ${BOLD}Port $SSH_PORT (SSH):${RESET} ${GREEN}Hidden${RESET} — ZTLP tunnel provides the only access path."
-info "    In production, SSH would be firewalled to block direct access."
-info "    Only authenticated ZTLP peers with the right policy can reach it."
+info "  ${BOLD}Port $SSH_PORT (SSH):${RESET} In this demo, SSH runs on localhost and is reachable."
+info "    ${BOLD}In production:${RESET} SSH is firewalled — only 127.0.0.1 (ZTLP backend) can reach it."
+info "    External attackers see nothing. Use ${CYAN}ztlp firewall lock${RESET} to enforce this."
 echo ""
 info "  ${BOLD}Port $LISTEN_PORT (ZTLP):${RESET} ${CYAN}Visible${RESET} — but it speaks ZTLP, not SSH."
 info "    An attacker can see this port is open, but can't determine what's behind it."
@@ -763,16 +763,16 @@ info "    Without a valid ZTLP identity, they can't even complete a handshake."
 info "    The magic byte check rejects non-ZTLP packets in ~19 nanoseconds."
 echo ""
 
-if [[ "$HAS_NMAP" == "true" ]]; then
-    step "Verifying with nmap (attacker's perspective)"
-    dimcmd "nmap -sU -sT -p T:$SSH_PORT,U:$LISTEN_PORT 127.0.0.1"
-    nmap -p "$SSH_PORT,$LISTEN_PORT" 127.0.0.1 2>/dev/null | grep -E "^PORT|^[0-9]" | sed 's/^/  /'
-    echo ""
-    info "nmap sees the ZTLP UDP port but gets nothing useful from it."
-    info "SSH is only reachable through the authenticated ZTLP tunnel."
-else
-    info "(nmap not installed — install it to see the scan results)"
-fi
+step "Running ztlp scan (port exposure audit)"
+dimcmd "$ZTLP scan --target 127.0.0.1 --ports $SSH_PORT,80,443 --ztlp-port $LISTEN_PORT"
+"$ZTLP" scan --target 127.0.0.1 --ports "$SSH_PORT,80,443" --ztlp-port "$LISTEN_PORT" 2>&1 | sed 's/^/  /'
+echo ""
+info "${BOLD}Production deployment:${RESET}"
+info "  1. Firewall SSH:  iptables -A INPUT -p tcp --dport $SSH_PORT -j DROP"
+info "     (ZTLP backend connects via 127.0.0.1, unaffected by the rule)"
+info "  2. Run ${CYAN}ztlp scan${RESET} to verify — SSH should show as ${GREEN}closed${RESET}"
+info "  3. Emergency access: ${CYAN}ztlp firewall whitelist add <your-ip>${RESET}"
+echo ""
 success "Key takeaway: ZTLP turns SSH into an invisible service"
 pause
 
@@ -1013,7 +1013,7 @@ What you saw:
   7. Interactive SSH session through the encrypted tunnel
   8. Eve DENIED — valid identity, not in any group (authN ≠ authZ)
   9. SCP throughput: ZTLP tunnel vs direct SSH (10/50/100 MB)
- 10. Port visibility: SSH hidden behind ZTLP identity layer
+ 10. Port exposure scan: ztlp scan audit + production lockdown guidance
  11. L1 DDoS defense: 50K random packets rejected at ~19ns each
  12. L2 defense: crafted magic-byte packets stopped by SessionID check
  13. Encrypted payload: captured traffic shows no plaintext

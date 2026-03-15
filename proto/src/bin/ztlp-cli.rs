@@ -414,6 +414,40 @@ enum Commands {
     #[command(subcommand)]
     Admin(AdminCommands),
 
+    /// Scan host ports and report exposure (what an attacker sees)
+    ///
+    /// Audits which TCP/UDP ports are reachable from the network and
+    /// whether they are protected by ZTLP or exposed directly.
+    /// Useful for verifying that services (SSH, etc.) are only
+    /// accessible through authenticated ZTLP tunnels.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp scan                                   # Scan common ports on this host\n  \
+            ztlp scan --target 10.0.0.5                 # Scan a remote host\n  \
+            ztlp scan --ports 22,80,443,3306,5432       # Scan specific ports\n  \
+            ztlp scan --ztlp-port 23095                 # Specify ZTLP listener port\n  \
+            ztlp scan --json                            # JSON output for automation")]
+    Scan {
+        /// Target IP or hostname to scan (default: 127.0.0.1)
+        #[arg(short, long, default_value = "127.0.0.1")]
+        target: String,
+
+        /// Comma-separated list of TCP ports to check (default: common services)
+        #[arg(short, long)]
+        ports: Option<String>,
+
+        /// ZTLP listener port to verify (default: 23095)
+        #[arg(long, default_value = "23095")]
+        ztlp_port: u16,
+
+        /// Output JSON for scripting/monitoring
+        #[arg(short, long)]
+        json: bool,
+
+        /// Include UDP port scan (slower, may need root)
+        #[arg(short, long)]
+        udp: bool,
+    },
+
     /// Tune system for optimal ZTLP performance
     ///
     /// Checks and optionally applies kernel settings for best tunnel
@@ -5157,6 +5191,307 @@ async fn cmd_status(target: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ─── Port Exposure Scanner ──────────────────────────────────────────────────
+
+/// Default TCP ports to scan if none specified.
+const SCAN_DEFAULT_PORTS: &[u16] = &[22, 80, 443, 3306, 5432, 6379, 8080, 8443, 9200, 27017];
+
+/// Well-known service names for common ports.
+fn port_service_name(port: u16) -> &'static str {
+    match port {
+        22 => "SSH",
+        80 => "HTTP",
+        443 => "HTTPS",
+        3306 => "MySQL",
+        5432 => "PostgreSQL",
+        6379 => "Redis",
+        8080 => "HTTP-alt",
+        8443 => "HTTPS-alt",
+        9200 => "Elasticsearch",
+        27017 => "MongoDB",
+        23095 => "ZTLP",
+        23096 => "ZTLP-NS",
+        _ => "unknown",
+    }
+}
+
+/// Result of scanning a single port.
+#[derive(Clone)]
+struct PortScanResult {
+    port: u16,
+    protocol: &'static str,
+    service: String,
+    open: bool,
+    /// "ztlp" | "exposed" | "closed"
+    status: String,
+    detail: String,
+}
+
+/// `ztlp scan` — Scan host ports and report exposure
+async fn cmd_scan(
+    target: &str,
+    ports_arg: &Option<String>,
+    ztlp_port: u16,
+    json_output: bool,
+    include_udp: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tcp_ports: Vec<u16> = if let Some(p) = ports_arg {
+        p.split(',').filter_map(|s| s.trim().parse().ok()).collect()
+    } else {
+        let mut v: Vec<u16> = SCAN_DEFAULT_PORTS.to_vec();
+        if !v.contains(&ztlp_port) {
+            v.push(ztlp_port);
+        }
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    if !json_output {
+        eprintln!("{}", c_bold("ZTLP Port Exposure Scan"));
+        eprintln!("  {} {}", c_cyan("Target:"), target);
+        eprintln!("  {} {:?}", c_cyan("TCP ports:"), tcp_ports);
+        eprintln!("  {} {}", c_cyan("ZTLP port:"), ztlp_port);
+        if include_udp {
+            eprintln!("  {} enabled", c_cyan("UDP scan:"));
+        }
+        eprintln!();
+    }
+
+    let mut results: Vec<PortScanResult> = Vec::new();
+
+    // --- TCP port scan ---
+    for &port in &tcp_ports {
+        let addr = format!("{}:{}", target, port);
+        let open = matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1500),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await,
+            Ok(Ok(_))
+        );
+
+        let svc = port_service_name(port).to_string();
+        let (status, detail) = if !open {
+            ("closed".to_string(), "not reachable".to_string())
+        } else if port == ztlp_port {
+            // ZTLP port is TCP — unusual, ZTLP is normally UDP
+            (
+                "exposed".to_string(),
+                "TCP open on ZTLP port (expected UDP only)".to_string(),
+            )
+        } else {
+            (
+                "exposed".to_string(),
+                format!(
+                    "{} directly reachable — should be behind ZTLP or firewalled",
+                    svc
+                ),
+            )
+        };
+
+        if !json_output && open {
+            let icon = c_red("✗");
+            eprintln!(
+                "  {} TCP {:>5}  {:<15} {}",
+                icon,
+                port,
+                format!("[{}]", svc),
+                c_yellow(&detail)
+            );
+        } else if !json_output {
+            eprintln!(
+                "  {} TCP {:>5}  {:<15} {}",
+                c_green("✓"),
+                port,
+                format!("[{}]", svc),
+                c_dim("closed")
+            );
+        }
+
+        results.push(PortScanResult {
+            port,
+            protocol: "tcp",
+            service: svc,
+            open,
+            status,
+            detail,
+        });
+    }
+
+    // --- UDP scan: check ZTLP port ---
+    if include_udp || !tcp_ports.contains(&ztlp_port) {
+        // Always check the ZTLP UDP port
+        let ztlp_udp_open = check_ztlp_udp(target, ztlp_port).await;
+        let (status, detail) = if ztlp_udp_open {
+            (
+                "ztlp".to_string(),
+                "ZTLP listener active — protected by three-layer pipeline".to_string(),
+            )
+        } else {
+            (
+                "closed".to_string(),
+                "no ZTLP listener detected".to_string(),
+            )
+        };
+
+        if !json_output {
+            let icon = if ztlp_udp_open {
+                c_green("●")
+            } else {
+                c_dim("○")
+            };
+            let svc_label = format!("[{}]", port_service_name(ztlp_port));
+            eprintln!(
+                "  {} UDP {:>5}  {:<15} {}",
+                icon,
+                ztlp_port,
+                svc_label,
+                if ztlp_udp_open {
+                    c_cyan(&detail)
+                } else {
+                    c_dim(&detail)
+                }
+            );
+        }
+
+        results.push(PortScanResult {
+            port: ztlp_port,
+            protocol: "udp",
+            service: "ZTLP".to_string(),
+            open: ztlp_udp_open,
+            status,
+            detail,
+        });
+    }
+
+    // --- Summary ---
+    let exposed: Vec<&PortScanResult> = results.iter().filter(|r| r.status == "exposed").collect();
+    let ztlp_protected: Vec<&PortScanResult> =
+        results.iter().filter(|r| r.status == "ztlp").collect();
+    let closed: Vec<&PortScanResult> = results.iter().filter(|r| r.status == "closed").collect();
+
+    if json_output {
+        let entries: Vec<String> = results
+            .iter()
+            .map(|r| {
+                format!(
+                    "{{\"port\":{},\"protocol\":\"{}\",\"service\":\"{}\",\"open\":{},\"status\":\"{}\",\"detail\":\"{}\"}}",
+                    r.port, r.protocol, r.service, r.open, r.status, r.detail
+                )
+            })
+            .collect();
+        println!(
+            "{{\"target\":\"{}\",\"ztlp_port\":{},\"exposed\":{},\"protected\":{},\"closed\":{},\"results\":[{}]}}",
+            target,
+            ztlp_port,
+            exposed.len(),
+            ztlp_protected.len(),
+            closed.len(),
+            entries.join(",")
+        );
+    } else {
+        eprintln!();
+        if exposed.is_empty() {
+            eprintln!(
+                "  {} {}",
+                c_green("✓"),
+                c_bold("No exposed services detected")
+            );
+            if !ztlp_protected.is_empty() {
+                eprintln!(
+                    "    {} ZTLP listener active on UDP {}",
+                    c_cyan("●"),
+                    ztlp_port
+                );
+            }
+            eprintln!(
+                "    {} {} port(s) closed, {} ZTLP-protected",
+                c_dim("→"),
+                closed.len(),
+                ztlp_protected.len()
+            );
+        } else {
+            eprintln!(
+                "  {} {} {}",
+                c_red("⚠"),
+                c_bold(&format!("{} exposed service(s) found:", exposed.len())),
+                c_red("ACTION REQUIRED")
+            );
+            for r in &exposed {
+                eprintln!(
+                    "    {} TCP {} ({}) — {}",
+                    c_red("✗"),
+                    r.port,
+                    r.service,
+                    r.detail
+                );
+            }
+            eprintln!();
+            eprintln!(
+                "    {} Recommendation: firewall these ports, route through ZTLP tunnels",
+                c_yellow("→")
+            );
+            eprintln!(
+                "    {} See: ztlp firewall lock --ports {}",
+                c_dim("→"),
+                exposed
+                    .iter()
+                    .map(|r| r.port.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// Probe a UDP port by sending a ZTLP magic byte packet and checking for
+/// any response (including ICMP unreachable via recv error).
+async fn check_ztlp_udp(target: &str, port: u16) -> bool {
+    let addr = format!("{}:{}", target, port);
+    let Ok(addr) = addr.parse::<std::net::SocketAddr>() else {
+        // Try DNS resolution
+        let Ok(addrs) = tokio::net::lookup_host(&addr).await else {
+            return false;
+        };
+        let Some(addr) = addrs.into_iter().next() else {
+            return false;
+        };
+        return check_ztlp_udp_addr(addr).await;
+    };
+    check_ztlp_udp_addr(addr).await
+}
+
+async fn check_ztlp_udp_addr(addr: std::net::SocketAddr) -> bool {
+    let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+        return false;
+    };
+    if sock.connect(addr).await.is_err() {
+        return false;
+    }
+    // Send a packet with ZTLP magic bytes but invalid session — a real ZTLP
+    // listener will silently drop it (L2 rejection). We detect liveness by
+    // the absence of an ICMP port-unreachable within a short window.
+    let probe = [
+        0x5A, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    if sock.send(&probe).await.is_err() {
+        return false;
+    }
+    // On Linux, a UDP send to a closed port typically causes an ICMP unreachable
+    // that surfaces as a recv error. If we get no error within 200ms, assume open.
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(std::time::Duration::from_millis(200), sock.recv(&mut buf)).await {
+        Ok(Ok(_)) => true,   // got a response — definitely open
+        Ok(Err(_)) => false, // ICMP unreachable — port closed
+        Err(_) => true,      // timeout with no error — likely open (silent drop = ZTLP L2)
+    }
+}
+
 // ─── Setup Wizard ───────────────────────────────────────────────────────────
 
 /// `ztlp setup` — Interactive setup wizard
@@ -8396,6 +8731,14 @@ async fn main() {
                 cmd_admin_export_zone_key(format, *json)
             }
         },
+
+        Commands::Scan {
+            target,
+            ports,
+            ztlp_port,
+            json,
+            udp,
+        } => cmd_scan(target, ports, *ztlp_port, *json, *udp).await,
 
         Commands::Tune { apply, persist } => cmd_tune(*apply, *persist),
 

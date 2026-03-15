@@ -2247,6 +2247,41 @@ async fn cmd_connect(
         c_cyan("Handshake latency:"),
         handshake_time.as_secs_f64() * 1000.0
     );
+
+    // Brief check for server REJECT frame (e.g. policy denial).
+    // The server sends REJECT *after* the handshake completes, so we
+    // poll for a short window before declaring the tunnel active.
+    {
+        let reject_deadline = tokio::time::sleep(std::time::Duration::from_millis(500));
+        tokio::pin!(reject_deadline);
+        loop {
+            tokio::select! {
+                _ = &mut reject_deadline => break, // no reject received — proceed
+                result = node.recv_data() => {
+                    match result {
+                        Ok(Some((plaintext, _from))) => {
+                            if RejectFrame::is_reject(&plaintext) {
+                                if let Some(reject) = RejectFrame::decode(&plaintext) {
+                                    eprintln!(
+                                        "\n{} {}",
+                                        c_red("✗ Server rejected:"),
+                                        reject.message
+                                    );
+                                    return Err(format!(
+                                        "access denied: {} ({})",
+                                        reject.message, reject.reason
+                                    ).into());
+                                }
+                            }
+                            // Non-reject data — ignore during this window
+                        }
+                        Ok(None) => {} // dropped by pipeline
+                        Err(_) => break, // socket error — proceed
+                    }
+                }
+            }
+        }
+    }
     eprintln!();
 
     // Branch: tunnel mode or interactive mode
@@ -6197,12 +6232,24 @@ async fn cmd_admin_devices(
                     eprintln!();
                     for device in &devices {
                         let name = device.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                        let node_id = device
+                        let mut node_id = device
                             .get("data")
                             .and_then(|d| d.get("node_id"))
                             .and_then(|n| n.as_str())
-                            .unwrap_or("?");
-                        eprintln!("  {} {} (NodeID: {})", c_dim("•"), name, node_id);
+                            .unwrap_or("")
+                            .to_string();
+                        // Fallback: if DEVICE record has no node_id, look up the KEY record
+                        if node_id.is_empty() || node_id == "?" {
+                            if let Ok(Some(key_rec)) = ns_query_raw(name, &ns_addr, 1).await {
+                                if let Some(nid) =
+                                    cbor_extract_string(&key_rec.data_bytes, "node_id")
+                                {
+                                    node_id = nid;
+                                }
+                            }
+                        }
+                        let display_nid = if node_id.is_empty() { "?" } else { &node_id };
+                        eprintln!("  {} {} (NodeID: {})", c_dim("•"), name, display_nid);
                     }
                     eprintln!();
                 }

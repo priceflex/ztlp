@@ -16,7 +16,7 @@
 #   Act  14:   Security summary + three-layer defense cost table
 #
 # Requirements:
-#   - ztlp binary (v0.5.6+) in PATH or ./ztlp
+#   - ztlp binary (v0.9.1+) in PATH or ./ztlp
 #   - SSH server on localhost (default 22)
 #   - optional: nmap, tcpdump, python3 (for packet generators)
 #   - Optional ZTLP‑NS server (Elixir) on port 23096 – auto-detected.
@@ -78,6 +78,11 @@ for arg in "$@"; do
             if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
                 grep -v "ztlp-demo-temp" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null || true
                 mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+            fi
+            # Remove user key files created by create-user during demo
+            if [[ -d "$HOME/.ztlp/users" ]]; then
+                rm -rf "$HOME/.ztlp/users"
+                echo "✓ Cleaned up $HOME/.ztlp/users"
             fi
             rm -rf "$DEMO_DIR" && echo "✓ Cleaned up $DEMO_DIR" && exit 0 ;;
         --help|-h)
@@ -165,6 +170,11 @@ cleanup() {
         grep -v "ztlp-demo-temp" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null || true
         mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" 2>/dev/null || true
         echo -e "  ${GREEN}✓${RESET} Removed demo SSH key from authorized_keys"
+    fi
+    # Remove user key files created by create-user during demo
+    if [[ -d "$HOME/.ztlp/users" ]]; then
+        rm -rf "$HOME/.ztlp/users"
+        echo -e "  ${GREEN}✓${RESET} Cleaned up ~/.ztlp/users"
     fi
     echo -e "${GREEN}✓${RESET} Demo processes stopped."
 }
@@ -724,7 +734,11 @@ if [[ "$HAS_SCP" == "true" ]]; then
     done
 
     rm -f "$TEST_FILE"
-    success "Throughput test complete — ZTLP adds encryption with minimal overhead"
+    echo ""
+    info "Note: overhead is from userspace Rust↔Elixir bridge + small UDP buffers."
+    info "Production eBPF/XDP offload targets <5% overhead at line rate."
+    info "Larger buffer tuning (sysctl net.core.rmem_max) further closes the gap."
+    success "Throughput test complete — ZTLP adds encryption with measurable but improvable overhead"
 else
     warn "scp not available — skipping throughput test"
 fi

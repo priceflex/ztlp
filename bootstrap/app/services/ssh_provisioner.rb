@@ -424,15 +424,25 @@ class SshProvisioner
     log "Stopping existing container #{container_name} (if any)..."
     exec_remote(ssh, sudo("docker rm -f #{container_name} 2>/dev/null"))
 
+    # Relay uses host networking so it can reach the local gateway sidecar
+    # at 127.0.0.1:23099 (sidecar also runs on host network).
+    use_host_network = (component == "relay")
+
     # Build docker run command
-    port_flags = ports.map do |proto, port|
-      case proto
-      when :udp then "-p #{port}:#{port}/udp"
-      when :tcp then "-p #{port}:#{port}/tcp"
-      when :mesh then "-p #{port}:#{port}/udp"
-      when :metrics then "-p #{port}:#{port}/tcp"
-      end
-    end.join(" ")
+    if use_host_network
+      port_flags = ""
+      network_flag = "--network host"
+    else
+      port_flags = ports.map do |proto, port|
+        case proto
+        when :udp then "-p #{port}:#{port}/udp"
+        when :tcp then "-p #{port}:#{port}/tcp"
+        when :mesh then "-p #{port}:#{port}/udp"
+        when :metrics then "-p #{port}:#{port}/tcp"
+        end
+      end.join(" ")
+      network_flag = ""
+    end
 
     # Add volume for NS data persistence
     volume_flag = component == "ns" ? "-v ztlp-ns-data:/app/data" : ""
@@ -442,6 +452,7 @@ class SshProvisioner
       "--name #{container_name}",
       "--restart unless-stopped",
       "--env-file /etc/ztlp/#{component}.env",
+      network_flag,
       port_flags,
       volume_flag,
       "--log-driver json-file --log-opt max-size=50m --log-opt max-file=3",

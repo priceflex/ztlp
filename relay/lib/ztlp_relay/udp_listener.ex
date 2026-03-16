@@ -31,6 +31,7 @@ defmodule ZtlpRelay.UdpListener do
     Config,
     InterRelay,
     MeshManager,
+    GatewayForwarder,
     Packet
   }
 
@@ -245,9 +246,9 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   # HELLO packets — first message of a new handshake.
-  # Creates a HALF_OPEN session with peer_a = sender.
-  # When the second peer sends a packet (HELLO_ACK or DATA), the session
-  # transitions to ESTABLISHED.
+  # If gateways are configured, forward the HELLO to a gateway and track
+  # the session for bidirectional forwarding (client ↔ relay ↔ gateway).
+  # Otherwise, creates a HALF_OPEN session with peer_a = sender (legacy).
   defp handle_admitted_packet(
          %{type: :handshake, msg_type: :hello} = parsed,
          data,
@@ -286,24 +287,78 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       :error ->
-        # New session — create HALF_OPEN
-        Logger.debug("New session #{Base.encode16(session_id)} from #{inspect(sender)}")
+        # New session — check if we should forward to a gateway
+        if GatewayForwarder.enabled?() do
+          forward_hello_to_gateway(session_id, data, sender, state)
+        else
+          create_half_open_session(session_id, sender)
+        end
+    end
+  end
 
-        SessionRegistry.register_session(session_id, sender, nil)
+  # Forward a HELLO to a configured gateway.
+  # The relay registers the session as {client, gateway} so that responses
+  # from the gateway are forwarded back to the client.
+  defp forward_hello_to_gateway(session_id, data, client_addr, state) do
+    case GatewayForwarder.pick_gateway() do
+      {:ok, gateway_addr} ->
+        Logger.info(
+          "[GatewayFwd] Forwarding HELLO for session #{Base.encode16(session_id)} " <>
+            "from #{inspect(client_addr)} to gateway #{inspect(gateway_addr)}"
+        )
+
+        # Register with GatewayForwarder for response routing
+        GatewayForwarder.register_forwarded_session(session_id, client_addr, gateway_addr)
+
+        # Create a normal session with client=peer_a, gateway=peer_b
+        SessionRegistry.register_session(session_id, client_addr, gateway_addr)
 
         case Session.start_link(
                session_id: session_id,
-               peer_a: sender,
-               peer_b: nil,
+               peer_a: client_addr,
+               peer_b: gateway_addr,
                timeout_ms: Config.session_timeout_ms(),
                half_open_timeout_ms: 30_000
              ) do
           {:ok, pid} ->
             SessionRegistry.update_session_pid(session_id, pid)
 
+            # Set peer_b immediately (session is pre-established)
+            Session.set_peer_b(pid, gateway_addr)
+
           {:error, reason} ->
-            Logger.error("Failed to start session: #{inspect(reason)}")
+            Logger.error("[GatewayFwd] Failed to start session: #{inspect(reason)}")
         end
+
+        # Forward the HELLO to the gateway
+        {dest_ip, dest_port} = gateway_addr
+        :gen_udp.send(state.socket, dest_ip, dest_port, data)
+        Stats.increment(:forwarded)
+
+      :error ->
+        # No gateways available, fall back to half-open session
+        create_half_open_session(session_id, client_addr)
+    end
+  end
+
+  # Create a standard half-open relay session (peer-to-peer, no gateway).
+  defp create_half_open_session(session_id, sender) do
+    Logger.debug("New session #{Base.encode16(session_id)} from #{inspect(sender)}")
+
+    SessionRegistry.register_session(session_id, sender, nil)
+
+    case Session.start_link(
+           session_id: session_id,
+           peer_a: sender,
+           peer_b: nil,
+           timeout_ms: Config.session_timeout_ms(),
+           half_open_timeout_ms: 30_000
+         ) do
+      {:ok, pid} ->
+        SessionRegistry.update_session_pid(session_id, pid)
+
+      {:error, reason} ->
+        Logger.error("Failed to start session: #{inspect(reason)}")
     end
   end
 

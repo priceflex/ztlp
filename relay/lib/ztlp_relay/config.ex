@@ -291,4 +291,50 @@ defmodule ZtlpRelay.Config do
       region -> region
     end
   end
+
+  @doc """
+  Gateway addresses for handshake forwarding. Default: [].
+
+  When a relay receives a HELLO and the session_id doesn't match a local
+  session, it forwards the handshake to configured gateways. This enables
+  clients behind UDP-hostile NATs to reach gateways via the relay.
+
+  Format: `ZTLP_RELAY_GATEWAYS=host1:port1,host2:port2`
+  """
+  @spec gateway_addresses() :: [{:inet.ip_address(), non_neg_integer()}]
+  def gateway_addresses do
+    case System.get_env("ZTLP_RELAY_GATEWAYS") do
+      nil ->
+        Application.get_env(:ztlp_relay, :gateway_addresses, [])
+
+      addrs_str ->
+        addrs_str
+        |> String.split(",", trim: true)
+        |> Enum.flat_map(fn addr_str ->
+          case parse_address(String.trim(addr_str)) do
+            {:ok, addr} -> [addr]
+            :error -> []
+          end
+        end)
+    end
+  end
+
+  defp parse_address(addr_str) do
+    case String.split(addr_str, ":") do
+      [host, port_str] ->
+        case Integer.parse(port_str) do
+          {port, ""} ->
+            case :inet.parse_address(String.to_charlist(host)) do
+              {:ok, ip} -> {:ok, {ip, port}}
+              {:error, _} -> :error
+            end
+
+          _ ->
+            :error
+        end
+
+      _ ->
+        :error
+    end
+  end
 end

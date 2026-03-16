@@ -48,7 +48,14 @@ defmodule ZtlpRelay.Application do
         []
       end
 
-    children = base_children ++ mesh_children ++ [ZtlpRelay.UdpListener]
+    gateway_children =
+      if ZtlpRelay.Config.gateway_addresses() != [] do
+        [ZtlpRelay.GatewayForwarder]
+      else
+        []
+      end
+
+    children = base_children ++ mesh_children ++ gateway_children ++ [ZtlpRelay.UdpListener]
 
     opts = [strategy: :one_for_one, name: ZtlpRelay.Supervisor]
     Supervisor.start_link(children, opts)

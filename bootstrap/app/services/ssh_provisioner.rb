@@ -373,6 +373,18 @@ class SshProvisioner
         peer_list = peers.map { |m| "#{m.ip_address}:#{ZTLP_PORTS['relay'][:mesh]}" }.join(",")
         lines << "ZTLP_RELAY_MESH_PEERS=#{peer_list}"
       end
+      # Configure gateway forwarding: relay forwards handshakes to local gateway sidecar
+      # and to any other gateways in the network
+      gateway_addrs = []
+      # Local gateway sidecar (always deployed alongside relay)
+      gateway_addrs << "127.0.0.1:#{GATEWAY_SIDECAR_PORT}"
+      # Remote gateway machines
+      gateway_machines = network.machines.where("roles LIKE ?", "%gateway%")
+                                        .where.not(id: machine.id)
+      gateway_machines.each { |gm| gateway_addrs << "#{gm.ip_address}:#{ZTLP_PORTS['gateway'][:tcp]}" }
+      # NS machines with gateway sidecars
+      ns_machines.each { |m| gateway_addrs << "#{m.ip_address}:#{GATEWAY_SIDECAR_PORT}" }
+      lines << "ZTLP_RELAY_GATEWAYS=#{gateway_addrs.join(',')}"
       lines.join("\n")
 
     when "gateway"

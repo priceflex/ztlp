@@ -130,7 +130,7 @@ success "Server + client identities generated"
 # Previous demo/test runs may have left orphaned ztlp processes holding
 # the ZTLP port or tunnel port. Kill them before starting fresh.
 for check_port in "$ZTLP_PORT" "$TUNNEL_LOCAL_PORT"; do
-    EXISTING_PID=$(ss -tlnp 2>/dev/null | grep ":${check_port} " | grep -oP 'pid=\K[0-9]+' | head -1)
+    EXISTING_PID=$(ss -tlnp 2>/dev/null | grep ":${check_port} " | grep -oP 'pid=\K[0-9]+' | head -1 || true)
     if [[ -n "$EXISTING_PID" ]]; then
         warn "Killing existing process on port $check_port (PID $EXISTING_PID)"
         kill "$EXISTING_PID" 2>/dev/null || true
@@ -139,7 +139,7 @@ for check_port in "$ZTLP_PORT" "$TUNNEL_LOCAL_PORT"; do
 done
 # Also check for ztlp processes by binary name (not pkill -f which
 # would match this shell script's arguments and kill us).
-for stale_pid in $(pgrep -x ztlp 2>/dev/null || true); do
+for stale_pid in $(pgrep -x "ztlp" 2>/dev/null || true); do
     warn "Killing stale ztlp process (PID $stale_pid)"
     kill "$stale_pid" 2>/dev/null || true
 done

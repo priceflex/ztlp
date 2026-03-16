@@ -226,9 +226,16 @@ impl EnrollmentToken {
         })
     }
 
-    /// Parse from base64url string (with or without `ztlp://enroll/` prefix).
+    /// Parse from base64url string, `ztlp://enroll/<base64>` URI, or
+    /// `ztlp://enroll/?zone=...&token=...` query-param URI (Bootstrap format).
     pub fn from_base64url(input: &str) -> Result<Self, String> {
         use base64::Engine;
+
+        // Handle Bootstrap-style query-param URIs:
+        // ztlp://enroll/?zone=foo.ztlp&ns=1.2.3.4:23096&relay=5.6.7.8:23095&token=abcd&expires=1773728471
+        if input.contains("?") && input.contains("token=") {
+            return Self::from_query_param_uri(input);
+        }
 
         let b64 = if let Some(stripped) = input.strip_prefix("ztlp://enroll/") {
             stripped
@@ -241,6 +248,58 @@ impl EnrollmentToken {
             .map_err(|e| format!("base64 decode error: {}", e))?;
 
         Self::deserialize(&bytes)
+    }
+
+    /// Parse from Bootstrap-style query-param URI.
+    /// Format: ztlp://enroll/?zone=<zone>&ns=<host:port>&relay=<host:port>&token=<hex>&expires=<unix>
+    ///
+    /// NOTE: Tokens in this format lack an HMAC MAC (the Bootstrap app tracks
+    /// validity server-side). The MAC field is zeroed; the NS must accept
+    /// unverified tokens when `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`.
+    fn from_query_param_uri(input: &str) -> Result<Self, String> {
+        // Extract query string
+        let query = input.split('?').nth(1)
+            .ok_or_else(|| "no query string in URI".to_string())?;
+
+        let mut zone = None;
+        let mut ns_addr = None;
+        let mut relay_addrs = Vec::new();
+        let mut token_hex = None;
+        let mut expires = None;
+        let mut gateway_addr = None;
+
+        for pair in query.split('&') {
+            let mut kv = pair.splitn(2, '=');
+            let key = kv.next().unwrap_or("");
+            let val = kv.next().unwrap_or("");
+            match key {
+                "zone" => zone = Some(val.to_string()),
+                "ns" => ns_addr = Some(val.to_string()),
+                "relay" => relay_addrs.push(val.to_string()),
+                "gateway" => gateway_addr = Some(val.to_string()),
+                "token" => token_hex = Some(val.to_string()),
+                "expires" => expires = Some(val.parse::<u64>()
+                    .map_err(|_| "invalid expires timestamp".to_string())?),
+                _ => {} // ignore unknown params
+            }
+        }
+
+        let zone = zone.ok_or("missing zone parameter")?;
+        let ns_addr = ns_addr.ok_or("missing ns parameter")?;
+        let _token_hex = token_hex.ok_or("missing token parameter")?;
+        let expires_at = expires.ok_or("missing expires parameter")?;
+
+        Ok(EnrollmentToken {
+            version: TOKEN_VERSION,
+            zone,
+            ns_addr,
+            relay_addrs,
+            gateway_addr,
+            max_uses: 1,
+            expires_at,
+            nonce: [0u8; 16], // No nonce in query-param format
+            mac: [0u8; 32],   // No MAC in query-param format
+        })
     }
 
     /// Validate the token: check version, MAC, and expiration.
@@ -690,5 +749,73 @@ mod tests {
             .unwrap_or(0);
         let token = EnrollmentToken::create("t.ztlp", "1:1", &[], None, 0, far_future, &secret);
         assert!(token.expires_in_human().ends_with('d'));
+    }
+
+    #[test]
+    fn test_from_query_param_uri() {
+        let uri = "ztlp://enroll/?zone=techrockstars.ztlp&ns=52.39.59.34:23096&relay=54.188.93.13:23095&token=8935f613470affc4&expires=1773728471";
+        let token = EnrollmentToken::from_base64url(uri).expect("should parse query-param URI");
+        assert_eq!(token.zone, "techrockstars.ztlp");
+        assert_eq!(token.ns_addr, "52.39.59.34:23096");
+        assert_eq!(token.relay_addrs, vec!["54.188.93.13:23095"]);
+        assert_eq!(token.expires_at, 1773728471);
+        assert_eq!(token.max_uses, 1);
+        assert_eq!(token.version, TOKEN_VERSION);
+    }
+
+    #[test]
+    fn test_from_query_param_uri_multiple_relays() {
+        let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&relay=10.0.0.2:23095&relay=10.0.0.3:23095&token=abcd1234&expires=9999999999";
+        let token = EnrollmentToken::from_base64url(uri).expect("should parse multi-relay URI");
+        assert_eq!(token.relay_addrs.len(), 2);
+    }
+
+    #[test]
+    fn test_from_query_param_uri_with_gateway() {
+        let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&relay=10.0.0.2:23095&gateway=10.0.0.4:23098&token=abcd&expires=9999999999";
+        let token = EnrollmentToken::from_base64url(uri).expect("should parse with gateway");
+        assert_eq!(token.gateway_addr, Some("10.0.0.4:23098".to_string()));
+    }
+
+    #[test]
+    fn test_from_query_param_uri_missing_zone() {
+        let uri = "ztlp://enroll/?ns=10.0.0.1:23096&token=abcd&expires=9999999999";
+        assert!(EnrollmentToken::from_base64url(uri).is_err());
+    }
+
+    #[test]
+    fn test_from_query_param_uri_missing_token() {
+        let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&expires=9999999999";
+        assert!(EnrollmentToken::from_base64url(uri).is_err());
+    }
+
+    #[test]
+    fn test_binary_format_still_works() {
+        // Ensure base64url binary format is not broken by query-param addition
+        let secret = test_secret();
+        let relays = vec!["10.0.0.2:23095".to_string()];
+        let original = EnrollmentToken::create(
+            "test.ztlp", "10.0.0.1:23096",
+            &relays, None, 1, 9999999999, &secret,
+        );
+        let b64 = original.to_base64url();
+        let parsed = EnrollmentToken::from_base64url(&b64).expect("binary round-trip");
+        assert_eq!(parsed.zone, "test.ztlp");
+        assert_eq!(parsed.ns_addr, "10.0.0.1:23096");
+    }
+
+    #[test]
+    fn test_uri_format_still_works() {
+        // ztlp://enroll/<base64> format
+        let secret = test_secret();
+        let relays = vec!["10.0.0.2:23095".to_string()];
+        let original = EnrollmentToken::create(
+            "test.ztlp", "10.0.0.1:23096",
+            &relays, None, 1, 9999999999, &secret,
+        );
+        let uri = original.to_uri();
+        assert!(uri.starts_with("ztlp://enroll/"));
+        let parsed = EnrollmentToken::from_base64url(&uri).expect("URI round-trip");
+        assert_eq!(parsed.zone, "test.ztlp");
     }
 }

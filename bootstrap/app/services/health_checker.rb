@@ -45,11 +45,13 @@ class HealthChecker
       @machine.update!(status: "error", last_error: results.select { |r| r.status == "down" }.map { |r|
         "#{r.component}: #{r.error_message || 'down'}"
       }.join("; "))
-    elsif !all_healthy
-      # Degraded but not down — keep current status, just update error info
+    elsif all_healthy
+      @machine.update!(status: "ready", last_error: nil)
+    else
+      # Degraded but not down — set to ready (container running) with warning
       degraded = results.select { |r| r.status == "degraded" }
       if degraded.any?
-        @machine.update!(last_error: degraded.map { |r|
+        @machine.update!(status: "ready", last_error: degraded.map { |r|
           "#{r.component}: #{r.error_message || 'degraded'}"
         }.join("; "))
       end

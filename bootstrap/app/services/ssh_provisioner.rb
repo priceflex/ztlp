@@ -351,7 +351,7 @@ class SshProvisioner
       end
     end
 
-    channel.wait(timeout)
+    channel.wait
     deployment&.append_log("$ #{command}")
     deployment&.append_log(stdout) if stdout.present?
     deployment&.append_log(stderr) if stderr.present?

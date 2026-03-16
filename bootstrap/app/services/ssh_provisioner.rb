@@ -340,6 +340,9 @@ class SshProvisioner
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['ns'][:metrics]}",
         "ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false"
       ]
+      if network.enrollment_secret_ciphertext.present?
+        lines << "ZTLP_ENROLLMENT_SECRET=#{network.enrollment_secret_ciphertext}"
+      end
       peers = ns_machines.reject { |m| m.id == machine.id }
       if peers.any?
         peer_list = peers.map { |m| "ztlp_ns@#{m.ip_address}" }.join(",")

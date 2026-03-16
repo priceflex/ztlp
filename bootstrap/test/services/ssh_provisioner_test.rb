@@ -14,6 +14,7 @@ class SshProvisionerTest < ActiveSupport::TestCase
     assert_includes config, "ZTLP_NS_PORT=23096"
     assert_includes config, "ZTLP_NS_STORAGE_MODE=ram_copies"
     assert_includes config, "ZTLP_NS_LOG_FORMAT=json"
+    assert_includes config, "ZTLP_ENROLLMENT_SECRET=deadbeef1234567890abcdef12345678deadbeef1234567890abcdef12345678"
   end
 
   test "generates relay config with NS reference" do

@@ -26,7 +26,7 @@ class TokenGeneratorTest < ActiveSupport::TestCase
     assert_includes token.token_uri, "ztlp://enroll/"
     assert_includes token.token_uri, "zone=office.acme.ztlp"
     # Should reference one of the NS machines
-    assert_match(/ns=10\.0\.1\.\d+:23097/, token.token_uri)
+    assert_match(/ns=10\.0\.1\.\d+:23096/, token.token_uri)
   end
 
   test "token URI includes relay when available" do

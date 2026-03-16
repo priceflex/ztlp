@@ -6,6 +6,10 @@ require "tempfile"
 
 # Provisions machines via SSH: installs Docker, deploys ZTLP components,
 # generates configs, and manages containers.
+#
+# Handles non-root SSH users by detecting sudo availability and prefixing
+# privileged commands automatically. Images are transferred via docker save/load
+# over SCP when not available on a registry.
 class SshProvisioner
   class ProvisionError < StandardError; end
 
@@ -22,7 +26,7 @@ class SshProvisioner
   }.freeze
 
   ZTLP_PORTS = {
-    "ns"      => { udp: 23097, metrics: 9103 },
+    "ns"      => { udp: 23096, metrics: 9103 },
     "relay"   => { udp: 23095, mesh: 23096, metrics: 9101 },
     "gateway" => { tcp: 23098, metrics: 9102 }
   }.freeze
@@ -33,6 +37,7 @@ class SshProvisioner
     @machine = machine
     @deployment = deployment
     @log_lines = []
+    @sudo_prefix = nil
   end
 
   # Full provisioning: check connectivity, install Docker, deploy component
@@ -49,8 +54,9 @@ class SshProvisioner
 
     with_ssh do |ssh|
       check_connectivity(ssh)
+      detect_sudo(ssh)
       ensure_docker(ssh)
-      pull_image(ssh, component)
+      load_or_pull_image(ssh, component)
       generate_and_upload_config(ssh, component)
       start_container(ssh, component)
       verify_health(ssh, component)
@@ -95,12 +101,22 @@ class SshProvisioner
 
   private
 
+  # Prefix a command with sudo if needed (non-root user)
+  def sudo(cmd)
+    @sudo_prefix ? "#{@sudo_prefix} #{cmd}" : cmd
+  end
+
   def with_ssh(&block)
     options = ssh_options
     log "Connecting to #{machine.ssh_user}@#{machine.ip_address}:#{machine.ssh_port}"
 
     Net::SSH.start(machine.ip_address, machine.ssh_user, **options) do |ssh|
       yield ssh
+    end
+  ensure
+    if @key_tempfile
+      @key_tempfile.unlink rescue nil
+      @key_tempfile = nil
     end
   end
 
@@ -115,7 +131,6 @@ class SshProvisioner
     when "key"
       key_data = machine.ssh_private_key_ciphertext
       raise ProvisionError, "No SSH key configured" if key_data.blank?
-      # Write key to temp file for net-ssh
       @key_tempfile = Tempfile.new("ztlp_ssh_key")
       @key_tempfile.write(key_data)
       @key_tempfile.close
@@ -131,8 +146,6 @@ class SshProvisioner
     end
 
     opts
-  ensure
-    # Cleanup is handled in with_ssh after block completes
   end
 
   def check_connectivity(ssh)
@@ -144,9 +157,30 @@ class SshProvisioner
     log "Connected: #{result[:stdout].lines.last&.strip}"
   end
 
+  # Detect whether we need sudo and if it's available
+  def detect_sudo(ssh)
+    result = exec_remote(ssh, "id -u")
+    uid = result[:stdout].strip.to_i
+
+    if uid == 0
+      @sudo_prefix = nil
+      log "Running as root"
+    else
+      # Check if sudo is available and passwordless
+      result = exec_remote(ssh, "sudo -n true 2>/dev/null && echo 'sudo-ok'")
+      if result[:stdout].include?("sudo-ok")
+        @sudo_prefix = "sudo"
+        log "Running as #{machine.ssh_user} with sudo"
+      else
+        raise ProvisionError, "User '#{machine.ssh_user}' is not root and cannot sudo without password. " \
+          "Add '#{machine.ssh_user} ALL=(ALL) NOPASSWD:ALL' to /etc/sudoers or connect as root."
+      end
+    end
+  end
+
   def ensure_docker(ssh)
     log "Checking Docker installation..."
-    result = exec_remote(ssh, "docker --version 2>/dev/null")
+    result = exec_remote(ssh, "#{sudo('docker')} --version 2>/dev/null")
 
     if result[:exit_status] != 0
       log "Docker not found, installing..."
@@ -157,12 +191,12 @@ class SshProvisioner
     end
 
     # Verify Docker daemon is running
-    result = exec_remote(ssh, "docker info --format '{{.ServerVersion}}' 2>/dev/null")
+    result = exec_remote(ssh, "#{sudo('docker')} info --format '{{.ServerVersion}}' 2>/dev/null")
     if result[:exit_status] != 0
       log "Starting Docker daemon..."
-      exec_remote(ssh, "systemctl start docker 2>/dev/null || service docker start 2>/dev/null")
+      exec_remote(ssh, sudo("systemctl start docker 2>/dev/null || service docker start 2>/dev/null"))
       sleep 3
-      result = exec_remote(ssh, "docker info --format '{{.ServerVersion}}' 2>/dev/null")
+      result = exec_remote(ssh, "#{sudo('docker')} info --format '{{.ServerVersion}}' 2>/dev/null")
       raise ProvisionError, "Docker daemon failed to start" if result[:exit_status] != 0
     end
     log "Docker daemon running: v#{result[:stdout].strip}"
@@ -174,33 +208,115 @@ class SshProvisioner
       "apt-get install -y -qq curl ca-certificates gnupg",
       "install -m 0755 -d /etc/apt/keyrings",
       "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
+      "chmod a+r /etc/apt/keyrings/docker.gpg",
       'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list',
       "apt-get update -qq",
-      "apt-get install -y -qq docker-ce docker-ce-cli containerd.io",
+      "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io",
       "systemctl enable docker",
       "systemctl start docker"
     ]
 
     commands.each do |cmd|
       log "  $ #{cmd}"
-      result = exec_remote(ssh, cmd)
-      if result[:exit_status] != 0 && !cmd.include?("gpg") # gpg warnings are ok
+      result = exec_remote(ssh, sudo(cmd))
+      if result[:exit_status] != 0 && !cmd.include?("gpg") && !cmd.include?("chmod")
         raise ProvisionError, "Docker install failed at: #{cmd}\n#{result[:stderr]}"
       end
+    end
+
+    # Add SSH user to docker group so subsequent commands can run without sudo
+    if @sudo_prefix
+      exec_remote(ssh, sudo("usermod -aG docker #{machine.ssh_user}"))
+      log "Added #{machine.ssh_user} to docker group"
     end
 
     machine.update!(docker_installed: true)
     log "Docker installed successfully"
   end
 
-  def pull_image(ssh, component)
+  # Try to pull from registry; if that fails, transfer via SCP
+  def load_or_pull_image(ssh, component)
     image = "#{DOCKER_IMAGES[component]}:latest"
-    log "Pulling image #{image}..."
-    result = exec_remote(ssh, "docker pull #{image}", timeout: 300)
-    if result[:exit_status] != 0
-      raise ProvisionError, "Failed to pull #{image}: #{result[:stderr]}"
+
+    # First try pulling from registry
+    log "Attempting to pull image #{image}..."
+    result = exec_remote(ssh, sudo("docker pull #{image} 2>&1"))
+
+    if result[:exit_status] == 0
+      log "Image pulled from registry"
+      return
     end
-    log "Image pulled successfully"
+
+    log "Registry pull failed, transferring image via SCP..."
+    transfer_image(ssh, component)
+  end
+
+  # Build image locally (if needed) and SCP it to the remote machine
+  def transfer_image(ssh, component)
+    image = "#{DOCKER_IMAGES[component]}:latest"
+
+    # Check if image exists locally
+    local_check = `docker image inspect #{image} 2>/dev/null`
+    if local_check.empty? || $?.exitstatus != 0
+      log "Image #{image} not found locally, building..."
+      build_image_locally(component)
+    end
+
+    # Save image to a temp tar file
+    tar_path = "/tmp/ztlp-#{component}-image.tar"
+    log "Saving image to #{tar_path}..."
+    system("docker save #{image} > #{tar_path}")
+    raise ProvisionError, "Failed to save Docker image #{image}" unless $?.success?
+
+    tar_size = File.size(tar_path)
+    log "Image size: #{(tar_size / 1024.0 / 1024.0).round(1)} MB"
+
+    # SCP the tar to remote
+    remote_tar = "/tmp/ztlp-#{component}-image.tar"
+    log "Uploading image to remote (this may take a few minutes)..."
+
+    ssh_opts = ssh_options
+    Net::SCP.upload!(machine.ip_address, machine.ssh_user,
+      tar_path, remote_tar, ssh: ssh_opts)
+
+    # Load on remote
+    log "Loading image on remote..."
+    result = exec_remote(ssh, sudo("docker load < #{remote_tar}"))
+    if result[:exit_status] != 0
+      raise ProvisionError, "Failed to load Docker image: #{result[:stderr]}"
+    end
+
+    # Clean up remote tar
+    exec_remote(ssh, "rm -f #{remote_tar}")
+    # Clean up local tar
+    File.delete(tar_path) rescue nil
+
+    log "Image #{image} loaded on remote"
+  end
+
+  # Build a ZTLP component Docker image from the monorepo source
+  def build_image_locally(component)
+    image = "#{DOCKER_IMAGES[component]}:latest"
+    source_dir = File.expand_path("../../../#{component}", __dir__) # ztlp/<component>/
+
+    # Fall back to monorepo sibling directory structure
+    unless File.directory?(source_dir) && File.exist?(File.join(source_dir, "Dockerfile"))
+      # Try the workspace-level monorepo
+      workspace_dir = ENV.fetch("ZTLP_MONOREPO_PATH", "/home/trs/.openclaw/workspace/ztlp")
+      source_dir = File.join(workspace_dir, component)
+    end
+
+    unless File.directory?(source_dir) && File.exist?(File.join(source_dir, "Dockerfile"))
+      raise ProvisionError, "Cannot find Dockerfile for #{component} at #{source_dir}. " \
+        "Build the image manually with: docker build -t #{image} ./#{component}"
+    end
+
+    log "Building #{image} from #{source_dir}..."
+    output = `docker build -t #{image} #{source_dir} 2>&1`
+    unless $?.success?
+      raise ProvisionError, "Failed to build #{image}:\n#{output.lines.last(10).join}"
+    end
+    log "Image #{image} built successfully"
   end
 
   def generate_and_upload_config(ssh, component)
@@ -211,9 +327,9 @@ class SshProvisioner
     config_path = "#{remote_dir}/#{component}.env"
 
     log "Uploading config to #{config_path}..."
-    exec_remote(ssh, "mkdir -p #{remote_dir}")
-    exec_remote(ssh, "cat > #{config_path} << 'ZTLP_CONFIG_EOF'\n#{config}\nZTLP_CONFIG_EOF")
-    exec_remote(ssh, "chmod 600 #{config_path}")
+    exec_remote(ssh, sudo("mkdir -p #{remote_dir}"))
+    exec_remote(ssh, sudo("tee #{config_path} > /dev/null << 'ZTLP_CONFIG_EOF'\n#{config}\nZTLP_CONFIG_EOF"))
+    exec_remote(ssh, sudo("chmod 600 #{config_path}"))
     log "Config uploaded"
   end
 
@@ -231,7 +347,6 @@ class SshProvisioner
         "ZTLP_NS_LOG_FORMAT=json",
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['ns'][:metrics]}"
       ]
-      # Add cluster peers (other NS machines)
       peers = ns_machines.reject { |m| m.id == machine.id }
       if peers.any?
         peer_list = peers.map { |m| "ztlp_ns@#{m.ip_address}" }.join(",")
@@ -246,11 +361,9 @@ class SshProvisioner
         "ZTLP_RELAY_LOG_FORMAT=json",
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['relay'][:metrics]}"
       ]
-      # Add NS server for relay discovery
       if ns_machines.any?
         lines << "ZTLP_NS_SERVER=#{ns_machines.first.ip_address}:#{ZTLP_PORTS['ns'][:udp]}"
       end
-      # Add mesh peers (other relay machines)
       peers = relay_machines.reject { |m| m.id == machine.id }
       if peers.any?
         peer_list = peers.map { |m| "#{m.ip_address}:#{ZTLP_PORTS['relay'][:mesh]}" }.join(",")
@@ -283,7 +396,7 @@ class SshProvisioner
 
     # Stop existing container if running
     log "Stopping existing container #{container_name} (if any)..."
-    exec_remote(ssh, "docker rm -f #{container_name} 2>/dev/null")
+    exec_remote(ssh, sudo("docker rm -f #{container_name} 2>/dev/null"))
 
     # Build docker run command
     port_flags = ports.map do |proto, port|
@@ -295,18 +408,22 @@ class SshProvisioner
       end
     end.join(" ")
 
+    # Add volume for NS data persistence
+    volume_flag = component == "ns" ? "-v ztlp-ns-data:/app/data" : ""
+
     cmd = [
       "docker run -d",
       "--name #{container_name}",
       "--restart unless-stopped",
       "--env-file /etc/ztlp/#{component}.env",
       port_flags,
+      volume_flag,
       "--log-driver json-file --log-opt max-size=50m --log-opt max-file=3",
       image
-    ].join(" ")
+    ].reject(&:blank?).join(" ")
 
     log "Starting container #{container_name}..."
-    result = exec_remote(ssh, cmd)
+    result = exec_remote(ssh, sudo(cmd))
     if result[:exit_status] != 0
       raise ProvisionError, "Failed to start #{container_name}: #{result[:stderr]}"
     end
@@ -321,11 +438,11 @@ class SshProvisioner
     log "Verifying container health..."
 
     # Wait a moment for startup
-    sleep 2
+    sleep 3
 
-    result = exec_remote(ssh, "docker inspect --format '{{.State.Running}}' #{container_name}")
+    result = exec_remote(ssh, sudo("docker inspect --format '{{.State.Running}}' #{container_name}"))
     unless result[:stdout].strip == "true"
-      logs = exec_remote(ssh, "docker logs --tail 20 #{container_name} 2>&1")
+      logs = exec_remote(ssh, sudo("docker logs --tail 30 #{container_name} 2>&1"))
       raise ProvisionError, "Container not running. Logs:\n#{logs[:stdout]}"
     end
 

@@ -1568,10 +1568,12 @@ async fn run_bridge_inner(
                             cc.rto_ms()
                         };
                         let current_pto = pto_count.load(std::sync::atomic::Ordering::Relaxed);
-                        // Exponential backoff: PTO * 2^pto_count, capped at 30s
-                        let backoff_factor = 1u64 << current_pto.min(5);
+                        // Exponential backoff: PTO * 2^pto_count, capped at 4s.
+                        // After persistent congestion (PTO >= 3), we retransmit
+                        // bulk data, so long backoff would just delay recovery.
+                        let backoff_factor = 1u64 << current_pto.min(4);
                         let pto_dur = std::time::Duration::from_millis(
-                            (rto.max(MIN_RTO_MS) as u64 * backoff_factor).min(30_000),
+                            (rto.max(MIN_RTO_MS) as u64 * backoff_factor).min(4_000),
                         );
 
                         if last_ack_check.elapsed() > pto_dur {
@@ -1603,10 +1605,23 @@ async fn run_bridge_inner(
                                 );
                             }
 
-                            // Send 1-2 probe packets (retransmit earliest unacked).
+                            // Send probe packets (retransmit earliest unacked).
                             // Probes are exempt from cwnd — they exist to force an
                             // ACK from the receiver.
-                            let probe_count = if new_pto == 1 { 2 } else { 1 };
+                            //
+                            // On persistent congestion (3+ PTOs), retransmit ALL
+                            // unacked data rather than 1-2 probes. When the receiver
+                            // has 86 buffered-but-undeliverable packets, sending 1
+                            // packet every PTO interval (with exp backoff) means
+                            // recovery takes minutes. A bulk retransmit clears the
+                            // gap immediately.
+                            let probe_count = if new_pto >= 3 {
+                                256
+                            } else if new_pto == 1 {
+                                2
+                            } else {
+                                1
+                            };
                             let entries = {
                                 let mut rb = retransmit_buf_sender.lock().await;
                                 let entries = rb.oldest_entries(probe_count);

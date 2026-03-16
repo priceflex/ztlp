@@ -222,14 +222,25 @@ class HealthChecker
     gateway_port = SshProvisioner.gateway_port_for(@machine)
     gateway_addr = "#{@machine.ip_address}:#{gateway_port}"
     relay_addr = find_relay_addr
+    relay_info = relay_addr ? " via relay #{relay_addr}" : " (direct)"
+    Rails.logger.info("[HealthChecker] ZTLP metrics fetch: #{@machine.hostname} → #{gateway_addr}#{relay_info}")
+
     tunnel = ZtlpTunnel.new(
       gateway_addr: gateway_addr,
       service: "metrics",
       relay_addr: relay_addr
     )
-    tunnel.fetch_metrics
+    result = tunnel.fetch_metrics
+
+    if result[:available]
+      Rails.logger.info("[HealthChecker] ✓ #{@machine.hostname}: ZTLP metrics OK (#{result[:data].size} metrics)")
+    else
+      Rails.logger.warn("[HealthChecker] ✗ #{@machine.hostname}: ZTLP metrics failed: #{result[:error]} — will fall back to SSH")
+    end
+
+    result
   rescue StandardError => e
-    Rails.logger.debug("[HealthChecker] ZTLP tunnel failed for #{@machine.hostname}: #{e.message}")
+    Rails.logger.error("[HealthChecker] ✗ #{@machine.hostname}: ZTLP tunnel error: #{e.class}: #{e.message}")
     { available: false, data: {} }
   end
 

@@ -30,11 +30,11 @@ class ZtlpConnectivity
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
 
-    # Find a relay to route through (required for hosts that can't receive inbound UDP)
-    relay_addr = find_relay_addr(machine)
-
     relay_addr = find_relay_addr(machine)
     identity_path = File.join(IDENTITY_DIR, "identity.json")
+
+    relay_info = relay_addr ? " via relay #{relay_addr}" : " (direct)"
+    Rails.logger.info("[ZtlpConnectivity] Checking #{machine.hostname} → #{gateway_addr}#{relay_info}")
 
     cmd = [
       ZTLP_CLI, "connect", gateway_addr,
@@ -63,7 +63,6 @@ class ZtlpConnectivity
 
       if output.include?("Handshake complete")
         elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).to_i
-        # Extract latency from output if available
         if output =~ /Handshake latency:\s*([\d.]+)ms/
           latency = Regexp.last_match(1).to_f.round.to_i
         else
@@ -72,16 +71,20 @@ class ZtlpConnectivity
         Process.kill("TERM", pid) rescue nil
         Process.wait(pid) rescue nil
         [stdin, stdout, stderr].each { |io| io&.close rescue nil }
+        Rails.logger.info("[ZtlpConnectivity] ✓ #{machine.hostname}: handshake OK in #{latency}ms")
         return Result.new(reachable: true, latency_ms: latency, metrics_source: "ztlp")
       end
     end
 
     elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).to_i
+    clean_output = output.gsub(/\e\[[0-9;]*m/, "").strip.truncate(500)
+    Rails.logger.warn("[ZtlpConnectivity] ✗ #{machine.hostname}: handshake timeout after #{CONNECT_TIMEOUT}s. CLI output: #{clean_output}")
     Process.kill("TERM", pid) rescue nil
     Process.wait(pid) rescue nil
     [stdin, stdout, stderr].each { |io| io&.close rescue nil }
     Result.new(reachable: false, latency_ms: elapsed, error: "Handshake timeout")
   rescue StandardError => e
+    Rails.logger.error("[ZtlpConnectivity] ✗ #{machine.hostname}: #{e.class}: #{e.message}")
     Result.new(reachable: false, error: e.message)
   end
 

@@ -62,29 +62,64 @@ class ZtlpTunnel
     return { available: false, data: {}, error: "not enrolled" } unless self.class.enrolled?
 
     last_error = nil
+    relay_info = @relay_addr ? " via relay #{@relay_addr}" : " (direct)"
     (1 + MAX_RETRIES).times do |attempt|
       begin
         @local_port = find_free_port if attempt > 0  # Fresh port for retries
+        Rails.logger.info("[ZtlpTunnel] Attempt #{attempt + 1}/#{1 + MAX_RETRIES}: #{@gateway_addr}#{relay_info} → localhost:#{@local_port}")
         open_tunnel
         wait_for_tunnel
 
         body = fetch_via_curl("127.0.0.1", @local_port, "/metrics")
 
         if body && !body.empty?
-          return { available: true, data: parse_prometheus(body) }
+          parsed = parse_prometheus(body)
+          Rails.logger.info("[ZtlpTunnel] ✓ #{@gateway_addr}: #{body.bytesize} bytes, #{parsed.size} metrics (attempt #{attempt + 1})")
+          return { available: true, data: parsed }
         end
 
         last_error = "empty response"
-        Rails.logger.debug("[ZtlpTunnel] Attempt #{attempt + 1}: empty response from #{@gateway_addr}, retrying...") if attempt < MAX_RETRIES
-      rescue Timeout::Error, Errno::ECONNREFUSED, Errno::ECONNRESET, StandardError => e
+        if attempt < MAX_RETRIES
+          Rails.logger.warn("[ZtlpTunnel] ✗ #{@gateway_addr}: empty response (attempt #{attempt + 1}/#{1 + MAX_RETRIES}), retrying with fresh tunnel...")
+        else
+          Rails.logger.warn("[ZtlpTunnel] ✗ #{@gateway_addr}: empty response after #{1 + MAX_RETRIES} attempts — possible UDP fragmentation/loss")
+        end
+      rescue Timeout::Error => e
         last_error = e.message
-        Rails.logger.debug("[ZtlpTunnel] Attempt #{attempt + 1}: #{e.message} from #{@gateway_addr}") if attempt < MAX_RETRIES
+        cli_output = drain_output
+        if attempt < MAX_RETRIES
+          Rails.logger.warn("[ZtlpTunnel] ✗ #{@gateway_addr}: timeout (attempt #{attempt + 1}/#{1 + MAX_RETRIES}), retrying... CLI output: #{cli_output}")
+        else
+          Rails.logger.error("[ZtlpTunnel] ✗ #{@gateway_addr}: timeout after #{1 + MAX_RETRIES} attempts. CLI output: #{cli_output}")
+        end
+      rescue Errno::ECONNREFUSED => e
+        last_error = e.message
+        Rails.logger.warn("[ZtlpTunnel] ✗ #{@gateway_addr}: connection refused on localhost:#{@local_port} — tunnel process may have died")
+      rescue StandardError => e
+        last_error = e.message
+        cli_output = drain_output
+        Rails.logger.error("[ZtlpTunnel] ✗ #{@gateway_addr}: #{e.class}: #{e.message} (attempt #{attempt + 1}). CLI output: #{cli_output}")
       ensure
         close_tunnel
       end
     end
 
     { available: false, data: {}, error: last_error }
+  end
+
+  # Drain any remaining stdout/stderr from the CLI process (for error diagnostics)
+  def drain_output
+    output = +""
+    [@stdout, @stderr].compact.each do |io|
+      begin
+        loop { output << io.read_nonblock(4096) }
+      rescue IO::WaitReadable, EOFError
+        # done
+      end
+    end
+    output.gsub(/\e\[[0-9;]*m/, "").strip.truncate(500)  # Strip ANSI, limit length
+  rescue StandardError
+    ""
   end
 
   # Open the ZTLP tunnel (background process)
@@ -125,8 +160,15 @@ class ZtlpTunnel
           begin
             chunk = io.read_nonblock(4096)
             output << chunk
-            # "Listening" means TCP listener is bound and accepting
-            return true if output.include?("Listening")
+            if output.include?("Listening")
+              # Extract handshake latency if present
+              if output =~ /Handshake latency:\s*([\d.]+)ms/
+                Rails.logger.info("[ZtlpTunnel] Handshake to #{@gateway_addr} completed in #{$1}ms, listener ready")
+              else
+                Rails.logger.info("[ZtlpTunnel] Tunnel listener ready for #{@gateway_addr}")
+              end
+              return true
+            end
           rescue IO::WaitReadable
             next
           rescue EOFError
@@ -137,6 +179,8 @@ class ZtlpTunnel
       end
     end
 
+    clean_output = output.gsub(/\e\[[0-9;]*m/, "").strip.truncate(500)
+    Rails.logger.warn("[ZtlpTunnel] Tunnel to #{@gateway_addr} not ready after #{CONNECT_TIMEOUT}s. CLI output: #{clean_output}")
     raise Timeout::Error, "ZTLP tunnel did not become ready within #{CONNECT_TIMEOUT}s"
   end
 
@@ -164,15 +208,21 @@ class ZtlpTunnel
   # curl --http0.9 handles this correctly.
   def fetch_via_curl(host, port, path)
     url = "http://#{host}:#{port}#{path}"
-    stdout, status = Open3.capture2(
+    stdout, stderr, status = Open3.capture3(
       "curl", "-sf", "--http0.9",
       "--connect-timeout", "3",
       "--max-time", METRICS_TIMEOUT.to_s,
       url
     )
-    status.success? ? stdout : nil
+    if status.success?
+      Rails.logger.debug("[ZtlpTunnel] curl → #{url}: #{stdout.bytesize} bytes") if stdout && !stdout.empty?
+      stdout
+    else
+      Rails.logger.debug("[ZtlpTunnel] curl → #{url}: failed (exit #{status.exitstatus}). stderr: #{stderr&.strip&.truncate(200)}")
+      nil
+    end
   rescue StandardError => e
-    Rails.logger.debug("[ZtlpTunnel] curl fetch failed: #{e.message}")
+    Rails.logger.warn("[ZtlpTunnel] curl → #{url}: exception: #{e.message}")
     nil
   end
 

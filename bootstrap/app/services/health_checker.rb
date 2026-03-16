@@ -272,8 +272,8 @@ class HealthChecker
   end
 
   def exec_ssh(ssh, command)
-    stdout = ""
-    stderr = ""
+    stdout = +""
+    stderr = +""
     exit_status = nil
 
     channel = ssh.open_channel do |ch|

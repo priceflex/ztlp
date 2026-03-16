@@ -57,7 +57,7 @@ defmodule ZtlpGateway.Session do
   Start a new session process.
 
   ## Parameters (as a map)
-  - `:session_id` — 16-byte SessionID for this session
+  - `:session_id` — 12-byte SessionID for this session (96-bit per ZTLP spec)
   - `:client_addr` — `{ip, port}` of the ZTLP client
   - `:udp_socket` — the gateway's UDP socket (for sending responses)
   - `:static_pub` — gateway's X25519 static public key

@@ -126,7 +126,7 @@ defmodule ZtlpGateway.Listener do
 
     if current < max do
       # Generate a random SessionID for this new session
-      session_id = :crypto.strong_rand_bytes(16)
+      session_id = :crypto.strong_rand_bytes(12)
 
       opts = %{
         session_id: session_id,

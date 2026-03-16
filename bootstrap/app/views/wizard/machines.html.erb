@@ -16,13 +16,6 @@
       <%= render "wizard/machine_form", machine: @new_machine, network: @network %>
     </div>
 
-    <div class="mt-6 flex justify-between">
-      <%= link_to "← Back", wizard_new_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
-      <% if @machines.any? %>
-        <%= link_to "Next: Review →", wizard_review_path, class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" %>
-      <% else %>
-        <span class="rounded-md bg-gray-300 px-4 py-2 text-sm font-semibold text-gray-500 cursor-not-allowed" title="Add at least one machine">Next: Review →</span>
-      <% end %>
-    </div>
+    <%= render "wizard/machine_nav", machines: @machines %>
   </div>
 </div>

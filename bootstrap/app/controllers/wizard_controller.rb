@@ -45,7 +45,8 @@ class WizardController < ApplicationController
           @new_machine = @network.machines.new(ssh_port: 22, ssh_user: "root", ssh_auth_method: "key")
           render turbo_stream: [
             turbo_stream.replace("machine-list", partial: "wizard/machine_list", locals: { machines: @machines, network: @network }),
-            turbo_stream.replace("new-machine-form", partial: "wizard/machine_form", locals: { machine: @new_machine, network: @network })
+            turbo_stream.replace("new-machine-form", partial: "wizard/machine_form", locals: { machine: @new_machine, network: @network }),
+            turbo_stream.replace("wizard-nav", partial: "wizard/machine_nav", locals: { machines: @machines })
           ]
         end
         format.html { redirect_to wizard_machines_path, notice: "Machine '#{@machine.hostname}' added." }
@@ -72,8 +73,10 @@ class WizardController < ApplicationController
     respond_to do |format|
       format.turbo_stream do
         @machines = @network.machines.reload.to_a
-        render turbo_stream: turbo_stream.replace("machine-list",
-          partial: "wizard/machine_list", locals: { machines: @machines, network: @network })
+        render turbo_stream: [
+          turbo_stream.replace("machine-list", partial: "wizard/machine_list", locals: { machines: @machines, network: @network }),
+          turbo_stream.replace("wizard-nav", partial: "wizard/machine_nav", locals: { machines: @machines })
+        ]
       end
       format.html { redirect_to wizard_machines_path, notice: "Machine '#{hostname}' removed." }
     end

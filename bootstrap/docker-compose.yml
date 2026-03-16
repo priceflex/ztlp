@@ -4,8 +4,7 @@ services:
   web:
     build: .
     image: priceflex/ztlp-bootstrap:latest
-    ports:
-      - "${PORT:-3000}:3000"
+    network_mode: host
     volumes:
       - bootstrap_data:/data
       - ${ZTLP_IMAGES_PATH:-/tmp/ztlp-images}:/ztlp-images:ro

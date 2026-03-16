@@ -58,16 +58,15 @@ class ZtlpTunnel
     open_tunnel
     wait_for_tunnel
 
-    # Fetch metrics through the tunnel
-    uri = URI("http://127.0.0.1:#{@local_port}/metrics")
-    response = Net::HTTP.start(uri.host, uri.port, read_timeout: METRICS_TIMEOUT, open_timeout: METRICS_TIMEOUT) do |http|
-      http.get(uri.path)
-    end
+    # Fetch metrics through the tunnel using curl.
+    # Net::HTTP rejects responses through ZTLP tunnel as HTTP/0.9;
+    # curl --http0.9 handles this correctly.
+    body = fetch_via_curl("127.0.0.1", @local_port, "/metrics")
 
-    if response.is_a?(Net::HTTPSuccess)
-      { available: true, data: parse_prometheus(response.body) }
+    if body && !body.empty?
+      { available: true, data: parse_prometheus(body) }
     else
-      { available: false, data: {}, error: "HTTP #{response.code}" }
+      { available: false, data: {}, error: "empty response" }
     end
   rescue Timeout::Error, Errno::ECONNREFUSED, Errno::ECONNRESET, StandardError => e
     { available: false, data: {}, error: e.message }
@@ -94,17 +93,37 @@ class ZtlpTunnel
     Rails.logger.info("[ZtlpTunnel] Started tunnel pid=#{@pid} #{@gateway_addr} → localhost:#{@local_port}")
   end
 
-  # Wait for the tunnel to be ready (TCP listener accepting connections)
+  # Wait for the tunnel's TCP listener to be ready.
+  # We CANNOT TCP-connect to probe — the tunnel only handles one TCP connection
+  # per ZTLP session, and a probe would consume it.
+  # Instead, read stderr for the "Listening" marker from the ztlp CLI.
   def wait_for_tunnel
     deadline = Time.now + CONNECT_TIMEOUT
+    output = +""
+    streams = [@stdout, @stderr].compact
+
     while Time.now < deadline
-      begin
-        TCPSocket.new("127.0.0.1", @local_port).close
-        return true
-      rescue Errno::ECONNREFUSED
-        sleep 0.2
+      remaining = deadline - Time.now
+      break if remaining <= 0
+
+      ready = IO.select(streams, nil, nil, [remaining, 0.3].min)
+      if ready && ready[0]
+        ready[0].each do |io|
+          begin
+            chunk = io.read_nonblock(4096)
+            output << chunk
+            # "Listening" means TCP listener is bound and accepting
+            return true if output.include?("Listening")
+          rescue IO::WaitReadable
+            next
+          rescue EOFError
+            streams.delete(io)
+            next
+          end
+        end
       end
     end
+
     raise Timeout::Error, "ZTLP tunnel did not become ready within #{CONNECT_TIMEOUT}s"
   end
 
@@ -126,6 +145,23 @@ class ZtlpTunnel
   end
 
   private
+
+  # Fetch via curl with --http0.9 flag.
+  # ZTLP tunnel responses may look like HTTP/0.9 to strict HTTP parsers;
+  # curl --http0.9 handles this correctly.
+  def fetch_via_curl(host, port, path)
+    url = "http://#{host}:#{port}#{path}"
+    stdout, status = Open3.capture2(
+      "curl", "-sf", "--http0.9",
+      "--connect-timeout", "3",
+      "--max-time", METRICS_TIMEOUT.to_s,
+      url
+    )
+    status.success? ? stdout : nil
+  rescue StandardError => e
+    Rails.logger.debug("[ZtlpTunnel] curl fetch failed: #{e.message}")
+    nil
+  end
 
   def find_free_port
     server = TCPServer.new("127.0.0.1", 0)

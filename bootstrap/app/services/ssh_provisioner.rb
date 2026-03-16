@@ -31,8 +31,16 @@ class SshProvisioner
     "gateway" => { tcp: 23098, metrics: 9102 }
   }.freeze
 
-  # Gateway sidecar port — each machine gets a gateway for ZTLP-native metrics access
-  GATEWAY_SIDECAR_PORT = 23098
+  # Gateway sidecar ports — each machine gets a gateway for ZTLP-native metrics access.
+  # Different roles use different ports so the relay can distinguish between
+  # its own local gateway and remote gateways when forwarding HELLO packets.
+  GATEWAY_SIDECAR_PORT = 23098          # Default (NS machines)
+  GATEWAY_SIDECAR_RELAY_PORT = 23099    # Relay machines use a separate port
+
+  # Returns the gateway sidecar port for a given machine based on its roles.
+  def self.gateway_port_for(machine)
+    machine.role_list.include?("relay") ? GATEWAY_SIDECAR_RELAY_PORT : GATEWAY_SIDECAR_PORT
+  end
 
   attr_reader :machine, :deployment, :log_lines
 
@@ -374,15 +382,17 @@ class SshProvisioner
         lines << "ZTLP_RELAY_MESH_PEERS=#{peer_list}"
       end
       # Configure gateway forwarding: relay forwards handshakes to local gateway sidecar
-      # and to any other gateways in the network
+      # and to any other gateways in the network.
+      # Each gateway sidecar has a role-specific port so the relay can distinguish
+      # its own local gateway from remote ones (prevents HELLO mis-routing).
       gateway_addrs = []
-      # Local gateway sidecar (always deployed alongside relay)
-      gateway_addrs << "127.0.0.1:#{GATEWAY_SIDECAR_PORT}"
-      # Remote gateway machines
+      # Local gateway sidecar (relay machines use GATEWAY_SIDECAR_RELAY_PORT)
+      gateway_addrs << "127.0.0.1:#{GATEWAY_SIDECAR_RELAY_PORT}"
+      # Remote gateway machines (dedicated gateway role)
       gateway_machines = network.machines.where("roles LIKE ?", "%gateway%")
                                         .where.not(id: machine.id)
       gateway_machines.each { |gm| gateway_addrs << "#{gm.ip_address}:#{ZTLP_PORTS['gateway'][:tcp]}" }
-      # NS machines with gateway sidecars
+      # NS machines with gateway sidecars (use default GATEWAY_SIDECAR_PORT)
       ns_machines.each { |m| gateway_addrs << "#{m.ip_address}:#{GATEWAY_SIDECAR_PORT}" }
       lines << "ZTLP_RELAY_GATEWAYS=#{gateway_addrs.join(',')}"
       lines.join("\n")
@@ -486,13 +496,16 @@ class SshProvisioner
       end
     end
 
-    # Generate gateway sidecar config — proxies metrics to localhost
+    # Generate gateway sidecar config — proxies metrics to localhost.
+    # Relay machines use a different port (23099) so the relay's HELLO forwarding
+    # can distinguish between local and remote gateways.
     metrics_port = ZTLP_PORTS[primary_component][:metrics]
     network = machine.network
     ns_machines = network.ns_machines
+    sidecar_port = self.class.gateway_port_for(machine)
 
     sidecar_config = [
-      "ZTLP_GATEWAY_PORT=#{GATEWAY_SIDECAR_PORT}",
+      "ZTLP_GATEWAY_PORT=#{sidecar_port}",
       "ZTLP_GATEWAY_LOG_FORMAT=json",
       "ZTLP_GATEWAY_BACKENDS=metrics:127.0.0.1:#{metrics_port}",
       "ZTLP_GATEWAY_POLICIES=*:metrics"  # Allow any authenticated identity
@@ -529,7 +542,7 @@ class SshProvisioner
     end
 
     container_id = result[:stdout].strip[0..11]
-    log "Gateway sidecar started: #{container_id} (port #{GATEWAY_SIDECAR_PORT}/UDP → metrics:#{metrics_port})"
+    log "Gateway sidecar started: #{container_id} (port #{sidecar_port}/UDP → metrics:#{metrics_port})"
 
     # Register the gateway in NS for service discovery
     svc_name = "metrics.#{machine.hostname}.#{network.zone}"

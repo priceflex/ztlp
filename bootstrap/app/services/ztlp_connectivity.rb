@@ -21,10 +21,12 @@ class ZtlpConnectivity
 
   # Test connectivity to a machine's gateway sidecar via ZTLP tunnel.
   # Automatically routes through the relay if available (for UDP-hostile NATs).
+  # Uses role-specific gateway ports (NS=23098, relay=23099).
   # Returns a Result struct.
-  def self.check(machine, gateway_port: SshProvisioner::GATEWAY_SIDECAR_PORT)
+  def self.check(machine, gateway_port: nil)
     return Result.new(reachable: false, error: "ZTLP not available") unless available?
 
+    gateway_port ||= SshProvisioner.gateway_port_for(machine)
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
 
@@ -94,9 +96,10 @@ class ZtlpConnectivity
   end
 
   # Quick check — just test if the handshake succeeds (no metrics fetch)
-  def self.handshake_check(machine, gateway_port: SshProvisioner::GATEWAY_SIDECAR_PORT)
+  def self.handshake_check(machine, gateway_port: nil)
     return Result.new(reachable: false, error: "ZTLP not available") unless available?
 
+    gateway_port ||= SshProvisioner.gateway_port_for(machine)
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
     relay_addr = find_relay_addr(machine)

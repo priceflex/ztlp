@@ -105,19 +105,14 @@
 
 ## Known Issues
 
-### Relay HELLO Routing (Bootstrap)
-**Problem:** When two gateway sidecars run on different machines (NS + relay), both listen on port 23098. The relay forwards HELLO packets to the gateway, but if the relay machine also has a local gateway on 23098, the relay may forward to its own local gateway instead of the remote one. This causes Bootstrap to get metrics from the wrong component (relay metrics when expecting NS metrics, or vice versa).
+_None currently tracked._
 
-**Impact:** The second health check (whichever routes through the relay) falls back to SSH because the ZTLP tunnel connects to the wrong gateway.
+### Resolved: Relay HELLO Routing (v0.9.11)
+**Problem:** When two gateway sidecars ran on different machines (NS + relay), both listened on port 23098. The relay's round-robin `pick_gateway()` could forward a HELLO to its own local gateway instead of the remote one, causing Bootstrap to get metrics from the wrong component.
 
-**Root cause:** The relay forwards based on destination address, but `127.0.0.1:23098` and `<remote_ip>:23098` both resolve to the local machine when running with host networking.
+**Fix:** Role-specific gateway sidecar ports. NS machines use port 23098 (default), relay machines use port 23099. The relay's `ZTLP_RELAY_GATEWAYS` config now lists `127.0.0.1:23099` for local and `<ns_ip>:23098` for remote. Bootstrap's `ZtlpConnectivity`, `ZtlpTunnel`, and `HealthChecker` use `SshProvisioner.gateway_port_for(machine)` to target the correct port per role.
 
-**Workaround:** Use different gateway ports per machine (e.g., NS gateway on 23098, relay gateway on 23099), or add explicit gateway address routing in the relay's forwarding logic.
-
-**Where to fix:**
-- `relay/lib/ztlp_relay/gateway_forwarder.ex` — needs to check if destination IP matches local vs remote
-- `bootstrap/app/services/health_checker.rb` — could pass explicit gateway port per machine
-- Alternative: configure each gateway with a unique port
+**Files changed:** `ssh_provisioner.rb`, `ztlp_connectivity.rb`, `health_checker.rb`
 
 ---
 

@@ -219,7 +219,8 @@ class HealthChecker
   def query_prometheus_via_ztlp(metrics_port)
     return { available: false, data: {} } unless ZtlpTunnel.available? && ZtlpTunnel.enrolled?
 
-    gateway_addr = "#{@machine.ip_address}:#{SshProvisioner::GATEWAY_SIDECAR_PORT}"
+    gateway_port = SshProvisioner.gateway_port_for(@machine)
+    gateway_addr = "#{@machine.ip_address}:#{gateway_port}"
     relay_addr = find_relay_addr
     tunnel = ZtlpTunnel.new(
       gateway_addr: gateway_addr,

@@ -35,31 +35,40 @@ Visit `http://localhost:3000`
 ```
 Network (zone + secrets)
   └── Machine (hostname, IP, SSH creds, roles)
-        └── Deployment (component, status, log, container ID)
+  │     └── Deployment (component, status, log, container ID)
+  │     └── HealthCheck (per-component status, metrics, container state)
+  │     └── Gateway Sidecar (ZTLP-native metrics access)
   └── EnrollmentToken (URI, QR, usage tracking)
+  └── Identity (ZtlpUser, ZtlpGroup, ZtlpDevice)
 
-AuditLog (all actions tracked)
+AuditLog + Alert (all actions tracked, status change alerts)
 ```
 
 ### Services
 
-- **SshProvisioner** — Connects via SSH, installs Docker, pulls images, generates per-component configs, starts containers, verifies health
-- **HealthChecker** — Checks container status, port binding, metrics endpoint, recent errors
-- **TokenGenerator** — Creates enrollment tokens with QR codes, wraps `ztlp` CLI when available
+- **SshProvisioner** — SSH into machines, install Docker, deploy components + gateway sidecars, generate configs
+- **HealthChecker** — Container status, port checks, Prometheus metrics (via ZTLP tunnel or SSH fallback), resource usage
+- **ZtlpTunnel** — Opens encrypted ZTLP tunnels to gateway sidecars for metrics collection (dogfooding)
+- **ZtlpConnectivity** — Handshake-only connectivity check (green/yellow/red dots on dashboard)
+- **TokenGenerator** — Creates enrollment tokens with QR codes
 
 ### ZTLP Components
 
-| Component | Container | Ports |
-|-----------|-----------|-------|
-| NS | ztlp-ns | 23097/udp, 9103/tcp (metrics) |
-| Relay | ztlp-relay | 23095/udp, 23096/udp (mesh), 9101/tcp (metrics) |
-| Gateway | ztlp-gateway | 23098/tcp, 9102/tcp (metrics) |
+| Component | Container | Ports | Gateway Sidecar |
+|-----------|-----------|-------|-----------------|
+| NS | ztlp-ns | 23096/udp, 9103/tcp (metrics) | :23098/udp |
+| Relay | ztlp-relay | 23095/udp, 23096/udp (mesh), 9101/tcp (metrics) | :23099/udp |
+| Gateway | ztlp-gateway | 23098/tcp, 9102/tcp (metrics) | — (is the gateway) |
+
+> **Note:** Relay uses a different sidecar port (23099) than NS (23098) to avoid
+> HELLO routing ambiguity. See [docs/ZTLP-TUNNEL-ARCHITECTURE.md](docs/ZTLP-TUNNEL-ARCHITECTURE.md)
+> for the full explanation.
 
 ## Tests
 
 ```bash
 bin/rails test
-# 97 tests, 249 assertions
+# 543 tests, ~1467 assertions
 ```
 
 ## Build Phases

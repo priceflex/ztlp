@@ -258,7 +258,9 @@ impl EnrollmentToken {
     /// unverified tokens when `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`.
     fn from_query_param_uri(input: &str) -> Result<Self, String> {
         // Extract query string
-        let query = input.split('?').nth(1)
+        let query = input
+            .split('?')
+            .nth(1)
             .ok_or_else(|| "no query string in URI".to_string())?;
 
         let mut zone = None;
@@ -278,8 +280,12 @@ impl EnrollmentToken {
                 "relay" => relay_addrs.push(val.to_string()),
                 "gateway" => gateway_addr = Some(val.to_string()),
                 "token" => token_hex = Some(val.to_string()),
-                "expires" => expires = Some(val.parse::<u64>()
-                    .map_err(|_| "invalid expires timestamp".to_string())?),
+                "expires" => {
+                    expires = Some(
+                        val.parse::<u64>()
+                            .map_err(|_| "invalid expires timestamp".to_string())?,
+                    )
+                }
                 _ => {} // ignore unknown params
             }
         }
@@ -795,8 +801,13 @@ mod tests {
         let secret = test_secret();
         let relays = vec!["10.0.0.2:23095".to_string()];
         let original = EnrollmentToken::create(
-            "test.ztlp", "10.0.0.1:23096",
-            &relays, None, 1, 9999999999, &secret,
+            "test.ztlp",
+            "10.0.0.1:23096",
+            &relays,
+            None,
+            1,
+            9999999999,
+            &secret,
         );
         let b64 = original.to_base64url();
         let parsed = EnrollmentToken::from_base64url(&b64).expect("binary round-trip");
@@ -810,8 +821,13 @@ mod tests {
         let secret = test_secret();
         let relays = vec!["10.0.0.2:23095".to_string()];
         let original = EnrollmentToken::create(
-            "test.ztlp", "10.0.0.1:23096",
-            &relays, None, 1, 9999999999, &secret,
+            "test.ztlp",
+            "10.0.0.1:23096",
+            &relays,
+            None,
+            1,
+            9999999999,
+            &secret,
         );
         let uri = original.to_uri();
         assert!(uri.starts_with("ztlp://enroll/"));

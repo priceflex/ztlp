@@ -1,0 +1,159 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "machines" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🖥️ Machines & Infrastructure</h1>
+      <p class="mt-1 text-sm text-gray-500">Machines are servers that run ZTLP components. Each machine can have one or more roles.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">What is a Machine?</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        A Machine is a server (physical or virtual) that runs ZTLP components. Unlike simple single-role setups,
+        machines in Bootstrap can have <strong class="text-gray-900">multiple roles</strong> — a single server can be
+        both a Relay and a Gateway, or run all three roles for small deployments.
+      </p>
+      <p class="text-sm text-gray-600">
+        Each machine has SSH credentials for provisioning, IP address, health monitoring, and deployment tracking.
+      </p>
+    </div>
+
+    <!-- The Three Roles -->
+    <div class="mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-4">The Three Roles</h2>
+
+      <!-- NS -->
+      <div class="rounded-lg bg-white border-l-4 border-purple-500 shadow-sm p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">Nameserver (NS)</span>
+          <span class="text-xs text-gray-400">UDP 5353</span>
+        </div>
+        <p class="text-sm text-gray-600 mb-3">
+          The Nameserver runs <strong class="text-gray-900">ZTLP-NS</strong>, the identity resolution system.
+          It's the equivalent of DNS for ZTLP — resolves Node IDs and hostnames to network endpoints.
+        </p>
+        <div class="space-y-2 text-xs text-gray-500">
+          <p><strong class="text-gray-700">Identity Resolution:</strong> Looks up Node IDs to find a device's current relay, public key, and endpoint address.</p>
+          <p><strong class="text-gray-700">Zone Records:</strong> Identity records, relay registrations, zone delegations, revocations — all Ed25519-signed.</p>
+          <p><strong class="text-gray-700">Storage:</strong> Mnesia (Erlang's distributed database) with disc persistence. Supports federation for HA.</p>
+          <p><strong class="text-gray-700">Discovery:</strong> Relays self-register on startup. Clients query NS to find relays and gateways.</p>
+        </div>
+        <div class="mt-3 rounded-md bg-gray-50 border border-gray-200 p-3">
+          <p class="text-xs font-mono text-gray-500"># Typical: 1-2 NS servers per network. Run 2 with Mnesia federation for HA.</p>
+        </div>
+      </div>
+
+      <!-- Relay -->
+      <div class="rounded-lg bg-white border-l-4 border-indigo-500 shadow-sm p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">Relay</span>
+          <span class="text-xs text-gray-400">UDP 4433</span>
+        </div>
+        <p class="text-sm text-gray-600 mb-3">
+          Relays are the <strong class="text-gray-900">traffic backbone</strong> of ZTLP. They route encrypted packets
+          between nodes — through NAT, firewalls, or across network boundaries.
+        </p>
+        <div class="space-y-2 text-xs text-gray-500">
+          <p><strong class="text-gray-700">Mesh Networking:</strong> Multiple relays form a mesh using a consistent hash ring (BLAKE2s, 128 virtual nodes). Sessions distributed for load balancing.</p>
+          <p><strong class="text-gray-700">PathScore Selection:</strong> Clients choose the best relay by PathScore: <code class="bg-gray-100 px-1 rounded">RTT × (1+loss×10) × (1+load×2) × (1+jitter/100)</code></p>
+          <p><strong class="text-gray-700">Relay Admission Tokens (RATs):</strong> 93-byte HMAC-BLAKE2s tokens prevent unauthorized usage. Issued by ingress relays, verified by transit relays.</p>
+          <p><strong class="text-gray-700">Multi-hop Forwarding:</strong> Up to 4 relay hops with TTL tracking and loop detection via traversed path.</p>
+          <p><strong class="text-gray-700">Inter-relay Protocol:</strong> 7 message types — HELLO, HEARTBEAT, SESSION_SYNC, FORWARD, LEAVE, PING, PONG.</p>
+        </div>
+        <div class="mt-3 rounded-md bg-gray-50 border border-gray-200 p-3">
+          <pre class="text-xs font-mono text-ztlp-700">[relay]
+listen_port = 4433
+max_connections = 1000
+buffer_size = 65536
+
+[relay.mesh]
+enabled = true
+vnodes = 128          # Virtual nodes in hash ring
+heartbeat_interval = 5
+probe_interval = 10   # PathScore probe interval
+
+[relay.admission]
+enabled = true
+token_ttl = 3600      # RAT lifetime in seconds
+challenge_enabled = true</pre>
+        </div>
+        <div class="mt-3 rounded-md bg-indigo-50 border border-indigo-200 p-3">
+          <p class="text-xs text-indigo-700">📊 Performance: ~233K packets/sec forwarding, 3.2% mesh overhead. RAT: ~275K issue/sec, ~393K verify/sec.</p>
+        </div>
+      </div>
+
+      <!-- Gateway -->
+      <div class="rounded-lg bg-white border-l-4 border-cyan-500 shadow-sm p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-cyan-100 text-cyan-800">Gateway</span>
+          <span class="text-xs text-gray-400">TCP 8443</span>
+        </div>
+        <p class="text-sm text-gray-600 mb-3">
+          Gateways <strong class="text-gray-900">bridge ZTLP and TCP</strong>. They let ZTLP clients
+          access traditional TCP services (SSH, HTTPS, databases) while enforcing access policies.
+        </p>
+        <div class="space-y-2 text-xs text-gray-500">
+          <p><strong class="text-gray-700">Noise_XX Handshake:</strong> Full mutual authentication using the Noise Protocol Framework. Gateway acts as responder.</p>
+          <p><strong class="text-gray-700">Policy Engine:</strong> JSON rules with zone wildcards. Groups define allowed targets and ports. Evaluated on every connection.</p>
+          <p><strong class="text-gray-700">Bidirectional Bridge:</strong> Proxies TCP traffic bidirectionally after authentication — ZTLP packets in, TCP out.</p>
+          <p><strong class="text-gray-700">Circuit Breaker:</strong> Protects upstream services from overload. Auto-recovers after cool-down.</p>
+        </div>
+        <div class="mt-3 rounded-md bg-gray-50 border border-gray-200 p-3">
+          <p class="text-xs font-mono text-gray-500"># Typical: 1-2 gateways per network. Performance: ~669K ops/sec data path.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Multi-role -->
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Multi-Role Machines</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        A single machine can run <strong class="text-gray-900">multiple roles simultaneously</strong>. This is useful for:
+      </p>
+      <ul class="text-sm text-gray-600 space-y-1 ml-4 list-disc">
+        <li><strong class="text-gray-900">Small deployments:</strong> One machine running NS + Relay + Gateway</li>
+        <li><strong class="text-gray-900">Cost optimization:</strong> Combine Relay + Gateway on the same server</li>
+        <li><strong class="text-gray-900">Edge sites:</strong> A single box at a branch office handling all roles</li>
+      </ul>
+      <p class="text-sm text-gray-600 mt-3">
+        For production workloads, separate roles onto dedicated machines for better isolation and scalability.
+      </p>
+    </div>
+
+    <!-- Statuses -->
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Machine Statuses</h2>
+      <div class="space-y-3">
+        <% [
+          ["Pending", "bg-yellow-100 text-yellow-800", "Registered but not yet provisioned."],
+          ["Provisioning", "bg-blue-100 text-blue-800", "Deployment in progress — SSH session active."],
+          ["Ready", "bg-green-100 text-green-800", "ZTLP component deployed and service running."],
+          ["Error", "bg-red-100 text-red-800", "Deployment failed or service down. Check deployment logs."],
+          ["Offline", "bg-gray-100 text-gray-800", "Machine unreachable via SSH."]
+        ].each do |label, color, desc| %>
+          <div class="flex items-start gap-3">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= color %>"><%= label %></span>
+            <p class="text-xs text-gray-500"><%= desc %></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Health Monitoring -->
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Health Monitoring</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        Bootstrap includes built-in health monitoring for all machines:
+      </p>
+      <div class="space-y-2 text-xs text-gray-500">
+        <p><strong class="text-gray-700">Health Checks:</strong> Periodic SSH-based probes check service status, port availability, and resource usage.</p>
+        <p><strong class="text-gray-700">Health States:</strong> 🟢 Healthy, 🟡 Degraded, 🔴 Down, ⚪ Unknown</p>
+        <p><strong class="text-gray-700">Alerts:</strong> Automatic alerts generated when machines become degraded or go down. View on the Alerts page.</p>
+        <p><strong class="text-gray-700">Audit Logging:</strong> All provisioning actions, health checks, and status changes are logged to the audit trail.</p>
+      </div>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "machines" %>
+  </div>
+</div>

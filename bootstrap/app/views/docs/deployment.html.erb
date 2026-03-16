@@ -1,0 +1,136 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "deployment" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🚀 Deployment</h1>
+      <p class="mt-1 text-sm text-gray-500">How ZTLP components are deployed to machines via SSH.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">How SSH Provisioning Works</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        Bootstrap deploys ZTLP components by <strong class="text-gray-900">SSH-ing into target machines</strong>
+        and writing configuration files, install scripts, and systemd service definitions.
+      </p>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-4 mt-3">
+        <pre class="text-xs font-mono text-ztlp-700">Bootstrap Server
+  │
+  │ SSH (Net::SSH)
+  ▼
+Target Machine
+  ├─ [1] Create /etc/ztlp/ directory
+  ├─ [2] Write ztlp.toml configuration
+  ├─ [3] Write & run install script
+  │   ├─ Download ZTLP binary
+  │   ├─ Create systemd service file
+  │   └─ Reload systemd daemon
+  ├─ [4] Enable ztlp service
+  └─ [5] Start ztlp service</pre>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Deployment Methods</h2>
+      <div class="space-y-3">
+        <% [
+          ["🎯", "Single Machine", "Machine detail → Provision. Deploys all assigned roles."],
+          ["🔄", "Network Deploy", "Network page → Deploy. Provisions all pending machines at once."],
+          ["🧙", "Setup Wizard", "Guided setup: create network → add machines → review → deploy all."],
+          ["🔌", "Test Connection", "Verify SSH access before deploying. Runs hostname on remote."]
+        ].each do |icon, title, desc| %>
+          <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+            <h3 class="text-sm font-semibold text-ztlp-600 mb-1"><%= icon %> <%= title %></h3>
+            <p class="text-xs text-gray-500"><%= desc %></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">SSH Authentication</h2>
+      <p class="text-sm text-gray-600 mb-3">Bootstrap supports three SSH auth methods:</p>
+      <div class="space-y-2 text-xs text-gray-500">
+        <p><strong class="text-gray-700">Key:</strong> Paste a PEM private key in the machine's SSH Private Key field. Most secure.</p>
+        <p><strong class="text-gray-700">Password:</strong> SSH password stored encrypted in the database.</p>
+        <p><strong class="text-gray-700">Agent:</strong> Use the local SSH agent for key management.</p>
+      </div>
+      <div class="mt-3 rounded-md bg-amber-50 border border-amber-200 p-3">
+        <p class="text-xs text-amber-700">💡 Both private keys and passwords are encrypted at rest using Rails' built-in ActiveRecord encryption.</p>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">File Locations on Target</h2>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+        <pre class="text-xs font-mono text-ztlp-700">/etc/ztlp/
+  └── ztlp.toml          # Main configuration
+
+/usr/local/bin/
+  └── ztlp-{role}        # ZTLP binary (one per role)
+
+/var/log/ztlp/
+  └── {role}.log         # Service logs
+
+/etc/systemd/system/
+  └── ztlp-{role}.service  # systemd unit file</pre>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Deployment History & Audit</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        Every deployment is logged with full detail:
+      </p>
+      <ul class="text-xs text-gray-500 space-y-1 ml-4 list-disc">
+        <li><strong class="text-gray-700">Status:</strong> pending → running → success/failed</li>
+        <li><strong class="text-gray-700">Log output:</strong> Full SSH session captured</li>
+        <li><strong class="text-gray-700">Timestamps:</strong> Start, end, and duration</li>
+        <li><strong class="text-gray-700">Audit trail:</strong> All actions logged to Audit Log (viewable in UI)</li>
+      </ul>
+      <p class="text-sm text-gray-600 mt-3">
+        View on machine detail page, the Deployments page, or the Audit Log.
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Troubleshooting</h2>
+      <div class="space-y-4">
+        <% [
+          ["Connection Refused", "border-red-300", [
+            "Verify IP address is correct and reachable",
+            "Check SSH is running: ssh -p <port> <user>@<ip>",
+            "Check firewall allows inbound SSH"
+          ]],
+          ["Authentication Failed", "border-red-300", [
+            "Verify SSH user exists on target",
+            "If using key auth, paste the full PEM private key",
+            "Ensure PubkeyAuthentication yes in sshd_config"
+          ]],
+          ["Binary Download Fails", "border-amber-300", [
+            "Install script uses stub URL (releases.ztlp.io)",
+            "Host your own binaries and update ZTLP_BINARY_URL",
+            "Pre-install binaries on machines before deploying"
+          ]],
+          ["Service Won't Start", "border-amber-300", [
+            "Check logs: journalctl -u ztlp-{role} -f",
+            "Verify config: cat /etc/ztlp/ztlp.toml",
+            "Check binary: which ztlp-{role}",
+            "Check permissions: ls -la /etc/ztlp/ztlp.toml"
+          ]]
+        ].each do |title, border, items| %>
+          <div class="rounded-md bg-gray-50 border-l-4 <%= border %> p-4">
+            <h3 class="text-sm font-semibold text-gray-700 mb-1"><%= title %></h3>
+            <ul class="text-xs text-gray-500 space-y-1">
+              <% items.each do |item| %>
+                <li>• <%= item %></li>
+              <% end %>
+            </ul>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "deployment" %>
+  </div>
+</div>

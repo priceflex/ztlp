@@ -1,0 +1,54 @@
+<div class="mb-8">
+  <h1 class="text-2xl font-bold text-gray-900">📖 Documentation</h1>
+  <p class="mt-1 text-sm text-gray-500">Learn how the ZTLP Bootstrap system works — networks, machines, users, devices, and more.</p>
+</div>
+
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+  <%= link_to doc_page_path(page: "overview"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🏗️</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">System Overview</h3>
+    <p class="mt-1 text-xs text-gray-500">Architecture, key concepts, and how it all fits together.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "networks"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🌐</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Networks</h3>
+    <p class="mt-1 text-xs text-gray-500">Zones, enrollment secrets, network lifecycle and best practices.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "machines"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🖥️</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Machines & Infrastructure</h3>
+    <p class="mt-1 text-xs text-gray-500">NS, Relay, Gateway — the three roles explained in depth.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "users"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">👥</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Users</h3>
+    <p class="mt-1 text-xs text-gray-500">Network identities, Node IDs, Ed25519 keys, roles and lifecycle.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "devices"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">💻</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Devices</h3>
+    <p class="mt-1 text-xs text-gray-500">Endpoint registration, key provisioning, config downloads.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "groups"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🏷️</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Groups & Policies</h3>
+    <p class="mt-1 text-xs text-gray-500">RBAC groups, JSON policy rules, gateway access control.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "enrollment"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🎫</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Enrollment</h3>
+    <p class="mt-1 text-xs text-gray-500">Tokens, QR codes, the enrollment flow, and security.</p>
+  <% end %>
+
+  <%= link_to doc_page_path(page: "deployment"), class: "rounded-lg bg-white border border-gray-200 shadow-sm p-5 hover:border-ztlp-400 hover:shadow-md transition group" do %>
+    <div class="text-3xl mb-3">🚀</div>
+    <h3 class="text-sm font-semibold text-gray-900 group-hover:text-ztlp-600">Deployment</h3>
+    <p class="mt-1 text-xs text-gray-500">SSH provisioning, systemd services, troubleshooting.</p>
+  <% end %>
+</div>

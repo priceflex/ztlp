@@ -22,6 +22,13 @@ class DashboardController < ApplicationController
 
     @active_alerts = Alert.active.recent.limit(5)
 
+    # Relay infrastructure
+    @relay_stats = {
+      total: Machine.with_role("relay").count,
+      ready: Machine.with_role("relay").ready.count,
+      error: Machine.with_role("relay").where(status: "error").count
+    }
+
     # Identity stats
     @identity_stats = {
       users: ZtlpUser.count,

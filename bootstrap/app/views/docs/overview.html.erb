@@ -1,0 +1,134 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "overview" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🏗️ System Overview</h1>
+      <p class="mt-1 text-sm text-gray-500">What ZTLP Bootstrap is and how the pieces fit together.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">What is ZTLP Bootstrap?</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        ZTLP Bootstrap is a <strong class="text-gray-900">web-based control plane</strong> for deploying and managing
+        <strong class="text-gray-900">ZTLP (Zero-Trust Lightweight Protocol)</strong> networks. It provides a single
+        dashboard to manage your entire zero-trust infrastructure — from network creation to device enrollment.
+      </p>
+      <p class="text-sm text-gray-600">
+        Think of it as the "admin console" for your ZTLP deployment. You define networks, add machines,
+        create user identities, manage access policies, and deploy ZTLP components — all from a clean web UI.
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Architecture</h2>
+      <p class="text-sm text-gray-600 mb-4">
+        The Bootstrap Server sits at the center of your ZTLP deployment. It manages configuration and
+        provisions components onto your infrastructure via SSH.
+      </p>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-4 overflow-x-auto">
+        <pre class="text-xs font-mono text-ztlp-700">┌─────────────────────────────────────────────────┐
+│            ZTLP Bootstrap Server                │
+│           (Rails 7.1 + Tailwind)                │
+│                                                 │
+│  ┌──────────┐ ┌──────────┐ ┌────────────────┐  │
+│  │Dashboard │ │ Networks │ │ Documentation  │  │
+│  │  Wizard  │ │  Alerts  │ │   Audit Log    │  │
+│  └────┬─────┘ └────┬─────┘ └────────────────┘  │
+│       │             │                           │
+│  ┌────┴─────────────┴────────────────────────┐  │
+│  │             SQLite Database                │  │
+│  │  Networks · Machines · Deployments         │  │
+│  │  Users · Groups · Devices · Tokens         │  │
+│  │  Alerts · Audit Logs · Health Checks       │  │
+│  │  Identity Providers                        │  │
+│  └─────────────────┬─────────────────────────┘  │
+│                    │                            │
+│  ┌─────────────────┴────────────────────────┐   │
+│  │          SSH Provisioner                  │   │
+│  │  • Generate TOML configs                 │   │
+│  │  • Deploy via SSH (Net::SSH)             │   │
+│  │  • Health monitoring                     │   │
+│  └──────────────────────────────────────────┘   │
+└──────────────────┬──────────────────────────────┘
+                   │ SSH
+    ┌──────────────┼──────────────┐
+    │              │              │
+┌───┴────┐  ┌─────┴─────┐  ┌────┴─────┐
+│   NS   │  │   Relay   │  │ Gateway  │
+│ Server │  │  Server   │  │  Server  │
+│UDP 5353│  │ UDP 4433  │  │ TCP 8443 │
+└────────┘  └───────────┘  └──────────┘</pre>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Key Concepts</h2>
+      <div class="space-y-4">
+        <div class="flex gap-3">
+          <span class="text-xl flex-shrink-0">🌐</span>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900">Networks</h3>
+            <p class="text-xs text-gray-500">A trust boundary with its own zone, enrollment secret, machines, users, and groups.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <span class="text-xl flex-shrink-0">🖥️</span>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900">Machines</h3>
+            <p class="text-xs text-gray-500">Servers running ZTLP components. Three roles: Nameserver (NS), Relay, and Gateway. Machines can have multiple roles.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <span class="text-xl flex-shrink-0">👥</span>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900">Users</h3>
+            <p class="text-xs text-gray-500">Network identities with 128-bit Node IDs and Ed25519 key pairs. Not the same as web login accounts.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <span class="text-xl flex-shrink-0">💻</span>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900">Devices</h3>
+            <p class="text-xs text-gray-500">Endpoints (laptops, phones, servers) linked to users. Each device gets its own identity and keys.</p>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <span class="text-xl flex-shrink-0">🏷️</span>
+          <div>
+            <h3 class="text-sm font-semibold text-gray-900">Groups</h3>
+            <p class="text-xs text-gray-500">RBAC groups with JSON policy rules. Control what users can access through the gateway.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">How It Works</h2>
+      <ol class="space-y-3 text-sm text-gray-600">
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">1</span>
+          <span><strong class="text-gray-900">Create a Network</strong> — define your trust boundary with a zone name (or use the Setup Wizard).</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">2</span>
+          <span><strong class="text-gray-900">Add Machines</strong> — register your servers and assign roles (NS, Relay, Gateway — or multiple).</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">3</span>
+          <span><strong class="text-gray-900">Deploy Components</strong> — one-click SSH deployment writes configs and starts services.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">4</span>
+          <span><strong class="text-gray-900">Create Users & Groups</strong> — define identities and access policies.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">5</span>
+          <span><strong class="text-gray-900">Enroll Devices</strong> — generate tokens or connect an IdP for self-service enrollment.</span>
+        </li>
+      </ol>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "overview" %>
+  </div>
+</div>

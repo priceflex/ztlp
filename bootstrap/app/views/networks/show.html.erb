@@ -44,6 +44,88 @@
   </div>
 </div>
 
+<!-- Network Topology -->
+<% if @ns_machines.any? || @relays.any? || @gateways.any? %>
+<div class="bg-white shadow rounded-lg mb-8 p-6">
+  <h3 class="text-lg font-medium text-gray-900 mb-4">🔗 Network Topology</h3>
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+    <!-- NS -->
+    <div class="rounded-lg bg-purple-50 border border-purple-200 p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">NS</span>
+        <span class="text-sm font-medium text-gray-700">Nameservers (<%= @ns_machines.count %>)</span>
+      </div>
+      <% if @ns_machines.any? %>
+        <div class="space-y-2">
+          <% @ns_machines.each do |ns| %>
+            <div class="flex items-center gap-2 text-xs">
+              <%= health_status_icon(ns.health_status) %>
+              <%= link_to ns.hostname, network_machine_path(@network, ns), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
+              <span class="text-gray-400"><%= ns.ip_address %></span>
+            </div>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-xs text-gray-400">None configured</p>
+      <% end %>
+    </div>
+
+    <!-- Relays -->
+    <div class="rounded-lg bg-indigo-50 border border-indigo-200 p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">Relay</span>
+        <span class="text-sm font-medium text-gray-700">Relays (<%= @relays.count %>)</span>
+      </div>
+      <% if @relays.any? %>
+        <div class="space-y-2">
+          <% @relays.each do |relay| %>
+            <div class="flex items-center gap-2 text-xs">
+              <%= health_status_icon(relay.health_status) %>
+              <%= link_to relay.hostname, network_machine_path(@network, relay), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
+              <span class="text-gray-400"><%= relay.ip_address %></span>
+            </div>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-xs text-gray-400">None configured</p>
+      <% end %>
+    </div>
+
+    <!-- Gateways -->
+    <div class="rounded-lg bg-cyan-50 border border-cyan-200 p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-cyan-100 text-cyan-800">Gateway</span>
+        <span class="text-sm font-medium text-gray-700">Gateways (<%= @gateways.count %>)</span>
+      </div>
+      <% if @gateways.any? %>
+        <div class="space-y-2">
+          <% @gateways.each do |gw| %>
+            <div class="flex items-center gap-2 text-xs">
+              <%= health_status_icon(gw.health_status) %>
+              <%= link_to gw.hostname, network_machine_path(@network, gw), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
+              <span class="text-gray-400"><%= gw.ip_address %></span>
+            </div>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-xs text-gray-400">None configured</p>
+      <% end %>
+    </div>
+  </div>
+  <div class="flex items-center justify-center mt-3 text-xs text-gray-400">
+    <span>Clients</span>
+    <span class="mx-2">→</span>
+    <span class="text-purple-600 font-medium">NS</span>
+    <span class="mx-1 text-gray-300">|</span>
+    <span class="text-indigo-600 font-medium">Relays</span>
+    <span class="mx-2">→</span>
+    <span class="text-cyan-600 font-medium">Gateways</span>
+    <span class="mx-2">→</span>
+    <span>Services</span>
+  </div>
+</div>
+<% end %>
+
 <!-- Machines -->
 <div class="bg-white shadow rounded-lg mb-8">
   <div class="px-4 py-5 sm:px-6 flex justify-between items-center">

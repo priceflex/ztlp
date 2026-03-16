@@ -69,6 +69,78 @@
   </div>
 </div>
 
+<!-- Relay-specific Details -->
+<% if @machine.role_list.include?("relay") %>
+<div class="bg-white shadow rounded-lg mb-8 p-6">
+  <h3 class="text-lg font-medium text-gray-900 mb-4">⚡ Relay Configuration</h3>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+    <div class="rounded-md bg-indigo-50 border border-indigo-200 p-4">
+      <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Relay Settings</h4>
+      <div class="space-y-2 text-xs">
+        <div class="flex justify-between"><span class="text-gray-500">Listen Port</span><span class="font-mono text-gray-900">4433 (UDP)</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Max Connections</span><span class="font-mono text-gray-900">1,000</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Buffer Size</span><span class="font-mono text-gray-900">64 KB</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Keepalive</span><span class="font-mono text-gray-900">30s</span></div>
+      </div>
+    </div>
+    <div class="rounded-md bg-indigo-50 border border-indigo-200 p-4">
+      <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Mesh Settings</h4>
+      <div class="space-y-2 text-xs">
+        <div class="flex justify-between"><span class="text-gray-500">Mesh Mode</span><span class="font-medium text-green-600">Enabled</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Virtual Nodes</span><span class="font-mono text-gray-900">128</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Heartbeat</span><span class="font-mono text-gray-900">5s</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Probe Interval</span><span class="font-mono text-gray-900">10s</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">Admission Tokens</span><span class="font-medium text-green-600">Enabled</span></div>
+        <div class="flex justify-between"><span class="text-gray-500">RAT TTL</span><span class="font-mono text-gray-900">3,600s</span></div>
+      </div>
+    </div>
+  </div>
+  <% other_relays = @network.machines.with_role("relay").where.not(id: @machine.id) %>
+  <% ns_machines = @network.machines.with_role("ns") %>
+  <% gateways = @network.machines.with_role("gateway") %>
+  <% if other_relays.any? || ns_machines.any? || gateways.any? %>
+    <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+      <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Related Infrastructure</h4>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <% if ns_machines.any? %>
+          <div>
+            <div class="text-xs text-gray-500 mb-1">NS Servers</div>
+            <% ns_machines.each do |ns| %>
+              <div class="flex items-center gap-1 text-xs">
+                <%= health_status_icon(ns.health_status) %>
+                <%= link_to ns.hostname, network_machine_path(@network, ns), class: "text-gray-700 hover:text-ztlp-600" %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+        <% if other_relays.any? %>
+          <div>
+            <div class="text-xs text-gray-500 mb-1">Mesh Peers</div>
+            <% other_relays.each do |r| %>
+              <div class="flex items-center gap-1 text-xs">
+                <%= health_status_icon(r.health_status) %>
+                <%= link_to r.hostname, network_machine_path(@network, r), class: "text-gray-700 hover:text-ztlp-600" %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+        <% if gateways.any? %>
+          <div>
+            <div class="text-xs text-gray-500 mb-1">Gateways</div>
+            <% gateways.each do |gw| %>
+              <div class="flex items-center gap-1 text-xs">
+                <%= health_status_icon(gw.health_status) %>
+                <%= link_to gw.hostname, network_machine_path(@network, gw), class: "text-gray-700 hover:text-ztlp-600" %>
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+</div>
+<% end %>
+
 <!-- Deployment History -->
 <div class="bg-white shadow rounded-lg">
   <div class="px-4 py-5 sm:px-6">

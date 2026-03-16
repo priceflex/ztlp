@@ -1,0 +1,37 @@
+<%
+  pages = [
+    { slug: "overview", title: "Overview", icon: "🏗️" },
+    { slug: "networks", title: "Networks", icon: "🌐" },
+    { slug: "machines", title: "Machines & Infrastructure", icon: "🖥️" },
+    { slug: "users", title: "Users", icon: "👥" },
+    { slug: "devices", title: "Devices", icon: "💻" },
+    { slug: "groups", title: "Groups & Policies", icon: "🏷️" },
+    { slug: "enrollment", title: "Enrollment", icon: "🎫" },
+    { slug: "deployment", title: "Deployment", icon: "🚀" }
+  ]
+  current = local_assigns[:current_page]
+%>
+
+<nav class="w-56 flex-shrink-0">
+  <div class="sticky top-4">
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Documentation</h3>
+    <ul class="space-y-1">
+      <li>
+        <% idx_active = current.nil? %>
+        <%= link_to docs_path, class: "flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium #{idx_active ? 'bg-ztlp-50 text-ztlp-700' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'} transition" do %>
+          <span>📖</span>
+          <span>All Topics</span>
+        <% end %>
+      </li>
+      <% pages.each do |pg| %>
+        <li>
+          <% active = current == pg[:slug] %>
+          <%= link_to doc_page_path(page: pg[:slug]), class: "flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium #{active ? 'bg-ztlp-50 text-ztlp-700 font-semibold' : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'} transition" do %>
+            <span><%= pg[:icon] %></span>
+            <span><%= pg[:title] %></span>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+</nav>

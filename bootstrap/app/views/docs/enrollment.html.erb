@@ -1,0 +1,151 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "enrollment" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🎫 Enrollment</h1>
+      <p class="mt-1 text-sm text-gray-500">Enrollment tokens and IdP integration let users self-register devices.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Enrollment Methods</h2>
+      <p class="text-sm text-gray-600 mb-3">Bootstrap supports two enrollment paths:</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+          <h3 class="text-sm font-semibold text-ztlp-600 mb-2">🎫 Token-based Enrollment</h3>
+          <p class="text-xs text-gray-500">Admin generates a token, shares it with users, they run a CLI command. Simple, universal, works without any external services.</p>
+        </div>
+        <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+          <h3 class="text-sm font-semibold text-ztlp-600 mb-2">🔑 IdP Enrollment (SSO)</h3>
+          <p class="text-xs text-gray-500">Connect Google Workspace, Okta, or any OIDC provider. Users authenticate with corporate credentials via a web flow, device is auto-provisioned.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Token Enrollment Flow</h2>
+      <ol class="space-y-4 text-sm text-gray-600">
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">1</span>
+          <div>
+            <strong class="text-gray-900">Admin creates a token</strong>
+            <p class="text-xs text-gray-500 mt-1">Network → Tokens → New Token. Set max uses and expiration as needed.</p>
+          </div>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">2</span>
+          <div>
+            <strong class="text-gray-900">Share the token</strong>
+            <p class="text-xs text-gray-500 mt-1">Send the token value or enrollment URI via a secure channel.</p>
+          </div>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">3</span>
+          <div>
+            <strong class="text-gray-900">User runs enrollment</strong>
+            <div class="mt-2 rounded-md bg-gray-50 border border-gray-200 p-3">
+              <pre class="text-xs font-mono text-ztlp-700">ztlp setup --token &lt;TOKEN_VALUE&gt;</pre>
+            </div>
+          </div>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">4</span>
+          <div>
+            <strong class="text-gray-900">Device provisioned</strong>
+            <p class="text-xs text-gray-500 mt-1">Config written, keys generated, agent started. Device is now on the ZTLP network.</p>
+          </div>
+        </li>
+      </ol>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Enrollment URIs & QR Codes</h2>
+      <p class="text-sm text-gray-600 mb-3">Tokens can be encoded as URIs for easy sharing:</p>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-3 mb-3">
+        <pre class="text-xs font-mono text-ztlp-700 break-all">ztlp://enroll/eyJ0IjoiYWJjMTIzLi4uIiwieiI6InByb2QuY29tcGFueS56dGxwIn0</pre>
+      </div>
+      <p class="text-sm text-gray-600 mb-3">The URI contains Base64url-encoded JSON:</p>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-3">
+        <pre class="text-xs font-mono text-ztlp-700">{
+  "t": "token_value",
+  "z": "prod.company.ztlp",
+  "n": "Production",
+  "ns": "10.0.1.5"
+}</pre>
+      </div>
+      <p class="text-sm text-gray-600 mt-3">
+        The ZTLP CLI supports QR codes via <code class="bg-gray-100 px-1 rounded">qr2term</code> for mobile enrollment.
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">IdP Enrollment (SSO)</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        For organizations using identity providers, Bootstrap supports OIDC-based enrollment:
+      </p>
+      <ol class="space-y-2 text-sm text-gray-600">
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">1</span>
+          <span>Admin configures an Identity Provider (Network → IdP settings)</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">2</span>
+          <span>User visits the enrollment URL (<code class="bg-gray-100 px-1 rounded">/networks/:id/enroll</code>)</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">3</span>
+          <span>Redirected to IdP (Google, Okta, etc.) for authentication</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-ztlp-100 text-ztlp-700 text-xs font-bold flex-shrink-0">4</span>
+          <span>On success: ZTLP user and device auto-created, config download provided</span>
+        </li>
+      </ol>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Token Lifecycle</h2>
+      <div class="space-y-3">
+        <% [
+          ["Active", "bg-green-100 text-green-800", "Valid and can be used. Not expired, not exhausted."],
+          ["Exhausted", "bg-yellow-100 text-yellow-800", "Reached max_uses limit. No more enrollments."],
+          ["Expired", "bg-gray-100 text-gray-800", "Past expiration date. No longer valid."],
+          ["Revoked", "bg-red-100 text-red-800", "Manually revoked by admin."]
+        ].each do |label, color, desc| %>
+          <div class="flex items-start gap-3">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium <%= color %>"><%= label %></span>
+            <p class="text-xs text-gray-500"><%= desc %></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Security Considerations</h2>
+      <ul class="space-y-2 text-sm text-gray-600">
+        <li class="flex gap-2">
+          <span class="text-amber-500 flex-shrink-0">⚠️</span>
+          <span>Tokens are bearer credentials — share via secure channels only.</span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-green-600 flex-shrink-0">✓</span>
+          <span>Use <strong>max_uses: 1</strong> for one-time tokens (individual onboarding).</span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-green-600 flex-shrink-0">✓</span>
+          <span>Set <strong>short expiration</strong> (24-48h) for batch enrollment.</span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-green-600 flex-shrink-0">✓</span>
+          <span>Prefer IdP enrollment for organizations — no shared tokens needed.</span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-green-600 flex-shrink-0">✓</span>
+          <span>Monitor uses_count for unauthorized enrollment attempts.</span>
+        </li>
+      </ul>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "enrollment" %>
+  </div>
+</div>

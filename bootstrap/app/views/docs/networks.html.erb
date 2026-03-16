@@ -1,0 +1,104 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "networks" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🌐 Networks</h1>
+      <p class="mt-1 text-sm text-gray-500">Networks are the top-level trust boundary in ZTLP. Everything else lives inside a network.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">What is a Network?</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        A ZTLP Network represents a <strong class="text-gray-900">trust boundary</strong> — a logical grouping of
+        machines, users, devices, and access policies. Each network has its own DNS zone, enrollment secret,
+        and independent identity namespace.
+      </p>
+      <p class="text-sm text-gray-600">
+        You might have one network for production, another for development, and another for a client's infrastructure.
+        The Setup Wizard can help you create your first network in minutes.
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Network Properties</h2>
+      <div class="space-y-4">
+        <div>
+          <h3 class="text-sm font-semibold text-ztlp-600">Name</h3>
+          <p class="text-xs text-gray-500 mt-1">A human-readable label (e.g., "Production", "Client-Acme").</p>
+        </div>
+        <div>
+          <h3 class="text-sm font-semibold text-ztlp-600">Zone</h3>
+          <p class="text-xs text-gray-500 mt-1">
+            The ZTLP-NS DNS zone (e.g., <code class="bg-gray-100 px-1 rounded text-ztlp-700">prod.company.ztlp</code>).
+            Used by NS for identity resolution and by clients for service discovery.
+            Machines are addressable as <code class="bg-gray-100 px-1 rounded text-ztlp-700">hostname.zone</code>.
+          </p>
+        </div>
+        <div>
+          <h3 class="text-sm font-semibold text-ztlp-600">Enrollment Secret</h3>
+          <p class="text-xs text-gray-500 mt-1">Auto-generated 32-byte hex string. Used to:</p>
+          <ul class="text-xs text-gray-500 mt-1 ml-4 list-disc space-y-1">
+            <li>Encrypt device private keys at rest (AES-256-GCM)</li>
+            <li>Authenticate enrollment requests from the ZTLP CLI</li>
+            <li>Generate Relay Admission Tokens (HMAC-BLAKE2s)</li>
+          </ul>
+          <p class="text-xs text-amber-600 mt-2">⚠️ Treat this like a root secret. Anyone with it can decrypt stored device keys.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Network Statuses</h2>
+      <div class="space-y-3">
+        <div class="flex items-start gap-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Created</span>
+          <p class="text-xs text-gray-500">Initial state. Network is configured but not yet deployed.</p>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Active</span>
+          <p class="text-xs text-gray-500">Live and operational. Machines deployed, users can enroll, traffic flows.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Zone Naming Best Practices</h2>
+      <ul class="text-sm text-gray-600 space-y-2">
+        <li class="flex gap-2">
+          <span class="text-green-600">✓</span>
+          <span>Use hierarchical names: <code class="bg-gray-100 px-1 rounded text-ztlp-700">prod.acme.ztlp</code>, <code class="bg-gray-100 px-1 rounded text-ztlp-700">dev.acme.ztlp</code></span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-green-600">✓</span>
+          <span>One network per trust boundary — don't mix production and development</span>
+        </li>
+        <li class="flex gap-2">
+          <span class="text-red-600">✗</span>
+          <span>Avoid spaces, uppercase, or special characters in zone names</span>
+        </li>
+      </ul>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">What's Inside a Network?</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <% [
+          ["🖥️", "Machines", "Servers running ZTLP components (NS, Relay, Gateway)."],
+          ["👥", "ZTLP Users", "Network identities with Node IDs and cryptographic keys."],
+          ["💻", "Devices", "Endpoints (laptops, phones) registered to users."],
+          ["🏷️", "Groups", "RBAC groups with gateway access policies."],
+          ["🎫", "Enrollment Tokens", "Tokens for self-service device enrollment."],
+          ["🔑", "Identity Providers", "External IdP (Google, Okta) for SSO enrollment."]
+        ].each do |icon, title, desc| %>
+          <div class="rounded-md bg-gray-50 border border-gray-200 p-3">
+            <div class="text-sm font-semibold text-gray-900"><%= icon %> <%= title %></div>
+            <p class="text-xs text-gray-500 mt-1"><%= desc %></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "networks" %>
+  </div>
+</div>

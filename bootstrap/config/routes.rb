@@ -79,6 +79,10 @@ Rails.application.routes.draw do
     get "alerts", to: "alerts#index", as: :alerts
   end
 
+  # Documentation
+  get "docs", to: "docs#index"
+  get "docs/:page", to: "docs#show", as: :doc_page
+
   # Health check endpoint
   get "up" => "rails/health#show", as: :rails_health_check
 end

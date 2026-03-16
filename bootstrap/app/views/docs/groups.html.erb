@@ -1,0 +1,102 @@
+<div class="flex gap-8">
+  <%= render "docs/sidebar", current_page: "groups" %>
+
+  <div class="flex-1 min-w-0">
+    <div class="mb-8">
+      <h1 class="text-2xl font-bold text-gray-900">🏷️ Groups & Policies</h1>
+      <p class="mt-1 text-sm text-gray-500">Groups provide role-based access control (RBAC) for gateway traffic.</p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">What are Groups?</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        Groups are the <strong class="text-gray-900">RBAC mechanism</strong> in ZTLP. They define what network resources
+        a set of users can access through the gateway. Create groups with policy rules and add users to them.
+      </p>
+      <p class="text-sm text-gray-600">
+        When a user connects through a gateway, the gateway checks their group memberships and evaluates
+        the combined policies to determine if the connection is allowed.
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Policy Rules Format</h2>
+      <p class="text-sm text-gray-600 mb-3">
+        Policy rules are <strong class="text-gray-900">JSON</strong> with
+        <code class="bg-gray-100 px-1 rounded text-ztlp-700">allow</code> and
+        <code class="bg-gray-100 px-1 rounded text-ztlp-700">deny</code> rules:
+      </p>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-3 mb-3">
+        <pre class="text-xs font-mono text-ztlp-700">{
+  "allow": [
+    { "target": "pattern", "ports": [port1, port2] }
+  ],
+  "deny": [
+    { "target": "pattern", "ports": [port1, port2] }
+  ]
+}</pre>
+      </div>
+      <div class="space-y-2 text-xs text-gray-500">
+        <p><strong class="text-gray-700">target:</strong> Hostname pattern. Wildcards: <code class="bg-gray-100 px-1 rounded">*.corp</code> matches <code class="bg-gray-100 px-1 rounded">web.corp</code>, <code class="bg-gray-100 px-1 rounded">db.corp</code>, etc.</p>
+        <p><strong class="text-gray-700">ports:</strong> Array of port numbers, or <code class="bg-gray-100 px-1 rounded text-ztlp-700">"all"</code> for unrestricted.</p>
+        <p><strong class="text-gray-700">Evaluation:</strong> Deny first → then allow → default deny if nothing matches.</p>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Common Policy Patterns</h2>
+      <div class="space-y-4">
+        <% [
+          ["Web Access Only", '{"allow": [{"target": "*.corp", "ports": [80, 443]}]}', "HTTP/HTTPS on any .corp host."],
+          ["Database Team", '{"allow": [{"target": "db.internal", "ports": [5432, 3306]}, {"target": "redis.internal", "ports": [6379]}]}', "PostgreSQL, MySQL, Redis access."],
+          ["Full Access (Admin)", '{"allow": [{"target": "*", "ports": "all"}]}', "Unrestricted. Use sparingly."],
+          ["Allow with Exceptions", '{"deny": [{"target": "secret.internal", "ports": "all"}], "allow": [{"target": "*.internal", "ports": [22, 80, 443]}]}', "SSH/HTTP/HTTPS on all internal hosts except secret.internal."]
+        ].each do |title, json, desc| %>
+          <div>
+            <h3 class="text-sm font-semibold text-ztlp-600 mb-2"><%= title %></h3>
+            <div class="rounded-md bg-gray-50 border border-gray-200 p-3">
+              <pre class="text-xs font-mono text-ztlp-700"><%= json %></pre>
+            </div>
+            <p class="text-xs text-gray-500 mt-1"><%= desc %></p>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">Group Membership</h2>
+      <p class="text-sm text-gray-600 mb-3">Users are added to groups through memberships with a role:</p>
+      <div class="space-y-2">
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">Member</span>
+          <span class="text-xs text-gray-500">Standard. Subject to the group's policy rules.</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">Admin</span>
+          <span class="text-xs text-gray-500">Can add/remove other members from the group.</span>
+        </div>
+      </div>
+      <p class="text-sm text-gray-600 mt-3">
+        Users in <strong class="text-gray-900">multiple groups</strong> get the union of all allow rules (after denies).
+      </p>
+    </div>
+
+    <div class="rounded-lg bg-white border border-gray-200 shadow-sm p-6 mb-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-3">How Policies Are Enforced</h2>
+      <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+        <pre class="text-xs font-mono text-ztlp-700">Client connects to Gateway
+  │
+  ├─ Noise_XX handshake → identity verified
+  ├─ Look up user's groups
+  ├─ Collect all policy rules
+  ├─ Check DENY rules first
+  │   └─ Match → CONNECTION REFUSED
+  ├─ Check ALLOW rules
+  │   └─ Match → CONNECTION ALLOWED
+  └─ No match → CONNECTION REFUSED (default deny)</pre>
+      </div>
+    </div>
+
+    <%= render "docs/prev_next", current_page: "groups" %>
+  </div>
+</div>

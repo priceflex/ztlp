@@ -83,6 +83,27 @@
 </div>
 <% end %>
 
+<!-- Relay Infrastructure -->
+<% if @relay_stats[:total] > 0 %>
+<div class="mb-8">
+  <h2 class="text-lg font-medium text-gray-900 mb-4">⚡ Relay Infrastructure</h2>
+  <div class="grid grid-cols-1 gap-5 sm:grid-cols-3">
+    <div class="rounded-lg bg-indigo-50 px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-indigo-700">Total Relays</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-indigo-900"><%= @relay_stats[:total] %></dd>
+    </div>
+    <div class="rounded-lg bg-green-50 px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-green-700">Ready</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-green-600"><%= @relay_stats[:ready] %></dd>
+    </div>
+    <div class="rounded-lg bg-<%= @relay_stats[:error] > 0 ? 'red' : 'gray' %>-50 px-4 py-5 shadow sm:p-6">
+      <dt class="truncate text-sm font-medium text-<%= @relay_stats[:error] > 0 ? 'red' : 'gray' %>-700">Errors</dt>
+      <dd class="mt-1 text-3xl font-semibold tracking-tight text-<%= @relay_stats[:error] > 0 ? 'red' : 'gray' %>-600"><%= @relay_stats[:error] %></dd>
+    </div>
+  </div>
+</div>
+<% end %>
+
 <!-- Identity Summary -->
 <div class="mb-8">
   <h2 class="text-lg font-medium text-gray-900 mb-4">🔐 Identity & Enrollment</h2>

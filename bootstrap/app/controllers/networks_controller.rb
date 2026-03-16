@@ -9,6 +9,9 @@ class NetworksController < ApplicationController
     @machines = @network.machines.includes(:deployments)
     @recent_deployments = @network.deployments.recent.limit(10)
     @active_tokens = @network.enrollment_tokens.active
+    @relays = @network.machines.with_role("relay")
+    @ns_machines = @network.machines.with_role("ns")
+    @gateways = @network.machines.with_role("gateway")
   end
 
   def new

@@ -16,14 +16,29 @@ defmodule ZtlpGateway.Config do
   - `:ns_server_host` — ZTLP-NS server address tuple (default: `{127, 0, 0, 1}`)
   - `:ns_server_port` — ZTLP-NS server UDP port (default: 23096)
   - `:ns_query_timeout_ms` — timeout for NS queries in ms (default: 2000)
+
+  ## Environment Variables
+
+  - `ZTLP_GATEWAY_PORT` — override listen port
+  - `ZTLP_GATEWAY_BACKENDS` — comma-separated `name:host:port` entries
+    Example: `metrics:127.0.0.1:9103,api:10.0.0.1:8080`
+  - `ZTLP_GATEWAY_POLICIES` — comma-separated `identity:service` entries
+    Use `*` for wildcard (any authenticated client).
+    Example: `*:metrics,admin.zone:api`
+  - `ZTLP_GATEWAY_SESSION_TIMEOUT_MS` — idle timeout per session
+  - `ZTLP_GATEWAY_MAX_SESSIONS` — max concurrent sessions
   """
 
   @doc """
   Get a configuration value by key.
 
   Falls back to a default if not set in the application environment.
+  Supports env var overrides for `:port`, `:backends`, `:policies`,
+  `:session_timeout_ms`, and `:max_sessions`.
   """
   @spec get(atom()) :: term()
+  def get(key)
+
   def get(:port) do
     case System.get_env("ZTLP_GATEWAY_PORT") do
       nil -> Application.get_env(:ztlp_gateway, :port, 23097)
@@ -31,8 +46,60 @@ defmodule ZtlpGateway.Config do
     end
   end
 
-  def get(:backends), do: Application.get_env(:ztlp_gateway, :backends, [])
-  def get(:policies), do: Application.get_env(:ztlp_gateway, :policies, [])
+  def get(:backends) do
+    case System.get_env("ZTLP_GATEWAY_BACKENDS") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :backends, [])
+
+      env ->
+        env
+        |> String.split(",", trim: true)
+        |> Enum.map(fn entry ->
+          case String.split(entry, ":", parts: 3) do
+            [name, host, port] ->
+              %{name: name, host: String.to_charlist(host), port: String.to_integer(port)}
+
+            _ ->
+              nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+    end
+  end
+
+  def get(:policies) do
+    case System.get_env("ZTLP_GATEWAY_POLICIES") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :policies, [])
+
+      env ->
+        # Parse entries and group by service
+        entries =
+          env
+          |> String.split(",", trim: true)
+          |> Enum.map(fn entry ->
+            case String.split(entry, ":", parts: 2) do
+              [identity, service] -> {service, identity}
+              _ -> nil
+            end
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        # Group by service and build policy rules
+        entries
+        |> Enum.group_by(fn {svc, _} -> svc end, fn {_, id} -> id end)
+        |> Enum.map(fn {service, identities} ->
+          allow =
+            if Enum.member?(identities, "*") do
+              :all
+            else
+              identities
+            end
+
+          %{service: service, allow: allow}
+        end)
+    end
+  end
 
   def get(:session_timeout_ms) do
     case System.get_env("ZTLP_GATEWAY_SESSION_TIMEOUT_MS") do

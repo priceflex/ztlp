@@ -46,10 +46,18 @@ RUN apt-get update -qq && \
 COPY --from=build /usr/local/bundle /usr/local/bundle
 COPY --from=build /rails /rails
 
+# Copy ZTLP CLI binary for ZTLP-native health checks and metrics tunneling.
+# The binary is pre-built for x86_64-linux from proto/target/release/ztlp.
+# If the binary doesn't exist, the health checker falls back to SSH.
+COPY bin/ztlp /usr/local/bin/ztlp
+
 # Create data directory for SQLite persistence and ensure Rails directories exist
 RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db && \
     useradd rails --create-home --shell /bin/bash && \
-    chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data
+    chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data && \
+    chmod +x /usr/local/bin/ztlp && \
+    mkdir -p /home/rails/.ztlp && \
+    chown rails:rails /home/rails/.ztlp
 
 USER rails:rails
 

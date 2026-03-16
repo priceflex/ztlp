@@ -274,4 +274,15 @@ class SshProvisionerTest < ActiveSupport::TestCase
     dep.reload
     assert_equal "failed", dep.status
   end
+
+  # ── Gateway sidecar ────────────────────────────────────────
+
+  test "GATEWAY_SIDECAR_PORT is defined" do
+    assert_equal 23098, SshProvisioner::GATEWAY_SIDECAR_PORT
+  end
+
+  test "NS config includes ZTLP_ENROLLMENT_SECRET when present" do
+    config = @provisioner.send(:generate_config, "ns")
+    assert_includes config, "ZTLP_ENROLLMENT_SECRET="
+  end
 end

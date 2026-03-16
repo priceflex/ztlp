@@ -99,8 +99,15 @@ class HealthChecker
         port_check = check_port(ssh, config[:port], config[:protocol])
         metrics[:port_listening] = port_check
 
-        # 4. Query Prometheus metrics endpoint
-        prom_result = query_prometheus(ssh, config[:metrics_port])
+        # 4. Query Prometheus metrics — try ZTLP tunnel first, fall back to SSH
+        prom_result = query_prometheus_via_ztlp(config[:metrics_port])
+        if prom_result[:available]
+          metrics[:metrics_source] = "ztlp"
+        else
+          # Fall back to SSH-based metrics query
+          prom_result = query_prometheus(ssh, config[:metrics_port])
+          metrics[:metrics_source] = "ssh" if prom_result[:available]
+        end
         metrics[:metrics_available] = prom_result[:available]
         metrics.merge!(prom_result[:data]) if prom_result[:available]
 
@@ -188,7 +195,19 @@ class HealthChecker
     result[:exit_status] == 0
   end
 
-  # Query Prometheus metrics endpoint
+  # Query Prometheus metrics via ZTLP tunnel (no open ports required)
+  def query_prometheus_via_ztlp(metrics_port)
+    return { available: false, data: {} } unless ZtlpTunnel.available? && ZtlpTunnel.enrolled?
+
+    gateway_addr = "#{@machine.ip_address}:#{SshProvisioner::GATEWAY_SIDECAR_PORT}"
+    tunnel = ZtlpTunnel.new(gateway_addr: gateway_addr, service: "metrics")
+    tunnel.fetch_metrics
+  rescue StandardError => e
+    Rails.logger.debug("[HealthChecker] ZTLP tunnel failed for #{@machine.hostname}: #{e.message}")
+    { available: false, data: {} }
+  end
+
+  # Query Prometheus metrics endpoint via SSH (fallback)
   def query_prometheus(ssh, metrics_port)
     result = exec_ssh(ssh, "curl -sf --max-time 5 http://localhost:#{metrics_port}/metrics 2>/dev/null")
 

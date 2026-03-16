@@ -31,6 +31,9 @@ class SshProvisioner
     "gateway" => { tcp: 23098, metrics: 9102 }
   }.freeze
 
+  # Gateway sidecar port — each machine gets a gateway for ZTLP-native metrics access
+  GATEWAY_SIDECAR_PORT = 23098
+
   attr_reader :machine, :deployment, :log_lines
 
   def initialize(machine, deployment: nil)
@@ -60,6 +63,11 @@ class SshProvisioner
       generate_and_upload_config(ssh, component)
       start_container(ssh, component)
       verify_health(ssh, component)
+
+      # Deploy gateway sidecar for metrics access via ZTLP
+      if %w[ns relay].include?(component)
+        deploy_gateway_sidecar(ssh, component)
+      end
     end
 
     deployment.finish!("success")
@@ -447,6 +455,78 @@ class SshProvisioner
     result = exec_remote(ssh, "ss -tuln | grep :#{port} || true")
     log "Port check: #{result[:stdout].strip.presence || 'binding...'}"
     log "Container #{container_name} is running"
+  end
+
+  # Deploy a ZTLP gateway sidecar alongside NS/relay for ZTLP-native metrics access.
+  # This allows Bootstrap to query metrics through the encrypted ZTLP overlay instead
+  # of requiring open TCP ports or SSH tunnels.
+  def deploy_gateway_sidecar(ssh, primary_component)
+    log "Deploying gateway sidecar for ZTLP metrics access..."
+
+    # Check if gateway image is already loaded
+    result = exec_remote(ssh, sudo("docker images --format '{{.Repository}}:{{.Tag}}' | grep ztlp-gateway || true"))
+    if result[:stdout].strip.empty?
+      # Need to load the gateway image
+      tar = find_image_tar("gateway")
+      if tar
+        upload_and_load_image(ssh, tar, "priceflex/ztlp-gateway:latest")
+      else
+        log "⚠ Gateway image not available — skipping sidecar. Build with: docker build -f gateway/Dockerfile -t priceflex/ztlp-gateway ."
+        return
+      end
+    end
+
+    # Generate gateway sidecar config — proxies metrics to localhost
+    metrics_port = ZTLP_PORTS[primary_component][:metrics]
+    network = machine.network
+    ns_machines = network.ns_machines
+
+    sidecar_config = [
+      "ZTLP_GATEWAY_PORT=#{GATEWAY_SIDECAR_PORT}",
+      "ZTLP_GATEWAY_LOG_FORMAT=json",
+      "ZTLP_GATEWAY_BACKENDS=metrics:127.0.0.1:#{metrics_port}",
+      "ZTLP_GATEWAY_POLICIES=*:metrics"  # Allow any authenticated identity
+    ]
+    if ns_machines.any?
+      sidecar_config << "ZTLP_GATEWAY_NS_HOST=#{ns_machines.first.ip_address}"
+      sidecar_config << "ZTLP_GATEWAY_NS_PORT=#{ZTLP_PORTS['ns'][:udp]}"
+    end
+    config_content = sidecar_config.join("\n")
+
+    # Upload config
+    config_path = "/etc/ztlp/gateway-sidecar.env"
+    exec_remote(ssh, sudo("tee #{config_path} > /dev/null << 'ZTLP_CONFIG_EOF'\n#{config_content}\nZTLP_CONFIG_EOF"))
+    exec_remote(ssh, sudo("chmod 600 #{config_path}"))
+
+    # Stop existing sidecar if running
+    exec_remote(ssh, sudo("docker rm -f ztlp-gateway-sidecar 2>/dev/null"))
+
+    # Start gateway sidecar — uses host network so it can reach localhost metrics
+    cmd = [
+      "docker run -d",
+      "--name ztlp-gateway-sidecar",
+      "--restart unless-stopped",
+      "--network host",
+      "--env-file #{config_path}",
+      "--log-driver json-file --log-opt max-size=10m --log-opt max-file=2",
+      "priceflex/ztlp-gateway:latest"
+    ].join(" ")
+
+    result = exec_remote(ssh, sudo(cmd))
+    if result[:exit_status] != 0
+      log "⚠ Gateway sidecar failed to start: #{result[:stderr].strip}. Metrics will use SSH fallback."
+      return
+    end
+
+    container_id = result[:stdout].strip[0..11]
+    log "Gateway sidecar started: #{container_id} (port #{GATEWAY_SIDECAR_PORT}/UDP → metrics:#{metrics_port})"
+
+    # Register the gateway in NS for service discovery
+    svc_name = "metrics.#{machine.hostname}.#{network.zone}"
+    log "Gateway sidecar provides: #{svc_name}"
+  rescue StandardError => e
+    # Don't fail the main deployment if sidecar fails
+    log "⚠ Gateway sidecar deployment failed: #{e.message}. Metrics will use SSH fallback."
   end
 
   def exec_remote(ssh, command, timeout: 60)

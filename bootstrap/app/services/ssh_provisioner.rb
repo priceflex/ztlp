@@ -463,15 +463,13 @@ class SshProvisioner
   def deploy_gateway_sidecar(ssh, primary_component)
     log "Deploying gateway sidecar for ZTLP metrics access..."
 
-    # Check if gateway image is already loaded
+    # Load gateway image (pull from registry or transfer via SCP)
     result = exec_remote(ssh, sudo("docker images --format '{{.Repository}}:{{.Tag}}' | grep ztlp-gateway || true"))
     if result[:stdout].strip.empty?
-      # Need to load the gateway image
-      tar = find_image_tar("gateway")
-      if tar
-        upload_and_load_image(ssh, tar, "priceflex/ztlp-gateway:latest")
-      else
-        log "⚠ Gateway image not available — skipping sidecar. Build with: docker build -f gateway/Dockerfile -t priceflex/ztlp-gateway ."
+      begin
+        load_or_pull_image(ssh, "gateway")
+      rescue ProvisionError => e
+        log "⚠ Gateway image not available: #{e.message}. Build with: docker build -f gateway/Dockerfile -t priceflex/ztlp-gateway ."
         return
       end
     end

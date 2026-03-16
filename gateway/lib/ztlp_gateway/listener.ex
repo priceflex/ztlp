@@ -133,13 +133,16 @@ defmodule ZtlpGateway.Listener do
           _ -> :crypto.strong_rand_bytes(12)
         end
 
+      # Extract service name from HELLO packet's dst_svc_id field
+      service = Packet.extract_service_name(packet_data)
+
       opts = %{
         session_id: session_id,
         client_addr: client_addr,
         udp_socket: state.socket,
         static_pub: state.static_pub,
         static_priv: state.static_priv,
-        service: "default"
+        service: service
       }
 
       case DynamicSupervisor.start_child(

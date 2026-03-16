@@ -497,26 +497,45 @@ defmodule ZtlpGateway.Handshake do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Derive transport keys after the handshake completes.
+  Derive transport keys after handshake completion.
 
-  Uses the final chaining key to derive two symmetric keys:
-  - `i2r_key` — initiator-to-responder (client→gateway)
-  - `r2i_key` — responder-to-initiator (gateway→client)
+  When `session_id` is provided, uses ZTLP's custom BLAKE2s-based key derivation
+  (matching the Rust client's `handshake.rs finalize()`): sorted public keys +
+  directional labels + session_id → BLAKE2s-256. Without session_id, falls back
+  to standard Noise Split (HKDF from chaining key).
 
   The responder uses `i2r_key` to decrypt incoming data and
   `r2i_key` to encrypt outgoing data.
 
   Must only be called after `phase == :complete`.
   """
-  @spec split(state()) :: {:ok, transport_keys()} | {:error, :handshake_incomplete}
-  def split(%{phase: :complete, ck: ck}) do
-    # Noise Split: HKDF(ck, <<>>) → two transport keys
+  def split(state, session_id \\ nil)
+
+  def split(%{phase: :complete, s_pub: our_pub, rs: remote_pub} = _state, session_id)
+      when is_binary(session_id) do
+    # ZTLP custom key derivation (must match Rust handshake.rs finalize):
+    # Sort public keys lexicographically, then BLAKE2s-256 with directional labels
+    shared_material =
+      if our_pub <= remote_pub do
+        our_pub <> remote_pub
+      else
+        remote_pub <> our_pub
+      end
+
+    i2r_key = :crypto.hash(:blake2s, shared_material <> "ztlp_initiator_to_responder" <> session_id)
+    r2i_key = :crypto.hash(:blake2s, shared_material <> "ztlp_responder_to_initiator" <> session_id)
+
+    {:ok, %{i2r_key: i2r_key, r2i_key: r2i_key}}
+  end
+
+  def split(%{phase: :complete, ck: ck}, _session_id) do
+    # Standard Noise Split: HKDF(ck, <<>>) → two transport keys
     {i2r_key, r2i_key} = Crypto.hkdf_noise(ck, <<>>)
 
     {:ok, %{i2r_key: i2r_key, r2i_key: r2i_key}}
   end
 
-  def split(_state), do: {:error, :handshake_incomplete}
+  def split(_state, _session_id), do: {:error, :handshake_incomplete}
 
   # ---------------------------------------------------------------------------
   # Internal helpers

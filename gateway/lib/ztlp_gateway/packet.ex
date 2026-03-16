@@ -168,6 +168,23 @@ defmodule ZtlpGateway.Packet do
   def extract_session_id(_), do: {:error, :cannot_extract_session_id}
 
   @doc """
+  Extract the service name from a handshake packet's dst_svc_id field.
+  Returns the service name as a trimmed UTF-8 string (null bytes stripped).
+  """
+  def extract_service_name(
+        <<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16, _msg_type::8,
+          _crypto_suite::16, _key_id::16, _session_id::binary-size(12),
+          _packet_seq::64, _timestamp::64, _src_node_id::binary-size(16),
+          dst_svc_id::binary-size(16), _::binary>>
+      ) do
+    # Strip trailing null bytes and decode as UTF-8
+    name = dst_svc_id |> :binary.replace(<<0>>, <<>>, [:global]) |> String.trim()
+    if name == "", do: "default", else: name
+  end
+
+  def extract_service_name(_), do: "default"
+
+  @doc """
   Extract the HdrLen field to determine packet type.
 
   Returns `:data` (HdrLen=12), `:handshake` (HdrLen=24), or `:unknown`.
@@ -355,6 +372,42 @@ defmodule ZtlpGateway.Packet do
     >>
 
     <<header::binary, pkt.payload::binary>>
+  end
+
+  @doc """
+  Compute the ZTLP header auth tag for a serialized data packet.
+  Uses ChaCha20-Poly1305 in MAC-only mode (encrypt empty plaintext with header AAD).
+  The AAD is bytes [0..26) ++ bytes [42..46) (skipping the auth tag field).
+  Returns the 16-byte Poly1305 tag.
+  """
+  @spec compute_data_auth_tag(binary(), binary()) :: binary()
+  def compute_data_auth_tag(key, serialized_packet) when byte_size(key) == 32 do
+    # AAD = pre-tag bytes [0..26) + post-tag bytes [42..46)
+    pre_tag = binary_part(serialized_packet, 0, 26)
+    post_tag = binary_part(serialized_packet, 42, 4)
+    aad = pre_tag <> post_tag
+    nonce = <<0::96>>
+
+    # Encrypt empty plaintext with AAD — the tag IS the auth tag
+    {<<>>, tag} = :crypto.crypto_one_time_aead(:chacha20_poly1305, key, nonce, <<>>, aad, true)
+    tag
+  end
+
+  @doc """
+  Serialize a data packet with a proper header auth tag computed from the given key.
+  """
+  @spec serialize_data_with_auth(data_packet(), binary()) :: binary()
+  def serialize_data_with_auth(pkt, key) do
+    # First serialize with placeholder auth tag
+    pkt = %{pkt | header_auth_tag: <<0::128>>}
+    raw = serialize_data(pkt)
+
+    # Compute the real auth tag
+    auth_tag = compute_data_auth_tag(key, raw)
+
+    # Replace the placeholder (bytes 26..42) with the real tag
+    <<pre::binary-size(26), _::binary-size(16), post::binary>> = raw
+    <<pre::binary, auth_tag::binary, post::binary>>
   end
 
   @doc """

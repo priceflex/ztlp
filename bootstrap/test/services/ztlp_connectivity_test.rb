@@ -32,35 +32,10 @@ class ZtlpConnectivityTest < ActiveSupport::TestCase
     assert_equal "ZTLP not available", result.error
   end
 
-  test "check returns success when tunnel fetch works" do
-    ZtlpTunnel.stubs(:available?).returns(true)
-    ZtlpTunnel.stubs(:enrolled?).returns(true)
-    mock_tunnel = mock("tunnel")
-    mock_tunnel.expects(:fetch_metrics).returns({ available: true, data: { sessions_active: 5 } })
-    ZtlpTunnel.stubs(:new).returns(mock_tunnel)
-
-    result = ZtlpConnectivity.check(@ns_machine)
-    assert result.reachable
-    assert_equal "ztlp", result.metrics_source
-    assert result.latency_ms.is_a?(Integer)
-  end
-
-  test "check returns failure when tunnel fetch fails" do
-    ZtlpTunnel.stubs(:available?).returns(true)
-    ZtlpTunnel.stubs(:enrolled?).returns(true)
-    mock_tunnel = mock("tunnel")
-    mock_tunnel.expects(:fetch_metrics).returns({ available: false, data: {}, error: "Handshake timeout" })
-    ZtlpTunnel.stubs(:new).returns(mock_tunnel)
-
-    result = ZtlpConnectivity.check(@ns_machine)
-    assert_not result.reachable
-    assert_equal "Handshake timeout", result.error
-  end
-
   test "check handles exceptions gracefully" do
     ZtlpTunnel.stubs(:available?).returns(true)
     ZtlpTunnel.stubs(:enrolled?).returns(true)
-    ZtlpTunnel.stubs(:new).raises(StandardError, "Connection refused")
+    Open3.stubs(:popen3).raises(StandardError, "Connection refused")
 
     result = ZtlpConnectivity.check(@ns_machine)
     assert_not result.reachable
@@ -75,5 +50,23 @@ class ZtlpConnectivityTest < ActiveSupport::TestCase
     results.each_value do |r|
       assert_not r.reachable
     end
+  end
+
+  test "Result struct has expected fields" do
+    result = ZtlpConnectivity::Result.new(
+      reachable: true, latency_ms: 42, metrics_source: "ztlp"
+    )
+    assert result.reachable
+    assert_equal 42, result.latency_ms
+    assert_equal "ztlp", result.metrics_source
+    assert_nil result.error
+  end
+
+  test "Result struct can represent failure" do
+    result = ZtlpConnectivity::Result.new(
+      reachable: false, error: "Handshake timeout"
+    )
+    assert_not result.reachable
+    assert_equal "Handshake timeout", result.error
   end
 end

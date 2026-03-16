@@ -115,8 +115,11 @@ defmodule ZtlpGateway.Session do
       # gateway→client encrypt key
       r2i_key: nil,
       # Sequence numbers for replay protection
-      recv_seq: 0,
+      # recv_seq starts at -1 so that seq=0 (first data packet) passes the > check
+      recv_seq: -1,
       send_seq: 0,
+      # Tunnel framing: data_seq for ordered reassembly
+      send_data_seq: 0,
       # Backend connection
       backend_pid: nil,
       # Stats
@@ -134,6 +137,7 @@ defmodule ZtlpGateway.Session do
   @impl true
   def handle_cast({:packet, packet_data, from_addr}, state) do
     Stats.bytes_received(byte_size(packet_data))
+    Logger.info("[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}")
 
     # Reset idle timeout on every packet
     state = reset_timeout(state)
@@ -251,7 +255,7 @@ defmodule ZtlpGateway.Session do
 
           {hs, _payload} ->
             # Derive transport keys
-            {:ok, keys} = Handshake.split(hs)
+            {:ok, keys} = Handshake.split(hs, state.session_id)
 
             # Extract client identity from handshake
             remote_static = hs.rs
@@ -321,9 +325,16 @@ defmodule ZtlpGateway.Session do
   # Data packets — decrypt and forward to backend
   # ---------------------------------------------------------------------------
 
+  # Tunnel frame types (must match Rust tunnel.rs constants)
+  @frame_data 0x00
+  @frame_ack 0x01
+  @frame_nack 0x03
+  @frame_reset 0x04
+
   defp handle_data_packet(packet_data, _from_addr, state) do
     case Packet.parse(packet_data) do
-      {:ok, %{type: :data, sequence: seq, payload: encrypted_payload}} ->
+      {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}} when type in [:data, :data_compact] ->
+        Logger.info("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} recv_seq=#{state.recv_seq}")
         # Replay protection: only accept packets with sequence > last seen
         if seq > state.recv_seq do
           # Decrypt the payload using the initiator→responder key
@@ -338,34 +349,105 @@ defmodule ZtlpGateway.Session do
 
             case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
               :error ->
-                Logger.warning("[Session] Decrypt failed for seq #{seq}")
+                Logger.warning("[Session] Decrypt FAILED for seq #{seq}, key_len=#{byte_size(state.i2r_key)}, ct_len=#{ct_len}, tag_len=#{byte_size(tag)}")
                 {:noreply, state}
 
               plaintext ->
-                # Forward to backend
-                if state.backend_pid do
-                  Backend.send_data(state.backend_pid, plaintext)
-                end
-
-                new_state = %{
-                  state
-                  | recv_seq: seq,
-                    bytes_in: state.bytes_in + byte_size(packet_data)
-                }
-
-                {:noreply, new_state}
+                Logger.info("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
+                state = %{state | recv_seq: seq, bytes_in: state.bytes_in + byte_size(packet_data)}
+                handle_tunnel_frame(plaintext, state)
             end
           else
+            Logger.warning("[Session] Payload too short: #{byte_size(encrypted_payload)} bytes")
             {:noreply, state}
           end
         else
-          # Replayed or out-of-order packet — silently drop
+          Logger.info("[Session] Replayed/out-of-order: seq=#{seq} <= recv_seq=#{state.recv_seq}")
           {:noreply, state}
         end
 
-      _ ->
+      {:ok, other} ->
+        Logger.info("[Session] Non-data packet in established phase: type=#{Map.get(other, :type, :unknown)}")
+        {:noreply, state}
+
+      {:error, reason} ->
+        Logger.warning("[Session] Packet parse failed: #{inspect(reason)}")
         {:noreply, state}
     end
+  end
+
+  # Parse tunnel frame: [frame_type(1) | data_seq(8) | payload(...)]
+  defp handle_tunnel_frame(<<@frame_data, data_seq::big-64, payload::binary>>, state) do
+    Logger.info("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
+    # Strip tunnel framing, forward raw TCP data to backend
+    if state.backend_pid && byte_size(payload) > 0 do
+      Logger.info("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+      Backend.send_data(state.backend_pid, payload)
+    end
+
+    # Send ACK for this packet
+    state = send_ack(state.recv_seq, state)
+
+    {:noreply, state}
+  end
+
+  defp handle_tunnel_frame(<<@frame_ack, _rest::binary>>, state) do
+    # ACK from client — ignore for now (gateway doesn't retransmit)
+    {:noreply, state}
+  end
+
+  defp handle_tunnel_frame(<<@frame_nack, _rest::binary>>, state) do
+    # NACK from client — ignore for now
+    {:noreply, state}
+  end
+
+  defp handle_tunnel_frame(<<@frame_reset, _rest::binary>>, state) do
+    # Client is starting a new TCP stream — reconnect backend
+    Logger.info("[Session] Received RESET frame, reconnecting backend")
+    if state.backend_pid && Process.alive?(state.backend_pid) do
+      Backend.close(state.backend_pid)
+    end
+
+    backends = ZtlpGateway.Config.get(:backends)
+
+    case find_backend(backends, state.service) do
+      {:ok, %{host: host, port: port}} ->
+        case Backend.start_link({host, port, self()}) do
+          {:ok, new_pid} ->
+            {:noreply, %{state | backend_pid: new_pid, send_data_seq: 0}}
+
+          {:error, _reason} ->
+            terminate_session(state, :backend_reconnect_failed)
+        end
+
+      :error ->
+        terminate_session(state, :no_backend)
+    end
+  end
+
+  defp handle_tunnel_frame(_other, state) do
+    # Unknown frame type — ignore
+    {:noreply, state}
+  end
+
+  # Send an ACK frame back to the client (returns updated state)
+  defp send_ack(packet_seq, state) do
+    seq = state.send_seq + 1
+    nonce = <<0::32, seq::little-64>>
+
+    # ACK frame: [FRAME_ACK(1) | acked_packet_seq(8 BE)]
+    ack_frame = <<@frame_ack, packet_seq::big-64>>
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, ack_frame, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+
+    send_udp(state, packet)
+    %{state | send_seq: seq}
   end
 
   # ---------------------------------------------------------------------------
@@ -374,25 +456,25 @@ defmodule ZtlpGateway.Session do
 
   defp encrypt_and_send(plaintext, state) do
     seq = state.send_seq + 1
+    data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
 
-    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, plaintext, <<>>)
+    # Wrap in tunnel frame: [FRAME_DATA(1) | data_seq(8 BE) | payload]
+    framed = <<@frame_data, data_seq::big-64, plaintext::binary>>
+
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)
     encrypted = ct <> tag
 
-    # Build a data packet with a dummy auth tag (12 bytes of zeros for prototype)
-    # In production, the header auth tag would be computed over the header fields
-    header_auth_tag = :crypto.strong_rand_bytes(16)
     pkt = Packet.build_data(state.session_id, seq,
-      header_auth_tag: header_auth_tag,
       payload: encrypted,
       payload_len: byte_size(encrypted)
     )
-    packet = Packet.serialize(pkt)
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))
 
-    {:ok, %{state | send_seq: seq, bytes_out: state.bytes_out + byte_size(packet)}}
+    {:ok, %{state | send_seq: seq, send_data_seq: data_seq + 1, bytes_out: state.bytes_out + byte_size(packet)}}
   end
 
   # ---------------------------------------------------------------------------

@@ -31,16 +31,54 @@ class ZtlpConnectivity
     # Find a relay to route through (required for hosts that can't receive inbound UDP)
     relay_addr = find_relay_addr(machine)
 
-    tunnel = ZtlpTunnel.new(gateway_addr: gateway_addr, service: "metrics", relay_addr: relay_addr)
-    result = tunnel.fetch_metrics
+    relay_addr = find_relay_addr(machine)
+    identity_path = File.join(IDENTITY_DIR, "identity.json")
+
+    cmd = [
+      ZTLP_CLI, "connect", gateway_addr,
+      "--key", identity_path,
+      "--service", "metrics"
+    ]
+    cmd += ["--relay", relay_addr] if relay_addr
+
+    # Run ztlp connect and check if handshake succeeds
+    stdin, stdout, stderr, wait_thread = Open3.popen3(*cmd)
+    pid = wait_thread.pid
+
+    output = +""
+    deadline = Time.now + CONNECT_TIMEOUT
+    while Time.now < deadline
+      readable = IO.select([stdout, stderr], nil, nil, 0.5)
+      if readable
+        readable[0].each do |io|
+          begin
+            output << io.read_nonblock(4096)
+          rescue IO::WaitReadable, EOFError
+            # continue
+          end
+        end
+      end
+
+      if output.include?("Handshake complete")
+        elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).to_i
+        # Extract latency from output if available
+        if output =~ /Handshake latency:\s*([\d.]+)ms/
+          latency = Regexp.last_match(1).to_f.round.to_i
+        else
+          latency = elapsed
+        end
+        Process.kill("TERM", pid) rescue nil
+        Process.wait(pid) rescue nil
+        [stdin, stdout, stderr].each { |io| io&.close rescue nil }
+        return Result.new(reachable: true, latency_ms: latency, metrics_source: "ztlp")
+      end
+    end
 
     elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).to_i
-
-    if result[:available]
-      Result.new(reachable: true, latency_ms: elapsed, metrics_source: "ztlp")
-    else
-      Result.new(reachable: false, latency_ms: elapsed, error: result[:error])
-    end
+    Process.kill("TERM", pid) rescue nil
+    Process.wait(pid) rescue nil
+    [stdin, stdout, stderr].each { |io| io&.close rescue nil }
+    Result.new(reachable: false, latency_ms: elapsed, error: "Handshake timeout")
   rescue StandardError => e
     Result.new(reachable: false, error: e.message)
   end

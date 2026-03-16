@@ -8,6 +8,7 @@ services:
       - "${PORT:-3000}:3000"
     volumes:
       - bootstrap_data:/data
+      - ${ZTLP_IMAGES_PATH:-/tmp/ztlp-images}:/ztlp-images:ro
     environment:
       - RAILS_ENV=production
       - RAILS_LOG_TO_STDOUT=1

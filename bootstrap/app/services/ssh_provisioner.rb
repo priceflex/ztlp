@@ -203,25 +203,30 @@ class SshProvisioner
   end
 
   def install_docker(ssh)
-    commands = [
-      "apt-get update -qq",
-      "apt-get install -y -qq curl ca-certificates gnupg",
-      "install -m 0755 -d /etc/apt/keyrings",
-      "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
-      "chmod a+r /etc/apt/keyrings/docker.gpg",
-      'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list',
-      "apt-get update -qq",
-      "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io",
-      "systemctl enable docker",
-      "systemctl start docker"
-    ]
+    # Use a single shell script to avoid sudo+redirect issues.
+    # When sudo wraps individual commands, shell redirects (>) run as
+    # the unprivileged user and fail to write to /etc. A heredoc script
+    # run under sudo -E bash avoids this.
+    script = <<~'BASH'
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq curl ca-certificates gnupg
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update -qq
+      apt-get install -y -qq docker-ce docker-ce-cli containerd.io
+      systemctl enable docker
+      systemctl start docker
+    BASH
 
-    commands.each do |cmd|
-      log "  $ #{cmd}"
-      result = exec_remote(ssh, sudo(cmd))
-      if result[:exit_status] != 0 && !cmd.include?("gpg") && !cmd.include?("chmod")
-        raise ProvisionError, "Docker install failed at: #{cmd}\n#{result[:stderr]}"
-      end
+    log "Installing Docker via script..."
+    result = exec_remote(ssh, "#{sudo('bash')} << 'DOCKER_INSTALL_EOF'\n#{script}DOCKER_INSTALL_EOF")
+
+    if result[:exit_status] != 0
+      raise ProvisionError, "Docker install failed:\n#{result[:stderr]}"
     end
 
     # Add SSH user to docker group so subsequent commands can run without sudo
@@ -251,72 +256,59 @@ class SshProvisioner
     transfer_image(ssh, component)
   end
 
-  # Build image locally (if needed) and SCP it to the remote machine
+  # Transfer a pre-saved image tar to the remote machine via SCP and load it
   def transfer_image(ssh, component)
     image = "#{DOCKER_IMAGES[component]}:latest"
 
-    # Check if image exists locally
-    local_check = `docker image inspect #{image} 2>/dev/null`
-    if local_check.empty? || $?.exitstatus != 0
-      log "Image #{image} not found locally, building..."
-      build_image_locally(component)
-    end
-
-    # Save image to a temp tar file
-    tar_path = "/tmp/ztlp-#{component}-image.tar"
-    log "Saving image to #{tar_path}..."
-    system("docker save #{image} > #{tar_path}")
-    raise ProvisionError, "Failed to save Docker image #{image}" unless $?.success?
+    # Look for pre-saved image tar (gzipped or plain)
+    tar_path = find_image_tar(component)
+    raise ProvisionError, "No image tar found for #{component}. " \
+      "Save it with: docker save #{image} | gzip > /ztlp-images/ztlp-#{component}.tar.gz" unless tar_path
 
     tar_size = File.size(tar_path)
-    log "Image size: #{(tar_size / 1024.0 / 1024.0).round(1)} MB"
+    compressed = tar_path.end_with?(".gz")
+    log "Found image tar: #{tar_path} (#{(tar_size / 1024.0 / 1024.0).round(1)} MB#{compressed ? ', gzipped' : ''})"
 
     # SCP the tar to remote
-    remote_tar = "/tmp/ztlp-#{component}-image.tar"
+    remote_tar = "/tmp/ztlp-#{component}-image.tar#{compressed ? '.gz' : ''}"
     log "Uploading image to remote (this may take a few minutes)..."
 
     ssh_opts = ssh_options
     Net::SCP.upload!(machine.ip_address, machine.ssh_user,
       tar_path, remote_tar, ssh: ssh_opts)
 
-    # Load on remote
+    # Load on remote (decompress if needed)
     log "Loading image on remote..."
-    result = exec_remote(ssh, sudo("docker load < #{remote_tar}"))
+    # Use sudo bash -c to ensure sudo covers the entire pipeline
+    load_cmd = if compressed
+      sudo("bash -c 'gunzip -c #{remote_tar} | docker load'")
+    else
+      sudo("bash -c 'docker load < #{remote_tar}'")
+    end
+
+    result = exec_remote(ssh, load_cmd)
     if result[:exit_status] != 0
       raise ProvisionError, "Failed to load Docker image: #{result[:stderr]}"
     end
 
     # Clean up remote tar
     exec_remote(ssh, "rm -f #{remote_tar}")
-    # Clean up local tar
-    File.delete(tar_path) rescue nil
 
     log "Image #{image} loaded on remote"
   end
 
-  # Build a ZTLP component Docker image from the monorepo source
-  def build_image_locally(component)
-    image = "#{DOCKER_IMAGES[component]}:latest"
-    source_dir = File.expand_path("../../../#{component}", __dir__) # ztlp/<component>/
+  # Search for a pre-saved image tar file in known locations
+  def find_image_tar(component)
+    search_paths = [
+      "/ztlp-images/ztlp-#{component}.tar.gz",
+      "/ztlp-images/ztlp-#{component}.tar",
+      "/tmp/ztlp-images/ztlp-#{component}.tar.gz",
+      "/tmp/ztlp-images/ztlp-#{component}.tar",
+      Rails.root.join("tmp", "ztlp-#{component}.tar.gz").to_s,
+      Rails.root.join("tmp", "ztlp-#{component}.tar").to_s
+    ]
 
-    # Fall back to monorepo sibling directory structure
-    unless File.directory?(source_dir) && File.exist?(File.join(source_dir, "Dockerfile"))
-      # Try the workspace-level monorepo
-      workspace_dir = ENV.fetch("ZTLP_MONOREPO_PATH", "/home/trs/.openclaw/workspace/ztlp")
-      source_dir = File.join(workspace_dir, component)
-    end
-
-    unless File.directory?(source_dir) && File.exist?(File.join(source_dir, "Dockerfile"))
-      raise ProvisionError, "Cannot find Dockerfile for #{component} at #{source_dir}. " \
-        "Build the image manually with: docker build -t #{image} ./#{component}"
-    end
-
-    log "Building #{image} from #{source_dir}..."
-    output = `docker build -t #{image} #{source_dir} 2>&1`
-    unless $?.success?
-      raise ProvisionError, "Failed to build #{image}:\n#{output.lines.last(10).join}"
-    end
-    log "Image #{image} built successfully"
+    search_paths.find { |p| File.exist?(p) }
   end
 
   def generate_and_upload_config(ssh, component)
@@ -469,6 +461,11 @@ class SshProvisioner
     end
 
     channel.wait
+
+    # Force UTF-8 encoding for log storage (SSH output may be ASCII-8BIT)
+    stdout.force_encoding("UTF-8").scrub!("?")
+    stderr.force_encoding("UTF-8").scrub!("?")
+
     deployment&.append_log("$ #{command}")
     deployment&.append_log(stdout) if stdout.present?
     deployment&.append_log(stderr) if stderr.present?
@@ -478,10 +475,11 @@ class SshProvisioner
   end
 
   def log(message)
-    @log_lines << "[#{Time.current.strftime('%H:%M:%S')}] #{message}"
-    deployment&.append_log(message)
+    safe_msg = message.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
+    @log_lines << "[#{Time.current.strftime('%H:%M:%S')}] #{safe_msg}"
+    deployment&.append_log(safe_msg)
     deployment&.save
-    Rails.logger.info("[SshProvisioner] #{message}")
+    Rails.logger.info("[SshProvisioner] #{safe_msg}")
   end
 
   def audit!(action, status: "success", details: nil)

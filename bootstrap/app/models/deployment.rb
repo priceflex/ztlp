@@ -26,7 +26,8 @@ class Deployment < ApplicationRecord
   end
 
   def append_log(line)
-    self.log = (log || "") + line + "\n"
+    safe_line = line.to_s.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
+    self.log = ((log || "") + safe_line + "\n").encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
   end
 
   def finish!(new_status)

@@ -197,6 +197,20 @@ const REASSEMBLY_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// If the sender receives no ACK for this long, abort.
 const SENDER_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Hard maximum time a bridge can spend waiting for the send window to open.
+/// Unlike `SENDER_ACK_TIMEOUT` (which resets on RTO retransmit), this is a
+/// monotonic deadline: once the sender enters window-stall, it MUST make
+/// progress (receive a new ACK that opens the window) within this duration
+/// or the bridge aborts. This prevents infinite retransmit loops where the
+/// RTO keeps resetting the ACK timeout.
+const SENDER_WINDOW_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Maximum number of RTO-driven retransmit cycles for the same stall.
+/// If the sender fires RTO this many times without any new ACK advancing
+/// the window, the bridge aborts. This is a safety net complementing
+/// `SENDER_WINDOW_STALL_LIMIT`.
+const MAX_RTO_RETRANSMIT_CYCLES: u32 = 10;
+
 /// After sending FIN, wait this long for remaining buffered packets to drain.
 #[allow(dead_code)]
 const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1119,6 +1133,19 @@ async fn run_bridge_inner(
         // uses data_seq for ordering, not the packet header's packet_seq.
         let mut data_seq: u64 = 0;
 
+        // ── Window stall tracking ─────────────────────────────────────
+        // Monotonic deadline: once the sender enters window-stall (can't
+        // send because window is full), it must make progress within
+        // SENDER_WINDOW_STALL_LIMIT or the bridge aborts. This prevents
+        // infinite retransmit loops where the RTO keeps resetting the
+        // softer SENDER_ACK_TIMEOUT.
+        let mut window_stall_start: Option<Instant> = None;
+        // Count RTO cycles during a single window stall episode.
+        let mut rto_cycles_in_stall: u32 = 0;
+        // Track the last_acked_seq value when stall started, to detect
+        // whether any new ACK arrived (real progress).
+        let mut stall_start_acked: Option<u64> = None;
+
         loop {
             // ── Check for retransmit requests before reading new TCP data ──
             // Process any pending NACK-triggered retransmissions.
@@ -1356,6 +1383,61 @@ async fn run_bridge_inner(
                 if window_avail_raw == 0 {
                     had_window_stall = true;
 
+                    // ── Monotonic stall tracking ──────────────────────────
+                    // Start tracking when we first enter window stall.
+                    // Reset only when a NEW ACK arrives (real progress).
+                    let current_acked = {
+                        let guard = last_acked_seq_reader.lock().await;
+                        *guard
+                    };
+                    if window_stall_start.is_none() {
+                        window_stall_start = Some(Instant::now());
+                        rto_cycles_in_stall = 0;
+                        stall_start_acked = current_acked;
+                        debug!(
+                            "sender: entering window stall (data_seq={}, acked={:?})",
+                            data_seq, current_acked
+                        );
+                    } else {
+                        // Check if a new ACK arrived since stall started
+                        let made_progress = match (stall_start_acked, current_acked) {
+                            (Some(start), Some(now)) => now > start,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        };
+                        if made_progress {
+                            // New ACK arrived — reset stall tracking
+                            window_stall_start = Some(Instant::now());
+                            rto_cycles_in_stall = 0;
+                            stall_start_acked = current_acked;
+                            debug!(
+                                "sender: window stall progress (acked={:?}), resetting stall timer",
+                                current_acked
+                            );
+                        }
+                    }
+
+                    // ── Hard stall limit (monotonic, cannot be reset by RTO) ──
+                    if let Some(stall_start) = window_stall_start {
+                        if stall_start.elapsed() > SENDER_WINDOW_STALL_LIMIT {
+                            warn!(
+                                "sender window stall limit reached ({:?} with no new ACK, {} RTO cycles)",
+                                SENDER_WINDOW_STALL_LIMIT, rto_cycles_in_stall
+                            );
+                            return Err("sender window stall limit — no progress".into());
+                        }
+                    }
+
+                    // ── RTO cycle limit ───────────────────────────────────
+                    // If we've fired too many RTOs without any new ACK, abort.
+                    if rto_cycles_in_stall >= MAX_RTO_RETRANSMIT_CYCLES {
+                        warn!(
+                            "sender: {} RTO retransmit cycles with no ACK progress, aborting",
+                            rto_cycles_in_stall
+                        );
+                        return Err("sender max RTO retransmit cycles exceeded".into());
+                    }
+
                     if last_ack_check.elapsed() > SENDER_ACK_TIMEOUT {
                         warn!(
                             "sender ACK timeout ({:?} with no window progress)",
@@ -1376,6 +1458,8 @@ async fn run_bridge_inner(
                         };
                         let rto_dur = std::time::Duration::from_millis(rto.max(MIN_RTO_MS) as u64);
                         if last_ack_check.elapsed() > rto_dur {
+                            rto_cycles_in_stall += 1;
+
                             let old_cwnd = {
                                 let mut cc = congestion_sender.lock().await;
                                 let old = cc.cwnd;
@@ -1387,8 +1471,8 @@ async fn run_bridge_inner(
                                 cc.cwnd
                             };
                             debug!(
-                                "RTO loss detection: no ACK for {:?}, cwnd {:.0} → {:.0}",
-                                rto_dur, old_cwnd, new_cwnd
+                                "RTO loss detection: no ACK for {:?}, cwnd {:.0} → {:.0} (stall cycle {})",
+                                rto_dur, old_cwnd, new_cwnd, rto_cycles_in_stall
                             );
 
                             // Retransmit the earliest unacked packets to recover
@@ -1416,7 +1500,7 @@ async fn run_bridge_inner(
                             }
 
                             // Reset the ACK check so we don't immediately
-                            // trigger another RTO
+                            // trigger another RTO (but NOT window_stall_start)
                             last_ack_check = Instant::now();
                         }
                     }
@@ -1553,6 +1637,9 @@ async fn run_bridge_inner(
 
                 // Reset ACK timeout on progress
                 last_ack_check = Instant::now();
+                // Window opened — clear stall tracking
+                window_stall_start = None;
+                rto_cycles_in_stall = 0;
 
                 // Yield between sub-batches to let the tokio runtime
                 // service the receiver task. With 7MB socket buffers,
@@ -1596,8 +1683,11 @@ async fn run_bridge_inner(
             tx_stats.log();
             stats_tx.record_tx(&tx_stats);
 
-            // Reset the ACK timeout tracker
+            // Reset the ACK timeout tracker (batch sent successfully)
             last_ack_check = Instant::now();
+            // Full batch sent — clear any stall tracking
+            window_stall_start = None;
+            rto_cycles_in_stall = 0;
         }
     };
 

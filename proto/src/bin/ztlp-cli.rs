@@ -2880,7 +2880,36 @@ async fn cmd_listen(
                 }
                 Err(e) => {
                     eprintln!("{} {}", c_red("✗ tunnel error:"), e);
-                    break;
+                    // Don't exit — the ZTLP session is still valid.
+                    // The client may open a new TCP connection and send RESET.
+                    // Wait for it so subsequent transfers can succeed.
+                    eprintln!("{}", c_dim("waiting for client to reconnect..."));
+                    match wait_for_reset_buffered(
+                        &node,
+                        session_id,
+                        from1,
+                        Duration::from_secs(300),
+                    )
+                    .await
+                    {
+                        Ok(reset_result) if reset_result.reset_received => {
+                            eprintln!(
+                                "{} (buffered {} packets)",
+                                c_cyan("↻ Remote started new TCP stream — reconnecting to backend"),
+                                reset_result.buffered_packets.len(),
+                            );
+                            pending_packets = reset_result.buffered_packets;
+                            continue;
+                        }
+                        Ok(_) => {
+                            eprintln!("{}", c_dim("idle timeout after error, listener exiting"));
+                            break;
+                        }
+                        Err(e2) => {
+                            eprintln!("{} {}", c_red("✗ error waiting for reset:"), e2);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -5236,7 +5265,9 @@ async fn cmd_scan(
     include_udp: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tcp_ports: Vec<u16> = if let Some(p) = ports_arg {
-        p.split(',').filter_map(|s| s.trim().parse::<u16>().ok()).collect()
+        p.split(',')
+            .filter_map(|s| s.trim().parse::<u16>().ok())
+            .collect()
     } else {
         let mut v: Vec<u16> = SCAN_DEFAULT_PORTS.to_vec();
         if !v.contains(&ztlp_port) {

@@ -23,10 +23,11 @@ class ZtlpTunnel
 
   attr_reader :gateway_addr, :service, :local_port
 
-  def initialize(gateway_addr:, service: "metrics", ns_server: nil)
+  def initialize(gateway_addr:, service: "metrics", ns_server: nil, relay_addr: nil)
     @gateway_addr = gateway_addr
     @service = service
     @ns_server = ns_server
+    @relay_addr = relay_addr
     @local_port = find_free_port
     @pid = nil
     @stdin = nil
@@ -85,6 +86,7 @@ class ZtlpTunnel
       "-L", "#{@local_port}:127.0.0.1:0"  # Local forward; remote port from gateway backend
     ]
     cmd += ["--ns", @ns_server] if @ns_server
+    cmd += ["--relay", @relay_addr] if @relay_addr
 
     @stdin, @stdout, @stderr, @wait_thread = Open3.popen3(*cmd)
     @pid = @wait_thread.pid

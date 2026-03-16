@@ -20,6 +20,7 @@ class ZtlpConnectivity
   end
 
   # Test connectivity to a machine's gateway sidecar via ZTLP tunnel.
+  # Automatically routes through the relay if available (for UDP-hostile NATs).
   # Returns a Result struct.
   def self.check(machine, gateway_port: SshProvisioner::GATEWAY_SIDECAR_PORT)
     return Result.new(reachable: false, error: "ZTLP not available") unless available?
@@ -27,7 +28,10 @@ class ZtlpConnectivity
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
 
-    tunnel = ZtlpTunnel.new(gateway_addr: gateway_addr, service: "metrics")
+    # Find a relay to route through (required for hosts that can't receive inbound UDP)
+    relay_addr = find_relay_addr(machine)
+
+    tunnel = ZtlpTunnel.new(gateway_addr: gateway_addr, service: "metrics", relay_addr: relay_addr)
     result = tunnel.fetch_metrics
 
     elapsed = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).to_i
@@ -57,6 +61,7 @@ class ZtlpConnectivity
 
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
+    relay_addr = find_relay_addr(machine)
     identity_path = File.join(IDENTITY_DIR, "identity.json")
 
     # Use ztlp connect with a very short timeout — we just want to see if handshake succeeds
@@ -65,6 +70,7 @@ class ZtlpConnectivity
       "--key", identity_path,
       "--service", "metrics"
     ]
+    cmd += ["--relay", relay_addr] if relay_addr
 
     pid = nil
     begin
@@ -107,4 +113,29 @@ class ZtlpConnectivity
   rescue StandardError => e
     Result.new(reachable: false, error: e.message)
   end
+
+  # Find a relay address for routing ZTLP connections.
+  # Returns "host:port" string or nil if no relay found.
+  def self.find_relay_addr(machine)
+    network = machine.network
+    return nil unless network
+
+    relay = network.machines
+                   .where("roles LIKE ?", "%relay%")
+                   .where.not(id: machine.id)
+                   .where.not(status: "offline")
+                   .first
+
+    # If the target IS a relay, use it as its own relay (relay has local gateway sidecar)
+    relay ||= machine if machine.role_list.include?("relay")
+
+    return nil unless relay
+
+    relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
+    "#{relay.ip_address}:#{relay_port}"
+  rescue StandardError
+    nil
+  end
+
+  private_class_method :find_relay_addr
 end

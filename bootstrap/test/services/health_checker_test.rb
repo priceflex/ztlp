@@ -129,21 +129,26 @@ class HealthCheckerTest < ActiveSupport::TestCase
 
   test "parse_prometheus_metrics extracts ZTLP metrics" do
     text = <<~PROM
-      # HELP ztlp_sessions_active Active sessions
-      ztlp_sessions_active 42
-      # HELP ztlp_packets_per_sec Packets per second
-      ztlp_packets_per_sec 1234.5
-      ztlp_ns_records_count 100
-      process_cpu_seconds_total 3.14
-      process_resident_memory_bytes 52428800
+      # HELP ztlp_relay_active_sessions Active relay sessions
+      ztlp_relay_active_sessions 42
+      ztlp_relay_uptime_seconds 7611
+      ztlp_relay_packets_total{result="passed"} 208
+      ztlp_relay_packets_forwarded_total 197
+      ztlp_ns_records_total 100
+      ztlp_ns_cluster_members 3
+      beam_memory_bytes{kind="total"} 52428800
+      beam_process_count 95
     PROM
 
     result = @checker.send(:parse_prometheus_metrics, text)
     assert_equal 42, result[:sessions_active]
-    assert_in_delta 1234.5, result[:packets_per_sec], 0.1
-    assert_equal 100, result[:ns_records_count]
-    assert_in_delta 3.14, result[:cpu_seconds], 0.01
+    assert_equal 7611, result[:uptime_seconds]
+    assert_equal 208, result[:packets_passed]
+    assert_equal 197, result[:packets_forwarded]
+    assert_equal 100, result[:ns_records]
+    assert_equal 3, result[:ns_cluster_members]
     assert_equal 52428800, result[:memory_bytes]
+    assert_equal 95, result[:beam_processes]
   end
 
   test "parse_prometheus_metrics handles empty text" do

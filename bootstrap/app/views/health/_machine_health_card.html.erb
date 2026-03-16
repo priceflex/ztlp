@@ -32,9 +32,39 @@
               Sessions: <%= metrics["sessions_active"] %>
             </span>
           <% end %>
-          <% if metrics["packets_per_sec"] %>
+          <% if metrics["packets_passed"] %>
             <span class="inline-flex items-center rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
-              Pkt/s: <%= metrics["packets_per_sec"] %>
+              Pkts: <%= number_with_delimiter(metrics["packets_passed"]) %>
+            </span>
+          <% end %>
+          <% if metrics["packets_forwarded"] %>
+            <span class="inline-flex items-center rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+              Fwd: <%= number_with_delimiter(metrics["packets_forwarded"]) %>
+            </span>
+          <% end %>
+          <% if metrics["ns_records"] %>
+            <span class="inline-flex items-center rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">
+              Records: <%= metrics["ns_records"] %>
+            </span>
+          <% end %>
+          <% if metrics["ns_cluster_members"] %>
+            <span class="inline-flex items-center rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">
+              Cluster: <%= metrics["ns_cluster_members"] %>
+            </span>
+          <% end %>
+          <% if metrics["handshakes_ok"] %>
+            <span class="inline-flex items-center rounded bg-green-50 px-2 py-0.5 text-xs text-green-700">
+              Handshakes: <%= number_with_delimiter(metrics["handshakes_ok"]) %>
+            </span>
+          <% end %>
+          <% if metrics["uptime_seconds"] %>
+            <span class="inline-flex items-center rounded bg-gray-50 px-2 py-0.5 text-xs text-gray-600">
+              Up: <%= distance_of_time_in_words(metrics["uptime_seconds"].to_i) %>
+            </span>
+          <% end %>
+          <% if metrics["memory_bytes"] %>
+            <span class="inline-flex items-center rounded bg-gray-50 px-2 py-0.5 text-xs text-gray-600">
+              Mem: <%= number_to_human_size(metrics["memory_bytes"].to_i) %>
             </span>
           <% end %>
           <% if metrics["cpu_percent"] %>
@@ -45,6 +75,11 @@
           <% if metrics["memory_usage"] %>
             <span class="inline-flex items-center rounded bg-gray-50 px-2 py-0.5 text-xs text-gray-600">
               Mem: <%= metrics["memory_usage"] %>
+            </span>
+          <% end %>
+          <% if metrics["metrics_source"] %>
+            <span class="inline-flex items-center rounded <%= metrics["metrics_source"] == "ztlp" ? "bg-emerald-50 text-emerald-700" : "bg-yellow-50 text-yellow-700" %> px-2 py-0.5 text-xs">
+              via <%= metrics["metrics_source"].upcase %>
             </span>
           <% end %>
         </div>

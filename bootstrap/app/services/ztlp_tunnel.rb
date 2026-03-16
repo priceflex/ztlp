@@ -142,23 +142,50 @@ class ZtlpTunnel
       line = line.strip
       next if line.empty? || line.start_with?("#")
 
-      parts = line.split(/\s+/)
-      next unless parts.length >= 2
+      # Split metric{labels} value → key includes labels
+      if line =~ /^([a-zA-Z_:][a-zA-Z0-9_:{}=",. -]*)\s+([\d.eE+-]+)/
+        key = Regexp.last_match(1)
+        value = Regexp.last_match(2)
 
-      key = parts[0]
-      value = parts[1]
+        case key
+        # Relay metrics
+        when /ztlp_relay_active_sessions/
+          data[:sessions_active] = value.to_i
+        when /ztlp_relay_uptime_seconds/
+          data[:uptime_seconds] = value.to_f.to_i
+        when /ztlp_relay_packets_total\{result="passed"\}/
+          data[:packets_passed] = value.to_i
+        when /ztlp_relay_packets_forwarded_total/
+          data[:packets_forwarded] = value.to_i
+        when /ztlp_relay_packets_total\{result="dropped_l1"\}/
+          data[:dropped_l1] = value.to_i
+        when /ztlp_relay_packets_total\{result="dropped_l2"\}/
+          data[:dropped_l2] = value.to_i
 
-      case key
-      when /ztlp_sessions_active/
-        data[:sessions_active] = value.to_i
-      when /ztlp_packets_total/, /ztlp_packets_per_sec/
-        data[:packets_per_sec] = value.to_f
-      when /ztlp_ns_records_count/
-        data[:ns_records_count] = value.to_i
-      when /process_cpu_seconds_total/
-        data[:cpu_seconds] = value.to_f
-      when /process_resident_memory_bytes/
-        data[:memory_bytes] = value.to_i
+        # NS metrics
+        when /ztlp_ns_records_total/
+          data[:ns_records] = value.to_i
+        when /ztlp_ns_uptime_seconds/
+          data[:uptime_seconds] = value.to_f.to_i
+        when /ztlp_ns_ratelimit_rejected_total/
+          data[:ns_ratelimit_rejected] = value.to_i
+        when /ztlp_ns_cluster_members$/
+          data[:ns_cluster_members] = value.to_i
+
+        # Gateway metrics
+        when /ztlp_gateway_sessions/
+          data[:sessions_active] = value.to_i
+        when /ztlp_gateway_handshakes_ok/
+          data[:handshakes_ok] = value.to_i
+        when /ztlp_gateway_policy_denials/
+          data[:policy_denials] = value.to_i
+
+        # BEAM resource metrics
+        when /beam_memory_bytes\{kind="total"\}/
+          data[:memory_bytes] = value.to_i
+        when /beam_process_count/
+          data[:beam_processes] = value.to_i
+        end
       end
     end
 

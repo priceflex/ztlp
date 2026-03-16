@@ -54,21 +54,29 @@ class ZtlpTunnelTest < ActiveSupport::TestCase
 
   test "parse_prometheus extracts ZTLP metrics" do
     text = <<~PROM
-      # HELP ztlp_sessions_active Active sessions
-      # TYPE ztlp_sessions_active gauge
-      ztlp_sessions_active 42
-      process_cpu_seconds_total 1.23
-      process_resident_memory_bytes 52428800
-      ztlp_ns_records_count 7
+      # HELP ztlp_relay_active_sessions Active relay sessions
+      # TYPE ztlp_relay_active_sessions gauge
+      ztlp_relay_active_sessions 42
+      ztlp_relay_uptime_seconds 7611
+      ztlp_relay_packets_total{result="passed"} 208
+      ztlp_relay_packets_forwarded_total 197
+      ztlp_ns_records_total 7
+      ztlp_ns_cluster_members 3
+      beam_memory_bytes{kind="total"} 52428800
+      beam_process_count 95
     PROM
 
     tunnel = ZtlpTunnel.new(gateway_addr: "127.0.0.1:23098")
     data = tunnel.send(:parse_prometheus, text)
 
     assert_equal 42, data[:sessions_active]
-    assert_in_delta 1.23, data[:cpu_seconds], 0.01
+    assert_equal 7611, data[:uptime_seconds]
+    assert_equal 208, data[:packets_passed]
+    assert_equal 197, data[:packets_forwarded]
+    assert_equal 7, data[:ns_records]
+    assert_equal 3, data[:ns_cluster_members]
     assert_equal 52428800, data[:memory_bytes]
-    assert_equal 7, data[:ns_records_count]
+    assert_equal 95, data[:beam_processes]
   end
 
   test "parse_prometheus handles empty input" do

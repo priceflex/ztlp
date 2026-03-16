@@ -48,17 +48,13 @@ class SshProvisionerTest < ActiveSupport::TestCase
     assert_includes config, "ZTLP_RELAY_MESH_PEERS="
   end
 
-  test "relay config uses RELAY_PORT for local gateway sidecar" do
+  test "relay config uses RELAY_PORT for local gateway sidecar only" do
     machine = machines(:relay1)
     provisioner = SshProvisioner.new(machine)
     config = provisioner.send(:generate_config, "relay")
     # Local gateway sidecar should use the relay-specific port (23099)
-    assert_includes config, "127.0.0.1:#{SshProvisioner::GATEWAY_SIDECAR_RELAY_PORT}"
-    # NS machines should use the default port (23098)
-    ns_machine = machine.network.ns_machines.first
-    if ns_machine
-      assert_includes config, "#{ns_machine.ip_address}:#{SshProvisioner::GATEWAY_SIDECAR_PORT}"
-    end
+    gateways_line = config.lines.find { |l| l.start_with?("ZTLP_RELAY_GATEWAYS=") }
+    assert_equal "ZTLP_RELAY_GATEWAYS=127.0.0.1:#{SshProvisioner::GATEWAY_SIDECAR_RELAY_PORT}", gateways_line.strip
   end
 
   test "raises on unknown component" do

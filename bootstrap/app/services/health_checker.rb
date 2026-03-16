@@ -233,20 +233,17 @@ class HealthChecker
     { available: false, data: {} }
   end
 
-  # Find a relay address for ZTLP tunnel routing
+  # Find a relay address for ZTLP tunnel routing.
+  # Only relay machines need relay routing (self-relay) — the relay's
+  # gateway sidecar may be firewalled but reachable through its own UDP port.
+  # Non-relay machines connect directly to their gateway sidecar.
   def find_relay_addr
-    network = @machine.network
-    return nil unless network
+    if @machine.role_list.include?("relay")
+      relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
+      return "#{@machine.ip_address}:#{relay_port}"
+    end
 
-    relay = network.machines
-                   .where("roles LIKE ?", "%relay%")
-                   .where.not(status: "offline")
-                   .first
-
-    return nil unless relay
-
-    relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
-    "#{relay.ip_address}:#{relay_port}"
+    nil
   rescue StandardError
     nil
   end

@@ -381,20 +381,12 @@ class SshProvisioner
         peer_list = peers.map { |m| "#{m.ip_address}:#{ZTLP_PORTS['relay'][:mesh]}" }.join(",")
         lines << "ZTLP_RELAY_MESH_PEERS=#{peer_list}"
       end
-      # Configure gateway forwarding: relay forwards handshakes to local gateway sidecar
-      # and to any other gateways in the network.
-      # Each gateway sidecar has a role-specific port so the relay can distinguish
-      # its own local gateway from remote ones (prevents HELLO mis-routing).
-      gateway_addrs = []
-      # Local gateway sidecar (relay machines use GATEWAY_SIDECAR_RELAY_PORT)
-      gateway_addrs << "127.0.0.1:#{GATEWAY_SIDECAR_RELAY_PORT}"
-      # Remote gateway machines (dedicated gateway role)
-      gateway_machines = network.machines.where("roles LIKE ?", "%gateway%")
-                                        .where.not(id: machine.id)
-      gateway_machines.each { |gm| gateway_addrs << "#{gm.ip_address}:#{ZTLP_PORTS['gateway'][:tcp]}" }
-      # NS machines with gateway sidecars (use default GATEWAY_SIDECAR_PORT)
-      ns_machines.each { |m| gateway_addrs << "#{m.ip_address}:#{GATEWAY_SIDECAR_PORT}" }
-      lines << "ZTLP_RELAY_GATEWAYS=#{gateway_addrs.join(',')}"
+      # Configure gateway forwarding: relay forwards HELLOs to its LOCAL gateway
+      # sidecar only. Remote gateways (NS, dedicated gateway machines) are reached
+      # directly by clients — the relay's round-robin pick_gateway() can't distinguish
+      # which gateway a client intended, so listing remote gateways here causes
+      # HELLOs to be mis-routed (the known v0.9.10 bug).
+      lines << "ZTLP_RELAY_GATEWAYS=127.0.0.1:#{GATEWAY_SIDECAR_RELAY_PORT}"
       lines.join("\n")
 
     when "gateway"

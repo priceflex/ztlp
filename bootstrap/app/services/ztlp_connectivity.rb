@@ -157,23 +157,23 @@ class ZtlpConnectivity
 
   # Find a relay address for routing ZTLP connections.
   # Returns "host:port" string or nil if no relay found.
+  #
+  # Only use relay routing when the target machine IS a relay — the relay's
+  # gateway sidecar (port 23099) may not be reachable directly (firewalled)
+  # but is reachable through the relay's own UDP port (23095).
+  #
+  # For non-relay machines (NS, dedicated gateways), connect directly to their
+  # gateway sidecar — the relay only forwards to its LOCAL sidecar, so routing
+  # a non-relay HELLO through the relay would connect to the wrong gateway.
   def self.find_relay_addr(machine)
-    network = machine.network
-    return nil unless network
+    # Only relay machines need relay routing (self-relay)
+    if machine.role_list.include?("relay")
+      relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
+      return "#{machine.ip_address}:#{relay_port}"
+    end
 
-    relay = network.machines
-                   .where("roles LIKE ?", "%relay%")
-                   .where.not(id: machine.id)
-                   .where.not(status: "offline")
-                   .first
-
-    # If the target IS a relay, use it as its own relay (relay has local gateway sidecar)
-    relay ||= machine if machine.role_list.include?("relay")
-
-    return nil unless relay
-
-    relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
-    "#{relay.ip_address}:#{relay_port}"
+    # Non-relay machines: connect directly (no relay routing)
+    nil
   rescue StandardError
     nil
   end

@@ -113,21 +113,17 @@ defmodule ZtlpRelay.MetricsServer do
     end
   end
 
-  defp handle_path(socket, '/metrics') do
-    body = collect_metrics()
-    send_response(socket, 200, "text/plain; version=0.0.4; charset=utf-8", body)
-  end
-
-  defp handle_path(socket, '/health') do
-    send_response(socket, 200, "text/plain", "OK\n")
-  end
-
-  defp handle_path(socket, '/ready') do
-    send_response(socket, 200, "text/plain", "OK\n")
-  end
-
-  defp handle_path(socket, _path) do
-    send_response(socket, 404, "text/plain", "Not Found\n")
+  defp handle_path(socket, path) do
+    # Normalize path: http_bin returns binary strings, http returns charlists
+    path_str = if is_list(path), do: List.to_string(path), else: path
+    case path_str do
+      "/metrics" ->
+        body = collect_metrics()
+        send_response(socket, 200, "text/plain; version=0.0.4; charset=utf-8", body)
+      "/health" -> send_response(socket, 200, "text/plain", "OK\n")
+      "/ready" -> send_response(socket, 200, "text/plain", "OK\n")
+      _ -> send_response(socket, 404, "text/plain", "Not Found\n")
+    end
   end
 
   defp send_response(socket, status, content_type, body) do

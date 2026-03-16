@@ -1,4 +1,4 @@
-<div class="mb-6 flex items-center justify-between" data-controller="alert">
+<div class="mb-6 flex items-center justify-between">
   <div>
     <h1 class="text-2xl font-bold text-gray-900">
       🚨 Alerts
@@ -12,9 +12,11 @@
   </div>
   <div class="flex items-center space-x-3">
     <% if @active_count > 0 %>
-      <%= link_to acknowledge_all_alerts_path, method: :post,
+      <%= button_to acknowledge_all_alerts_path,
+          method: :post,
           class: "inline-flex items-center rounded-md bg-yellow-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-yellow-400",
-          data: { confirm: "Acknowledge all active alerts?" } do %>
+          data: { turbo_confirm: "Acknowledge all active alerts?" },
+          form: { class: "inline" } do %>
         ✓ Acknowledge All
       <% end %>
     <% end %>
@@ -22,7 +24,7 @@
 </div>
 
 <!-- Filters -->
-<div class="mb-6 flex space-x-4" data-alert-target="filters">
+<div class="mb-6 flex flex-wrap gap-2">
   <% { nil => "All", "active" => "Active", "acknowledged" => "Acknowledged", "resolved" => "Resolved" }.each do |val, label| %>
     <%
       active = params[:status] == val
@@ -31,7 +33,7 @@
     %>
     <%= link_to label, alerts_path(status: val, severity: params[:severity]), class: "#{base_class} #{color}" %>
   <% end %>
-  <span class="border-l border-gray-300 mx-2"></span>
+  <span class="border-l border-gray-300 mx-1"></span>
   <% { nil => "All Severity", "warning" => "⚠️ Warning", "critical" => "🔴 Critical" }.each do |val, label| %>
     <%
       active = params[:severity] == val
@@ -46,7 +48,7 @@
 <div class="bg-white shadow rounded-lg">
   <ul class="divide-y divide-gray-200">
     <% @alerts.each do |alert| %>
-      <li class="px-4 py-4 sm:px-6 <%= alert.resolved? ? 'bg-gray-50' : '' %>">
+      <li class="px-4 py-4 sm:px-6 <%= alert.resolved? ? 'bg-gray-50 opacity-75' : '' %>">
         <div class="flex items-center justify-between">
           <div class="flex items-center space-x-3">
             <span class="text-lg">
@@ -63,15 +65,17 @@
           <div class="flex items-center space-x-3">
             <% if alert.resolved? %>
               <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
-                Resolved <%= time_ago_short(alert.resolved_at) %>
+                ✓ Resolved <%= time_ago_short(alert.resolved_at) %>
               </span>
             <% elsif alert.acknowledged %>
               <span class="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
-                Acknowledged
+                ✓ Acknowledged
               </span>
             <% else %>
-              <%= link_to acknowledge_alert_path(alert), method: :post,
-                  class: "inline-flex items-center rounded-md bg-yellow-100 px-2.5 py-1 text-xs font-medium text-yellow-800 hover:bg-yellow-200" do %>
+              <%= button_to acknowledge_alert_path(alert),
+                  method: :post,
+                  class: "inline-flex items-center rounded-md bg-yellow-100 px-2.5 py-1 text-xs font-medium text-yellow-800 hover:bg-yellow-200 border border-yellow-300",
+                  form: { class: "inline" } do %>
                 ✓ Acknowledge
               <% end %>
             <% end %>

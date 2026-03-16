@@ -51,13 +51,36 @@ class NetworksController < ApplicationController
   # POST /networks/:id/deploy - Deploy all machines
   def deploy
     errors = []
+    deployed_ns = false
+
     @network.machines.each do |machine|
       machine.role_list.each do |component|
         begin
           SshProvisioner.new(machine).provision!(component)
+          deployed_ns = true if component == "ns"
         rescue SshProvisioner::ProvisionError => e
           errors << "#{machine.hostname}/#{component}: #{e.message}"
         end
+      end
+    end
+
+    # Auto-register Bootstrap with NS after deploying any NS machines
+    if deployed_ns && @network.ns_machines.any?
+      begin
+        registrar = NsRegistrar.new(@network)
+        registrar.register!
+      rescue NsRegistrar::RegistrationError => e
+        Rails.logger.warn("[Deploy] NS registration skipped: #{e.message}")
+      end
+    end
+
+    # Auto-run health checks after deploy
+    @network.machines.each do |machine|
+      next unless machine.role_list.any?
+      begin
+        HealthChecker.new(machine).check_all
+      rescue StandardError => e
+        Rails.logger.warn("[Deploy] Health check for #{machine.hostname} failed: #{e.message}")
       end
     end
 

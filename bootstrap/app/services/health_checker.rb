@@ -27,11 +27,13 @@ class HealthChecker
 
   def initialize(machine)
     @machine = machine
+    @ssh_tempfiles = []  # Hold references to prevent GC deletion
   end
 
   # Check all components on this machine and store results
   def check_all
     results = @machine.role_list.map { |role| check_component(role) }
+    cleanup_ssh_tempfiles
     @machine.update!(last_health_check_at: Time.current)
 
     # Store each result as a HealthCheck record
@@ -280,6 +282,7 @@ class HealthChecker
         tempfile.write(key_data)
         tempfile.close
         File.chmod(0o600, tempfile.path)
+        @ssh_tempfiles << tempfile  # Keep reference to prevent GC deletion
         opts[:keys] = [tempfile.path]
         opts[:keys_only] = true
       end
@@ -312,6 +315,16 @@ class HealthChecker
 
   def elapsed_ms(start_time)
     ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).to_i
+  end
+
+  # Clean up SSH key tempfiles after all checks are done
+  def cleanup_ssh_tempfiles
+    @ssh_tempfiles.each do |tf|
+      tf.unlink
+    rescue StandardError
+      nil
+    end
+    @ssh_tempfiles.clear
   end
 
   # Prefix for privileged commands — sudo when not root

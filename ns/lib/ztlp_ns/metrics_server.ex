@@ -58,19 +58,18 @@ defmodule ZtlpNs.MetricsServer do
 
   defp handle_request(socket) do
     case :gen_tcp.recv(socket, 0, 5_000) do
-      {:ok, {:http_request, :GET, {:abs_path, '/metrics'}, _}} ->
+      {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
         drain_headers(socket)
-        body = collect_metrics()
-        send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
-      {:ok, {:http_request, :GET, {:abs_path, '/health'}, _}} ->
-        drain_headers(socket)
-        send_response(socket, 200, "OK\n")
-      {:ok, {:http_request, :GET, {:abs_path, '/ready'}, _}} ->
-        drain_headers(socket)
-        send_response(socket, 200, "OK\n")
-      {:ok, {:http_request, :GET, _, _}} ->
-        drain_headers(socket)
-        send_response(socket, 404, "Not Found\n")
+        # Normalize path: http_bin returns binary strings, http returns charlists
+        path_str = if is_list(path), do: List.to_string(path), else: path
+        case path_str do
+          "/metrics" ->
+            body = collect_metrics()
+            send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
+          "/health" -> send_response(socket, 200, "OK\n")
+          "/ready" -> send_response(socket, 200, "OK\n")
+          _ -> send_response(socket, 404, "Not Found\n")
+        end
       {:ok, {:http_request, _, _, _}} ->
         drain_headers(socket)
         send_response(socket, 405, "Method Not Allowed\n")

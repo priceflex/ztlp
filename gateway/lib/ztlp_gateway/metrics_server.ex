@@ -76,13 +76,18 @@ defmodule ZtlpGateway.MetricsServer do
     end
   end
 
-  defp handle_path(socket, '/metrics') do
-    body = collect_metrics()
-    send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
+  defp handle_path(socket, path) do
+    # Normalize path: http_bin returns binary strings, http returns charlists
+    path_str = if is_list(path), do: List.to_string(path), else: path
+    case path_str do
+      "/metrics" ->
+        body = collect_metrics()
+        send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
+      "/health" -> send_response(socket, 200, "OK\n")
+      "/ready" -> send_response(socket, 200, "OK\n")
+      _ -> send_response(socket, 404, "Not Found\n")
+    end
   end
-  defp handle_path(socket, '/health'), do: send_response(socket, 200, "OK\n")
-  defp handle_path(socket, '/ready'), do: send_response(socket, 200, "OK\n")
-  defp handle_path(socket, _), do: send_response(socket, 404, "Not Found\n")
 
   defp send_response(socket, status, body, ct \\ "text/plain") do
     status_text = case status do

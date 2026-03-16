@@ -52,10 +52,36 @@ class MachinesController < ApplicationController
       return
     end
 
+    messages = []
+
     begin
       provisioner = SshProvisioner.new(@machine)
       provisioner.provision!(component)
-      redirect_to network_machine_path(@network, @machine), notice: "#{component} deployed successfully!"
+      messages << "#{component} deployed successfully!"
+
+      # Auto-register Bootstrap with NS after deploying an NS machine
+      if component == "ns"
+        begin
+          registrar = NsRegistrar.new(@network)
+          result = registrar.register!
+          messages << "Registered Bootstrap with NS (#{result[:name]})"
+          AuditLog.record(action: "ns_register_bootstrap", target: @network, details: result)
+        rescue NsRegistrar::RegistrationError => e
+          messages << "NS registration skipped: #{e.message}"
+        end
+      end
+
+      # Auto-run health check after successful deploy
+      begin
+        checker = HealthChecker.new(@machine)
+        results = checker.check_all
+        healthy = results.count { |r| r.status == "healthy" }
+        messages << "Health: #{healthy}/#{results.count} healthy"
+      rescue StandardError => e
+        messages << "Health check skipped: #{e.message}"
+      end
+
+      redirect_to network_machine_path(@network, @machine), notice: messages.join(" · ")
     rescue SshProvisioner::ProvisionError => e
       redirect_to network_machine_path(@network, @machine), alert: "Deploy failed: #{e.message}"
     end
@@ -76,10 +102,11 @@ class MachinesController < ApplicationController
     checker = HealthChecker.new(@machine)
     @results = checker.check_all
 
-    if @results.all?(&:healthy)
+    healthy = @results.select { |r| r.status == "healthy" }
+    if healthy.count == @results.count
       redirect_to network_machine_path(@network, @machine), notice: "All components healthy!"
     else
-      unhealthy = @results.reject(&:healthy).map { |r| "#{r.component}: #{r.details}" }
+      unhealthy = @results.reject { |r| r.status == "healthy" }.map { |r| "#{r.component}: #{r.status} — #{r.error_message || 'unknown'}" }
       redirect_to network_machine_path(@network, @machine), alert: "Issues found: #{unhealthy.join('; ')}"
     end
   end

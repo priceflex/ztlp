@@ -28,9 +28,30 @@ class NsRegistrarTest < ActiveSupport::TestCase
 
   test "register builds correct service name" do
     registrar = NsRegistrar.new(@network)
-    # We can't actually connect to an NS, but we can test the name computation
     expected_name = "bootstrap.#{@network.zone}"
     assert_equal "bootstrap.office.acme.ztlp", expected_name
+  end
+
+  test "MiniCbor encodes strings" do
+    encoded = NsRegistrar::MiniCbor.encode("hello")
+    # CBOR text string: major type 3, length 5
+    assert_equal "\x65hello".b, encoded
+  end
+
+  test "MiniCbor encodes small integers" do
+    assert_equal "\x00".b, NsRegistrar::MiniCbor.encode(0)
+    assert_equal "\x17".b, NsRegistrar::MiniCbor.encode(23)
+    assert_equal "\x18\x18".b, NsRegistrar::MiniCbor.encode(24)
+  end
+
+  test "MiniCbor encodes maps with sorted keys" do
+    encoded = NsRegistrar::MiniCbor.encode({ "b" => "2", "a" => "1" })
+    # Map with 2 entries, keys sorted: "a" < "b"
+    assert encoded.start_with?("\xa2".b)  # map(2)
+    # "a" should come before "b" in the encoding
+    a_pos = encoded.index("\x61a".b)
+    b_pos = encoded.index("\x61b".b)
+    assert a_pos < b_pos, "Keys should be sorted: 'a' before 'b'"
   end
 
   test "lookup returns nil when NS unreachable" do

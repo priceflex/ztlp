@@ -137,9 +137,12 @@ for check_port in "$ZTLP_PORT" "$TUNNEL_LOCAL_PORT"; do
         sleep 1
     fi
 done
-# Also kill any existing ztlp listen/connect processes (belt and suspenders)
-pkill -f "ztlp listen.*$ZTLP_PORT" 2>/dev/null || true
-pkill -f "ztlp connect.*$TUNNEL_LOCAL_PORT" 2>/dev/null || true
+# Also check for ztlp processes by binary name (not pkill -f which
+# would match this shell script's arguments and kill us).
+for stale_pid in $(pgrep -x ztlp 2>/dev/null || true); do
+    warn "Killing stale ztlp process (PID $stale_pid)"
+    kill "$stale_pid" 2>/dev/null || true
+done
 sleep 0.5
 
 # ── Start listener ───────────────────────────────────────────────────

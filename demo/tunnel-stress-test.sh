@@ -126,6 +126,22 @@ $ZTLP_BIN keygen --output "$SERVER_ID" 2>/dev/null
 $ZTLP_BIN keygen --output "$CLIENT_ID" 2>/dev/null
 success "Server + client identities generated"
 
+# ── Kill lingering ZTLP processes on our ports ──────────────────────
+# Previous demo/test runs may have left orphaned ztlp processes holding
+# the ZTLP port or tunnel port. Kill them before starting fresh.
+for check_port in "$ZTLP_PORT" "$TUNNEL_LOCAL_PORT"; do
+    EXISTING_PID=$(ss -tlnp 2>/dev/null | grep ":${check_port} " | grep -oP 'pid=\K[0-9]+' | head -1)
+    if [[ -n "$EXISTING_PID" ]]; then
+        warn "Killing existing process on port $check_port (PID $EXISTING_PID)"
+        kill "$EXISTING_PID" 2>/dev/null || true
+        sleep 1
+    fi
+done
+# Also kill any existing ztlp listen/connect processes (belt and suspenders)
+pkill -f "ztlp listen.*$ZTLP_PORT" 2>/dev/null || true
+pkill -f "ztlp connect.*$TUNNEL_LOCAL_PORT" 2>/dev/null || true
+sleep 0.5
+
 # ── Start listener ───────────────────────────────────────────────────
 info "Starting ZTLP listener (forwarding to localhost:$SSH_PORT)..."
 RUST_LOG=ztlp_proto=debug,ztlp=debug \
@@ -148,9 +164,17 @@ ZTLP_DEBUG=1 \
     --key "$CLIENT_ID" \
     -L "$TUNNEL_LOCAL_PORT:127.0.0.1:$SSH_PORT" \
     > "$LOG_DIR/client.log" 2>&1 &
-PIDS+=($!)
+CLIENT_PID=$!
+PIDS+=($CLIENT_PID)
 sleep 2
-success "Client tunnel running (PID ${PIDS[-1]})"
+
+# Verify client process is still alive (may have crashed on bind)
+if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    fail "Client tunnel process died on startup — check $LOG_DIR/client.log"
+    tail -20 "$LOG_DIR/client.log"
+    exit 1
+fi
+success "Client tunnel running (PID $CLIENT_PID)"
 
 # Verify tunnel is up
 if ! ss -tlnp 2>/dev/null | grep -q ":$TUNNEL_LOCAL_PORT" && \

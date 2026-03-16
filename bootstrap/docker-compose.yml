@@ -20,6 +20,7 @@ services:
       - FORCE_SSL=${FORCE_SSL:-false}
       - DATABASE_PATH=/data/production.sqlite3
       - ZTLP_CLI_PATH=${ZTLP_CLI_PATH:-ztlp}
+      - BOOTSTRAP_URL=${BOOTSTRAP_URL:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/up"]

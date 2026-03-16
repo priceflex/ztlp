@@ -28,12 +28,17 @@ class TokenGenerator
     ns_addr = "#{ns_machine.ip_address}:#{SshProvisioner::ZTLP_PORTS['ns'][:udp]}"
     relay_addr = relay_machine ? "#{relay_machine.ip_address}:#{SshProvisioner::ZTLP_PORTS['relay'][:udp]}" : nil
 
+    # Build callback URL for CLI to confirm enrollment usage
+    bootstrap_url = ENV.fetch("BOOTSTRAP_URL", nil)
+    callback_url = bootstrap_url ? "#{bootstrap_url}/api/enrollment/confirm" : nil
+
     params = {
       zone: @network.zone,
       ns: ns_addr,
       relay: relay_addr,
       token: token_id,
-      expires: expires_at.to_i
+      expires: expires_at.to_i,
+      callback: callback_url
     }.compact
 
     token_uri = "ztlp://enroll/?" + params.map { |k, v| "#{k}=#{v}" }.join("&")

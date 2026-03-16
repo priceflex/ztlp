@@ -50,6 +50,12 @@ pub struct EnrollmentToken {
     pub expires_at: u64,
     pub nonce: [u8; 16],
     pub mac: [u8; 32],
+    /// Token identifier (hex string from query-param URI `token` parameter).
+    /// Used for enrollment confirmation callback.
+    pub token_id: Option<String>,
+    /// Optional callback URL for the CLI to confirm enrollment usage
+    /// (populated from query-param URI `callback` parameter).
+    pub callback_url: Option<String>,
 }
 
 /// Result of token validation.
@@ -100,6 +106,8 @@ impl EnrollmentToken {
             expires_at,
             nonce,
             mac: [0u8; 32],
+            token_id: None,
+            callback_url: None,
         };
 
         // Serialize everything except the MAC field, then compute MAC
@@ -223,6 +231,8 @@ impl EnrollmentToken {
             expires_at,
             nonce,
             mac,
+            token_id: None,      // Binary tokens don't carry token IDs
+            callback_url: None,  // Binary tokens don't carry callback URLs
         })
     }
 
@@ -269,6 +279,7 @@ impl EnrollmentToken {
         let mut token_hex = None;
         let mut expires = None;
         let mut gateway_addr = None;
+        let mut callback_url = None;
 
         for pair in query.split('&') {
             let mut kv = pair.splitn(2, '=');
@@ -286,13 +297,14 @@ impl EnrollmentToken {
                             .map_err(|_| "invalid expires timestamp".to_string())?,
                     )
                 }
+                "callback" => callback_url = Some(val.to_string()),
                 _ => {} // ignore unknown params
             }
         }
 
         let zone = zone.ok_or("missing zone parameter")?;
         let ns_addr = ns_addr.ok_or("missing ns parameter")?;
-        let _token_hex = token_hex.ok_or("missing token parameter")?;
+        let token_id = token_hex.ok_or("missing token parameter")?;
         let expires_at = expires.ok_or("missing expires parameter")?;
 
         Ok(EnrollmentToken {
@@ -305,6 +317,8 @@ impl EnrollmentToken {
             expires_at,
             nonce: [0u8; 16], // No nonce in query-param format
             mac: [0u8; 32],   // No MAC in query-param format
+            token_id: Some(token_id),
+            callback_url,
         })
     }
 

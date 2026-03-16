@@ -5733,6 +5733,11 @@ async fn setup_join(
                         &gateway_addrs,
                     )?;
 
+                    // Confirm enrollment with Bootstrap (best-effort)
+                    if let Some(ref url) = token.callback_url {
+                        confirm_enrollment(url, &token, &full_name, &identity.node_id).await;
+                    }
+
                     // Test connectivity
                     eprintln!();
                     eprintln!("  {} Testing connectivity...", c_dim("→"));
@@ -5945,6 +5950,51 @@ enrollment_secret = "{secret_path}"
     eprintln!();
 
     Ok(())
+}
+
+/// Confirm enrollment with the Bootstrap app (best-effort, non-blocking).
+/// Sends a POST to the callback URL with the token_id and enrolled device info.
+async fn confirm_enrollment(
+    callback_url: &str,
+    token: &ztlp_proto::enrollment::EnrollmentToken,
+    device_name: &str,
+    node_id: &NodeId,
+) {
+    let token_id = match &token.token_id {
+        Some(id) => id.clone(),
+        None => return,
+    };
+
+    // Use curl for HTTPS support (TLS without adding deps)
+    let body = format!(
+        "token_id={}&node_id={}&name={}",
+        token_id, node_id, device_name
+    );
+
+    let result = tokio::process::Command::new("curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "5",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/x-www-form-urlencoded",
+            "-d",
+            &body,
+            callback_url,
+        ])
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {
+            // Silently succeed — Bootstrap has been notified
+        }
+        _ => {
+            // Best-effort: don't fail enrollment if callback fails
+        }
+    }
 }
 
 /// Build the 0x07 ENROLL request body (without the 0x07 prefix).

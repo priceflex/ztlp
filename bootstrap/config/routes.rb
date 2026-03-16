@@ -77,6 +77,7 @@ Rails.application.routes.draw do
     get "networks/:network_id/health", to: "health#network_health", as: :network_health
     get "machines/:id/health", to: "health#machine_health", as: :machine_health
     get "alerts", to: "alerts#index", as: :alerts
+    post "enrollment/confirm", to: "enrollment#confirm", as: :enrollment_confirm
   end
 
   # Documentation

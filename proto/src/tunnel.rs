@@ -502,6 +502,11 @@ struct RetransmitEntry {
     packet_seq: u64,
     /// When this packet was originally sent (for RTT measurement).
     send_time: Instant,
+    /// Whether this packet has been retransmitted (RTO or NACK-driven).
+    /// Karn's algorithm: SRTT must NOT be updated from ACKs of retransmitted
+    /// packets because we can't disambiguate whether the ACK is for the
+    /// original or the retransmit.
+    was_retransmitted: bool,
 }
 
 /// Buffer of sent packets awaiting ACK, keyed by sequence number.
@@ -547,6 +552,7 @@ impl RetransmitBuffer {
                 framed_plaintext,
                 packet_seq,
                 send_time,
+                was_retransmitted: false,
             },
         );
     }
@@ -568,8 +574,21 @@ impl RetransmitBuffer {
     }
 
     /// Get the send timestamp for a data_seq (for RTT measurement).
+    /// Returns None if the packet was retransmitted (Karn's algorithm:
+    /// ambiguous ACKs must not update SRTT).
     fn send_time(&self, data_seq: u64) -> Option<Instant> {
-        self.entries.get(&data_seq).map(|e| e.send_time)
+        self.entries
+            .get(&data_seq)
+            .filter(|e| !e.was_retransmitted)
+            .map(|e| e.send_time)
+    }
+
+    /// Mark a data_seq as retransmitted (Karn's algorithm).
+    /// After this, `send_time()` will return None for this seq.
+    fn mark_retransmitted(&mut self, data_seq: u64) {
+        if let Some(entry) = self.entries.get_mut(&data_seq) {
+            entry.was_retransmitted = true;
+        }
     }
 
     /// Prune all entries with seq <= acked_seq (they've been ACKed).
@@ -1175,7 +1194,10 @@ async fn run_bridge_inner(
                         cc.spurious.record_retransmit(*nack_data_seq, srtt);
                     }
                     let entry_info = {
-                        let rb = retransmit_buf_sender.lock().await;
+                        let mut rb = retransmit_buf_sender.lock().await;
+                        // Karn's algorithm: mark as retransmitted so SRTT
+                        // is not updated from the ambiguous ACK.
+                        rb.mark_retransmitted(*nack_data_seq);
                         rb.get_with_packet_seq(*nack_data_seq)
                     };
                     if let Some((plaintext, orig_packet_seq)) = entry_info {
@@ -1263,7 +1285,9 @@ async fn run_bridge_inner(
                                 cc.spurious.record_retransmit(*nack_data_seq, srtt);
                             }
                             let entry_info = {
-                                let rb = retransmit_buf_sender.lock().await;
+                                let mut rb = retransmit_buf_sender.lock().await;
+                                // Karn's algorithm
+                                rb.mark_retransmitted(*nack_data_seq);
                                 rb.get_with_packet_seq(*nack_data_seq)
                             };
                             if let Some((plaintext, orig_packet_seq)) = entry_info {
@@ -1480,8 +1504,14 @@ async fn run_bridge_inner(
                             // Retransmit up to new_cwnd packets from the retransmit buffer.
                             let retransmit_count = (new_cwnd as usize).min(32);
                             let entries = {
-                                let rb = retransmit_buf_sender.lock().await;
-                                rb.oldest_entries(retransmit_count)
+                                let mut rb = retransmit_buf_sender.lock().await;
+                                let entries = rb.oldest_entries(retransmit_count);
+                                // Karn's algorithm: mark all RTO-retransmitted
+                                // entries so SRTT is not updated from their ACKs.
+                                for (ds, _, _) in &entries {
+                                    rb.mark_retransmitted(*ds);
+                                }
+                                entries
                             };
                             for (ds, ps, plaintext) in &entries {
                                 let mut nonce_bytes = [0u8; 12];
@@ -1540,7 +1570,9 @@ async fn run_bridge_inner(
                                 cc.spurious.record_retransmit(*nack_data_seq, srtt);
                             }
                             let entry_info = {
-                                let rb = retransmit_buf_sender.lock().await;
+                                let mut rb = retransmit_buf_sender.lock().await;
+                                // Karn's algorithm
+                                rb.mark_retransmitted(*nack_data_seq);
                                 rb.get_with_packet_seq(*nack_data_seq)
                             };
                             if let Some((plaintext, orig_pkt_seq)) = entry_info {

@@ -276,6 +276,33 @@ defmodule ZtlpNs.EnrollmentTest do
     :gen_udp.close(sock2)
   end
 
+  # ── MAC skip when require_registration_auth=false ───────────────────
+
+  test "zeroed MAC accepted when require_registration_auth=false", %{secret: s, pfx: p} do
+    # Create a valid token, then zero out the MAC to simulate Bootstrap query-param tokens
+    token = create_token(s)
+    mac_start = byte_size(token) - 32
+    <<data::binary-size(mac_start), _mac::binary-size(32)>> = token
+    zeroed_token = <<data::binary, 0::256>>
+
+    # With auth required, zeroed MAC should be rejected
+    Application.put_env(:ztlp_ns, :require_registration_auth, true)
+    result = Enrollment.process_enroll(
+      enroll_req(zeroed_token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), dev_name(p, "mac-skip1"))
+    )
+    assert result == <<0x08, 0x03>>
+
+    # With auth disabled, zeroed MAC should be accepted
+    Application.put_env(:ztlp_ns, :require_registration_auth, false)
+    result = Enrollment.process_enroll(
+      enroll_req(zeroed_token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), dev_name(p, "mac-skip2"))
+    )
+    assert <<0x08, 0x00, _::binary>> = result
+
+    # Restore default
+    Application.put_env(:ztlp_ns, :require_registration_auth, true)
+  end
+
   # ── Helpers ────────────────────────────────────────────────────────
 
   defp parse_addrs(bin, 0), do: {[], bin}

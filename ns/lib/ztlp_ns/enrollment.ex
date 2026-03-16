@@ -134,12 +134,20 @@ defmodule ZtlpNs.Enrollment do
   defp validate_token(token_bin, secret) do
     case parse_token(token_bin) do
       {:ok, token} ->
-        # 1. Verify MAC
-        {data, mac} = split_mac(token_bin)
+        # 1. Verify MAC (skip when registration auth is disabled — allows
+        #    Bootstrap-generated query-param tokens with zeroed MAC/nonce)
+        require_auth = ZtlpNs.Config.require_registration_auth?()
 
-        expected_mac = hmac_blake2s(secret, data)
+        mac_ok =
+          if require_auth do
+            {data, mac} = split_mac(token_bin)
+            expected_mac = hmac_blake2s(secret, data)
+            constant_time_equal(mac, expected_mac)
+          else
+            true
+          end
 
-        if not constant_time_equal(mac, expected_mac) do
+        if not mac_ok do
           {:error, :invalid_mac}
         else
           # 2. Check expiration

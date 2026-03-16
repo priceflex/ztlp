@@ -50,28 +50,41 @@ class ZtlpTunnel
     File.exist?(File.join(dir, "identity.json"))
   end
 
-  # One-shot: open tunnel, fetch metrics, close tunnel
+  MAX_RETRIES = 2  # Total attempts = 1 + MAX_RETRIES
+
+  # One-shot: open tunnel, fetch metrics, close tunnel.
+  # Retries on empty response — large metrics responses (~1.7KB+) can
+  # exceed UDP MTU when relayed, causing IP fragmentation. If any fragment
+  # is lost, the entire datagram is dropped and curl gets an empty response.
+  # Retrying with a fresh tunnel/session typically succeeds.
   def fetch_metrics
     return { available: false, data: {}, error: "ztlp CLI not found" } unless self.class.available?
     return { available: false, data: {}, error: "not enrolled" } unless self.class.enrolled?
 
-    open_tunnel
-    wait_for_tunnel
+    last_error = nil
+    (1 + MAX_RETRIES).times do |attempt|
+      begin
+        @local_port = find_free_port if attempt > 0  # Fresh port for retries
+        open_tunnel
+        wait_for_tunnel
 
-    # Fetch metrics through the tunnel using curl.
-    # Net::HTTP rejects responses through ZTLP tunnel as HTTP/0.9;
-    # curl --http0.9 handles this correctly.
-    body = fetch_via_curl("127.0.0.1", @local_port, "/metrics")
+        body = fetch_via_curl("127.0.0.1", @local_port, "/metrics")
 
-    if body && !body.empty?
-      { available: true, data: parse_prometheus(body) }
-    else
-      { available: false, data: {}, error: "empty response" }
+        if body && !body.empty?
+          return { available: true, data: parse_prometheus(body) }
+        end
+
+        last_error = "empty response"
+        Rails.logger.debug("[ZtlpTunnel] Attempt #{attempt + 1}: empty response from #{@gateway_addr}, retrying...") if attempt < MAX_RETRIES
+      rescue Timeout::Error, Errno::ECONNREFUSED, Errno::ECONNRESET, StandardError => e
+        last_error = e.message
+        Rails.logger.debug("[ZtlpTunnel] Attempt #{attempt + 1}: #{e.message} from #{@gateway_addr}") if attempt < MAX_RETRIES
+      ensure
+        close_tunnel
+      end
     end
-  rescue Timeout::Error, Errno::ECONNREFUSED, Errno::ECONNRESET, StandardError => e
-    { available: false, data: {}, error: e.message }
-  ensure
-    close_tunnel
+
+    { available: false, data: {}, error: last_error }
   end
 
   # Open the ZTLP tunnel (background process)

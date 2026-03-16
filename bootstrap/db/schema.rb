@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_15_020001) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_16_170000) do
   create_table "alerts", force: :cascade do |t|
     t.integer "network_id", null: false
     t.integer "machine_id", null: false
@@ -141,6 +141,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_15_020001) do
     t.boolean "docker_installed", default: false, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.boolean "ztlp_tunnel_reachable", default: false
+    t.integer "ztlp_tunnel_latency_ms"
+    t.string "ztlp_tunnel_error"
+    t.datetime "ztlp_tunnel_checked_at"
     t.index ["network_id", "hostname"], name: "index_machines_on_network_id_and_hostname", unique: true
     t.index ["network_id", "ip_address"], name: "index_machines_on_network_id_and_ip_address", unique: true
     t.index ["network_id"], name: "index_machines_on_network_id"

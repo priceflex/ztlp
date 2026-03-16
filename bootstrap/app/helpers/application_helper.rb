@@ -94,6 +94,33 @@ module ApplicationHelper
     end
   end
 
+  # ZTLP tunnel connectivity indicator — red/green dot with tooltip
+  def ztlp_tunnel_indicator(machine)
+    if machine.ztlp_tunnel_reachable?
+      latency = machine.ztlp_tunnel_latency_ms
+      checked = machine.ztlp_tunnel_checked_at
+      title = "ZTLP tunnel: connected"
+      title += " (#{latency}ms)" if latency
+      title += " — checked #{time_ago_short(checked)}" if checked
+      content_tag(:span, class: "inline-flex items-center gap-1", title: title) do
+        content_tag(:span, "", class: "inline-block h-2.5 w-2.5 rounded-full bg-green-500 shadow-sm shadow-green-500/50") +
+          content_tag(:span, "ZTLP", class: "text-xs font-medium text-green-700")
+      end
+    elsif machine.ztlp_tunnel_checked_at.present?
+      error = machine.ztlp_tunnel_error || "unreachable"
+      title = "ZTLP tunnel: #{error}"
+      content_tag(:span, class: "inline-flex items-center gap-1", title: title) do
+        content_tag(:span, "", class: "inline-block h-2.5 w-2.5 rounded-full bg-red-500 shadow-sm shadow-red-500/50") +
+          content_tag(:span, "ZTLP", class: "text-xs font-medium text-red-600")
+      end
+    else
+      content_tag(:span, class: "inline-flex items-center gap-1", title: "ZTLP tunnel: not checked") do
+        content_tag(:span, "", class: "inline-block h-2.5 w-2.5 rounded-full bg-gray-300") +
+          content_tag(:span, "ZTLP", class: "text-xs font-medium text-gray-400")
+      end
+    end
+  end
+
   def alert_count_badge
     count = Alert.active_count
     return "" if count == 0

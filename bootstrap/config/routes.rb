@@ -17,6 +17,7 @@ Rails.application.routes.draw do
         post :provision
         post :test_connection
         post :health_check
+        post :check_ztlp_tunnel
       end
 
       # Machine health detail

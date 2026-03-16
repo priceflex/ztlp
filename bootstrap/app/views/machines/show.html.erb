@@ -7,9 +7,11 @@
       <h1 class="text-2xl font-bold text-gray-900"><%= @machine.hostname %></h1>
       <p class="mt-1 text-sm text-gray-500 font-mono"><%= @machine.ip_address %>:<%= @machine.ssh_port %></p>
     </div>
-    <div class="mt-4 sm:mt-0 flex space-x-3">
+    <div class="mt-4 sm:mt-0 flex items-center space-x-3">
+      <%= ztlp_tunnel_indicator(@machine) %>
       <%= button_to "Test SSH", test_connection_network_machine_path(@network, @machine), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
       <%= button_to "Health Check", health_check_network_machine_path(@network, @machine), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= button_to "🔒 Check ZTLP", check_ztlp_tunnel_network_machine_path(@network, @machine), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
       <%= link_to "Edit", edit_network_machine_path(@network, @machine), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
     </div>
   </div>
@@ -40,6 +42,23 @@
     <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
       <dt class="text-sm font-medium text-gray-500">Last Health Check</dt>
       <dd class="mt-1 sm:mt-0 sm:col-span-2"><%= time_ago_short(@machine.last_health_check_at) %></dd>
+    </div>
+    <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">
+      <dt class="text-sm font-medium text-gray-500">ZTLP Tunnel</dt>
+      <dd class="mt-1 sm:mt-0 sm:col-span-2">
+        <div class="flex items-center gap-3">
+          <%= ztlp_tunnel_indicator(@machine) %>
+          <% if @machine.ztlp_tunnel_latency_ms.present? && @machine.ztlp_tunnel_reachable? %>
+            <span class="text-xs text-gray-500"><%= @machine.ztlp_tunnel_latency_ms %>ms</span>
+          <% end %>
+          <% if @machine.ztlp_tunnel_checked_at.present? %>
+            <span class="text-xs text-gray-400">checked <%= time_ago_short(@machine.ztlp_tunnel_checked_at) %></span>
+          <% end %>
+        </div>
+        <% if @machine.ztlp_tunnel_error.present? && !@machine.ztlp_tunnel_reachable? %>
+          <p class="mt-1 text-xs text-red-500"><%= @machine.ztlp_tunnel_error %></p>
+        <% end %>
+      </dd>
     </div>
     <% if @machine.last_error.present? %>
       <div class="px-4 py-4 sm:grid sm:grid-cols-3 sm:gap-4 sm:px-6">

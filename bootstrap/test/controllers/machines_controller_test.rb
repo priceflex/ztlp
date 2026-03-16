@@ -82,4 +82,28 @@ class MachinesControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to network_machine_path(@network, @machine)
     assert_includes flash[:alert], "Invalid component"
   end
+
+  test "check_ztlp_tunnel when unreachable" do
+    ZtlpConnectivity.stubs(:check).returns(
+      ZtlpConnectivity::Result.new(reachable: false, latency_ms: 500, error: "Handshake timeout")
+    )
+    post check_ztlp_tunnel_network_machine_path(@network, @machine)
+    assert_redirected_to network_machine_path(@network, @machine)
+    assert_includes flash[:alert], "ZTLP tunnel"
+    @machine.reload
+    assert_not @machine.ztlp_tunnel_reachable
+    assert_equal "Handshake timeout", @machine.ztlp_tunnel_error
+  end
+
+  test "check_ztlp_tunnel when reachable" do
+    ZtlpConnectivity.stubs(:check).returns(
+      ZtlpConnectivity::Result.new(reachable: true, latency_ms: 42, metrics_source: "ztlp")
+    )
+    post check_ztlp_tunnel_network_machine_path(@network, @machine)
+    assert_redirected_to network_machine_path(@network, @machine)
+    assert_includes flash[:notice], "Connected"
+    @machine.reload
+    assert @machine.ztlp_tunnel_reachable
+    assert_equal 42, @machine.ztlp_tunnel_latency_ms
+  end
 end

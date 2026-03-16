@@ -73,4 +73,32 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_includes badge, "5"
     assert_includes badge, "red"
   end
+
+  test "ztlp_tunnel_indicator shows green when reachable" do
+    machine = machines(:ns1)
+    machine.ztlp_tunnel_reachable = true
+    machine.ztlp_tunnel_latency_ms = 42
+    machine.ztlp_tunnel_checked_at = Time.current
+    html = ztlp_tunnel_indicator(machine)
+    assert_includes html, "bg-green-500"
+    assert_includes html, "ZTLP"
+  end
+
+  test "ztlp_tunnel_indicator shows red when checked but unreachable" do
+    machine = machines(:ns1)
+    machine.ztlp_tunnel_reachable = false
+    machine.ztlp_tunnel_error = "Handshake timeout"
+    machine.ztlp_tunnel_checked_at = Time.current
+    html = ztlp_tunnel_indicator(machine)
+    assert_includes html, "bg-red-500"
+    assert_includes html, "ZTLP"
+  end
+
+  test "ztlp_tunnel_indicator shows gray when not checked" do
+    machine = machines(:ns1)
+    machine.ztlp_tunnel_checked_at = nil
+    html = ztlp_tunnel_indicator(machine)
+    assert_includes html, "bg-gray-300"
+    assert_includes html, "not checked"
+  end
 end

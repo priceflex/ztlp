@@ -66,6 +66,7 @@
               <%= health_status_icon(ns.health_status) %>
               <%= link_to ns.hostname, network_machine_path(@network, ns), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
               <span class="text-gray-400"><%= ns.ip_address %></span>
+              <%= ztlp_tunnel_indicator(ns) %>
             </div>
           <% end %>
         </div>
@@ -87,6 +88,7 @@
               <%= health_status_icon(relay.health_status) %>
               <%= link_to relay.hostname, network_machine_path(@network, relay), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
               <span class="text-gray-400"><%= relay.ip_address %></span>
+              <%= ztlp_tunnel_indicator(relay) %>
             </div>
           <% end %>
         </div>
@@ -108,6 +110,7 @@
               <%= health_status_icon(gw.health_status) %>
               <%= link_to gw.hostname, network_machine_path(@network, gw), class: "font-mono text-gray-700 hover:text-ztlp-600" %>
               <span class="text-gray-400"><%= gw.ip_address %></span>
+              <%= ztlp_tunnel_indicator(gw) %>
             </div>
           <% end %>
         </div>
@@ -144,6 +147,7 @@
         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Roles</th>
         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Docker</th>
         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">ZTLP</th>
         <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Check</th>
         <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
       </tr>
@@ -164,6 +168,7 @@
             <% end %>
           </td>
           <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(machine.status) %></td>
+          <td class="px-6 py-4 whitespace-nowrap"><%= ztlp_tunnel_indicator(machine) %></td>
           <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= time_ago_short(machine.last_health_check_at) %></td>
           <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
             <%= link_to "View", network_machine_path(@network, machine), class: "text-ztlp-600 hover:text-ztlp-500" %>

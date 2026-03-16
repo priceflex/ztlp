@@ -39,6 +39,24 @@ class HealthChecker
     # Store each result as a HealthCheck record
     results.each { |result| store_result(result) }
 
+    # Update ZTLP tunnel status from metrics source
+    ztlp_result = results.find { |r| r.metrics&.dig(:metrics_source) == "ztlp" }
+    if ztlp_result
+      @machine.update!(
+        ztlp_tunnel_reachable: true,
+        ztlp_tunnel_latency_ms: ztlp_result.response_time_ms,
+        ztlp_tunnel_error: nil,
+        ztlp_tunnel_checked_at: Time.current
+      )
+    elsif results.any? { |r| r.metrics&.dig(:metrics_source) == "ssh" }
+      # SSH worked but ZTLP didn't
+      @machine.update!(
+        ztlp_tunnel_reachable: false,
+        ztlp_tunnel_error: "ZTLP tunnel unavailable, using SSH fallback",
+        ztlp_tunnel_checked_at: Time.current
+      )
+    end
+
     # Update machine status based on overall health
     all_healthy = results.all? { |r| r.status == "healthy" }
     any_down = results.any? { |r| r.status == "down" }

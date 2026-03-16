@@ -1,6 +1,6 @@
 class MachinesController < ApplicationController
   before_action :set_network
-  before_action :set_machine, only: [:show, :edit, :update, :destroy, :provision, :test_connection, :health_check]
+  before_action :set_machine, only: [:show, :edit, :update, :destroy, :provision, :test_connection, :health_check, :check_ztlp_tunnel]
 
   def index
     @machines = @network.machines.includes(:deployments)
@@ -94,6 +94,26 @@ class MachinesController < ApplicationController
       redirect_to network_machine_path(@network, @machine), notice: "SSH connection successful!"
     rescue SshProvisioner::ProvisionError => e
       redirect_to network_machine_path(@network, @machine), alert: e.message
+    end
+  end
+
+  # POST /networks/:network_id/machines/:id/check_ztlp_tunnel
+  def check_ztlp_tunnel
+    result = ZtlpConnectivity.check(@machine)
+
+    @machine.update!(
+      ztlp_tunnel_reachable: result.reachable,
+      ztlp_tunnel_latency_ms: result.latency_ms,
+      ztlp_tunnel_error: result.error,
+      ztlp_tunnel_checked_at: Time.current
+    )
+
+    if result.reachable
+      redirect_to network_machine_path(@network, @machine),
+                  notice: "ZTLP tunnel: ✅ Connected (#{result.latency_ms}ms)"
+    else
+      redirect_to network_machine_path(@network, @machine),
+                  alert: "ZTLP tunnel: ❌ #{result.error}"
     end
   end
 

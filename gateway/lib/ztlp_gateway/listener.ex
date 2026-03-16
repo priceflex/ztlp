@@ -23,7 +23,7 @@ defmodule ZtlpGateway.Listener do
 
   require Logger
 
-  alias ZtlpGateway.{Pipeline, Session, Config}
+  alias ZtlpGateway.{Packet, Pipeline, Session, Config}
 
   # ---------------------------------------------------------------------------
   # Client API
@@ -125,8 +125,13 @@ defmodule ZtlpGateway.Listener do
     max = Config.get(:max_sessions)
 
     if current < max do
-      # Generate a random SessionID for this new session
-      session_id = :crypto.strong_rand_bytes(12)
+      # Use the client's SessionID from the HELLO packet (echoed in HELLO_ACK)
+      session_id =
+        case Packet.extract_session_id(packet_data) do
+          {:ok, <<0::96>>} -> :crypto.strong_rand_bytes(12)
+          {:ok, sid} -> sid
+          _ -> :crypto.strong_rand_bytes(12)
+        end
 
       opts = %{
         session_id: session_id,

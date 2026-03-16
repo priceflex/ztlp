@@ -12,7 +12,7 @@ class SshProvisionerTest < ActiveSupport::TestCase
     config = @provisioner.send(:generate_config, "ns")
     assert_includes config, "ZTLP_NS_ZONE=office.acme.ztlp"
     assert_includes config, "ZTLP_NS_PORT=23096"
-    assert_includes config, "ZTLP_NS_STORAGE_MODE=disc_copies"
+    assert_includes config, "ZTLP_NS_STORAGE_MODE=ram_copies"
     assert_includes config, "ZTLP_NS_LOG_FORMAT=json"
   end
 

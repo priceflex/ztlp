@@ -335,9 +335,10 @@ class SshProvisioner
       lines = [
         "ZTLP_NS_ZONE=#{network.zone}",
         "ZTLP_NS_PORT=#{ZTLP_PORTS['ns'][:udp]}",
-        "ZTLP_NS_STORAGE_MODE=disc_copies",
+        "ZTLP_NS_STORAGE_MODE=ram_copies",
         "ZTLP_NS_LOG_FORMAT=json",
-        "ZTLP_METRICS_PORT=#{ZTLP_PORTS['ns'][:metrics]}"
+        "ZTLP_METRICS_PORT=#{ZTLP_PORTS['ns'][:metrics]}",
+        "ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false"
       ]
       peers = ns_machines.reject { |m| m.id == machine.id }
       if peers.any?

@@ -43,7 +43,11 @@ module ApplicationHelper
 
   def time_ago_short(time)
     return "never" if time.nil?
-    time_ago_in_words(time) + " ago"
+    if time > Time.current
+      "in " + time_ago_in_words(time)
+    else
+      time_ago_in_words(time) + " ago"
+    end
   end
 
   def health_status_badge(status)

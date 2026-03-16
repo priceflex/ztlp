@@ -1,6 +1,6 @@
 # syntax = docker/dockerfile:1
 
-ARG RUBY_VERSION=3.0.2
+ARG RUBY_VERSION=3.2.7
 FROM registry.docker.com/library/ruby:$RUBY_VERSION-slim AS base
 
 WORKDIR /rails
@@ -46,10 +46,10 @@ RUN apt-get update -qq && \
 COPY --from=build /usr/local/bundle /usr/local/bundle
 COPY --from=build /rails /rails
 
-# Create data directory for SQLite persistence
-RUN mkdir -p /data && \
+# Create data directory for SQLite persistence and ensure Rails directories exist
+RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db && \
     useradd rails --create-home --shell /bin/bash && \
-    chown -R rails:rails db log storage tmp /data
+    chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data
 
 USER rails:rails
 

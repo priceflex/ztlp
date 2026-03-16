@@ -337,8 +337,8 @@ class SshProvisioner
   end
 
   def exec_remote(ssh, command, timeout: 60)
-    stdout = ""
-    stderr = ""
+    stdout = +""
+    stderr = +""
     exit_status = nil
 
     channel = ssh.open_channel do |ch|

@@ -144,6 +144,19 @@ const FRAME_SACK: u8 = 0x05;
 /// Payload: [reason_code: 1B] [message: UTF-8 remaining bytes]
 const FRAME_REJECT: u8 = 0x08;
 
+/// Frame type byte: RTT_PING frame for dedicated RTT measurement.
+/// Payload: [ping_id: u32 BE] [timestamp_us: u64 BE]
+/// Sent periodically by the sender to obtain clean RTT samples even during
+/// heavy retransmission (when Karn's algorithm filters all data-packet RTTs).
+/// Never retransmitted — if lost, the next probe covers it.
+const FRAME_RTT_PING: u8 = 0x06;
+
+/// Frame type byte: RTT_PONG frame — response to RTT_PING.
+/// Payload: [ping_id: u32 BE] [echo_timestamp_us: u64 BE] [receiver_delay_us: u32 BE]
+/// The receiver echoes the ping_id and original timestamp, plus the time it
+/// spent processing (receiver_delay_us) so the sender can subtract it.
+const FRAME_RTT_PONG: u8 = 0x07;
+
 /// Frame type byte: CORRUPTION_NACK frame — receiver detected AEAD decrypt
 /// failure (bit-flip, not congestion). Same wire format as NACK. Sender
 /// retransmits but does NOT reduce cwnd.
@@ -214,6 +227,13 @@ const MAX_RTO_RETRANSMIT_CYCLES: u32 = 10;
 /// After sending FIN, wait this long for remaining buffered packets to drain.
 #[allow(dead_code)]
 const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+// ─── RTT probe parameters ───────────────────────────────────────────────────
+
+/// How often to send RTT_PING probes during active data transfer.
+/// These give clean RTT samples even when all data-packet ACKs are filtered
+/// by Karn's algorithm due to retransmission.
+const RTT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 // ─── Congestion control parameters ──────────────────────────────────────────
 
@@ -1120,6 +1140,21 @@ async fn run_bridge_inner(
     let reset_received = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reset_received_rx = reset_received.clone();
 
+    // ── RTT probe state (improvement #2: dedicated RTT probes) ─────────
+    // The sender sends RTT_PING frames every RTT_PROBE_INTERVAL.
+    // The receiver responds immediately with RTT_PONG. These probes are
+    // never retransmitted — loss just means the next probe covers it.
+    // Outstanding ping timestamps keyed by ping_id.
+    let rtt_ping_outstanding: Arc<Mutex<std::collections::HashMap<u32, Instant>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let rtt_ping_outstanding_rx = rtt_ping_outstanding.clone();
+
+    // PTO (Probe Timeout) counter — tracks consecutive PTOs without progress.
+    // Improvement #3: PTO replaces RTO for congestion window management.
+    let pto_count: Arc<std::sync::atomic::AtomicU32> =
+        Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let pto_count_rx = pto_count.clone();
+
     // ── TCP → ZTLP direction (sender) ──────────────────────────────────
 
     let tcp_to_ztlp = async move {
@@ -1165,7 +1200,57 @@ async fn run_bridge_inner(
         // whether any new ACK arrived (real progress).
         let mut stall_start_acked: Option<u64> = None;
 
+        // RTT probe state (sender side)
+        let mut last_rtt_ping = Instant::now();
+        let mut next_ping_id: u32 = 0;
+
         loop {
+            // ── Send RTT probe if interval has elapsed ─────────────────
+            if last_rtt_ping.elapsed() >= RTT_PROBE_INTERVAL {
+                let ping_id = next_ping_id;
+                next_ping_id = next_ping_id.wrapping_add(1);
+
+                // Build PING frame: [FRAME_RTT_PING | ping_id: u32 BE | timestamp_us: u64 BE]
+                let now_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64;
+                let mut ping_frame = Vec::with_capacity(13);
+                ping_frame.push(FRAME_RTT_PING);
+                ping_frame.extend_from_slice(&ping_id.to_be_bytes());
+                ping_frame.extend_from_slice(&now_us.to_be_bytes());
+
+                // Encrypt and send
+                let seq = {
+                    let mut pl = pipeline_send.lock().await;
+                    let session = pl
+                        .get_session_mut(&sid_send)
+                        .ok_or("session not found for RTT ping")?;
+                    session.next_send_seq()
+                };
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
+                if let Ok(encrypted) = cipher.encrypt(nonce, ping_frame.as_slice()) {
+                    let mut header = DataHeader::new(sid_send, seq);
+                    let aad = header.aad_bytes();
+                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                    let mut packet = header.serialize();
+                    packet.extend_from_slice(&encrypted);
+                    let _ = udp_send.send_to(&packet, peer_addr).await;
+                    // Record outstanding ping for RTT calculation
+                    let mut outstanding = rtt_ping_outstanding.lock().await;
+                    outstanding.insert(ping_id, Instant::now());
+                    // Prune old pings (keep at most 32)
+                    if outstanding.len() > 32 {
+                        let oldest_id = ping_id.wrapping_sub(32);
+                        outstanding.remove(&oldest_id);
+                    }
+                    debug!("sent RTT_PING id={} seq={}", ping_id, seq);
+                }
+                last_rtt_ping = Instant::now();
+            }
+
             // ── Check for retransmit requests before reading new TCP data ──
             // Process any pending NACK-triggered retransmissions.
             while let Ok(nack_seqs) = retransmit_rx.try_recv() {
@@ -1470,44 +1555,62 @@ async fn run_bridge_inner(
                         return Err("sender ACK timeout".into());
                     }
 
-                    // RTO-based loss detection: if we've been waiting for window
-                    // space longer than the congestion controller's RTO, treat
-                    // this as packet loss. This handles the case where both the
-                    // data packets AND the NACKs were dropped (e.g., UDP buffer
-                    // overflow on systems with small rmem_max).
+                    // ── PTO (Probe Timeout) — replaces RTO (QUIC-style) ────
+                    // Instead of collapsing cwnd on timeout (which causes death
+                    // spirals), we send 1-2 probe packets and back off the PTO
+                    // timer exponentially. Only collapse cwnd on *persistent*
+                    // congestion (multiple consecutive PTOs with zero progress).
+                    //
+                    // This matches QUIC RFC 9002 §6.2 / §7.5-7.6.
                     {
                         let rto = {
                             let cc = congestion_sender.lock().await;
                             cc.rto_ms()
                         };
-                        let rto_dur = std::time::Duration::from_millis(rto.max(MIN_RTO_MS) as u64);
-                        if last_ack_check.elapsed() > rto_dur {
+                        let current_pto = pto_count.load(std::sync::atomic::Ordering::Relaxed);
+                        // Exponential backoff: PTO * 2^pto_count, capped at 30s
+                        let backoff_factor = 1u64 << current_pto.min(5);
+                        let pto_dur = std::time::Duration::from_millis(
+                            (rto.max(MIN_RTO_MS) as u64 * backoff_factor).min(30_000),
+                        );
+
+                        if last_ack_check.elapsed() > pto_dur {
                             rto_cycles_in_stall += 1;
+                            let new_pto =
+                                pto_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
-                            let old_cwnd = {
-                                let mut cc = congestion_sender.lock().await;
-                                let old = cc.cwnd;
-                                cc.on_rto();
-                                old
-                            };
-                            let new_cwnd = {
-                                let cc = congestion_sender.lock().await;
-                                cc.cwnd
-                            };
-                            debug!(
-                                "RTO loss detection: no ACK for {:?}, cwnd {:.0} → {:.0} (stall cycle {})",
-                                rto_dur, old_cwnd, new_cwnd, rto_cycles_in_stall
-                            );
+                            // Persistent congestion: if 3+ consecutive PTOs with
+                            // no progress, reduce cwnd to minimum (like QUIC §7.6).
+                            if new_pto >= 3 {
+                                let old_cwnd = {
+                                    let mut cc = congestion_sender.lock().await;
+                                    let old = cc.cwnd;
+                                    cc.on_rto(); // collapse cwnd on persistent congestion
+                                    old
+                                };
+                                let new_cwnd = {
+                                    let cc = congestion_sender.lock().await;
+                                    cc.cwnd
+                                };
+                                warn!(
+                                    "persistent congestion: {} PTOs, cwnd {:.0} → {:.0}",
+                                    new_pto, old_cwnd, new_cwnd
+                                );
+                            } else {
+                                debug!(
+                                    "PTO #{}: sending probe packets (no cwnd reduction)",
+                                    new_pto
+                                );
+                            }
 
-                            // Retransmit the earliest unacked packets to recover
-                            // from complete loss (both data and NACK dropped).
-                            // Retransmit up to new_cwnd packets from the retransmit buffer.
-                            let retransmit_count = (new_cwnd as usize).min(32);
+                            // Send 1-2 probe packets (retransmit earliest unacked).
+                            // Probes are exempt from cwnd — they exist to force an
+                            // ACK from the receiver.
+                            let probe_count = if new_pto == 1 { 2 } else { 1 };
                             let entries = {
                                 let mut rb = retransmit_buf_sender.lock().await;
-                                let entries = rb.oldest_entries(retransmit_count);
-                                // Karn's algorithm: mark all RTO-retransmitted
-                                // entries so SRTT is not updated from their ACKs.
+                                let entries = rb.oldest_entries(probe_count);
+                                // Karn's algorithm: mark probed entries.
                                 for (ds, _, _) in &entries {
                                     rb.mark_retransmitted(*ds);
                                 }
@@ -1525,12 +1628,11 @@ async fn run_bridge_inner(
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ = udp_send.send_to(&packet, peer_addr).await;
-                                    debug!("RTO retransmit data_seq {} (packet_seq {})", ds, ps);
+                                    debug!("PTO probe: data_seq {} (packet_seq {})", ds, ps);
                                 }
                             }
 
-                            // Reset the ACK check so we don't immediately
-                            // trigger another RTO (but NOT window_stall_start)
+                            // Reset ACK check timer (but NOT window_stall_start)
                             last_ack_check = Instant::now();
                         }
                     }
@@ -1672,6 +1774,8 @@ async fn run_bridge_inner(
                 // Window opened — clear stall tracking
                 window_stall_start = None;
                 rto_cycles_in_stall = 0;
+                // Reset PTO counter on real progress
+                pto_count.store(0, std::sync::atomic::Ordering::Relaxed);
 
                 // Yield between sub-batches to let the tokio runtime
                 // service the receiver task. With 7MB socket buffers,
@@ -1720,6 +1824,7 @@ async fn run_bridge_inner(
             // Full batch sent — clear any stall tracking
             window_stall_start = None;
             rto_cycles_in_stall = 0;
+            pto_count.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     };
 
@@ -2326,6 +2431,110 @@ async fn run_bridge_inner(
                                     .into());
                                 }
                                 warn!("received malformed REJECT frame");
+                            }
+
+                            FRAME_RTT_PING => {
+                                // Received a RTT probe from the sender — respond
+                                // immediately with RTT_PONG echoing the timestamp.
+                                // frame_payload = [ping_id: u32 BE | timestamp_us: u64 BE]
+                                if frame_payload.len() >= 12 {
+                                    let ping_id = u32::from_be_bytes([
+                                        frame_payload[0],
+                                        frame_payload[1],
+                                        frame_payload[2],
+                                        frame_payload[3],
+                                    ]);
+                                    let echo_ts = &frame_payload[4..12];
+
+                                    // Measure receiver processing delay (time since
+                                    // we received this UDP batch until now).
+                                    let receiver_delay_us =
+                                        recv_start.elapsed().as_micros().min(u32::MAX as u128)
+                                            as u32;
+
+                                    // Build PONG: [FRAME_RTT_PONG | ping_id | echo_ts | delay_us]
+                                    let mut pong_frame = Vec::with_capacity(17);
+                                    pong_frame.push(FRAME_RTT_PONG);
+                                    pong_frame.extend_from_slice(&ping_id.to_be_bytes());
+                                    pong_frame.extend_from_slice(echo_ts);
+                                    pong_frame.extend_from_slice(&receiver_delay_us.to_be_bytes());
+
+                                    // Encrypt and send back
+                                    let pong_seq = {
+                                        let mut pl = pipeline_recv.lock().await;
+                                        let session = pl
+                                            .get_session_mut(&sid_recv)
+                                            .ok_or("session not found for RTT pong")?;
+                                        session.next_send_seq()
+                                    };
+                                    let mut nonce_bytes = [0u8; 12];
+                                    nonce_bytes[4..12].copy_from_slice(&pong_seq.to_le_bytes());
+                                    let nonce = Nonce::from_slice(&nonce_bytes);
+                                    if let Ok(encrypted) =
+                                        ack_cipher.encrypt(nonce, pong_frame.as_slice())
+                                    {
+                                        let mut header = DataHeader::new(sid_recv, pong_seq);
+                                        let aad = header.aad_bytes();
+                                        header.header_auth_tag =
+                                            compute_header_auth_tag(&send_key_for_acks, &aad);
+                                        let mut packet = header.serialize();
+                                        packet.extend_from_slice(&encrypted);
+                                        let _ = udp_recv.send_to(&packet, peer_addr).await;
+                                        debug!(
+                                            "sent RTT_PONG id={} delay={}us",
+                                            ping_id, receiver_delay_us
+                                        );
+                                    }
+                                }
+                            }
+
+                            FRAME_RTT_PONG => {
+                                // Received a PONG from the receiver — extract clean
+                                // RTT sample and update congestion controller.
+                                // frame_payload = [ping_id: u32 BE | echo_ts: u64 BE | delay_us: u32 BE]
+                                if frame_payload.len() >= 16 {
+                                    let ping_id = u32::from_be_bytes([
+                                        frame_payload[0],
+                                        frame_payload[1],
+                                        frame_payload[2],
+                                        frame_payload[3],
+                                    ]);
+                                    let receiver_delay_us = u32::from_be_bytes([
+                                        frame_payload[12],
+                                        frame_payload[13],
+                                        frame_payload[14],
+                                        frame_payload[15],
+                                    ]);
+
+                                    // Look up when we sent this ping
+                                    let send_time = {
+                                        let mut outstanding = rtt_ping_outstanding_rx.lock().await;
+                                        outstanding.remove(&ping_id)
+                                    };
+
+                                    if let Some(send_time) = send_time {
+                                        let total_rtt_ms =
+                                            send_time.elapsed().as_secs_f64() * 1000.0;
+                                        let delay_ms = receiver_delay_us as f64 / 1000.0;
+                                        // Subtract receiver processing delay for
+                                        // network-only RTT
+                                        let net_rtt_ms = (total_rtt_ms - delay_ms).max(0.01);
+
+                                        let mut cc = congestion_receiver.lock().await;
+                                        cc.update_rtt(net_rtt_ms);
+                                        // Reset PTO count on successful probe
+                                        pto_count_rx.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        debug!(
+                                            "RTT_PONG id={}: total={:.2}ms net={:.2}ms (delay={:.2}ms)",
+                                            ping_id, total_rtt_ms, net_rtt_ms, delay_ms
+                                        );
+                                    } else {
+                                        debug!(
+                                            "RTT_PONG id={}: no outstanding ping (late/dup)",
+                                            ping_id
+                                        );
+                                    }
+                                }
                             }
 
                             _ => {

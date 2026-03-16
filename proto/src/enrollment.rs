@@ -231,8 +231,8 @@ impl EnrollmentToken {
             expires_at,
             nonce,
             mac,
-            token_id: None,      // Binary tokens don't carry token IDs
-            callback_url: None,  // Binary tokens don't carry callback URLs
+            token_id: None,     // Binary tokens don't carry token IDs
+            callback_url: None, // Binary tokens don't carry callback URLs
         })
     }
 

@@ -57,4 +57,18 @@ class NetworksControllerTest < ActionDispatch::IntegrationTest
     end
     assert_redirected_to networks_path
   end
+
+  test "register_ns redirects with alert when BOOTSTRAP_URL not set" do
+    ENV.delete("BOOTSTRAP_URL")
+    post register_ns_network_path(networks(:office))
+    assert_redirected_to network_path(networks(:office))
+    follow_redirect!
+    assert_includes response.body, "BOOTSTRAP_URL not configured"
+  end
+
+  test "run_health_check redirects with notice" do
+    # Health check will fail (no SSH access to test fixtures) but should redirect gracefully
+    post run_health_check_network_path(networks(:office))
+    assert_redirected_to network_path(networks(:office))
+  end
 end

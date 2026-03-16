@@ -1,5 +1,5 @@
 class NetworksController < ApplicationController
-  before_action :set_network, only: [:show, :edit, :update, :destroy, :deploy]
+  before_action :set_network, only: [:show, :edit, :update, :destroy, :deploy, :register_ns, :run_health_check]
 
   def index
     @networks = Network.all.includes(:machines, :enrollment_tokens)
@@ -68,6 +68,42 @@ class NetworksController < ApplicationController
       @network.update!(status: "error")
       redirect_to @network, alert: "Some deployments failed: #{errors.join('; ')}"
     end
+  end
+
+  # POST /networks/:id/register_ns — Register Bootstrap with the NS
+  def register_ns
+    registrar = NsRegistrar.new(@network)
+    result = registrar.register!
+    AuditLog.record(
+      action: "ns_register_bootstrap",
+      target: @network,
+      details: { name: result[:name], addr: result[:addr], ns: result[:ns] }
+    )
+    redirect_to @network, notice: "Registered #{result[:name]} → #{result[:addr]} with NS"
+  rescue NsRegistrar::RegistrationError => e
+    redirect_to @network, alert: "NS registration failed: #{e.message}"
+  end
+
+  # POST /networks/:id/run_health_check — Run health checks on all machines
+  def run_health_check
+    results = []
+    errors = []
+    @network.machines.each do |machine|
+      next unless machine.role_list.any?
+      begin
+        checker = HealthChecker.new(machine)
+        results.concat(checker.check_all)
+      rescue StandardError => e
+        errors << "#{machine.hostname}: #{e.message}"
+      end
+    end
+
+    healthy = results.count { |r| r.status == "healthy" }
+    total = results.count
+    msg = "Health check complete: #{healthy}/#{total} healthy"
+    msg += ". Errors: #{errors.join('; ')}" if errors.any?
+
+    redirect_to @network, notice: msg
   end
 
   private

@@ -4,6 +4,8 @@ Rails.application.routes.draw do
   resources :networks do
     member do
       post :deploy
+      post :register_ns
+      post :run_health_check
     end
 
     # Health monitoring routes

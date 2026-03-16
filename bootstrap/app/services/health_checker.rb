@@ -14,7 +14,7 @@ class HealthChecker
                        :error_message, :response_time_ms, keyword_init: true)
 
   HEALTH_CHECKS = {
-    "ns"      => { port: 23097, protocol: :udp, metrics_port: 9103 },
+    "ns"      => { port: 23096, protocol: :udp, metrics_port: 9103 },
     "relay"   => { port: 23095, protocol: :udp, metrics_port: 9101 },
     "gateway" => { port: 23098, protocol: :tcp, metrics_port: 9102 }
   }.freeze
@@ -139,7 +139,7 @@ class HealthChecker
 
   # Check Docker container status via docker inspect
   def check_container_status(ssh, container_name)
-    result = exec_ssh(ssh, "docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.State.Pid}}' #{container_name} 2>/dev/null")
+    result = exec_ssh(ssh, "#{sudo}docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.State.Pid}}' #{container_name} 2>/dev/null")
 
     if result[:exit_status] != 0
       return { running: false, state: "not_found", metrics: {} }
@@ -172,7 +172,7 @@ class HealthChecker
 
   # Get recent container logs and count errors
   def get_container_logs(ssh, container_name)
-    result = exec_ssh(ssh, "docker logs --tail 20 #{container_name} 2>&1")
+    result = exec_ssh(ssh, "#{sudo}docker logs --tail 20 #{container_name} 2>&1")
     lines = result[:stdout].to_s.lines.map(&:strip)
     error_count = lines.count { |l| l.downcase.include?("error") || l.downcase.include?("fatal") }
 
@@ -234,7 +234,7 @@ class HealthChecker
 
   # Check CPU and memory usage of the container
   def check_resource_usage(ssh, container_name)
-    result = exec_ssh(ssh, "docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}' #{container_name} 2>/dev/null")
+    result = exec_ssh(ssh, "#{sudo}docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}' #{container_name} 2>/dev/null")
 
     return {} if result[:exit_status] != 0
 
@@ -284,13 +284,18 @@ class HealthChecker
         ch.on_request("exit-status") { |_, buf| exit_status = buf.read_long }
       end
     end
-    channel.wait(15)
+    channel.wait
 
     { stdout: stdout, stderr: stderr, exit_status: exit_status || 0 }
   end
 
   def elapsed_ms(start_time)
     ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).to_i
+  end
+
+  # Prefix for privileged commands — sudo when not root
+  def sudo
+    @sudo ||= (@machine.ssh_user == "root" ? "" : "sudo ")
   end
 
   # Store a check result as a HealthCheck record and manage alerts

@@ -6,6 +6,10 @@
     </div>
     <div class="mt-4 sm:mt-0 flex space-x-3">
       <%= link_to "Edit", edit_network_path(@network), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= button_to "🏥 Check Health", run_health_check_network_path(@network), method: :post, class: "rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
+      <% if @ns_machines.any? %>
+        <%= button_to "📡 Register with NS", register_ns_network_path(@network), method: :post, class: "rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500" %>
+      <% end %>
       <% if @network.deployable? %>
         <%= button_to "Deploy All", deploy_network_path(@network), method: :post, class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500", data: { turbo_confirm: "Deploy all components to all machines?" } %>
       <% end %>

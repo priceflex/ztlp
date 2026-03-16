@@ -115,6 +115,14 @@ class HealthCheckerTest < ActiveSupport::TestCase
     assert_equal %w[gateway ns relay], HealthChecker::HEALTH_CHECKS.keys.sort
   end
 
+  test "NS port is 23096 not 23097" do
+    assert_equal 23096, HealthChecker::HEALTH_CHECKS["ns"][:port]
+  end
+
+  test "relay port is 23095" do
+    assert_equal 23095, HealthChecker::HEALTH_CHECKS["relay"][:port]
+  end
+
   test "CONTAINER_NAMES defines all three components" do
     assert_equal %w[gateway ns relay], HealthChecker::CONTAINER_NAMES.keys.sort
   end

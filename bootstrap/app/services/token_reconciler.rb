@@ -129,10 +129,12 @@ class TokenReconciler
       nil
     end
 
+    # NS machines are reached directly (same VPC); only relay machines need relay routing.
+    # Matches the logic in HealthChecker#find_relay_addr and ZtlpConnectivity.find_relay_addr.
     def find_relay_addr(machine)
-      relay = machine.network.relay_machines.first
-      return nil unless relay
-      "#{relay.ip_address}:#{SshProvisioner::ZTLP_PORTS['relay'][:udp]}"
+      return nil unless machine.role_list.include?("relay")
+      relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
+      "#{machine.ip_address}:#{relay_port}"
     end
 
     # Match NS enrollments against pending tokens.

@@ -68,6 +68,9 @@ defmodule ZtlpNs.MetricsServer do
             send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
           "/health" -> send_response(socket, 200, "OK\n")
           "/ready" -> send_response(socket, 200, "OK\n")
+          "/token_status" ->
+            body = collect_token_status()
+            send_response(socket, 200, body, "application/json")
           _ -> send_response(socket, 404, "Not Found\n")
         end
       {:ok, {:http_request, _, _, _}} ->
@@ -269,6 +272,25 @@ defmodule ZtlpNs.MetricsServer do
       "# HELP beam_process_count BEAM processes\n# TYPE beam_process_count gauge\n",
       "beam_process_count #{procs}\n"
     ]
+  end
+
+  # Returns JSON with enrollment log entries for Bootstrap to reconcile tokens.
+  # Each entry has the device name, node_id, pubkey, zone, and enrollment timestamp.
+  defp collect_token_status do
+    try do
+      entries = ZtlpNs.Enrollment.enrollment_log()
+
+      enrollments =
+        Enum.map(entries, fn entry ->
+          ~s({"name":"#{entry.name}","node_id":"#{entry.node_id}","zone":"#{entry.zone}","enrolled_at":#{entry.enrolled_at}})
+        end)
+
+      ~s({"enrollments":[#{Enum.join(enrollments, ",")}]})
+    rescue
+      _ -> ~s({"enrollments":[],"error":"unavailable"})
+    catch
+      _, _ -> ~s({"enrollments":[],"error":"unavailable"})
+    end
   end
 
   defp metrics_enabled? do

@@ -107,6 +107,38 @@ class ZtlpTunnel
     { available: false, data: {}, error: last_error }
   end
 
+  # One-shot: open tunnel, fetch an arbitrary HTTP endpoint, close tunnel.
+  # Returns { available: true/false, body: string_or_nil, error: string_or_nil }
+  def fetch_endpoint(path)
+    return { available: false, body: nil, error: "ztlp CLI not found" } unless self.class.available?
+    return { available: false, body: nil, error: "not enrolled" } unless self.class.enrolled?
+
+    last_error = nil
+    relay_info = @relay_addr ? " via relay #{@relay_addr}" : " (direct)"
+    (1 + MAX_RETRIES).times do |attempt|
+      begin
+        @local_port = find_free_port if attempt > 0
+        Rails.logger.info("[ZtlpTunnel] fetch_endpoint #{path} attempt #{attempt + 1}/#{1 + MAX_RETRIES}: #{@gateway_addr}#{relay_info}")
+        open_tunnel
+        wait_for_tunnel
+
+        body = fetch_via_curl("127.0.0.1", @local_port, path)
+        if body && !body.empty?
+          Rails.logger.info("[ZtlpTunnel] ✓ #{@gateway_addr}#{path}: #{body.bytesize} bytes (attempt #{attempt + 1})")
+          return { available: true, body: body }
+        end
+
+        last_error = "empty response"
+      rescue Timeout::Error, Errno::ECONNREFUSED, StandardError => e
+        last_error = e.message
+      ensure
+        close_tunnel
+      end
+    end
+
+    { available: false, body: nil, error: last_error }
+  end
+
   # Drain any remaining stdout/stderr from the CLI process (for error diagnostics)
   def drain_output
     output = +""

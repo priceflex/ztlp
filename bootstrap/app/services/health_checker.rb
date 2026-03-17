@@ -57,6 +57,11 @@ class HealthChecker
       )
     end
 
+    # Reconcile enrollment tokens if this is an NS machine with a working ZTLP tunnel
+    if @machine.role_list.include?("ns") && @machine.ztlp_tunnel_reachable && @machine.network
+      TokenReconciler.reconcile!(@machine.network)
+    end
+
     # Update machine status based on overall health
     all_healthy = results.all? { |r| r.status == "healthy" }
     any_down = results.any? { |r| r.status == "down" }

@@ -51,14 +51,19 @@ defmodule ZtlpNs.Enrollment do
   @blake2s_block_size 64
 
   @table :ztlp_enrollment_tokens
+  @enrollments_table :ztlp_enrollment_log
 
   # ── Public API ─────────────────────────────────────────────────────
 
-  @doc "Initialize the enrollment token tracking table."
+  @doc "Initialize the enrollment token tracking tables."
   @spec init() :: :ok
   def init do
     if :ets.whereis(@table) == :undefined do
       :ets.new(@table, [:named_table, :public, :set])
+    end
+
+    if :ets.whereis(@enrollments_table) == :undefined do
+      :ets.new(@enrollments_table, [:named_table, :public, :ordered_set])
     end
 
     :ok
@@ -118,15 +123,21 @@ defmodule ZtlpNs.Enrollment do
     Application.get_env(:ztlp_ns, :enrollment_secret)
   end
 
-  @doc "Reset the token tracking table (for testing)."
+  @doc "Reset the token tracking tables (for testing)."
   @spec reset() :: :ok
   def reset do
     if :ets.whereis(@table) != :undefined do
       :ets.delete_all_objects(@table)
     end
 
+    if :ets.whereis(@enrollments_table) != :undefined do
+      :ets.delete_all_objects(@enrollments_table)
+    end
+
     :ok
   end
+
+
 
   # ── Token Validation ───────────────────────────────────────────────
 
@@ -170,6 +181,11 @@ defmodule ZtlpNs.Enrollment do
   end
 
   defp check_usage(%{max_uses: 0}), do: :ok
+
+  # Skip usage tracking for zero-nonce tokens (Bootstrap query-param format).
+  # Bootstrap manages token validity server-side; the NS shouldn't reject
+  # subsequent enrollments just because an earlier zero-nonce token was used.
+  defp check_usage(%{nonce: <<0::128>>, max_uses: _}), do: :ok
 
   defp check_usage(%{nonce: nonce, max_uses: max_uses}) do
     init()
@@ -359,6 +375,9 @@ defmodule ZtlpNs.Enrollment do
       end
     end
 
+    # Log the enrollment for status tracking
+    log_enrollment(name, node_id_hex, pubkey_hex, token)
+
     # Build success response with network config
     config = build_config_response(token)
     <<0x08, 0x00, config::binary>>
@@ -387,6 +406,40 @@ defmodule ZtlpNs.Enrollment do
     end)
 
     <<relay_bin::binary, gw_bin::binary>>
+  end
+
+  defp log_enrollment(name, node_id_hex, pubkey_hex, token) do
+    init()
+    ts = System.system_time(:second)
+    zone = token.zone
+
+    entry = %{
+      name: name,
+      node_id: node_id_hex,
+      pubkey: pubkey_hex,
+      zone: zone,
+      enrolled_at: ts
+    }
+
+    # Key by {timestamp, name} for ordered retrieval
+    :ets.insert(@enrollments_table, {{ts, name}, entry})
+  end
+
+  @doc """
+  Return all enrollment log entries.
+  Used by the metrics server's `/token_status` endpoint.
+  """
+  @spec enrollment_log() :: [map()]
+  def enrollment_log do
+    init()
+
+    if :ets.whereis(@enrollments_table) != :undefined do
+      :ets.tab2list(@enrollments_table)
+      |> Enum.map(fn {_key, entry} -> entry end)
+      |> Enum.sort_by(& &1.enrolled_at)
+    else
+      []
+    end
   end
 
   defp return_error(code), do: <<0x08, code>>

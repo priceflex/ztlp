@@ -8,7 +8,7 @@
 
 **Version 0.9.13 | Experimental / Informational**
 
-> 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
+> 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; 📄 **[Whitepaper](https://ztlp.org/whitepaper/)** ([PDF](https://ztlp.org/whitepaper/ZTLP-Whitepaper.pdf)) &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
 
 ---
 

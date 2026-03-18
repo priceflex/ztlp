@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZTLP Whitepaper — Zero Trust Layer Protocol</title>
+  <meta name="description" content="ZTLP: Identity-First Networking for the Post-Perimeter Internet. Whitepaper v0.9.13 by Steven Price." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Marked.js for Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/lib/marked.umd.min.js"></script>
+
+  <!-- Prism.js for syntax highlighting -->
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-rust.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-toml.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg2: #1e293b;
+      --surface: #1e293b;
+      --border: #334155;
+      --text: #f1f5f9;
+      --text2: #94a3b8;
+      --text3: #64748b;
+      --accent: #38bdf8;
+      --accent2: #7dd3fc;
+      --green: #34d399;
+      --red: #f87171;
+      --font: 'Inter', system-ui, -apple-system, sans-serif;
+      --mono: 'JetBrains Mono', monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+
+    /* Header */
+    .header {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .header-left a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+
+    .header-left a:hover { color: var(--accent2); }
+
+    .header-right {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .btn-pdf {
+      background: var(--accent);
+      color: #0f172a;
+    }
+
+    .btn-pdf:hover {
+      background: var(--accent2);
+    }
+
+    .btn-github {
+      background: #24292e;
+      color: #fff;
+      border: 1px solid var(--border);
+    }
+
+    .btn-github:hover {
+      background: #333;
+    }
+
+    .btn-back {
+      background: transparent;
+      color: var(--text2);
+      border: 1px solid var(--border);
+    }
+
+    .btn-back:hover {
+      color: var(--text);
+      border-color: var(--text3);
+    }
+
+    /* Content */
+    .content {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 3rem 2rem 6rem;
+    }
+
+    .content h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      margin-bottom: 0.25rem;
+      color: var(--text);
+    }
+
+    .content h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-top: 3rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+      color: var(--accent);
+    }
+
+    .content h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-top: 2rem;
+      margin-bottom: 0.75rem;
+      color: var(--text);
+    }
+
+    .content p {
+      margin-bottom: 1rem;
+      color: var(--text2);
+    }
+
+    .content strong { color: var(--text); }
+
+    .content a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .content a:hover {
+      text-decoration: underline;
+    }
+
+    .content ul, .content ol {
+      margin-bottom: 1rem;
+      padding-left: 1.5rem;
+      color: var(--text2);
+    }
+
+    .content li { margin-bottom: 0.35rem; }
+
+    .content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+
+    .content th {
+      text-align: left;
+      padding: 0.6rem 0.75rem;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .content td {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      color: var(--text2);
+    }
+
+    .content tr:hover td {
+      background: rgba(56,189,248,.03);
+    }
+
+    .content pre {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    .content code {
+      font-family: var(--mono);
+      font-size: 0.85em;
+    }
+
+    .content p code, .content li code, .content td code {
+      background: var(--bg2);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      color: var(--accent);
+    }
+
+    .content hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 3rem 0;
+    }
+
+    .content blockquote {
+      border-left: 3px solid var(--accent);
+      padding-left: 1rem;
+      margin-bottom: 1rem;
+      color: var(--text3);
+      font-style: italic;
+    }
+
+    /* Meta info under title */
+    .meta {
+      color: var(--text3);
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+    }
+
+    .meta strong { color: var(--text2); }
+
+    /* TOC styling */
+    .content > ul:first-of-type {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem 1.5rem 1.5rem 2.5rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .content { padding: 2rem 1rem 4rem; }
+      .content h1 { font-size: 1.6rem; }
+      .content h2 { font-size: 1.25rem; }
+      .header { padding: 0.75rem 1rem; flex-wrap: wrap; gap: 0.5rem; }
+      .header-right { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-left">
+      <a href="../">← ZTLP.org</a>
+    </div>
+    <div class="header-right">
+      <a href="ZTLP-Whitepaper.pdf" class="btn btn-pdf">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+        Download PDF
+      </a>
+      <a href="https://github.com/priceflex/ztlp/blob/main/whitepaper/ZTLP-Whitepaper.md" target="_blank" rel="noopener" class="btn btn-github">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </div>
+
+  <div class="content" id="whitepaper-content">
+    <p style="color: var(--text3); text-align: center; padding: 4rem 0;">Loading whitepaper…</p>
+  </div>
+
+  <script>
+    async function loadWhitepaper() {
+      try {
+        const resp = await fetch('ZTLP-Whitepaper.md');
+        if (!resp.ok) throw new Error('Failed to fetch');
+        const md = await resp.text();
+
+        // Configure marked
+        marked.setOptions({
+          gfm: true,
+          breaks: false,
+          headerIds: true,
+          mangle: false
+        });
+
+        document.getElementById('whitepaper-content').innerHTML = marked.parse(md);
+
+        // Apply Prism syntax highlighting
+        document.querySelectorAll('pre code').forEach(block => {
+          Prism.highlightElement(block);
+        });
+
+        // Smooth scroll for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(a => {
+          a.addEventListener('click', e => {
+            const id = a.getAttribute('href').slice(1);
+            const el = document.getElementById(id);
+            if (el) {
+              e.preventDefault();
+              el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        });
+      } catch (err) {
+        document.getElementById('whitepaper-content').innerHTML =
+          '<p style="color: var(--red);">Failed to load whitepaper. <a href="ZTLP-Whitepaper.md">View raw Markdown</a> or <a href="ZTLP-Whitepaper.pdf">download PDF</a>.</p>';
+      }
+    }
+
+    loadWhitepaper();
+  </script>
+
+</body>
+</html>

@@ -1,6 +1,6 @@
 # ZTLP Roadmap
 
-## Current Release: v0.9.10
+## Current Release: v0.9.13
 
 ---
 

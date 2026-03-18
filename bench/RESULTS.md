@@ -103,14 +103,11 @@ flow control with congestion window, ACK-driven pacing.
 
 | Component | Tests | Failures |
 |-----------|-------|----------|
-| Rust lib | 263 | 0 |
-| Rust integration | 115 | 0 |
-| Rust perf gate | 5 | 0 |
-| Interop (Rust ↔ Elixir) | 31 | 0 |
-| Elixir relay | 541 | 0 |
-| Elixir NS | 286 | 0 |
-| Elixir gateway | 202 | 0 |
-| **Total** | **1,443** | **0** |
+| Rust (library + agent + CLI + interop) | 853 | 0 |
+| Elixir relay | 557 | 0 |
+| Elixir NS | 608 | 0 |
+| Elixir gateway | 260 | 0 |
+| **Total** | **2,278** | **0** |
 
 ## SCP Through ZTLP Tunnel (v0.5.3)
 

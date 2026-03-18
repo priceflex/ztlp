@@ -376,7 +376,7 @@ ztlp inspect 5a37100b0000f8d2a1e703c4b90a1b2c000000000000002a4d8f1c3e7b2a9d0e5f4
 echo ""
 echo "  ZTLP — Zero Trust Layer Protocol"
 echo "  ztlp.org | Apache 2.0"
-echo "  723 tests. Zero failures."
+echo "  2,278 tests. Zero failures."
 echo ""
 ```
 

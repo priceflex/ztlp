@@ -88,6 +88,63 @@
   </div>
 </div>
 
+<!-- Gateway-specific Details -->
+<% if @machine.role_list.include?("gateway") %>
+<div class="bg-white shadow rounded-lg mb-8 p-6">
+  <h3 class="text-lg font-medium text-gray-900 mb-4">🌐 Gateway Configuration</h3>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+    <div class="rounded-md bg-emerald-50 border border-emerald-200 p-4">
+      <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Backends</h4>
+      <% if @machine.gateway_backends.present? %>
+        <div class="space-y-2">
+          <% @machine.gateway_backends.strip.split("\n").each do |line| %>
+            <% parts = line.strip.split(":") %>
+            <% if parts.length >= 3 %>
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-medium text-gray-900"><%= parts[0] %></span>
+                <span class="font-mono text-gray-500"><%= parts[1..].join(":") %></span>
+              </div>
+            <% else %>
+              <div class="text-xs font-mono text-gray-700"><%= line.strip %></div>
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-xs text-gray-400 italic">No backends configured. <br>Edit this machine to add backends (e.g., beta:127.0.0.1:80)</p>
+      <% end %>
+    </div>
+    <div class="rounded-md bg-emerald-50 border border-emerald-200 p-4">
+      <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Access Policies</h4>
+      <% if @machine.gateway_policies.present? %>
+        <div class="space-y-2">
+          <% @machine.gateway_policies.strip.split("\n").each do |line| %>
+            <% parts = line.strip.split(":") %>
+            <% if parts.length >= 2 %>
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-mono text-gray-500"><%= parts[0] == "*" ? "Any authenticated" : parts[0] %></span>
+                <span class="font-medium text-gray-900">→ <%= parts[1] %></span>
+              </div>
+            <% else %>
+              <div class="text-xs font-mono text-gray-700"><%= line.strip %></div>
+            <% end %>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-xs text-gray-400 italic">No policies configured. <br>Edit this machine to add policies (e.g., *:beta)</p>
+      <% end %>
+    </div>
+  </div>
+  <div class="rounded-md bg-gray-50 border border-gray-200 p-4">
+    <h4 class="text-xs font-medium text-gray-500 uppercase mb-3">Gateway Settings</h4>
+    <div class="space-y-2 text-xs">
+      <div class="flex justify-between"><span class="text-gray-500">Listen Port</span><span class="font-mono text-gray-900"><%= SshProvisioner::ZTLP_PORTS['gateway'][:tcp] %> (TCP)</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Metrics Port</span><span class="font-mono text-gray-900"><%= SshProvisioner::ZTLP_PORTS['gateway'][:metrics] %></span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Networking</span><span class="font-medium text-green-600">Host Network</span></div>
+    </div>
+  </div>
+</div>
+<% end %>
+
 <!-- Relay-specific Details -->
 <% if @machine.role_list.include?("relay") %>
 <div class="bg-white shadow rounded-lg mb-8 p-6">

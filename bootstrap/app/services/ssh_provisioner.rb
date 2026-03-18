@@ -391,7 +391,7 @@ class SshProvisioner
 
     when "gateway"
       lines = [
-        "ZTLP_GATEWAY_LISTEN=0.0.0.0:#{ZTLP_PORTS['gateway'][:tcp]}",
+        "ZTLP_GATEWAY_PORT=#{ZTLP_PORTS['gateway'][:tcp]}",
         "ZTLP_GATEWAY_LOG_FORMAT=json",
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['gateway'][:metrics]}"
       ]
@@ -400,6 +400,15 @@ class SshProvisioner
       end
       if relay_machines.any?
         lines << "ZTLP_RELAY_SERVER=#{relay_machines.first.ip_address}:#{ZTLP_PORTS['relay'][:udp]}"
+      end
+      # Add backends and policies from machine configuration
+      if machine.gateway_backends.present?
+        backends = machine.gateway_backends.strip.split("\n").map(&:strip).reject(&:empty?).join(",")
+        lines << "ZTLP_GATEWAY_BACKENDS=#{backends}"
+      end
+      if machine.gateway_policies.present?
+        policies = machine.gateway_policies.strip.split("\n").map(&:strip).reject(&:empty?).join(",")
+        lines << "ZTLP_GATEWAY_POLICIES=#{policies}"
       end
       lines.join("\n")
     else
@@ -418,7 +427,8 @@ class SshProvisioner
 
     # Relay uses host networking so it can reach the local gateway sidecar
     # at 127.0.0.1:23099 (sidecar also runs on host network).
-    use_host_network = (component == "relay")
+    # Gateway uses host networking to reach localhost services (e.g., kamal-proxy on port 80).
+    use_host_network = %w[relay gateway].include?(component)
 
     # Build docker run command
     if use_host_network

@@ -22,11 +22,18 @@ class ZtlpConnectivity
   # Test connectivity to a machine's gateway sidecar via ZTLP tunnel.
   # Automatically routes through the relay if available (for UDP-hostile NATs).
   # Uses role-specific gateway ports (NS=23098, relay=23099).
+  # For standalone gateway machines (role=gateway only), connects directly to
+  # the main gateway port (23098) instead of using sidecar port logic.
   # Returns a Result struct.
   def self.check(machine, gateway_port: nil)
     return Result.new(reachable: false, error: "ZTLP not available") unless available?
 
-    gateway_port ||= SshProvisioner.gateway_port_for(machine)
+    gateway_port ||= if machine.role_list == ["gateway"]
+      # Standalone gateway — connect directly to its main gateway port
+      SshProvisioner::ZTLP_PORTS["gateway"][:tcp]
+    else
+      SshProvisioner.gateway_port_for(machine)
+    end
     start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     gateway_addr = "#{machine.ip_address}:#{gateway_port}"
 
@@ -166,16 +173,22 @@ class ZtlpConnectivity
   # but is reachable through the relay's own UDP port (23095).
   #
   # For non-relay machines (NS, dedicated gateways), connect directly to their
-  # gateway sidecar — the relay only forwards to its LOCAL sidecar, so routing
+  # gateway/sidecar — the relay only forwards to its LOCAL sidecar, so routing
   # a non-relay HELLO through the relay would connect to the wrong gateway.
+  #
+  # Standalone gateway machines (role=gateway only) are connected to directly
+  # on their main gateway port — no relay routing needed.
   def self.find_relay_addr(machine)
+    # Standalone gateway machines: connect directly (no relay routing)
+    return nil if machine.role_list == ["gateway"]
+
     # Only relay machines need relay routing (self-relay)
     if machine.role_list.include?("relay")
       relay_port = SshProvisioner::ZTLP_PORTS.dig("relay", :udp) || 23095
       return "#{machine.ip_address}:#{relay_port}"
     end
 
-    # Non-relay machines: connect directly (no relay routing)
+    # Non-relay machines (NS, etc.): connect directly (no relay routing)
     nil
   rescue StandardError
     nil

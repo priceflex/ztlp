@@ -30,7 +30,7 @@ class SshProvisionerTest < ActiveSupport::TestCase
     machine = machines(:gateway1)
     provisioner = SshProvisioner.new(machine)
     config = provisioner.send(:generate_config, "gateway")
-    assert_includes config, "ZTLP_GATEWAY_LISTEN=0.0.0.0:23098"
+    assert_includes config, "ZTLP_GATEWAY_PORT=23098"
     assert_includes config, "ZTLP_GATEWAY_LOG_FORMAT=json"
   end
 

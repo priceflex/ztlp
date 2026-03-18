@@ -71,10 +71,34 @@
       <%= form.hidden_field :roles, id: "roles_field" %>
     </fieldset>
 
+    <!-- Gateway Configuration (shown when gateway role is selected) -->
+    <fieldset id="gateway_config_section" class="border rounded-md p-4" style="display: none;">
+      <legend class="text-sm font-medium text-gray-700 px-2">Gateway Configuration</legend>
+      <p class="text-xs text-gray-500 mb-3">Configure backends and access policies for the ZTLP gateway</p>
+      <div class="space-y-4 mt-2">
+        <div>
+          <%= form.label :gateway_backends, "Backends", class: "block text-sm font-medium text-gray-700" %>
+          <%= form.text_area :gateway_backends, rows: 3, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm font-mono px-3 py-2 border", placeholder: "beta:127.0.0.1:80\napi:127.0.0.1:3000" %>
+          <p class="mt-1 text-xs text-gray-500">One per line. Format: <code class="bg-gray-100 px-1 rounded">name:host:port</code> (e.g., <code class="bg-gray-100 px-1 rounded">beta:127.0.0.1:80</code>)</p>
+        </div>
+        <div>
+          <%= form.label :gateway_policies, "Policies", class: "block text-sm font-medium text-gray-700" %>
+          <%= form.text_area :gateway_policies, rows: 3, class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm sm:text-sm font-mono px-3 py-2 border", placeholder: "*:beta\nsteves-macbook.techrockstars.ztlp:api" %>
+          <p class="mt-1 text-xs text-gray-500">One per line. Format: <code class="bg-gray-100 px-1 rounded">identity:backend</code> — use <code class="bg-gray-100 px-1 rounded">*</code> for any authenticated identity (e.g., <code class="bg-gray-100 px-1 rounded">*:beta</code>)</p>
+        </div>
+      </div>
+    </fieldset>
+
     <script>
       function updateRoles() {
         const checked = [...document.querySelectorAll('input[name="machine[role_checks][]"]:checked')].map(el => el.value);
         document.getElementById('roles_field').value = checked.join(',');
+
+        // Show/hide gateway config section based on gateway role selection
+        const gatewaySection = document.getElementById('gateway_config_section');
+        if (gatewaySection) {
+          gatewaySection.style.display = checked.includes('gateway') ? 'block' : 'none';
+        }
       }
       // Initialize on load
       document.addEventListener('DOMContentLoaded', updateRoles);

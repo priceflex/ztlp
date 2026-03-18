@@ -145,7 +145,7 @@ class MachinesController < ApplicationController
     params.require(:machine).permit(
       :hostname, :ip_address, :ssh_port, :ssh_user,
       :ssh_auth_method, :ssh_private_key_ciphertext, :ssh_password_ciphertext,
-      :roles, :notes
+      :roles, :notes, :gateway_backends, :gateway_policies
     )
   end
 end

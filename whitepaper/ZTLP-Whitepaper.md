@@ -2,7 +2,7 @@
 
 ## Identity-First Networking for the Post-Perimeter Internet
 
-**Version 2.0 — March 2026**
+**Version 0.9.13 — March 2026**
 
 **Steven Price**
 Tech Rockstar Academy / ZTLP.org
@@ -17,7 +17,7 @@ The Zero Trust Layer Protocol (ZTLP) inverts this model. ZTLP is a transport-lay
 
 This whitepaper presents the architecture, design rationale, security properties, and measured performance of the ZTLP reference implementation. The protocol provides mutual authentication via the Noise_XX handshake framework, a three-layer DDoS-resistant admission pipeline, a distributed identity namespace (ZTLP-NS) with federated replication and a person-centric identity model, relay mesh routing with consistent-hash load distribution, a gateway model that enables incremental deployment in front of existing infrastructure without application modification, and a client agent daemon that makes ZTLP connectivity transparent to applications.
 
-A working reference implementation comprising over 30,000 lines of Rust, Elixir/OTP, C, and Ruby — with 1,443 tests and zero failures — demonstrates that ZTLP is not merely theoretical. The implementation has been validated in a real-world production deployment protecting a web application behind a ZTLP gateway, with end-to-end encrypted tunnels from a macOS client through ZTLP infrastructure to an internal service with zero exposed ports. Benchmarks show Layer 1 packet rejection in 19 nanoseconds, full Noise_XX handshake completion in under 300 microseconds, and tunnel throughput exceeding 400 MB/s on commodity hardware, confirming the protocol's viability for production deployment.
+A working reference implementation comprising over 30,000 lines of Rust, Elixir/OTP, C, and Ruby — with 2,278 tests and zero failures — demonstrates that ZTLP is not merely theoretical. The implementation has been validated in a real-world production deployment protecting a web application behind a ZTLP gateway, with end-to-end encrypted tunnels from a macOS client through ZTLP infrastructure to an internal service with zero exposed ports. Benchmarks show Layer 1 packet rejection in 19 nanoseconds, full Noise_XX handshake completion in under 300 microseconds, and tunnel throughput exceeding 400 MB/s on commodity hardware, confirming the protocol's viability for production deployment.
 
 ---
 
@@ -810,14 +810,11 @@ The reference implementation maintains comprehensive test coverage:
 
 | Component | Tests | Failures |
 |-----------|-------|----------|
-| Rust library | 263 | 0 |
-| Rust integration | 115 | 0 |
-| Rust performance gates | 5 | 0 |
-| Cross-language interop (Rust ↔ Elixir) | 31 | 0 |
-| Elixir relay | 541 | 0 |
-| Elixir NS | 286 | 0 |
-| Elixir gateway | 202 | 0 |
-| **Total** | **1,443** | **0** |
+| Rust (library + agent + CLI + interop) | 853 | 0 |
+| Elixir relay | 557 | 0 |
+| Elixir NS | 608 | 0 |
+| Elixir gateway | 260 | 0 |
+| **Total** | **2,278** | **0** |
 
 Additional testing infrastructure:
 - **Fuzz testing** — 8 mutation strategies, 0 panics in 50,000 iterations.
@@ -906,7 +903,7 @@ The Internet's anonymous connectivity model was designed for an era when the pri
 
 ZTLP proposes a different foundation. By making cryptographic identity a precondition for connectivity rather than an afterthought, the protocol eliminates entire categories of attack at the transport layer. Services become invisible to unauthorized parties. DDoS floods are rejected in nanoseconds. A person-centric identity model maps real-world organizational relationships — people, their devices, and their roles — into cryptographic policy enforcement. Relay infrastructure scales horizontally through consistent-hash distribution and label-switching forwarding. Existing applications gain identity-first protection without modification, deployed incrementally through edge gateways. A transparent agent daemon makes encrypted tunnels invisible to applications.
 
-The reference implementation — over 30,000 lines of Rust, Elixir/OTP, C, and Ruby with 1,443 tests and zero failures — demonstrates that this architecture is not merely theoretical. A production deployment protecting a live web application confirms that ZTLP works end-to-end: from device enrollment through encrypted tunnel establishment to gateway policy enforcement and application delivery, with zero exposed ports. The benchmarks show that identity-first networking is practical at Internet scale: 19-nanosecond packet rejection, sub-300-microsecond handshake completion, 400+ MB/s tunnel throughput, and multi-gigabit steady-state gateway capacity on commodity hardware.
+The reference implementation — over 30,000 lines of Rust, Elixir/OTP, C, and Ruby with 2,278 tests and zero failures — demonstrates that this architecture is not merely theoretical. A production deployment protecting a live web application confirms that ZTLP works end-to-end: from device enrollment through encrypted tunnel establishment to gateway policy enforcement and application delivery, with zero exposed ports. The benchmarks show that identity-first networking is practical at Internet scale: 19-nanosecond packet rejection, sub-300-microsecond handshake completion, 400+ MB/s tunnel throughput, and multi-gigabit steady-state gateway capacity on commodity hardware.
 
 ZTLP is not a product. It is a protocol specification and open reference implementation, released under Apache 2.0, designed to be the transport-layer foundation for identity-first networking. The specification, implementation, benchmarks, and documentation are available at **ztlp.org**.
 

@@ -100,8 +100,9 @@
           gatewaySection.style.display = checked.includes('gateway') ? 'block' : 'none';
         }
       }
-      // Initialize on load
+      // Initialize on load (call both ways in case DOMContentLoaded already fired)
       document.addEventListener('DOMContentLoaded', updateRoles);
+      if (document.readyState !== 'loading') { updateRoles(); }
     </script>
 
     <div class="flex items-center space-x-4">

@@ -15,31 +15,31 @@ The modern Internet was built on a foundational assumption: any device can send 
 
 The Zero Trust Layer Protocol (ZTLP) inverts this model. ZTLP is a transport-layer overlay protocol in which cryptographic identity verification is a precondition for network connectivity — not a consequence of it. Services protected by ZTLP have no public ports, no discoverable attack surface, and no exposure to unauthenticated traffic. To an observer without valid credentials, a ZTLP-protected service simply does not exist on the network.
 
-This whitepaper presents the architecture, design rationale, security properties, and measured performance of the ZTLP protocol and its reference implementation. The protocol provides mutual authentication via the Noise_XX handshake framework, a three-layer DDoS-resistant admission pipeline, a distributed identity namespace (ZTLP-NS) with federated replication, relay mesh routing with consistent-hash load distribution, a gateway model for incremental deployment in front of existing infrastructure, a structured identity model with users, devices, and groups, an agent daemon for transparent tunnel management, and a device enrollment system with QR-code provisioning.
+This whitepaper presents the architecture, design rationale, security properties, and measured performance of the ZTLP reference implementation. The protocol provides mutual authentication via the Noise_XX handshake framework, a three-layer DDoS-resistant admission pipeline, a distributed identity namespace (ZTLP-NS) with federated replication and a person-centric identity model, relay mesh routing with consistent-hash load distribution, a gateway model that enables incremental deployment in front of existing infrastructure without application modification, and a client agent daemon that makes ZTLP connectivity transparent to applications.
 
-A working reference implementation comprising over 70,000 lines of Rust, Elixir/OTP, and C — with over 1,900 tests and zero failures — demonstrates that ZTLP is not merely theoretical. The implementation includes a complete CLI toolchain, Docker deployment manifests, a web-based fleet management application, stress testing and fuzz testing infrastructure, and a production deployment protecting a live web application behind a ZTLP gateway. Benchmarks show Layer 1 packet rejection in 19 nanoseconds (Rust eBPF), full Noise_XX handshake completion in under 300 microseconds, tunnel throughput exceeding 300 MB/s, and SCP file transfers at 31 MB/s through encrypted ZTLP tunnels — confirming the protocol's viability for production deployment.
+A working reference implementation comprising over 30,000 lines of Rust, Elixir/OTP, C, and Ruby — with 1,443 tests and zero failures — demonstrates that ZTLP is not merely theoretical. The implementation has been validated in a real-world production deployment protecting a web application behind a ZTLP gateway, with end-to-end encrypted tunnels from a macOS client through ZTLP infrastructure to an internal service with zero exposed ports. Benchmarks show Layer 1 packet rejection in 19 nanoseconds, full Noise_XX handshake completion in under 300 microseconds, and tunnel throughput exceeding 400 MB/s on commodity hardware, confirming the protocol's viability for production deployment.
 
 ---
 
 ## Table of Contents
 
-1. [The Problem: Anonymous Connectivity as a Security Primitive](#1-the-problem)
+1. [The Problem: Anonymous Connectivity as a Security Primitive](#1-the-problem-anonymous-connectivity-as-a-security-primitive)
 2. [Design Principles](#2-design-principles)
 3. [Protocol Architecture](#3-protocol-architecture)
 4. [The Three-Layer Admission Pipeline](#4-the-three-layer-admission-pipeline)
-5. [Session Establishment: Noise_XX Handshake](#5-session-establishment)
+5. [Session Establishment: Noise_XX Handshake](#5-session-establishment-noisexx-handshake)
 6. [Transport Reliability](#6-transport-reliability)
-7. [ZTLP-NS: Distributed Identity Namespace](#7-ztlp-ns)
-8. [Identity Model: Users, Devices, and Groups](#8-identity-model)
+7. [ZTLP-NS: Distributed Identity Namespace](#7-ztlp-ns-distributed-identity-namespace)
+8. [Identity Model: Devices, Users, and Groups](#8-identity-model-devices-users-and-groups)
 9. [Device Enrollment](#9-device-enrollment)
 10. [Relay Mesh Architecture](#10-relay-mesh-architecture)
 11. [Gateway Deployment Model](#11-gateway-deployment-model)
 12. [Agent Daemon](#12-agent-daemon)
-13. [Threat Model and Security Properties](#13-threat-model)
+13. [Threat Model and Security Properties](#13-threat-model-and-security-properties)
 14. [Performance](#14-performance)
-15. [Comparison with Existing Systems](#15-comparison)
-16. [Post-Quantum Migration Path](#16-post-quantum)
-17. [Reference Implementation](#17-reference-implementation)
+15. [Production Readiness](#15-production-readiness)
+16. [Comparison with Existing Systems](#16-comparison-with-existing-systems)
+17. [Post-Quantum Migration Path](#17-post-quantum-migration-path)
 18. [Deployment Roadmap](#18-deployment-roadmap)
 19. [Conclusion](#19-conclusion)
 
@@ -99,52 +99,60 @@ ZTLP defines six components that together form a complete identity-first network
 ```
 ┌──────────────┐                              ┌──────────────┐
 │   Client     │                              │   Service    │
-│   Agent      │                              │   Gateway    │
+│  Agent       │                              │   Gateway    │
 │  (Rust)      │        ┌──────────────┐      │  (Elixir)    │
 │              │        │    Relay     │      │              │
 │  Identity    │        │    Mesh     │      │  Identity    │
-│  Noise_XX    │◄──────►│  (Elixir)   │◄────►│  Policy      │
-│  Tunnels     │   UDP  │             │  UDP │  Bridge      │
-│  DNS Proxy   │        │  Routing    │      │  Audit       │
+│  DNS Resolver│◄──────►│  (Elixir)   │◄────►│  Policy      │
+│  Tunnel Pool │   UDP  │             │  UDP │  Bridge      │
+│  Stream Mux  │        │  Routing    │      │  Audit Log   │
 └──────────────┘        └──────────────┘      └──────┬───────┘
-       ▲                       ▲                     │
-       │                       │               ┌─────┴────────┐
-  ┌────┴─────┐           ┌────┴─────┐         │  Internal    │
-  │ ZTLP-NS  │           │  eBPF    │         │  Services    │
-  │ Namespace│           │  XDP     │         │  (unchanged) │
-  │ (Elixir) │           │  Filter  │         └──────────────┘
-  └──────────┘           └──────────┘
+       │                       │                      │
+       │                ┌──────┴───────┐       ┌──────┴───────┐
+       │                │   ZTLP-NS    │       │  Internal    │
+       │                │  Namespace   │       │  Services    │
+       │                │  (Elixir)    │       │  (unchanged) │
+       │                │              │       └──────────────┘
+       │                │  Federation  │
+       │                │  Enrollment  │
+       │                └──────────────┘
+       │
+┌──────┴───────┐
+│  eBPF/XDP    │
+│  Filter (C)  │
+│  L1 pipeline │
+└──────────────┘
 ```
 
 ### 3.1 Client Agent
 
-A Rust binary that runs as a background daemon on endpoint devices. The agent manages cryptographic identities, establishes ZTLP tunnels transparently, provides a local DNS resolver that maps service names to virtual IP addresses, handles credential renewal, and supports stream multiplexing with up to 256 concurrent streams per tunnel. The unified CLI (`ztlp`) provides keygen, connect, listen, relay interaction, namespace queries, packet inspection, device enrollment, fleet administration, and agent lifecycle management.
+A Rust daemon that provides transparent ZTLP connectivity. The agent includes a DNS resolver that intercepts queries for ZTLP-mapped domains, a VIP pool that assigns local loopback addresses to remote services, a tunnel pool with automatic reconnection, and stream multiplexing supporting up to 256 concurrent streams per tunnel. Applications connect to local VIP addresses using standard protocols — they have no awareness of ZTLP. The agent also provides SSH ProxyCommand integration, credential renewal, and system DNS configuration.
 
-### 3.2 Relay Mesh
+### 3.2 Relay Nodes
 
-Elixir/OTP processes that form a distributed mesh for session routing. Relays perform admission control (handshake validation, identity verification, policy enforcement) for new sessions and high-speed SessionID-based forwarding for established sessions. The BEAM VM provides per-session fault isolation via supervised GenServer processes, with ETS tables delivering O(1) session lookups at millions of operations per second. The relay mesh uses consistent-hash routing with PathScore-based selection and supports multi-hop forwarding through up to 4 relay hops.
+Elixir/OTP processes that form a distributed mesh for session routing. Relays perform admission control (handshake validation, identity verification, policy enforcement) for new sessions and high-speed SessionID-based forwarding for established sessions. The BEAM VM provides per-session fault isolation via supervised GenServer processes, with ETS tables delivering O(1) session lookups at millions of operations per second.
 
 ### 3.3 ZTLP-NS Namespace
 
-A distributed, hierarchical identity namespace with Ed25519-signed records, Mnesia-backed persistent storage, and federated replication using Merkle-tree anti-entropy synchronization. ZTLP-NS provides identity-to-key bindings, service discovery, relay advertisements, zone delegation, credential revocation, and the structured identity model (users, devices, groups) — replacing the need for external certificate authorities with a protocol-native trust infrastructure.
+A distributed, hierarchical identity namespace with Ed25519-signed records, backed by Mnesia for persistent storage. ZTLP-NS provides identity-to-key bindings, service discovery, relay advertisements, zone delegation, credential revocation, and the identity model (DEVICE, USER, GROUP records). NS nodes support federated replication with Merkle-tree anti-entropy synchronization, enabling multi-node clusters with automatic conflict resolution.
 
-### 3.4 Gateway
+### 3.4 Gateway Nodes
 
-Edge terminators that bridge ZTLP sessions to internal service protocols. A gateway performs the full Noise_XX handshake as responder, resolves the client's identity via ZTLP-NS, evaluates group-based access policy, and forwards authenticated traffic to internal services over conventional protocols. Gateways support named backend services, zone-wildcard policy rules, circuit breakers for backend fault isolation, and structured audit logging of all admission decisions.
+Edge terminators that bridge ZTLP sessions to internal service protocols. A gateway performs the full Noise_XX handshake as responder, evaluates access policy against the client's identity — including group membership resolution — and forwards authenticated traffic to internal services over conventional protocols. The gateway supports multiple named backend services, zone-based wildcard policies, and comprehensive audit logging.
 
 ### 3.5 eBPF/XDP Filter
 
-A kernel-level packet filter written in C that provides Layer 1 rejection at line rate. The XDP program validates the ZTLP magic byte before packets reach userspace, rejecting non-ZTLP traffic in approximately 19 nanoseconds. The filter supports dual-port operation (client + mesh traffic), peer allowlists, FORWARD TTL checking, and RAT-aware HELLO processing.
+A C program loaded into the Linux kernel's XDP hook that performs Layer 1 packet validation at the NIC driver level. The filter checks the ZTLP magic byte and optionally validates SessionIDs against a kernel-space allowlist, rejecting invalid traffic before it reaches userspace. The filter supports dual-port operation (client and mesh traffic on separate ports), peer allowlists, FORWARD packet TTL validation, and RAT-aware HELLO processing.
 
-### 3.6 Bootstrap Management UI
+### 3.6 Bootstrap Management Server
 
-A Rails web application that provides fleet management for ZTLP deployments. Bootstrap enables user and device CRUD operations, group management, enrollment token generation with QR codes, audit logging, machine provisioning via SSH, and real-time ZTLP connectivity monitoring — all backed by the `ztlp admin` CLI over SSH connections to managed infrastructure.
+A Ruby on Rails web application that provides fleet management for ZTLP deployments. Bootstrap handles machine provisioning via SSH, Docker container orchestration for ZTLP components (relay, NS, gateway), user and device CRUD operations, group management, enrollment token generation with QR codes, audit logging, and real-time connectivity monitoring with health indicators.
 
 ### 3.7 Packet Format
 
 ZTLP uses two wire formats optimized for their respective roles:
 
-**Handshake Header (96 bytes, fixed):** Carries the full identity and crypto fields needed for session establishment — Magic, Version, Flags, MessageType, CryptoSuite, KeyID, SessionID, PacketSequence, Timestamp, SrcNodeID, DstSvcID, PolicyTag, and HeaderAuthTag.
+**Handshake Header (96 bytes, fixed):** Carries the full identity and crypto fields needed for session establishment — Magic, Version, Flags, HdrLen, MessageType, CryptoSuite, KeyID, SessionID, PacketSequence, Timestamp, SrcNodeID, DstSvcID, PolicyTag, and HeaderAuthTag.
 
 **Compact Data Header (42 bytes):** Used for all post-handshake traffic. Carries only Magic, Version, Flags, SessionID, PacketSequence, and HeaderAuthTag. NodeIDs are deliberately absent from the data path — they were verified during the handshake and are not needed for forwarding. This keeps the per-packet overhead minimal and prevents passive observers from correlating traffic to specific identities.
 
@@ -158,11 +166,13 @@ The core DDoS resilience property of ZTLP is a three-layer admission pipeline wh
 
 | Layer | Check | Cost (Rust) | Cost (Elixir) | What It Rejects |
 |-------|-------|-------------|---------------|-----------------|
-| **L1: Magic** | 2-byte comparison | **19 ns** | **89 ns** | All non-ZTLP traffic (random floods, port scans, protocol confusion) |
+| **L1: Magic** | 1-byte comparison | **19 ns** | **89 ns** | All non-ZTLP traffic (random floods, port scans, protocol confusion) |
 | **L2: SessionID** | Hash table lookup | **31 ns** | **1.05 µs** | Traffic with unknown session identifiers (forged or expired) |
-| **L3: HeaderAuthTag** | AEAD verification | **840 ns** | **5.8 µs** | Packets targeting valid sessions but with forged authentication |
+| **L3: HeaderAuthTag** | ChaCha20-Poly1305 AEAD | **840 ns** | **5.8 µs** | Packets targeting valid sessions but with forged authentication |
 
-**The key insight:** In a volumetric DDoS attack, the vast majority of flood traffic is random garbage. It fails L1 in 19 nanoseconds — a single branch instruction in an eBPF kernel filter — consuming effectively zero resources. Traffic crafted with the correct magic byte but a random SessionID fails L2 in 31 nanoseconds via a hash table miss. Only traffic that guesses both the correct magic byte AND a valid 96-bit SessionID (probability: 2⁻⁹⁶ against a sparse session table) reaches the cryptographic layer.
+**The key insight:** In a volumetric DDoS attack, the vast majority of flood traffic is random garbage. It fails L1 in 19 nanoseconds — a single branch instruction — consuming effectively zero resources. Traffic crafted with the correct magic byte but a random SessionID fails L2 in 31 nanoseconds via a hash table miss. Only traffic that guesses both the correct magic byte AND a valid 96-bit SessionID (probability: 2⁻⁹⁶ against a sparse session table) reaches the cryptographic layer.
+
+**Layer 1 — eBPF Fast Path:** The first layer runs as an XDP program in the Linux kernel, checking the magic byte before the packet reaches userspace. On systems without eBPF support, the check runs in userspace with slightly higher latency (~89 ns in Elixir) but identical filtering effectiveness.
 
 **Measured impact:** The Rust client rejects invalid traffic 42× cheaper than it admits valid traffic. In practical terms, a single CPU core can reject 54 million garbage packets per second at L1 while simultaneously processing 1.1 million legitimate packets through the full pipeline.
 
@@ -199,9 +209,11 @@ Client                          Relay / Gateway
 
 The three-message exchange performs six X25519 Diffie-Hellman operations and derives symmetric session keys via BLAKE2s-based HKDF. The entire handshake completes in **293 µs (Rust)** or **471 µs (Elixir)** — enabling a single gateway core to establish over 2,100 new sessions per second.
 
-Handshake reliability is ensured through exponential-backoff retransmission (500ms–5s), a half-open connection cache (64 entries, 15-second TTL) for handling duplicate HELLO packets, and an amplification limit (3 retransmits per session) to prevent handshake reflection attacks.
+### 5.2 Handshake Reliability
 
-### 5.2 Post-Handshake Data Path
+ZTLP implements handshake retransmission with exponential backoff (500ms to 5 seconds) to handle packet loss during session establishment. A half-open cache (64 entries, 15-second TTL) prevents resource exhaustion from retransmitted HELLOs, and an amplification limit of 3 retransmits per session prevents the handshake mechanism from being abused as a reflector.
+
+### 5.3 Post-Handshake Data Path
 
 After `SESSION_OK`, all traffic carries only the 96-bit SessionID — no NodeIDs, no identity fields, no policy metadata. This design serves three purposes:
 
@@ -209,7 +221,7 @@ After `SESSION_OK`, all traffic carries only the 96-bit SessionID — no NodeIDs
 - **Performance:** Relays perform SessionID-based label switching — a constant-time ETS/HashMap lookup — without touching any cryptographic state on the forwarding path.
 - **Scalability:** The separation of identity verification (admission plane) from packet forwarding (forwarding plane) allows relay infrastructure to scale horizontally.
 
-### 5.3 Session Lifecycle
+### 5.4 Session Lifecycle
 
 Sessions have a maximum lifetime of 24 hours with mandatory rekeying every hour. Rekeying is transparent to applications — a new SessionID is issued, relay forwarding tables are updated atomically, and the old SessionID remains valid for a 5-second overlap window to drain in-flight packets. Sessions may also terminate via explicit CLOSE, lifetime expiry, or inactivity timeout (default: 5 minutes for interactive sessions).
 
@@ -217,49 +229,44 @@ Sessions have a maximum lifetime of 24 hours with mandatory rekeying every hour.
 
 ## 6. Transport Reliability
 
-ZTLP provides a reliable, ordered byte stream over UDP with congestion-aware transport and NAT traversal — capabilities essential for tunneling TCP-based protocols such as SSH and HTTP.
+ZTLP operates over UDP, requiring the protocol to implement its own reliability mechanisms. The transport layer provides TCP-competitive reliability with optimizations for the encrypted tunnel use case.
 
 ### 6.1 Congestion Control
 
-The transport implements a production-grade congestion controller inspired by modern TCP stacks:
+ZTLP implements a modern congestion control stack:
 
-- **SACK-based selective retransmission** — Receivers report gaps in received sequence space, allowing the sender to retransmit only lost packets rather than the entire window.
-- **Proportional Rate Reduction (PRR)** — Smoothly reduces the congestion window during loss recovery, avoiding the throughput cliff of multiplicative decrease.
-- **Token bucket pacing** — Spreads packet transmission evenly across the congestion window interval to prevent burst-induced loss.
-- **Eifel spurious retransmit detection** — Identifies and undoes unnecessary retransmissions triggered by delayed ACKs or reordering, preventing spurious congestion window reductions.
-- **Jacobson/Karels RTT estimation** — Maintains smoothed RTT and RTT variance for adaptive retransmission timeout calculation with a bounded RTO cap of 4 seconds.
-- **Fast retransmit** — Triggers immediate retransmission after 3 duplicate ACKs without waiting for the retransmission timer.
+- **SACK-based selective retransmission** — Receivers report gaps in received sequences, enabling the sender to retransmit only lost packets rather than retransmitting everything after a gap.
+- **Proportional Rate Reduction (PRR)** — On loss detection, the sending rate is reduced proportionally rather than halved, maintaining higher throughput during recovery.
+- **Token bucket pacing** — Outgoing packets are paced using a token bucket to prevent burst-induced congestion, with configurable inter-batch delays.
+- **Eifel spurious retransmission detection** — Prevents unnecessary rate reduction when retransmissions are triggered by reordering rather than actual loss.
+- **Jacobson/Karels RTT estimation** — Adaptive RTO calculation with smoothed RTT and RTT variance tracking, bounded at 4 seconds maximum.
+- **Fast retransmit** — Immediate retransmission after 3 duplicate ACKs, without waiting for the retransmission timeout.
 
 ### 6.2 NAT Traversal
 
-ZTLP supports deployment across NAT boundaries without requiring port forwarding or UPnP:
+ZTLP supports Nebula-style NAT traversal:
 
-- **UDP hole punching** — Coordinated via relay signaling for peer-to-peer tunnel establishment through symmetric and cone NATs.
-- **NAT timeout auto-detection** — Probes the NAT binding lifetime and adjusts keepalive intervals to maintain the mapping.
-- **Roaming support** — Tunnels survive IP address changes (e.g., Wi-Fi to cellular transitions) by rebinding to the new source address and renegotiating relay paths.
-- **Tunnel health monitoring** — Continuous liveness probing with automatic reconnection using exponential backoff (1s–60s).
+- **UDP hole punching** — Coordinated through relay nodes to establish direct paths between clients behind NAT.
+- **NAT timeout auto-detection** — Periodic keepalive probes detect the NAT mapping lifetime and adjust keepalive intervals to maintain traversal.
+- **Roaming support** — Sessions survive IP address changes (Wi-Fi to cellular, DHCP renewal) by rebinding to the new address transparently.
+- **Tunnel health monitoring** — Continuous RTT and loss measurement with automatic failover to relay-mediated paths when direct connectivity degrades.
 
-### 6.3 Stream Multiplexing
+### 6.3 Flow Control
 
-A single ZTLP tunnel supports up to 256 concurrent streams using three wire frame types:
+The transport provides windowed flow control with a configurable send window (default: 2,048 outstanding packets). Each ZTLP data packet carries up to 16,375 bytes of plaintext (approximately 16KB), encrypted with ChaCha20-Poly1305. Receivers send acknowledgments every 16 packets or every 5 milliseconds (whichever comes first), with a cumulative ACK plus selective ACK bitmap.
 
-- **STREAM_OPEN (0x05)** — Opens a new stream within an existing tunnel, carrying service name and destination metadata.
-- **STREAM_DATA (0x06)** — Carries payload data for a specific stream, with per-stream flow control.
-- **STREAM_CLOSE (0x07)** — Gracefully terminates a stream without tearing down the tunnel.
+### 6.4 Measured Tunnel Throughput
 
-This allows a single authenticated tunnel to carry multiple TCP connections — SSH sessions, HTTP requests, and database connections — without repeated handshakes.
-
-### 6.4 Measured Throughput
-
-End-to-end tunnel benchmarks (TCP → encrypt → UDP → decrypt → TCP, localhost) demonstrate practical throughput:
+End-to-end tunnel benchmarks on a 4-vCPU system (localhost loopback, including Noise_XX handshake, ChaCha20-Poly1305 encryption, flow control, and reassembly):
 
 | Transfer Size | Throughput | Notes |
 |--------------|-----------|-------|
-| 1 MB | 334–415 MB/s | Peak performance (congestion window covers entire transfer) |
-| 10 MB | 235–275 MB/s | Large transfer steady-state |
-| SCP 10 MB | 31 MB/s | Real-world SSH file transfer through ZTLP tunnel |
+| 64 KB | 101 MB/s | Small transfer, handshake dominates |
+| 1 MB | 334–415 MB/s | Peak throughput (congestion window covers full transfer) |
+| 10 MB | 235–275 MB/s | Steady-state with pacing |
+| SCP 10 MB | 31 MB/s | Real-world SCP through ZTLP tunnel (~1.6× overhead vs. direct SSH) |
 
-The crypto overhead is negligible: ChaCha20-Poly1305 encrypt + decrypt takes approximately 10 µs per 16KB packet, accounting for less than 6% of total transfer time. The primary bottleneck on Linux systems is the default UDP receive buffer size (208KB), which limits burst absorption.
+Cryptographic overhead is negligible: ChaCha20-Poly1305 encrypt/decrypt takes approximately 10 µs per 16KB packet, contributing only 6% of total transfer time for multi-megabyte transfers.
 
 ---
 
@@ -269,21 +276,19 @@ ZTLP-NS is a protocol-native namespace that provides the trust infrastructure ZT
 
 ### 7.1 Record Types
 
-ZTLP-NS supports nine record types that cover identity binding, service discovery, access control, and organizational modeling:
-
 | Record Type | Wire Code | Purpose |
 |-------------|-----------|---------|
-| `ZTLP_KEY` | 0x01 | Binds a NodeID to its Ed25519 public key. Signed by an Enrollment Authority. |
-| `ZTLP_SVC` | 0x02 | Publishes a service identity, gateway endpoint, and policy requirements. |
-| `ZTLP_RELAY` | 0x03 | Advertises a relay node's availability, capacity, and geographic region. |
-| `ZTLP_POLICY` | 0x04 | Defines which NodeIDs or identity classes may access a service. |
-| `ZTLP_REVOKE` | 0x06 | Invalidates a previously issued identity binding or credential. |
-| `ZTLP_ZONE` | 0x07 | Delegates authority over a sub-namespace to a subordinate zone. |
-| `ZTLP_DEVICE` | 0x10 | Hardware-bound device identity: NodeID, X25519 key, optional owner link, hardware attestation. |
-| `ZTLP_USER` | 0x11 | Person-bound identity: role (admin/tech/user), contact email, associated device list. |
-| `ZTLP_GROUP` | 0x12 | Named group with flat membership list, used for policy evaluation. |
+| `ZTLP_KEY` | `0x01` | Binds a NodeID to its Ed25519 public key. Signed by an Enrollment Authority. |
+| `ZTLP_SVC` | `0x02` | Publishes a service identity, gateway endpoint, and policy requirements. |
+| `ZTLP_RELAY` | `0x03` | Advertises a relay node's availability, capacity, and geographic region. |
+| `ZTLP_POLICY` | `0x04` | Defines which NodeIDs or identity classes may access a service. |
+| `ZTLP_REVOKE` | `0x06` | Invalidates a previously issued identity binding or credential. |
+| `ZTLP_ZONE` | `0x07` | Delegates authority over a sub-namespace to a subordinate zone. |
+| `ZTLP_DEVICE` | `0x10` | Hardware-bound identity record linking a device to a user (see Section 8). |
+| `ZTLP_USER` | `0x11` | Person-bound identity record with role and device associations (see Section 8). |
+| `ZTLP_GROUP` | `0x12` | Named group record with flat membership for policy evaluation (see Section 8). |
 
-All records are Ed25519-signed. Unsigned records are rejected unconditionally. Record validity is enforced via explicit TTLs and expiration timestamps.
+All records are Ed25519-signed. Record validity is enforced via explicit TTLs and expiration timestamps.
 
 ### 7.2 Hierarchical Delegation
 
@@ -293,158 +298,152 @@ ZTLP-NS uses hierarchical zone delegation analogous to DNS, but with cryptograph
 Root Trust Anchor
   └── org.ztlp (delegated to Org enrollment authority)
        ├── engineering.org.ztlp
-       │    ├── ZTLP_DEVICE: laptop-01 (NodeID → pubkey)
-       │    ├── ZTLP_USER: alice (role=admin, devices=[laptop-01])
+       │    ├── ZTLP_KEY: node-a (NodeID → pubkey binding)
        │    └── ZTLP_SVC: api.engineering.org.ztlp
        └── partners.org.ztlp
-            ├── ZTLP_GROUP: vendors (members=[alice, bob])
             └── ZTLP_POLICY: partner-access rules
 ```
 
-Each delegation is signed by the parent zone authority. Trust chain verification traverses from the queried record up through delegation records to a configured trust anchor. The reference implementation verifies a 2-level trust chain in ~250 µs.
+Each delegation is signed by the parent zone authority. Trust chain verification traverses from the queried record up through delegation records to a configured trust anchor. The reference implementation verifies a 2-level trust chain in approximately 250 µs.
 
 ### 7.3 Multi-Root Trust
 
 ZTLP does not require a single global root authority. Deployments may configure multiple independent trust roots — enterprise roots, partner roots, public roots — and define per-interaction trust policies. This federated model avoids the single-point-of-failure inherent in centralized PKI while maintaining auditable trust chains.
 
-### 7.4 Federation and Replication
+### 7.4 NS Federation
 
-ZTLP-NS supports multi-node federation for availability and partition tolerance:
+ZTLP-NS supports multi-node federation for high availability and geographic distribution:
 
-- **Eager replication** — Record writes are immediately forwarded to all known peers, providing fast convergence under normal conditions.
-- **Merkle-tree anti-entropy** — Periodic Merkle-tree synchronization detects and repairs divergence caused by network partitions or missed replication events.
-- **Conflict resolution** — Deterministic resolution ordering: revocations always win, followed by highest serial number, then most recent signature timestamp, then shortest TTL. This ensures convergence without coordination.
-- **Cluster management** — Nodes discover peers via configuration or DNS, with health monitoring and automatic reconnection.
+- **Eager replication** — Write operations are propagated to all cluster peers immediately upon acceptance.
+- **Merkle-tree anti-entropy** — Periodic synchronization using Merkle trees detects and repairs divergence between NS nodes, ensuring eventual consistency even after network partitions.
+- **Conflict resolution** — When records conflict (due to concurrent writes during a partition), resolution follows a deterministic priority order: revocation records always win, then highest serial number, then signature comparison, then shortest TTL. This ensures convergence without coordination.
+- **Cluster management** — NS nodes discover peers via configuration or DNS-based discovery and maintain health status through periodic heartbeats.
 
 ### 7.5 Security Hardening
 
-The NS server enforces multiple layers of protection against abuse:
+Production NS deployments include:
 
-- **Registration authentication** — Ed25519 signature verification and zone authorization for all record writes (configurable: can be disabled for development).
-- **Rate limiting** — Per-source-IP query and registration rate limits, enforced at the server entry point.
-- **Size limits** — Maximum 8KB per packet, 4KB per record, with DNS-compatible name validation.
-- **Amplification prevention** — Response size capped at 8× request size, with truncation flag when exceeded.
-- **Pubkey reverse index** — O(1) lookups from public key to registered name via a dedicated Mnesia table, enabling identity resolution in the gateway policy engine.
-- **Worker pool** — Bounded concurrency via Task.Supervisor (max 100 workers) to prevent resource exhaustion.
-- **Audit logging** — Structured JSON logging of all registration, query, and administrative operations.
+- **Registration authentication** — Ed25519 signature verification on all registration requests, with zone-scoped authorization.
+- **Rate limiting** — Per-source query and registration rate limits to prevent abuse.
+- **Amplification prevention** — Response size limited to 8× the request size, with truncation when exceeded.
+- **Packet and record size limits** — 8KB maximum packet size, 4KB maximum record size, DNS-compatible name validation.
+- **Pubkey reverse index** — Mnesia-backed O(1) lookups from public key to registered name, enabling identity resolution on the gateway data path.
+- **Worker pool** — Task.Supervisor with configurable concurrency limits (default: 100 workers) to prevent resource exhaustion.
+- **Audit logging** — Structured logging of all registration, query, and administrative operations.
 
 ### 7.6 Revocation
 
-Credential revocation is a first-class operation. `ZTLP_REVOKE` records propagate through the namespace via federation, and relay nodes periodically synchronize revocation state. Revoked NodeIDs are rejected at the admission stage — before any session resources are allocated. Revocation supports cascade semantics: revoking a USER record automatically revokes all linked DEVICE records. Revocation is fast (sub-second propagation to connected relays) and does not require cooperation from the revoked party.
+Credential revocation is a first-class operation. `ZTLP_REVOKE` records propagate through the namespace and via federation to all cluster peers. Revoked NodeIDs are rejected at the admission stage — before any session resources are allocated. Revocation is fast (sub-second propagation to connected relays) and does not require cooperation from the revoked party. Revoking a USER record automatically cascades to revoke all linked DEVICE records.
 
 ---
 
-## 8. Identity Model: Users, Devices, and Groups
+## 8. Identity Model: Devices, Users, and Groups
 
-ZTLP v0.9 introduces a structured identity model that maps real-world organizational relationships onto the cryptographic identity layer.
+ZTLP v0.9 introduced a person-centric identity model that maps real-world organizational relationships — people, their devices, and their roles — into the cryptographic namespace.
 
 ### 8.1 Design Rationale
 
-The original ZTLP identity model used only NodeIDs and KEY records — sufficient for machine-to-machine authentication but insufficient for answering questions like "which person owns this device?" or "should employees in the engineering team have access to the staging server?" The structured identity model adds the organizational layer needed for practical deployment without compromising the cryptographic foundation.
+The original ZTLP identity model used only NodeIDs and KEY records — sufficient for device-to-device authentication, but inadequate for answering the question "who is connecting?" In managed IT environments, access policy is defined in terms of people and roles: "technicians can access monitoring dashboards" or "administrators can reach the database." ZTLP's identity model bridges the gap between cryptographic device identity and organizational human identity.
 
 ### 8.2 Record Types
 
-**DEVICE (0x10)** — Represents a physical or virtual machine. Every endpoint that connects to a ZTLP gateway is a device. Each device has a unique NodeID, an X25519 key pair for Noise_XX handshakes, an Ed25519 key for signing NS registrations, an optional owner link to a USER record, and an optional hardware identifier (hostname, serial number, TPM attestation).
+**DEVICE (0x10)** — Represents a physical or virtual machine. Each device has a unique NodeID, X25519 key pair (for Noise_XX handshakes), Ed25519 key pair (for signing), and an optional owner link to a USER record. Devices can exist without owners (kiosks, servers, infrastructure nodes).
 
-**USER (0x11)** — Represents a person. Users own devices and belong to groups. Each user has a unique name within a zone, a role (admin, tech, or user), an Ed25519 signing key for administrative operations, and an optional contact email.
+**USER (0x11)** — Represents a person. Users have a role (admin, tech, or user), an optional contact email, an Ed25519 signing key for administrative operations, and a list of associated devices. Users do not directly participate in Noise_XX handshakes — their devices do.
 
-**GROUP (0x12)** — Represents a named collection of users for policy evaluation. Groups have flat membership (no nesting) and are referenced in gateway access policies. A user may belong to multiple groups.
+**GROUP (0x12)** — Represents a named collection of users. Groups have flat membership (no nested groups) and are the primary unit of policy evaluation. When a device connects to a gateway, the gateway resolves the device's owner, enumerates the owner's group memberships, and evaluates the access policy against those groups.
 
-### 8.3 Relationship Model
-
-```
-GROUP "admins"          GROUP "techs"
-  ├── steve               ├── alice
-  └── alice               └── bob
-
-USER "steve"            USER "alice"           USER "bob"
-  └── DEVICE laptop-01    ├── DEVICE mbp-02      └── DEVICE ipad-03
-                          └── DEVICE desktop-04
-```
-
-**Key principle:** Users are people. Devices are machines. Groups collect users for policy enforcement. A device can exist without a user (e.g., a kiosk or shared terminal), but when a device has an owner, policy evaluation considers the owner's group membership.
-
-### 8.4 Group-Based Policy Evaluation
-
-The gateway policy engine evaluates access in the following order:
-
-1. Complete Noise_XX handshake with the connecting device.
-2. Query ZTLP-NS to resolve the device's X25519 public key to a DEVICE record.
-3. If the device has an owner, resolve the USER record.
-4. Query the user's group memberships.
-5. Evaluate the service's access policy against the user's groups, role, or NodeID.
-
-Group membership is cached at the gateway with a configurable TTL (default: 60 seconds), avoiding per-connection NS queries for repeated access patterns.
-
-### 8.5 Administrative Operations
-
-The `ztlp admin` CLI provides fleet management:
+### 8.3 Policy Evaluation Flow
 
 ```
-ztlp admin create-user alice --role tech --zone clients.corp.ztlp
-ztlp admin create-group techs --zone clients.corp.ztlp
-ztlp admin group add techs alice
-ztlp admin group remove techs bob
-ztlp admin revoke alice            # Cascades to all alice's devices
-ztlp admin audit --since 24h --json
-ztlp admin ls --zone clients.corp.ztlp
+Device connects → Gateway extracts X25519 pubkey from handshake
+  → NS reverse lookup: pubkey → DEVICE record
+  → DEVICE.owner → USER record
+  → USER → enumerate GROUP memberships
+  → Policy engine: does any group match the service's access policy?
+  → ALLOW or DENY
 ```
 
-All administrative operations are Ed25519-signed and produce audit log entries. The `--json` output mode enables integration with external tooling and the Bootstrap web management UI.
+Group membership is cached at the gateway with a configurable TTL to avoid per-connection NS queries. The entire resolution chain — from handshake completion to policy decision — adds sub-millisecond overhead.
+
+### 8.4 Administration
+
+Identity management is performed via the `ztlp admin` CLI:
+
+```bash
+# Create a user
+ztlp admin create-user alice --role tech --zone clients.example.ztlp
+
+# Create a group
+ztlp admin create-group technicians --zone clients.example.ztlp
+
+# Add user to group
+ztlp admin group add technicians alice
+
+# List identities
+ztlp admin ls --zone clients.example.ztlp
+
+# Revoke a user (cascades to all linked devices)
+ztlp admin revoke alice
+
+# Audit log
+ztlp admin audit --since 24h
+```
+
+All admin commands support `--json` output for programmatic integration. The Bootstrap web UI provides the same capabilities through a graphical interface with QR code generation for device enrollment.
+
+### 8.5 Key Overwrite Protection
+
+ZTLP-NS rejects registration attempts for names that already exist with a different public key, preventing identity hijacking. Administrators can force-overwrite with an explicit flag when legitimate key rotation is needed.
 
 ---
 
 ## 9. Device Enrollment
 
-Device enrollment is the process by which a new machine joins a ZTLP network. ZTLP provides a secure, user-friendly enrollment flow suitable for both self-service and IT-managed deployment.
+ZTLP provides a streamlined enrollment system for onboarding new devices into the network, designed for managed service providers who need to enroll dozens or hundreds of client devices.
 
 ### 9.1 Enrollment Tokens
 
-An Enrollment Token is a compact, authenticated credential that authorizes a device to register with a specific zone. Tokens are generated by an administrator and distributed to end users or embedded in QR codes.
+An Enrollment Token is a compact, authenticated credential that authorizes a new device to register with a specific zone. Tokens are HMAC-BLAKE2s authenticated, carry an expiration timestamp and maximum usage count, and encode to a `ztlp://enroll/` URI suitable for QR code generation.
 
-**Token structure:**
-- Zone name (variable length)
-- Expiration timestamp (48 bits)
-- Maximum usage count (16 bits)
-- HMAC-BLAKE2s MAC (32 bytes) over all fields, keyed with the zone's enrollment secret
+Token wire format (compact binary, base64url-encoded for URIs):
 
-Tokens are encoded as base64url strings and can be embedded in `ztlp://enroll/` URIs for one-click enrollment from mobile devices or QR code scanners.
+| Field | Size | Description |
+|-------|------|-------------|
+| Version | 1 byte | Token format version |
+| Zone | variable | Target zone name |
+| Expiry | 8 bytes | Unix timestamp (seconds) |
+| Max uses | 4 bytes | Maximum enrollment count |
+| MAC | 32 bytes | HMAC-BLAKE2s authentication tag |
 
-### 9.2 Wire Protocol
+### 9.2 Enrollment Flow
+
+```
+Administrator                    New Device                    NS Server
+     │                              │                             │
+     │── Generate token ───────────►│                             │
+     │   (QR code or URL)           │                             │
+     │                              │── ztlp setup --token ──────►│
+     │                              │   (generates keypair,       │
+     │                              │    sends ENROLL 0x07)       │
+     │                              │                             │
+     │                              │◄── ENROLL_OK 0x08 ─────────│
+     │                              │   (confirms registration)   │
+     │                              │                             │
+     │                              │   Device is now enrolled    │
+     │                              │   with DEVICE record in NS  │
+```
+
+The `ztlp setup` command provides an interactive wizard that generates a new identity, sends an enrollment request to the NS server, and configures the local agent — all in a single step. For unattended enrollment, `ztlp setup --token TOKEN` runs non-interactively.
+
+### 9.3 Wire Protocol
 
 Enrollment uses two dedicated message types:
 
-| Type | Code | Direction | Purpose |
-|------|------|-----------|---------|
-| ENROLL Request | 0x07 | Client → NS | Presents enrollment token + device identity |
-| ENROLL Response | 0x08 | NS → Client | Returns registration result with status code |
+- **ENROLL (0x07)** — Sent by the new device. Contains the enrollment token, the device's newly generated public key, requested name, and zone.
+- **ENROLL_OK (0x08)** — Sent by the NS server on success. Contains the assigned NodeID and confirmation of registration.
 
-Response codes: `0x00` success, `0x01` expired, `0x02` usage exhausted, `0x03` invalid MAC, `0x04` zone mismatch, `0x05` name already taken, `0x06` invalid format.
-
-### 9.3 Enrollment Flow
-
-```
-Administrator                     New Device                       NS Server
-     │                                │                                │
-     │── ztlp admin enroll ──────────►│                                │
-     │   (generates token + QR)       │                                │
-     │                                │                                │
-     │   Scan QR or paste token       │                                │
-     │                                │── ztlp setup --token TOKEN ──►│
-     │                                │   1. Generate X25519 + Ed25519 │
-     │                                │   2. Send ENROLL request       │
-     │                                │                                │
-     │                                │◄── ENROLL response (0x00) ────│
-     │                                │   3. Save identity to disk     │
-     │                                │   4. Start agent               │
-     │                                │                                │
-```
-
-The `ztlp setup` wizard is interactive by default, guiding the user through token entry, identity generation, and agent configuration. The `--token` flag enables non-interactive provisioning for automation.
-
-### 9.4 Key Overwrite Protection
-
-ZTLP-NS rejects registration attempts that would overwrite an existing name with a different public key, preventing identity theft. Administrators can force re-enrollment with an explicit flag for legitimate device replacement scenarios.
+Error response codes: `0x01` (token expired), `0x02` (usage exhausted), `0x03` (invalid MAC), `0x04` (zone mismatch), `0x05` (name already taken), `0x06` (validation error).
 
 ---
 
@@ -464,19 +463,19 @@ Relay selection uses a composite scoring function:
 PathScore = RTT × (1 + loss × 10) × (1 + load × 2) × (1 + jitter / 100)
 ```
 
-Clients maintain real-time PathScore measurements via sequence-numbered PING/PONG probes with a 20-probe sliding window for loss detection and jitter tracking (standard deviation of RTT). Relay health states (healthy / degraded / unreachable) use hysteresis to prevent flapping. Clients maintain at least two active relay paths for failover.
+Clients maintain real-time PathScore measurements via sequence-numbered PING/PONG probes with a 20-probe sliding window. Jitter is tracked as the standard deviation of RTT samples. Relay health states (healthy / degraded / unreachable) use hysteresis to prevent flapping. Clients maintain at least two active relay paths for failover.
 
 ### 10.3 Multi-Hop Forwarding
 
-When no single relay provides adequate connectivity, ZTLP supports multi-hop forwarding through up to 4 relay hops. Each forwarded packet carries a TTL byte and traversed-path list for loop detection. Route planning selects ingress → transit → service paths using measured PathScores. The forwarding table uses ETS-backed route caching with configurable TTL.
+When no single relay provides adequate connectivity, ZTLP supports multi-hop forwarding through up to 4 relay hops. Each forwarded packet carries a TTL byte and traversed-path list for loop detection. Route planning selects ingress → transit → service paths using measured PathScores.
 
 ### 10.4 Relay Admission Tokens
 
-Transit relays authenticate forwarded sessions using Relay Admission Tokens (RATs) — 93-byte HMAC-BLAKE2s authenticated tokens that bind a session to a specific relay path. RAT issuance runs at 275,000 tokens/sec; verification at 393,000/sec. Key rotation is supported for zero-downtime relay credential updates. The Rust client includes full RAT parsing, serialization, verification, and issuance, enabling cross-language interoperability.
+Transit relays authenticate forwarded sessions using Relay Admission Tokens (RATs) — 93-byte HMAC-BLAKE2s authenticated tokens that bind a session to a specific relay path. RAT issuance runs at 275,000 tokens/sec; verification at 393,000/sec. Key rotation is supported for zero-downtime relay credential updates.
 
 ### 10.5 NS-Based Relay Discovery
 
-Relays self-register with ZTLP-NS on startup and periodically refresh their advertisements. Clients discover available relays by querying NS for RELAY records in their zone, with fallback to statically configured bootstrap addresses when NS is unavailable. Relay records include capacity class, geographic region, and supported protocol features.
+Relays register themselves with ZTLP-NS on startup and refresh their registration periodically (default: 60 seconds). Clients discover available relays by querying NS for RELAY records in their target zone. When NS is not configured, relays fall back to a static bootstrap list.
 
 ### 10.6 Admission Plane / Forwarding Plane Separation
 
@@ -497,39 +496,48 @@ Internet                    ZTLP Network                    Internal Network
   ZTLP Client ──►│     ZTLP Gateway        │──► HTTP service
                   │                         │──► gRPC API
   Unauthorized ──►│  • Noise_XX termination │──► Database
-  traffic    ✗    │  • Identity resolution  │──► Admin console
-  (rejected)      │  • Group-based policy   │
-                  │  • Circuit breaker      │    (all unchanged,
-                  │  • Audit logging        │     internal protocols)
+  traffic    ✗    │  • Identity verification│──► Admin console
+  (rejected)      │  • Group policy engine  │
+                  │  • Audit logging        │    (all unchanged,
+                  │  • Circuit breaker      │     internal protocols)
                   └─────────────────────────┘
 ```
 
-The gateway performs the full Noise_XX handshake as responder, resolves the client's identity via ZTLP-NS (including pubkey reverse lookup for human-readable identity resolution), evaluates group-based access policy, and bridges authenticated ZTLP sessions to internal TCP services. Internal services see standard protocol traffic — they have no awareness of ZTLP.
+The gateway performs the full Noise_XX handshake as responder, resolves the client's identity via ZTLP-NS (including reverse pubkey lookup for human-readable identity resolution), evaluates access policy including group membership, and bridges authenticated ZTLP sessions to internal TCP services. Internal services see standard protocol traffic — they have no awareness of ZTLP.
 
-### 11.2 Policy Engine
+### 11.2 Named Backend Services
+
+A single gateway can front multiple internal services, each identified by a service name:
+
+```
+ZTLP_GATEWAY_BACKENDS=web:127.0.0.1:80,api:127.0.0.1:8080,db:127.0.0.1:5432
+ZTLP_GATEWAY_POLICIES=admins@:*,techs@:web,techs@:api
+```
+
+The client specifies the target service during the handshake. The gateway routes to the appropriate backend based on the service name and evaluates service-specific access policy.
+
+### 11.3 Policy Engine
 
 The gateway policy engine supports:
 
-- **Group-based access** — Allow access based on group membership (e.g., `allow = ["techs@corp.ztlp"]`).
-- **Exact NodeID matching** — Permit specific devices by their 128-bit NodeID.
-- **Zone-based wildcards** — Allow all identities within a zone (e.g., `*.engineering.org.ztlp`).
-- **Role-based rules** — Restrict access by user role (admin, tech, user).
-- **Named backend services** — Route different services to different internal backends (e.g., `beta → 127.0.0.1:80`, `db → 127.0.0.1:5432`).
-- **Audit logging** — Structured JSON logging of all admission decisions with identity, service, timestamp, and outcome.
+- **Exact NodeID matching** — Allow specific devices by cryptographic identity.
+- **Zone-based wildcards** — `*.engineering.org.ztlp` matches all identities in a zone.
+- **Group-based access** — `admins@` grants access to all members of the "admins" group, resolved dynamically via NS.
+- **Service-specific rules** — Different policies per backend service.
+- **Assurance level requirements** — Distinguish between software keys, hardware tokens, and attested devices.
+- **Audit logging** — Every admission decision is logged with timestamp, identity, service, and outcome.
 
 Policy evaluation adds sub-microsecond overhead — even with 10 pattern rules, the engine completes in 371 ns.
 
-### 11.3 Production Hardening
+### 11.4 Operational Resilience
 
-Gateways include several features for production deployment:
+The gateway includes production-grade operational features:
 
-- **Circuit breaker** — Protects backends from cascading failure by detecting error rate thresholds and temporarily rejecting new connections.
-- **Backpressure** — Propagates load signals from overloaded backends back through the ZTLP session, allowing clients to apply flow control.
-- **Rate limiting** — Per-identity and per-service rate limits to prevent individual actors from consuming disproportionate resources.
-- **Inter-component authentication** — Ed25519 challenge-response authentication between gateway, NS, and relay components.
-- **Prometheus metrics** — Exposes handshake rates, session counts, policy evaluation latency, backend health, and error rates for monitoring.
+- **Circuit breaker** — Prevents cascade failures when backend services are unresponsive, with configurable thresholds and recovery intervals.
+- **Backpressure** — Flow control between the ZTLP session and the backend TCP connection prevents memory exhaustion under load.
+- **Rate limiting** — Per-source admission rate limits prevent handshake floods from consuming gateway resources.
 
-### 11.4 Phased Adoption
+### 11.5 Phased Adoption
 
 Organizations adopt ZTLP incrementally:
 
@@ -544,56 +552,107 @@ Each phase is independently valuable. Phase 1 alone eliminates exposed managemen
 
 ## 12. Agent Daemon
 
-The ZTLP Agent is a background daemon that makes ZTLP connections seamless and transparent. Instead of manually running `ztlp connect` with IP addresses and port forwards, users simply use ZTLP names or custom domain names as if they were regular hostnames.
+The ZTLP agent is a background daemon that makes ZTLP connectivity transparent to applications. Instead of manually establishing tunnels, users interact with ZTLP-protected services as if they were regular network hosts.
 
 ### 12.1 Design Goals
 
-- **Zero-config after enrollment** — `ztlp setup` + `ztlp agent start` and the device is connected.
-- **Works with any TCP application** — SSH, HTTP, databases, arbitrary protocols.
-- **Custom domains** — Organizations use their own domain names; ZTLP handles identity underneath.
-- **Auto-reconnect** — Tunnels recover from network changes (Wi-Fi → cellular, IP reassignment).
-- **Credential lifecycle** — Automatic certificate renewal, NS record refresh, and key rotation.
-- **Minimal privileges** — Runs as an unprivileged user; no TUN device or kernel module required.
-- **Pure Rust** — Single binary, no runtime dependencies.
+- **Zero-config after enrollment** — `ztlp setup` + `ztlp agent start` and all services are reachable.
+- **Works with any TCP application** — SSH, HTTP, databases, file transfers.
+- **Custom domain support** — Organizations use their own domain names; ZTLP handles identity underneath.
+- **Auto-reconnect** — Tunnels survive network changes (Wi-Fi to cellular, IP reassignment).
+- **Credential lifecycle** — Automatic renewal of certificates and NS record refresh.
+- **Minimal privileges** — Runs as an unprivileged user (DNS on loopback, no TUN device required).
 
 ### 12.2 Architecture
 
-The agent consists of five cooperating subsystems:
-
-**DNS Resolver** — Listens on a local address (default: `127.0.0.1:5353`) and intercepts queries for configured domains. A domain map translates custom domain names (e.g., `app.internal.corp.com`) to ZTLP zone names (e.g., `app.services.corp.ztlp`). The resolver queries ZTLP-NS, assigns a virtual IP from the VIP pool (`127.100.0.0/16`), creates a tunnel if needed, and returns the VIP as a DNS A record. Unrecognized queries are forwarded to upstream DNS.
-
-**Tunnel Pool** — Maintains persistent ZTLP tunnels to gateways, with automatic reconnection using exponential backoff (1s–60s). Tunnels are created on-demand when DNS resolution triggers a new service lookup. Keepalive probes (30-second interval) maintain NAT bindings and detect dead tunnels. Idle tunnels are torn down after a configurable timeout (default: 5 minutes).
-
-**TCP Proxy** — Binds a listener on each assigned VIP and proxies TCP connections through the corresponding ZTLP tunnel. Supports stream multiplexing — multiple TCP connections share a single authenticated tunnel.
-
-**Credential Renewal** — Monitors certificate lifetimes and NS record TTLs, triggering renewal at 67% of lifetime (certificates) and 75% of TTL (NS records). Applies ±10% jitter to prevent thundering herd renewal storms. Failed renewals use exponential backoff.
-
-**Control Socket** — Provides a Unix domain socket for CLI interaction (`ztlp agent status`, `ztlp agent tunnels`, `ztlp agent flush-dns`).
-
-### 12.3 SSH Integration
-
-The agent provides `ztlp proxy` as an SSH ProxyCommand:
-
 ```
-# ~/.ssh/config
-Host *.corp.ztlp
-    ProxyCommand ztlp proxy %h %p
+Application (curl, ssh, psql)
+       │
+       │  DNS query: beta.example.com
+       ▼
+┌──────────────────────────────┐
+│  Agent DNS Resolver          │
+│  (127.0.0.1:5353)           │
+│                              │
+│  domain_map lookup:          │
+│  beta.example.com            │
+│    → beta.corp.ztlp          │
+│                              │
+│  NS query: beta.corp.ztlp   │
+│    → gateway 10.x.x.x:23098 │
+│                              │
+│  Assign VIP: 127.100.0.1    │
+│  Create tunnel to gateway    │
+│  Bind TCP listener on VIP    │
+│                              │
+│  Return A record: 127.100.0.1│
+└──────────────────────────────┘
+       │
+       │  TCP connect: 127.100.0.1:443
+       ▼
+┌──────────────────────────────┐
+│  Tunnel Pool                 │
+│  (encrypted ZTLP session)    │
+│                              │
+│  Stream Multiplexer          │
+│  (up to 256 streams/tunnel) │
+└──────────────────────────────┘
+       │
+       │  Encrypted UDP
+       ▼
+   ZTLP Gateway → Backend Service
 ```
 
-This enables transparent SSH tunneling through ZTLP:
+### 12.3 VIP Pool
+
+The agent allocates virtual IP addresses from a configurable loopback range (default: `127.100.0.0/16`, providing 65,534 addresses). Each ZTLP service is assigned a unique VIP. Applications connect to these VIPs using standard TCP — the agent intercepts the connection and routes it through the appropriate ZTLP tunnel.
+
+### 12.4 Stream Multiplexing
+
+Multiple application connections to the same service share a single ZTLP tunnel via stream multiplexing. The agent supports up to 256 concurrent streams per tunnel using three frame types:
+
+- **STREAM_OPEN (0x05)** — Establishes a new stream within an existing tunnel.
+- **STREAM_DATA (0x06)** — Carries application data for a specific stream.
+- **STREAM_CLOSE (0x07)** — Terminates a stream, releasing its resources.
+
+This avoids the overhead of establishing a new Noise_XX handshake for every application connection while maintaining stream-level isolation.
+
+### 12.5 Tunnel Pool and Auto-Reconnect
+
+The agent maintains a pool of tunnels with automatic lifecycle management:
+
+- **Auto-reconnect** — When a tunnel fails, the agent reconnects with exponential backoff (1 second to 60 seconds).
+- **Keepalive** — Periodic probes (default: every 30 seconds) detect tunnel failures before the application timeout.
+- **Idle timeout** — Tunnels with no active streams are closed after a configurable period (default: 5 minutes).
+- **Connection pooling** — Multiple services on the same gateway share a tunnel when possible.
+
+### 12.6 Credential Renewal
+
+The agent automatically manages the credential lifecycle:
+
+- **Certificate renewal** — Initiated at 67% of the certificate's lifetime.
+- **NS record refresh** — Re-registered at 75% of the record's TTL.
+- **Jitter** — ±10% randomization prevents thundering herd when many devices renew simultaneously.
+- **Failure backoff** — Exponential backoff on renewal failures with a credential tracker that monitors all credential expiry times.
+
+### 12.7 SSH Integration
+
+The agent provides SSH ProxyCommand integration for transparent SSH tunneling:
 
 ```bash
-ssh admin@fileserver.corp.ztlp
-scp report.pdf admin@nas.corp.ztlp:~/
+# Direct use
+ssh -o ProxyCommand="ztlp proxy %h" user@server.corp.ztlp
+
+# SSH config integration
+Host *.corp.ztlp
+    ProxyCommand ztlp proxy %h
 ```
 
-### 12.4 System Integration
+### 12.8 System Integration
 
-The agent integrates with platform-specific DNS and service management:
-
-- **macOS** — `/etc/resolver/` split DNS configuration; `ztlp agent install` generates a LaunchAgent plist.
-- **Linux (systemd)** — systemd-resolved split DNS configuration; `ztlp agent install` generates a systemd unit file.
-- **DNS TXT discovery** — Queries `_ztlp` TXT records for automatic NS server discovery, enabling zero-configuration deployment in environments with TXT-capable DNS.
+- **DNS setup** — `ztlp agent dns-setup` configures the system DNS to route ZTLP domains through the agent (supports systemd-resolved, resolv.conf, and macOS /etc/resolver).
+- **Service installer** — `ztlp agent install` generates a systemd unit file or macOS LaunchAgent plist for automatic startup.
+- **DNS TXT discovery** — Queries `_ztlp` TXT records for automatic NS server discovery, enabling zero-configuration connectivity when the organization publishes its ZTLP infrastructure in DNS.
 
 ---
 
@@ -601,15 +660,15 @@ The agent integrates with platform-specific DNS and service management:
 
 ### 13.1 Attacker Classes
 
-ZTLP's security analysis considers five attacker positions at increasing levels of access:
+ZTLP's security analysis considers five attacker positions with increasing capability:
 
 | Attacker Position | Payload Visibility | Can Impersonate | Can Disrupt Service | Can Discover Services |
 |---|---|---|---|---|
-| External (no identity) | None | No | Bandwidth only | No |
-| Network Observer | None | No | No | No |
-| Compromised Relay | None | No | Selective drop | Limited |
-| Authorized Insider | Own sessions only | Others: no | App-layer only | Authorized only |
-| Endpoint Compromise | That node's traffic | That node only | That node | That node's access |
+| **External (no identity)** | None | No | Bandwidth saturation only | No |
+| **Network observer** | None | No | No | No |
+| **Compromised relay** | None | No | Selective packet drop | Limited metadata |
+| **Authorized insider** | Own sessions only | No (others) | Application-layer only | Authorized services only |
+| **Endpoint compromise** | That node's traffic | That node only | That node only | That node's access only |
 
 ### 13.2 Cryptographic Properties
 
@@ -620,25 +679,27 @@ ZTLP's security analysis considers five attacker positions at increasing levels 
 | **Replay protection** | 64-bit sequence numbers with sliding anti-replay window |
 | **Endpoint confidentiality** | ChaCha20-Poly1305 AEAD; relays forward opaque ciphertext |
 | **Key freshness** | Mandatory rekeying every hour; 24-hour max session lifetime |
-| **Revocation** | ZTLP_REVOKE records propagated via NS federation; checked at admission |
+| **Identity integrity** | Ed25519-signed NS records; registration authentication |
 
 ### 13.3 Trust Assumptions
 
 When deploying ZTLP, the operator trusts:
 
-1. **The cryptographic primitives** — Ed25519, X25519, ChaCha20-Poly1305, BLAKE2s. Well-studied, widely deployed. Post-quantum migration path defined (Section 16).
-2. **The Enrollment Authority** — Issues NodeIDs. Compromise allows minting valid identities. Mitigation: hardware-backed EA keys, certificate transparency-style logging.
-3. **The trust root** — Anchors the namespace hierarchy. Mitigation: offline storage, multi-party signing, regular rotation.
-4. **Endpoint integrity** — ZTLP secures the network layer, not the endpoint. A compromised endpoint with root access bypasses ZTLP's protections on that node.
-5. **Relay operators (partially)** — Trusted for availability but not confidentiality or integrity. A malicious relay can deny service but cannot decrypt or forge traffic.
+1. **The cryptographic primitives** — Ed25519, X25519, ChaCha20-Poly1305, BLAKE2s. Well-studied, widely deployed, but not post-quantum resistant (see Section 17).
+2. **The enrollment authority** — Issues NodeIDs. A compromised EA can mint valid identities. Mitigation: hardware-backed EA keys, audit logging, multi-root trust.
+3. **The trust root** — Anchors the namespace. Compromise means arbitrary zone delegation. Mitigation: offline keys, multi-party signing.
+4. **Endpoint integrity** — ZTLP secures the network layer, not the endpoint. Pair with endpoint hardening.
+5. **Relay availability (not confidentiality)** — Relays can drop traffic but cannot read it. A malicious relay can deny service but cannot compromise data.
 
 ### 13.4 Explicit Non-Goals
 
-- **Traffic analysis** — ZTLP is not an anonymity network. Multi-hop relaying provides topology hiding, but a global passive adversary can correlate flows.
-- **Endpoint compromise with key extraction** — If an attacker holds the private key, they ARE the node. Hardware key storage (TPM, Secure Enclave) mitigates this.
-- **Application-layer vulnerabilities** — ZTLP protects the transport path, not the application logic. SQL injection, XSS, and business logic flaws require application-layer defenses.
-- **Quantum computing** — Current asymmetric primitives are vulnerable to Shor's algorithm. Migration path defined in Section 16.
-- **Layer 0 denial of service** — ZTLP cannot prevent bandwidth saturation at the physical link, BGP hijacking, or infrastructure-level attacks.
+ZTLP is transparent about what it does *not* defend against:
+
+- **Traffic analysis** — ZTLP is not an anonymity network. Relay IP addresses are visible; traffic patterns are observable. Multi-hop relaying provides some topology hiding, but a global passive adversary can still correlate flows.
+- **Endpoint compromise with key extraction** — If an attacker holds the private key, they ARE the node. Hardware key storage (TPM, Secure Enclave, YubiKey) mitigates this.
+- **Application-layer vulnerabilities** — ZTLP protects the transport path, not the application logic.
+- **Bandwidth saturation** — While ZTLP makes application-layer DDoS structurally ineffective, filling the network pipe before packets reach the eBPF filter is outside ZTLP's scope.
+- **Social engineering** — ZTLP cannot distinguish between legitimate and coerced use of valid credentials.
 
 ---
 
@@ -650,16 +711,16 @@ All benchmarks measured on a 4-vCPU AMD EPYC 4564P system with 7.8 GiB RAM runni
 
 | Operation | Rust | Elixir |
 |-----------|------|--------|
-| L1 reject (bad magic) | **19 ns** — 54M ops/sec | **89 ns** — 11.3M ops/sec |
-| L2 reject (unknown session) | **31 ns** — 32M ops/sec | **1.05 µs** — 950K ops/sec |
+| L1 reject (bad magic) | **19 ns** — 54M pkt/sec | **89 ns** — 11.3M pkt/sec |
+| L2 reject (unknown session) | **31 ns** — 32M pkt/sec | **1.05 µs** — 950K pkt/sec |
 | L3 AEAD verify | **840 ns** | **5.8 µs** |
-| Full pipeline (valid packet) | **904 ns** — 1.1M ops/sec | **7.5 µs** |
+| Full pipeline (valid packet) | **904 ns** — 1.1M pkt/sec | **7.5 µs** — 133K pkt/sec |
 
 ### 14.2 Handshake
 
 | Implementation | Latency | Throughput |
 |---------------|---------|------------|
-| Rust (client) | **293 µs** | 3,412 handshakes/sec |
+| Rust (client) | **293 µs** | 3,413 handshakes/sec |
 | Elixir (gateway) | **471 µs** | 2,125 handshakes/sec |
 
 With 4 BEAM schedulers: **~8,500 new sessions/sec** per gateway node.
@@ -668,9 +729,11 @@ With 4 BEAM schedulers: **~8,500 new sessions/sec** per gateway node.
 
 | Operation | Rust Latency |
 |-----------|-------------|
-| ChaCha20-Poly1305 (64B) | 1.15 µs |
-| ChaCha20-Poly1305 (1KB) | 1.60 µs |
-| ChaCha20-Poly1305 (8KB) | 5.12 µs |
+| ChaCha20-Poly1305 (64 B) | 1.15 µs |
+| ChaCha20-Poly1305 (1 KB) | 1.60 µs |
+| ChaCha20-Poly1305 (8 KB) | 5.12 µs |
+| Ed25519 sign | ~50 µs |
+| Ed25519 verify | ~80 µs |
 
 ### 14.4 Tunnel Throughput
 
@@ -678,21 +741,9 @@ With 4 BEAM schedulers: **~8,500 new sessions/sec** per gateway node.
 |--------------|-----------|
 | 1 MB | **334–415 MB/s** |
 | 10 MB | **235–275 MB/s** |
-| SCP 1 MB | 3.9 MB/s |
-| SCP 10 MB | **31 MB/s** |
+| SCP 10 MB (real-world) | **31 MB/s** (1.6× overhead vs. direct SSH) |
 
-SCP overhead vs. direct SSH: ~1.6× (includes Noise_XX crypto + UDP encapsulation + flow control + reassembly).
-
-### 14.5 Steady-State Data Path
-
-| Operation | Throughput |
-|-----------|------------|
-| Gateway data path (decrypt + identity + policy) | **669K ops/sec** per core |
-| Relay forwarding (no auth) | **600K pkt/sec** per core |
-| Relay forwarding (with auth) | **377K pkt/sec** per core |
-| Mesh overhead | **3.2%** (vs. non-mesh forwarding) |
-
-### 14.6 Namespace
+### 14.5 Namespace
 
 | Operation | Latency |
 |-----------|---------|
@@ -700,18 +751,83 @@ SCP overhead vs. direct SSH: ~1.6× (includes Noise_XX crypto + UDP encapsulatio
 | Verified query (lookup + Ed25519 verify) | **79.7 µs** — 12.5K queries/sec |
 | Trust chain verification (2-level) | **250 µs** |
 
-### 14.7 Relay Mesh
+### 14.6 Relay Mesh
 
 | Operation | Throughput |
 |-----------|------------|
 | Hash ring lookup | 36K ops/sec |
 | Packet forwarding | 233K pkt/sec |
+| Mesh overhead | 3.2% (vs. non-mesh) |
 | RAT issuance | 275K tokens/sec |
 | RAT verification | 393K tokens/sec |
 
+### 14.7 Gateway Data Path
+
+| Operation | Throughput |
+|-----------|------------|
+| Full data path (decrypt + identity + policy) | **669K ops/sec** per core |
+| Policy evaluation (10 rules) | **371 ns** |
+
+**Throughput projections** (4-core gateway):
+- **2.7M packets/sec** steady-state data path
+- **~19 Gbps** theoretical at 1KB MTU (without per-packet auth)
+- **~12 Gbps** theoretical at 1KB MTU (with per-packet auth)
+
 ---
 
-## 15. Comparison with Existing Systems
+## 15. Production Readiness
+
+The ZTLP reference implementation includes production-grade operational infrastructure.
+
+### 15.1 Observability
+
+- **Structured logging** — JSON-formatted log output across all components with consistent field schemas, enabling log aggregation and analysis.
+- **Prometheus metrics** — Eight metric modules expose counters, histograms, and gauges for handshake rates, pipeline layer rejection counts, session counts, relay forwarding rates, NS query latencies, and federation sync status.
+- **Grafana dashboards** — Pre-built dashboard with 9 panels covering admission pipeline, session lifecycle, relay mesh health, and NS federation status.
+
+### 15.2 Resilience
+
+- **Backpressure** — Flow control on the relay forwarding path prevents memory exhaustion under sustained load.
+- **Circuit breakers** — Gateway circuit breakers trip when backend services become unresponsive, returning fast failures instead of accumulating timeouts.
+- **Rate limiters** — Per-source rate limiting on NS queries, relay admission, and gateway handshakes.
+- **Inter-component authentication** — Ed25519 challenge-response authentication between relay, NS, and gateway nodes prevents unauthorized components from joining the infrastructure.
+
+### 15.3 Deployment
+
+- **OTP releases** — All Elixir components ship as self-contained OTP releases with runtime configuration via `runtime.exs` and environment variables.
+- **Hot upgrades** — Appup templates enable in-place upgrades without dropping active sessions.
+- **Docker packaging** — Dockerfiles for all components with a `docker-compose.yml` for full-stack deployment.
+- **Bootstrap web UI** — Rails-based fleet management with SSH-driven provisioning, enabling one-click deployment and monitoring of ZTLP infrastructure across multiple machines.
+
+### 15.4 Operations Documentation
+
+- **Ops runbook** (1,687 lines) — Procedures for common operational tasks: deployment, scaling, troubleshooting, incident response, backup, and recovery.
+- **Key management guide** (1,367 lines) — Comprehensive key lifecycle documentation covering generation, storage (including HashiCorp Vault and cloud KMS integration), rotation procedures, and incident response for key compromise.
+
+### 15.5 Testing Infrastructure
+
+The reference implementation maintains comprehensive test coverage:
+
+| Component | Tests | Failures |
+|-----------|-------|----------|
+| Rust library | 263 | 0 |
+| Rust integration | 115 | 0 |
+| Rust performance gates | 5 | 0 |
+| Cross-language interop (Rust ↔ Elixir) | 31 | 0 |
+| Elixir relay | 541 | 0 |
+| Elixir NS | 286 | 0 |
+| Elixir gateway | 202 | 0 |
+| **Total** | **1,443** | **0** |
+
+Additional testing infrastructure:
+- **Fuzz testing** — 8 mutation strategies, 0 panics in 50,000 iterations.
+- **Stress testing** — Userspace impairment proxy simulating packet loss, delay, reordering, and corruption across 11 extreme network scenarios.
+- **Docker chaos lab** — 7 automated scenarios testing mesh formation, failover, partition recovery, and federation convergence.
+- **Network test scenarios** — 10 Docker-based end-to-end scenarios with 3 isolated networks and 7 containers, testing the full stack under realistic conditions.
+
+---
+
+## 16. Comparison with Existing Systems
 
 | Capability | ZTLP | WireGuard | Tailscale | Cloudflare Access | Teleport |
 |-----------|------|-----------|-----------|-------------------|----------|
@@ -719,13 +835,13 @@ SCP overhead vs. direct SSH: ~1.6× (includes Noise_XX crypto + UDP encapsulatio
 | No open ports | ✓ | ✗ (UDP port exposed) | ✗ (device IPs visible) | ✗ (proxy exposed) | ✗ (proxy exposed) |
 | DDoS-resistant pipeline | ✓ Three-layer, 19ns reject | ✗ | ✗ | ✓ (L3/L4/L7 mitigation) | ✗ |
 | Distributed relay mesh | ✓ Consistent-hash | ✗ (point-to-point) | ✓ (DERP relays) | ✓ (Anycast CDN) | ✗ |
-| Protocol-native namespace | ✓ ZTLP-NS | ✗ | ✗ | ✗ | ✗ |
+| Protocol-native namespace | ✓ ZTLP-NS (federated) | ✗ | ✗ | ✗ | ✗ |
+| Person-centric identity | ✓ USER/DEVICE/GROUP | ✗ | ✗ | Partial (via IdP) | ✓ (RBAC) |
 | Multi-root federated trust | ✓ | ✗ | ✗ (single control plane) | ✗ (single provider) | ✗ (single cluster) |
 | Hardware identity support | ✓ (TPM/YubiKey/SE) | ✗ | ✗ | ✗ | ✓ (hardware keys) |
-| Identity model (users/groups) | ✓ DEVICE/USER/GROUP | ✗ | ✗ | ✓ (IdP-dependent) | ✓ (RBAC) |
-| Device enrollment (QR/token) | ✓ | ✗ | ✓ | ✗ | ✓ |
-| Agent daemon (transparent DNS) | ✓ | ✗ | ✓ | ✗ | ✗ |
 | Gateway for existing services | ✓ | ✗ | ✗ | ✓ | ✓ |
+| Transparent agent daemon | ✓ (DNS + VIP + tunnel) | ✗ | ✓ (Tailscale client) | ✗ | ✗ |
+| Device enrollment (QR/token) | ✓ | ✗ | ✓ (SSO) | ✓ (IdP) | ✓ (token) |
 | Forward secrecy | ✓ (per-session) | ✓ | ✓ | ✓ (TLS) | ✓ (TLS) |
 | Open protocol/spec | ✓ (full spec + impl) | ✓ | ✗ (proprietary) | ✗ (proprietary) | ✓ |
 
@@ -735,93 +851,32 @@ ZTLP aims to be the layer beneath all of these — the transport primitive that 
 
 ---
 
-## 16. Post-Quantum Migration Path
+## 17. Post-Quantum Migration Path
 
-ZTLP's current cryptographic suite (X25519, Ed25519, ChaCha20-Poly1305, BLAKE2s) provides ~128-bit classical security. The symmetric primitives (ChaCha20, BLAKE2s) retain adequate security under quantum models. The asymmetric primitives (X25519, Ed25519) are vulnerable to Shor's algorithm on a fault-tolerant quantum computer.
+ZTLP's current cryptographic suite (X25519, Ed25519, ChaCha20-Poly1305, BLAKE2s) provides ~128-bit classical security. The symmetric primitives (ChaCha20, BLAKE2s) retain adequate security under quantum models (Grover's algorithm halves the effective key length, leaving 128-bit security). The asymmetric primitives (X25519, Ed25519) are vulnerable to Shor's algorithm on a fault-tolerant quantum computer.
 
-### 16.1 Threat Assessment
+### 17.1 Migration Strategy
 
-The "harvest-now, decrypt-later" risk is real: adversaries can record encrypted ZTLP sessions today and attempt decryption once a cryptographically relevant quantum computer (CRQC) becomes available. While ZTLP's per-session forward secrecy protects ephemeral key material (which is destroyed after derivation), the static long-term identity keys used in ZTLP-NS records are not protected by forward secrecy and could be recovered retroactively.
-
-### 16.2 Migration Strategy
+ZTLP's migration to post-quantum cryptography follows a staged approach:
 
 **Phase 1 — Hybrid Key Exchange:**
-Replace the Noise_XX ephemeral key exchange with a hybrid construction combining X25519 with ML-KEM-768 (NIST FIPS 203). This provides quantum resistance for session key derivation while preserving classical security as a fallback. The handshake payload increases by ~2,272 bytes (ML-KEM-768 public key 1,184B + ciphertext 1,088B) — acceptable for the three-message handshake. Expected operation latency: keygen ~27 µs, encapsulation ~42 µs, decapsulation ~44 µs.
+Replace the Noise_XX ephemeral key exchange with a hybrid construction combining X25519 with ML-KEM (CRYSTALS-Kyber, NIST FIPS 203). This provides quantum resistance for session key derivation while preserving classical security as a fallback. The handshake payload increases by ~1,568 bytes (ML-KEM-768 public key + ciphertext) — acceptable for the three-message handshake.
 
 **Phase 2 — Hybrid Signatures:**
-Replace Ed25519 identity signatures with a hybrid scheme combining Ed25519 with ML-DSA-65 (NIST FIPS 204). This increases ZTLP-NS record sizes and handshake authentication payloads (ML-DSA-65 signatures are 3,309 bytes vs. Ed25519's 64 bytes) but preserves the existing trust model. Sign ~58 µs, verify ~41 µs.
+Replace Ed25519 identity signatures with a hybrid scheme combining Ed25519 with ML-DSA (CRYSTALS-Dilithium, NIST FIPS 204). This increases ZTLP-NS record sizes and handshake authentication payloads but preserves the existing trust model. ML-DSA-65 signatures are 3,309 bytes — larger than Ed25519's 64 bytes, but manageable for handshake and namespace operations that are not on the per-packet data path.
 
 **Phase 3 — Pure Post-Quantum:**
-Once confidence in lattice-based constructions is established through widespread deployment and continued cryptanalysis (estimated no earlier than 2030), the classical fallbacks may be removed.
+Once confidence in lattice-based constructions is established through widespread deployment and continued cryptanalysis, the hybrid fallback may be removed. This phase is not expected before 2030.
 
-### 16.3 Design Decisions
+### 17.2 Forward Secrecy Under Quantum Threat
+
+ZTLP's existing forward secrecy property provides a meaningful defense: an attacker who records encrypted sessions today cannot derive past session keys even after obtaining a quantum computer, because the ephemeral X25519 values were never stored. The hybrid ML-KEM extension strengthens this by making *future* sessions quantum-resistant as well.
+
+### 17.3 Design Decisions
 
 - **Symmetric primitives unchanged:** ChaCha20-Poly1305 and BLAKE2s are not quantum-vulnerable at their current security levels.
 - **Per-packet overhead unchanged:** Post-quantum primitives affect only the handshake and namespace operations. The compact 42-byte data header is unaffected.
-- **Algorithm agility via CryptoSuite field:** Post-quantum migration will be introduced via the versioned CryptoSuite field in the handshake header, with explicit negotiation rules and no downgrade path to classical-only.
-- **SLH-DSA fallback:** A hash-based signature scheme (NIST FIPS 205) is specified as a root-of-trust fallback, providing conservative post-quantum security for the highest-value signing keys at the cost of larger signatures (7,856 bytes).
-
----
-
-## 17. Reference Implementation
-
-The ZTLP reference implementation is open source under the Apache 2.0 license. It comprises six primary components implemented in three languages, reflecting the protocol's design philosophy of using each language where it excels.
-
-### 17.1 Component Summary
-
-| Component | Language | Lines of Code | Tests | Purpose |
-|-----------|----------|---------------|-------|---------|
-| Client + Agent | Rust | ~48,000 | 394+ | Endpoint identity, tunnels, CLI, agent daemon |
-| Relay | Elixir/OTP | ~8,700 | 541 | Session routing, mesh, admission control |
-| Namespace (NS) | Elixir/OTP | ~7,300 | 286+ | Identity records, federation, queries |
-| Gateway | Elixir/OTP | ~5,900 | 202+ | Session termination, policy, TCP bridge |
-| eBPF/XDP Filter | C | ~1,000 | N/A | Kernel-level L1 packet rejection |
-| Bootstrap Web UI | Ruby (Rails) | ~5,000 | 54 | Fleet management, enrollment, audit |
-
-**Total: ~76,000 lines of source code, 1,900+ tests, 0 failures.**
-
-### 17.2 Language Architecture
-
-- **Rust** — Client endpoints and the agent daemon. Chosen for single-binary deployment, memory safety without garbage collection, and nanosecond-precision packet processing.
-- **Elixir/OTP** — All server-side components (relay, NS, gateway). Chosen for per-session fault isolation (each ZTLP session is a supervised GenServer), massive concurrency on the BEAM VM (millions of lightweight processes), hot code upgrades via OTP releases, and Mnesia for built-in distributed storage. **All Elixir components have zero external dependencies** — they use only OTP standard library modules.
-- **C** — eBPF/XDP filter only. Chosen for kernel-level execution at line rate.
-
-### 17.3 CLI Tool
-
-The unified `ztlp` binary provides comprehensive protocol interaction:
-
-| Command | Purpose |
-|---------|---------|
-| `ztlp keygen` | Generate cryptographic identity (X25519 + Ed25519 key pair) |
-| `ztlp connect` | Establish a ZTLP tunnel with port forwarding |
-| `ztlp listen` | Accept ZTLP connections as a responder |
-| `ztlp ns lookup/register` | Query and register identities in ZTLP-NS |
-| `ztlp admin` | Fleet administration (create-user, create-group, revoke, audit) |
-| `ztlp setup` | Interactive device enrollment wizard |
-| `ztlp agent` | Agent daemon lifecycle (start, stop, status, tunnels, dns-setup) |
-| `ztlp proxy` | SSH ProxyCommand for transparent ZTLP tunneling |
-| `ztlp inspect` | Packet decoder with three output modes |
-| `ztlp ping` | ZTLP-level connectivity test |
-
-### 17.4 Testing Infrastructure
-
-The implementation includes comprehensive testing beyond unit tests:
-
-- **Interop test suite** — 31 tests verifying Rust ↔ Elixir interoperability for Noise_XX handshakes, pipeline validation, gateway end-to-end flows, and NS resolution.
-- **Stress testing** — Userspace impairment proxy simulating packet loss, delay, reordering, and corruption across 11 extreme network scenarios.
-- **Fuzz testing** — 8 mutation strategies applied to ZTLP packets for 50,000+ iterations with zero panics discovered.
-- **Docker chaos lab** — 7 failure scenarios testing mesh resilience under node failure, network partition, and concurrent session storms.
-- **Network integration tests** — 10 Docker-based end-to-end scenarios with 3 isolated networks, 7 containers, and configurable impairment parameters.
-
-### 17.5 Deployment Artifacts
-
-- **Docker images** — Dockerfiles for all four server components with multi-stage builds.
-- **Docker Compose** — Full-stack deployment manifest with environment-variable configuration.
-- **OTP releases** — Production Elixir releases with runtime configuration and hot upgrade support via appup templates.
-- **Prebuilt binaries** — Cross-compiled Rust client for Linux (x86_64, aarch64) and macOS (Apple Silicon).
-- **MSP Deployment Guide** — Step-by-step documentation for protecting web applications behind ZTLP gateways.
-- **Ops Runbook** — 1,687-line operational guide covering monitoring, alerting, incident response, and capacity planning.
-- **Key Management Guide** — 1,367-line guide covering Vault/KMS integration, key rotation procedures, and incident response protocols.
+- **Algorithm agility deferred:** The current specification fixes the algorithm suite to prevent downgrade attacks. Post-quantum migration will be introduced via a versioned CryptoSuite field in the handshake header, with explicit negotiation rules.
 
 ---
 
@@ -829,25 +884,19 @@ The implementation includes comprehensive testing beyond unit tests:
 
 ### Stage 1 — Private Network Tool (Deployed)
 
-ZTLP is deployed in production protecting a live web application (a Ruby on Rails CRM system) behind a ZTLP gateway on AWS infrastructure. A macOS client enrolled via the `ztlp setup` enrollment flow establishes an authenticated, encrypted tunnel to the gateway, which proxies traffic to the application's reverse proxy. This deployment validates the complete stack: identity generation, NS registration, Noise_XX handshake, tunnel establishment, TCP bridging, and gateway policy enforcement — all functioning end-to-end over the public Internet.
+ZTLP has been validated in a production deployment protecting a web application (Ruby on Rails) behind a ZTLP gateway on AWS infrastructure. The deployment consists of a ZTLP gateway with named backend services, an NS server for identity resolution, and a relay for session routing — all deployed as Docker containers via the Bootstrap management server. A macOS client enrolled with a cryptographic identity connects through an encrypted ZTLP tunnel to access the application with zero exposed HTTP ports. This deployment demonstrates the complete lifecycle: identity generation, device enrollment, tunnel establishment, gateway policy enforcement, and bidirectional application data flow.
 
-The Bootstrap web management UI provides fleet visibility: machine status, ZTLP component health, enrollment token management, and audit logging. The relay, NS, and gateway components run as Docker containers with host networking on production infrastructure.
+### Stage 2 — Enterprise Adoption
 
-### Stage 2 — MSP Adoption
+Organizations deploy ZTLP at scale for compliance, access control, and remote workforce requirements. Enterprises operate their own trust roots, enrollment authorities, and relay infrastructure. The Bootstrap web UI enables fleet management with group-based access policies. Managed service providers deploy ZTLP across client networks using the MSP deployment guide, enrollment tokens, and QR-code-based device onboarding.
 
-Managed Service Providers deploy ZTLP to protect client infrastructure. The structured identity model (users, devices, groups) maps directly to MSP organizational models: technicians belong to the `techs` group, customer devices are enrolled with scoped access, and group-based policy ensures each client can only access their own services. The MSP Deployment Guide provides step-by-step instructions for this use case.
+### Stage 3 — Service Provider Integration
 
-### Stage 3 — Enterprise Adoption
+Cloud providers, CDN operators, and security vendors integrate ZTLP gateway and relay functionality into their platforms. Organizations adopt ZTLP-secured access without operating relay infrastructure themselves. External IdP integration (OIDC, SAML, LDAP) enables enterprise SSO workflows during enrollment.
 
-Organizations deploy ZTLP at scale for compliance, access control, and remote workforce requirements. Enterprises operate their own trust roots, enrollment authorities, and relay infrastructure. NS federation enables multi-site deployments with automatic record synchronization. External IdP integration (OIDC/SAML/LDAP) is planned for this stage to enable authentication against existing enterprise directories during enrollment.
+### Stage 4 — Public Ecosystem
 
-### Stage 4 — Service Provider Integration
-
-Cloud providers, CDN operators, and security vendors integrate ZTLP gateway and relay functionality into their platforms. Organizations adopt ZTLP-secured access without operating relay infrastructure themselves.
-
-### Stage 5 — Public Ecosystem
-
-ZTLP becomes a generally available Internet security layer. Public services offer ZTLP-authenticated access alongside legacy Internet access. Independent relay operators establish commercial relay networks. Developer SDKs (Go SDK scaffolded, additional languages planned) enable integration across application frameworks.
+ZTLP becomes a generally available Internet security layer. Public services offer ZTLP-authenticated access alongside legacy Internet access. Independent relay operators establish commercial relay networks. Developer SDKs (Rust, Go) enable integration across application frameworks.
 
 ---
 
@@ -855,9 +904,9 @@ ZTLP becomes a generally available Internet security layer. Public services offe
 
 The Internet's anonymous connectivity model was designed for an era when the primary challenge was making communication possible. That era has passed. The primary challenge now is making communication *trustworthy* — and the current model, where security is applied after connectivity is already established, is structurally inadequate.
 
-ZTLP proposes a different foundation. By making cryptographic identity a precondition for connectivity rather than an afterthought, the protocol eliminates entire categories of attack at the transport layer. Services become invisible to unauthorized parties. DDoS floods are rejected in nanoseconds at the kernel level. Relay infrastructure scales horizontally through consistent-hash distribution and label-switching forwarding. Existing applications gain identity-first protection without modification, deployed incrementally through edge gateways. A structured identity model with users, devices, and groups provides the organizational mapping that practical deployment requires. An agent daemon makes ZTLP connections transparent to end users and existing applications.
+ZTLP proposes a different foundation. By making cryptographic identity a precondition for connectivity rather than an afterthought, the protocol eliminates entire categories of attack at the transport layer. Services become invisible to unauthorized parties. DDoS floods are rejected in nanoseconds. A person-centric identity model maps real-world organizational relationships — people, their devices, and their roles — into cryptographic policy enforcement. Relay infrastructure scales horizontally through consistent-hash distribution and label-switching forwarding. Existing applications gain identity-first protection without modification, deployed incrementally through edge gateways. A transparent agent daemon makes encrypted tunnels invisible to applications.
 
-The reference implementation — over 70,000 lines of Rust, Elixir, and C with 1,900+ tests and zero failures — demonstrates that this architecture is not merely theoretical. A production deployment protects a live web application behind a ZTLP gateway today. The benchmarks show that identity-first networking is practical at Internet scale: 19-nanosecond packet rejection, sub-300-microsecond handshake completion, 300+ MB/s tunnel throughput, and multi-gigabit steady-state packet forwarding on commodity hardware.
+The reference implementation — over 30,000 lines of Rust, Elixir/OTP, C, and Ruby with 1,443 tests and zero failures — demonstrates that this architecture is not merely theoretical. A production deployment protecting a live web application confirms that ZTLP works end-to-end: from device enrollment through encrypted tunnel establishment to gateway policy enforcement and application delivery, with zero exposed ports. The benchmarks show that identity-first networking is practical at Internet scale: 19-nanosecond packet rejection, sub-300-microsecond handshake completion, 400+ MB/s tunnel throughput, and multi-gigabit steady-state gateway capacity on commodity hardware.
 
 ZTLP is not a product. It is a protocol specification and open reference implementation, released under Apache 2.0, designed to be the transport-layer foundation for identity-first networking. The specification, implementation, benchmarks, and documentation are available at **ztlp.org**.
 
@@ -876,11 +925,12 @@ The Internet does not need a new application. It needs a new transport primitive
 7. RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3.
 8. NIST FIPS 203 — Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM).
 9. NIST FIPS 204 — Module-Lattice-Based Digital Signature Algorithm (ML-DSA).
-10. NIST FIPS 205 — Stateless Hash-Based Digital Signature Algorithm (SLH-DSA).
-11. WireGuard: Next Generation Kernel Network Tunnel. Donenfeld, J., NDSS 2017.
-12. BeyondCorp: A New Approach to Enterprise Security. Ward & Beyer, Google.
-13. SCION: A Secure Internet Architecture. Barrera et al., ETH Zurich.
-14. NIST SP 800-208 — Recommendation for Stateful Hash-Based Signature Schemes.
+10. WireGuard: Next Generation Kernel Network Tunnel. Donenfeld, J., NDSS 2017.
+11. BeyondCorp: A New Approach to Enterprise Security. Ward & Beyer, Google.
+12. SCION: A Secure Internet Architecture. Barrera et al., ETH Zurich.
+13. RFC 6298 — Computing TCP's Retransmission Timer (Jacobson/Karels).
+14. RFC 3517 — A Conservative SACK-based Loss Recovery Algorithm for TCP.
+15. RFC 6937 — Proportional Rate Reduction for TCP.
 
 ---
 

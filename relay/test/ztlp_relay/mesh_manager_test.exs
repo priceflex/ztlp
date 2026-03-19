@@ -38,8 +38,17 @@ defmodule ZtlpRelay.MeshManagerTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(mm_pid), do: GenServer.stop(mm_pid, :normal, 5000)
-      if Process.alive?(reg_pid), do: GenServer.stop(reg_pid, :normal, 5000)
+      try do
+        GenServer.stop(mm_pid, :normal, 5000)
+      catch
+        :exit, _ -> :ok
+      end
+
+      try do
+        GenServer.stop(reg_pid, :normal, 5000)
+      catch
+        :exit, _ -> :ok
+      end
     end)
 
     %{node_id: node_id, mm_pid: mm_pid, reg_pid: reg_pid}

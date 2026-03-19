@@ -493,7 +493,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
         )
 
       on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid)
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       %{table: table_name}
@@ -921,7 +925,11 @@ defmodule ZtlpRelay.MeshIntegrationTest do
       {:ok, pid} = RelayRegistry.start_link(name: name, sweep_interval_ms: 600_000)
 
       on_exit(fn ->
-        if Process.alive?(pid), do: GenServer.stop(pid)
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, _ -> :ok
+        end
       end)
 
       :ok

@@ -16,7 +16,11 @@ defmodule ZtlpRelay.ForwardingTableTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
     end)
 
     %{table: table_name}

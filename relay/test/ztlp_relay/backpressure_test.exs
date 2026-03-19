@@ -16,10 +16,14 @@ defmodule ZtlpRelay.BackpressureTest do
 
     {:ok, _pid} = Backpressure.start_link()
     on_exit(fn ->
-      case GenServer.whereis(Backpressure) do
-        nil -> :ok
-        p when is_pid(p) -> if Process.alive?(p), do: GenServer.stop(p)
-        _ -> :ok
+      try do
+        case GenServer.whereis(Backpressure) do
+          nil -> :ok
+          p when is_pid(p) -> GenServer.stop(p)
+          _ -> :ok
+        end
+      catch
+        :exit, _ -> :ok
       end
     end)
     :ok

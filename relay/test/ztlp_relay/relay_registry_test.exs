@@ -16,8 +16,20 @@ defmodule ZtlpRelay.RelayRegistryTest do
         remove_threshold_ms: 300_000
       )
 
+    # Clear any stale entries from previous tests
+    try do
+      :ets.delete_all_objects(:ztlp_relay_registry)
+    rescue
+      ArgumentError -> :ok
+    end
+
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+
       # Clean up the ETS table if it still exists
       try do
         :ets.delete(:ztlp_relay_registry)

@@ -10,12 +10,14 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  ELIXIR_VERSION: '1.15'
+  OTP_VERSION: '26'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ── Build Rust binaries for each platform ─────────────────────
-  build:
-    name: Build — ${{ matrix.target }}
+  rust:
+    name: Rust — ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -71,24 +73,32 @@ jobs:
         working-directory: proto
         shell: bash
         run: |
-          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --bin ztlp --bin ztlp-inspect --bin ztlp-load --bin ztlp-fuzz
+          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --bin ztlp --bin ztlp-node --bin ztlp-inspect --bin ztlp-load --bin ztlp-fuzz --bin ztlp-bench
 
-      - name: Prepare release directory
+      - name: Build static library
+        working-directory: proto
+        shell: bash
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --lib
+
+      - name: Package
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
           DIR="ztlp-${VERSION}-${{ matrix.target }}"
           mkdir -p "${DIR}"
 
-          # Copy binaries
-          for bin in ztlp ztlp-inspect ztlp-load ztlp-fuzz; do
-            cp "proto/target/${{ matrix.target }}/release/${bin}${{ matrix.suffix }}" "${DIR}/"
+          for bin in ztlp ztlp-node ztlp-inspect ztlp-load ztlp-fuzz ztlp-bench; do
+            cp "proto/target/${{ matrix.target }}/release/${bin}${{ matrix.suffix }}" "${DIR}/" 2>/dev/null || true
           done
 
-          # Copy docs
-          cp README.md "${DIR}/"
-          cp LICENSE "${DIR}/" 2>/dev/null || cp NOTICE "${DIR}/" 2>/dev/null || true
-          cp CLI.md "${DIR}/"
+          # Include static library
+          cp proto/target/${{ matrix.target }}/release/libztlp_proto.a "${DIR}/" 2>/dev/null || true
+          cp proto/target/${{ matrix.target }}/release/ztlp_proto.lib "${DIR}/" 2>/dev/null || true
+
+          cp README.md "${DIR}/" 2>/dev/null || true
+          cp LICENSE "${DIR}/" 2>/dev/null || true
+          cp CLI.md "${DIR}/" 2>/dev/null || true
 
           echo "${DIR}" > artifact-name.txt
 
@@ -109,13 +119,153 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: rust-${{ matrix.target }}
           path: ztlp-*.${{ matrix.archive }}
 
-  # ── Create GitHub Release ─────────────────────────────────────
+  # ── Build Elixir OTP releases ─────────────────────────────────
+  elixir:
+    name: Elixir — ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, ns, gateway]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Cache deps
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ matrix.component }}/deps
+            ${{ matrix.component }}/_build
+          key: release-${{ matrix.component }}-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles(format('{0}/mix.exs', matrix.component)) }}
+
+      - name: Fetch deps for component
+        working-directory: ${{ matrix.component }}
+        run: mix deps.get
+
+      # Gateway depends on NS
+      - name: Fetch NS deps (gateway only)
+        if: matrix.component == 'gateway'
+        working-directory: ns
+        run: mix deps.get
+
+      - name: Build OTP release
+        working-directory: ${{ matrix.component }}
+        env:
+          MIX_ENV: prod
+        run: |
+          mix compile
+          mix release --overwrite
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMPONENT="${{ matrix.component }}"
+          APP_NAME="ztlp_${COMPONENT}"
+          ARCHIVE="ztlp-${COMPONENT}-${VERSION}-linux-x86_64.tar.gz"
+
+          cd ${COMPONENT}/_build/prod/rel
+          tar czf /tmp/${ARCHIVE} ${APP_NAME}/
+          echo "Built ${ARCHIVE}: $(ls -lh /tmp/${ARCHIVE} | awk '{print $5}')"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elixir-${{ matrix.component }}
+          path: /tmp/ztlp-${{ matrix.component }}-*.tar.gz
+
+  # ── Build Desktop installers (Tauri) ──────────────────────────
+  desktop:
+    name: Desktop — ${{ matrix.target }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: linux
+          - platform: windows-latest
+            target: windows
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install Linux dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install Tauri CLI
+        working-directory: desktop
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build
+        working-directory: desktop
+        run: cargo tauri build
+
+      - name: Upload Linux artifacts
+        if: matrix.target == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: |
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Upload Windows artifacts
+        if: matrix.target == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+
+  # ── Package eBPF source ───────────────────────────────────────
+  ebpf:
+    name: eBPF source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          cd ebpf
+          tar czf /tmp/ztlp-ebpf-${VERSION}.tar.gz *.c *.h Makefile README.md 2>/dev/null || \
+          tar czf /tmp/ztlp-ebpf-${VERSION}.tar.gz $(ls *.c *.h Makefile README.md 2>/dev/null)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebpf
+          path: /tmp/ztlp-ebpf-*.tar.gz
+
+  # ── Publish GitHub Release ────────────────────────────────────
   release:
     name: Publish Release
-    needs: build
+    needs: [rust, elixir, desktop, ebpf]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -125,10 +275,24 @@ jobs:
         with:
           path: artifacts
 
-      - name: Collect archives
+      - name: Collect all release files
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} release/ \;
+
+          # Rust binaries (tar.gz and zip)
+          find artifacts/rust-* -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} release/ \;
+
+          # Elixir OTP releases
+          find artifacts/elixir-* -type f -name '*.tar.gz' -exec mv {} release/ \;
+
+          # Desktop installers
+          find artifacts/desktop-linux -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec mv {} release/ \; 2>/dev/null || true
+          find artifacts/desktop-windows -type f \( -name '*.msi' -o -name '*.exe' \) -exec mv {} release/ \; 2>/dev/null || true
+
+          # eBPF source
+          find artifacts/ebpf -type f -name '*.tar.gz' -exec mv {} release/ \; 2>/dev/null || true
+
+          echo "=== Release assets ==="
           ls -lh release/
 
       - name: Generate checksums
@@ -140,48 +304,51 @@ jobs:
       - name: Generate release notes
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          cat > release/RELEASE_NOTES.md << EOF
+          cat > release/RELEASE_NOTES.md << 'NOTES_EOF'
           ## ZTLP ${VERSION}
 
-          ### Included Binaries
-
-          | Binary | Description |
-          |--------|-------------|
-          | \`ztlp\` | Unified CLI — keygen, connect, listen, relay, ns, gateway, inspect, ping, status |
-          | \`ztlp-inspect\` | Packet decoder — hex, file, or stdin input with pretty/JSON/compact output |
-          | \`ztlp-load\` | Load generator — pipeline benchmarks, relay/gateway/NS stress testing |
-          | \`ztlp-fuzz\` | Protocol fuzzer — 8 mutation strategies, local and network modes |
-
-          ### Platforms
+          ### Core Binaries
 
           | Archive | OS | Arch |
           |---------|----|------|
-          | \`ztlp-*-x86_64-unknown-linux-gnu.tar.gz\` | Linux | x86_64 |
-          | \`ztlp-*-aarch64-unknown-linux-gnu.tar.gz\` | Linux | ARM64 |
-          | \`ztlp-*-x86_64-apple-darwin.tar.gz\` | macOS | Intel |
-          | \`ztlp-*-aarch64-apple-darwin.tar.gz\` | macOS | Apple Silicon |
-          | \`ztlp-*-x86_64-pc-windows-msvc.zip\` | Windows | x86_64 |
+          | `ztlp-*-x86_64-unknown-linux-gnu.tar.gz` | Linux | x86_64 |
+          | `ztlp-*-aarch64-unknown-linux-gnu.tar.gz` | Linux | ARM64 |
+          | `ztlp-*-x86_64-apple-darwin.tar.gz` | macOS | Intel |
+          | `ztlp-*-aarch64-apple-darwin.tar.gz` | macOS | Apple Silicon |
+          | `ztlp-*-x86_64-pc-windows-msvc.zip` | Windows | x86_64 |
 
-          ### Quick Start
+          Each archive includes: `ztlp` (CLI), `ztlp-node` (agent daemon), `ztlp-inspect`, `ztlp-load`, `ztlp-fuzz`, `ztlp-bench`, and `libztlp_proto.a` (static library).
 
-          \`\`\`bash
-          # Download and extract (Linux x86_64 example)
-          tar xzf ztlp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz
-          cd ztlp-${VERSION}-x86_64-unknown-linux-gnu
+          ### Server Components (Linux x86_64, Elixir/OTP)
 
-          # Generate an identity
-          ./ztlp keygen --output ~/.ztlp/identity.json
+          | Package | Description |
+          |---------|-------------|
+          | `ztlp-relay-*` | Relay mesh server |
+          | `ztlp-ns-*` | Namespace / trust server |
+          | `ztlp-gateway-*` | ZTLP↔TCP bridge gateway |
 
-          # Connect to a peer
-          ./ztlp connect peer.example.com:23095 --key ~/.ztlp/identity.json
-          \`\`\`
+          ### Desktop Installers
+
+          | File | Platform |
+          |------|----------|
+          | `ZTLP_*_x64-setup.exe` | Windows (NSIS) |
+          | `ZTLP_*_x64_en-US.msi` | Windows (MSI) |
+          | `ZTLP_*_amd64.AppImage` | Linux (portable) |
+          | `ZTLP_*_amd64.deb` | Debian / Ubuntu |
+
+          ### eBPF/XDP Filter
+          | Package | Description |
+          |---------|-------------|
+          | `ztlp-ebpf-*` | XDP packet filter source (C) — compile with `make` |
 
           ### Verification
-
-          \`\`\`bash
+          ```bash
           sha256sum -c SHA256SUMS.txt
-          \`\`\`
-          EOF
+          ```
+          NOTES_EOF
+
+          # Substitute version
+          sed -i "s/\${VERSION}/${VERSION}/g" release/RELEASE_NOTES.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

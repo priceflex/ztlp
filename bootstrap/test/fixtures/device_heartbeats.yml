@@ -1,0 +1,39 @@
+alice_laptop_recent:
+  ztlp_device: alice_laptop
+  network: office
+  source_ip: "10.0.1.50"
+  source_port: 43210
+  relay_name: "relay-us-west"
+  latency_ms: 15
+  bytes_sent: 1024000
+  bytes_received: 2048000
+  active_streams: 3
+  client_version: "1.2.0"
+  os_info: "macOS 15.1"
+  created_at: <%= 2.minutes.ago %>
+
+alice_laptop_old:
+  ztlp_device: alice_laptop
+  network: office
+  source_ip: "10.0.1.50"
+  relay_name: "relay-us-west"
+  latency_ms: 20
+  bytes_sent: 512000
+  bytes_received: 1024000
+  active_streams: 2
+  client_version: "1.2.0"
+  os_info: "macOS 15.1"
+  created_at: <%= 1.hour.ago %>
+
+bob_desktop_recent:
+  ztlp_device: bob_desktop
+  network: office
+  source_ip: "10.0.1.60"
+  relay_name: "relay-us-east"
+  latency_ms: 25
+  bytes_sent: 256000
+  bytes_received: 512000
+  active_streams: 1
+  client_version: "1.1.5"
+  os_info: "Windows 11"
+  created_at: <%= 3.minutes.ago %>

@@ -9,7 +9,7 @@
 </div>
 
 <!-- Stats -->
-<div class="grid grid-cols-1 gap-5 sm:grid-cols-4 mb-8">
+<div class="grid grid-cols-1 gap-5 sm:grid-cols-5 mb-8">
   <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
     <dt class="truncate text-sm font-medium text-gray-500">Networks</dt>
     <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-900"><%= @networks.count %></dd>
@@ -25,6 +25,13 @@
   <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
     <dt class="truncate text-sm font-medium text-gray-500">Errors</dt>
     <dd class="mt-1 text-3xl font-semibold tracking-tight text-red-600"><%= @machine_stats[:error] %></dd>
+  </div>
+  <div class="rounded-lg bg-green-50 px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-green-700">
+      <span class="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse mr-1"></span>
+      Online Devices
+    </dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-green-600"><%= @online_devices_count %></dd>
   </div>
 </div>
 
@@ -136,24 +143,48 @@
     </div>
   </div>
 
-  <% if @recent_enrollments.any? %>
-    <div class="bg-white shadow rounded-lg">
-      <div class="px-4 py-3 sm:px-6">
-        <h4 class="text-sm font-medium text-gray-900">Recent Enrollments</h4>
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <% if @recent_enrollments.any? %>
+      <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-3 sm:px-6">
+          <h4 class="text-sm font-medium text-gray-900">Recent Enrollments</h4>
+        </div>
+        <ul class="divide-y divide-gray-200">
+          <% @recent_enrollments.each do |device| %>
+            <li class="px-4 py-3 sm:px-6 flex items-center justify-between">
+              <div>
+                <span class="text-sm font-medium text-gray-900"><%= device.name %></span>
+                <span class="text-xs text-gray-500 ml-2"><%= device.owner_name %></span>
+              </div>
+              <span class="text-xs text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></span>
+            </li>
+          <% end %>
+        </ul>
       </div>
-      <ul class="divide-y divide-gray-200">
-        <% @recent_enrollments.each do |device| %>
-          <li class="px-4 py-3 sm:px-6 flex items-center justify-between">
-            <div>
-              <span class="text-sm font-medium text-gray-900"><%= device.name %></span>
-              <span class="text-xs text-gray-500 ml-2"><%= device.owner_name %></span>
-            </div>
-            <span class="text-xs text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></span>
-          </li>
-        <% end %>
-      </ul>
-    </div>
-  <% end %>
+    <% end %>
+
+    <% if @recent_connection_events.any? %>
+      <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-3 sm:px-6">
+          <h4 class="text-sm font-medium text-gray-900">Recent Connection Activity</h4>
+        </div>
+        <ul class="divide-y divide-gray-200">
+          <% @recent_connection_events.each do |event| %>
+            <li class="px-4 py-3 sm:px-6 flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span><%= event.event_icon %></span>
+                <div>
+                  <span class="text-sm font-medium text-gray-900"><%= event.ztlp_device&.name || "Unknown" %></span>
+                  <span class="text-xs text-gray-500 ml-1"><%= event.event_type %></span>
+                </div>
+              </div>
+              <span class="text-xs text-gray-500"><%= time_ago_short(event.created_at) %></span>
+            </li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+  </div>
 </div>
 
 <div class="grid grid-cols-1 gap-8 lg:grid-cols-2">

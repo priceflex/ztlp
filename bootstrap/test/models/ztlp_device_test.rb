@@ -91,4 +91,72 @@ class ZtlpDeviceTest < ActiveSupport::TestCase
     assert_includes revoked, ztlp_devices(:revoked_device)
     assert_not_includes revoked, ztlp_devices(:alice_laptop)
   end
+
+  # Online/Offline status tests
+
+  test "online? returns true when last_seen_at is recent" do
+    @device.update!(last_seen_at: 2.minutes.ago)
+    assert @device.online?
+    assert_not @device.offline?
+  end
+
+  test "online? returns false when last_seen_at is old" do
+    @device.update!(last_seen_at: 10.minutes.ago)
+    assert_not @device.online?
+    assert @device.offline?
+  end
+
+  test "online? returns false when last_seen_at is nil" do
+    @device.update!(last_seen_at: nil)
+    assert_not @device.online?
+    assert @device.offline?
+  end
+
+  test "scope online returns recently seen devices" do
+    online = ZtlpDevice.online
+    # alice_laptop (2 min ago) and bob_desktop (3 min ago) should be online
+    assert_includes online, ztlp_devices(:alice_laptop)
+    assert_includes online, ztlp_devices(:bob_desktop)
+    # alice_phone (1 hour ago) should be offline
+    assert_not_includes online, ztlp_devices(:alice_phone)
+    # nil last_seen should be offline
+    assert_not_includes online, ztlp_devices(:unassigned_device)
+  end
+
+  test "scope offline returns old or nil last_seen devices" do
+    offline = ZtlpDevice.offline
+    assert_includes offline, ztlp_devices(:alice_phone)
+    assert_includes offline, ztlp_devices(:unassigned_device)
+    assert_not_includes offline, ztlp_devices(:alice_laptop)
+  end
+
+  test "scope recently_seen returns devices seen in last 24h" do
+    recent = ZtlpDevice.recently_seen
+    assert_includes recent, ztlp_devices(:alice_laptop)
+    assert_includes recent, ztlp_devices(:alice_phone)
+    assert_not_includes recent, ztlp_devices(:unassigned_device)
+  end
+
+  test "status_with_presence returns revoked for revoked devices" do
+    revoked = ztlp_devices(:revoked_device)
+    assert_equal "revoked", revoked.status_with_presence
+  end
+
+  test "status_with_presence returns online for online devices" do
+    @device.update!(last_seen_at: 2.minutes.ago)
+    assert_equal "online", @device.status_with_presence
+  end
+
+  test "status_with_presence returns offline for offline devices" do
+    @device.update!(last_seen_at: 10.minutes.ago)
+    assert_equal "offline", @device.status_with_presence
+  end
+
+  test "has_many device_heartbeats" do
+    assert_respond_to @device, :device_heartbeats
+  end
+
+  test "has_many connection_events" do
+    assert_respond_to @device, :connection_events
+  end
 end

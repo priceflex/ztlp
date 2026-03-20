@@ -7,6 +7,11 @@ alice_laptop:
   hardware_id: hw-laptop-001
   status: enrolled
   enrolled_at: <%= 1.day.ago %>
+  last_seen_at: <%= 2.minutes.ago %>
+  last_source_ip: "10.0.1.50"
+  last_relay: "relay-us-west"
+  client_version: "1.2.0"
+  os_info: "macOS 15.1"
 
 alice_phone:
   name: alice-phone
@@ -16,6 +21,8 @@ alice_phone:
   hardware_id: hw-phone-001
   status: enrolled
   enrolled_at: <%= 2.days.ago %>
+  last_seen_at: <%= 1.hour.ago %>
+  last_source_ip: "10.0.1.51"
 
 bob_desktop:
   name: bob-desktop
@@ -24,6 +31,11 @@ bob_desktop:
   node_id: node-003
   status: enrolled
   enrolled_at: <%= 3.days.ago %>
+  last_seen_at: <%= 3.minutes.ago %>
+  last_source_ip: "10.0.1.60"
+  last_relay: "relay-us-east"
+  client_version: "1.1.5"
+  os_info: "Windows 11"
 
 revoked_device:
   name: old-server

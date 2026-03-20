@@ -4,12 +4,16 @@ class Network < ApplicationRecord
   has_many :ztlp_devices, dependent: :destroy
   has_many :ztlp_users, dependent: :destroy
   has_many :ztlp_groups, dependent: :destroy
+  has_many :device_heartbeats, dependent: :destroy
+  has_many :connection_events, dependent: :destroy
   has_many :machines, dependent: :destroy
   has_many :enrollment_tokens, dependent: :destroy
   has_many :deployments, through: :machines
   has_many :health_checks, through: :machines
   has_many :alerts, dependent: :destroy
   has_many :identity_providers, dependent: :destroy
+  has_many :notification_channels, dependent: :destroy
+  has_many :policies, dependent: :destroy
 
   encrypts :enrollment_secret_ciphertext
   encrypts :zone_key_ciphertext
@@ -53,6 +57,23 @@ class Network < ApplicationRecord
     return "down" if statuses.any? { |s| s == "down" }
     return "degraded" if statuses.any? { |s| s == "degraded" }
     "healthy"
+  end
+
+  # Export policy config for gateway push
+  def export_policy_config
+    policies.enabled.not_expired.order(Arel.sql(
+      "CASE priority WHEN 'high' THEN 100 WHEN 'normal' THEN 50 WHEN 'low' THEN 10 ELSE 50 END DESC"
+    )).map(&:to_gateway_rule)
+  end
+
+  def policy_summary
+    enabled_policies = policies.enabled
+    {
+      total: policies.count,
+      active: enabled_policies.count,
+      allow_count: enabled_policies.allow_rules.count,
+      deny_count: enabled_policies.deny_rules.count
+    }
   end
 
   def health_summary

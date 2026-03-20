@@ -25,7 +25,8 @@ module ApplicationHelper
       "expired"      => "bg-gray-100 text-gray-800",
       "exhausted"    => "bg-gray-100 text-gray-800",
       "revoked"      => "bg-red-100 text-red-800",
-      "enrolled"     => "bg-green-100 text-green-800"
+      "enrolled"     => "bg-green-100 text-green-800",
+      "online"       => "bg-green-100 text-green-800"
     }
     color = colors[status] || "bg-gray-100 text-gray-800"
     content_tag(:span, status, class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium #{color}")
@@ -119,6 +120,25 @@ module ApplicationHelper
         content_tag(:span, "", class: "inline-block h-2.5 w-2.5 rounded-full bg-gray-300") +
           content_tag(:span, "ZTLP", class: "text-xs font-medium text-gray-400")
       end
+    end
+  end
+
+  # Policy helpers
+
+  def resource_placeholder(resource_type)
+    case resource_type
+    when "service" then "*.internal or erp.acme.ztlp"
+    when "zone" then "office.acme.ztlp or *"
+    when "ip_range" then "10.42.0.0/16"
+    else "Enter resource value..."
+    end
+  end
+
+  def policy_action_badge(policy)
+    if policy.allow?
+      content_tag(:span, "Allow", class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-green-100 text-green-800")
+    else
+      content_tag(:span, "Deny", class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium bg-red-100 text-red-800")
     end
   end
 

@@ -41,5 +41,9 @@ class DashboardController < ApplicationController
     }
     @pending_tokens = EnrollmentToken.usable.count
     @recent_enrollments = ZtlpDevice.enrolled.order(enrolled_at: :desc).limit(5)
+
+    # Real-time status
+    @online_devices_count = ZtlpDevice.online.count
+    @recent_connection_events = ConnectionEvent.recent.includes(:ztlp_device, :ztlp_user).limit(5)
   end
 end

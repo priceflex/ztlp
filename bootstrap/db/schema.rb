@@ -10,7 +10,23 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
+  create_table "admin_users", force: :cascade do |t|
+    t.string "email", null: false
+    t.string "name", null: false
+    t.string "password_digest", null: false
+    t.string "role", default: "admin", null: false
+    t.string "totp_secret"
+    t.boolean "totp_enabled", default: false
+    t.datetime "last_login_at"
+    t.string "last_login_ip"
+    t.integer "failed_login_attempts", default: 0
+    t.datetime "locked_until"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["email"], name: "index_admin_users_on_email", unique: true
+  end
+
   create_table "alerts", force: :cascade do |t|
     t.integer "network_id", null: false
     t.integer "machine_id", null: false
@@ -44,6 +60,22 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
     t.index ["target_type", "target_id"], name: "index_audit_logs_on_target_type_and_target_id"
   end
 
+  create_table "connection_events", force: :cascade do |t|
+    t.integer "ztlp_device_id", null: false
+    t.integer "network_id", null: false
+    t.integer "ztlp_user_id"
+    t.string "event_type", null: false
+    t.string "source_ip"
+    t.string "relay_name"
+    t.string "disconnect_reason"
+    t.integer "session_duration_seconds"
+    t.text "details"
+    t.datetime "created_at", null: false
+    t.index ["network_id", "created_at"], name: "index_connection_events_on_network_id_and_created_at"
+    t.index ["ztlp_device_id", "created_at"], name: "index_connection_events_on_ztlp_device_id_and_created_at"
+    t.index ["ztlp_user_id", "created_at"], name: "index_connection_events_on_ztlp_user_id_and_created_at"
+  end
+
   create_table "deployments", force: :cascade do |t|
     t.integer "machine_id", null: false
     t.string "status", default: "pending", null: false
@@ -59,6 +91,23 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
     t.index ["machine_id", "component"], name: "index_deployments_on_machine_id_and_component"
     t.index ["machine_id"], name: "index_deployments_on_machine_id"
     t.index ["status"], name: "index_deployments_on_status"
+  end
+
+  create_table "device_heartbeats", force: :cascade do |t|
+    t.integer "ztlp_device_id", null: false
+    t.integer "network_id", null: false
+    t.string "source_ip"
+    t.integer "source_port"
+    t.string "relay_name"
+    t.integer "latency_ms"
+    t.integer "bytes_sent", default: 0
+    t.integer "bytes_received", default: 0
+    t.integer "active_streams", default: 0
+    t.string "client_version"
+    t.string "os_info"
+    t.datetime "created_at", null: false
+    t.index ["network_id", "created_at"], name: "index_device_heartbeats_on_network_id_and_created_at"
+    t.index ["ztlp_device_id", "created_at"], name: "index_device_heartbeats_on_ztlp_device_id_and_created_at"
   end
 
   create_table "enrollment_tokens", force: :cascade do |t|
@@ -165,6 +214,69 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
     t.index ["zone"], name: "index_networks_on_zone", unique: true
   end
 
+  create_table "notification_channels", force: :cascade do |t|
+    t.integer "network_id"
+    t.string "name", null: false
+    t.string "channel_type", null: false
+    t.text "config_json", null: false
+    t.boolean "enabled", default: true
+    t.string "severity_filter", default: "all"
+    t.string "event_filter"
+    t.datetime "last_sent_at"
+    t.integer "send_count", default: 0
+    t.text "last_error"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_type", "enabled"], name: "index_notification_channels_on_channel_type_and_enabled"
+    t.index ["network_id"], name: "index_notification_channels_on_network_id"
+  end
+
+  create_table "notification_logs", force: :cascade do |t|
+    t.integer "notification_channel_id", null: false
+    t.string "event_type", null: false
+    t.string "subject"
+    t.text "body"
+    t.string "status", default: "pending", null: false
+    t.text "error_message"
+    t.datetime "sent_at"
+    t.datetime "created_at", null: false
+    t.index ["notification_channel_id", "created_at"], name: "idx_on_notification_channel_id_created_at_3c34eeb0ae"
+    t.index ["status"], name: "index_notification_logs_on_status"
+  end
+
+  create_table "policies", force: :cascade do |t|
+    t.integer "network_id", null: false
+    t.string "name", null: false
+    t.text "description"
+    t.string "policy_type", null: false
+    t.string "priority", default: "normal"
+    t.boolean "enabled", default: true
+    t.string "subject_type", null: false
+    t.string "subject_value"
+    t.string "resource_type", null: false
+    t.string "resource_value", null: false
+    t.string "action", default: "allow", null: false
+    t.string "time_schedule"
+    t.string "timezone", default: "UTC"
+    t.integer "created_by_id"
+    t.datetime "expires_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["network_id", "enabled"], name: "index_policies_on_network_id_and_enabled"
+    t.index ["network_id", "subject_type", "subject_value"], name: "index_policies_on_network_subject"
+    t.index ["policy_type"], name: "index_policies_on_policy_type"
+  end
+
+  create_table "policy_templates", force: :cascade do |t|
+    t.string "name", null: false
+    t.text "description"
+    t.string "category", null: false
+    t.text "rules_json", null: false
+    t.boolean "built_in", default: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
   create_table "ztlp_devices", force: :cascade do |t|
     t.string "name", null: false
     t.integer "network_id", null: false
@@ -179,6 +291,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
     t.string "revocation_reason"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.datetime "last_seen_at"
+    t.string "last_source_ip"
+    t.string "last_relay"
+    t.string "client_version"
+    t.string "os_info"
+    t.index ["last_seen_at"], name: "index_ztlp_devices_on_last_seen_at"
     t.index ["machine_id"], name: "index_ztlp_devices_on_machine_id"
     t.index ["network_id", "name"], name: "index_ztlp_devices_on_network_id_and_name", unique: true
     t.index ["network_id"], name: "index_ztlp_devices_on_network_id"

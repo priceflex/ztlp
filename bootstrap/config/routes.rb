@@ -1,6 +1,20 @@
 Rails.application.routes.draw do
   root "dashboard#index"
 
+  # Authentication
+  get    "login",  to: "sessions#new",     as: :login
+  post   "login",  to: "sessions#create"
+  delete "logout", to: "sessions#destroy", as: :logout
+
+  # Admin user management (super_admin only)
+  namespace :admin do
+    resources :users do
+      member do
+        post :unlock
+      end
+    end
+  end
+
   resources :networks do
     member do
       post :deploy
@@ -11,6 +25,9 @@ Rails.application.routes.draw do
     # Health monitoring routes
     get :health, to: "health#network_health", as: :health
     post :check_health, to: "health#check_health"
+
+    # Real-time network status
+    get :status, to: "status#index", as: :status
 
     resources :machines do
       member do
@@ -47,6 +64,25 @@ Rails.application.routes.draw do
       member do
         post :add_member
         delete :remove_member
+      end
+    end
+    resources :policies do
+      member do
+        post :toggle
+        post :duplicate
+      end
+      collection do
+        get :templates
+        post :apply_template
+      end
+    end
+    resources :notification_channels, path: "notifications" do
+      member do
+        post :test
+        post :toggle
+      end
+      collection do
+        get :logs
       end
     end
     resources :enrollment, only: [:index, :create]
@@ -91,6 +127,8 @@ Rails.application.routes.draw do
     get "machines/:id/health", to: "health#machine_health", as: :machine_health
     get "alerts", to: "alerts#index", as: :alerts
     post "enrollment/confirm", to: "enrollment#confirm", as: :enrollment_confirm
+    post "heartbeat", to: "status#heartbeat", as: :heartbeat
+    post "events", to: "status#event", as: :events
   end
 
   # Documentation

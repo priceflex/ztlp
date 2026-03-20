@@ -1,0 +1,45 @@
+alice_laptop_connected:
+  ztlp_device: alice_laptop
+  network: office
+  ztlp_user: alice
+  event_type: connected
+  source_ip: "10.0.1.50"
+  relay_name: "relay-us-west"
+  created_at: <%= 10.minutes.ago %>
+
+alice_phone_connected:
+  ztlp_device: alice_phone
+  network: office
+  ztlp_user: alice
+  event_type: connected
+  source_ip: "10.0.1.51"
+  relay_name: "relay-us-west"
+  created_at: <%= 30.minutes.ago %>
+
+bob_desktop_disconnected:
+  ztlp_device: bob_desktop
+  network: office
+  ztlp_user: bob
+  event_type: disconnected
+  source_ip: "10.0.1.60"
+  relay_name: "relay-us-east"
+  disconnect_reason: timeout
+  session_duration_seconds: 3600
+  created_at: <%= 1.hour.ago %>
+
+alice_laptop_reconnected:
+  ztlp_device: alice_laptop
+  network: office
+  ztlp_user: alice
+  event_type: reconnected
+  source_ip: "10.0.1.50"
+  relay_name: "relay-us-west"
+  created_at: <%= 2.hours.ago %>
+
+failed_handshake:
+  ztlp_device: revoked_device
+  network: office
+  event_type: handshake_failed
+  source_ip: "10.0.1.99"
+  details: "Device certificate revoked"
+  created_at: <%= 3.hours.ago %>

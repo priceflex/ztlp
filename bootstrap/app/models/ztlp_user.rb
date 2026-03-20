@@ -2,8 +2,11 @@
 
 # Mirrors a ZTLP NS USER record. Not a Rails auth user.
 class ZtlpUser < ApplicationRecord
+  include Notifiable
+
   belongs_to :network
   has_many :ztlp_devices, foreign_key: :ztlp_user_id, dependent: :nullify
+  has_many :connection_events, dependent: :nullify
   has_many :group_memberships, dependent: :destroy
   has_many :ztlp_groups, through: :group_memberships
 
@@ -18,10 +21,12 @@ class ZtlpUser < ApplicationRecord
 
   def revoke!(reason: nil)
     update!(status: "revoked", revoked_at: Time.current, revocation_reason: reason)
+    notify_event("user_revoked", subject: "User revoked: #{name}", body: "User #{name} was revoked. Reason: #{reason || 'none'}", severity: "warning")
   end
 
   def suspend!
     update!(status: "suspended", suspended_at: Time.current)
+    notify_event("user_suspended", subject: "User suspended: #{name}", body: "User #{name} was suspended.", severity: "warning")
   end
 
   def reactivate!

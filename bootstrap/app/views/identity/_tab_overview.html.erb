@@ -124,7 +124,14 @@
               <% if enrolled.any? %>
                 <div class="flex flex-wrap gap-1">
                   <% enrolled.each do |d| %>
-                    <%= link_to d.name, network_ztlp_device_path(@network, d), class: "inline-flex items-center rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-200" %>
+                    <%= link_to network_ztlp_device_path(@network, d), class: "inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-200" do %>
+                      <% if d.online? %>
+                        <span class="inline-block h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" title="Online"></span>
+                      <% else %>
+                        <span class="inline-block h-1.5 w-1.5 rounded-full bg-gray-300" title="Offline"></span>
+                      <% end %>
+                      <%= d.name %>
+                    <% end %>
                   <% end %>
                 </div>
               <% else %>

@@ -1,0 +1,269 @@
+<meta http-equiv="refresh" content="30">
+
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Network Status</h1>
+    <p class="mt-1 text-sm text-gray-500"><%= @network.name %> — Live Overview</p>
+  </div>
+  <div class="flex items-center gap-3">
+    <span class="inline-flex items-center gap-1 text-xs text-gray-400">
+      <span class="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse"></span>
+      Auto-refreshes every 30s
+    </span>
+    <%= link_to "← Back to Network", network_path(@network), class: "rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200" %>
+  </div>
+</div>
+
+<!-- Live Overview Panel -->
+<div class="grid grid-cols-1 gap-5 sm:grid-cols-4 mb-8">
+  <!-- Online Devices -->
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Online Devices</dt>
+    <dd class="mt-1 flex items-baseline gap-2">
+      <span class="text-3xl font-semibold tracking-tight text-green-600"><%= @online_count %></span>
+      <span class="text-sm text-gray-400">/ <%= @total_count %></span>
+    </dd>
+  </div>
+
+  <!-- Offline Devices -->
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">Offline Devices</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-gray-400"><%= @total_count - @online_count %></dd>
+  </div>
+
+  <!-- Bandwidth In -->
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">↓ Bytes Received (1h)</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-blue-600"><%= number_to_human_size(@bytes_received) %></dd>
+  </div>
+
+  <!-- Bandwidth Out -->
+  <div class="rounded-lg bg-white px-4 py-5 shadow sm:p-6">
+    <dt class="truncate text-sm font-medium text-gray-500">↑ Bytes Sent (1h)</dt>
+    <dd class="mt-1 text-3xl font-semibold tracking-tight text-indigo-600"><%= number_to_human_size(@bytes_sent) %></dd>
+  </div>
+</div>
+
+<!-- Connection Graph (SVG Sparkline) -->
+<div class="bg-white shadow rounded-lg p-6 mb-8">
+  <h2 class="text-base font-semibold text-gray-900 mb-4">Connected Devices — Last 24 Hours</h2>
+  <%
+    max_val = [@sparkline_data.max || 1, 1].max
+    step = 480.0 / ([@sparkline_data.size - 1, 1].max)
+    line_points = @sparkline_data.each_with_index.map { |v, i|
+      x = (i * step).round(1)
+      y = (80 - (v.to_f / max_val * 70)).round(1)
+      "#{x},#{y}"
+    }.join(' ')
+    last_x = ((@sparkline_data.size - 1) * step).round(1)
+    polygon_points = "#{line_points} #{last_x},80 0,80"
+  %>
+  <svg viewBox="0 0 480 80" class="w-full h-20" preserveAspectRatio="none">
+    <!-- Grid lines -->
+    <line x1="0" y1="0" x2="480" y2="0" stroke="#f3f4f6" stroke-width="1"/>
+    <line x1="0" y1="40" x2="480" y2="40" stroke="#f3f4f6" stroke-width="1"/>
+    <line x1="0" y1="80" x2="480" y2="80" stroke="#f3f4f6" stroke-width="1"/>
+    <!-- Area fill -->
+    <polygon
+      points="<%= polygon_points %>"
+      fill="url(#sparkGradient)" />
+    <!-- Line -->
+    <polyline
+      fill="none"
+      stroke="#22c55e"
+      stroke-width="2"
+      points="<%= line_points %>" />
+    <defs>
+      <linearGradient id="sparkGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#22c55e" stop-opacity="0.3"/>
+        <stop offset="100%" stop-color="#22c55e" stop-opacity="0.05"/>
+      </linearGradient>
+    </defs>
+  </svg>
+  <div class="flex justify-between text-xs text-gray-400 mt-1">
+    <span>24h ago</span>
+    <span>12h ago</span>
+    <span>Now</span>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+  <!-- Device Status Table (2 cols) -->
+  <div class="lg:col-span-2 bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
+      <h3 class="text-base font-semibold text-gray-900">Device Status</h3>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Device</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Seen</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP / Relay</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Version / OS</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Streams</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+          <% @devices.each do |device| %>
+            <tr class="hover:bg-gray-50 cursor-pointer" onclick="window.location='<%= network_ztlp_device_path(@network, device) %>'">
+              <td class="px-4 py-3 whitespace-nowrap">
+                <div class="flex items-center gap-2">
+                  <% if device.revoked? %>
+                    <span class="inline-block h-2.5 w-2.5 rounded-full bg-red-400" title="Revoked"></span>
+                  <% elsif device.online? %>
+                    <span class="inline-block h-2.5 w-2.5 rounded-full bg-green-400 animate-pulse" title="Online"></span>
+                  <% else %>
+                    <span class="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" title="Offline"></span>
+                  <% end %>
+                  <div>
+                    <p class="text-sm font-medium text-gray-900"><%= device.name %></p>
+                    <p class="text-xs text-gray-500"><%= device.owner_name %></p>
+                  </div>
+                </div>
+              </td>
+              <td class="px-4 py-3 whitespace-nowrap"><%= status_badge(device.status_with_presence) %></td>
+              <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                <%= device.last_seen_at ? time_ago_short(device.last_seen_at) : "Never" %>
+              </td>
+              <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                <% if device.last_source_ip.present? %>
+                  <span><%= device.last_source_ip %></span>
+                  <% if device.last_relay.present? %>
+                    <br><span class="text-xs text-gray-400">via <%= device.last_relay %></span>
+                  <% end %>
+                <% else %>
+                  <span class="text-gray-300">—</span>
+                <% end %>
+              </td>
+              <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                <% if device.client_version.present? || device.os_info.present? %>
+                  <span><%= device.client_version %></span>
+                  <% if device.os_info.present? %>
+                    <br><span class="text-xs text-gray-400"><%= device.os_info %></span>
+                  <% end %>
+                <% else %>
+                  <span class="text-gray-300">—</span>
+                <% end %>
+              </td>
+              <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                <% latest_hb = device.device_heartbeats.order(created_at: :desc).first %>
+                <%= latest_hb&.active_streams || "—" %>
+              </td>
+            </tr>
+          <% end %>
+          <% if @devices.empty? %>
+            <tr>
+              <td colspan="6" class="px-4 py-8 text-center text-gray-500">No devices enrolled.</td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- User Sessions Panel (1 col) -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
+      <h3 class="text-base font-semibold text-gray-900">Online Users</h3>
+      <p class="text-xs text-gray-500 mt-1"><%= @online_users.size %> user<%= @online_users.size == 1 ? '' : 's' %> connected</p>
+    </div>
+    <ul class="divide-y divide-gray-200">
+      <% @online_users.each do |user| %>
+        <% online_devices = user.ztlp_devices.select(&:online?) %>
+        <li class="px-4 py-3 sm:px-6">
+          <div class="flex items-center gap-3">
+            <%= user_avatar(user) %>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900 truncate"><%= user.name %></p>
+              <p class="text-xs text-gray-500">
+                <%= online_devices.size %> device<%= online_devices.size == 1 ? '' : 's' %> online
+              </p>
+              <div class="flex flex-wrap gap-1 mt-1">
+                <% online_devices.each do |d| %>
+                  <span class="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-xs text-green-700">
+                    <span class="h-1.5 w-1.5 rounded-full bg-green-400"></span>
+                    <%= d.name %>
+                  </span>
+                <% end %>
+              </div>
+            </div>
+          </div>
+        </li>
+      <% end %>
+      <% if @online_users.empty? %>
+        <li class="px-4 py-8 text-center text-gray-500">No users currently online.</li>
+      <% end %>
+    </ul>
+  </div>
+</div>
+
+<!-- Connection Timeline -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-base font-semibold text-gray-900">Connection Timeline</h3>
+        <p class="text-xs text-gray-500 mt-1"><%= @events_total %> events</p>
+      </div>
+      <div class="flex gap-2">
+        <%= link_to "All", network_status_path(@network),
+          class: "rounded-md px-2.5 py-1 text-xs font-medium #{params[:event_type].blank? ? 'bg-ztlp-100 text-ztlp-800' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}" %>
+        <% ConnectionEvent::VALID_EVENT_TYPES.each do |type| %>
+          <% color = case type
+               when "connected" then "green"
+               when "disconnected" then "red"
+               when "reconnected" then "yellow"
+               else "gray"
+             end %>
+          <%= link_to type.capitalize, network_status_path(@network, event_type: type),
+            class: "rounded-md px-2.5 py-1 text-xs font-medium #{params[:event_type] == type ? "bg-#{color}-100 text-#{color}-800" : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}" %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+  <ul class="divide-y divide-gray-200">
+    <% @events.each do |event| %>
+      <% color = event.event_color %>
+      <li class="px-4 py-3 sm:px-6">
+        <div class="flex items-center gap-3">
+          <span class="text-lg"><%= event.event_icon %></span>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-medium text-<%= color %>-700"><%= event.event_type.capitalize %></span>
+              <span class="text-sm text-gray-900"><%= event.ztlp_device&.name || "Unknown device" %></span>
+              <% if event.ztlp_user %>
+                <span class="text-xs text-gray-500">(<%= event.ztlp_user.name %>)</span>
+              <% end %>
+            </div>
+            <div class="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+              <% if event.relay_name.present? %>
+                <span>Relay: <%= event.relay_name %></span>
+              <% end %>
+              <% if event.source_ip.present? %>
+                <span>IP: <%= event.source_ip %></span>
+              <% end %>
+              <% if event.disconnect_reason.present? %>
+                <span>Reason: <%= event.disconnect_reason %></span>
+              <% end %>
+              <% if event.session_duration_seconds.present? %>
+                <span>Duration: <%= format_uptime(event.session_duration_seconds) %></span>
+              <% end %>
+            </div>
+          </div>
+          <span class="text-xs text-gray-400 whitespace-nowrap"><%= time_ago_short(event.created_at) %></span>
+        </div>
+      </li>
+    <% end %>
+    <% if @events.empty? %>
+      <li class="px-4 py-8 text-center text-gray-500">No connection events recorded.</li>
+    <% end %>
+  </ul>
+  <% if @events_total > @page * @per_page %>
+    <div class="px-4 py-3 border-t border-gray-200 text-center">
+      <%= link_to "Load More →", network_status_path(@network, page: @page + 1, event_type: params[:event_type]),
+        class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+    </div>
+  <% end %>
+</div>

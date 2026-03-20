@@ -1,0 +1,11 @@
+{
+  "name": "ztlp-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ZTLP Desktop — Zero Trust Layer Protocol client",
+  "scripts": {
+    "tauri": "cargo tauri",
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build"
+  }
+}

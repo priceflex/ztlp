@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZTLP</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <img src="assets/shield.svg" alt="ZTLP">
+        <h1>ZTLP</h1>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <button class="nav-item active" data-page="home">
+          <span class="nav-icon">🏠</span> Home
+        </button>
+        <button class="nav-item" data-page="services">
+          <span class="nav-icon">🔌</span> Services
+        </button>
+        <button class="nav-item" data-page="identity">
+          <span class="nav-icon">🪪</span> Identity
+        </button>
+        <button class="nav-item" data-page="enrollment">
+          <span class="nav-icon">🔑</span> Enrollment
+        </button>
+        <button class="nav-item" data-page="settings">
+          <span class="nav-icon">⚙️</span> Settings
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        ZTLP v1.0.0
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+      <!-- Home -->
+      <div id="page-home" class="page active"></div>
+
+      <!-- Services -->
+      <div id="page-services" class="page"></div>
+
+      <!-- Identity -->
+      <div id="page-identity" class="page"></div>
+
+      <!-- Enrollment -->
+      <div id="page-enrollment" class="page"></div>
+
+      <!-- Settings -->
+      <div id="page-settings" class="page"></div>
+    </main>
+  </div>
+
+  <!-- Component scripts -->
+  <script src="components/home.js"></script>
+  <script src="components/services.js"></script>
+  <script src="components/identity.js"></script>
+  <script src="components/enrollment.js"></script>
+  <script src="components/settings.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -6,6 +6,8 @@ ZTLP_RFC_Draft_v0.5.docx
 
 # Rust build artifacts
 /proto/target/
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
 
 # Elixir build artifacts (relay)
 /relay/_build/

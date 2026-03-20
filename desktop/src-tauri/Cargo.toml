@@ -1,0 +1,16 @@
+[package]
+name = "ztlp-desktop"
+version = "1.0.0"
+edition = "2021"
+description = "ZTLP Desktop — Zero Trust Layer Protocol client"
+authors = ["Steven Price <steve@techrockstars.com>"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tauri-build = "2"

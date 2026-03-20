@@ -1,0 +1,17 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for the ZTLP desktop app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:tray:default",
+    "shell:allow-open"
+  ]
+}

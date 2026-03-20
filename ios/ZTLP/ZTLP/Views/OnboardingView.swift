@@ -35,7 +35,7 @@ struct OnboardingView: View {
                 viewModel: EnrollmentViewModel(configuration: configuration)
             )
         }
-        .onChange(of: configuration.isEnrolled) { _, enrolled in
+        .onChange(of: configuration.isEnrolled) { enrolled in
             if enrolled {
                 withAnimation { currentPage = 2 }
             }
@@ -52,12 +52,12 @@ struct OnboardingView: View {
             // App icon / hero
             ZStack {
                 Circle()
-                    .fill(.ztlpBlue.opacity(0.1))
+                    .fill(Color.ztlpBlue.opacity(0.1))
                     .frame(width: 160, height: 160)
 
                 Image(systemName: "shield.checkered")
                     .font(.system(size: 70))
-                    .foregroundStyle(.ztlpBlue)
+                    .foregroundStyle(Color.ztlpBlue)
             }
             .accessibilityHidden(true)
 
@@ -98,7 +98,7 @@ struct OnboardingView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.ztlpBlue)
+            .tint(Color.ztlpBlue)
             .controlSize(.large)
             .padding(.horizontal, 32)
             .padding(.bottom, 48)
@@ -112,7 +112,7 @@ struct OnboardingView: View {
 
             Image(systemName: "qrcode.viewfinder")
                 .font(.system(size: 80))
-                .foregroundStyle(.ztlpBlue)
+                .foregroundStyle(Color.ztlpBlue)
                 .accessibilityHidden(true)
 
             VStack(spacing: 12) {
@@ -136,7 +136,7 @@ struct OnboardingView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.ztlpBlue)
+                .tint(Color.ztlpBlue)
                 .controlSize(.large)
 
                 Button {
@@ -161,7 +161,7 @@ struct OnboardingView: View {
 
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 80))
-                .foregroundStyle(.ztlpGreen)
+                .foregroundStyle(Color.ztlpGreen)
                 .accessibilityHidden(true)
 
             VStack(spacing: 12) {
@@ -192,7 +192,7 @@ struct OnboardingView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.ztlpBlue)
+            .tint(Color.ztlpBlue)
             .controlSize(.large)
             .padding(.horizontal, 32)
             .padding(.bottom, 48)
@@ -206,7 +206,7 @@ struct OnboardingView: View {
         HStack(alignment: .top, spacing: 16) {
             Image(systemName: icon)
                 .font(.title2)
-                .foregroundStyle(.ztlpBlue)
+                .foregroundStyle(Color.ztlpBlue)
                 .frame(width: 36, height: 36)
                 .accessibilityHidden(true)
 

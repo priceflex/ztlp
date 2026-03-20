@@ -57,7 +57,7 @@ struct ServicesView: View {
                             } label: {
                                 Label("Copy", systemImage: "doc.on.doc")
                             }
-                            .tint(.ztlpBlue)
+                            .tint(Color.ztlpBlue)
                         }
                         .swipeActions(edge: .leading) {
                             Button {
@@ -65,7 +65,7 @@ struct ServicesView: View {
                             } label: {
                                 Label("Ping", systemImage: "antenna.radiowaves.left.and.right")
                             }
-                            .tint(.ztlpGreen)
+                            .tint(Color.ztlpGreen)
                         }
                 }
             } header: {
@@ -73,14 +73,14 @@ struct ServicesView: View {
                     Text("\(viewModel.filteredServices.count) services")
                     Spacer()
                     Text("\(viewModel.reachableCount) reachable")
-                        .foregroundStyle(.ztlpGreen)
+                        .foregroundStyle(Color.ztlpGreen)
                 }
             }
 
             if let error = viewModel.lastError {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.ztlpRed)
+                        .foregroundStyle(Color.ztlpRed)
                         .font(.caption)
                 }
             }
@@ -90,16 +90,24 @@ struct ServicesView: View {
 
     /// Empty state when no services are discovered.
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label("No Services", systemImage: "server.rack")
-        } description: {
+        VStack(spacing: 20) {
+            Spacer()
+            Image(systemName: "server.rack")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No Services")
+                .font(.title2.weight(.semibold))
             Text("Services in your ZTLP zone will appear here. Connect to the tunnel and pull to refresh.")
-        } actions: {
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
             Button("Refresh") {
                 Task { await viewModel.refresh() }
             }
             .buttonStyle(.borderedProminent)
-            .tint(.ztlpBlue)
+            .tint(Color.ztlpBlue)
+            Spacer()
         }
     }
 }
@@ -132,8 +140,8 @@ private struct ServiceRow: View {
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(.ztlpBlue.opacity(0.12), in: Capsule())
-                        .foregroundStyle(.ztlpBlue)
+                        .background(Color.ztlpBlue.opacity(0.12), in: Capsule())
+                        .foregroundStyle(Color.ztlpBlue)
                 }
 
                 if let description = service.description, !description.isEmpty {

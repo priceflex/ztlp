@@ -94,11 +94,11 @@ struct IdentityView: View {
                 Spacer()
                 if configuration.isEnrolled {
                     Label("Enrolled", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.ztlpGreen)
+                        .foregroundStyle(Color.ztlpGreen)
                         .font(.callout)
                 } else {
                     Label("Not Enrolled", systemImage: "xmark.circle")
-                        .foregroundStyle(.ztlpOrange)
+                        .foregroundStyle(Color.ztlpOrange)
                         .font(.callout)
                 }
             }
@@ -131,7 +131,7 @@ struct IdentityView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Image(systemName: identity.isHardwareBacked ? "checkmark.circle.fill" : "xmark.circle")
-                    .foregroundStyle(identity.isHardwareBacked ? .ztlpGreen : .secondary)
+                    .foregroundStyle(identity.isHardwareBacked ? Color.ztlpGreen : Color.secondary)
             }
 
             HStack {
@@ -140,7 +140,7 @@ struct IdentityView: View {
                 Spacer()
                 Text(SecureEnclaveService.shared.isAvailable ? "Available" : "Unavailable")
                     .font(.callout)
-                    .foregroundStyle(SecureEnclaveService.shared.isAvailable ? .ztlpGreen : .secondary)
+                    .foregroundStyle(SecureEnclaveService.shared.isAvailable ? Color.ztlpGreen : Color.secondary)
             }
         }
     }
@@ -190,11 +190,19 @@ struct IdentityView: View {
     /// No identity found.
     private var noIdentitySection: some View {
         Section {
-            ContentUnavailableView {
-                Label("No Identity", systemImage: "person.badge.key")
-            } description: {
+            VStack(spacing: 12) {
+                Image(systemName: "person.badge.key")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.secondary)
+                Text("No Identity")
+                    .font(.headline)
                 Text("Generate or enroll an identity to see your node information.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
         }
     }
 

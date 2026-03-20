@@ -54,7 +54,7 @@ struct EnrollmentView: View {
 
             Image(systemName: "qrcode.viewfinder")
                 .font(.system(size: 80))
-                .foregroundStyle(.ztlpBlue)
+                .foregroundStyle(Color.ztlpBlue)
                 .accessibilityHidden(true)
 
             Text("Scan Enrollment QR Code")
@@ -76,7 +76,7 @@ struct EnrollmentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.ztlpBlue)
+                .tint(Color.ztlpBlue)
                 .controlSize(.large)
                 .disabled(!viewModel.cameraAuthorized)
 
@@ -150,7 +150,7 @@ struct EnrollmentView: View {
 
             Image(systemName: "checkmark.seal")
                 .font(.system(size: 60))
-                .foregroundStyle(.ztlpBlue)
+                .foregroundStyle(Color.ztlpBlue)
 
             Text("Enrollment Token Found")
                 .font(.title2.weight(.semibold))
@@ -192,7 +192,7 @@ struct EnrollmentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.ztlpBlue)
+                .tint(Color.ztlpBlue)
                 .controlSize(.large)
 
                 Button {
@@ -232,8 +232,7 @@ struct EnrollmentView: View {
 
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 80))
-                .foregroundStyle(.ztlpGreen)
-                .symbolEffect(.bounce, value: true)
+                .foregroundStyle(Color.ztlpGreen)
 
             Text("Enrolled!")
                 .font(.title.weight(.bold))
@@ -253,7 +252,7 @@ struct EnrollmentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.ztlpBlue)
+            .tint(Color.ztlpBlue)
             .controlSize(.large)
             .padding(.horizontal, 32)
             .padding(.bottom, 32)
@@ -267,7 +266,7 @@ struct EnrollmentView: View {
 
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 60))
-                .foregroundStyle(.ztlpOrange)
+                .foregroundStyle(Color.ztlpOrange)
 
             Text("Enrollment Failed")
                 .font(.title2.weight(.semibold))
@@ -288,7 +287,7 @@ struct EnrollmentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.ztlpBlue)
+                .tint(Color.ztlpBlue)
                 .controlSize(.large)
 
                 Button {
@@ -327,7 +326,7 @@ struct EnrollmentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.ztlpBlue)
+                .tint(Color.ztlpBlue)
                 .disabled(manualEntryText.isEmpty)
                 .padding(.horizontal)
 

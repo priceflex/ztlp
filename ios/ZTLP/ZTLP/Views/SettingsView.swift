@@ -8,6 +8,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject var configuration: ZTLPConfiguration
 
     /// Confirmation alert for destructive actions.
     @State private var showRegenConfirm = false
@@ -46,7 +47,7 @@ struct SettingsView: View {
             HStack {
                 Label("Relay Server", systemImage: "antenna.radiowaves.left.and.right")
                 Spacer()
-                TextField("relay.ztlp.net:4433", text: $viewModel.configuration.relayAddress)
+                TextField("relay.ztlp.net:4433", text: $configuration.relayAddress)
                     .multilineTextAlignment(.trailing)
                     .font(.callout.monospaced())
                     .textInputAutocapitalization(.never)
@@ -58,7 +59,7 @@ struct SettingsView: View {
             HStack {
                 Label("STUN Server", systemImage: "network")
                 Spacer()
-                TextField("stun.l.google.com:19302", text: $viewModel.configuration.stunServer)
+                TextField("stun.l.google.com:19302", text: $configuration.stunServer)
                     .multilineTextAlignment(.trailing)
                     .font(.callout.monospaced())
                     .textInputAutocapitalization(.never)
@@ -70,7 +71,7 @@ struct SettingsView: View {
             HStack {
                 Label("Target Node ID", systemImage: "point.3.filled.connected.trianglepath.dotted")
                 Spacer()
-                TextField("Peer node ID (hex)", text: $viewModel.configuration.targetNodeId)
+                TextField("Peer node ID (hex)", text: $configuration.targetNodeId)
                     .multilineTextAlignment(.trailing)
                     .font(.callout.monospaced())
                     .textInputAutocapitalization(.never)
@@ -78,11 +79,11 @@ struct SettingsView: View {
             }
             .accessibilityElement(children: .combine)
 
-            Toggle(isOn: $viewModel.configuration.natAssist) {
+            Toggle(isOn: $configuration.natAssist) {
                 Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
             }
 
-            Toggle(isOn: $viewModel.configuration.autoConnect) {
+            Toggle(isOn: $configuration.autoConnect) {
                 Label("Auto-Connect on Launch", systemImage: "bolt.fill")
             }
         }
@@ -94,7 +95,7 @@ struct SettingsView: View {
             HStack {
                 Label("Tunnel Address", systemImage: "network.badge.shield.half.filled")
                 Spacer()
-                TextField("10.0.0.2", text: $viewModel.configuration.tunnelAddress)
+                TextField("10.0.0.2", text: $configuration.tunnelAddress)
                     .multilineTextAlignment(.trailing)
                     .font(.callout.monospaced())
                     .textInputAutocapitalization(.never)
@@ -105,9 +106,9 @@ struct SettingsView: View {
                 Label("DNS Servers", systemImage: "server.rack")
                 Spacer()
                 TextField("1.1.1.1, 8.8.8.8", text: Binding(
-                    get: { viewModel.configuration.dnsServers.joined(separator: ", ") },
+                    get: { configuration.dnsServers.joined(separator: ", ") },
                     set: { newValue in
-                        viewModel.configuration.dnsServers = newValue
+                        configuration.dnsServers = newValue
                             .split(separator: ",")
                             .map { $0.trimmingCharacters(in: .whitespaces) }
                     }
@@ -118,8 +119,8 @@ struct SettingsView: View {
                 .keyboardType(.numbersAndPunctuation)
             }
 
-            Stepper(value: $viewModel.configuration.mtu, in: 1200...1500, step: 50) {
-                Label("MTU: \(viewModel.configuration.mtu)", systemImage: "arrow.left.and.right")
+            Stepper(value: $configuration.mtu, in: 1200...1500, step: 50) {
+                Label("MTU: \(configuration.mtu)", systemImage: "arrow.left.and.right")
             }
         }
     }
@@ -127,7 +128,7 @@ struct SettingsView: View {
     /// Security settings.
     private var securitySection: some View {
         Section("Security") {
-            Toggle(isOn: $viewModel.configuration.useSecureEnclave) {
+            Toggle(isOn: $configuration.useSecureEnclave) {
                 Label("Use Secure Enclave", systemImage: "cpu")
             }
             .disabled(!viewModel.secureEnclaveAvailable)
@@ -261,5 +262,6 @@ struct SettingsView: View {
 // MARK: - Previews
 
 #Preview {
-    SettingsView(viewModel: SettingsViewModel(configuration: ZTLPConfiguration()))
+    let config = ZTLPConfiguration()
+    SettingsView(viewModel: SettingsViewModel(configuration: config), configuration: config)
 }

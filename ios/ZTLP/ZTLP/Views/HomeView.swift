@@ -122,7 +122,6 @@ struct HomeView: View {
                     Image(systemName: viewModel.status.systemImage)
                         .font(.system(size: 48))
                         .foregroundStyle(viewModel.status.color)
-                        .contentTransition(.symbolEffect(.replace))
 
                     Text(viewModel.status.canConnect ? "Connect" : "Disconnect")
                         .font(.caption.weight(.medium))

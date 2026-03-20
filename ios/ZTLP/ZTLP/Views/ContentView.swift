@@ -43,7 +43,8 @@ struct ContentView: View {
             .tag(Tab.identity)
 
             SettingsView(
-                viewModel: SettingsViewModel(configuration: configuration)
+                viewModel: SettingsViewModel(configuration: configuration),
+                configuration: configuration
             )
             .tabItem {
                 Label("Settings", systemImage: "gear")

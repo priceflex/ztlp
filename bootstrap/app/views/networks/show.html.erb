@@ -21,27 +21,37 @@
   <% end %>
 </div>
 
-<!-- Identity & Groups Navigation -->
-<div class="bg-white shadow rounded-lg mb-8 px-4 py-4">
-  <div class="flex items-center space-x-6">
-    <span class="text-sm font-medium text-gray-500">Identity:</span>
-    <%= link_to network_ztlp_users_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
-      <span>👤</span><span>Users (<%= @network.ztlp_users.count %>)</span>
-    <% end %>
-    <%= link_to network_ztlp_devices_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
-      <span>💻</span><span>Devices (<%= @network.ztlp_devices.count %>)</span>
-    <% end %>
-    <%= link_to network_ztlp_groups_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
-      <span>👥</span><span>Groups (<%= @network.ztlp_groups.count %>)</span>
-    <% end %>
-    <%= link_to network_enrollment_index_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+<!-- Identity & Access Management -->
+<div class="bg-white shadow rounded-lg mb-8 overflow-hidden">
+  <%= link_to identity_network_path(@network), class: "block hover:bg-gray-50 transition-colors" do %>
+    <div class="px-6 py-5">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-4">
+          <div class="flex h-12 w-12 items-center justify-center rounded-lg bg-ztlp-600">
+            <svg class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+          </div>
+          <div>
+            <h3 class="text-base font-semibold text-gray-900">Identity & Access Management</h3>
+            <p class="mt-1 text-sm text-gray-500">
+              <%= @network.ztlp_users.active.count %> active users ·
+              <%= @network.ztlp_devices.enrolled.count %> enrolled devices ·
+              <%= @network.ztlp_groups.count %> groups
+            </p>
+          </div>
+        </div>
+        <svg class="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+      </div>
+    </div>
+  <% end %>
+  <div class="border-t border-gray-200 px-6 py-3 flex items-center gap-6 bg-gray-50">
+    <%= link_to network_enrollment_index_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center gap-1" do %>
       <span>🎫</span><span>Enrollment</span>
     <% end %>
-    <%= link_to network_identity_providers_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center space-x-1" do %>
+    <%= link_to network_identity_providers_path(@network), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500 flex items-center gap-1" do %>
       <span>🔑</span><span>IdP (<%= @network.identity_providers.count %>)</span>
     <% end %>
     <% if @network.identity_providers.enabled.any? %>
-      <%= link_to network_enroll_path(@network), class: "text-sm font-medium text-green-600 hover:text-green-500 flex items-center space-x-1" do %>
+      <%= link_to network_enroll_path(@network), class: "text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1" do %>
         <span>🌐</span><span>Self-Service Enroll</span>
       <% end %>
     <% end %>

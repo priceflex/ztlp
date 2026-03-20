@@ -15,6 +15,7 @@ module ApplicationHelper
       "success"      => "bg-green-100 text-green-800",
       "created"      => "bg-blue-100 text-blue-800",
       "pending"      => "bg-yellow-100 text-yellow-800",
+      "suspended"    => "bg-yellow-100 text-yellow-800",
       "deploying"    => "bg-blue-100 text-blue-800",
       "provisioning" => "bg-blue-100 text-blue-800",
       "running"      => "bg-blue-100 text-blue-800",
@@ -126,5 +127,36 @@ module ApplicationHelper
     return "" if count == 0
     content_tag(:span, count,
       class: "ml-1 inline-flex items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-xs font-bold text-white")
+  end
+
+  # Identity helpers
+
+  def user_role_badge(role)
+    color = case role
+            when "admin" then "bg-red-100 text-red-800"
+            when "tech"  then "bg-amber-100 text-amber-800"
+            else "bg-blue-100 text-blue-800"
+            end
+    content_tag(:span, role, class: "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium #{color}")
+  end
+
+  def user_avatar(user, size: "h-8 w-8", text_size: "text-xs")
+    bg = case user.role
+         when "admin" then "bg-red-500"
+         when "tech"  then "bg-amber-500"
+         else "bg-blue-500"
+         end
+    content_tag(:span, user.initials,
+      class: "inline-flex items-center justify-center rounded-full #{size} #{bg} #{text_size} font-medium text-white",
+      title: "#{user.name} (#{user.role})")
+  end
+
+  def identity_tab_class(current_tab, tab_name)
+    base = "inline-flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium whitespace-nowrap"
+    if current_tab == tab_name
+      "#{base} border-ztlp-500 text-ztlp-600"
+    else
+      "#{base} border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700"
+    end
   end
 end

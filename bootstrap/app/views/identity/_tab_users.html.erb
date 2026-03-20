@@ -1,0 +1,151 @@
+<!-- Filters & Search -->
+<div class="bg-white shadow rounded-lg mb-6 p-4">
+  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <!-- Search -->
+    <div class="flex-1 max-w-md">
+      <%= form_with url: identity_network_path(@network), method: :get, class: "flex items-center gap-2", data: { turbo_frame: "identity_content" } do %>
+        <input type="hidden" name="tab" value="users">
+        <input type="hidden" name="role" value="<%= params[:role] %>">
+        <input type="hidden" name="status" value="<%= params[:status] %>">
+        <div class="relative flex-1">
+          <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+            <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+          </div>
+          <input type="text" name="search" value="<%= params[:search] %>" placeholder="Search users..."
+                 class="block w-full rounded-md border-0 py-1.5 pl-10 pr-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-ztlp-500 sm:text-sm sm:leading-6">
+        </div>
+        <button type="submit" class="rounded-md bg-ztlp-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500">Search</button>
+      <% end %>
+    </div>
+
+    <!-- Add User -->
+    <%= link_to new_network_ztlp_user_path(@network), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 inline-flex items-center gap-1" do %>
+      <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+      Add User
+    <% end %>
+  </div>
+
+  <!-- Filter Pills -->
+  <div class="mt-4 flex flex-wrap gap-3">
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-medium text-gray-500 uppercase">Role:</span>
+      <% [["All", nil], ["Admin", "admin"], ["Tech", "tech"], ["User", "user"]].each do |label, value| %>
+        <% active = params[:role] == value || (value.nil? && params[:role].blank?) %>
+        <%= link_to label,
+            identity_network_path(@network, tab: "users", role: value, status: params[:status], search: params[:search]),
+            class: "rounded-full px-3 py-1 text-xs font-medium #{active ? 'bg-ztlp-100 text-ztlp-700 ring-1 ring-ztlp-300' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}",
+            data: { turbo_frame: "identity_content" } %>
+      <% end %>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-medium text-gray-500 uppercase">Status:</span>
+      <% [["All", nil], ["Active", "active"], ["Suspended", "suspended"], ["Revoked", "revoked"]].each do |label, value| %>
+        <% active = params[:status] == value || (value.nil? && params[:status].blank?) %>
+        <%= link_to label,
+            identity_network_path(@network, tab: "users", role: params[:role], status: value, search: params[:search]),
+            class: "rounded-full px-3 py-1 text-xs font-medium #{active ? 'bg-ztlp-100 text-ztlp-700 ring-1 ring-ztlp-300' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}",
+            data: { turbo_frame: "identity_content" } %>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Users Table -->
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+            <%= link_to identity_network_path(@network, tab: "users", sort: "name", dir: params[:sort] == "name" && params[:dir] != "desc" ? "desc" : "asc", role: params[:role], status: params[:status], search: params[:search]),
+                class: "inline-flex items-center gap-1 hover:text-gray-700", data: { turbo_frame: "identity_content" } do %>
+              User
+              <% if params[:sort] == "name" || params[:sort].blank? %>
+                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><%= params[:dir] == "desc" ? raw('<path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/>') : raw('<path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/>') %></svg>
+              <% end %>
+            <% end %>
+          </th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+            <%= link_to identity_network_path(@network, tab: "users", sort: "role", dir: params[:sort] == "role" && params[:dir] != "desc" ? "desc" : "asc", role: params[:role], status: params[:status], search: params[:search]),
+                class: "inline-flex items-center gap-1 hover:text-gray-700", data: { turbo_frame: "identity_content" } do %>
+              Role
+              <% if params[:sort] == "role" %>
+                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><%= params[:dir] == "desc" ? raw('<path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/>') : raw('<path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/>') %></svg>
+              <% end %>
+            <% end %>
+          </th>
+          <th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Devices</th>
+          <th class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Groups</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+            <%= link_to identity_network_path(@network, tab: "users", sort: "status", dir: params[:sort] == "status" && params[:dir] != "desc" ? "desc" : "asc", role: params[:role], status: params[:status], search: params[:search]),
+                class: "inline-flex items-center gap-1 hover:text-gray-700", data: { turbo_frame: "identity_content" } do %>
+              Status
+              <% if params[:sort] == "status" %>
+                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><%= params[:dir] == "desc" ? raw('<path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/>') : raw('<path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/>') %></svg>
+              <% end %>
+            <% end %>
+          </th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Login</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+            <%= link_to identity_network_path(@network, tab: "users", sort: "created_at", dir: params[:sort] == "created_at" && params[:dir] != "desc" ? "desc" : "asc", role: params[:role], status: params[:status], search: params[:search]),
+                class: "inline-flex items-center gap-1 hover:text-gray-700", data: { turbo_frame: "identity_content" } do %>
+              Created
+              <% if params[:sort] == "created_at" %>
+                <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><%= params[:dir] == "desc" ? raw('<path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"/>') : raw('<path d="M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"/>') %></svg>
+              <% end %>
+            <% end %>
+          </th>
+          <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @users.each do |user| %>
+          <tr class="hover:bg-gray-50">
+            <td class="px-6 py-4 whitespace-nowrap">
+              <div class="flex items-center gap-3">
+                <%= user_avatar(user) %>
+                <%= link_to user.name, network_ztlp_user_path(@network, user), class: "text-sm font-medium text-gray-900 hover:text-ztlp-600" %>
+              </div>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= user.email || "—" %></td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= user_role_badge(user.role) %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500"><%= user.ztlp_devices.size %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500"><%= user.ztlp_groups.size %></td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(user.status) %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= user.last_login_at ? time_ago_short(user.last_login_at) : "Never" %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= user.created_at.strftime("%b %d, %Y") %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+              <div class="flex items-center justify-end gap-2">
+                <%= link_to "View", network_ztlp_user_path(@network, user), class: "text-ztlp-600 hover:text-ztlp-500 font-medium" %>
+                <% if user.active? %>
+                  <%= button_to "Suspend", suspend_network_ztlp_user_path(@network, user), method: :post,
+                      class: "text-yellow-600 hover:text-yellow-500 font-medium text-sm",
+                      data: { turbo_confirm: "Suspend user '#{user.name}'?" } %>
+                <% end %>
+                <% if user.suspended? %>
+                  <%= button_to "Reactivate", reactivate_network_ztlp_user_path(@network, user), method: :post,
+                      class: "text-green-600 hover:text-green-500 font-medium text-sm" %>
+                <% end %>
+                <% if !user.revoked? %>
+                  <%= button_to "Revoke", network_ztlp_user_path(@network, user), method: :delete,
+                      class: "text-red-600 hover:text-red-500 font-medium text-sm",
+                      data: { turbo_confirm: "Revoke user '#{user.name}'? This cannot be undone." } %>
+                <% end %>
+              </div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <% if @users.empty? %>
+      <div class="px-6 py-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" /></svg>
+        <p class="mt-2 text-sm text-gray-500">No users match your filters.</p>
+        <p class="mt-1 text-sm text-gray-400">Try adjusting the filters or
+          <%= link_to "add a user", new_network_ztlp_user_path(@network), class: "text-ztlp-600 hover:text-ztlp-500" %>.
+        </p>
+      </div>
+    <% end %>
+  </div>
+</div>

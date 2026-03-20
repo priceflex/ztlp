@@ -1,0 +1,57 @@
+<!-- Header -->
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <p class="text-sm text-gray-500"><%= @groups.count %> group<%= @groups.count == 1 ? "" : "s" %> configured</p>
+  </div>
+  <%= link_to new_network_ztlp_group_path(@network), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 inline-flex items-center gap-1" do %>
+    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+    Create Group
+  <% end %>
+</div>
+
+<!-- Groups Grid -->
+<% if @groups.any? %>
+  <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+    <% @groups.each do |group| %>
+      <div class="bg-white shadow rounded-lg overflow-hidden hover:shadow-md transition-shadow">
+        <div class="p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-base font-semibold text-gray-900">
+              <%= link_to group.name, network_ztlp_group_path(@network, group), class: "hover:text-ztlp-600" %>
+            </h3>
+            <span class="inline-flex items-center rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-medium text-purple-800">
+              <%= group.member_count %> member<%= group.member_count == 1 ? "" : "s" %>
+            </span>
+          </div>
+          <% if group.description.present? %>
+            <p class="text-sm text-gray-500 mb-4"><%= group.description %></p>
+          <% end %>
+          <!-- Member Preview -->
+          <div class="flex items-center gap-1">
+            <% group.ztlp_users.limit(5).each do |member| %>
+              <%= user_avatar(member, size: "h-7 w-7", text_size: "text-[10px]") %>
+            <% end %>
+            <% overflow = group.member_count - 5 %>
+            <% if overflow > 0 %>
+              <span class="inline-flex items-center justify-center h-7 w-7 rounded-full bg-gray-200 text-[10px] font-medium text-gray-600">+<%= overflow %></span>
+            <% end %>
+            <% if group.member_count == 0 %>
+              <span class="text-xs text-gray-400">No members yet</span>
+            <% end %>
+          </div>
+        </div>
+        <div class="border-t border-gray-200 bg-gray-50 px-5 py-3">
+          <%= link_to "Manage Members →", network_ztlp_group_path(@network, group), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+        </div>
+      </div>
+    <% end %>
+  </div>
+<% else %>
+  <div class="bg-white shadow rounded-lg px-6 py-12 text-center">
+    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" /></svg>
+    <p class="mt-2 text-sm text-gray-500">No groups yet.</p>
+    <p class="mt-1 text-sm text-gray-400">
+      <%= link_to "Create one", new_network_ztlp_group_path(@network), class: "text-ztlp-600 hover:text-ztlp-500" %> to organize users.
+    </p>
+  </div>
+<% end %>

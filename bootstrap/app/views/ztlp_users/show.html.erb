@@ -1,92 +1,263 @@
 <div class="mb-6">
   <nav class="text-sm text-gray-500 mb-2">
     <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
-    <%= link_to "Users", network_ztlp_users_path(@network), class: "hover:text-gray-700" %> /
+    <%= link_to "Identity & Access", identity_network_path(@network, tab: "users"), class: "hover:text-gray-700" %> /
     <span class="text-gray-700"><%= @user.name %></span>
   </nav>
-  <div class="sm:flex sm:items-center sm:justify-between">
-    <div>
-      <h1 class="text-2xl font-bold text-gray-900"><%= @user.name %></h1>
-      <p class="mt-1 text-sm text-gray-500"><%= @user.email || "No email" %></p>
+</div>
+
+<!-- User Header -->
+<div class="bg-white shadow rounded-lg mb-6">
+  <div class="px-6 py-5">
+    <div class="sm:flex sm:items-center sm:justify-between">
+      <div class="flex items-center gap-4">
+        <%= user_avatar(@user, size: "h-14 w-14", text_size: "text-lg") %>
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900"><%= @user.name %></h1>
+          <p class="text-sm text-gray-500"><%= @user.email || "No email" %></p>
+          <div class="mt-2 flex items-center gap-2">
+            <%= user_role_badge(@user.role) %>
+            <%= status_badge(@user.status) %>
+          </div>
+        </div>
+      </div>
+      <div class="mt-4 sm:mt-0 flex flex-wrap gap-2">
+        <% if @user.active? %>
+          <%= button_to "Suspend", suspend_network_ztlp_user_path(@network, @user), method: :post,
+              class: "rounded-md bg-yellow-500 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-yellow-400",
+              data: { turbo_confirm: "Suspend user '#{@user.name}'?" } %>
+        <% end %>
+        <% if @user.suspended? %>
+          <%= button_to "Reactivate", reactivate_network_ztlp_user_path(@network, @user), method: :post,
+              class: "rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
+        <% end %>
+        <% if !@user.revoked? %>
+          <%= button_to "Revoke User", network_ztlp_user_path(@network, @user), method: :delete,
+              class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500",
+              data: { turbo_confirm: "Revoke user '#{@user.name}'? This cannot be undone." } %>
+          <% if @user.ztlp_devices.enrolled.any? %>
+            <%= button_to "Revoke User & All Devices", cascade_revoke_network_ztlp_user_path(@network, @user), method: :post,
+                class: "rounded-md bg-red-800 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700",
+                data: { turbo_confirm: "This will revoke '#{@user.name}' AND all #{@user.ztlp_devices.enrolled.count} enrolled device(s). Are you sure?" } %>
+          <% end %>
+        <% end %>
+      </div>
     </div>
-    <div class="mt-4 sm:mt-0 flex space-x-3">
-      <% if @user.active? %>
-        <%= button_to "Revoke User", network_ztlp_user_path(@network, @user), method: :delete,
-            class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500",
-            data: { turbo_confirm: "Revoke user '#{@user.name}'? This cannot be undone." } %>
-      <% end %>
-    </div>
-  </div>
-  <div class="mt-2 flex space-x-3">
-    <% role_color = case @user.role
-       when "admin" then "bg-red-100 text-red-800"
-       when "tech" then "bg-yellow-100 text-yellow-800"
-       else "bg-gray-100 text-gray-800"
-       end %>
-    <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium <%= role_color %>"><%= @user.role %></span>
-    <%= status_badge(@user.status) %>
   </div>
 </div>
 
-<% if @user.revoked? %>
-  <div class="rounded-md bg-red-50 p-4 mb-6">
-    <p class="text-sm text-red-800">
-      <strong>Revoked</strong> <%= time_ago_short(@user.revoked_at) %>
-      <% if @user.revocation_reason.present? %>
-        — <%= @user.revocation_reason %>
-      <% end %>
-    </p>
+<!-- Status Banners -->
+<% if @user.suspended? %>
+  <div class="rounded-md bg-yellow-50 border border-yellow-200 p-4 mb-6">
+    <div class="flex items-center">
+      <svg class="h-5 w-5 text-yellow-400 mr-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+      <p class="text-sm font-medium text-yellow-800">
+        This user is <strong>suspended</strong><%= @user.suspended_at ? " since #{time_ago_short(@user.suspended_at)}" : "" %>. They cannot access network resources but can be reactivated.
+      </p>
+    </div>
   </div>
 <% end %>
 
-<!-- Linked Devices -->
-<div class="bg-white shadow rounded-lg mb-8">
-  <div class="px-4 py-5 sm:px-6">
-    <h3 class="text-lg font-medium text-gray-900">Devices (<%= @devices.count %>)</h3>
+<% if @user.revoked? %>
+  <div class="rounded-md bg-red-50 border border-red-200 p-4 mb-6">
+    <div class="flex items-center">
+      <svg class="h-5 w-5 text-red-400 mr-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+      <p class="text-sm font-medium text-red-800">
+        <strong>Revoked</strong> <%= time_ago_short(@user.revoked_at) %>
+        <% if @user.revocation_reason.present? %>
+          — <%= @user.revocation_reason %>
+        <% end %>
+      </p>
+    </div>
+  </div>
+<% end %>
+
+<!-- Info Cards Row -->
+<div class="grid grid-cols-1 gap-6 lg:grid-cols-3 mb-6">
+  <!-- Contact Info -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-4 border-b border-gray-200">
+      <h3 class="text-sm font-semibold text-gray-900">Contact Info</h3>
+    </div>
+    <dl class="divide-y divide-gray-100">
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Name</dt>
+        <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0"><%= @user.name %></dd>
+      </div>
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Email</dt>
+        <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0"><%= @user.email || "—" %></dd>
+      </div>
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Role</dt>
+        <dd class="mt-1 sm:col-span-2 sm:mt-0">
+          <%= user_role_badge(@user.role) %>
+          <% if !@user.revoked? %>
+            <div class="mt-2">
+              <%= form_with url: update_role_network_ztlp_user_path(@network, @user), method: :patch, class: "flex items-center gap-2" do %>
+                <select name="role" class="block rounded-md border-gray-300 shadow-sm text-sm px-2 py-1 border">
+                  <% %w[user tech admin].each do |r| %>
+                    <option value="<%= r %>" <%= "selected" if r == @user.role %>><%= r.capitalize %></option>
+                  <% end %>
+                </select>
+                <button type="submit" class="text-xs text-ztlp-600 hover:text-ztlp-500 font-medium">Update</button>
+              <% end %>
+            </div>
+          <% end %>
+        </dd>
+      </div>
+    </dl>
+  </div>
+
+  <!-- Security -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-4 border-b border-gray-200">
+      <h3 class="text-sm font-semibold text-gray-900">Security</h3>
+    </div>
+    <dl class="divide-y divide-gray-100">
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Public Key</dt>
+        <dd class="mt-1 text-xs text-gray-900 font-mono sm:col-span-2 sm:mt-0 break-all"><%= @user.pubkey.present? ? @user.pubkey.truncate(60) : "Not set" %></dd>
+      </div>
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Created</dt>
+        <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0"><%= @user.created_at.strftime("%b %d, %Y %H:%M") %></dd>
+      </div>
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">Last Login</dt>
+        <dd class="mt-1 text-sm text-gray-900 sm:col-span-2 sm:mt-0"><%= @user.last_login_at ? time_ago_short(@user.last_login_at) : "Never" %></dd>
+      </div>
+      <% if @user.external_id.present? %>
+      <div class="px-4 py-3 sm:grid sm:grid-cols-3 sm:gap-2">
+        <dt class="text-sm font-medium text-gray-500">External ID</dt>
+        <dd class="mt-1 text-xs text-gray-900 font-mono sm:col-span-2 sm:mt-0"><%= @user.external_id %></dd>
+      </div>
+      <% end %>
+    </dl>
+  </div>
+
+  <!-- Access / Groups -->
+  <div class="bg-white shadow rounded-lg">
+    <div class="px-4 py-4 border-b border-gray-200">
+      <h3 class="text-sm font-semibold text-gray-900">Access Groups</h3>
+    </div>
+    <% if @groups.any? %>
+      <ul class="divide-y divide-gray-100">
+        <% @groups.each do |group| %>
+          <li class="px-4 py-3 flex items-center justify-between">
+            <div>
+              <%= link_to group.name, network_ztlp_group_path(@network, group), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+              <% if group.description.present? %>
+                <p class="text-xs text-gray-400"><%= group.description.truncate(40) %></p>
+              <% end %>
+            </div>
+            <span class="text-xs text-gray-500"><%= group.member_count %> members</span>
+          </li>
+        <% end %>
+      </ul>
+    <% else %>
+      <div class="px-4 py-6 text-center text-sm text-gray-500">Not a member of any groups.</div>
+    <% end %>
+  </div>
+</div>
+
+<!-- Devices -->
+<div class="bg-white shadow rounded-lg mb-6">
+  <div class="px-4 py-4 sm:px-6 border-b border-gray-200 flex items-center justify-between">
+    <h3 class="text-base font-semibold text-gray-900">Devices (<%= @devices.count %>)</h3>
   </div>
   <% if @devices.any? %>
-    <table class="min-w-full divide-y divide-gray-200">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machine</th>
-          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-        </tr>
-      </thead>
-      <tbody class="bg-white divide-y divide-gray-200">
-        <% @devices.each do |device| %>
+    <div class="overflow-x-auto">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
           <tr>
-            <td class="px-6 py-4 whitespace-nowrap">
-              <%= link_to device.name, network_ztlp_device_path(@network, device), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
-            </td>
-            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= device.machine&.hostname || "—" %></td>
-            <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(device.status) %></td>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machine</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Node ID</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Enrolled</th>
+            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
           </tr>
-        <% end %>
-      </tbody>
-    </table>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+          <% @devices.each do |device| %>
+            <tr class="hover:bg-gray-50">
+              <td class="px-6 py-3 whitespace-nowrap">
+                <%= link_to device.name, network_ztlp_device_path(@network, device), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
+              </td>
+              <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500">
+                <% if device.machine %>
+                  <%= link_to device.machine.hostname, network_machine_path(@network, device.machine), class: "font-mono text-xs hover:text-ztlp-600" %>
+                <% else %>
+                  <span class="text-gray-400">—</span>
+                <% end %>
+              </td>
+              <td class="px-6 py-3 whitespace-nowrap text-xs font-mono text-gray-500"><%= device.node_id.present? ? device.node_id.truncate(16) : "—" %></td>
+              <td class="px-6 py-3 whitespace-nowrap text-sm text-gray-500"><%= device.enrolled_at ? device.enrolled_at.strftime("%b %d, %Y") : "—" %></td>
+              <td class="px-6 py-3 whitespace-nowrap"><%= status_badge(device.status) %></td>
+              <td class="px-6 py-3 whitespace-nowrap text-right text-sm">
+                <% if device.enrolled? %>
+                  <%= button_to "Revoke", network_ztlp_device_path(@network, device), method: :delete,
+                      class: "text-red-600 hover:text-red-500 font-medium text-sm",
+                      data: { turbo_confirm: "Revoke device '#{device.name}'?" } %>
+                <% end %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
   <% else %>
-    <div class="px-6 py-4 text-sm text-gray-500">No devices linked to this user.</div>
+    <div class="px-6 py-6 text-center text-sm text-gray-500">No devices linked to this user.</div>
   <% end %>
 </div>
 
-<!-- Group Memberships -->
+<!-- Activity Timeline -->
 <div class="bg-white shadow rounded-lg">
-  <div class="px-4 py-5 sm:px-6">
-    <h3 class="text-lg font-medium text-gray-900">Groups (<%= @groups.count %>)</h3>
+  <div class="px-4 py-4 sm:px-6 border-b border-gray-200">
+    <h3 class="text-base font-semibold text-gray-900">Activity Timeline</h3>
   </div>
-  <% if @groups.any? %>
-    <ul class="divide-y divide-gray-200">
-      <% @groups.each do |group| %>
-        <li class="px-6 py-4">
-          <%= link_to group.name, network_ztlp_group_path(@network, group), class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-500" %>
-          <% if group.description.present? %>
-            <span class="text-sm text-gray-500 ml-2"><%= group.description %></span>
-          <% end %>
-        </li>
-      <% end %>
-    </ul>
+  <% if @activity.any? %>
+    <div class="flow-root px-6 py-4">
+      <ul class="-mb-8">
+        <% @activity.each_with_index do |log, idx| %>
+          <li>
+            <div class="relative pb-8">
+              <% unless idx == @activity.size - 1 %>
+                <span class="absolute left-4 top-4 -ml-px h-full w-0.5 bg-gray-200" aria-hidden="true"></span>
+              <% end %>
+              <div class="relative flex space-x-3">
+                <div>
+                  <% dot_color = case log.action
+                     when /create/ then "bg-green-500"
+                     when /revoke/ then "bg-red-500"
+                     when /suspend/ then "bg-yellow-500"
+                     when /reactivate/ then "bg-blue-500"
+                     else "bg-gray-400"
+                     end %>
+                  <span class="flex h-8 w-8 items-center justify-center rounded-full ring-8 ring-white <%= dot_color %>">
+                    <svg class="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                  </span>
+                </div>
+                <div class="flex min-w-0 flex-1 justify-between space-x-4 pt-1.5">
+                  <div>
+                    <p class="text-sm text-gray-900"><%= log.action.humanize %></p>
+                    <% details = log.parsed_details %>
+                    <% if details.is_a?(Hash) %>
+                      <p class="text-xs text-gray-500"><%= details.except("network").map { |k,v| "#{k}: #{v}" }.join(", ") %></p>
+                    <% end %>
+                  </div>
+                  <div class="whitespace-nowrap text-right text-xs text-gray-500">
+                    <%= time_ago_short(log.created_at) %>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </li>
+        <% end %>
+      </ul>
+    </div>
   <% else %>
-    <div class="px-6 py-4 text-sm text-gray-500">Not a member of any groups.</div>
+    <div class="px-6 py-6 text-center text-sm text-gray-500">No activity recorded for this user.</div>
   <% end %>
 </div>

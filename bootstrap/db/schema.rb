@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_18_030000) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_20_045000) do
   create_table "alerts", force: :cascade do |t|
     t.integer "network_id", null: false
     t.integer "machine_id", null: false
@@ -209,6 +209,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_18_030000) do
     t.string "external_id"
     t.string "idp_issuer"
     t.datetime "last_login_at"
+    t.datetime "suspended_at"
     t.index ["network_id", "external_id", "idp_issuer"], name: "index_ztlp_users_on_network_external_idp", unique: true, where: "external_id IS NOT NULL"
     t.index ["network_id", "name"], name: "index_ztlp_users_on_network_id_and_name", unique: true
     t.index ["network_id"], name: "index_ztlp_users_on_network_id"

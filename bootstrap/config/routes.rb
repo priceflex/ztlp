@@ -31,7 +31,17 @@ Rails.application.routes.draw do
       end
     end
 
-    resources :ztlp_users, path: "users"
+    # Unified identity management
+    get :identity, on: :member, to: "identity#index"
+
+    resources :ztlp_users, path: "users" do
+      member do
+        post :suspend
+        post :reactivate
+        post :cascade_revoke
+        patch :update_role
+      end
+    end
     resources :ztlp_devices, path: "devices", only: [:index, :show, :destroy]
     resources :ztlp_groups, path: "groups" do
       member do

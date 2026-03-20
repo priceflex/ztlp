@@ -26,6 +26,14 @@ revoked_user:
   revoked_at: <%= Time.current %>
   revocation_reason: "Left the company"
 
+suspended_user:
+  name: frank
+  network: office
+  email: frank@example.com
+  role: user
+  status: suspended
+  suspended_at: <%= Time.current %>
+
 other_network_user:
   name: eve
   network: production

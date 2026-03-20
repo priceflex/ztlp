@@ -1,0 +1,194 @@
+<!-- Summary Cards -->
+<div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5 mb-8">
+  <!-- Active Users -->
+  <div class="overflow-hidden rounded-lg bg-white shadow">
+    <div class="p-5">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500">
+            <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>
+          </div>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500">Active Users</p>
+          <p class="text-2xl font-semibold text-gray-900"><%= @active_users_count %></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Suspended Users -->
+  <div class="overflow-hidden rounded-lg bg-white shadow">
+    <div class="p-5">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-yellow-500">
+            <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+          </div>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500">Suspended</p>
+          <p class="text-2xl font-semibold text-gray-900"><%= @suspended_users_count %></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enrolled Devices -->
+  <div class="overflow-hidden rounded-lg bg-white shadow">
+    <div class="p-5">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-green-500">
+            <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25A2.25 2.25 0 015.25 3h13.5A2.25 2.25 0 0121 5.25z" /></svg>
+          </div>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500">Enrolled Devices</p>
+          <p class="text-2xl font-semibold text-gray-900"><%= @enrolled_devices_count %></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Groups -->
+  <div class="overflow-hidden rounded-lg bg-white shadow">
+    <div class="p-5">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-500">
+            <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" /></svg>
+          </div>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500">Groups</p>
+          <p class="text-2xl font-semibold text-gray-900"><%= @groups_count %></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Revoked -->
+  <div class="overflow-hidden rounded-lg bg-white shadow">
+    <div class="p-5">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-red-500">
+            <svg class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          </div>
+        </div>
+        <div class="ml-4">
+          <p class="text-sm font-medium text-gray-500">Revoked</p>
+          <p class="text-2xl font-semibold text-gray-900"><%= @revoked_count %></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- User → Device Associations -->
+<div class="bg-white shadow rounded-lg mb-8">
+  <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
+    <h3 class="text-base font-semibold text-gray-900">User → Device Associations</h3>
+    <p class="mt-1 text-sm text-gray-500">Overview of which users own which devices</p>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Devices</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Groups</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @users.not_revoked.each do |user| %>
+          <tr>
+            <td class="px-6 py-3 whitespace-nowrap">
+              <div class="flex items-center gap-3">
+                <%= user_avatar(user) %>
+                <div>
+                  <%= link_to user.name, network_ztlp_user_path(@network, user), class: "text-sm font-medium text-gray-900 hover:text-ztlp-600" %>
+                  <% if user.email.present? %>
+                    <p class="text-xs text-gray-500"><%= user.email %></p>
+                  <% end %>
+                </div>
+              </div>
+            </td>
+            <td class="px-6 py-3 whitespace-nowrap"><%= user_role_badge(user.role) %></td>
+            <td class="px-6 py-3 whitespace-nowrap"><%= status_badge(user.status) %></td>
+            <td class="px-6 py-3">
+              <% enrolled = user.ztlp_devices.select(&:enrolled?) %>
+              <% if enrolled.any? %>
+                <div class="flex flex-wrap gap-1">
+                  <% enrolled.each do |d| %>
+                    <%= link_to d.name, network_ztlp_device_path(@network, d), class: "inline-flex items-center rounded bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700 hover:bg-gray-200" %>
+                  <% end %>
+                </div>
+              <% else %>
+                <span class="text-xs text-gray-400">No devices</span>
+              <% end %>
+            </td>
+            <td class="px-6 py-3">
+              <% if user.ztlp_groups.any? %>
+                <div class="flex flex-wrap gap-1">
+                  <% user.ztlp_groups.each do |g| %>
+                    <span class="inline-flex items-center rounded bg-purple-50 px-2 py-0.5 text-xs font-medium text-purple-700"><%= g.name %></span>
+                  <% end %>
+                </div>
+              <% else %>
+                <span class="text-xs text-gray-400">None</span>
+              <% end %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <% if @users.not_revoked.empty? %>
+      <div class="px-6 py-8 text-center text-gray-500">No active or suspended users.</div>
+    <% end %>
+  </div>
+</div>
+
+<!-- Recent Identity Activity -->
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6 border-b border-gray-200">
+    <h3 class="text-base font-semibold text-gray-900">Recent Identity Activity</h3>
+  </div>
+  <% if @recent_activity.any? %>
+    <ul class="divide-y divide-gray-200">
+      <% @recent_activity.each do |log| %>
+        <li class="px-6 py-3 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <% icon = case log.action
+               when /create/ then "🟢"
+               when /revoke/ then "🔴"
+               when /suspend/ then "🟡"
+               when /reactivate/ then "🔵"
+               when /add_member/ then "➕"
+               when /remove_member/ then "➖"
+               when /update_role/ then "🔄"
+               else "📋"
+               end %>
+            <span class="text-lg"><%= icon %></span>
+            <div>
+              <p class="text-sm font-medium text-gray-900"><%= log.action.humanize %></p>
+              <% details = log.parsed_details %>
+              <% if details.is_a?(Hash) && details["name"] %>
+                <p class="text-xs text-gray-500"><%= details["name"] %></p>
+              <% end %>
+            </div>
+          </div>
+          <div class="text-right">
+            <%= status_badge(log.status) %>
+            <p class="text-xs text-gray-400 mt-1"><%= time_ago_short(log.created_at) %></p>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  <% else %>
+    <div class="px-6 py-8 text-center text-gray-500">No identity activity yet.</div>
+  <% end %>
+</div>

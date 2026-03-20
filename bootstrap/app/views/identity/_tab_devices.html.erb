@@ -1,0 +1,114 @@
+<!-- Filters & Search -->
+<div class="bg-white shadow rounded-lg mb-6 p-4">
+  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <!-- Search -->
+    <div class="flex-1 max-w-md">
+      <%= form_with url: identity_network_path(@network), method: :get, class: "flex items-center gap-2", data: { turbo_frame: "identity_content" } do %>
+        <input type="hidden" name="tab" value="devices">
+        <input type="hidden" name="device_status" value="<%= params[:device_status] %>">
+        <input type="hidden" name="owner_id" value="<%= params[:owner_id] %>">
+        <div class="relative flex-1">
+          <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+            <svg class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>
+          </div>
+          <input type="text" name="device_search" value="<%= params[:device_search] %>" placeholder="Search devices..."
+                 class="block w-full rounded-md border-0 py-1.5 pl-10 pr-3 text-gray-900 ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-ztlp-500 sm:text-sm sm:leading-6">
+        </div>
+        <button type="submit" class="rounded-md bg-ztlp-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500">Search</button>
+      <% end %>
+    </div>
+  </div>
+
+  <!-- Filter Pills -->
+  <div class="mt-4 flex flex-wrap gap-3">
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-medium text-gray-500 uppercase">Status:</span>
+      <% [["All", nil], ["Enrolled", "enrolled"], ["Revoked", "revoked"]].each do |label, value| %>
+        <% active = params[:device_status] == value || (value.nil? && params[:device_status].blank?) %>
+        <%= link_to label,
+            identity_network_path(@network, tab: "devices", device_status: value, owner_id: params[:owner_id], device_search: params[:device_search]),
+            class: "rounded-full px-3 py-1 text-xs font-medium #{active ? 'bg-ztlp-100 text-ztlp-700 ring-1 ring-ztlp-300' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}",
+            data: { turbo_frame: "identity_content" } %>
+      <% end %>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-medium text-gray-500 uppercase">Owner:</span>
+      <% active_all = params[:owner_id].blank? %>
+      <%= link_to "All",
+          identity_network_path(@network, tab: "devices", device_status: params[:device_status], device_search: params[:device_search]),
+          class: "rounded-full px-3 py-1 text-xs font-medium #{active_all ? 'bg-ztlp-100 text-ztlp-700 ring-1 ring-ztlp-300' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}",
+          data: { turbo_frame: "identity_content" } %>
+      <% @network.ztlp_users.active.order(:name).each do |owner| %>
+        <% active_owner = params[:owner_id] == owner.id.to_s %>
+        <%= link_to owner.name,
+            identity_network_path(@network, tab: "devices", device_status: params[:device_status], owner_id: owner.id, device_search: params[:device_search]),
+            class: "rounded-full px-3 py-1 text-xs font-medium #{active_owner ? 'bg-ztlp-100 text-ztlp-700 ring-1 ring-ztlp-300' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}",
+            data: { turbo_frame: "identity_content" } %>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Devices Table -->
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Device Name</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Owner</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Machine</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Node ID</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Enrolled</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @devices.each do |device| %>
+          <tr class="hover:bg-gray-50">
+            <td class="px-6 py-4 whitespace-nowrap">
+              <%= link_to device.name, network_ztlp_device_path(@network, device), class: "text-sm font-medium text-gray-900 hover:text-ztlp-600" %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm">
+              <% if device.ztlp_user %>
+                <div class="flex items-center gap-2">
+                  <%= user_avatar(device.ztlp_user, size: "h-6 w-6", text_size: "text-[10px]") %>
+                  <%= link_to device.ztlp_user.name, network_ztlp_user_path(@network, device.ztlp_user), class: "text-gray-700 hover:text-ztlp-600" %>
+                </div>
+              <% else %>
+                <span class="text-gray-400">Unassigned</span>
+              <% end %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm">
+              <% if device.machine %>
+                <%= link_to device.machine.hostname, network_machine_path(@network, device.machine), class: "text-gray-700 hover:text-ztlp-600 font-mono text-xs" %>
+              <% else %>
+                <span class="text-gray-400">—</span>
+              <% end %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-xs font-mono text-gray-500"><%= device.node_id.present? ? device.node_id.truncate(16) : "—" %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= device.enrolled_at ? time_ago_short(device.enrolled_at) : "—" %></td>
+            <td class="px-6 py-4 whitespace-nowrap"><%= status_badge(device.status) %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+              <div class="flex items-center justify-end gap-2">
+                <%= link_to "View", network_ztlp_device_path(@network, device), class: "text-ztlp-600 hover:text-ztlp-500 font-medium" %>
+                <% if device.enrolled? %>
+                  <%= button_to "Revoke", network_ztlp_device_path(@network, device), method: :delete,
+                      class: "text-red-600 hover:text-red-500 font-medium text-sm",
+                      data: { turbo_confirm: "Revoke device '#{device.name}'?" } %>
+                <% end %>
+              </div>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <% if @devices.empty? %>
+      <div class="px-6 py-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25A2.25 2.25 0 015.25 3h13.5A2.25 2.25 0 0121 5.25z" /></svg>
+        <p class="mt-2 text-sm text-gray-500">No devices match your filters.</p>
+      </div>
+    <% end %>
+  </div>
+</div>

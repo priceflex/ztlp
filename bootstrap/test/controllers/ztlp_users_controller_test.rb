@@ -49,12 +49,12 @@ class ZtlpUsersControllerTest < ActionDispatch::IntegrationTest
   test "create adds new user" do
     assert_difference "ZtlpUser.count", 1 do
       post network_ztlp_users_path(@network), params: {
-        ztlp_user: { name: "frank", role: "tech", email: "frank@example.com" }
+        ztlp_user: { name: "grace", role: "tech", email: "grace@example.com" }
       }
     end
     assert_redirected_to network_ztlp_user_path(@network, ZtlpUser.last)
     follow_redirect!
-    assert_match "frank", response.body
+    assert_match "grace", response.body
   end
 
   test "create with invalid data re-renders form" do

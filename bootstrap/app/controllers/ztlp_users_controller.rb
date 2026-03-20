@@ -2,7 +2,7 @@
 
 class ZtlpUsersController < ApplicationController
   before_action :set_network
-  before_action :set_user, only: [:show, :destroy]
+  before_action :set_user, only: [:show, :destroy, :suspend, :reactivate, :cascade_revoke, :update_role]
 
   def index
     @users = @network.ztlp_users.includes(:ztlp_devices, :ztlp_groups).order(:name)
@@ -11,6 +11,7 @@ class ZtlpUsersController < ApplicationController
   def show
     @devices = @user.ztlp_devices.includes(:machine)
     @groups = @user.ztlp_groups
+    @activity = AuditLog.for_target("ZtlpUser", @user.id).recent.limit(20)
   end
 
   def new
@@ -42,6 +43,56 @@ class ZtlpUsersController < ApplicationController
       details: { name: @user.name, reason: reason, network: @network.name }
     )
     redirect_to network_ztlp_users_path(@network), notice: "User '#{@user.name}' revoked."
+  end
+
+  # POST /networks/:network_id/users/:id/suspend
+  def suspend
+    @user.suspend!
+    AuditLog.record(
+      action: "ztlp_user_suspend",
+      target: @user,
+      details: { name: @user.name, network: @network.name }
+    )
+    redirect_to network_ztlp_user_path(@network, @user), notice: "User '#{@user.name}' suspended."
+  end
+
+  # POST /networks/:network_id/users/:id/reactivate
+  def reactivate
+    @user.reactivate!
+    AuditLog.record(
+      action: "ztlp_user_reactivate",
+      target: @user,
+      details: { name: @user.name, network: @network.name }
+    )
+    redirect_to network_ztlp_user_path(@network, @user), notice: "User '#{@user.name}' reactivated."
+  end
+
+  # POST /networks/:network_id/users/:id/cascade_revoke
+  def cascade_revoke
+    reason = params[:reason] || "Cascade revoked via Bootstrap UI"
+    device_count = @user.ztlp_devices.enrolled.count
+    @user.cascade_revoke!(reason: reason)
+    AuditLog.record(
+      action: "ztlp_user_cascade_revoke",
+      target: @user,
+      details: { name: @user.name, reason: reason, devices_revoked: device_count, network: @network.name }
+    )
+    redirect_to network_ztlp_user_path(@network, @user), notice: "User '#{@user.name}' and #{device_count} device(s) revoked."
+  end
+
+  # PATCH /networks/:network_id/users/:id/update_role
+  def update_role
+    new_role = params[:role]
+    if %w[user tech admin].include?(new_role) && @user.update(role: new_role)
+      AuditLog.record(
+        action: "ztlp_user_update_role",
+        target: @user,
+        details: { name: @user.name, role: new_role, network: @network.name }
+      )
+      redirect_to network_ztlp_user_path(@network, @user), notice: "Role updated to '#{new_role}'."
+    else
+      redirect_to network_ztlp_user_path(@network, @user), alert: "Invalid role."
+    end
   end
 
   private

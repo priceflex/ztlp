@@ -5,6 +5,7 @@
 // for available services in the current zone and their reachability.
 
 import Foundation
+import UIKit
 import Combine
 
 /// ViewModel for the Services discovery list.

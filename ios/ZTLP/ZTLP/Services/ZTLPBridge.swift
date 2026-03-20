@@ -460,6 +460,11 @@ final class ZTLPBridge {
         bytesSent = 0
         bytesReceived = 0
     }
+
+    /// Increment bytes received counter (called from C callback context).
+    func addBytesReceived(_ count: UInt64) {
+        bytesReceived += count
+    }
 }
 
 // MARK: - Continuation Box
@@ -504,7 +509,7 @@ private func recvCallback(userData: UnsafeMutableRawPointer?,
     guard let dataPtr = dataPtr, dataLen > 0 else { return }
     // Copy data immediately — the pointer is only valid during this callback.
     let data = Data(bytes: dataPtr, count: dataLen)
-    ZTLPBridge.shared.bytesReceived += UInt64(dataLen)
+    ZTLPBridge.shared.addBytesReceived(UInt64(dataLen))
     ZTLPBridge.shared.eventSubject.send(.dataReceived(data))
 }
 

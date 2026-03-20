@@ -6,6 +6,7 @@
 // and observes shared UserDefaults for real-time state updates.
 
 import Foundation
+import UIKit
 import NetworkExtension
 import Combine
 import SwiftUI

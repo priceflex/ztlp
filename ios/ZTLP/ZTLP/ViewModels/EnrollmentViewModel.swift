@@ -8,6 +8,7 @@
 // Query-param format: ztlp://enroll/?zone=foo&ns=1.2.3.4:23096&token=abcd&expires=...
 
 import Foundation
+import UIKit
 import Combine
 import AVFoundation
 

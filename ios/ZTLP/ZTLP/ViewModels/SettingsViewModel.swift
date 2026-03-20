@@ -4,6 +4,7 @@
 // Manages app settings, identity display, and about information.
 
 import Foundation
+import UIKit
 import Combine
 import NetworkExtension
 

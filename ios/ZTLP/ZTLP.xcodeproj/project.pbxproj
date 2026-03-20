@@ -1,0 +1,282 @@
+// project.pbxproj
+// This is a minimal Xcode project file for the ZTLP iOS app and its Network Extension.
+// It defines two targets: the main application (ZTLP) and the packet tunnel extension (ZTLPTunnel).
+// The file references the source groups but does not list every individual source file.
+// Xcode will resolve the wildcard groups at build time. Adjust paths as needed.
+
+archiveVersion = 1;
+objectVersion = 55;
+objects = {
+
+/* Begin PBXBuildFile */
+    1D6058900D05DD3D006BFB54 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D6058800D05DD3D006BFB54; };
+    1D6058910D05DD3D006BFB54 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D6058820D05DD3D006BFB54; };
+    1D6058920D05DD3D006BFB54 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D6058840D05DD3D006BFB54; };
+    1D6058930D05DD3D006BFB54 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D6058860D05DD3D006BFB54; };
+    1D6058940D05DD3D006BFB54 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D6058880D05DD3D006BFB54; };
+    1D6058950D05DD3D006BFB54 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1D60588A0D05DD3D006BFB54; };
+/* End PBXBuildFile */
+
+/* Begin PBXFileReference */
+    1D6058800D05DD3D006BFB54 /* Foundation.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Foundation.framework; sourceTree = SDKROOT; };
+    1D6058820D05DD3D006BFB54 /* SwiftUI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SwiftUI.framework; sourceTree = SDKROOT; };
+    1D6058840D05DD3D006BFB54 /* Network.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Network.framework; sourceTree = SDKROOT; };
+    1D6058860D05DD3D006BFB54 /* Security.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Security.framework; sourceTree = SDKROOT; };
+    1D6058880D05DD3D006BFB54 /* SystemConfiguration.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SystemConfiguration.framework; sourceTree = SDKROOT; };
+    1D60588A0D05DD3D006BFB54 /* NetworkExtension.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = NetworkExtension.framework; sourceTree = SDKROOT; };
+    7B0A5C0D1C7F8B4700C3F13D /* ZTLP */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = ZTLP; sourceTree = "<group>"; };
+    7B0A5C0D1C7F8B4700C3F13E /* ZTLPTunnel */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = ZTLPTunnel; sourceTree = "<group>"; };
+/* End PBXFileReference */
+
+/* Begin PBXGroup */
+    4B1EFB8D1FDE9D8500E2D3C2 /* ZTLP */ = {
+        isa = PBXGroup;
+        children = (
+            1D6058800D05DD3D006BFB54,
+            1D6058820D05DD3D006BFB54,
+            1D6058840D05DD3D006BFB54,
+            1D6058860D05DD3D006BFB54,
+            1D6058880D05DD3D006BFB54,
+            1D60588A0D05DD3D006BFB54,
+        );
+        path = ZTLP;
+        sourceTree = "<group>";
+    };
+    4B1EFB8E1FDE9D8500E2D3C2 /* ZTLPTunnel */ = {
+        isa = PBXGroup;
+        children = (
+            1D6058800D05DD3D006BFB54,
+            1D6058820D05DD3D006BFB54,
+            1D6058840D05DD3D006BFB54,
+            1D6058860D05DD3D006BFB54,
+            1D6058880D05DD3D006BFB54,
+            1D60588A0D05DD3D006BFB54,
+        );
+        path = ZTLPTunnel;
+        sourceTree = "<group>";
+    };
+    4B1EFB8C1FDE9D8500E2D3C2 /* Project */ = {
+        isa = PBXGroup;
+        children = (
+            4B1EFB8D1FDE9D8500E2D3C2,
+            4B1EFB8E1FDE9D8500E2D3C2,
+        );
+        sourceTree = "<group>";
+    };
+/* End PBXGroup */
+
+/* Begin PBXNativeTarget */
+    C0A1B9701A6E6E7F002B3A01 /* ZTLP */ = {
+        isa = PBXNativeTarget;
+        buildConfigurationList = C0A1B9721A6E6E7F002B3A01 /* Build configuration list for PBXNativeTarget "ZTLP" */;
+        buildPhases = (
+            C0A1B9711A6E6E7F002B3A01 /* Sources */,
+            C0A1B9731A6E6E7F002B3A01 /* Frameworks */,
+        );
+        buildRules = ();
+        dependencies = (
+        );
+        name = ZTLP;
+        productName = "ZTLP";
+        productReference = 7B0A5C0D1C7F8B4700C3F13D /* ZTLP */;
+        productType = "com.apple.product-type.application";
+    };
+    C0A1B9781A6E6E7F002B3A01 /* ZTLPTunnel */ = {
+        isa = PBXNativeTarget;
+        buildConfigurationList = C0A1B97A1A6E6E7F002B3A01 /* Build configuration list for PBXNativeTarget "ZTLPTunnel" */;
+        buildPhases = (
+            C0A1B9791A6E6E7F002B3A01 /* Sources */,
+            C0A1B97B1A6E6E7F002B3A01 /* Frameworks */,
+        );
+        buildRules = ();
+        dependencies = (
+        );
+        name = ZTLPTunnel;
+        productName = "ZTLPTunnel";
+        productReference = 7B0A5C0D1C7F8B4700C3F13E /* ZTLPTunnel */;
+        productType = "com.apple.product-type.app-extension";
+    };
+/* End PBXNativeTarget */
+
+/* Begin PBXProject */
+    4B1EFB8B1FDE9D8500E2D3C2 /* Project object */ = {
+        isa = PBXProject;
+        attributes = {
+            LastUpgradeCheck = 1430;
+        };
+        buildConfigurationList = 4B1EFB8A1FDE9D8500E2D3C2 /* Build configuration list for PBXProject "ZTLP" */;
+        compatibilityVersion = "Xcode 13.0";
+        developmentRegion = en;
+        hasScannedForEncodings = 0;
+        knownRegions = (
+            en,
+        );
+        mainGroup = 4B1EFB8C1FDE9D8500E2D3C2;
+        projectDirPath = "";
+        projectRoot = "";
+        targets = (
+            C0A1B9701A6E6E7F002B3A01,
+            C0A1B9781A6E6E7F002B3A01,
+        );
+    };
+/* End PBXProject */
+
+/* Begin XCBuildConfiguration */
+    4B1EFB8F1FDE9D8500E2D3C2 /* Debug */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+            CODE_SIGN_STYLE = Automatic;
+            INFOPLIST_FILE = ZTLP/Resources/Info.plist;
+            PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app;
+            PRODUCT_NAME = "${TARGET_NAME}";
+            SDKROOT = iphoneos;
+            TARGETED_DEVICE_FAMILY = "1,2";
+            DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+            SWIFT_VERSION = 5.9;
+            IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+            ENABLE_BITCODE = NO;
+            FRAMEWORK_SEARCH_PATHS = "$(inherited)";
+            OTHER_LDFLAGS = "$(inherited) -lztlp_proto";
+        };
+        name = Debug;
+    };
+    4B1EFB901FDE9D8500E2D3C2 /* Release */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+            CODE_SIGN_STYLE = Automatic;
+            INFOPLIST_FILE = ZTLP/Resources/Info.plist;
+            PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app;
+            PRODUCT_NAME = "${TARGET_NAME}";
+            SDKROOT = iphoneos;
+            TARGETED_DEVICE_FAMILY = "1,2";
+            DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+            SWIFT_VERSION = 5.9;
+            IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+            ENABLE_BITCODE = NO;
+            FRAMEWORK_SEARCH_PATHS = "$(inherited)";
+            OTHER_LDFLAGS = "$(inherited) -lztlp_proto";
+        };
+        name = Release;
+    };
+    C0A1B9721A6E6E7F002B3A01 /* Build configuration list for PBXNativeTarget "ZTLP" */ = {
+        isa = XCConfigurationList;
+        buildConfigurations = (
+            C0A1B9741A6E6E7F002B3A01,
+            C0A1B9751A6E6E7F002B3A01,
+        );
+        defaultConfigurationIsVisible = 0;
+        defaultConfigurationName = Release;
+    };
+    C0A1B9741A6E6E7F002B3A01 /* Debug */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            OTHER_SWIFT_FLAGS = "$(inherited) -DDEBUG";
+        };
+        name = Debug;
+    };
+    C0A1B9751A6E6E7F002B3A01 /* Release */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            OTHER_SWIFT_FLAGS = "$(inherited)";
+        };
+        name = Release;
+    };
+    C0A1B97A1A6E6E7F002B3A01 /* Build configuration list for PBXNativeTarget "ZTLPTunnel" */ = {
+        isa = XCConfigurationList;
+        buildConfigurations = (
+            C0A1B97C1A6E6E7F002B3A01,
+            C0A1B97D1A6E6E7F002B3A01,
+        );
+        defaultConfigurationIsVisible = 0;
+        defaultConfigurationName = Release;
+    };
+    C0A1B97C1A6E6E7F002B3A01 /* Debug */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            INFOPLIST_FILE = ZTLPTunnel/Info.plist;
+            PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.tunnel;
+            PRODUCT_NAME = "${TARGET_NAME}";
+            SWIFT_VERSION = 5.9;
+            IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+            CODE_SIGN_STYLE = Automatic;
+            DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+            OTHER_LDFLAGS = "$(inherited) -lztlp_proto";
+        };
+        name = Debug;
+    };
+    C0A1B97D1A6E6E7F002B3A01 /* Release */ = {
+        isa = XCBuildConfiguration;
+        buildSettings = {
+            INFOPLIST_FILE = ZTLPTunnel/Info.plist;
+            PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.tunnel;
+            PRODUCT_NAME = "${TARGET_NAME}";
+            SWIFT_VERSION = 5.9;
+            IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+            CODE_SIGN_STYLE = Automatic;
+            DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+            OTHER_LDFLAGS = "$(inherited) -lztlp_proto";
+        };
+        name = Release;
+    };
+    4B1EFB8A1FDE9D8500E2D3C2 /* Build configuration list for PBXProject "ZTLP" */ = {
+        isa = XCConfigurationList;
+        buildConfigurations = (
+            4B1EFB8F1FDE9D8500E2D3C2,
+            4B1EFB901FDE9D8500E2D3C2,
+        );
+        defaultConfigurationIsVisible = 0;
+        defaultConfigurationName = Release;
+    };
+/* End XCBuildConfiguration */
+
+/* Begin PBXSourcesBuildPhase */
+    C0A1B9711A6E6E7F002B3A01 /* Sources */ = {
+        isa = PBXSourcesBuildPhase;
+        buildActionMask = 2147483647;
+        files = (
+            // Source files will be added automatically by Xcode when the project is opened.
+        );
+        runOnlyForDeploymentPostprocessing = 0;
+    };
+    C0A1B9791A6E6E7F002B3A01 /* Sources */ = {
+        isa = PBXSourcesBuildPhase;
+        buildActionMask = 2147483647;
+        files = (
+        );
+        runOnlyForDeploymentPostprocessing = 0;
+    };
+/* End PBXSourcesBuildPhase */
+
+/* Begin PBXFrameworksBuildPhase */
+    C0A1B9731A6E6E7F002B3A01 /* Frameworks */ = {
+        isa = PBXFrameworksBuildPhase;
+        buildActionMask = 2147483647;
+        files = (
+            1D6058900D05DD3D006BFB54,
+            1D6058910D05DD3D006BFB54,
+            1D6058920D05DD3D006BFB54,
+            1D6058930D05DD3D006BFB54,
+            1D6058940D05DD3D006BFB54,
+            1D6058950D05DD3D006BFB54,
+        );
+        runOnlyForDeploymentPostprocessing = 0;
+    };
+    C0A1B97B1A6E6E7F002B3A01 /* Frameworks */ = {
+        isa = PBXFrameworksBuildPhase;
+        buildActionMask = 2147483647;
+        files = (
+            1D6058900D05DD3D006BFB54,
+            1D6058910D05DD3D006BFB54,
+            1D6058920D05DD3D006BFB54,
+            1D6058930D05DD3D006BFB54,
+            1D6058940D05DD3D006BFB54,
+            1D6058950D05DD3D006BFB54,
+        );
+        runOnlyForDeploymentPostprocessing = 0;
+    };
+/* End PBXFrameworksBuildPhase */
+
+};
+rootObject = 4B1EFB8B1FDE9D8500E2D3C2;

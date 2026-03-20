@@ -31,7 +31,7 @@ bob_desktop:
   node_id: node-003
   status: enrolled
   enrolled_at: <%= 3.days.ago %>
-  last_seen_at: <%= 3.minutes.ago %>
+  last_seen_at: <%= 1.minute.ago %>
   last_source_ip: "10.0.1.60"
   last_relay: "relay-us-east"
   client_version: "1.1.5"

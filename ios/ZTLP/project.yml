@@ -1,0 +1,95 @@
+name: ZTLP
+options:
+  bundleIdPrefix: com.ztlp
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    ENABLE_BITCODE: false
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  ZTLP:
+    type: application
+    platform: iOS
+    sources:
+      - path: ZTLP
+        excludes:
+          - "**/*.plist"
+    resources:
+      - path: ZTLP/Resources/Assets.xcassets
+    settings:
+      base:
+        INFOPLIST_FILE: ZTLP/Resources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app
+        SWIFT_OBJC_BRIDGING_HEADER: ZTLP/ZTLP-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lztlp_proto"
+          - "-lresolv"
+          - "-lz"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - target: ZTLPTunnel
+        embed: true
+    scheme:
+      testTargets:
+        - ZTLPTests
+
+  ZTLPTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ZTLPTunnel
+        excludes:
+          - "**/*.plist"
+    settings:
+      base:
+        INFOPLIST_FILE: ZTLPTunnel/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app.tunnel
+        SWIFT_OBJC_BRIDGING_HEADER: ZTLPTunnel/ZTLPTunnel-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lztlp_proto"
+          - "-lresolv"
+          - "-lz"
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: true
+
+  ZTLPTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ZTLPTests
+    dependencies:
+      - target: ZTLP
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app.tests
+        CODE_SIGN_STYLE: Automatic

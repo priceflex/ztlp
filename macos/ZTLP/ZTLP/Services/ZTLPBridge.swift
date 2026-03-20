@@ -1,0 +1,406 @@
+// ZTLPBridge.swift
+// ZTLP macOS
+//
+// Swift wrapper around the ZTLP C FFI (ztlp.h).
+// Adapted from iOS version — removes iOS-specific bits (UIKit).
+
+import Foundation
+import Combine
+
+// MARK: - Error Types
+
+/// Errors originating from the ZTLP C library.
+enum ZTLPError: LocalizedError {
+    case notInitialized
+    case invalidArgument(String)
+    case identityError(String)
+    case handshakeError(String)
+    case connectionError(String)
+    case timeout(String)
+    case sessionNotFound(String)
+    case encryptionError(String)
+    case natError(String)
+    case alreadyConnected
+    case notConnected
+    case internalError(String)
+    case unknownError(Int32, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notInitialized:
+            return "ZTLP library not initialized"
+        case .invalidArgument(let msg):
+            return "Invalid argument: \(msg)"
+        case .identityError(let msg):
+            return "Identity error: \(msg)"
+        case .handshakeError(let msg):
+            return "Handshake failed: \(msg)"
+        case .connectionError(let msg):
+            return "Connection error: \(msg)"
+        case .timeout(let msg):
+            return "Timeout: \(msg)"
+        case .sessionNotFound(let msg):
+            return "Session not found: \(msg)"
+        case .encryptionError(let msg):
+            return "Encryption error: \(msg)"
+        case .natError(let msg):
+            return "NAT traversal error: \(msg)"
+        case .alreadyConnected:
+            return "Already connected to a peer"
+        case .notConnected:
+            return "Not connected — call connect first"
+        case .internalError(let msg):
+            return "Internal error: \(msg)"
+        case .unknownError(let code, let msg):
+            return "Unknown error (\(code)): \(msg)"
+        }
+    }
+
+    /// Map a C result code to a Swift error (returns nil for ZTLP_OK).
+    static func from(code: Int32) -> ZTLPError? {
+        guard code != 0 else { return nil }
+        let message = lastError() ?? "no details"
+        switch code {
+        case -1:  return .invalidArgument(message)
+        case -2:  return .identityError(message)
+        case -3:  return .handshakeError(message)
+        case -4:  return .connectionError(message)
+        case -5:  return .timeout(message)
+        case -6:  return .sessionNotFound(message)
+        case -7:  return .encryptionError(message)
+        case -8:  return .natError(message)
+        case -9:  return .alreadyConnected
+        case -10: return .notConnected
+        case -99: return .internalError(message)
+        default:  return .unknownError(code, message)
+        }
+    }
+
+    private static func lastError() -> String? {
+        guard let ptr = ztlp_last_error() else { return nil }
+        return String(cString: ptr)
+    }
+}
+
+// MARK: - Handle Wrappers
+
+/// RAII wrapper for ZtlpIdentity*.
+final class ZTLPIdentityHandle {
+    private(set) var pointer: OpaquePointer?
+    private var ownsPointer: Bool
+
+    init(_ pointer: OpaquePointer) {
+        self.pointer = pointer
+        self.ownsPointer = true
+    }
+
+    func transferOwnership() -> OpaquePointer? {
+        ownsPointer = false
+        return pointer
+    }
+
+    var nodeId: String? {
+        guard let ptr = pointer, let cStr = ztlp_identity_node_id(ptr) else { return nil }
+        return String(cString: cStr)
+    }
+
+    var publicKey: String? {
+        guard let ptr = pointer, let cStr = ztlp_identity_public_key(ptr) else { return nil }
+        return String(cString: cStr)
+    }
+
+    func save(to path: String) throws {
+        guard let ptr = pointer else { throw ZTLPError.notInitialized }
+        let result = path.withCString { cPath in
+            ztlp_identity_save(ptr, cPath)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    deinit {
+        if ownsPointer, let ptr = pointer {
+            ztlp_identity_free(ptr)
+        }
+    }
+}
+
+/// RAII wrapper for ZtlpConfig*.
+final class ZTLPConfigHandle {
+    let pointer: OpaquePointer
+
+    init() {
+        self.pointer = ztlp_config_new()
+    }
+
+    func setRelay(_ address: String) throws {
+        let result = address.withCString { cAddr in
+            ztlp_config_set_relay(pointer, cAddr)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    func setStunServer(_ address: String) throws {
+        let result = address.withCString { cAddr in
+            ztlp_config_set_stun_server(pointer, cAddr)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    func setNatAssist(_ enabled: Bool) throws {
+        let result = ztlp_config_set_nat_assist(pointer, enabled)
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    func setTimeoutMs(_ ms: UInt64) throws {
+        let result = ztlp_config_set_timeout_ms(pointer, ms)
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    deinit {
+        ztlp_config_free(pointer)
+    }
+}
+
+// MARK: - Connection Event
+
+/// Events emitted by the bridge via Combine publishers.
+enum ZTLPConnectionEvent {
+    case connected(peerAddress: String)
+    case disconnected(reason: Int32)
+    case dataReceived(Data)
+    case stateChanged(Int32)
+    case error(ZTLPError)
+}
+
+// MARK: - Bridge
+
+/// Singleton bridge between Swift and the ZTLP C FFI.
+final class ZTLPBridge {
+
+    static let shared = ZTLPBridge()
+
+    let eventSubject = PassthroughSubject<ZTLPConnectionEvent, Never>()
+
+    private var client: OpaquePointer?
+    private var currentIdentity: ZTLPIdentityHandle?
+    private let clientLock = DispatchQueue(label: "com.ztlp.bridge.client", qos: .userInitiated)
+    private var isInitialized = false
+
+    private(set) var bytesSent: UInt64 = 0
+    private(set) var bytesReceived: UInt64 = 0
+
+    private init() {}
+
+    // MARK: - Lifecycle
+
+    func initialize() throws {
+        guard !isInitialized else { return }
+        let result = ztlp_init()
+        if let error = ZTLPError.from(code: result) { throw error }
+        isInitialized = true
+    }
+
+    func shutdown() {
+        clientLock.sync {
+            if let c = client {
+                ztlp_client_free(c)
+                client = nil
+            }
+            currentIdentity = nil
+        }
+        if isInitialized {
+            ztlp_shutdown()
+            isInitialized = false
+        }
+    }
+
+    var version: String {
+        guard let ptr = ztlp_version() else { return "unknown" }
+        return String(cString: ptr)
+    }
+
+    // MARK: - Identity
+
+    func generateIdentity() throws -> ZTLPIdentityHandle {
+        try ensureInitialized()
+        guard let ptr = ztlp_identity_generate() else {
+            throw lastErrorAsZTLPError(fallback: .identityError("generation failed"))
+        }
+        return ZTLPIdentityHandle(ptr)
+    }
+
+    func loadIdentity(from path: String) throws -> ZTLPIdentityHandle {
+        try ensureInitialized()
+        let ptr = path.withCString { cPath -> OpaquePointer? in
+            return ztlp_identity_from_file(cPath)
+        }
+        guard let identity = ptr else {
+            throw lastErrorAsZTLPError(fallback: .identityError("failed to load from \(path)"))
+        }
+        return ZTLPIdentityHandle(identity)
+    }
+
+    /// Create a hardware-backed identity.
+    /// On macOS, provider 0 (software) is the typical choice.
+    func createHardwareIdentity(provider: Int32 = 0) throws -> ZTLPIdentityHandle {
+        try ensureInitialized()
+        guard let ptr = ztlp_identity_from_hardware(provider) else {
+            throw lastErrorAsZTLPError(fallback: .identityError("hardware provider \(provider) unavailable"))
+        }
+        return ZTLPIdentityHandle(ptr)
+    }
+
+    // MARK: - Client
+
+    func createClient(identity: ZTLPIdentityHandle) throws {
+        try ensureInitialized()
+        guard let idPtr = identity.transferOwnership() else {
+            throw ZTLPError.invalidArgument("identity handle is nil")
+        }
+        let newClient = ztlp_client_new(idPtr)
+        guard let c = newClient else {
+            throw lastErrorAsZTLPError(fallback: .internalError("client creation failed"))
+        }
+        clientLock.sync {
+            if let old = self.client {
+                ztlp_client_free(old)
+            }
+            self.client = c
+        }
+        try setupCallbacks()
+    }
+
+    func destroyClient() {
+        clientLock.sync {
+            if let c = self.client {
+                ztlp_client_free(c)
+                self.client = nil
+            }
+            self.bytesSent = 0
+            self.bytesReceived = 0
+        }
+    }
+
+    // MARK: - Connection
+
+    func connect(target: String, config: ZTLPConfigHandle? = nil) async throws {
+        try ensureInitialized()
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let context = Unmanaged.passRetained(
+                ContinuationBox(continuation: continuation)
+            ).toOpaque()
+
+            let result = target.withCString { cTarget in
+                ztlp_connect(c, cTarget, config?.pointer, connectCallback, context)
+            }
+
+            if let error = ZTLPError.from(code: result) {
+                let _ = Unmanaged<ContinuationBox>.fromOpaque(context).takeRetainedValue()
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    func disconnect() {
+        destroyClient()
+        eventSubject.send(.disconnected(reason: 0))
+    }
+
+    // MARK: - Data Transfer
+
+    func send(data: Data) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = data.withUnsafeBytes { rawBuf -> Int32 in
+            guard let baseAddress = rawBuf.baseAddress else { return -1 }
+            return ztlp_send(c, baseAddress.assumingMemoryBound(to: UInt8.self), rawBuf.count)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+        bytesSent += UInt64(data.count)
+    }
+
+    // MARK: - Callbacks
+
+    private func setupCallbacks() throws {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        let recvResult = ztlp_set_recv_callback(c, recvCallback, selfPtr)
+        if let error = ZTLPError.from(code: recvResult) { throw error }
+
+        let disconnectResult = ztlp_set_disconnect_callback(c, disconnectCallbackFn, selfPtr)
+        if let error = ZTLPError.from(code: disconnectResult) { throw error }
+    }
+
+    // MARK: - Helpers
+
+    private func ensureInitialized() throws {
+        guard isInitialized else { throw ZTLPError.notInitialized }
+    }
+
+    private func lastErrorAsZTLPError(fallback: ZTLPError) -> ZTLPError {
+        if let ptr = ztlp_last_error() {
+            let msg = String(cString: ptr)
+            return .internalError(msg)
+        }
+        return fallback
+    }
+
+    func resetCounters() {
+        bytesSent = 0
+        bytesReceived = 0
+    }
+
+    func addBytesReceived(_ count: UInt64) {
+        bytesReceived += count
+    }
+}
+
+// MARK: - Continuation Box
+
+private final class ContinuationBox {
+    let continuation: CheckedContinuation<Void, Error>
+    init(continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+    }
+}
+
+// MARK: - C Callback Trampolines
+
+private func connectCallback(userData: UnsafeMutableRawPointer?,
+                              resultCode: Int32,
+                              peerAddr: UnsafePointer<CChar>?) {
+    guard let userData = userData else { return }
+    let box_ = Unmanaged<ContinuationBox>.fromOpaque(userData).takeRetainedValue()
+
+    if resultCode == 0 {
+        let addr = peerAddr.map { String(cString: $0) } ?? "unknown"
+        ZTLPBridge.shared.eventSubject.send(.connected(peerAddress: addr))
+        box_.continuation.resume()
+    } else {
+        let error = ZTLPError.from(code: resultCode) ?? .unknownError(resultCode, "connection failed")
+        box_.continuation.resume(throwing: error)
+    }
+}
+
+private func recvCallback(userData: UnsafeMutableRawPointer?,
+                           dataPtr: UnsafePointer<UInt8>?,
+                           dataLen: Int,
+                           session: OpaquePointer?) {
+    guard let dataPtr = dataPtr, dataLen > 0 else { return }
+    let data = Data(bytes: dataPtr, count: dataLen)
+    ZTLPBridge.shared.addBytesReceived(UInt64(dataLen))
+    ZTLPBridge.shared.eventSubject.send(.dataReceived(data))
+}
+
+private func disconnectCallbackFn(userData: UnsafeMutableRawPointer?,
+                                   session: OpaquePointer?,
+                                   reason: Int32) {
+    ZTLPBridge.shared.eventSubject.send(.disconnected(reason: reason))
+}

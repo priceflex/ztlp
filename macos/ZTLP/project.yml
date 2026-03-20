@@ -1,0 +1,80 @@
+name: ZTLP
+options:
+  bundleIdPrefix: com.ztlp
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+targets:
+  ZTLP:
+    type: application
+    platform: macOS
+    sources:
+      - path: ZTLP
+        excludes:
+          - "**/*.plist"
+    settings:
+      base:
+        INFOPLIST_FILE: ZTLP/Resources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app.macos
+        SWIFT_OBJC_BRIDGING_HEADER: ZTLP/ZTLP-Bridging-Header.h
+        SWIFT_VERSION: "5.9"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lztlp_proto"
+          - "-lresolv"
+          - "-lz"
+        CODE_SIGN_STYLE: Automatic
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    dependencies:
+      - target: ZTLPSystemExtension
+        embed: true
+    scheme:
+      testTargets:
+        - ZTLPTests
+
+  ZTLPSystemExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: ZTLPSystemExtension
+        excludes:
+          - "**/*.plist"
+    settings:
+      base:
+        INFOPLIST_FILE: ZTLPSystemExtension/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app.macos.system-extension
+        SWIFT_OBJC_BRIDGING_HEADER: ZTLPSystemExtension/ZTLPSystemExtension-Bridging-Header.h
+        SWIFT_VERSION: "5.9"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lztlp_proto"
+          - "-lresolv"
+          - "-lz"
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: true
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+  ZTLPTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ZTLPTests
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+    dependencies:
+      - target: ZTLP

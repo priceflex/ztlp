@@ -1,0 +1,155 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Access Policies</h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @network.name %> · <%= @network.zone %></p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to templates_network_policies_path(@network), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" do %>
+        📋 Browse Templates
+      <% end %>
+      <%= link_to new_network_policy_path(@network), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" do %>
+        + Add Policy
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="bg-white shadow rounded-lg mb-6 p-4">
+  <%= form_with url: network_policies_path(@network), method: :get, class: "flex flex-wrap gap-4 items-end", data: { turbo_frame: "_top" } do |f| %>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Search</label>
+      <input type="text" name="search" value="<%= params[:search] %>" placeholder="Name or resource..."
+             class="rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" />
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Type</label>
+      <select name="type" class="rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500">
+        <option value="">All Types</option>
+        <% Policy::POLICY_TYPES.each do |t| %>
+          <option value="<%= t %>" <%= "selected" if params[:type] == t %>><%= t.titleize %></option>
+        <% end %>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Status</label>
+      <select name="status" class="rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500">
+        <option value="">All</option>
+        <option value="enabled" <%= "selected" if params[:status] == "enabled" %>>Enabled</option>
+        <option value="disabled" <%= "selected" if params[:status] == "disabled" %>>Disabled</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Action</label>
+      <select name="action_filter" class="rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500">
+        <option value="">All</option>
+        <option value="allow" <%= "selected" if params[:action_filter] == "allow" %>>Allow</option>
+        <option value="deny" <%= "selected" if params[:action_filter] == "deny" %>>Deny</option>
+      </select>
+    </div>
+    <div>
+      <button type="submit" class="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200">
+        Filter
+      </button>
+      <% if params[:search].present? || params[:type].present? || params[:status].present? || params[:action_filter].present? %>
+        <%= link_to "Clear", network_policies_path(@network), class: "ml-2 text-sm text-gray-500 hover:text-gray-700" %>
+      <% end %>
+    </div>
+  <% end %>
+</div>
+
+<!-- Summary -->
+<div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+  <div class="bg-white shadow rounded-lg p-4 text-center">
+    <p class="text-2xl font-bold text-gray-900"><%= @network.policies.count %></p>
+    <p class="text-xs text-gray-500">Total Policies</p>
+  </div>
+  <div class="bg-white shadow rounded-lg p-4 text-center">
+    <p class="text-2xl font-bold text-green-600"><%= @network.policies.enabled.allow_rules.count %></p>
+    <p class="text-xs text-gray-500">Allow Rules</p>
+  </div>
+  <div class="bg-white shadow rounded-lg p-4 text-center">
+    <p class="text-2xl font-bold text-red-600"><%= @network.policies.enabled.deny_rules.count %></p>
+    <p class="text-xs text-gray-500">Deny Rules</p>
+  </div>
+  <div class="bg-white shadow rounded-lg p-4 text-center">
+    <p class="text-2xl font-bold text-gray-400"><%= @network.policies.disabled.count %></p>
+    <p class="text-xs text-gray-500">Disabled</p>
+  </div>
+</div>
+
+<!-- Policy List grouped by type -->
+<% type_labels = { "access" => "Access Control", "time_based" => "Time-Based", "network_segment" => "Network Segment" } %>
+<% type_icons = { "access" => "🔐", "time_based" => "🕐", "network_segment" => "🌐" } %>
+
+<% if @grouped_policies.empty? %>
+  <div class="bg-white shadow rounded-lg p-12 text-center">
+    <div class="text-4xl mb-4">🛡️</div>
+    <h3 class="text-lg font-medium text-gray-900 mb-2">No policies yet</h3>
+    <p class="text-sm text-gray-500 mb-6">Create your first access policy or start from a template.</p>
+    <div class="flex justify-center gap-3">
+      <%= link_to new_network_policy_path(@network), class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white hover:bg-ztlp-500" do %>
+        + Create Policy
+      <% end %>
+      <%= link_to templates_network_policies_path(@network), class: "rounded-md bg-white px-4 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50" do %>
+        📋 Browse Templates
+      <% end %>
+    </div>
+  </div>
+<% else %>
+  <% Policy::POLICY_TYPES.each do |type| %>
+    <% policies = @grouped_policies[type] %>
+    <% next unless policies.present? %>
+
+    <div class="bg-white shadow rounded-lg mb-6 overflow-hidden">
+      <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
+        <h3 class="text-base font-semibold text-gray-900">
+          <%= type_icons[type] %> <%= type_labels[type] || type.titleize %>
+          <span class="ml-2 text-sm font-normal text-gray-500">(<%= policies.count %>)</span>
+        </h3>
+      </div>
+
+      <div class="divide-y divide-gray-200">
+        <% policies.each do |policy| %>
+          <div class="flex items-center px-6 py-4 <%= policy.enabled? ? '' : 'opacity-50 bg-gray-50' %> border-l-4 <%= policy.allow? ? 'border-l-green-500' : 'border-l-red-500' %>">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <%= link_to policy.name, network_policy_path(@network, policy), class: "text-sm font-medium text-gray-900 hover:text-ztlp-600 truncate" %>
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium <%= policy.allow? ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
+                  <%= policy.action.capitalize %>
+                </span>
+                <span class="text-xs text-gray-400" title="Priority: <%= policy.priority %>"><%= policy.priority_emoji %></span>
+                <% unless policy.enabled? %>
+                  <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">Disabled</span>
+                <% end %>
+                <% if policy.expired? %>
+                  <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800">Expired</span>
+                <% end %>
+                <% if policy.has_conflicts? %>
+                  <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800" title="Conflicting policies exist">⚠️ Conflict</span>
+                <% end %>
+              </div>
+              <p class="mt-1 text-xs text-gray-500">
+                <%= policy.subject_display %> → <%= policy.resource_display %>
+                <% if policy.time_schedule.present? %>
+                  · 🕐 <%= policy.time_schedule %>
+                <% end %>
+              </p>
+            </div>
+            <div class="flex items-center gap-2 ml-4">
+              <%= button_to toggle_network_policy_path(@network, policy), method: :post, class: "text-xs px-2 py-1 rounded #{policy.enabled? ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}" do %>
+                <%= policy.enabled? ? "Enabled" : "Disabled" %>
+              <% end %>
+              <%= link_to "View", network_policy_path(@network, policy), class: "text-xs text-ztlp-600 hover:text-ztlp-500" %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+<% end %>
+
+<div class="mt-6">
+  <%= link_to "← Back to Network", network_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+</div>

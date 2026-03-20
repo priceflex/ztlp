@@ -1,0 +1,20 @@
+standard_employee:
+  name: Standard Employee
+  description: Access all internal services during business hours
+  category: employee
+  built_in: true
+  rules_json: '[{"name":"Employee — Internal Services","policy_type":"access","priority":"normal","subject_type":"role","subject_value":"user","resource_type":"service","resource_value":"*.internal","action":"allow"}]'
+
+it_admin:
+  name: IT Admin — Full Access
+  description: Full unrestricted access to all services
+  category: security
+  built_in: true
+  rules_json: '[{"name":"IT Admin — All Services","policy_type":"access","priority":"high","subject_type":"role","subject_value":"admin","resource_type":"service","resource_value":"*","action":"allow"},{"name":"IT Admin — All Zones","policy_type":"access","priority":"high","subject_type":"role","subject_value":"admin","resource_type":"zone","resource_value":"*","action":"allow"}]'
+
+quarantine:
+  name: Restricted — Quarantine
+  description: Deny all except remediation portal
+  category: security
+  built_in: true
+  rules_json: '[{"name":"Quarantine — Deny All","policy_type":"access","priority":"high","subject_type":"group","subject_value":"quarantine","resource_type":"service","resource_value":"*","action":"deny"},{"name":"Quarantine — Allow Remediation","policy_type":"access","priority":"high","subject_type":"group","subject_value":"quarantine","resource_type":"service","resource_value":"remediation.internal","action":"allow"}]'

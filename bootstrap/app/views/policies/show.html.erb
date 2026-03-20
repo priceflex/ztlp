@@ -1,0 +1,184 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @policy.name %></h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @network.name %> · <%= @policy.policy_type.titleize %> Policy</p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to edit_network_policy_path(@network, @policy), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" do %>
+        ✏️ Edit
+      <% end %>
+      <%= button_to duplicate_network_policy_path(@network, @policy), method: :post, class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" do %>
+        📋 Duplicate
+      <% end %>
+      <%= button_to toggle_network_policy_path(@network, @policy), method: :post, class: "rounded-md px-3 py-2 text-sm font-semibold shadow-sm #{@policy.enabled? ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200' : 'bg-green-100 text-green-800 hover:bg-green-200'}" do %>
+        <%= @policy.enabled? ? "Disable" : "Enable" %>
+      <% end %>
+      <%= button_to network_policy_path(@network, @policy), method: :delete, class: "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500", data: { turbo_confirm: "Delete this policy?" } do %>
+        🗑️ Delete
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Status badges -->
+<div class="flex gap-2 mb-6">
+  <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium <%= @policy.allow? ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
+    <%= @policy.action.capitalize %>
+  </span>
+  <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium bg-gray-100 text-gray-800">
+    <%= @policy.priority_emoji %> <%= @policy.priority.capitalize %> Priority
+  </span>
+  <% if @policy.enabled? %>
+    <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium bg-green-100 text-green-800">Enabled</span>
+  <% else %>
+    <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium bg-gray-100 text-gray-600">Disabled</span>
+  <% end %>
+  <% if @policy.expired? %>
+    <span class="inline-flex items-center rounded-full px-3 py-1 text-sm font-medium bg-yellow-100 text-yellow-800">Expired</span>
+  <% end %>
+</div>
+
+<% if @conflicts.any? %>
+  <div class="rounded-md bg-yellow-50 border border-yellow-200 p-4 mb-6">
+    <div class="flex">
+      <div class="flex-shrink-0">⚠️</div>
+      <div class="ml-3">
+        <h3 class="text-sm font-medium text-yellow-800">Conflicting Policies Detected</h3>
+        <div class="mt-2 text-sm text-yellow-700">
+          <p>The following policies target the same subject and resource but with a different action:</p>
+          <ul class="list-disc list-inside mt-1">
+            <% @conflicts.each do |conflict| %>
+              <li>
+                <%= link_to conflict.name, network_policy_path(@network, conflict), class: "font-medium underline" %>
+                (<%= conflict.action %>) — <%= conflict.subject_display %> → <%= conflict.resource_display %>
+              </li>
+            <% end %>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+<% end %>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+  <!-- Policy Details -->
+  <div class="bg-white shadow rounded-lg overflow-hidden">
+    <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
+      <h3 class="text-base font-semibold text-gray-900">Policy Details</h3>
+    </div>
+    <dl class="divide-y divide-gray-200">
+      <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+        <dt class="text-sm font-medium text-gray-500">Type</dt>
+        <dd class="text-sm text-gray-900 sm:col-span-2"><%= @policy.policy_type.titleize %></dd>
+      </div>
+      <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+        <dt class="text-sm font-medium text-gray-500">Subject</dt>
+        <dd class="text-sm text-gray-900 sm:col-span-2"><%= @policy.subject_display %></dd>
+      </div>
+      <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+        <dt class="text-sm font-medium text-gray-500">Resource</dt>
+        <dd class="text-sm text-gray-900 sm:col-span-2 font-mono"><%= @policy.resource_display %></dd>
+      </div>
+      <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+        <dt class="text-sm font-medium text-gray-500">Action</dt>
+        <dd class="text-sm sm:col-span-2">
+          <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium <%= @policy.allow? ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
+            <%= @policy.action.capitalize %>
+          </span>
+        </dd>
+      </div>
+      <% if @policy.time_schedule.present? %>
+        <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+          <dt class="text-sm font-medium text-gray-500">Schedule</dt>
+          <dd class="text-sm text-gray-900 sm:col-span-2 font-mono"><%= @policy.time_schedule %> (<%= @policy.timezone %>)</dd>
+        </div>
+      <% end %>
+      <% if @policy.expires_at.present? %>
+        <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+          <dt class="text-sm font-medium text-gray-500">Expires</dt>
+          <dd class="text-sm sm:col-span-2 <%= @policy.expired? ? 'text-red-600' : 'text-gray-900' %>">
+            <%= @policy.expires_at.strftime("%b %d, %Y %H:%M %Z") %>
+            <% if @policy.expired? %><span class="text-xs text-red-500">(expired)</span><% end %>
+          </dd>
+        </div>
+      <% end %>
+      <% if @policy.description.present? %>
+        <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+          <dt class="text-sm font-medium text-gray-500">Description</dt>
+          <dd class="text-sm text-gray-900 sm:col-span-2"><%= @policy.description %></dd>
+        </div>
+      <% end %>
+      <div class="px-6 py-4 sm:grid sm:grid-cols-3 sm:gap-4">
+        <dt class="text-sm font-medium text-gray-500">Created</dt>
+        <dd class="text-sm text-gray-500 sm:col-span-2"><%= @policy.created_at.strftime("%b %d, %Y %H:%M") %></dd>
+      </div>
+    </dl>
+  </div>
+
+  <!-- Effective Scope -->
+  <div class="bg-white shadow rounded-lg overflow-hidden">
+    <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
+      <h3 class="text-base font-semibold text-gray-900">Effective Scope</h3>
+      <p class="text-xs text-gray-500 mt-1">Users this policy currently applies to</p>
+    </div>
+    <div class="px-6 py-4">
+      <% if @effective_users.any? %>
+        <div class="space-y-2">
+          <% @effective_users.each do |user| %>
+            <div class="flex items-center gap-3">
+              <%= user_avatar(user, size: "h-7 w-7", text_size: "text-xs") %>
+              <div>
+                <p class="text-sm font-medium text-gray-900"><%= user.name %></p>
+                <p class="text-xs text-gray-500"><%= user.role %><%= " · #{user.email}" if user.email.present? %></p>
+              </div>
+            </div>
+          <% end %>
+          <% total = @policy.effective_users.count %>
+          <% if total > 20 %>
+            <p class="text-xs text-gray-400 pt-2">...and <%= total - 20 %> more</p>
+          <% end %>
+        </div>
+      <% else %>
+        <p class="text-sm text-gray-500">No active users match this policy's subject criteria.</p>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<!-- Gateway Rule Preview -->
+<div class="bg-white shadow rounded-lg mb-6 overflow-hidden">
+  <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
+    <h3 class="text-base font-semibold text-gray-900">Gateway Rule Preview</h3>
+    <p class="text-xs text-gray-500 mt-1">This is how this policy will appear in the gateway configuration</p>
+  </div>
+  <div class="px-6 py-4">
+    <pre class="bg-gray-900 text-green-400 rounded-lg p-4 text-sm overflow-x-auto"><%= JSON.pretty_generate(@policy.to_gateway_rule) %></pre>
+  </div>
+</div>
+
+<!-- Audit Log -->
+<% if @audit_logs.any? %>
+  <div class="bg-white shadow rounded-lg overflow-hidden">
+    <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
+      <h3 class="text-base font-semibold text-gray-900">Audit History</h3>
+    </div>
+    <div class="divide-y divide-gray-200">
+      <% @audit_logs.each do |log| %>
+        <div class="px-6 py-3 flex items-center justify-between">
+          <div>
+            <p class="text-sm text-gray-900"><%= log.action.humanize %></p>
+            <p class="text-xs text-gray-500"><%= log.created_at.strftime("%b %d, %Y %H:%M") %></p>
+          </div>
+          <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium <%= log.status == 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800' %>">
+            <%= log.status %>
+          </span>
+        </div>
+      <% end %>
+    </div>
+  </div>
+<% end %>
+
+<div class="mt-6">
+  <%= link_to "← Back to Policies", network_policies_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+</div>

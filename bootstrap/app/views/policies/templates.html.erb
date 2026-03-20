@@ -1,0 +1,73 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Policy Templates</h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @network.name %> · Quick-start policy sets</p>
+    </div>
+    <div class="mt-4 sm:mt-0">
+      <%= link_to network_policies_path(@network), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" do %>
+        ← Back to Policies
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% category_labels = { "employee" => "Employee", "contractor" => "Contractor", "guest" => "Guest", "security" => "Security" } %>
+<% category_colors = { "employee" => "blue", "contractor" => "amber", "guest" => "green", "security" => "red" } %>
+
+<% if @grouped_templates.empty? %>
+  <div class="bg-white shadow rounded-lg p-12 text-center">
+    <div class="text-4xl mb-4">📋</div>
+    <h3 class="text-lg font-medium text-gray-900 mb-2">No templates available</h3>
+    <p class="text-sm text-gray-500">Run <code class="bg-gray-100 px-2 py-0.5 rounded">PolicyTemplate.seed_built_in!</code> to create built-in templates.</p>
+  </div>
+<% else %>
+  <% PolicyTemplate::CATEGORIES.each do |category| %>
+    <% templates = @grouped_templates[category] %>
+    <% next unless templates.present? %>
+    <% color = category_colors[category] %>
+
+    <div class="mb-8">
+      <h2 class="text-lg font-semibold text-gray-900 mb-4">
+        <%= { "employee" => "👤", "contractor" => "🔧", "guest" => "👥", "security" => "🛡️" }[category] %>
+        <%= category_labels[category] || category.titleize %> Templates
+      </h2>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <% templates.each do |template| %>
+          <div class="bg-white shadow rounded-lg overflow-hidden border-t-4 border-<%= color %>-500">
+            <div class="p-6">
+              <div class="flex items-start justify-between mb-3">
+                <h3 class="text-base font-semibold text-gray-900"><%= template.name %></h3>
+                <% if template.built_in? %>
+                  <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">Built-in</span>
+                <% end %>
+              </div>
+              <p class="text-sm text-gray-600 mb-4"><%= template.description %></p>
+
+              <div class="mb-4">
+                <p class="text-xs font-medium text-gray-500 mb-2">Creates <%= template.rules.count %> policies:</p>
+                <ul class="space-y-1">
+                  <% template.rules.each do |rule| %>
+                    <li class="flex items-center gap-2 text-xs">
+                      <span class="inline-flex items-center rounded-full px-1.5 py-0.5 text-xs font-medium <%= rule['action'] == 'allow' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700' %>">
+                        <%= rule['action']&.capitalize || 'Allow' %>
+                      </span>
+                      <span class="text-gray-600 truncate"><%= rule['name'] || rule['resource_value'] %></span>
+                    </li>
+                  <% end %>
+                </ul>
+              </div>
+
+              <%= button_to "Apply to Network", apply_template_network_policies_path(@network),
+                  params: { template_id: template.id },
+                  method: :post,
+                  class: "w-full rounded-md bg-#{color}-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-#{color}-500 text-center",
+                  data: { turbo_confirm: "Apply '#{template.name}' template? This will create #{template.rules.count} new policies." } %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+<% end %>

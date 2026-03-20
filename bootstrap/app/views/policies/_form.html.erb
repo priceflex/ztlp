@@ -1,0 +1,183 @@
+<%= form_with(model: [@network, policy], class: "space-y-8") do |f| %>
+  <% if policy.errors.any? %>
+    <div class="rounded-md bg-red-50 p-4">
+      <div class="flex">
+        <div class="text-sm text-red-800">
+          <p class="font-medium mb-2"><%= pluralize(policy.errors.count, "error") %> prevented this policy from being saved:</p>
+          <ul class="list-disc list-inside space-y-1">
+            <% policy.errors.full_messages.each do |msg| %>
+              <li><%= msg %></li>
+            <% end %>
+          </ul>
+        </div>
+      </div>
+    </div>
+  <% end %>
+
+  <!-- Step 1: Policy Type -->
+  <div class="bg-white shadow rounded-lg p-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-4">1. Policy Type</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <% policy_type_options = [
+        { value: "access", icon: "🔐", label: "Access Control", desc: "Control who can access specific resources" },
+        { value: "time_based", icon: "🕐", label: "Time-Based", desc: "Restrict access to specific time windows" },
+        { value: "network_segment", icon: "🌐", label: "Network Segment", desc: "Control access by network segments" }
+      ] %>
+      <% policy_type_options.each do |opt| %>
+        <label class="relative flex cursor-pointer rounded-lg border p-4 shadow-sm focus:outline-none hover:border-ztlp-300 transition-colors">
+          <%= f.radio_button :policy_type, opt[:value], class: "sr-only peer", required: true %>
+          <span class="flex flex-1">
+            <span class="flex flex-col">
+              <span class="text-2xl mb-2"><%= opt[:icon] %></span>
+              <span class="block text-sm font-medium text-gray-900"><%= opt[:label] %></span>
+              <span class="block text-xs text-gray-500 mt-1"><%= opt[:desc] %></span>
+            </span>
+          </span>
+          <span class="pointer-events-none absolute -inset-px rounded-lg border-2 border-transparent peer-checked:border-ztlp-600"></span>
+        </label>
+      <% end %>
+    </div>
+  </div>
+
+  <!-- Step 2: Subject -->
+  <div class="bg-white shadow rounded-lg p-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-4">2. Who does this apply to?</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Subject Type</label>
+        <%= f.select :subject_type, Policy::SUBJECT_TYPES.map { |t| [t.titleize, t] },
+            { include_blank: "Select..." },
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500",
+            data: { action: "change->policy-form#subjectTypeChanged" } %>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Subject Value</label>
+        <% # Show different inputs based on current subject_type %>
+        <% if policy.subject_type == "user" && @users.present? %>
+          <%= f.select :subject_value, @users.map { |u| [u.name, u.name] },
+              { include_blank: "Select user..." },
+              class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+        <% elsif policy.subject_type == "group" && @groups.present? %>
+          <%= f.select :subject_value, @groups.map { |g| [g.name, g.name] },
+              { include_blank: "Select group..." },
+              class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+        <% elsif policy.subject_type == "role" %>
+          <div class="flex gap-4 mt-2">
+            <% %w[user tech admin].each do |role| %>
+              <label class="inline-flex items-center">
+                <%= f.radio_button :subject_value, role, class: "text-ztlp-600 focus:ring-ztlp-500" %>
+                <span class="ml-2 text-sm text-gray-700"><%= role.capitalize %></span>
+              </label>
+            <% end %>
+          </div>
+        <% elsif policy.subject_type == "everyone" %>
+          <%= f.hidden_field :subject_value, value: "" %>
+          <p class="text-sm text-gray-500 mt-2">Applies to all users in the network.</p>
+        <% else %>
+          <%= f.text_field :subject_value, placeholder: "Enter value...",
+              class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+        <% end %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: Resource -->
+  <div class="bg-white shadow rounded-lg p-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-4">3. What can they access?</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Resource Type</label>
+        <%= f.select :resource_type, Policy::RESOURCE_TYPES.map { |t| [t.titleize, t] },
+            { include_blank: "Select..." },
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Resource Value</label>
+        <%= f.text_field :resource_value, placeholder: resource_placeholder(policy.resource_type),
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+        <p class="mt-1 text-xs text-gray-400">
+          <% case policy.resource_type %>
+          <% when "service" %>
+            Use wildcards like <code class="bg-gray-100 px-1 rounded">*.internal</code> or specific names like <code class="bg-gray-100 px-1 rounded">erp.acme.ztlp</code>
+          <% when "ip_range" %>
+            Use CIDR notation like <code class="bg-gray-100 px-1 rounded">10.42.0.0/16</code>
+          <% when "zone" %>
+            Enter a zone name or use <code class="bg-gray-100 px-1 rounded">*</code> for all zones
+          <% else %>
+            Enter the resource identifier
+          <% end %>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 4: Action & Schedule -->
+  <div class="bg-white shadow rounded-lg p-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-4">4. Action & Constraints</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Action</label>
+        <div class="flex gap-4 mt-2">
+          <label class="inline-flex items-center cursor-pointer">
+            <%= f.radio_button :action, "allow", class: "text-green-600 focus:ring-green-500" %>
+            <span class="ml-2 text-sm font-medium text-green-700">✅ Allow</span>
+          </label>
+          <label class="inline-flex items-center cursor-pointer">
+            <%= f.radio_button :action, "deny", class: "text-red-600 focus:ring-red-500" %>
+            <span class="ml-2 text-sm font-medium text-red-700">🚫 Deny</span>
+          </label>
+        </div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+        <%= f.select :priority, Policy::PRIORITIES.map { |p| ["#{Policy::PRIORITY_WEIGHTS[p] ? {'high' => '🔴', 'normal' => '🟡', 'low' => '🟢'}[p] : ''} #{p.capitalize}", p] },
+            {},
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Time Schedule <span class="text-gray-400">(optional)</span></label>
+        <%= f.text_field :time_schedule, placeholder: "MON-FRI 09:00-17:00",
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Expires <span class="text-gray-400">(optional)</span></label>
+        <%= f.datetime_local_field :expires_at,
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+        <%= f.text_field :timezone, value: policy.timezone || "UTC",
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 5: Name & Description -->
+  <div class="bg-white shadow rounded-lg p-6">
+    <h3 class="text-base font-semibold text-gray-900 mb-4">5. Name & Description</h3>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Policy Name</label>
+        <%= f.text_field :name, placeholder: "e.g., Allow employees to access internal services",
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500",
+            required: true %>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Description <span class="text-gray-400">(optional)</span></label>
+        <%= f.text_area :description, rows: 3, placeholder: "Describe what this policy does and why...",
+            class: "block w-full rounded-md border-gray-300 shadow-sm text-sm focus:border-ztlp-500 focus:ring-ztlp-500" %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Submit -->
+  <div class="flex items-center justify-between">
+    <%= link_to "Cancel", network_policies_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+    <div class="flex gap-3">
+      <%= f.submit policy.new_record? ? "Create Policy" : "Update Policy",
+          class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+    </div>
+  </div>
+<% end %>

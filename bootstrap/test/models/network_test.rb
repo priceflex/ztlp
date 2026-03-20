@@ -71,6 +71,44 @@ class NetworkTest < ActiveSupport::TestCase
     assert ns.all? { |m| m.has_role?("ns") }
   end
 
+  # --- Policy methods ---
+
+  test "export_policy_config returns gateway rules" do
+    network = networks(:office)
+    config = network.export_policy_config
+    assert_kind_of Array, config
+    # Should only include enabled, non-expired policies
+    assert config.all? { |r| r.is_a?(Hash) }
+    assert config.all? { |r| r.key?(:subject) && r.key?(:resource) && r.key?(:action) }
+    # Expired policy should not be included
+    expired_values = config.select { |r| r[:resource][:value] == "temp.internal" }
+    assert_empty expired_values
+  end
+
+  test "policy_summary returns counts" do
+    network = networks(:office)
+    summary = network.policy_summary
+    assert summary[:total] > 0
+    assert summary[:active] > 0
+    assert summary[:allow_count] >= 0
+    assert summary[:deny_count] >= 0
+  end
+
+  test "policies association" do
+    network = networks(:office)
+    assert network.policies.count > 0
+    assert network.policies.first.is_a?(Policy)
+  end
+
+  test "destroying network destroys policies" do
+    network = networks(:office)
+    policy_count = network.policies.count
+    assert policy_count > 0
+    assert_difference "Policy.count", -policy_count do
+      network.destroy
+    end
+  end
+
   test "deployable? requires machines with roles" do
     network = Network.create!(name: "Empty", zone: "empty.ztlp", status: "created")
     assert_not network.deployable?

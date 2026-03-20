@@ -1,0 +1,99 @@
+allow_internal:
+  network: office
+  name: Allow Internal Services
+  description: Allow all users to access internal services
+  policy_type: access
+  priority: normal
+  enabled: true
+  subject_type: everyone
+  subject_value:
+  resource_type: service
+  resource_value: "*.internal"
+  action: allow
+  timezone: UTC
+
+deny_admin_zone:
+  network: office
+  name: Deny Admin Zone
+  description: Deny regular users from admin zone
+  policy_type: access
+  priority: high
+  enabled: true
+  subject_type: role
+  subject_value: user
+  resource_type: zone
+  resource_value: "admin.office.acme.ztlp"
+  action: deny
+  timezone: UTC
+
+time_based_contractor:
+  network: office
+  name: Contractor Business Hours
+  description: Contractors only during business hours
+  policy_type: time_based
+  priority: normal
+  enabled: true
+  subject_type: group
+  subject_value: engineering
+  resource_type: service
+  resource_value: "contractor.internal"
+  action: allow
+  time_schedule: "MON-FRI 09:00-17:00"
+  timezone: UTC
+
+disabled_policy:
+  network: office
+  name: Disabled Old Policy
+  description: This policy is disabled
+  policy_type: access
+  priority: low
+  enabled: false
+  subject_type: everyone
+  subject_value:
+  resource_type: service
+  resource_value: "legacy.internal"
+  action: allow
+  timezone: UTC
+
+network_segment_policy:
+  network: office
+  name: Server Network Access
+  description: Allow tech users to server subnet
+  policy_type: network_segment
+  priority: normal
+  enabled: true
+  subject_type: role
+  subject_value: tech
+  resource_type: ip_range
+  resource_value: "10.42.0.0/16"
+  action: allow
+  timezone: UTC
+
+expired_policy:
+  network: office
+  name: Expired Temp Access
+  description: Temporary access that has expired
+  policy_type: access
+  priority: normal
+  enabled: true
+  subject_type: user
+  subject_value: bob
+  resource_type: service
+  resource_value: "temp.internal"
+  action: allow
+  expires_at: <%= 1.day.ago %>
+  timezone: UTC
+
+other_network_policy:
+  network: production
+  name: Production Allow All
+  description: Allow all in production
+  policy_type: access
+  priority: high
+  enabled: true
+  subject_type: everyone
+  subject_value:
+  resource_type: service
+  resource_value: "*"
+  action: allow
+  timezone: UTC

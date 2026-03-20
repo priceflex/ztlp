@@ -1,6 +1,10 @@
 require "test_helper"
 
 class HealthControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   test "network_health shows health overview" do
     get network_health_path(networks(:office))
     assert_response :success

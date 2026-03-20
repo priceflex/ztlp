@@ -83,6 +83,7 @@ GEM
     aes_key_wrap (1.1.0)
     attr_required (1.0.2)
     base64 (0.3.0)
+    bcrypt (3.1.22)
     bcrypt_pbkdf (1.1.2)
     bcrypt_pbkdf (1.1.2-arm64-darwin)
     bcrypt_pbkdf (1.1.2-x86_64-darwin)
@@ -368,6 +369,7 @@ PLATFORMS
   x86_64-linux
 
 DEPENDENCIES
+  bcrypt (~> 3.1)
   bcrypt_pbkdf (~> 1.1)
   bootsnap
   ed25519 (~> 1.3)

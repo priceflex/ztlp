@@ -4,6 +4,7 @@ require "test_helper"
 
 class ZtlpDevicesControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @device = ztlp_devices(:alice_laptop)
   end

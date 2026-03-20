@@ -3,6 +3,10 @@
 require "test_helper"
 
 class WizardControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   # ── Step 1: Create Network ──────────────────────────────────────────
 
   test "GET wizard/new renders step 1" do

@@ -1,6 +1,10 @@
 require "test_helper"
 
 class DashboardControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   test "index loads dashboard" do
     get root_path
     assert_response :success

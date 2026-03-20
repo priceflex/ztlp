@@ -1,6 +1,10 @@
 require "test_helper"
 
 class DeploymentsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   test "index" do
     get deployments_path
     assert_response :success

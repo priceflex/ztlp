@@ -1,0 +1,62 @@
+<div class="max-w-2xl">
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold text-gray-900"><%= @admin_user.new_record? ? "New Admin User" : "Edit Admin User" %></h1>
+    <p class="mt-1 text-sm text-gray-500">
+      <%= @admin_user.new_record? ? "Create a new administrator account." : "Update administrator account details." %>
+    </p>
+  </div>
+
+  <%= form_with model: @admin_user, url: (@admin_user.new_record? ? admin_users_path : admin_user_path(@admin_user)), method: (@admin_user.new_record? ? :post : :patch), local: true do |f| %>
+    <% if @admin_user.errors.any? %>
+      <div class="mb-6 rounded-lg bg-red-50 border border-red-200 p-4">
+        <h3 class="text-sm font-medium text-red-800">
+          <%= pluralize(@admin_user.errors.count, "error") %> prevented this admin from being saved:
+        </h3>
+        <ul class="mt-2 list-disc list-inside text-sm text-red-700">
+          <% @admin_user.errors.full_messages.each do |msg| %>
+            <li><%= msg %></li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+
+    <div class="bg-white shadow rounded-lg p-6 space-y-6">
+      <div>
+        <%= f.label :name, class: "block text-sm font-medium text-gray-700" %>
+        <%= f.text_field :name, class: "mt-1 block w-full rounded-lg border border-gray-300 px-4 py-3 text-gray-900 shadow-sm focus:border-ztlp-500 focus:ring-2 focus:ring-ztlp-500 sm:text-sm", required: true %>
+      </div>
+
+      <div>
+        <%= f.label :email, class: "block text-sm font-medium text-gray-700" %>
+        <%= f.email_field :email, class: "mt-1 block w-full rounded-lg border border-gray-300 px-4 py-3 text-gray-900 shadow-sm focus:border-ztlp-500 focus:ring-2 focus:ring-ztlp-500 sm:text-sm", required: true %>
+      </div>
+
+      <div>
+        <%= f.label :role, class: "block text-sm font-medium text-gray-700" %>
+        <%= f.select :role, AdminUser::ROLES.map { |r| [r.titleize, r] },
+            {}, class: "mt-1 block w-full rounded-lg border border-gray-300 px-4 py-3 text-gray-900 shadow-sm focus:border-ztlp-500 focus:ring-2 focus:ring-ztlp-500 sm:text-sm" %>
+      </div>
+
+      <div>
+        <%= f.label :password, class: "block text-sm font-medium text-gray-700" %>
+        <%= f.password_field :password, class: "mt-1 block w-full rounded-lg border border-gray-300 px-4 py-3 text-gray-900 shadow-sm focus:border-ztlp-500 focus:ring-2 focus:ring-ztlp-500 sm:text-sm",
+            required: @admin_user.new_record?, autocomplete: "new-password" %>
+        <% unless @admin_user.new_record? %>
+          <p class="mt-1 text-xs text-gray-500">Leave blank to keep current password.</p>
+        <% end %>
+      </div>
+
+      <div>
+        <%= f.label :password_confirmation, class: "block text-sm font-medium text-gray-700" %>
+        <%= f.password_field :password_confirmation, class: "mt-1 block w-full rounded-lg border border-gray-300 px-4 py-3 text-gray-900 shadow-sm focus:border-ztlp-500 focus:ring-2 focus:ring-ztlp-500 sm:text-sm",
+            required: @admin_user.new_record?, autocomplete: "new-password" %>
+      </div>
+
+      <div class="flex items-center justify-between pt-4 border-t">
+        <%= link_to "Cancel", admin_users_path, class: "text-sm font-medium text-gray-500 hover:text-gray-700" %>
+        <%= f.submit @admin_user.new_record? ? "Create Admin User" : "Update Admin User",
+            class: "inline-flex items-center rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-700 cursor-pointer" %>
+      </div>
+    </div>
+  <% end %>
+</div>

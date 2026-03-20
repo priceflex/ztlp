@@ -4,6 +4,7 @@ require "test_helper"
 
 class IdentityControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @alice = ztlp_users(:alice)
     @bob = ztlp_users(:bob)
@@ -140,6 +141,7 @@ end
 
 class ZtlpUsersSuspendReactivateTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @user = ztlp_users(:bob)
   end
@@ -202,6 +204,7 @@ end
 
 class ZtlpUsersCascadeRevokeTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @user = ztlp_users(:alice)
   end
@@ -244,6 +247,7 @@ end
 
 class ZtlpUsersUpdateRoleTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @user = ztlp_users(:bob)
   end
@@ -274,6 +278,7 @@ end
 
 class ZtlpUsersEnhancedShowTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @alice = ztlp_users(:alice)
   end

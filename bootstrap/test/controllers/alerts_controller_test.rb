@@ -1,6 +1,10 @@
 require "test_helper"
 
 class AlertsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   test "index shows alerts" do
     get alerts_path
     assert_response :success

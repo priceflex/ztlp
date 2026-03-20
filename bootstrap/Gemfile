@@ -10,6 +10,9 @@ gem "importmap-rails"
 gem "turbo-rails"
 gem "stimulus-rails"
 
+# Authentication
+gem "bcrypt", "~> 3.1"
+
 # SSH provisioning
 gem "net-ssh", "~> 7.2"
 gem "ed25519", "~> 1.3"

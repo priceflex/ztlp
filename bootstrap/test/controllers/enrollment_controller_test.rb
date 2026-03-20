@@ -5,6 +5,7 @@ require "test_helper"
 class EnrollmentControllerTest < ActionDispatch::IntegrationTest
   setup do
     @network = networks(:office)
+    sign_in_as_admin
   end
 
   test "index renders enrollment page" do

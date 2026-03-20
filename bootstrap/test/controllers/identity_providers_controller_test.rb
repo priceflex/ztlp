@@ -4,6 +4,7 @@ require "test_helper"
 
 class IdentityProvidersControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @google_idp = identity_providers(:google_idp)
   end

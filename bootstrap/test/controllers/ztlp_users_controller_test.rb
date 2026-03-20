@@ -4,6 +4,7 @@ require "test_helper"
 
 class ZtlpUsersControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @user = ztlp_users(:alice)
   end

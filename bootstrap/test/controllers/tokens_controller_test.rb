@@ -2,6 +2,7 @@ require "test_helper"
 
 class TokensControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
   end
 

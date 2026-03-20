@@ -45,8 +45,17 @@
                 <%= link_to "Audit Log", audit_logs_path, class: nav_link_class(audit_logs_path) %>
                 <%= link_to "🧙 Wizard", wizard_new_path, class: nav_link_class(wizard_new_path) %>
                 <%= link_to "📖 Docs", docs_path, class: nav_link_class(docs_path) %>
+              <% if current_admin&.super_admin? %>
+                <%= link_to "👤 Admin Users", admin_users_path, class: nav_link_class(admin_users_path) %>
+              <% end %>
               </div>
             </div>
+            <% if admin_signed_in? %>
+              <div class="flex items-center space-x-4">
+                <span class="text-sm text-gray-300"><%= current_admin.name %></span>
+                <%= button_to "Sign Out", logout_path, method: :delete, class: "rounded-md px-3 py-2 text-sm font-medium text-gray-300 hover:bg-ztlp-700 hover:text-white" %>
+              </div>
+            <% end %>
           </div>
         </div>
       </nav>

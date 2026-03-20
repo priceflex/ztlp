@@ -4,6 +4,7 @@ require "test_helper"
 
 class ZtlpGroupsControllerTest < ActionDispatch::IntegrationTest
   setup do
+    sign_in_as_admin
     @network = networks(:office)
     @group = ztlp_groups(:engineering)
   end

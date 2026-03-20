@@ -1,0 +1,31 @@
+# Generated password_digest for "password123" using BCrypt
+# BCrypt::Password.create("password123")
+
+super_admin:
+  email: "super@example.com"
+  name: "Super Admin"
+  password_digest: "<%= BCrypt::Password.create('password123') %>"
+  role: "super_admin"
+  failed_login_attempts: 0
+
+regular_admin:
+  email: "admin@example.com"
+  name: "Regular Admin"
+  password_digest: "<%= BCrypt::Password.create('password123') %>"
+  role: "admin"
+  failed_login_attempts: 0
+
+read_only_admin:
+  email: "readonly@example.com"
+  name: "Read Only"
+  password_digest: "<%= BCrypt::Password.create('password123') %>"
+  role: "read_only"
+  failed_login_attempts: 0
+
+locked_admin:
+  email: "locked@example.com"
+  name: "Locked Admin"
+  password_digest: "<%= BCrypt::Password.create('password123') %>"
+  role: "admin"
+  failed_login_attempts: 5
+  locked_until: "<%= 10.minutes.from_now.iso8601 %>"

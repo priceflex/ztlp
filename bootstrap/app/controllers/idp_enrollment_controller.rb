@@ -3,6 +3,7 @@
 # Handles self-service enrollment via external identity providers.
 # Users authenticate via OIDC/OAuth2, then receive a single-use enrollment token.
 class IdpEnrollmentController < ApplicationController
+  skip_before_action :require_authentication
   # OmniAuth callbacks bypass CSRF by design (redirected from external IdP)
   skip_forgery_protection only: :callback
 

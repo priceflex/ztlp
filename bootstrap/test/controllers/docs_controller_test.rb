@@ -1,6 +1,10 @@
 require "test_helper"
 
 class DocsControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    sign_in_as_admin
+  end
+
   test "GET docs index" do
     get docs_path
     assert_response :success

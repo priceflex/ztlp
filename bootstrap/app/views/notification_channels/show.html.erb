@@ -1,0 +1,100 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @channel.type_icon %> <%= @channel.name %></h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @channel.channel_type.capitalize %> channel for <%= @network.name %></p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to "Edit", edit_network_notification_channel_path(@network, @channel), class: "rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50" %>
+      <%= button_to "Send Test", test_network_notification_channel_path(@network, @channel), method: :post, class: "rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
+      <%= button_to @channel.enabled? ? "Disable" : "Enable", toggle_network_notification_channel_path(@network, @channel), method: :post, class: "rounded-md bg-yellow-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-yellow-500" %>
+    </div>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg p-6 mb-6">
+  <dl class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Status</dt>
+      <dd class="mt-1">
+        <% case @channel.status_label %>
+        <% when "healthy" %>
+          <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Enabled & Healthy</span>
+        <% when "error" %>
+          <span class="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">Error</span>
+          <p class="mt-1 text-xs text-red-600"><%= @channel.last_error %></p>
+        <% when "disabled" %>
+          <span class="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800">Disabled</span>
+        <% end %>
+      </dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Severity Filter</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @channel.severity_filter&.titleize || "All" %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Events Sent</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @channel.send_count %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Last Sent</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @channel.last_sent_at ? time_ago_short(@channel.last_sent_at) : "Never" %></dd>
+    </div>
+    <% if @channel.event_filter.present? %>
+    <div class="sm:col-span-2">
+      <dt class="text-sm font-medium text-gray-500">Event Filter</dt>
+      <dd class="mt-1 flex flex-wrap gap-1">
+        <% @channel.event_types.each do |evt| %>
+          <span class="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800"><%= evt %></span>
+        <% end %>
+      </dd>
+    </div>
+    <% end %>
+  </dl>
+</div>
+
+<!-- Recent Logs -->
+<div class="bg-white shadow rounded-lg">
+  <div class="px-4 py-5 sm:px-6 flex justify-between items-center">
+    <h3 class="text-lg font-medium text-gray-900">Recent Notifications</h3>
+    <%= link_to "View All Logs", logs_network_notification_channels_path(@network, channel_id: @channel.id), class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+  </div>
+  <% logs = @channel.notification_logs.recent.limit(10) %>
+  <% if logs.any? %>
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Event</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% logs.each do |log| %>
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= log.created_at.strftime("%b %d %H:%M") %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono"><%= log.event_type %></td>
+            <td class="px-6 py-4 text-sm text-gray-900"><%= log.subject %></td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <% case log.status %>
+              <% when "sent" %>
+                <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Sent</span>
+              <% when "failed" %>
+                <span class="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800" title="<%= log.error_message %>">Failed</span>
+              <% when "pending" %>
+                <span class="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800">Pending</span>
+              <% end %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <div class="px-6 py-8 text-center text-gray-500">No notifications sent yet.</div>
+  <% end %>
+</div>
+
+<div class="mt-4">
+  <%= link_to "← Back to Channels", network_notification_channels_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+</div>

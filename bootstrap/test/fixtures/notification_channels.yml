@@ -1,0 +1,54 @@
+email_channel:
+  network: office
+  name: Team Email Alerts
+  channel_type: email
+  config_json: '{"recipients":["admin@example.com"],"from":"ztlp@example.com","smtp_server":"smtp.example.com","smtp_port":587,"smtp_user":"user","smtp_password":"pass"}'
+  enabled: true
+  severity_filter: all
+  send_count: 5
+  last_sent_at: <%= 1.hour.ago %>
+
+webhook_channel:
+  network: office
+  name: CI Webhook
+  channel_type: webhook
+  config_json: '{"url":"https://hooks.example.com/webhook","method":"POST","headers":{"Content-Type":"application/json"}}'
+  enabled: true
+  severity_filter: critical
+  event_filter: "alert_critical,health_down"
+  send_count: 2
+
+slack_channel:
+  network: office
+  name: Slack Alerts
+  channel_type: slack
+  config_json: '{"webhook_url":"https://hooks.slack.com/services/T00/B00/xxx","channel":"#alerts"}'
+  enabled: true
+  severity_filter: warning_and_above
+  send_count: 10
+  last_sent_at: <%= 30.minutes.ago %>
+
+disabled_channel:
+  network: office
+  name: Disabled Channel
+  channel_type: email
+  config_json: '{"recipients":["nobody@example.com"]}'
+  enabled: false
+  severity_filter: all
+
+error_channel:
+  network: office
+  name: Broken Webhook
+  channel_type: webhook
+  config_json: '{"url":"https://hooks.example.com/broken"}'
+  enabled: true
+  severity_filter: all
+  last_error: "Connection refused"
+
+production_channel:
+  network: production
+  name: Prod Alerts
+  channel_type: slack
+  config_json: '{"webhook_url":"https://hooks.slack.com/services/T00/B00/prod","channel":"#prod-alerts"}'
+  enabled: true
+  severity_filter: all

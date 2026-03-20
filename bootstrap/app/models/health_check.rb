@@ -1,7 +1,11 @@
 # frozen_string_literal: true
 
 class HealthCheck < ApplicationRecord
+  include Notifiable
+
   belongs_to :machine
+
+  after_create_commit :notify_health_change, if: :bad_status?
 
   VALID_COMPONENTS = %w[ns relay gateway].freeze
   VALID_STATUSES = %w[healthy degraded down unknown].freeze
@@ -47,5 +51,22 @@ class HealthCheck < ApplicationRecord
   # Summary stats for a set of health checks
   def self.status_counts
     group(:status).count
+  end
+
+  private
+
+  def bad_status?
+    %w[down degraded].include?(status)
+  end
+
+  def notify_health_change
+    event = status == "down" ? "health_down" : "health_degraded"
+    severity = status == "down" ? "critical" : "warning"
+    notify_event(event,
+      subject: "Health #{status.upcase}: #{component} on #{machine&.hostname}",
+      body: "#{component.upcase} on #{machine&.hostname} is now #{status}.",
+      severity: severity,
+      details: { component: component, machine: machine&.hostname, status: status }
+    )
   end
 end

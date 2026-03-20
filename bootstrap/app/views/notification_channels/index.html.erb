@@ -1,0 +1,86 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Notification Channels</h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @network.name %> — Configure where notifications get delivered</p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-3">
+      <%= link_to network_notification_channels_path(@network, type: "email"), class: "rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" do %>
+        📧 Add Email
+      <% end %>
+      <%= link_to new_network_notification_channel_path(@network, type: "webhook"), class: "rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500" do %>
+        🔗 Add Webhook
+      <% end %>
+      <%= link_to new_network_notification_channel_path(@network, type: "slack"), class: "rounded-md bg-purple-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-purple-500" do %>
+        💬 Add Slack
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<% if @channels.any? %>
+  <div class="bg-white shadow rounded-lg overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Severity</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Sent</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Sent</th>
+          <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @channels.each do |channel| %>
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <div class="flex items-center">
+                <span class="text-lg mr-2"><%= channel.type_icon %></span>
+                <span class="text-sm font-medium text-gray-900"><%= channel.name %></span>
+              </div>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= channel.channel_type.capitalize %></td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <% case channel.status_label %>
+              <% when "healthy" %>
+                <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Enabled</span>
+              <% when "error" %>
+                <span class="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800" title="<%= channel.last_error %>">Error</span>
+              <% when "disabled" %>
+                <span class="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800">Disabled</span>
+              <% end %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= channel.severity_filter&.titleize || "All" %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+              <%= channel.last_sent_at ? time_ago_short(channel.last_sent_at) : "Never" %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= channel.send_count %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm space-x-2">
+              <%= link_to "Edit", edit_network_notification_channel_path(@network, channel), class: "text-ztlp-600 hover:text-ztlp-500" %>
+              <%= button_to "Test", test_network_notification_channel_path(@network, channel), method: :post, class: "text-green-600 hover:text-green-500 font-medium", form: { class: "inline" } %>
+              <%= button_to channel.enabled? ? "Disable" : "Enable", toggle_network_notification_channel_path(@network, channel), method: :post, class: "text-yellow-600 hover:text-yellow-500 font-medium", form: { class: "inline" } %>
+              <%= button_to "Delete", network_notification_channel_path(@network, channel), method: :delete, class: "text-red-600 hover:text-red-500 font-medium", data: { turbo_confirm: "Delete this notification channel?" }, form: { class: "inline" } %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  </div>
+<% else %>
+  <div class="bg-white shadow rounded-lg p-8 text-center">
+    <div class="text-4xl mb-3">🔔</div>
+    <h3 class="text-lg font-medium text-gray-900 mb-1">No notification channels configured</h3>
+    <p class="text-sm text-gray-500 mb-4">Set up email, webhook, or Slack notifications to stay informed about alerts and events.</p>
+    <%= link_to new_network_notification_channel_path(@network, type: "email"), class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500" do %>
+      Add Your First Channel
+    <% end %>
+  </div>
+<% end %>
+
+<div class="mt-6">
+  <%= link_to "📋 View Notification Logs", logs_network_notification_channels_path(@network), class: "text-sm text-ztlp-600 hover:text-ztlp-500 font-medium" %>
+  <span class="mx-2 text-gray-300">|</span>
+  <%= link_to "← Back to Network", network_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+</div>

@@ -1,0 +1,109 @@
+<div class="mb-6">
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Notification Logs</h1>
+      <p class="mt-1 text-sm text-gray-500"><%= @network.name %> — Delivery history</p>
+    </div>
+    <div>
+      <%= link_to "← Back to Channels", network_notification_channels_path(@network), class: "text-sm text-gray-500 hover:text-gray-700" %>
+    </div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="bg-white shadow rounded-lg p-4 mb-6">
+  <form method="get" class="flex flex-wrap items-end gap-4">
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Channel</label>
+      <select name="channel_id" class="rounded-md border-gray-300 text-sm">
+        <option value="">All Channels</option>
+        <% @channels.each do |ch| %>
+          <option value="<%= ch.id %>" <%= 'selected' if params[:channel_id] == ch.id.to_s %>><%= ch.type_icon %> <%= ch.name %></option>
+        <% end %>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Status</label>
+      <select name="status" class="rounded-md border-gray-300 text-sm">
+        <option value="">All</option>
+        <% NotificationLog::STATUSES.each do |s| %>
+          <option value="<%= s %>" <%= 'selected' if params[:status] == s %>><%= s.capitalize %></option>
+        <% end %>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-gray-500 mb-1">Event</label>
+      <select name="event_type" class="rounded-md border-gray-300 text-sm">
+        <option value="">All Events</option>
+        <% NotificationService::EVENTS.each do |e| %>
+          <option value="<%= e %>" <%= 'selected' if params[:event_type] == e %>><%= e.humanize %></option>
+        <% end %>
+      </select>
+    </div>
+    <div>
+      <button type="submit" class="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200">Filter</button>
+    </div>
+  </form>
+</div>
+
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <% if @logs.any? %>
+    <table class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Channel</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Event</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subject</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+          <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Error</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-200">
+        <% @logs.each do |log| %>
+          <tr>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><%= log.created_at.strftime("%b %d %H:%M:%S") %></td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+              <%= log.notification_channel.type_icon %> <%= log.notification_channel.name %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono"><%= log.event_type %></td>
+            <td class="px-6 py-4 text-sm text-gray-900"><%= log.subject %></td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <% case log.status %>
+              <% when "sent" %>
+                <span class="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">Sent</span>
+              <% when "failed" %>
+                <span class="inline-flex items-center rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800">Failed</span>
+              <% when "pending" %>
+                <span class="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800">Pending</span>
+              <% end %>
+            </td>
+            <td class="px-6 py-4 text-sm text-red-600 max-w-xs truncate"><%= log.error_message %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+
+    <!-- Pagination -->
+    <% total_pages = (@total / @per_page.to_f).ceil %>
+    <% if total_pages > 1 %>
+      <div class="px-6 py-3 bg-gray-50 flex items-center justify-between border-t border-gray-200">
+        <span class="text-sm text-gray-500">
+          Showing <%= (@page - 1) * @per_page + 1 %>-<%= [@page * @per_page, @total].min %> of <%= @total %> logs
+        </span>
+        <div class="flex gap-2">
+          <% if @page > 1 %>
+            <%= link_to "← Previous", request.params.merge(page: @page - 1), class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+          <% end %>
+          <% if @page < total_pages %>
+            <%= link_to "Next →", request.params.merge(page: @page + 1), class: "text-sm text-ztlp-600 hover:text-ztlp-500" %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% else %>
+    <div class="px-6 py-8 text-center text-gray-500">
+      No notification logs found.
+    </div>
+  <% end %>
+</div>

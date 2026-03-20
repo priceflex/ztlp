@@ -1,8 +1,12 @@
 # frozen_string_literal: true
 
 class Alert < ApplicationRecord
+  include Notifiable
+
   belongs_to :network
   belongs_to :machine
+
+  after_create_commit :notify_alert_created
 
   VALID_COMPONENTS = %w[ns relay gateway].freeze
   VALID_SEVERITIES = %w[warning critical].freeze
@@ -63,5 +67,17 @@ class Alert < ApplicationRecord
   # Count of active (unresolved, unacknowledged) alerts
   def self.active_count
     active.count
+  end
+
+  private
+
+  def notify_alert_created
+    event = severity == "critical" ? "alert_critical" : "alert_created"
+    notify_event(event,
+      subject: "#{severity.upcase}: #{message}",
+      body: "Alert on #{machine&.hostname || 'unknown'} (#{component}): #{message}",
+      severity: severity,
+      details: { component: component, machine: machine&.hostname, network: network&.name }
+    )
   end
 end

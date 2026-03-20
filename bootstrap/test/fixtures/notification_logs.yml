@@ -1,0 +1,34 @@
+email_sent:
+  notification_channel: email_channel
+  event_type: alert_created
+  subject: "WARNING: Gateway degraded"
+  body: "Gateway on gw1 is degraded"
+  status: sent
+  sent_at: <%= 1.hour.ago %>
+  created_at: <%= 1.hour.ago %>
+
+email_failed:
+  notification_channel: email_channel
+  event_type: alert_critical
+  subject: "CRITICAL: NS down"
+  body: "NS on ns1 is down"
+  status: failed
+  error_message: "Connection refused"
+  created_at: <%= 2.hours.ago %>
+
+webhook_sent:
+  notification_channel: webhook_channel
+  event_type: health_down
+  subject: "Health DOWN: gateway on gw1"
+  body: "Gateway on gw1 is now down"
+  status: sent
+  sent_at: <%= 30.minutes.ago %>
+  created_at: <%= 30.minutes.ago %>
+
+slack_pending:
+  notification_channel: slack_channel
+  event_type: user_revoked
+  subject: "User revoked: johndoe"
+  body: "User johndoe was revoked"
+  status: pending
+  created_at: <%= 5.minutes.ago %>

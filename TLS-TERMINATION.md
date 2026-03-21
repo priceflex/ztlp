@@ -13,6 +13,8 @@ Add TLS termination to the ZTLP Gateway so that standard browsers and HTTPS clie
 
 The approach: **ZTLP acts as its own internal Certificate Authority.** Services get ZTLP-issued X.509 certificates. Clients that install the ZTLP root CA (via `ztlp setup` or MDM) get trusted HTTPS with green locks. mTLS client certificates provide strong identity for the TLS path, unifying both access methods under one identity model.
 
+The gateway injects **trusted identity headers** (`X-ZTLP-Identity`, etc.) into HTTP requests, enabling backend applications to implement **passwordless authentication** — the mTLS certificate IS the login. No passwords, no MFA tokens, no OAuth dances. The cryptographic proof of identity happens at the network layer before the request ever reaches the application.
+
 For public-facing edges that need browser trust without CA installation, an optional ACME/Let's Encrypt integration is included as a secondary mode.
 
 ---
@@ -50,6 +52,14 @@ ZTLP Client ──[ZTLP/UDP]──► Gateway ──[plaintext TCP]──► Bac
 │                        │                                        │
 │                        ▼                                        │
 │  ┌─────────────────────────────────────────────┐                │
+│  │         Identity Header Injector             │                │
+│  │  Strip client X-ZTLP-* → Inject trusted     │                │
+│  │  X-ZTLP-Identity / Node-ID / Groups / HMAC  │                │
+│  │  (HTTP mode only — per-service auth_mode)    │                │
+│  └─────────────────────┬───────────────────────┘                │
+│                        │                                        │
+│                        ▼                                        │
+│  ┌─────────────────────────────────────────────┐                │
 │  │              Backend Pool                    │                │
 │  │  TCP / TLS connections to service backends   │                │
 │  └──────────────────────────────────────────────┘                │
@@ -65,11 +75,12 @@ ZTLP Client ──[ZTLP/UDP]──► Gateway ──[plaintext TCP]──► Bac
 
 ### Identity Flow Comparison
 
-| Path | Authentication | Identity Source | Policy Engine Input |
-|------|---------------|-----------------|---------------------|
-| ZTLP/UDP (existing) | Noise_XX handshake | Remote static pubkey → NS lookup → NodeID/user/zone | Same `authorize?/2` |
-| TLS + mTLS (new) | Client certificate | Cert CN/SAN → NS lookup → NodeID/user/zone | Same `authorize?/2` |
-| TLS without mTLS (new) | None at transport layer | Delegated to backend (pass-through) or IP-based | Reduced policy (IP/service only) |
+| Path | Authentication | Identity Source | Policy Engine Input | Backend Sees |
+|------|---------------|-----------------|---------------------|--------------|
+| ZTLP/UDP (existing) | Noise_XX handshake | Remote static pubkey → NS lookup → NodeID/user/zone | Same `authorize?/2` | Raw TCP bytes |
+| TLS + mTLS + `enforce` (new) | Client certificate | Cert CN/SAN → NS lookup → NodeID/user/zone | Same `authorize?/2` | `X-ZTLP-*` headers (passwordless) |
+| TLS + mTLS + `identity` (new) | Client certificate | Cert CN/SAN → NS lookup → NodeID/user/zone | Same `authorize?/2` | `X-ZTLP-*` headers (app can use or ignore) |
+| TLS + `passthrough` (new) | None at transport layer | Delegated to backend or IP-based | Reduced policy (IP/service only) | No ZTLP headers |
 
 ---
 
@@ -383,6 +394,361 @@ ZTLP_GATEWAY_MTLS_REQUIRED=false
 
 ---
 
+#### 2E — Identity Header Injection & Passwordless Auth
+
+**Goal:** Inject trusted ZTLP identity headers into HTTP requests so backend apps get cryptographically-verified user identity without building their own auth. Enables passwordless login.
+
+This is the feature that transforms ZTLP from "secure transport" into "zero-trust application identity." The app doesn't build an auth layer — it reads headers that the gateway guarantees are authentic.
+
+##### The Problem This Solves
+
+Without identity headers, even with mTLS:
+1. Gateway knows the client is `steve@corp.ztlp` (from cert)
+2. Gateway opens TCP connection to backend
+3. Backend sees raw HTTP bytes — has NO idea who the client is
+4. Backend still needs its own login page, password database, session cookies
+5. User could type any username at the login form — the app can't verify it
+
+With identity headers:
+1. Gateway extracts identity from mTLS cert
+2. Gateway parses the HTTP request, strips any forged `X-ZTLP-*` headers
+3. Gateway injects authenticated headers + HMAC signature
+4. Backend reads `X-ZTLP-Identity: steve@corp.ztlp` — guaranteed by gateway
+5. Backend auto-logs in the user. No password. No form. No MFA.
+
+##### Auth Modes (per-service configuration)
+
+| Mode | mTLS Required | Headers Injected | Login Page Needed | Use Case |
+|------|:---:|:---:|:---:|------|
+| `passthrough` | No | No | Yes (app's own) | Public-facing apps, legacy apps not yet integrated |
+| `identity` | Optional | Yes (if cert present) | Optional | Apps that support both password and passwordless login |
+| `enforce` | **Yes** | Yes | **No** | Internal tools, admin panels — pure zero-trust passwordless |
+
+##### Identity Headers
+
+| Header | Description | Example |
+|--------|-------------|---------|
+| `X-ZTLP-Identity` | User/device FQDN from cert | `steve@corp.ztlp` |
+| `X-ZTLP-Node-ID` | 128-bit NodeID (hex) | `a1b2c3d4e5f60718...` |
+| `X-ZTLP-Zone` | Zone the identity belongs to | `corp.ztlp` |
+| `X-ZTLP-Groups` | Comma-separated group memberships | `admins,engineering` |
+| `X-ZTLP-Device` | Device name (if device cert) | `laptop-01.corp.ztlp` |
+| `X-ZTLP-Verified` | Whether mTLS identity was verified | `true` or `false` |
+| `X-ZTLP-Timestamp` | Unix timestamp of header injection | `1711062600` |
+| `X-ZTLP-Signature` | HMAC-SHA256 of all above headers | `sha256=a1b2c3...` |
+
+##### Header Injection Flow
+
+```
+Client HTTP request arrives over TLS:
+    GET /dashboard HTTP/1.1
+    Host: webapp.corp.ztlp
+    X-ZTLP-Identity: evil-attempt-to-forge    ← attacker tries this
+    Cookie: session=abc123
+
+Gateway processing:
+    1. Extract mTLS identity → steve@corp.ztlp
+    2. Query NS for group memberships → [admins, engineering]
+    3. Strip ALL existing X-ZTLP-* headers from request  ← forgery prevention
+    4. Inject authenticated headers
+    5. Compute HMAC-SHA256 over injected headers
+    6. Forward modified request to backend
+
+Backend receives:
+    GET /dashboard HTTP/1.1
+    Host: webapp.corp.ztlp
+    Cookie: session=abc123
+    X-ZTLP-Identity: steve@corp.ztlp           ← gateway-injected
+    X-ZTLP-Node-ID: a1b2c3d4e5f60718...        ← gateway-injected
+    X-ZTLP-Zone: corp.ztlp                      ← gateway-injected
+    X-ZTLP-Groups: admins,engineering            ← gateway-injected
+    X-ZTLP-Device: steve-macbook.corp.ztlp       ← gateway-injected
+    X-ZTLP-Verified: true                        ← gateway-injected
+    X-ZTLP-Timestamp: 1711062600                 ← gateway-injected
+    X-ZTLP-Signature: sha256=9f8e7d6c5b4a...    ← gateway-injected (HMAC proof)
+```
+
+##### HMAC Signature (Anti-Forgery)
+
+Even though the backend should only be reachable through the gateway, defense in depth says we sign the headers:
+
+```elixir
+# Gateway computes:
+payload = "#{identity}|#{node_id}|#{zone}|#{groups}|#{device}|#{verified}|#{timestamp}"
+signature = :crypto.mac(:hmac, :sha256, shared_secret, payload) |> Base.encode16(case: :lower)
+
+# Backend verifies:
+# 1. Parse X-ZTLP-Signature header
+# 2. Recompute HMAC from the other X-ZTLP-* headers
+# 3. Constant-time compare
+# 4. Check timestamp is within acceptable window (e.g., ±60 seconds)
+```
+
+The shared secret is configured in both gateway and backend:
+- Gateway: `ZTLP_HEADER_HMAC_SECRET` or `gateway.yml` → `tls.header_signing_secret`
+- Backend: app reads from environment variable
+
+##### HTTP Parsing (Minimal)
+
+The gateway does NOT become a full HTTP reverse proxy. It only needs to:
+
+1. **Buffer bytes until `\r\n\r\n`** — end of HTTP/1.1 headers (or HTTP/2 HEADERS frame)
+2. **Scan for `X-ZTLP-` prefix** in header lines → remove them
+3. **Append new `X-ZTLP-*` header lines** before the blank line
+4. **Forward modified headers + body** to backend (body is never parsed)
+5. **Response direction: pure passthrough** — no modification
+
+For HTTP/2: frame-level header manipulation via HPACK. More complex but same principle.
+For WebSocket: headers injected on the upgrade request, then pure passthrough.
+
+```elixir
+defmodule ZtlpGateway.HttpHeaderInjector do
+  @moduledoc """
+  Minimal HTTP header manipulation for identity injection.
+  
+  NOT a full HTTP parser. Only understands enough to:
+  1. Find the end of HTTP headers
+  2. Strip X-ZTLP-* headers (prevent forgery)
+  3. Inject authenticated identity headers
+  4. Pass everything else through unchanged
+  """
+
+  @ztlp_prefix "x-ztlp-"
+
+  @doc """
+  Process the first chunk of an HTTP request.
+  
+  Returns {:ok, modified_data, remaining_body_bytes} or
+  {:incomplete, buffered} if headers aren't complete yet.
+  """
+  @spec inject(binary(), map(), binary()) :: {:ok, binary()} | {:incomplete, binary()}
+  def inject(data, identity, hmac_secret) do
+    case find_header_end(data) do
+      {:ok, header_bytes, body_bytes} ->
+        headers = parse_headers(header_bytes)
+        cleaned = strip_ztlp_headers(headers)
+        injected = append_identity_headers(cleaned, identity, hmac_secret)
+        {:ok, serialize_headers(injected) <> body_bytes}
+      
+      :incomplete ->
+        {:incomplete, data}
+    end
+  end
+end
+```
+
+##### Backend Integration Examples
+
+**Rails — Passwordless auto-login middleware:**
+
+```ruby
+# config/initializers/ztlp_auth.rb
+class ZtlpAuth
+  HMAC_SECRET = ENV["ZTLP_HEADER_HMAC_SECRET"]
+
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    request = Rack::Request.new(env)
+    
+    if valid_ztlp_headers?(request)
+      identity = request.get_header("HTTP_X_ZTLP_IDENTITY")
+      user = User.find_by(ztlp_identity: identity)
+      
+      if user
+        # Auto-login — no password needed
+        env["warden"].set_user(user) if defined?(Warden)
+        # Or for simple apps:
+        env["rack.session"]["user_id"] = user.id
+      end
+    end
+
+    @app.call(env)
+  end
+
+  private
+
+  def valid_ztlp_headers?(request)
+    return false unless request.get_header("HTTP_X_ZTLP_VERIFIED") == "true"
+    return false unless HMAC_SECRET
+    
+    # Verify HMAC signature
+    timestamp = request.get_header("HTTP_X_ZTLP_TIMESTAMP").to_i
+    return false if (Time.now.to_i - timestamp).abs > 60  # 60-second window
+    
+    payload = [
+      request.get_header("HTTP_X_ZTLP_IDENTITY"),
+      request.get_header("HTTP_X_ZTLP_NODE_ID"),
+      request.get_header("HTTP_X_ZTLP_ZONE"),
+      request.get_header("HTTP_X_ZTLP_GROUPS"),
+      request.get_header("HTTP_X_ZTLP_DEVICE"),
+      request.get_header("HTTP_X_ZTLP_VERIFIED"),
+      timestamp.to_s
+    ].join("|")
+    
+    expected = OpenSSL::HMAC.hexdigest("SHA256", HMAC_SECRET, payload)
+    actual = request.get_header("HTTP_X_ZTLP_SIGNATURE")&.delete_prefix("sha256=")
+    
+    ActiveSupport::SecurityUtils.secure_compare(expected, actual || "")
+  end
+end
+```
+
+**Express.js — Passwordless middleware:**
+
+```javascript
+// middleware/ztlpAuth.js
+const crypto = require('crypto');
+const HMAC_SECRET = process.env.ZTLP_HEADER_HMAC_SECRET;
+
+function ztlpAuth(req, res, next) {
+  if (req.headers['x-ztlp-verified'] !== 'true') return next();
+  
+  // Verify HMAC
+  const ts = parseInt(req.headers['x-ztlp-timestamp']);
+  if (Math.abs(Date.now() / 1000 - ts) > 60) return next();
+  
+  const payload = [
+    req.headers['x-ztlp-identity'],
+    req.headers['x-ztlp-node-id'],
+    req.headers['x-ztlp-zone'],
+    req.headers['x-ztlp-groups'],
+    req.headers['x-ztlp-device'],
+    req.headers['x-ztlp-verified'],
+    ts.toString()
+  ].join('|');
+  
+  const expected = crypto.createHmac('sha256', HMAC_SECRET)
+    .update(payload).digest('hex');
+  const actual = (req.headers['x-ztlp-signature'] || '').replace('sha256=', '');
+  
+  if (crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) {
+    req.ztlpIdentity = req.headers['x-ztlp-identity'];
+    req.ztlpGroups = (req.headers['x-ztlp-groups'] || '').split(',');
+    // Auto-login: set session, find user, etc.
+  }
+  
+  next();
+}
+```
+
+**Any language — the pattern is the same:**
+1. Check `X-ZTLP-Verified: true`
+2. Verify HMAC signature (prevents forgery even if backend is accidentally exposed)
+3. Check timestamp freshness (prevents replay)
+4. Read `X-ZTLP-Identity` → look up or create user → auto-login
+
+##### What This Replaces
+
+| Old Way | ZTLP Passwordless |
+|---------|-------------------|
+| Username + password form | Device cert → auto-login (no form) |
+| Password database (bcrypt/argon2) | Not needed — identity is in the cert |
+| Password reset emails | Not needed |
+| MFA / TOTP / SMS codes | Not needed — cert IS "something you have" |
+| Session cookies (expire, stolen) | Identity header on every request (stateless) |
+| OAuth2 / OIDC / SAML redirects | Not needed for internal apps |
+| API keys (leaked in repos, Slack) | mTLS service certs (never leave the machine) |
+| VPN to reach internal tools | ZTLP IS the access layer |
+
+##### Security Properties
+
+1. **Headers are gateway-injected, never client-provided.** Gateway strips ALL incoming `X-ZTLP-*` headers before injecting its own. Clients cannot forge identity.
+
+2. **Backend MUST only be reachable through the gateway.** If someone bypasses the gateway, they could forge headers. Enforced by:
+   - Binding backend to `127.0.0.1` (same host) or private network
+   - ZTLP policy blocking direct access
+   - HMAC signature as defense-in-depth (even if reached directly, can't sign)
+
+3. **HMAC-signed headers (defense in depth).** Shared secret between gateway and backend. Even if an attacker reaches the backend directly, they cannot produce a valid HMAC.
+
+4. **Timestamp prevents replay.** 60-second window means captured headers can't be reused later.
+
+5. **Group memberships are live.** Gateway queries NS for current group membership at request time (cached with short TTL). Removing a user from a group takes effect within the cache window.
+
+##### Per-Service Auth Mode Configuration
+
+```yaml
+# gateway.yml — extended backend config
+backends:
+  - name: bootstrap
+    host: 127.0.0.1
+    port: 3000
+    hostnames:
+      - bootstrap.corp.ztlp
+    auth_mode: enforce          # mTLS required, headers injected, no login page
+    
+  - name: lincx-tech
+    host: 127.0.0.1
+    port: 3001
+    hostnames:
+      - support.corp.ztlp
+    auth_mode: identity         # mTLS optional, headers if cert present
+    
+  - name: lincx-customer
+    host: 127.0.0.1
+    port: 3001
+    hostnames:
+      - chat.corp.ztlp
+    auth_mode: passthrough      # no mTLS, no headers, app handles auth
+    
+  - name: chooseforce
+    host: 127.0.0.1
+    port: 3002
+    hostnames:
+      - crm.corp.ztlp
+    auth_mode: enforce          # passwordless — open URL, you're in
+
+# HMAC signing secret (shared between gateway and backends)
+tls:
+  header_signing:
+    enabled: true
+    secret_env: ZTLP_HEADER_HMAC_SECRET    # read from env var
+    # Or inline (not recommended for production):
+    # secret: "your-256-bit-secret-here"
+    timestamp_window_seconds: 60
+    
+    # Optional: per-backend secret override
+    backend_secrets:
+      bootstrap: "${BOOTSTRAP_HMAC_SECRET}"
+      chooseforce: "${CHOOSEFORCE_HMAC_SECRET}"
+```
+
+##### SDK / Helper Libraries (Future)
+
+To make backend integration even easier, publish lightweight HMAC-verification libraries:
+
+- `ztlp-auth-ruby` (gem) — Rack middleware, Rails integration
+- `ztlp-auth-node` (npm) — Express/Koa/Fastify middleware
+- `ztlp-auth-python` (pip) — Django/Flask middleware
+- `ztlp-auth-go` (module) — net/http middleware
+- `ztlp-auth-elixir` (hex) — Plug middleware
+
+Each is ~50-100 lines. Just HMAC verification + header parsing. Not v1 scope, but worth noting.
+
+**Files:**
+- `gateway/lib/ztlp_gateway/http_header_injector.ex` — HTTP header parsing, stripping, injection
+- `gateway/lib/ztlp_gateway/header_signer.ex` — HMAC-SHA256 computation and verification
+- Update `gateway/lib/ztlp_gateway/tls_session.ex` — wire up header injection after identity extraction
+- Update `gateway/lib/ztlp_gateway/config.ex` — `auth_mode` and `header_signing` config
+- `docs/PASSWORDLESS.md` — Passwordless auth guide with backend integration examples
+- `docs/IDENTITY-HEADERS.md` — Header reference, security model, HMAC verification guide
+
+**Tests:** ~55
+- Header injection/stripping (various HTTP request formats)
+- HMAC computation and verification
+- Forged header rejection
+- Auth mode enforcement (passthrough/identity/enforce)
+- Timestamp window validation
+- Group membership resolution
+- WebSocket upgrade header injection
+- Malformed HTTP handling (graceful fallback to passthrough)
+- HTTP/1.0, HTTP/1.1, chunked transfer edge cases
+
+---
+
 ### Phase 3: Client-Side CA Trust Installation
 
 **Goal:** Make `ztlp setup` install the ZTLP root CA into the system trust store so browsers trust ZTLP-issued certs.
@@ -678,7 +1044,7 @@ Phase 2A: TLS Acceptor ───► Phase 2B: SNI Routing ───► Phase 2C:
     │                                                        │
     └────────────────────────────────────────────────────────┤
                                                              │
-Phase 2D: mTLS Identity ◄───────────────────────────────────┘
+Phase 2D: mTLS Identity ───► Phase 2E: Identity Headers & Passwordless
     │
     ▼
 Phase 3A: CA Distribution ───► Phase 3B: OS Trust Install ───► Phase 3C: Browser Cert
@@ -694,14 +1060,14 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 
 **Estimated scope:**
 - **Phase 1:** ~125 tests, ~2,500 lines (Elixir + Rust)
-- **Phase 2:** ~150 tests, ~2,000 lines (Elixir)
+- **Phase 2:** ~205 tests, ~2,800 lines (Elixir) — includes 2E identity headers
 - **Phase 3:** ~25 tests, ~800 lines (Rust)
 - **Phase 4:** ~40 tests, ~1,200 lines (Elixir) — optional
 - **Phase 5:** ~35 tests, ~600 lines (Elixir)
 - **Phase 6:** ~15 tests, ~500 lines + docs
 
-**Total: ~390 tests, ~7,600 lines** (excluding Phase 4)
-**With Phase 4: ~430 tests, ~8,800 lines**
+**Total: ~445 tests, ~8,400 lines** (excluding Phase 4)
+**With Phase 4: ~485 tests, ~9,600 lines**
 
 ---
 
@@ -718,6 +1084,11 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 | SNI spoofing | SNI validated against configured services; unknown SNI rejected |
 | CA key at rest | Encrypted with AES-256-GCM; passphrase or zone-secret derived |
 | mTLS bypass (no client cert) | Configurable: `mtls_required` per service; anonymous gets restricted policy |
+| Forged `X-ZTLP-*` headers | Gateway strips ALL incoming `X-ZTLP-*` before injecting; only gateway can set them |
+| Direct backend access (bypass gateway) | Backend binds to localhost; HMAC signature as defense-in-depth |
+| Header replay attack | Timestamp in HMAC payload; 60-second validity window |
+| HMAC secret compromise | Per-backend secret override; rotation without downtime; secret from env vars (not config files) |
+| User impersonation at login | `enforce` mode: identity comes from cert, no login form exists; `identity` mode: app can cross-check form input against header |
 
 ### Key Decisions
 
@@ -729,7 +1100,11 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 
 4. **No OCSP in v1:** CRL is simpler and sufficient for the scale. OCSP adds latency to every TLS handshake. Revisit if needed.
 
-5. **No HTTP parsing in gateway:** The gateway proxies TCP bytes, not HTTP requests. This keeps it transport-agnostic and avoids the complexity of a full reverse proxy. If HTTP header injection (like `X-ZTLP-User`) is needed, that's a separate feature.
+5. **Minimal HTTP parsing for identity headers:** The gateway does NOT become a full reverse proxy. It only parses enough HTTP to strip forged `X-ZTLP-*` headers and inject authenticated ones. Request bodies are never parsed. Response direction is pure passthrough. Services configured as `auth_mode: passthrough` get zero HTTP parsing — pure TCP proxy as before.
+
+6. **Three auth modes per service:** `passthrough` (legacy/public), `identity` (headers if cert present, app chooses), `enforce` (mTLS required, passwordless). This gives a migration path — start with `passthrough`, move to `identity`, graduate to `enforce` as trust grows.
+
+7. **HMAC-signed headers:** Defense in depth. Even if someone reaches the backend directly (misconfigured firewall, etc.), they can't produce valid HMAC signatures. Per-backend secrets supported for isolation.
 
 ---
 
@@ -755,31 +1130,67 @@ All X.509 work uses Erlang's built-in `:public_key` module. Zero external deps, 
 After all phases are complete:
 
 ```bash
-# Admin sets up CA (once)
+# ── Admin setup (once per deployment) ──────────────────────────────
+
+# Initialize the ZTLP Certificate Authority
 ztlp admin ca init --org "Tech Rockstars"
 
-# Admin issues cert for a web app
+# Issue cert for a web app
 ztlp admin cert issue --service webapp.corp.ztlp
 
-# Gateway config routes TLS → backend
-# (gateway.yml already configured with backends + hostnames)
+# Gateway config routes TLS → backend with auth_mode
+# (gateway.yml already configured with backends + hostnames + auth_mode)
 
-# User enrolls their device (once)
+
+# ── User enrollment (once per device) ─────────────────────────────
+
 ztlp setup --token ztlp://enroll/AQ... --trust-ca --install-client-cert
-# → Identity provisioned
-# → Root CA installed in system trust store
-# → Client cert installed in browser (optional)
+# → Identity provisioned (steve@corp.ztlp)
+# → Root CA installed in system trust store (green lock in browsers)
+# → Client cert installed in browser keychain (for mTLS)
 
-# Now from any browser on that machine:
-https://webapp.corp.ztlp     # ✅ Trusted, green lock, no warnings
-https://grafana.corp.ztlp    # ✅ Same
-https://internal-api.corp.ztlp  # ✅ mTLS — browser shows cert picker
+
+# ── Daily use (zero friction) ─────────────────────────────────────
+
+# Open any internal app — no login page, no password:
+https://bootstrap.corp.ztlp    # ✅ Auto-logged in as steve@corp.ztlp
+https://crm.corp.ztlp          # ✅ ChooseForce — instant access
+https://grafana.corp.ztlp      # ✅ Dashboards — zero-click
+
+# Backend app sees trusted headers:
+#   X-ZTLP-Identity: steve@corp.ztlp
+#   X-ZTLP-Groups: admins,engineering
+#   X-ZTLP-Verified: true
+#   X-ZTLP-Signature: sha256=9f8e7d...  (HMAC proof)
+
+# App reads headers → auto-login → done. No password. No MFA. No OAuth.
+
+# Customer-facing endpoints still work normally:
+https://chat.corp.ztlp         # ✅ passthrough mode — app's own login
 
 # From ZTLP native client (unchanged):
 ztlp connect webapp.corp.ztlp  # ✅ Same backend, same policy, ZTLP/UDP path
 
 # Both paths: same PolicyEngine, same AuditLog, same identity model
 ```
+
+### What Passwordless Eliminates
+
+For every internal app behind ZTLP with `auth_mode: enforce`:
+
+| Component | Status |
+|-----------|--------|
+| Login page | **Delete it** |
+| Password database (bcrypt/argon2) | **Delete it** |
+| Password reset flow | **Delete it** |
+| "Forgot password" emails | **Gone** |
+| MFA / TOTP / SMS codes | **Not needed** — the cert IS the second factor |
+| Session cookie management | **Optional** — identity on every request |
+| OAuth2 / OIDC integration | **Not needed** for internal apps |
+| API key rotation | **Replaced** by mTLS service certs |
+| VPN client | **Replaced** by ZTLP |
+
+For apps in `identity` mode (supporting both), you keep the login page as fallback but most enrolled users never see it.
 
 ---
 

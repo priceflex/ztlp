@@ -193,11 +193,15 @@ final class TunnelViewModel: ObservableObject {
             if !svcName.isEmpty && !nsServer.isEmpty {
                 let nsName = svcName.contains(".") ? svcName : "\(svcName).techrockstars.ztlp"
                 do {
-                    let resolved = try bridge.nsResolve(
-                        serviceName: nsName,
-                        nsServer: nsServer,
-                        timeoutMs: 5000
-                    )
+                    // Run blocking NS resolve off the main thread to avoid priority inversion
+                    let bridgeRef = bridge
+                    let resolved = try await Task.detached(priority: .userInitiated) {
+                        try bridgeRef.nsResolve(
+                            serviceName: nsName,
+                            nsServer: nsServer,
+                            timeoutMs: 5000
+                        )
+                    }.value
                     print("[ZTLP] NS resolved \(nsName) -> \(resolved)")
                     target = resolved
                 } catch {

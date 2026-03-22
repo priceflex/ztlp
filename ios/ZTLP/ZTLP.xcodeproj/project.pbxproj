@@ -43,6 +43,7 @@
 		AA000028 /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC000009; };
 		/* Tunnel Sources */
 		AA000030 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000030; };
+		AA100001 /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB100001; };
 		AA000031 /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000031; };
 		/* Tunnel Frameworks */
 		AA000040 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC000001; };
@@ -121,6 +122,7 @@
 		BB000019 /* ZTLP-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ZTLP-Bridging-Header.h"; sourceTree = "<group>"; };
 		/* Tunnel Sources */
 		BB000030 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		BB100001 /* TunnelConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfiguration.swift; sourceTree = "<group>"; };
 		BB000031 /* TunnelConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfiguration.swift; sourceTree = "<group>"; };
 		BB000032 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB000033 /* ZTLPTunnel-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "ZTLPTunnel-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -251,6 +253,8 @@
 			isa = PBXGroup;
 			children = (
 				BB00000E,
+				BB100001,
+				BB000050,
 				BB00000F,
 				BB000010,
 				BB000011,
@@ -468,6 +472,7 @@
 				AA00000C,
 				AA00000D,
 				AA00000E,
+				AA100001,
 				AA00000F,
 				AA000010,
 				AA000011,

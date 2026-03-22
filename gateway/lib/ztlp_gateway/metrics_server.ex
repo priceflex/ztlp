@@ -135,6 +135,7 @@ defmodule ZtlpGateway.MetricsServer do
       "ztlp_gateway_backend_errors_total #{stats.backend_errors}\n\n",
       circuit_breaker_metrics(),
       gateway_component_auth_metrics(),
+      tls_metrics(),
       beam_metrics()
     ] |> IO.iodata_to_binary()
   end
@@ -209,6 +210,40 @@ defmodule ZtlpGateway.MetricsServer do
         "# HELP ztlp_gateway_component_auth_failures_total Failed authentications\n",
         "# TYPE ztlp_gateway_component_auth_failures_total counter\n",
         "ztlp_gateway_component_auth_failures_total #{auth.failures}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
+    end
+  end
+
+  defp tls_metrics do
+    try do
+      tls_stats = ZtlpGateway.TlsListener.stats()
+
+      [
+        "# HELP ztlp_gateway_tls_connections_total TLS connections by status\n",
+        "# TYPE ztlp_gateway_tls_connections_total counter\n",
+        "ztlp_gateway_tls_connections_total{status=\"established\"} #{Map.get(tls_stats, :established, 0)}\n",
+        "ztlp_gateway_tls_connections_total{status=\"rejected\"} #{Map.get(tls_stats, :rejected, 0)}\n",
+        "ztlp_gateway_tls_connections_total{status=\"error\"} #{Map.get(tls_stats, :errors, 0)}\n",
+        "\n",
+        "# HELP ztlp_gateway_tls_connections_active Active TLS connections\n",
+        "# TYPE ztlp_gateway_tls_connections_active gauge\n",
+        "ztlp_gateway_tls_connections_active #{Map.get(tls_stats, :active, 0)}\n",
+        "\n",
+        "# HELP ztlp_gateway_tls_mtls_auth_total mTLS authentication results\n",
+        "# TYPE ztlp_gateway_tls_mtls_auth_total counter\n",
+        "ztlp_gateway_tls_mtls_auth_total{result=\"success\"} #{Map.get(tls_stats, :mtls_success, 0)}\n",
+        "ztlp_gateway_tls_mtls_auth_total{result=\"failure\"} #{Map.get(tls_stats, :mtls_failure, 0)}\n",
+        "ztlp_gateway_tls_mtls_auth_total{result=\"none\"} #{Map.get(tls_stats, :mtls_none, 0)}\n",
+        "\n",
+        "# HELP ztlp_gateway_tls_cert_renewals_total Certificate renewals\n",
+        "# TYPE ztlp_gateway_tls_cert_renewals_total counter\n",
+        "ztlp_gateway_tls_cert_renewals_total{status=\"success\"} #{Map.get(tls_stats, :cert_renewals_ok, 0)}\n",
+        "ztlp_gateway_tls_cert_renewals_total{status=\"failure\"} #{Map.get(tls_stats, :cert_renewals_fail, 0)}\n",
         "\n"
       ]
     rescue

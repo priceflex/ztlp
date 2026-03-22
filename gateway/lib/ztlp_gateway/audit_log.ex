@@ -120,6 +120,87 @@ defmodule ZtlpGateway.AuditLog do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # TLS Audit Events
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Log a TLS connection established event.
+
+  ## Parameters
+  - `hostname` — SNI hostname
+  - `identity` — TLS identity map (from TlsIdentity)
+  - `source` — `{ip, port}` of the client
+  """
+  @spec tls_connection_established(String.t(), map() | nil, {tuple(), non_neg_integer()} | nil) :: :ok
+  def tls_connection_established(hostname, identity, source \\ nil) do
+    log(%{
+      event: :tls_connection_established,
+      hostname: hostname,
+      node_id: identity && Map.get(identity, :node_id),
+      node_name: identity && Map.get(identity, :node_name),
+      assurance: identity && Map.get(identity, :assurance),
+      authenticated: identity != nil and Map.get(identity || %{}, :authenticated, false),
+      source: source
+    })
+  end
+
+  @doc """
+  Log a TLS authentication failure event.
+
+  ## Parameters
+  - `hostname` — SNI hostname
+  - `reason` — failure reason
+  - `source` — `{ip, port}` of the client
+  """
+  @spec tls_auth_failed(String.t() | nil, atom() | String.t(), {tuple(), non_neg_integer()} | nil) :: :ok
+  def tls_auth_failed(hostname, reason, source \\ nil) do
+    log(%{
+      event: :tls_auth_failed,
+      hostname: hostname,
+      reason: reason,
+      source: source
+    })
+  end
+
+  @doc """
+  Log a certificate revocation check event.
+  """
+  @spec cert_revocation_checked(String.t(), boolean()) :: :ok
+  def cert_revocation_checked(fingerprint, revoked) do
+    log(%{
+      event: :cert_revocation_checked,
+      fingerprint: fingerprint,
+      revoked: revoked
+    })
+  end
+
+  @doc """
+  Log a certificate revoked event.
+  """
+  @spec cert_revoked(String.t(), String.t()) :: :ok
+  def cert_revoked(fingerprint, reason) do
+    log(%{
+      event: :cert_revoked,
+      fingerprint: fingerprint,
+      reason: reason
+    })
+  end
+
+  @doc """
+  Log an assurance level insufficient event.
+  """
+  @spec assurance_insufficient(String.t() | nil, atom(), atom(), String.t() | nil) :: :ok
+  def assurance_insufficient(node_id, actual, required, service) do
+    log(%{
+      event: :assurance_insufficient,
+      node_id: node_id,
+      actual_assurance: actual,
+      required_assurance: required,
+      service: service
+    })
+  end
+
   @doc "Clear all audit events."
   @spec clear() :: :ok
   def clear do

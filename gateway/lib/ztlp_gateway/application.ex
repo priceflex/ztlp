@@ -43,7 +43,8 @@ defmodule ZtlpGateway.Application do
       ZtlpGateway.PolicyEngine,
       ZtlpGateway.NsClient,
       {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
-      ZtlpGateway.Listener
+      ZtlpGateway.Listener,
+      ZtlpGateway.RelayRegistrar
     ]
 
     opts = [strategy: :one_for_one, name: ZtlpGateway.Supervisor]

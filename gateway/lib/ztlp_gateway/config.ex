@@ -175,6 +175,114 @@ defmodule ZtlpGateway.Config do
     Application.get_env(:ztlp_gateway, :header_signing_timestamp_window, 60)
   end
 
+  # ── Relay Registration ─────────────────────────────────────────
+
+  @doc """
+  Relay server address for dynamic registration.
+
+  Format: `ZTLP_RELAY_SERVER=host:port`
+  Returns `{ip_tuple, port}` or nil if not set.
+  """
+  @spec relay_server() :: {:inet.ip_address(), non_neg_integer()} | nil
+  def relay_server do
+    case System.get_env("ZTLP_RELAY_SERVER") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :relay_server)
+
+      str ->
+        case String.split(str, ":") do
+          [host, port_str] ->
+            case Integer.parse(port_str) do
+              {port, ""} ->
+                case :inet.parse_address(String.to_charlist(host)) do
+                  {:ok, ip} -> {ip, port}
+                  {:error, _} ->
+                    # Try DNS resolution
+                    case :inet.getaddr(String.to_charlist(host), :inet) do
+                      {:ok, ip} -> {ip, port}
+                      _ -> nil
+                    end
+                end
+
+              _ ->
+                nil
+            end
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  @doc """
+  Shared secret for relay registration HMAC.
+
+  Set via `ZTLP_RELAY_REGISTRATION_SECRET` env var.
+  Returns nil if not set (dev mode — sends registrations without HMAC).
+  """
+  @spec registration_secret() :: binary() | nil
+  def registration_secret do
+    case System.get_env("ZTLP_RELAY_REGISTRATION_SECRET") do
+      nil -> Application.get_env(:ztlp_gateway, :registration_secret)
+      secret -> secret
+    end
+  end
+
+  @doc """
+  Service names this gateway exposes. Used in relay registration packets.
+
+  Format: `ZTLP_GATEWAY_SERVICE_NAMES=beta,api,metrics`
+  Default: `["default"]`
+  """
+  @spec service_names() :: [String.t()]
+  def service_names do
+    case System.get_env("ZTLP_GATEWAY_SERVICE_NAMES") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :service_names, ["default"])
+
+      str ->
+        str
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+    end
+  end
+
+  @doc """
+  Gateway node ID (16 bytes) for relay registration.
+
+  Read from `ZTLP_GATEWAY_NODE_ID` env var (hex-encoded, 32 hex chars = 16 bytes).
+  If not set, generates a random ID.
+  """
+  @spec node_id() :: binary()
+  def node_id do
+    case System.get_env("ZTLP_GATEWAY_NODE_ID") do
+      nil ->
+        case Application.get_env(:ztlp_gateway, :node_id) do
+          nil ->
+            id = :crypto.strong_rand_bytes(16)
+            Application.put_env(:ztlp_gateway, :node_id, id)
+            id
+
+          id when byte_size(id) == 16 ->
+            id
+
+          _ ->
+            id = :crypto.strong_rand_bytes(16)
+            Application.put_env(:ztlp_gateway, :node_id, id)
+            id
+        end
+
+      hex_str ->
+        case Base.decode16(hex_str, case: :mixed) do
+          {:ok, <<id::binary-size(16)>>} -> id
+          _ ->
+            id = :crypto.strong_rand_bytes(16)
+            Application.put_env(:ztlp_gateway, :node_id, id)
+            id
+        end
+    end
+  end
+
   @doc "NS host for service discovery. Only used in Docker/production."
   @spec ns_host() :: String.t() | nil
   def ns_host, do: System.get_env("ZTLP_GATEWAY_NS_HOST")

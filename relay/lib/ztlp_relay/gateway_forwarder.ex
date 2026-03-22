@@ -34,8 +34,16 @@ defmodule ZtlpRelay.GatewayForwarder do
           created_at: integer()
         }
 
+  @type dynamic_gateway :: %{
+          address: {:inet.ip_address(), non_neg_integer()},
+          node_id: binary(),
+          service_name: String.t(),
+          expires_at: integer()
+        }
+
   @type state :: %{
           gateways: [{:inet.ip_address(), non_neg_integer()}],
+          dynamic_gateways: [dynamic_gateway()],
           sessions: %{binary() => gateway_session()},
           gateway_index: non_neg_integer()
         }
@@ -48,10 +56,20 @@ defmodule ZtlpRelay.GatewayForwarder do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Check if gateway forwarding is enabled."
+  @doc """
+  Check if gateway forwarding is enabled.
+  Returns true if static gateways are configured OR if any dynamic gateways
+  are registered (the forwarder process must be running).
+  """
   @spec enabled?() :: boolean()
   def enabled? do
-    Config.gateway_addresses() != []
+    case GenServer.whereis(__MODULE__) do
+      nil ->
+        Config.gateway_addresses() != []
+
+      _pid ->
+        GenServer.call(__MODULE__, :enabled?)
+    end
   end
 
   @doc """
@@ -81,6 +99,27 @@ defmodule ZtlpRelay.GatewayForwarder do
     GenServer.call(__MODULE__, :pick_gateway)
   end
 
+  @doc """
+  Register a dynamically-discovered gateway.
+  Called when the relay receives a GATEWAY_REGISTER packet.
+  The address is the source address of the UDP packet (works behind NAT).
+  """
+  @spec register_dynamic_gateway(
+          {:inet.ip_address(), non_neg_integer()},
+          binary(),
+          String.t(),
+          non_neg_integer()
+        ) :: :ok
+  def register_dynamic_gateway(address, node_id, service_name, ttl) do
+    GenServer.cast(__MODULE__, {:register_dynamic, address, node_id, service_name, ttl})
+  end
+
+  @doc "List currently registered dynamic gateways."
+  @spec dynamic_gateways() :: [dynamic_gateway()]
+  def dynamic_gateways do
+    GenServer.call(__MODULE__, :dynamic_gateways)
+  end
+
   @doc "Count of active forwarded sessions."
   @spec count() :: non_neg_integer()
   def count do
@@ -95,19 +134,42 @@ defmodule ZtlpRelay.GatewayForwarder do
 
     if gateways != [] do
       Logger.info(
-        "[GatewayForwarder] Gateway forwarding enabled for #{length(gateways)} gateway(s): #{inspect(gateways)}"
+        "[GatewayForwarder] Gateway forwarding enabled for #{length(gateways)} static gateway(s): #{inspect(gateways)}"
       )
     end
 
-    # Schedule periodic cleanup of stale sessions
-    if gateways != [] do
-      Process.send_after(self(), :cleanup, 60_000)
-    end
+    # Always schedule cleanup (for sessions and dynamic gateway expiry)
+    Process.send_after(self(), :cleanup, 60_000)
 
-    {:ok, %{gateways: gateways, sessions: %{}, gateway_index: 0}}
+    {:ok, %{gateways: gateways, dynamic_gateways: [], sessions: %{}, gateway_index: 0}}
   end
 
   @impl true
+  def handle_cast({:register_dynamic, address, node_id, service_name, ttl}, state) do
+    now = System.monotonic_time(:second)
+    expires_at = now + ttl
+
+    # Remove any existing entry for this node_id + service_name, then add fresh
+    dynamic =
+      Enum.reject(state.dynamic_gateways, fn gw ->
+        gw.node_id == node_id and gw.service_name == service_name
+      end)
+
+    new_entry = %{
+      address: address,
+      node_id: node_id,
+      service_name: service_name,
+      expires_at: expires_at
+    }
+
+    Logger.info(
+      "[GatewayForwarder] Registered dynamic gateway #{Base.encode16(node_id)} " <>
+        "service=#{service_name} addr=#{inspect(address)} ttl=#{ttl}s"
+    )
+
+    {:noreply, %{state | dynamic_gateways: [new_entry | dynamic]}}
+  end
+
   def handle_cast({:register, session_id, client_addr, gateway_addr}, state) do
     session = %{
       client: client_addr,
@@ -133,14 +195,40 @@ defmodule ZtlpRelay.GatewayForwarder do
     end
   end
 
-  def handle_call(:pick_gateway, _from, %{gateways: []} = state) do
-    {:reply, :error, state}
+  def handle_call(:pick_gateway, _from, state) do
+    now = System.monotonic_time(:second)
+
+    # Combine static gateways with non-expired dynamic gateway addresses
+    dynamic_addrs =
+      state.dynamic_gateways
+      |> Enum.filter(fn gw -> gw.expires_at > now end)
+      |> Enum.map(fn gw -> gw.address end)
+      |> Enum.uniq()
+
+    all_gateways = state.gateways ++ dynamic_addrs
+
+    case all_gateways do
+      [] ->
+        {:reply, :error, state}
+
+      _ ->
+        index = rem(state.gateway_index, length(all_gateways))
+        gateway = Enum.at(all_gateways, index)
+        {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
+    end
   end
 
-  def handle_call(:pick_gateway, _from, state) do
-    index = rem(state.gateway_index, length(state.gateways))
-    gateway = Enum.at(state.gateways, index)
-    {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
+  def handle_call(:dynamic_gateways, _from, state) do
+    {:reply, state.dynamic_gateways, state}
+  end
+
+  def handle_call(:enabled?, _from, state) do
+    now = System.monotonic_time(:second)
+
+    has_dynamic =
+      Enum.any?(state.dynamic_gateways, fn gw -> gw.expires_at > now end)
+
+    {:reply, state.gateways != [] or has_dynamic, state}
   end
 
   def handle_call(:count, _from, state) do
@@ -149,22 +237,34 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   @impl true
   def handle_info(:cleanup, state) do
-    now = System.monotonic_time(:millisecond)
+    now_ms = System.monotonic_time(:millisecond)
+    now_s = System.monotonic_time(:second)
+
     # Remove sessions older than 10 minutes
     max_age_ms = 600_000
 
     sessions =
       state.sessions
-      |> Enum.reject(fn {_id, s} -> now - s.created_at > max_age_ms end)
+      |> Enum.reject(fn {_id, s} -> now_ms - s.created_at > max_age_ms end)
       |> Map.new()
 
-    removed = map_size(state.sessions) - map_size(sessions)
+    removed_sessions = map_size(state.sessions) - map_size(sessions)
 
-    if removed > 0 do
-      Logger.debug("[GatewayForwarder] Cleaned up #{removed} stale forwarded sessions")
+    if removed_sessions > 0 do
+      Logger.debug("[GatewayForwarder] Cleaned up #{removed_sessions} stale forwarded sessions")
+    end
+
+    # Remove expired dynamic gateways
+    {active, expired} =
+      Enum.split_with(state.dynamic_gateways, fn gw -> gw.expires_at > now_s end)
+
+    if expired != [] do
+      Logger.info(
+        "[GatewayForwarder] Expired #{length(expired)} dynamic gateway registration(s)"
+      )
     end
 
     Process.send_after(self(), :cleanup, 60_000)
-    {:noreply, %{state | sessions: sessions}}
+    {:noreply, %{state | sessions: sessions, dynamic_gateways: active}}
   end
 end

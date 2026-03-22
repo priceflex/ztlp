@@ -48,12 +48,9 @@ defmodule ZtlpRelay.Application do
         []
       end
 
-    gateway_children =
-      if ZtlpRelay.Config.gateway_addresses() != [] do
-        [ZtlpRelay.GatewayForwarder]
-      else
-        []
-      end
+    # GatewayForwarder is always started to support both static config
+    # (ZTLP_RELAY_GATEWAYS) and dynamic registration from gateways.
+    gateway_children = [ZtlpRelay.GatewayForwarder]
 
     children = base_children ++ mesh_children ++ gateway_children ++ [ZtlpRelay.UdpListener]
 

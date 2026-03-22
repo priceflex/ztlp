@@ -319,6 +319,20 @@ defmodule ZtlpRelay.Config do
     end
   end
 
+  @doc """
+  Shared secret for gateway dynamic registration HMAC verification.
+
+  Set via `ZTLP_RELAY_REGISTRATION_SECRET` env var.
+  Returns nil if not set (dev mode — registrations accepted without HMAC).
+  """
+  @spec registration_secret() :: binary() | nil
+  def registration_secret do
+    case System.get_env("ZTLP_RELAY_REGISTRATION_SECRET") do
+      nil -> Application.get_env(:ztlp_relay, :registration_secret)
+      secret -> secret
+    end
+  end
+
   defp parse_address(addr_str) do
     case String.split(addr_str, ":") do
       [host, port_str] ->

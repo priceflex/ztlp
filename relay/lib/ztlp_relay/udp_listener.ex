@@ -104,7 +104,16 @@ defmodule ZtlpRelay.UdpListener do
   @impl true
   def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
-    handle_packet(data, sender, state)
+
+    # Check for GATEWAY_REGISTER packet before the pipeline
+    case data do
+      <<0x5A, 0x37, 0x0A, rest::binary>> ->
+        handle_gateway_register(rest, sender)
+
+      _ ->
+        handle_packet(data, sender, state)
+    end
+
     {:noreply, state}
   end
 
@@ -120,7 +129,84 @@ defmodule ZtlpRelay.UdpListener do
 
   def terminate(_reason, _state), do: :ok
 
+  # ---------------------------------------------------------------------------
+  # Gateway dynamic registration
+  # ---------------------------------------------------------------------------
+
+  # Handle a GATEWAY_REGISTER packet (magic + 0x0A already stripped).
+  # Format after magic+type: [16 node_id][16 service_name][4 TTL][8 timestamp][32 HMAC]
+  defp handle_gateway_register(
+         <<node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
+           timestamp::64, hmac::binary-size(32)>>,
+         sender
+       ) do
+    service_name = service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+
+    # Verify HMAC if a shared secret is configured
+    case Config.registration_secret() do
+      nil ->
+        # Dev mode — accept without verification
+        Logger.debug("[UdpListener] Accepting unverified GATEWAY_REGISTER from #{inspect(sender)}")
+        do_register_gateway(sender, node_id, service_name, ttl)
+
+      secret ->
+        # Build the message that was signed: type + node_id + service + ttl + timestamp
+        signed_data = <<0x0A, node_id::binary, service_raw::binary, ttl::32, timestamp::64>>
+        expected_hmac = :crypto.mac(:hmac, :sha256, secret, signed_data)
+
+        if secure_compare(expected_hmac, hmac) do
+          # Verify timestamp is within 5 minutes
+          now = System.system_time(:second)
+
+          if abs(now - timestamp) <= 300 do
+            do_register_gateway(sender, node_id, service_name, ttl)
+          else
+            Logger.warning(
+              "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: timestamp too old " <>
+                "(delta=#{now - timestamp}s)"
+            )
+          end
+        else
+          Logger.warning(
+            "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: invalid HMAC"
+          )
+        end
+    end
+  end
+
+  # Packet too short or malformed
+  defp handle_gateway_register(_data, sender) do
+    Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER from #{inspect(sender)}")
+  end
+
+  # Constant-time binary comparison to prevent timing attacks on HMAC verification.
+  defp secure_compare(a, b) when byte_size(a) == byte_size(b) do
+    a_bytes = :binary.bin_to_list(a)
+    b_bytes = :binary.bin_to_list(b)
+
+    Enum.zip(a_bytes, b_bytes)
+    |> Enum.reduce(0, fn {x, y}, acc -> Bitwise.bor(acc, Bitwise.bxor(x, y)) end)
+    |> Kernel.==(0)
+  end
+
+  defp secure_compare(_a, _b), do: false
+
+  defp do_register_gateway(sender, node_id, service_name, ttl) do
+    # Ensure GatewayForwarder is running
+    case GenServer.whereis(GatewayForwarder) do
+      nil ->
+        Logger.warning(
+          "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} but GatewayForwarder not running"
+        )
+
+      _pid ->
+        GatewayForwarder.register_dynamic_gateway(sender, node_id, service_name, ttl)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Internal packet handling
+  # ---------------------------------------------------------------------------
 
   # Process a raw UDP packet through the admission pipeline.
   # The relay passes `nil` for session_key, which means Layer 3

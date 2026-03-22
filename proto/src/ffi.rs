@@ -106,6 +106,8 @@ struct ActiveSession {
     bytes_received: Arc<AtomicU64>,
     /// Flag to stop the recv loop.
     stop_flag: Arc<AtomicBool>,
+    /// Tunnel data sequence counter (for FRAME_DATA framing).
+    data_seq: Arc<AtomicU64>,
     // Cached C strings for accessors
     session_id_str: CString,
     peer_node_id_str: CString,
@@ -783,6 +785,7 @@ async fn do_connect(
         bytes_sent,
         bytes_received,
         stop_flag,
+        data_seq: Arc::new(AtomicU64::new(0)),
         session_id_str: CString::new(hex::encode(session_id.as_bytes())).unwrap_or_default(),
         peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes())).unwrap_or_default(),
         peer_addr_str: CString::new(send_addr.to_string()).unwrap_or_default(),
@@ -968,14 +971,23 @@ pub extern "C" fn ztlp_send(client: *mut ZtlpClient, data: *const u8, len: usize
     let session_id = session.session_id;
     let peer_addr = session.peer_addr;
     let bytes_sent = session.bytes_sent.clone();
-    let payload = data_slice.to_vec();
+    let data_seq = session.data_seq.fetch_add(1, Ordering::Relaxed);
+    let raw_payload = data_slice.to_vec();
+
+    // Wrap in tunnel frame: [FRAME_DATA(1) | data_seq(8 BE) | payload]
+    // The gateway expects this framing before decrypted TCP data.
+    const FRAME_DATA: u8 = 0x00;
+    let mut framed = Vec::with_capacity(1 + 8 + raw_payload.len());
+    framed.push(FRAME_DATA);
+    framed.extend_from_slice(&data_seq.to_be_bytes());
+    framed.extend_from_slice(&raw_payload);
 
     // Send on the runtime — we can't block here
     guard.runtime.spawn(async move {
-        if let Err(e) = transport.send_data(session_id, &payload, peer_addr).await {
+        if let Err(e) = transport.send_data(session_id, &framed, peer_addr).await {
             set_last_error(&format!("send failed: {}", e));
         } else {
-            bytes_sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
+            bytes_sent.fetch_add(raw_payload.len() as u64, Ordering::Relaxed);
         }
     });
 

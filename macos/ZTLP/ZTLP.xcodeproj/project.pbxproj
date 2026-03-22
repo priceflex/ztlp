@@ -73,6 +73,7 @@
 		055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		20C97C4B77AA52A20831FA3F /* ZTLPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPService.swift; sourceTree = "<group>"; };
 		2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
+		411B1DD85CF6221E04B3A45E /* ZTLP.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZTLP.entitlements; sourceTree = "<group>"; };
 		4A7EB8A3208E156EA025CA71 /* IdentityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityView.swift; sourceTree = "<group>"; };
 		68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPConfiguration.swift; sourceTree = "<group>"; };
 		6A98A6B9F9DF87D848B72322 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -101,6 +102,7 @@
 		EB39AED62EE8F69A116903FC /* EnrollmentViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentViewModel.swift; sourceTree = "<group>"; };
 		ED182AF9379C3B47E706235A /* ZTLPTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZTLPTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F2999C81580662F16AC6B03E /* TunnelViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelViewModel.swift; sourceTree = "<group>"; };
+		FEF29387E1BE2AE03C1D8D30 /* ZTLPSystemExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZTLPSystemExtension.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -110,6 +112,7 @@
 				75867312BD712CE5153370DF /* main.swift */,
 				055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */,
 				E7FE0765786A7E06A1826D47 /* ZTLPSystemExtension-Bridging-Header.h */,
+				FEF29387E1BE2AE03C1D8D30 /* ZTLPSystemExtension.entitlements */,
 			);
 			path = ZTLPSystemExtension;
 			sourceTree = "<group>";
@@ -201,6 +204,7 @@
 			isa = PBXGroup;
 			children = (
 				E1C6E48E391FCCE5528F1C32 /* ZTLP-Bridging-Header.h */,
+				411B1DD85CF6221E04B3A45E /* ZTLP.entitlements */,
 				C46671B6D96AB5A0FE2547A5 /* App */,
 				30F094DDD6F32C2EB91ED7EA /* Extensions */,
 				89D88C238CC7ECFDC11F8FDB /* Models */,
@@ -441,6 +445,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZTLP/ZTLP.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 5527A7TH5P;
@@ -538,6 +543,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZTLP/ZTLP.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 5527A7TH5P;

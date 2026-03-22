@@ -32,6 +32,7 @@ targets:
           - "-lz"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 5527A7TH5P
+        CODE_SIGN_ENTITLEMENTS: ZTLP/ZTLP.entitlements
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     dependencies:
       - target: ZTLPSystemExtension

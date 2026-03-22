@@ -876,6 +876,17 @@ async fn recv_loop(
                             &mut session_handle as *mut ZtlpSession,
                         );
                     }
+
+                    // Forward to VIP proxy if running.
+                    // Strip tunnel frame header: [frame_type(1) | data_seq(8) | payload]
+                    if plaintext.len() > 9 && plaintext[0] == 0x00 {
+                        let payload = plaintext[9..].to_vec();
+                        if let Some(ref proxy) = guard.vip_proxy {
+                            let tx = proxy.tunnel_sender();
+                            // Non-blocking send — drop data if channel is full
+                            let _ = tx.try_send(crate::vip::TunnelData { payload });
+                        }
+                    }
                 }
             }
             Ok(Ok(None)) => {

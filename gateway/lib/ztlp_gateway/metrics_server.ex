@@ -253,37 +253,48 @@ defmodule ZtlpGateway.MetricsServer do
     end
   end
 
-  defp beam_metrics do
-    mem = :erlang.memory()
-    procs = :erlang.system_info(:process_count)
-    [
-      "# HELP beam_memory_bytes BEAM VM memory\n# TYPE beam_memory_bytes gauge\n",
-      "beam_memory_bytes{kind=\"total\"} #{mem[:total]}\n",
-      "beam_memory_bytes{kind=\"processes\"} #{mem[:processes]}\n\n",
-      "# HELP beam_process_count BEAM processes\n# TYPE beam_process_count gauge\n",
-      "beam_process_count #{procs}\n"
-    ]
-  end
-
-  defp get_uptime do
-    case :persistent_term.get({ZtlpGateway.StatsReporter, :start_time}, nil) do
-      nil -> 0
-      start -> System.monotonic_time(:second) - start
-    end
-  end
+  # ── Helpers ──────────────────────────────────────────────────────
 
   defp metrics_enabled? do
-    case System.get_env("ZTLP_GATEWAY_METRICS_ENABLED") do
-      "false" -> false
-      "0" -> false
-      _ -> Application.get_env(:ztlp_gateway, :metrics_enabled, true)
-    end
+    Application.get_env(:ztlp_gateway, :metrics_enabled, true)
   end
 
   defp metrics_port do
-    case System.get_env("ZTLP_GATEWAY_METRICS_PORT") do
-      nil -> Application.get_env(:ztlp_gateway, :metrics_port, @default_port)
-      port -> String.to_integer(port)
+    Application.get_env(:ztlp_gateway, :metrics_port, @default_port)
+  end
+
+  defp get_uptime do
+    {total_ms, _since_last} = :erlang.statistics(:wall_clock)
+    div(total_ms, 1000)
+  end
+
+  defp beam_metrics do
+    try do
+      mem = :erlang.memory()
+      procs = :erlang.system_info(:process_count)
+      {reductions, _} = :erlang.statistics(:reductions)
+
+      [
+        "# HELP erlang_memory_bytes BEAM memory usage\n",
+        "# TYPE erlang_memory_bytes gauge\n",
+        "erlang_memory_bytes{type=\"total\"} #{Keyword.get(mem, :total, 0)}\n",
+        "erlang_memory_bytes{type=\"processes\"} #{Keyword.get(mem, :processes, 0)}\n",
+        "erlang_memory_bytes{type=\"binary\"} #{Keyword.get(mem, :binary, 0)}\n",
+        "erlang_memory_bytes{type=\"ets\"} #{Keyword.get(mem, :ets, 0)}\n",
+        "\n",
+        "# HELP erlang_processes BEAM process count\n",
+        "# TYPE erlang_processes gauge\n",
+        "erlang_processes #{procs}\n",
+        "\n",
+        "# HELP erlang_reductions_total BEAM reductions\n",
+        "# TYPE erlang_reductions_total counter\n",
+        "erlang_reductions_total #{reductions}\n",
+        "\n"
+      ]
+    rescue
+      _ -> ""
+    catch
+      _, _ -> ""
     end
   end
 end

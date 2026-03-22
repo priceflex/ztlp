@@ -381,54 +381,73 @@ final class ZTLPBridge {
 
     /// Set up loopback aliases + pf redirect + DNS resolver (one admin prompt).
     func setupNetworking(vips: [String]) throws {
-        // Build commands: add loopback aliases, pf redirect, resolver config
-        var cmds: [String] = []
+        // Write a temp shell script to avoid AppleScript escaping hell
+        let tmpScript = "/tmp/ztlp_setup.sh"
+        var script = "#!/bin/bash\nset -e\n"
+
+        // Add loopback aliases
         for vip in vips {
-            cmds.append("ifconfig lo0 alias \(vip) up")
+            script += "ifconfig lo0 alias \(vip) up\n"
         }
-        // pf rules: redirect port 80/443 on VIPs to high ports (8080/8443)
-        // so the app can bind without root
-        var pfRules = "# ZTLP VIP port redirects\n"
-        for vip in vips.filter({ $0 != "127.0.55.53" }) {
-            pfRules += "rdr pass on lo0 proto tcp from any to \(vip) port 80 -> \(vip) port 8080\n"
-            pfRules += "rdr pass on lo0 proto tcp from any to \(vip) port 443 -> \(vip) port 8443\n"
+
+        // pf rules: redirect port 80/443 on VIPs to high ports
+        let serviceVips = vips.filter { $0 != "127.0.55.53" }
+        script += "cat > /etc/pf.anchors/ztlp << 'PFEOF'\n"
+        for vip in serviceVips {
+            script += "rdr pass on lo0 proto tcp from any to \(vip) port 80 -> \(vip) port 8080\n"
+            script += "rdr pass on lo0 proto tcp from any to \(vip) port 443 -> \(vip) port 8443\n"
         }
-        cmds.append("printf '\(pfRules)' > /etc/pf.anchors/ztlp")
-        // Load anchor into pf
-        cmds.append("grep -q 'ztlp' /etc/pf.conf || (echo 'rdr-anchor \"ztlp\"' >> /etc/pf.conf && echo 'load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"' >> /etc/pf.conf)")
-        cmds.append("pfctl -f /etc/pf.conf 2>/dev/null")
-        cmds.append("pfctl -e 2>/dev/null; true")
+        script += "PFEOF\n"
+
+        // Load pf anchor
+        script += "if ! grep -q ztlp /etc/pf.conf; then\n"
+        script += "  echo 'rdr-anchor \"ztlp\"' >> /etc/pf.conf\n"
+        script += "  echo 'load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"' >> /etc/pf.conf\n"
+        script += "fi\n"
+        script += "pfctl -f /etc/pf.conf 2>/dev/null || true\n"
+        script += "pfctl -e 2>/dev/null || true\n"
+
         // DNS resolver
-        cmds.append("mkdir -p /etc/resolver")
-        cmds.append("printf 'nameserver 127.0.55.53\\nport 5353\\n' > /etc/resolver/ztlp")
+        script += "mkdir -p /etc/resolver\n"
+        script += "cat > /etc/resolver/ztlp << 'DNSEOF'\n"
+        script += "nameserver 127.0.55.53\n"
+        script += "port 5353\n"
+        script += "DNSEOF\n"
 
-        let combined = cmds.joined(separator: " && ")
-        let script = "do shell script \"\(combined)\" with administrator privileges"
+        // Write the script and make executable
+        try script.write(toFile: tmpScript, atomically: true, encoding: .utf8)
 
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        appleScript?.executeAndReturnError(&error)
-        if let error = error {
-            throw ZTLPError.connectionError("Failed to setup networking: \(error)")
+        // Run with admin privileges via AppleScript
+        let asSource = "do shell script \"/bin/bash \(tmpScript)\" with administrator privileges"
+        let appleScript = NSAppleScript(source: asSource)
+        var asError: NSDictionary?
+        appleScript?.executeAndReturnError(&asError)
+
+        // Clean up temp script
+        try? FileManager.default.removeItem(atPath: tmpScript)
+
+        if let asError = asError {
+            throw ZTLPError.connectionError("Failed to setup networking: \(asError)")
         }
     }
 
     /// Remove loopback aliases + pf rules + DNS resolver.
     func teardownNetworking(vips: [String]) {
-        var cmds: [String] = []
+        let tmpScript = "/tmp/ztlp_teardown.sh"
+        var script = "#!/bin/bash\n"
         for vip in vips {
-            cmds.append("ifconfig lo0 -alias \(vip)")
+            script += "ifconfig lo0 -alias \(vip) 2>/dev/null || true\n"
         }
-        cmds.append("rm -f /etc/pf.anchors/ztlp /etc/resolver/ztlp")
-        // Remove ztlp lines from pf.conf and reload
-        cmds.append("sed -i '' '/ztlp/d' /etc/pf.conf 2>/dev/null; true")
-        cmds.append("pfctl -f /etc/pf.conf 2>/dev/null; true")
+        script += "rm -f /etc/pf.anchors/ztlp /etc/resolver/ztlp\n"
+        script += "sed -i \'\' \'/ztlp/d\' /etc/pf.conf 2>/dev/null || true\n"
+        script += "pfctl -f /etc/pf.conf 2>/dev/null || true\n"
 
-        let combined = cmds.joined(separator: " ; ")
-        let script = "do shell script \"\(combined)\" with administrator privileges"
-        let appleScript = NSAppleScript(source: script)
-        var error: NSDictionary?
-        appleScript?.executeAndReturnError(&error)
+        try? script.write(toFile: tmpScript, atomically: true, encoding: .utf8)
+        let asSource = "do shell script \"/bin/bash \(tmpScript)\" with administrator privileges"
+        let appleScript = NSAppleScript(source: asSource)
+        var asError: NSDictionary?
+        appleScript?.executeAndReturnError(&asError)
+        try? FileManager.default.removeItem(atPath: tmpScript)
     }
 
         // MARK: - Callbacks

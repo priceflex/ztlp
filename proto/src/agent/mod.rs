@@ -16,6 +16,8 @@
 //! - **stream** — Stream multiplexing over ZTLP tunnels
 //! - **tunnel_pool** — Managed tunnel lifecycle with auto-reconnect
 
+pub mod ca_trust;
+pub mod cert_install;
 pub mod config;
 pub mod control;
 pub mod daemon;
@@ -24,6 +26,7 @@ pub mod dns;
 #[cfg(unix)]
 pub mod dns_setup;
 pub mod domain_map;
+pub mod hardware_key;
 pub mod proxy;
 pub mod renewal;
 pub mod stream;

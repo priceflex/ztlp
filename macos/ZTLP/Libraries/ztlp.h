@@ -619,6 +619,74 @@ int32_t ztlp_tunnel_start(ZtlpClient *client, uint16_t local_port,
 int32_t ztlp_tunnel_stop(ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * VIP Proxy (Virtual IP — Local TCP → Tunnel)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Register a service with a VIP (Virtual IP) address and port.
+ *
+ * The VIP proxy will listen on vip:port and forward TCP traffic through
+ * the ZTLP tunnel. Call multiple times to register multiple ports for
+ * the same service (e.g., 80 and 443).
+ *
+ * @param client  Valid client handle.
+ * @param name    Service name (e.g., "beta"). Null-terminated.
+ * @param vip     VIP IPv4 address (e.g., "127.0.55.1"). Null-terminated.
+ * @param port    TCP port to listen on (e.g., 80).
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_vip_add_service(ZtlpClient *client, const char *name,
+                              const char *vip, uint16_t port);
+
+/**
+ * @brief Start VIP proxy listeners for all registered services.
+ *
+ * Requires an active ZTLP session (call ztlp_connect first). Each
+ * registered service gets TCP listeners on its VIP:port that pipe data
+ * bidirectionally through the tunnel.
+ *
+ * @param client  Valid, connected client handle.
+ * @return ZTLP_OK on success, ZTLP_NOT_CONNECTED if no active session.
+ */
+int32_t ztlp_vip_start(ZtlpClient *client);
+
+/**
+ * @brief Stop all VIP proxy listeners.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_vip_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * DNS Resolver (*.ztlp → VIP Address)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Start the ZTLP DNS resolver.
+ *
+ * Resolves *.ztlp domain queries to VIP addresses based on services
+ * registered with ztlp_vip_add_service(). Typically bound to
+ * "127.0.55.53:53".
+ *
+ * macOS setup: create /etc/resolver/ztlp with:
+ *   nameserver 127.0.55.53
+ *
+ * @param client       Valid client handle.
+ * @param listen_addr  Bind address (e.g., "127.0.55.53:53"). Null-terminated.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_dns_start(ZtlpClient *client, const char *listen_addr);
+
+/**
+ * @brief Stop the ZTLP DNS resolver.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_dns_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Statistics
  * ═══════════════════════════════════════════════════════════════════════════ */
 

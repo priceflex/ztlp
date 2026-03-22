@@ -39,3 +39,4 @@ demo/ztlp
 stress/results/
 ios/ZTLP/Libraries/*.a
 ios/ZTLP/Libraries/*.xcframework/
+macos/ZTLP/Libraries/*.a

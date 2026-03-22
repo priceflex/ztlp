@@ -31,6 +31,7 @@ targets:
           - "-lresolv"
           - "-lz"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 5527A7TH5P
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     dependencies:
       - target: ZTLPSystemExtension
@@ -64,6 +65,7 @@ targets:
           - "-lresolv"
           - "-lz"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 5527A7TH5P
         SKIP_INSTALL: true
         MACOSX_DEPLOYMENT_TARGET: "13.0"
 

@@ -19,7 +19,7 @@ defmodule ZtlpNs.MixProject do
       # :crypto provides Ed25519 signing/verification (OTP 24+)
       # :inets provides :httpc for HTTPS bootstrap discovery
       # :mnesia provides persistent record storage (OTP built-in)
-      extra_applications: [:logger, :crypto, :inets, :mnesia],
+      extra_applications: [:logger, :crypto, :public_key, :ssl, :inets, :mnesia],
       mod: {ZtlpNs.Application, []}
     ]
   end

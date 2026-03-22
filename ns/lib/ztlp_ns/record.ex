@@ -43,7 +43,7 @@ defmodule ZtlpNs.Record do
   @enforce_keys [:name, :type, :data, :created_at, :ttl, :serial]
   defstruct [:name, :type, :data, :signature, :signer_public_key, :created_at, :ttl, :serial]
 
-  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator | :device | :user | :group
+  @type record_type :: :key | :svc | :relay | :policy | :revoke | :bootstrap | :operator | :device | :user | :group | :ca | :cert
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -61,8 +61,8 @@ defmodule ZtlpNs.Record do
   # serialization. They MUST NOT change without a protocol version bump.
   # Types 0x10-0x12 are reserved for identity/group records (Phase 1+).
 
-  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7, device: 0x10, user: 0x11, group: 0x12}
-  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user, 0x12 => :group}
+  @type_bytes %{key: 1, svc: 2, relay: 3, policy: 4, revoke: 5, bootstrap: 6, operator: 7, device: 0x10, user: 0x11, group: 0x12, ca: 0x13, cert: 0x14}
+  @byte_types %{1 => :key, 2 => :svc, 3 => :relay, 4 => :policy, 5 => :revoke, 6 => :bootstrap, 7 => :operator, 0x10 => :device, 0x11 => :user, 0x12 => :group, 0x13 => :ca, 0x14 => :cert}
 
   @doc "Convert a record type atom to its wire format byte."
   @spec type_to_byte(record_type()) :: non_neg_integer()
@@ -471,6 +471,69 @@ defmodule ZtlpNs.Record do
       length(members) > 255 -> {:error, :too_many_members}
       true -> :ok
     end
+  end
+
+  @doc """
+  Create a ZTLP_CA record (CA certificate distribution).
+
+  Fields:
+  - `name` — CA name like "rootca.corp.ztlp" or "intermediateca.corp.ztlp"
+  - `cert_pem` — PEM-encoded CA certificate
+  - `opts` — keyword list with optional `:fingerprint`, `:ca_type`, `:created_at`, `:ttl`, `:serial`
+
+  `ca_type` values: "root", "intermediate"
+  """
+  @spec new_ca(String.t(), String.t(), keyword()) :: t()
+  def new_ca(name, cert_pem, opts \\ []) do
+    %__MODULE__{
+      name: name,
+      type: :ca,
+      data: %{
+        cert_pem: cert_pem,
+        fingerprint: opts[:fingerprint] || "",
+        ca_type: opts[:ca_type] || "root"
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 86400,
+      serial: opts[:serial] || 1
+    }
+  end
+
+  @doc """
+  Create a ZTLP_CERT record (issued certificate tracking).
+
+  Fields:
+  - `name` — certificate FQDN like "web-server.corp.ztlp"
+  - `cert_pem` — PEM-encoded certificate
+  - `opts` — keyword list with optional fields:
+    - `:cert_serial` — X.509 serial number
+    - `:cert_type` — "server" or "client"
+    - `:fingerprint` — SHA-256 fingerprint
+    - `:not_after` — expiry ISO8601 string
+    - `:node_id` — NodeID hex (for client certs)
+    - `:assurance` — assurance level string
+    - `:revoked` — boolean
+    - `:created_at`, `:ttl`, `:serial`
+  """
+  @spec new_cert(String.t(), String.t(), keyword()) :: t()
+  def new_cert(name, cert_pem, opts \\ []) do
+    %__MODULE__{
+      name: name,
+      type: :cert,
+      data: %{
+        cert_pem: cert_pem,
+        cert_serial: opts[:cert_serial] || "",
+        cert_type: opts[:cert_type] || "server",
+        fingerprint: opts[:fingerprint] || "",
+        not_after: opts[:not_after] || "",
+        node_id: opts[:node_id] || "",
+        assurance: opts[:assurance] || "",
+        revoked: opts[:revoked] || false
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 604800,
+      serial: opts[:serial] || 1
+    }
   end
 
   @doc """

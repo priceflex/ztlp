@@ -87,11 +87,7 @@ impl ZtlpDns {
 }
 
 /// Main DNS server loop.
-async fn dns_server_loop(
-    socket: UdpSocket,
-    registry: VipRegistry,
-    stop: Arc<AtomicBool>,
-) {
+async fn dns_server_loop(socket: UdpSocket, registry: VipRegistry, stop: Arc<AtomicBool>) {
     let mut buf = vec![0u8; DNS_MAX_PACKET];
 
     loop {
@@ -337,10 +333,7 @@ mod tests {
 
     #[test]
     fn test_extract_service_name_simple() {
-        assert_eq!(
-            extract_service_name("beta.ztlp"),
-            Some("beta".to_string())
-        );
+        assert_eq!(extract_service_name("beta.ztlp"), Some("beta".to_string()));
     }
 
     #[test]
@@ -392,7 +385,10 @@ mod tests {
     #[test]
     fn test_encode_dns_name() {
         let encoded = encode_dns_name("beta.ztlp");
-        assert_eq!(encoded, vec![4, b'b', b'e', b't', b'a', 4, b'z', b't', b'l', b'p', 0]);
+        assert_eq!(
+            encoded,
+            vec![4, b'b', b'e', b't', b'a', 4, b'z', b't', b'l', b'p', 0]
+        );
     }
 
     #[test]
@@ -412,7 +408,7 @@ mod tests {
         // Check header
         assert_eq!(response[0], 0x12); // ID high
         assert_eq!(response[1], 0x34); // ID low
-        // Check QR + AA flags
+                                       // Check QR + AA flags
         let flags = u16::from_be_bytes([response[2], response[3]]);
         assert_ne!(flags & DNS_FLAG_QR, 0);
         assert_ne!(flags & DNS_FLAG_AA, 0);
@@ -427,17 +423,12 @@ mod tests {
         question_section.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
         question_section.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
 
-        let response = build_dns_response(
-            0x5678,
-            &question_section,
-            DNS_FLAG_RCODE_NXDOMAIN,
-            None,
-        );
+        let response = build_dns_response(0x5678, &question_section, DNS_FLAG_RCODE_NXDOMAIN, None);
 
         // Check RCODE = NXDOMAIN
         let flags = u16::from_be_bytes([response[2], response[3]]);
         assert_eq!(flags & 0x000F, 3); // NXDOMAIN
-        // ANCOUNT = 0
+                                       // ANCOUNT = 0
         assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0);
     }
 

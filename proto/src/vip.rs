@@ -73,11 +73,14 @@ impl VipProxy {
 
     /// Register a service with a VIP address and port.
     pub fn add_service(&mut self, name: String, vip: Ipv4Addr, port: u16) {
-        let entry = self.services.entry(name.clone()).or_insert_with(|| VipService {
-            name,
-            vip,
-            ports: Vec::new(),
-        });
+        let entry = self
+            .services
+            .entry(name.clone())
+            .or_insert_with(|| VipService {
+                name,
+                vip,
+                ports: Vec::new(),
+            });
         if !entry.ports.contains(&port) {
             entry.ports.push(port);
         }
@@ -133,13 +136,7 @@ impl VipProxy {
 
                 let handle = tokio::spawn(async move {
                     vip_listener_task(
-                        listener,
-                        stop,
-                        transport,
-                        session_id,
-                        peer_addr,
-                        data_seq,
-                        bytes_sent,
+                        listener, stop, transport, session_id, peer_addr, data_seq, bytes_sent,
                         tunnel_rx,
                     )
                     .await;
@@ -215,12 +212,7 @@ async fn vip_listener_task(
                     break;
                 }
                 let mut rx = tunnel_rx_clone.lock().await;
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    rx.recv(),
-                )
-                .await
-                {
+                match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
                     Ok(Some(data)) => {
                         drop(rx); // Release lock before writing
                         if write_half.write_all(&data.payload).await.is_err() {
@@ -243,11 +235,8 @@ async fn vip_listener_task(
                 break;
             }
 
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                read_half.read(&mut buf),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(1), read_half.read(&mut buf))
+                .await
             {
                 Ok(Ok(0)) => break, // Connection closed
                 Ok(Ok(n)) => {
@@ -294,7 +283,10 @@ mod tests {
         proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
 
         assert_eq!(proxy.services().len(), 1);
-        let svc = proxy.services().get("beta").expect("beta service should exist");
+        let svc = proxy
+            .services()
+            .get("beta")
+            .expect("beta service should exist");
         assert_eq!(svc.vip, Ipv4Addr::new(127, 0, 55, 1));
         assert_eq!(svc.ports, vec![80]);
     }

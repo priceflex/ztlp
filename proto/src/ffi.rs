@@ -390,10 +390,7 @@ pub extern "C" fn ztlp_config_set_relay(config: *mut ZtlpConfig, addr: *const c_
 }
 
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_stun_server(
-    config: *mut ZtlpConfig,
-    addr: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_stun_server(config: *mut ZtlpConfig, addr: *const c_char) -> i32 {
     if config.is_null() || addr.is_null() {
         set_last_error("config or addr is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -440,10 +437,7 @@ pub extern "C" fn ztlp_config_set_timeout_ms(config: *mut ZtlpConfig, ms: u64) -
 /// For example, "beta" would route to the "beta" backend configured in
 /// the gateway.
 #[no_mangle]
-pub extern "C" fn ztlp_config_set_service(
-    config: *mut ZtlpConfig,
-    service: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_config_set_service(config: *mut ZtlpConfig, service: *const c_char) -> i32 {
     if config.is_null() || service.is_null() {
         set_last_error("config or service is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -547,7 +541,8 @@ pub extern "C" fn ztlp_connect(
                 let hw_node_id = *guard.identity.node_id();
                 match SoftwareIdentityProvider::generate() {
                     Ok(sw) => {
-                        let mut ni = sw.as_node_identity()
+                        let mut ni = sw
+                            .as_node_identity()
                             .expect("freshly generated software identity must have node_identity")
                             .clone();
                         // Override with hardware node_id
@@ -555,7 +550,9 @@ pub extern "C" fn ztlp_connect(
                         ni
                     }
                     Err(e) => {
-                        set_last_error(&format!("failed to generate ephemeral keys for hardware identity: {e}"));
+                        set_last_error(&format!(
+                            "failed to generate ephemeral keys for hardware identity: {e}"
+                        ));
                         return ZtlpResult::IdentityError as i32;
                     }
                 }
@@ -813,6 +810,35 @@ async fn recv_loop(
     peer_addr: SocketAddr,
     inner: Arc<std::sync::Mutex<ZtlpClientInner>>,
 ) {
+    // NAT keepalive: send an encrypted empty frame every 15s to keep
+    // UDP NAT mappings alive (typical timeout 30-60s).
+    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+    // Frame type 0x01 = KEEPALIVE (distinct from 0x00 = DATA)
+    const KEEPALIVE_FRAME: [u8; 1] = [0x01];
+
+    let keepalive_transport = transport.clone();
+    let keepalive_stop = stop_flag.clone();
+    let keepalive_peer = peer_addr;
+    let keepalive_session_id = session_id;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(KEEPALIVE_INTERVAL);
+        interval.tick().await; // skip first immediate tick
+        loop {
+            interval.tick().await;
+            if keepalive_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            // Send a minimal encrypted keepalive frame
+            if keepalive_transport
+                .send_data(keepalive_session_id, &KEEPALIVE_FRAME, keepalive_peer)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
     loop {
         if stop_flag.load(Ordering::SeqCst) {
             break;
@@ -855,6 +881,11 @@ async fn recv_loop(
                     }
                 }
 
+                // Skip keepalive frames (frame_type 0x01) — they're just NAT pings
+                if plaintext.len() == 1 && plaintext[0] == 0x01 {
+                    continue;
+                }
+
                 // Invoke recv callback
                 if let Ok(guard) = inner.lock() {
                     if let Some((cb, ud)) = guard.recv_callback {
@@ -866,8 +897,7 @@ async fn recv_loop(
                                 .unwrap_or_default(),
                             peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes()))
                                 .unwrap_or_default(),
-                            peer_addr_str: CString::new(peer_addr.to_string())
-                                .unwrap_or_default(),
+                            peer_addr_str: CString::new(peer_addr.to_string()).unwrap_or_default(),
                         };
                         cb(
                             ud,
@@ -1375,10 +1405,7 @@ pub extern "C" fn ztlp_vip_stop(client: *mut ZtlpClient) -> i32 {
 /// ```
 /// This tells macOS to route all `*.ztlp` queries to our DNS server.
 #[no_mangle]
-pub extern "C" fn ztlp_dns_start(
-    client: *mut ZtlpClient,
-    listen_addr: *const c_char,
-) -> i32 {
+pub extern "C" fn ztlp_dns_start(client: *mut ZtlpClient, listen_addr: *const c_char) -> i32 {
     if client.is_null() || listen_addr.is_null() {
         set_last_error("client or listen_addr is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -1499,7 +1526,11 @@ pub extern "C" fn ztlp_ns_resolve(
         }
     };
 
-    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+    let timeout = if timeout_ms == 0 {
+        5000
+    } else {
+        timeout_ms as u64
+    };
 
     // Run NS resolution on a dedicated thread to avoid nesting tokio runtimes.
     // The FFI may be called from Swift's async context which already has a runtime.
@@ -2373,8 +2404,7 @@ mod tests {
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind test socket");
         sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .expect("set timeout");
-        sock.send_to(&query, "127.0.0.1:15356")
-            .expect("send query");
+        sock.send_to(&query, "127.0.0.1:15356").expect("send query");
 
         let mut resp_buf = [0u8; 512];
         let (resp_len, _) = sock.recv_from(&mut resp_buf).expect("recv response");

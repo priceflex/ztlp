@@ -58,6 +58,12 @@ pub struct VipProxy {
     listener_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
+impl Default for VipProxy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VipProxy {
     /// Create a new VIP proxy with default channel buffer size.
     pub fn new() -> Self {
@@ -128,15 +134,21 @@ impl VipProxy {
 
                 let stop = self.stop_flag.clone();
                 let transport = transport.clone();
-                let session_id = session_id;
-                let peer_addr = peer_addr;
+                let svc_session_id = session_id;
+                let svc_peer_addr = peer_addr;
                 let data_seq = data_seq.clone();
                 let bytes_sent = bytes_sent.clone();
                 let tunnel_rx = self.tunnel_rx.clone();
 
                 let handle = tokio::spawn(async move {
                     vip_listener_task(
-                        listener, stop, transport, session_id, peer_addr, data_seq, bytes_sent,
+                        listener,
+                        stop,
+                        transport,
+                        svc_session_id,
+                        svc_peer_addr,
+                        data_seq,
+                        bytes_sent,
                         tunnel_rx,
                     )
                     .await;
@@ -167,6 +179,7 @@ impl VipProxy {
 /// 3. Sends through the ZTLP transport
 /// 4. Receives tunnel responses via the mpsc channel
 /// 5. Forwards responses back to the TCP client
+#[allow(clippy::too_many_arguments)]
 async fn vip_listener_task(
     listener: TcpListener,
     stop: Arc<AtomicBool>,

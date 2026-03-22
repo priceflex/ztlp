@@ -34,6 +34,8 @@ use crate::mobile::{
 };
 use crate::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use crate::reject::RejectFrame;
+// SessionState used for future session management features
+#[allow(unused_imports)]
 use crate::session::SessionState;
 use crate::transport::TransportNode;
 use crate::tunnel::encode_service_name;
@@ -83,6 +85,7 @@ pub struct ZtlpClient {
     inner: Arc<std::sync::Mutex<ZtlpClientInner>>,
 }
 
+#[allow(dead_code)]
 struct ZtlpClientInner {
     runtime: tokio::runtime::Runtime,
     identity: Box<dyn PlatformIdentity>,
@@ -102,6 +105,7 @@ struct ZtlpClientInner {
 unsafe impl Send for ZtlpClientInner {}
 
 /// Active session with real transport state.
+#[allow(dead_code)]
 struct ActiveSession {
     session_id: SessionId,
     peer_node_id: NodeId,
@@ -122,6 +126,7 @@ struct ActiveSession {
     peer_addr_str: CString,
 }
 
+#[allow(dead_code)]
 pub struct ZtlpSession {
     session_id: SessionId,
     peer_node_id: NodeId,

@@ -54,6 +54,20 @@ struct HomeView: View {
             // Network indicator
             networkIndicator
 
+            // Connection mode indicator
+            if viewModel.status.isActive || viewModel.status.isTransitioning {
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.connectionMode.icon)
+                        .font(.caption)
+                    Text(viewModel.connectionMode.rawValue)
+                        .font(.caption.weight(.medium))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+            }
+
             // Error message
             if let error = viewModel.lastError {
                 errorBanner(error)

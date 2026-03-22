@@ -1,16 +1,39 @@
 // TunnelViewModel.swift
 // ZTLP macOS
 //
-// Manages the VPN tunnel lifecycle from the main app's perspective.
-// Communicates with the System Extension via NETunnelProviderManager
-// and observes shared UserDefaults for real-time state updates.
-// Adapted from iOS — no UIKit haptics, uses NSApp/AppKit equivalents.
+// Manages the tunnel lifecycle with two connection modes:
+//   1. VPN Tunnel (System Extension) — routes all system traffic, needs Apple entitlement
+//   2. Direct Connect (userspace) — app-level encrypted session, no entitlement needed
+//
+// Automatically falls back to Direct Connect if VPN setup fails with permission error.
 
 import Foundation
 import AppKit
 import NetworkExtension
 import Combine
 import SwiftUI
+
+/// Connection mode used by the tunnel.
+enum ConnectionMode: String, Equatable {
+    case vpnTunnel = "VPN Tunnel"
+    case directConnect = "Direct Connect"
+
+    var icon: String {
+        switch self {
+        case .vpnTunnel: return "lock.shield"
+        case .directConnect: return "bolt.shield"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .vpnTunnel:
+            return "Full VPN — all traffic routed through ZTLP"
+        case .directConnect:
+            return "App-level encrypted session (no VPN entitlement needed)"
+        }
+    }
+}
 
 /// ViewModel for the main connect/disconnect UI.
 @MainActor
@@ -24,15 +47,19 @@ final class TunnelViewModel: ObservableObject {
     @Published private(set) var peerAddress: String = ""
     @Published private(set) var lastError: String?
     @Published private(set) var isVPNConfigInstalled: Bool = false
+    @Published private(set) var connectionMode: ConnectionMode = .directConnect
+    @Published var preferVPN: Bool = false
 
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
     private let networkMonitor = NetworkMonitor.shared
     private let sysExtManager = SystemExtensionManager.shared
+    private let bridge = ZTLPBridge.shared
     private var cancellables = Set<AnyCancellable>()
     private var tunnelManager: NETunnelProviderManager?
     private var statsTimer: Timer?
+    private var directIdentity: ZTLPIdentityHandle?
 
     private let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared.macos")
 
@@ -42,7 +69,7 @@ final class TunnelViewModel: ObservableObject {
         self.configuration = configuration
         self.zoneName = configuration.zoneName
         setupObservers()
-        loadTunnelManager()
+        checkVPNAvailability()
     }
 
     // MARK: - Actions
@@ -64,45 +91,29 @@ final class TunnelViewModel: ObservableObject {
         lastError = nil
         status = .connecting
 
-        // macOS haptic feedback (trackpad)
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
         Task {
-            do {
-                let manager = try await loadOrCreateTunnelManager()
-                self.tunnelManager = manager
-
-                let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol)
-                    ?? NETunnelProviderProtocol()
-                proto.providerBundleIdentifier = "com.ztlp.app.macos.system-extension"
-                proto.serverAddress = configuration.relayAddress.isEmpty
-                    ? configuration.targetNodeId
-                    : configuration.relayAddress
-                proto.providerConfiguration = [
-                    "targetNodeId": configuration.targetNodeId,
-                    "relayAddress": configuration.relayAddress,
-                    "stunServer": configuration.stunServer,
-                    "tunnelAddress": configuration.tunnelAddress,
-                    "dnsServers": configuration.dnsServers,
-                    "mtu": configuration.mtu,
-                ]
-
-                manager.protocolConfiguration = proto
-                manager.localizedDescription = "ZTLP VPN"
-                manager.isEnabled = true
-
-                try await manager.saveToPreferences()
-                try await manager.loadFromPreferences()
-
-                let session = manager.connection as! NETunnelProviderSession
-                try session.startVPNTunnel()
-
-                startStatsPolling()
-
-            } catch {
-                status = .disconnected
-                lastError = error.localizedDescription
-                NSSound.beep()
+            if preferVPN {
+                // Try VPN first, fall back to direct
+                do {
+                    try await connectVPN()
+                    connectionMode = .vpnTunnel
+                } catch {
+                    let errMsg = error.localizedDescription
+                    if errMsg.contains("permission") || errMsg.contains("entitlement")
+                        || errMsg.contains("configuration is invalid") || errMsg.contains("NEVPNError") {
+                        // VPN not available — fall back to direct connect
+                        lastError = nil
+                        await connectDirect()
+                    } else {
+                        status = .disconnected
+                        lastError = errMsg
+                        NSSound.beep()
+                    }
+                }
+            } else {
+                await connectDirect()
             }
         }
     }
@@ -113,8 +124,140 @@ final class TunnelViewModel: ObservableObject {
         status = .disconnecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
-        tunnelManager?.connection.stopVPNTunnel()
+        switch connectionMode {
+        case .vpnTunnel:
+            tunnelManager?.connection.stopVPNTunnel()
+        case .directConnect:
+            bridge.disconnect()
+        }
+
         stopStatsPolling()
+        status = .disconnected
+        stats = TrafficStats()
+        peerAddress = ""
+    }
+
+    // MARK: - Direct Connect (Userspace)
+
+    private func connectDirect() async {
+        connectionMode = .directConnect
+
+        do {
+            try bridge.initialize()
+
+            // Load or create identity
+            let identity: ZTLPIdentityHandle
+            let identityPath = defaultIdentityPath()
+
+            if let path = identityPath,
+               FileManager.default.fileExists(atPath: path) {
+                identity = try bridge.loadIdentity(from: path)
+            } else {
+                identity = try bridge.generateIdentity()
+                if let path = identityPath {
+                    try identity.save(to: path)
+                }
+            }
+
+            self.directIdentity = identity
+
+            guard let nodeId = identity.nodeId else {
+                status = .disconnected
+                lastError = "Failed to get node ID from identity"
+                return
+            }
+
+            // Create client
+            try bridge.createClient(identity: identity)
+
+            // Build config
+            let config = ZTLPConfigHandle()
+            let relay = configuration.relayAddress
+            if !relay.isEmpty {
+                try config.setRelay(relay)
+            }
+            try config.setNatAssist(configuration.natAssist)
+            try config.setTimeoutMs(15000)
+
+            // Connect — target is the NS or relay address
+            let target = relay.isEmpty ? configuration.targetNodeId : relay
+            guard !target.isEmpty else {
+                status = .disconnected
+                lastError = "No relay or target address configured. Enroll first."
+                return
+            }
+
+            try await bridge.connect(target: target, config: config)
+
+            // Connected!
+            status = .connected
+            stats.connectedSince = Date()
+            peerAddress = target
+            startDirectStatsPolling()
+
+            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+
+        } catch {
+            status = .disconnected
+            lastError = error.localizedDescription
+            NSSound.beep()
+        }
+    }
+
+    // MARK: - VPN Tunnel (System Extension)
+
+    private func connectVPN() async throws {
+        let manager = try await loadOrCreateTunnelManager()
+        self.tunnelManager = manager
+
+        let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol)
+            ?? NETunnelProviderProtocol()
+        proto.providerBundleIdentifier = "com.ztlp.app.macos.system-extension"
+        proto.serverAddress = configuration.relayAddress.isEmpty
+            ? configuration.targetNodeId
+            : configuration.relayAddress
+        proto.providerConfiguration = [
+            "targetNodeId": configuration.targetNodeId,
+            "relayAddress": configuration.relayAddress,
+            "stunServer": configuration.stunServer,
+            "tunnelAddress": configuration.tunnelAddress,
+            "dnsServers": configuration.dnsServers,
+            "mtu": configuration.mtu,
+        ]
+
+        manager.protocolConfiguration = proto
+        manager.localizedDescription = "ZTLP VPN"
+        manager.isEnabled = true
+
+        try await manager.saveToPreferences()
+        try await manager.loadFromPreferences()
+
+        let session = manager.connection as! NETunnelProviderSession
+        try session.startVPNTunnel()
+
+        startStatsPolling()
+    }
+
+    // MARK: - VPN Availability
+
+    private func checkVPNAvailability() {
+        Task {
+            do {
+                let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+                if let existing = managers.first(where: {
+                    (/bin/bash.protocolConfiguration as? NETunnelProviderProtocol)?
+                        .providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
+                }) {
+                    self.tunnelManager = existing
+                    self.isVPNConfigInstalled = true
+                    self.preferVPN = true
+                    updateStatusFromConnection(existing.connection)
+                }
+            } catch {
+                self.isVPNConfigInstalled = false
+                self.preferVPN = false
+            }
+        }
     }
 
     func sendMessageToExtension(_ message: Data) async -> Data? {
@@ -138,7 +281,7 @@ final class TunnelViewModel: ObservableObject {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
 
         if let existing = managers.first(where: {
-            ($0.protocolConfiguration as? NETunnelProviderProtocol)?
+            (/bin/bash.protocolConfiguration as? NETunnelProviderProtocol)?
                 .providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
         }) {
             return existing
@@ -147,36 +290,43 @@ final class TunnelViewModel: ObservableObject {
         return NETunnelProviderManager()
     }
 
-    private func loadTunnelManager() {
-        Task {
-            do {
-                let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-                if let manager = managers.first(where: {
-                    ($0.protocolConfiguration as? NETunnelProviderProtocol)?
-                        .providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
-                }) {
-                    self.tunnelManager = manager
-                    self.isVPNConfigInstalled = true
-                    updateStatusFromConnection(manager.connection)
-                }
-            } catch {
-                self.isVPNConfigInstalled = false
-            }
-        }
-    }
-
     private func setupObservers() {
-        NotificationCenter.default.publisher(
-            for: .NEVPNStatusDidChange
-        )
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] notification in
-            guard let self = self,
-                  let connection = notification.object as? NEVPNConnection else { return }
-            self.updateStatusFromConnection(connection)
-        }
-        .store(in: &cancellables)
+        // VPN status changes
+        NotificationCenter.default.publisher(for: .NEVPNStatusDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self,
+                      self.connectionMode == .vpnTunnel,
+                      let connection = notification.object as? NEVPNConnection else { return }
+                self.updateStatusFromConnection(connection)
+            }
+            .store(in: &cancellables)
 
+        // Direct connect events
+        bridge.eventSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] event in
+                guard let self = self, self.connectionMode == .directConnect else { return }
+                switch event {
+                case .connected(let addr):
+                    self.peerAddress = addr
+                    if self.status != .connected {
+                        self.status = .connected
+                        self.stats.connectedSince = Date()
+                    }
+                case .disconnected:
+                    self.status = .disconnected
+                    self.stats = TrafficStats()
+                    self.stopStatsPolling()
+                case .error(let error):
+                    self.lastError = error.localizedDescription
+                default:
+                    break
+                }
+            }
+            .store(in: &cancellables)
+
+        // Network changes
         networkMonitor.interfaceChangePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -185,9 +335,10 @@ final class TunnelViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        configuration.$zoneName
+        // Zone name binding
+        configuration.
             .receive(on: DispatchQueue.main)
-            .assign(to: &$zoneName)
+            .assign(to: &)
     }
 
     private func updateStatusFromConnection(_ connection: NEVPNConnection) {
@@ -218,7 +369,16 @@ final class TunnelViewModel: ObservableObject {
         stopStatsPolling()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshStats()
+                self?.refreshVPNStats()
+            }
+        }
+    }
+
+    private func startDirectStatsPolling() {
+        stopStatsPolling()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshDirectStats()
             }
         }
     }
@@ -228,7 +388,7 @@ final class TunnelViewModel: ObservableObject {
         statsTimer = nil
     }
 
-    private func refreshStats() {
+    private func refreshVPNStats() {
         guard let defaults = sharedDefaults else { return }
         stats.bytesSent = UInt64(defaults.integer(forKey: "ztlp_bytes_sent"))
         stats.bytesReceived = UInt64(defaults.integer(forKey: "ztlp_bytes_received"))
@@ -236,5 +396,21 @@ final class TunnelViewModel: ObservableObject {
             stats.connectedSince = Date(timeIntervalSince1970: since)
         }
         peerAddress = defaults.string(forKey: "ztlp_peer_address") ?? ""
+    }
+
+    private func refreshDirectStats() {
+        stats.bytesSent = bridge.bytesSent
+        stats.bytesReceived = bridge.bytesReceived
+    }
+
+    // MARK: - Identity Path
+
+    private func defaultIdentityPath() -> String? {
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first
+        guard let dir = appSupport?.appendingPathComponent("ZTLP") else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("identity.json").path
     }
 }

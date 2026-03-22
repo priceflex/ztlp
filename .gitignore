@@ -37,3 +37,5 @@ demo/ztlp
 
 # Stress test results
 stress/results/
+ios/ZTLP/Libraries/*.a
+ios/ZTLP/Libraries/*.xcframework/

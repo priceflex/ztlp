@@ -136,6 +136,12 @@ defmodule ZtlpRelay.GatewayForwarder do
     GenServer.call(__MODULE__, :count)
   end
 
+  @doc "Clear all dynamic gateways and forwarded sessions (for testing)."
+  @spec clear_all() :: :ok
+  def clear_all do
+    GenServer.call(__MODULE__, :clear_all)
+  end
+
   # GenServer callbacks
 
   @impl true
@@ -273,6 +279,10 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   def handle_call(:count, _from, state) do
     {:reply, map_size(state.sessions), state}
+  end
+
+  def handle_call(:clear_all, _from, state) do
+    {:reply, :ok, %{state | sessions: %{}, dynamic_gateways: %{}}}
   end
 
   @impl true

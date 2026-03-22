@@ -18,6 +18,11 @@ defmodule ZtlpRelay.ForwardingTest do
     # Ensure the registry is available
     _ = SessionRegistry.count()
 
+    # Clear any dynamic gateway registrations from other tests
+    # so HELLOs without service names create half-open sessions
+    # instead of being forwarded to gateways
+    ZtlpRelay.GatewayForwarder.clear_all()
+
     # Get the relay's actual listening port
     port = ZtlpRelay.UdpListener.get_port()
     relay_addr = {{127, 0, 0, 1}, port}

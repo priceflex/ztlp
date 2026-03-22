@@ -379,15 +379,28 @@ final class ZTLPBridge {
         ztlp_dns_stop(c)
     }
 
-    /// Set up loopback aliases + DNS resolver (one admin prompt).
+    /// Set up loopback aliases + pf redirect + DNS resolver (one admin prompt).
     func setupNetworking(vips: [String]) throws {
-        // Build commands: add loopback aliases + create resolver config
+        // Build commands: add loopback aliases, pf redirect, resolver config
         var cmds: [String] = []
         for vip in vips {
             cmds.append("ifconfig lo0 alias \(vip) up")
         }
+        // pf rules: redirect port 80/443 on VIPs to high ports (8080/8443)
+        // so the app can bind without root
+        var pfRules = "# ZTLP VIP port redirects\n"
+        for vip in vips.filter({ $0 != "127.0.55.53" }) {
+            pfRules += "rdr pass on lo0 proto tcp from any to \(vip) port 80 -> \(vip) port 8080\n"
+            pfRules += "rdr pass on lo0 proto tcp from any to \(vip) port 443 -> \(vip) port 8443\n"
+        }
+        cmds.append("printf '\(pfRules)' > /etc/pf.anchors/ztlp")
+        // Load anchor into pf
+        cmds.append("grep -q 'ztlp' /etc/pf.conf || (echo 'rdr-anchor \"ztlp\"' >> /etc/pf.conf && echo 'load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"' >> /etc/pf.conf)")
+        cmds.append("pfctl -f /etc/pf.conf 2>/dev/null")
+        cmds.append("pfctl -e 2>/dev/null; true")
+        // DNS resolver
         cmds.append("mkdir -p /etc/resolver")
-        cmds.append("printf 'nameserver 127.0.55.53\\nport 53\\n' > /etc/resolver/ztlp")
+        cmds.append("printf 'nameserver 127.0.55.53\\nport 5353\\n' > /etc/resolver/ztlp")
 
         let combined = cmds.joined(separator: " && ")
         let script = "do shell script \"\(combined)\" with administrator privileges"
@@ -400,13 +413,16 @@ final class ZTLPBridge {
         }
     }
 
-    /// Remove loopback aliases + DNS resolver.
+    /// Remove loopback aliases + pf rules + DNS resolver.
     func teardownNetworking(vips: [String]) {
         var cmds: [String] = []
         for vip in vips {
             cmds.append("ifconfig lo0 -alias \(vip)")
         }
-        cmds.append("rm -f /etc/resolver/ztlp")
+        cmds.append("rm -f /etc/pf.anchors/ztlp /etc/resolver/ztlp")
+        // Remove ztlp lines from pf.conf and reload
+        cmds.append("sed -i '' '/ztlp/d' /etc/pf.conf 2>/dev/null; true")
+        cmds.append("pfctl -f /etc/pf.conf 2>/dev/null; true")
 
         let combined = cmds.joined(separator: " ; ")
         let script = "do shell script \"\(combined)\" with administrator privileges"

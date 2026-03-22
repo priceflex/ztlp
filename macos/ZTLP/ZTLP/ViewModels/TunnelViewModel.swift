@@ -461,18 +461,18 @@ final class TunnelViewModel: ObservableObject {
 
     private func startVipProxy() async {
         do {
-            // Register services with VIP addresses
-            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 80)
-            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 443)
+            // Register services with VIP addresses (high ports — pf redirects 80->8080, 443->8443)
+            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8080)
+            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)
 
-            // Set up loopback aliases + DNS resolver (prompts for admin password once)
+            // Set up loopback aliases + pf redirect + DNS resolver (prompts for admin password once)
             try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.53"])
 
-            // Start TCP proxy listeners
+            // Start TCP proxy listeners on high ports (pf handles 80/443 redirect)
             try bridge.vipStart()
 
             // Start DNS resolver
-            try bridge.dnsStart()
+            try bridge.dnsStart(listenAddr: "127.0.55.53:5353")
 
             await MainActor.run {
                 vipStatus = "VIP proxy active \u{2014} browse to http://beta.techrockstars.ztlp"

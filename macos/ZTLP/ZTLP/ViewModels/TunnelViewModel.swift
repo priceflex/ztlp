@@ -129,6 +129,7 @@ final class TunnelViewModel: ObservableObject {
         case .vpnTunnel:
             tunnelManager?.connection.stopVPNTunnel()
         case .directConnect:
+            stopVipProxy()
             bridge.disconnect()
         }
 
@@ -196,11 +197,12 @@ final class TunnelViewModel: ObservableObject {
 
             try await bridge.connect(target: target, config: config)
 
-            // Connected!
+            // Connected! Start VIP proxy + DNS
             status = .connected
             stats.connectedSince = Date()
             peerAddress = target
             startDirectStatsPolling()
+            await startVipProxy()
 
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
 
@@ -424,11 +426,7 @@ final class TunnelViewModel: ObservableObject {
         }
         testResult = "Testing..."
         
-        let httpRequest = "GET / HTTP/1.1
-Host: beta.local
-Connection: close
-
-"
+        let httpRequest = "GET / HTTP/1.1\r\nHost: beta.local\r\nConnection: close\r\n\r\n"
         guard let requestData = httpRequest.data(using: .utf8) else {
             testResult = "Failed to encode request"
             return
@@ -454,6 +452,43 @@ Connection: close
                 testResult = "Error: \(error.localizedDescription)"
             }
         }
+    }
+
+
+    // MARK: - VIP Proxy + DNS
+
+    @Published private(set) var vipStatus: String?
+
+    private func startVipProxy() async {
+        do {
+            // Register services with VIP addresses
+            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 80)
+            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 443)
+
+            // Start TCP proxy listeners
+            try bridge.vipStart()
+
+            // Start DNS resolver
+            try bridge.dnsStart()
+
+            // Set up macOS resolver config (will prompt for admin password)
+            try bridge.setupDNSResolver()
+
+            await MainActor.run {
+                vipStatus = "VIP proxy active — browse to http://beta.techrockstars.ztlp"
+            }
+        } catch {
+            await MainActor.run {
+                vipStatus = "VIP proxy failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func stopVipProxy() {
+        bridge.vipStop()
+        bridge.dnsStop()
+        bridge.teardownDNSResolver()
+        vipStatus = nil
     }
 
     // MARK: - Identity Path

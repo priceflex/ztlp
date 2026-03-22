@@ -77,6 +77,15 @@ struct HomeView: View {
                 }
             }
             
+            // VIP proxy status
+            if let vipStatus = viewModel.vipStatus {
+                Text(vipStatus)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.green)
+                    .padding(.horizontal)
+                    .multilineTextAlignment(.center)
+            }
+
             // Network indicator
             networkIndicator
 

@@ -332,7 +332,83 @@ final class ZTLPBridge {
         bytesSent += UInt64(data.count)
     }
 
-    // MARK: - Callbacks
+    // MARK: - VIP Proxy & DNS
+
+    /// Register a service with a VIP address for local proxy.
+    func vipAddService(name: String, vip: String, port: UInt16) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = name.withCString { cName in
+            vip.withCString { cVip in
+                ztlp_vip_add_service(c, cName, cVip, port)
+            }
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Start VIP TCP proxy listeners on all registered VIP:port combos.
+    func vipStart() throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = ztlp_vip_start(c)
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Stop all VIP proxy listeners.
+    func vipStop() {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+        ztlp_vip_stop(c)
+    }
+
+    /// Start local DNS resolver for *.ztlp domains.
+    func dnsStart(listenAddr: String = "127.0.55.53:53") throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = listenAddr.withCString { cAddr in
+            ztlp_dns_start(c, cAddr)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Stop DNS resolver.
+    func dnsStop() {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+        ztlp_dns_stop(c)
+    }
+
+    /// Set up macOS resolver for .ztlp domain (requires admin privileges).
+    func setupDNSResolver() throws {
+        let resolverDir = "/etc/resolver"
+        let resolverFile = "\(resolverDir)/ztlp"
+        let content = "nameserver 127.0.55.53\nport 53\n"
+
+        // Use AppleScript to get admin privileges for writing resolver config
+        let script = """
+        do shell script "mkdir -p \(resolverDir) && echo '\(content)' > \(resolverFile)" with administrator privileges
+        """
+
+        let appleScript = NSAppleScript(source: script)
+        var error: NSDictionary?
+        appleScript?.executeAndReturnError(&error)
+        if let error = error {
+            throw ZTLPError.connectionError("Failed to setup DNS: \(error)")
+        }
+    }
+
+    /// Remove macOS resolver for .ztlp domain.
+    func teardownDNSResolver() {
+        let script = """
+        do shell script "rm -f /etc/resolver/ztlp" with administrator privileges
+        """
+        let appleScript = NSAppleScript(source: script)
+        var error: NSDictionary?
+        appleScript?.executeAndReturnError(&error)
+    }
+
+        // MARK: - Callbacks
 
     private func setupCallbacks() throws {
         guard let c = clientLock.sync(execute: { self.client }) else { return }

@@ -264,6 +264,9 @@ defmodule ZtlpGateway.CircuitBreakerTest do
 
       Enum.each(tasks, &Task.await/1)
 
+      # Allow ETS state to settle after concurrent writes
+      Process.sleep(50)
+
       {state, failures} = CircuitBreaker.get_state("backend-1")
       # Due to races, the exact count might vary, but should be around 100
       # and the state should be open (since 100 >= 50)

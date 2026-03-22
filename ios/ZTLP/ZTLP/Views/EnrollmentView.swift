@@ -371,8 +371,8 @@ struct QRScannerView: UIViewRepresentable {
         Coordinator(onCodeScanned: onCodeScanned)
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
+    func makeUIView(context: Context) -> QRPreviewUIView {
+        let view = QRPreviewUIView()
 
         let session = AVCaptureSession()
         context.coordinator.session = session
@@ -395,8 +395,8 @@ struct QRScannerView: UIViewRepresentable {
 
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = UIScreen.main.bounds
         view.layer.addSublayer(previewLayer)
+        view.previewLayer = previewLayer
         context.coordinator.previewLayer = previewLayer
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -406,15 +406,25 @@ struct QRScannerView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.previewLayer?.frame = uiView.bounds
+    func updateUIView(_ uiView: QRPreviewUIView, context: Context) {
+        // Frame updates handled by QRPreviewUIView.layoutSubviews
     }
 
-    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+    static func dismantleUIView(_ uiView: QRPreviewUIView, coordinator: Coordinator) {
         coordinator.session?.stopRunning()
     }
 
-    class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
+/// Custom UIView subclass that keeps the preview layer sized correctly.
+    class QRPreviewUIView: UIView {
+        var previewLayer: AVCaptureVideoPreviewLayer?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            previewLayer?.frame = bounds
+        }
+    }
+
+        class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
         let onCodeScanned: (String) -> Void
         var session: AVCaptureSession?
         var previewLayer: AVCaptureVideoPreviewLayer?

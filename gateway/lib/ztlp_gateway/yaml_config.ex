@@ -83,11 +83,19 @@ defmodule ZtlpGateway.YamlConfig do
         validated_backends = Enum.map(backends, fn b ->
           case b do
             b when is_map(b) ->
-              %{
+              base = %{
                 name: Map.get(b, "name", "default"),
                 host: Map.get(b, "host", "127.0.0.1"),
                 port: Map.get(b, "port", 8080)
               }
+
+              # TLS-specific backend fields
+              base
+              |> maybe_put(:auth_mode, parse_auth_mode(Map.get(b, "auth_mode")))
+              |> maybe_put(:min_assurance, parse_assurance(Map.get(b, "min_assurance")))
+              |> maybe_put(:hostnames, Map.get(b, "hostnames"))
+              |> maybe_put(:required_groups, Map.get(b, "required_groups"))
+
             _ -> b
           end
         end)
@@ -127,9 +135,26 @@ defmodule ZtlpGateway.YamlConfig do
     {config, errors} = case Map.get(raw, "tls", %{}) do
       tls when is_map(tls) ->
         {config, errors} = validate_field(config, errors, tls, "enabled", :tls_enabled, :boolean, false, nil)
+        {config, errors} = validate_field(config, errors, tls, "port", :tls_port, :integer, 8443, 1..65535)
+        {config, errors} = validate_field(config, errors, tls, "acceptors", :tls_acceptors, :integer, 10, 1..1000)
         {config, errors} = validate_field(config, errors, tls, "cert_file", :tls_cert_file, :string, nil, nil)
         {config, errors} = validate_field(config, errors, tls, "key_file", :tls_key_file, :string, nil, nil)
-        validate_field(config, errors, tls, "ca_cert_file", :tls_ca_cert_file, :string, nil, nil)
+        {config, errors} = validate_field(config, errors, tls, "ca_cert_file", :tls_ca_cert_file, :string, nil, nil)
+        {config, errors} = validate_field(config, errors, tls, "mtls_required", :tls_mtls_required, :boolean, false, nil)
+        {config, errors} = validate_field(config, errors, tls, "mtls_optional", :tls_mtls_optional, :boolean, true, nil)
+
+        # Header signing sub-section
+        {config, errors} = case Map.get(tls, "header_signing", %{}) do
+          hs when is_map(hs) ->
+            {config, errors} = validate_field(config, errors, hs, "enabled", :header_signing_enabled, :boolean, false, nil)
+            {config, errors} = validate_field(config, errors, hs, "secret", :header_signing_secret, :string, nil, nil)
+            {config, errors} = validate_field(config, errors, hs, "secret_env", :header_signing_secret_env, :string, nil, nil)
+            validate_field(config, errors, hs, "timestamp_window_seconds", :header_signing_timestamp_window, :integer, 60, 1..3600)
+          nil -> {config, errors}
+          other -> {config, ["tls.header_signing: expected a map, got: #{inspect(other)}" | errors]}
+        end
+
+        {config, errors}
       nil -> {config, errors}
       other -> {config, ["tls: expected a map, got: #{inspect(other)}" | errors]}
     end
@@ -224,6 +249,10 @@ defmodule ZtlpGateway.YamlConfig do
     end
   end
 
+  defp coerce(value, :string, _c, _key) when is_binary(value), do: {:ok, value}
+  defp coerce(value, :string, _c, key),
+    do: {:error, "#{key}: expected a string, got: #{inspect(value)}"}
+
   defp coerce(value, :ip_address, _c, key) when is_binary(value) do
     case :inet.parse_address(String.to_charlist(value)) do
       {:ok, addr} -> {:ok, addr}
@@ -258,4 +287,25 @@ defmodule ZtlpGateway.YamlConfig do
     end
   end
   defp to_int(_), do: :error
+
+  # ── TLS Backend Helpers ───────────────────────────────────────────
+
+  defp parse_auth_mode(nil), do: nil
+  defp parse_auth_mode("passthrough"), do: :passthrough
+  defp parse_auth_mode("identity"), do: :identity
+  defp parse_auth_mode("enforce"), do: :enforce
+  defp parse_auth_mode(val) when is_atom(val), do: val
+  defp parse_auth_mode(_), do: :passthrough
+
+  defp parse_assurance(nil), do: nil
+  defp parse_assurance("hardware"), do: :hardware
+  defp parse_assurance("device-bound"), do: :device_bound
+  defp parse_assurance("device_bound"), do: :device_bound
+  defp parse_assurance("software"), do: :software
+  defp parse_assurance("unknown"), do: :unknown
+  defp parse_assurance(val) when is_atom(val), do: val
+  defp parse_assurance(_), do: nil
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

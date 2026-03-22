@@ -123,6 +123,58 @@ defmodule ZtlpGateway.Config do
   def get(:ns_query_timeout_ms),
     do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
 
+  # ── TLS Configuration ───────────────────────────────────────────
+
+  def get(:tls_enabled) do
+    case System.get_env("ZTLP_GATEWAY_TLS_ENABLED") do
+      nil -> Application.get_env(:ztlp_gateway, :tls_enabled, false)
+      "true" -> true
+      "1" -> true
+      _ -> false
+    end
+  end
+
+  def get(:tls_port) do
+    case System.get_env("ZTLP_GATEWAY_TLS_PORT") do
+      nil -> Application.get_env(:ztlp_gateway, :tls_port, 8443)
+      port -> String.to_integer(port)
+    end
+  end
+
+  def get(:tls_acceptors) do
+    Application.get_env(:ztlp_gateway, :tls_acceptors, 10)
+  end
+
+  def get(:tls_mtls_required) do
+    Application.get_env(:ztlp_gateway, :tls_mtls_required, false)
+  end
+
+  def get(:tls_mtls_optional) do
+    Application.get_env(:ztlp_gateway, :tls_mtls_optional, true)
+  end
+
+  def get(:header_signing_enabled) do
+    Application.get_env(:ztlp_gateway, :header_signing_enabled, false)
+  end
+
+  def get(:header_signing_secret) do
+    # First check env var override, then direct config, then env var name from config
+    case System.get_env("ZTLP_HEADER_HMAC_SECRET") do
+      nil ->
+        case Application.get_env(:ztlp_gateway, :header_signing_secret) do
+          nil ->
+            env_key = Application.get_env(:ztlp_gateway, :header_signing_secret_env)
+            if env_key, do: System.get_env(env_key), else: nil
+          secret -> secret
+        end
+      secret -> secret
+    end
+  end
+
+  def get(:header_signing_timestamp_window) do
+    Application.get_env(:ztlp_gateway, :header_signing_timestamp_window, 60)
+  end
+
   @doc "NS host for service discovery. Only used in Docker/production."
   @spec ns_host() :: String.t() | nil
   def ns_host, do: System.get_env("ZTLP_GATEWAY_NS_HOST")

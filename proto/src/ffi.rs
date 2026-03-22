@@ -1457,6 +1457,92 @@ pub extern "C" fn ztlp_dns_stop(client: *mut ZtlpClient) -> i32 {
     ZtlpResult::Ok as i32
 }
 
+// ── NS Resolution ───────────────────────────────────────────────────────
+
+/// Resolve a ZTLP service name via NS, returning the gateway endpoint address.
+///
+/// Queries the NS server for a SVC record matching `service_name` (e.g.,
+/// "beta.techrockstars.ztlp"). On success, returns a heap-allocated C string
+/// containing the resolved address (e.g., "10.42.42.112:23098"). The caller
+/// must free the string with `ztlp_string_free`.
+///
+/// Returns NULL on failure (check `ztlp_last_error` for details).
+///
+/// # Parameters
+/// - `service_name`: The ZTLP-NS name to resolve (e.g., "beta.techrockstars.ztlp")
+/// - `ns_server`: The NS server address (e.g., "52.39.59.34:23096")
+/// - `timeout_ms`: Query timeout in milliseconds (0 = default 5000ms)
+#[no_mangle]
+pub extern "C" fn ztlp_ns_resolve(
+    service_name: *const c_char,
+    ns_server: *const c_char,
+    timeout_ms: u32,
+) -> *mut c_char {
+    if service_name.is_null() || ns_server.is_null() {
+        set_last_error("service_name or ns_server is null");
+        return std::ptr::null_mut();
+    }
+
+    let name = match unsafe { CStr::from_ptr(service_name) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in service_name");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let server = match unsafe { CStr::from_ptr(ns_server) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in ns_server");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+
+    // Run the async NS resolution on the tokio runtime
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            set_last_error(&format!("failed to create runtime: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let result = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout),
+            crate::agent::proxy::ns_resolve(&name, &server),
+        )
+        .await
+    });
+
+    match result {
+        Ok(Ok(resolution)) => {
+            let addr_str = resolution.addr.to_string();
+            match CString::new(addr_str) {
+                Ok(cs) => cs.into_raw(),
+                Err(_) => {
+                    set_last_error("resolved address contains null byte");
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            set_last_error(&format!("NS resolution failed: {e}"));
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            set_last_error(&format!(
+                "NS resolution timed out after {}ms (server: {}, name: {})",
+                timeout, server, name
+            ));
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2338,5 +2424,28 @@ mod tests {
         packet.extend_from_slice(&1u16.to_be_bytes()); // CLASS_IN
 
         packet
+    }
+
+    #[test]
+    fn test_ns_resolve_null_args() {
+        let server = CString::new("127.0.0.1:23096").unwrap();
+        let result = ztlp_ns_resolve(std::ptr::null(), server.as_ptr(), 0);
+        assert!(result.is_null());
+
+        let name = CString::new("beta.test.ztlp").unwrap();
+        let result = ztlp_ns_resolve(name.as_ptr(), std::ptr::null(), 0);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_ns_resolve_timeout_on_bad_server() {
+        let name = CString::new("beta.test.ztlp").unwrap();
+        // Use a non-routable address that will timeout
+        let server = CString::new("192.0.2.1:23096").unwrap();
+        let result = ztlp_ns_resolve(name.as_ptr(), server.as_ptr(), 500);
+        assert!(result.is_null());
+        // Should have a timeout error
+        let err = ztlp_last_error();
+        assert!(!err.is_null());
     }
 }

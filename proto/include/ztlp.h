@@ -687,6 +687,28 @@ int32_t ztlp_dns_start(ZtlpClient *client, const char *listen_addr);
 int32_t ztlp_dns_stop(ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * NS Resolution
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Resolve a ZTLP service name via ZTLP-NS.
+ *
+ * Queries the NS server for a SVC record matching the given name.
+ * Returns the resolved endpoint address (e.g., "10.42.42.112:23098").
+ *
+ * The caller must free the returned string with ztlp_string_free().
+ * Returns NULL on failure — check ztlp_last_error() for details.
+ *
+ * @param service_name  ZTLP-NS name (e.g., "beta.techrockstars.ztlp").
+ * @param ns_server     NS server address (e.g., "52.39.59.34:23096").
+ * @param timeout_ms    Query timeout in ms (0 = default 5000ms).
+ * @return Heap-allocated address string, or NULL on failure.
+ */
+char *ztlp_ns_resolve(const char *service_name,
+                       const char *ns_server,
+                       uint32_t timeout_ms);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Statistics
  * ═══════════════════════════════════════════════════════════════════════════ */
 

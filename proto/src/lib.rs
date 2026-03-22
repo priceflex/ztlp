@@ -40,6 +40,7 @@ pub mod agent;
 pub mod anti_replay;
 pub mod batch;
 pub mod congestion;
+pub mod dns;
 pub mod enrollment;
 pub mod error;
 #[allow(unsafe_code)]
@@ -69,3 +70,4 @@ pub mod session_manager;
 pub mod stats;
 pub mod transport;
 pub mod tunnel;
+pub mod vip;

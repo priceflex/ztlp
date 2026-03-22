@@ -21,8 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::RwLock as TokioRwLock;
 
+use crate::dns::{VipRegistry, ZtlpDns};
 use crate::handshake::{
     HandshakeContext, INITIAL_HANDSHAKE_RETRY_MS, MAX_HANDSHAKE_RETRIES, MAX_HANDSHAKE_RETRY_MS,
 };
@@ -36,6 +37,7 @@ use crate::reject::RejectFrame;
 use crate::session::SessionState;
 use crate::transport::TransportNode;
 use crate::tunnel::encode_service_name;
+use crate::vip::VipProxy;
 
 // ── Thread-local error storage ──────────────────────────────────────────
 
@@ -89,6 +91,12 @@ struct ZtlpClientInner {
     active_session: Option<ActiveSession>,
     recv_callback: Option<(ZtlpRecvCallback, *mut c_void)>,
     disconnect_callback: Option<(ZtlpDisconnectCallback, *mut c_void)>,
+    /// VIP proxy manager (local TCP → tunnel).
+    vip_proxy: Option<VipProxy>,
+    /// DNS resolver for *.ztlp domains.
+    dns_server: Option<ZtlpDns>,
+    /// Shared VIP registry (service name → IP) used by both VIP proxy and DNS.
+    vip_registry: VipRegistry,
 }
 
 unsafe impl Send for ZtlpClientInner {}
@@ -321,6 +329,9 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         active_session: None,
         recv_callback: None,
         disconnect_callback: None,
+        vip_proxy: None,
+        dns_server: None,
+        vip_registry: Arc::new(TokioRwLock::new(std::collections::HashMap::new())),
     };
     let client = ZtlpClient {
         inner: Arc::new(std::sync::Mutex::new(inner)),
@@ -1172,6 +1183,269 @@ pub extern "C" fn ztlp_last_error() -> *const c_char {
     })
 }
 
+// ── VIP Proxy functions ─────────────────────────────────────────────────
+
+/// Register a service with a VIP (Virtual IP) address and port.
+///
+/// The VIP proxy will listen on `vip:port` and forward TCP traffic
+/// through the ZTLP tunnel.
+///
+/// # Example
+/// ```c
+/// ztlp_vip_add_service(client, "beta", "127.0.55.1", 80);
+/// ztlp_vip_add_service(client, "beta", "127.0.55.1", 443);
+/// ```
+#[no_mangle]
+pub extern "C" fn ztlp_vip_add_service(
+    client: *mut ZtlpClient,
+    name: *const c_char,
+    vip: *const c_char,
+    port: u16,
+) -> i32 {
+    if client.is_null() || name.is_null() || vip.is_null() {
+        set_last_error("client, name, or vip is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let client = unsafe { &*client };
+    let name_str = unsafe { CStr::from_ptr(name) };
+    let name_string = match name_str.to_str() {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in name: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let vip_str = unsafe { CStr::from_ptr(vip) };
+    let vip_string = match vip_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in vip: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let vip_addr: std::net::Ipv4Addr = match vip_string.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            set_last_error(&format!("invalid VIP address '{}': {}", vip_string, e));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    // Initialize VIP proxy if needed
+    if guard.vip_proxy.is_none() {
+        guard.vip_proxy = Some(VipProxy::new());
+    }
+
+    if let Some(ref mut proxy) = guard.vip_proxy {
+        proxy.add_service(name_string.clone(), vip_addr, port);
+    }
+
+    // Also update the shared DNS registry
+    let registry = guard.vip_registry.clone();
+    guard.runtime.spawn(async move {
+        let mut reg = registry.write().await;
+        reg.insert(name_string, vip_addr);
+    });
+
+    ZtlpResult::Ok as i32
+}
+
+/// Start VIP proxy listeners for all registered services.
+///
+/// Requires an active ZTLP session. Each registered service will get
+/// a TCP listener on its VIP:port that pipes data through the tunnel.
+#[no_mangle]
+pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    if guard.state != ConnectionState::Connected {
+        set_last_error("not connected — connect first, then start VIP proxy");
+        return ZtlpResult::NotConnected as i32;
+    }
+
+    let session = match guard.active_session.as_ref() {
+        Some(s) => s,
+        None => {
+            set_last_error("no active session");
+            return ZtlpResult::SessionNotFound as i32;
+        }
+    };
+
+    let transport = session.transport.clone();
+    let session_id = session.session_id;
+    let peer_addr = session.peer_addr;
+    let data_seq = session.data_seq.clone();
+    let bytes_sent = session.bytes_sent.clone();
+
+    let mut proxy = match guard.vip_proxy.take() {
+        Some(p) => p,
+        None => {
+            set_last_error("no services registered — call ztlp_vip_add_service first");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    // Start proxy listeners on the runtime
+    let result = guard.runtime.block_on(async {
+        proxy
+            .start(transport, session_id, peer_addr, data_seq, bytes_sent)
+            .await
+    });
+
+    guard.vip_proxy = Some(proxy);
+
+    match result {
+        Ok(()) => ZtlpResult::Ok as i32,
+        Err(e) => {
+            set_last_error(&format!("VIP proxy start failed: {e}"));
+            ZtlpResult::ConnectionError as i32
+        }
+    }
+}
+
+/// Stop all VIP proxy listeners.
+#[no_mangle]
+pub extern "C" fn ztlp_vip_stop(client: *mut ZtlpClient) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    if let Some(ref mut proxy) = guard.vip_proxy {
+        proxy.stop();
+    }
+
+    ZtlpResult::Ok as i32
+}
+
+// ── DNS Resolver functions ──────────────────────────────────────────────
+
+/// Start the ZTLP DNS resolver on the given listen address.
+///
+/// Resolves `*.ztlp` domain queries to VIP addresses based on registered
+/// services. Typically bound to `127.0.55.53:53`.
+///
+/// # macOS Setup
+/// Create `/etc/resolver/ztlp` with:
+/// ```text
+/// nameserver 127.0.55.53
+/// ```
+/// This tells macOS to route all `*.ztlp` queries to our DNS server.
+#[no_mangle]
+pub extern "C" fn ztlp_dns_start(
+    client: *mut ZtlpClient,
+    listen_addr: *const c_char,
+) -> i32 {
+    if client.is_null() || listen_addr.is_null() {
+        set_last_error("client or listen_addr is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let client = unsafe { &*client };
+    let addr_str = unsafe { CStr::from_ptr(listen_addr) };
+    let addr_string = match addr_str.to_str() {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in listen_addr: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let bind_addr: SocketAddr = match addr_string.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            set_last_error(&format!("invalid address '{}': {}", addr_string, e));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    // Stop existing DNS server if any
+    if let Some(ref mut dns) = guard.dns_server {
+        dns.stop();
+    }
+
+    let registry = guard.vip_registry.clone();
+    let mut dns = ZtlpDns::new(registry);
+
+    let result = guard.runtime.block_on(async { dns.start(bind_addr).await });
+
+    match result {
+        Ok(()) => {
+            guard.dns_server = Some(dns);
+            ZtlpResult::Ok as i32
+        }
+        Err(e) => {
+            set_last_error(&format!("DNS start failed: {e}"));
+            ZtlpResult::ConnectionError as i32
+        }
+    }
+}
+
+/// Stop the ZTLP DNS resolver.
+#[no_mangle]
+pub extern "C" fn ztlp_dns_stop(client: *mut ZtlpClient) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    if let Some(ref mut dns) = guard.dns_server {
+        dns.stop();
+    }
+    guard.dns_server = None;
+
+    ZtlpResult::Ok as i32
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1758,5 +2032,300 @@ mod tests {
             std::ptr::null_mut(),
         );
         assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    // ── VIP Proxy tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_vip_add_service_null_client() {
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("127.0.55.1").unwrap();
+        let result = ztlp_vip_add_service(std::ptr::null_mut(), name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn test_vip_add_service_null_name() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let vip = CString::new("127.0.55.1").unwrap();
+        let result = ztlp_vip_add_service(client, std::ptr::null(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_add_service_null_vip() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("beta").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), std::ptr::null(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_add_service_invalid_ip() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("not_an_ip").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_add_service_success() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("127.0.55.1").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::Ok as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_add_service_multiple() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("127.0.55.1").unwrap();
+        assert_eq!(
+            ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80),
+            ZtlpResult::Ok as i32
+        );
+        assert_eq!(
+            ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 443),
+            ZtlpResult::Ok as i32
+        );
+
+        let name2 = CString::new("backstage").unwrap();
+        let vip2 = CString::new("127.0.55.2").unwrap();
+        assert_eq!(
+            ztlp_vip_add_service(client, name2.as_ptr(), vip2.as_ptr(), 80),
+            ZtlpResult::Ok as i32
+        );
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_start_null_client() {
+        let result = ztlp_vip_start(std::ptr::null_mut());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn test_vip_start_not_connected() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("127.0.55.1").unwrap();
+        ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        let result = ztlp_vip_start(client);
+        assert_eq!(result, ZtlpResult::NotConnected as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_start_no_services() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        // Don't add any services — should fail
+        let result = ztlp_vip_start(client);
+        // Not connected, so we'll get NotConnected before checking services
+        assert_eq!(result, ZtlpResult::NotConnected as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_vip_stop_null_client() {
+        let result = ztlp_vip_stop(std::ptr::null_mut());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn test_vip_stop_no_proxy() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let result = ztlp_vip_stop(client);
+        assert_eq!(result, ZtlpResult::Ok as i32); // No-op is fine
+        ztlp_client_free(client);
+    }
+
+    // ── DNS Resolver tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_dns_start_null_client() {
+        let addr = CString::new("127.0.55.53:15353").unwrap();
+        let result = ztlp_dns_start(std::ptr::null_mut(), addr.as_ptr());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn test_dns_start_null_addr() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let result = ztlp_dns_start(client, std::ptr::null());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_start_invalid_addr() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let addr = CString::new("not_a_valid_addr").unwrap();
+        let result = ztlp_dns_start(client, addr.as_ptr());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_start_and_stop() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        // Use a high port to avoid permission issues in tests
+        let addr = CString::new("127.0.0.1:15353").unwrap();
+        let result = ztlp_dns_start(client, addr.as_ptr());
+        assert_eq!(result, ZtlpResult::Ok as i32);
+
+        let result = ztlp_dns_stop(client);
+        assert_eq!(result, ZtlpResult::Ok as i32);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_stop_null_client() {
+        let result = ztlp_dns_stop(std::ptr::null_mut());
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn test_dns_stop_no_server() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let result = ztlp_dns_stop(client);
+        assert_eq!(result, ZtlpResult::Ok as i32); // No-op is fine
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_start_twice_replaces() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        let addr1 = CString::new("127.0.0.1:15354").unwrap();
+        let result = ztlp_dns_start(client, addr1.as_ptr());
+        assert_eq!(result, ZtlpResult::Ok as i32);
+
+        // Start again on different port — should stop first and start new
+        let addr2 = CString::new("127.0.0.1:15355").unwrap();
+        let result = ztlp_dns_start(client, addr2.as_ptr());
+        assert_eq!(result, ZtlpResult::Ok as i32);
+
+        ztlp_dns_stop(client);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_resolves_registered_service() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        // Register a service
+        let name = CString::new("beta").unwrap();
+        let vip = CString::new("127.0.55.1").unwrap();
+        assert_eq!(
+            ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80),
+            ZtlpResult::Ok as i32
+        );
+
+        // Start DNS on a high port
+        let addr = CString::new("127.0.0.1:15356").unwrap();
+        assert_eq!(ztlp_dns_start(client, addr.as_ptr()), ZtlpResult::Ok as i32);
+
+        // Give the DNS server a moment to start
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Send a DNS query and check the response
+        let query = build_dns_test_query(0xABCD, "beta.techrockstars.ztlp");
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind test socket");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set timeout");
+        sock.send_to(&query, "127.0.0.1:15356")
+            .expect("send query");
+
+        let mut resp_buf = [0u8; 512];
+        let (resp_len, _) = sock.recv_from(&mut resp_buf).expect("recv response");
+        let response = &resp_buf[..resp_len];
+
+        // Check: QR flag set, ANCOUNT = 1
+        let flags = u16::from_be_bytes([response[2], response[3]]);
+        assert_ne!(flags & 0x8000, 0, "QR flag should be set");
+        let ancount = u16::from_be_bytes([response[6], response[7]]);
+        assert_eq!(ancount, 1, "should have 1 answer");
+
+        // Extract the IP from the answer (last 4 bytes of response)
+        let ip_bytes = &response[resp_len - 4..resp_len];
+        assert_eq!(ip_bytes, &[127, 0, 55, 1], "should resolve to 127.0.55.1");
+
+        ztlp_dns_stop(client);
+        ztlp_client_free(client);
+    }
+
+    #[test]
+    fn test_dns_nxdomain_for_unknown() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        let addr = CString::new("127.0.0.1:15357").unwrap();
+        assert_eq!(ztlp_dns_start(client, addr.as_ptr()), ZtlpResult::Ok as i32);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let query = build_dns_test_query(0x1234, "unknown.ztlp");
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set timeout");
+        sock.send_to(&query, "127.0.0.1:15357").expect("send");
+
+        let mut resp_buf = [0u8; 512];
+        let (resp_len, _) = sock.recv_from(&mut resp_buf).expect("recv");
+        let response = &resp_buf[..resp_len];
+
+        // Check NXDOMAIN
+        let flags = u16::from_be_bytes([response[2], response[3]]);
+        assert_eq!(flags & 0x000F, 3, "should be NXDOMAIN");
+
+        ztlp_dns_stop(client);
+        ztlp_client_free(client);
+    }
+
+    /// Build a minimal DNS query for testing.
+    fn build_dns_test_query(id: u16, name: &str) -> Vec<u8> {
+        let mut packet = Vec::new();
+        // Header
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes()); // Standard query
+        packet.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
+        packet.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+        packet.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+        packet.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+
+        // Question: encode name
+        for label in name.split('.') {
+            packet.push(label.len() as u8);
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.push(0); // Root label
+
+        // Type A, Class IN
+        packet.extend_from_slice(&1u16.to_be_bytes()); // TYPE_A
+        packet.extend_from_slice(&1u16.to_be_bytes()); // CLASS_IN
+
+        packet
     }
 }

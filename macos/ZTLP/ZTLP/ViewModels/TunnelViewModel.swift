@@ -187,8 +187,32 @@ final class TunnelViewModel: ObservableObject {
                 try config.setService(svcName)
             }
 
-            // Connect — target is the NS or relay address
-            let target = relay.isEmpty ? configuration.targetNodeId : relay
+            // Resolve gateway address via NS if we have a service name and NS server
+            var target = relay
+            let nsServer = configuration.targetNodeId  // NS server address
+            if !svcName.isEmpty && !nsServer.isEmpty {
+                let nsName = svcName.contains(".") ? svcName : "\(svcName).techrockstars.ztlp"
+                do {
+                    let resolved = try bridge.nsResolve(
+                        serviceName: nsName,
+                        nsServer: nsServer,
+                        timeoutMs: 5000
+                    )
+                    print("[ZTLP] NS resolved \(nsName) -> \(resolved)")
+                    target = resolved
+                } catch {
+                    print("[ZTLP] NS resolution failed: \(error), falling back to relay/direct")
+                    // Fall back to relay address or NS server
+                    if target.isEmpty {
+                        target = nsServer
+                    }
+                }
+            }
+
+            // Fall back to relay or NS address if NS resolution didn't set a target
+            if target.isEmpty {
+                target = nsServer
+            }
             guard !target.isEmpty else {
                 status = .disconnected
                 lastError = "No relay or target address configured. Enroll first."

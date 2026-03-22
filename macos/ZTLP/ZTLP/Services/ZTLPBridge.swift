@@ -332,7 +332,30 @@ final class ZTLPBridge {
         bytesSent += UInt64(data.count)
     }
 
-    // MARK: - VIP Proxy & DNS
+    // MARK: - NS Resolution
+
+    /// Resolve a ZTLP service name via NS, returning the gateway endpoint address.
+    /// - Parameters:
+    ///   - serviceName: The ZTLP-NS name (e.g., "beta.techrockstars.ztlp")
+    ///   - nsServer: The NS server address (e.g., "52.39.59.34:23096")
+    ///   - timeoutMs: Query timeout in ms (0 = default 5000ms)
+    /// - Returns: Resolved address string (e.g., "10.42.42.112:23098")
+    func nsResolve(serviceName: String, nsServer: String, timeoutMs: UInt32 = 5000) throws -> String {
+        let result = serviceName.withCString { cName in
+            nsServer.withCString { cServer in
+                ztlp_ns_resolve(cName, cServer, timeoutMs)
+            }
+        }
+        guard let cStr = result else {
+            let errMsg = String(cString: ztlp_last_error())
+            throw ZTLPError.connectionError("NS resolution failed: \(errMsg)")
+        }
+        let resolved = String(cString: cStr)
+        ztlp_string_free(cStr)
+        return resolved
+    }
+
+        // MARK: - VIP Proxy & DNS
 
     /// Register a service with a VIP address for local proxy.
     func vipAddService(name: String, vip: String, port: UInt16) throws {

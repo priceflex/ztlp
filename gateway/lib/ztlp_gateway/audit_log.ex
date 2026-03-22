@@ -201,6 +201,90 @@ defmodule ZtlpGateway.AuditLog do
     })
   end
 
+  # ---------------------------------------------------------------------------
+  # TLS Session Lifecycle Events
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Log a generic event map.
+
+  Used by TlsSession and other modules that build their own event maps.
+  The map must include an `:event` key.
+  """
+  @spec log_event(map()) :: :ok
+  def log_event(%{event: _} = event) do
+    log(event)
+  end
+
+  @doc """
+  Log a TLS mTLS identity extraction event.
+
+  Records the identity details extracted from a client certificate.
+  """
+  @spec tls_mtls_identity(map()) :: :ok
+  def tls_mtls_identity(identity) when is_map(identity) do
+    log(%{
+      event: :tls_mtls_identity,
+      node_id: Map.get(identity, :node_id),
+      node_name: Map.get(identity, :node_name),
+      zone: Map.get(identity, :zone),
+      assurance: Map.get(identity, :assurance),
+      key_source: Map.get(identity, :key_source)
+    })
+  end
+
+  @doc """
+  Log a TLS policy decision event.
+  """
+  @spec tls_policy_decision(String.t() | nil, String.t() | nil, :allow | :deny, String.t() | nil) :: :ok
+  def tls_policy_decision(identity, service, decision, reason \\ nil) do
+    log(%{
+      event: :tls_policy_decision,
+      identity: identity,
+      service: service,
+      decision: decision,
+      reason: reason
+    })
+  end
+
+  @doc """
+  Log a TLS connection closed event.
+  """
+  @spec tls_connection_closed(keyword() | map()) :: :ok
+  def tls_connection_closed(attrs) when is_map(attrs) do
+    log(Map.put(attrs, :event, :tls_connection_closed))
+  end
+
+  def tls_connection_closed(attrs) when is_list(attrs) do
+    tls_connection_closed(Map.new(attrs))
+  end
+
+  @doc """
+  Log a certificate issued event.
+  """
+  @spec tls_cert_issued(String.t(), String.t(), String.t() | nil) :: :ok
+  def tls_cert_issued(hostname, serial, issuer \\ nil) do
+    log(%{
+      event: :tls_cert_issued,
+      hostname: hostname,
+      serial: serial,
+      issuer: issuer
+    })
+  end
+
+  @doc """
+  Log a certificate renewed event.
+  """
+  @spec tls_cert_renewed(String.t(), String.t(), String.t()) :: :ok
+  def tls_cert_renewed(hostname, old_serial, new_serial) do
+    log(%{
+      event: :tls_cert_renewed,
+      hostname: hostname,
+      old_serial: old_serial,
+      new_serial: new_serial
+    })
+  end
+
   @doc "Clear all audit events."
   @spec clear() :: :ok
   def clear do

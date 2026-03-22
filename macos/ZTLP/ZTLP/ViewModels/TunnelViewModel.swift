@@ -161,7 +161,7 @@ final class TunnelViewModel: ObservableObject {
 
             self.directIdentity = identity
 
-            guard let nodeId = identity.nodeId else {
+            guard identity.nodeId != nil else {
                 status = .disconnected
                 lastError = "Failed to get node ID from identity"
                 return
@@ -216,14 +216,17 @@ final class TunnelViewModel: ObservableObject {
         proto.serverAddress = configuration.relayAddress.isEmpty
             ? configuration.targetNodeId
             : configuration.relayAddress
-        proto.providerConfiguration = [
+
+        var providerConfig: [String: Any] = [
             "targetNodeId": configuration.targetNodeId,
             "relayAddress": configuration.relayAddress,
             "stunServer": configuration.stunServer,
             "tunnelAddress": configuration.tunnelAddress,
-            "dnsServers": configuration.dnsServers,
             "mtu": configuration.mtu,
         ]
+        providerConfig["dnsServers"] = configuration.dnsServers
+
+        proto.providerConfiguration = providerConfig
 
         manager.protocolConfiguration = proto
         manager.localizedDescription = "ZTLP VPN"
@@ -245,8 +248,8 @@ final class TunnelViewModel: ObservableObject {
             do {
                 let managers = try await NETunnelProviderManager.loadAllFromPreferences()
                 if let existing = managers.first(where: {
-                    (/bin/bash.protocolConfiguration as? NETunnelProviderProtocol)?
-                        .providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
+                    guard let proto = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+                    return proto.providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
                 }) {
                     self.tunnelManager = existing
                     self.isVPNConfigInstalled = true
@@ -281,8 +284,8 @@ final class TunnelViewModel: ObservableObject {
         let managers = try await NETunnelProviderManager.loadAllFromPreferences()
 
         if let existing = managers.first(where: {
-            (/bin/bash.protocolConfiguration as? NETunnelProviderProtocol)?
-                .providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
+            guard let proto = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+            return proto.providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
         }) {
             return existing
         }
@@ -336,9 +339,9 @@ final class TunnelViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Zone name binding
-        configuration.
+        configuration.$zoneName
             .receive(on: DispatchQueue.main)
-            .assign(to: &)
+            .assign(to: &$zoneName)
     }
 
     private func updateStatusFromConnection(_ connection: NEVPNConnection) {

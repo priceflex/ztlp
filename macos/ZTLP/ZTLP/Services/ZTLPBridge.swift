@@ -411,7 +411,7 @@ final class ZTLPBridge {
         script += "mkdir -p /etc/resolver\n"
         script += "cat > /etc/resolver/ztlp << 'DNSEOF'\n"
         script += "nameserver 127.0.55.53\n"
-        script += "port 5353\n"
+        script += "port 5354\n"
         script += "DNSEOF\n"
 
         // Write the script and make executable

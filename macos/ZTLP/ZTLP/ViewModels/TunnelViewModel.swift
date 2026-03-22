@@ -472,7 +472,7 @@ final class TunnelViewModel: ObservableObject {
             try bridge.vipStart()
 
             // Start DNS resolver
-            try bridge.dnsStart(listenAddr: "127.0.55.53:5353")
+            try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
 
             await MainActor.run {
                 vipStatus = "VIP proxy active \u{2014} browse to http://beta.techrockstars.ztlp"

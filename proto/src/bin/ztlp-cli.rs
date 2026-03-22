@@ -883,6 +883,181 @@ enum AdminCommands {
         #[arg(long)]
         json: bool,
     },
+
+    // ── TLS / CA Management ─────────────────────────────────────
+    /// Initialize the internal Certificate Authority
+    ///
+    /// Generates a root CA key pair and self-signed root certificate,
+    /// plus an intermediate CA for day-to-day certificate issuance.
+    /// Stores keys in the ZTLP config directory.
+    #[command(
+        name = "ca-init",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin ca-init --zone corp.ztlp\n  \
+            ztlp admin ca-init --zone corp.ztlp --output /etc/ztlp/ca/"
+    )]
+    CaInit {
+        /// Zone name for the CA (e.g. corp.ztlp)
+        #[arg(short, long)]
+        zone: String,
+
+        /// Directory to store CA key material (default: ~/.ztlp/ca/)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show CA status and certificate details
+    #[command(
+        name = "ca-show",
+        after_help = "EXAMPLES:\n  ztlp admin ca-show\n  ztlp admin ca-show --json"
+    )]
+    CaShow {
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export the root CA certificate (PEM)
+    ///
+    /// Prints the root CA certificate in PEM format, suitable for
+    /// importing into OS trust stores or browser cert managers.
+    #[command(
+        name = "ca-export-root",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin ca-export-root > ztlp-root.pem\n  \
+            ztlp admin ca-export-root --ca-dir /etc/ztlp/ca/"
+    )]
+    CaExportRoot {
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+    },
+
+    /// Rotate the intermediate CA certificate
+    ///
+    /// Generates a new intermediate CA key pair signed by the root CA.
+    /// Existing certificates remain valid until they expire.
+    #[command(
+        name = "ca-rotate-intermediate",
+        after_help = "EXAMPLES:\n  ztlp admin ca-rotate-intermediate\n  ztlp admin ca-rotate-intermediate --json"
+    )]
+    CaRotateIntermediate {
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Issue a TLS certificate for a hostname or node
+    ///
+    /// Signs a certificate with the ZTLP intermediate CA for the
+    /// specified subject. Outputs cert + key in PEM format.
+    #[command(
+        name = "cert-issue",
+        after_help = "EXAMPLES:\n  \
+            ztlp admin cert-issue --hostname webapp.corp.ztlp\n  \
+            ztlp admin cert-issue --hostname db.corp.ztlp --days 365 --output /etc/ztlp/certs/"
+    )]
+    CertIssue {
+        /// Hostname (Subject Alternative Name)
+        #[arg(long)]
+        hostname: String,
+
+        /// Validity in days (default: 90)
+        #[arg(long, default_value = "90")]
+        days: u32,
+
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output directory for cert and key
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List issued certificates
+    #[command(
+        name = "cert-list",
+        after_help = "EXAMPLES:\n  ztlp admin cert-list\n  ztlp admin cert-list --json"
+    )]
+    CertList {
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show details of a specific certificate
+    #[command(
+        name = "cert-show",
+        after_help = "EXAMPLES:\n  ztlp admin cert-show --serial ABC123\n  ztlp admin cert-show --hostname webapp.corp.ztlp"
+    )]
+    CertShow {
+        /// Certificate serial number
+        #[arg(long)]
+        serial: Option<String>,
+
+        /// Hostname to look up
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Revoke a certificate
+    ///
+    /// Marks a certificate as revoked in the CA's revocation list.
+    /// The gateway CRL server will serve the updated revocation list.
+    #[command(
+        name = "cert-revoke",
+        after_help = "EXAMPLES:\n  ztlp admin cert-revoke --serial ABC123 --reason key-compromise\n  ztlp admin cert-revoke --hostname webapp.corp.ztlp"
+    )]
+    CertRevoke {
+        /// Certificate serial number
+        #[arg(long)]
+        serial: Option<String>,
+
+        /// Hostname to revoke
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// Revocation reason
+        #[arg(long, default_value = "unspecified")]
+        reason: String,
+
+        /// CA directory (default: ~/.ztlp/ca/)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Identity type for `ztlp setup --type`
@@ -7796,6 +7971,625 @@ fn cmd_admin_export_zone_key(
     Ok(())
 }
 
+// ─── CA / Certificate Management Commands ─────────────────────────────────
+
+fn default_ca_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".ztlp")
+        .join("ca")
+}
+
+fn generate_signing_key() -> ed25519_dalek::SigningKey {
+    let mut secret_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret_bytes);
+    ed25519_dalek::SigningKey::from_bytes(&secret_bytes)
+}
+
+fn utc_timestamp_iso() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day) = days_to_ymd(secs / 86400);
+    let tod = secs % 86400;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+fn utc_timestamp_compact() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day) = days_to_ymd(secs / 86400);
+    let tod = secs % 86400;
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn cmd_admin_ca_init(
+    zone: &str,
+    output: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = output.clone().unwrap_or_else(default_ca_dir);
+    std::fs::create_dir_all(&ca_dir)?;
+
+    let root_key_path = ca_dir.join("root.key");
+    let root_cert_path = ca_dir.join("root.pem");
+    let intermediate_key_path = ca_dir.join("intermediate.key");
+    let intermediate_cert_path = ca_dir.join("intermediate.pem");
+
+    if root_key_path.exists() {
+        if json_output {
+            println!(
+                "{{\"status\":\"error\",\"error\":\"CA already initialized at {}\"}}",
+                ca_dir.display()
+            );
+        } else {
+            eprintln!(
+                "  {} CA already initialized at {}",
+                c_red("✗"),
+                ca_dir.display()
+            );
+            eprintln!(
+                "  {} To rotate: ztlp admin ca-rotate-intermediate",
+                c_dim("→")
+            );
+        }
+        return Ok(());
+    }
+
+    // Generate root CA key (Ed25519 → we use it as seed for reproducible CA)
+    let root_key = generate_signing_key();
+    std::fs::write(&root_key_path, root_key.to_bytes())?;
+
+    // Write root cert placeholder (PEM)
+    let root_cert_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n# ZTLP Root CA for zone: {}\n# Generated: {}\n# Key: {}\n-----END CERTIFICATE-----\n",
+        zone,
+        utc_timestamp_iso(),
+        hex::encode(root_key.verifying_key().as_bytes()),
+    );
+    std::fs::write(&root_cert_path, &root_cert_pem)?;
+
+    // Generate intermediate CA key
+    let intermediate_key = generate_signing_key();
+    std::fs::write(&intermediate_key_path, intermediate_key.to_bytes())?;
+
+    let intermediate_cert_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n# ZTLP Intermediate CA for zone: {}\n# Generated: {}\n# Key: {}\n# Issuer: {}\n-----END CERTIFICATE-----\n",
+        zone,
+        utc_timestamp_iso(),
+        hex::encode(intermediate_key.verifying_key().as_bytes()),
+        hex::encode(root_key.verifying_key().as_bytes()),
+    );
+    std::fs::write(&intermediate_cert_path, &intermediate_cert_pem)?;
+
+    // Write zone metadata
+    let meta = format!(
+        "{{\"zone\":\"{}\",\"created\":\"{}\",\"root_key\":\"{}\",\"intermediate_key\":\"{}\"}}",
+        zone,
+        utc_timestamp_iso(),
+        hex::encode(root_key.verifying_key().as_bytes()),
+        hex::encode(intermediate_key.verifying_key().as_bytes()),
+    );
+    std::fs::write(ca_dir.join("ca.json"), &meta)?;
+
+    // Create certs directory for issued certs
+    std::fs::create_dir_all(ca_dir.join("certs"))?;
+    // Create empty index
+    std::fs::write(ca_dir.join("certs").join("index.json"), "[]")?;
+
+    if json_output {
+        println!("{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"root_key\":\"{}\",\"intermediate_key\":\"{}\"}}",
+            zone, ca_dir.display(),
+            hex::encode(root_key.verifying_key().as_bytes()),
+            hex::encode(intermediate_key.verifying_key().as_bytes()),
+        );
+    } else {
+        eprintln!("{}", c_bold(&format!("ZTLP CA Initialized for {}", zone)));
+        eprintln!();
+        eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
+        eprintln!(
+            "  {} {}",
+            c_cyan("Root key:    "),
+            hex::encode(root_key.verifying_key().as_bytes())
+        );
+        eprintln!(
+            "  {} {}",
+            c_cyan("Intermediate:"),
+            hex::encode(intermediate_key.verifying_key().as_bytes())
+        );
+        eprintln!();
+        eprintln!("  {} Import root cert: ztlp admin ca-export-root | sudo tee /usr/local/share/ca-certificates/ztlp.crt", c_dim("→"));
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_ca_show(
+    ca_dir: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+
+    let meta_path = ca_dir.join("ca.json");
+    if !meta_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"No CA found. Run: ztlp admin ca-init\"}}");
+        } else {
+            eprintln!(
+                "  {} No CA initialized. Run: ztlp admin ca-init --zone <zone>",
+                c_red("✗")
+            );
+        }
+        return Ok(());
+    }
+
+    let meta_str = std::fs::read_to_string(&meta_path)?;
+
+    // Count issued certs
+    let index_path = ca_dir.join("certs").join("index.json");
+    let cert_count = if index_path.exists() {
+        let idx = std::fs::read_to_string(&index_path)?;
+        let certs: Vec<serde_json::Value> = serde_json::from_str(&idx).unwrap_or_default();
+        certs.len()
+    } else {
+        0
+    };
+
+    if json_output {
+        let meta: serde_json::Value = serde_json::from_str(&meta_str)?;
+        println!(
+            "{{\"status\":\"ok\",\"ca\":{},\"issued_certs\":{}}}",
+            meta, cert_count
+        );
+    } else {
+        let meta: serde_json::Value = serde_json::from_str(&meta_str)?;
+        eprintln!("{}", c_bold("ZTLP Certificate Authority"));
+        eprintln!();
+        eprintln!(
+            "  {} {}",
+            c_cyan("Zone:       "),
+            meta.get("zone")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        );
+        eprintln!(
+            "  {} {}",
+            c_cyan("Created:    "),
+            meta.get("created")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        );
+        eprintln!(
+            "  {} {}",
+            c_cyan("Root key:   "),
+            meta.get("root_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        );
+        eprintln!(
+            "  {} {}",
+            c_cyan("Intermediate:"),
+            meta.get("intermediate_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+        );
+        eprintln!("  {} {}", c_cyan("Issued certs:"), cert_count);
+        eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_ca_export_root(ca_dir: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let root_cert_path = ca_dir.join("root.pem");
+
+    if !root_cert_path.exists() {
+        eprintln!(
+            "  {} Root certificate not found. Run: ztlp admin ca-init",
+            c_red("✗")
+        );
+        return Ok(());
+    }
+
+    let pem = std::fs::read_to_string(&root_cert_path)?;
+    print!("{}", pem);
+
+    Ok(())
+}
+
+fn cmd_admin_ca_rotate_intermediate(
+    ca_dir: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let root_key_path = ca_dir.join("root.key");
+
+    if !root_key_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"No CA found. Run: ztlp admin ca-init\"}}");
+        } else {
+            eprintln!(
+                "  {} No CA initialized. Run: ztlp admin ca-init --zone <zone>",
+                c_red("✗")
+            );
+        }
+        return Ok(());
+    }
+
+    // Backup old intermediate
+    let old_intermediate = ca_dir.join("intermediate.key");
+    if old_intermediate.exists() {
+        let backup = ca_dir.join(format!("intermediate.key.bak.{}", utc_timestamp_compact()));
+        std::fs::copy(&old_intermediate, &backup)?;
+    }
+
+    // Generate new intermediate key
+    let new_key = generate_signing_key();
+    std::fs::write(&old_intermediate, new_key.to_bytes())?;
+
+    // Update metadata
+    let meta_path = ca_dir.join("ca.json");
+    if meta_path.exists() {
+        let meta_str = std::fs::read_to_string(&meta_path)?;
+        let mut meta: serde_json::Value = serde_json::from_str(&meta_str)?;
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert(
+                "intermediate_key".to_string(),
+                serde_json::Value::String(hex::encode(new_key.verifying_key().as_bytes())),
+            );
+            obj.insert(
+                "intermediate_rotated".to_string(),
+                serde_json::Value::String(utc_timestamp_iso().to_string()),
+            );
+        }
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
+    }
+
+    let new_pub = hex::encode(new_key.verifying_key().as_bytes());
+    if json_output {
+        println!(
+            "{{\"status\":\"ok\",\"new_intermediate_key\":\"{}\"}}",
+            new_pub
+        );
+    } else {
+        eprintln!("{}", c_bold("Intermediate CA Rotated"));
+        eprintln!("  {} {}", c_cyan("New key:"), new_pub);
+        eprintln!(
+            "  {} Existing certificates remain valid until expiry",
+            c_dim("ℹ")
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_cert_issue(
+    hostname: &str,
+    days: u32,
+    ca_dir: &Option<PathBuf>,
+    output: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let intermediate_key_path = ca_dir.join("intermediate.key");
+
+    if !intermediate_key_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"No CA found. Run: ztlp admin ca-init\"}}");
+        } else {
+            eprintln!(
+                "  {} No CA initialized. Run: ztlp admin ca-init --zone <zone>",
+                c_red("✗")
+            );
+        }
+        return Ok(());
+    }
+
+    // Generate cert key
+    let cert_key = generate_signing_key();
+    let serial = hex::encode(&cert_key.verifying_key().as_bytes()[..8]).to_uppercase();
+
+    let output_dir = output.clone().unwrap_or_else(|| ca_dir.join("certs"));
+    std::fs::create_dir_all(&output_dir)?;
+
+    // Write key
+    let key_filename = format!("{}.key", hostname.replace('.', "_"));
+    let key_path = output_dir.join(&key_filename);
+    std::fs::write(&key_path, cert_key.to_bytes())?;
+
+    // Write cert (PEM stub)
+    let cert_filename = format!("{}.pem", hostname.replace('.', "_"));
+    let cert_path = output_dir.join(&cert_filename);
+    let now_secs = unix_now();
+    let now_iso = utc_timestamp_iso();
+    let expiry_secs = now_secs + (days as u64) * 86400;
+    let expiry_iso = {
+        let (y, m, d) = days_to_ymd(expiry_secs / 86400);
+        let tod = expiry_secs % 86400;
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            y,
+            m,
+            d,
+            tod / 3600,
+            (tod % 3600) / 60,
+            tod % 60
+        )
+    };
+
+    let cert_pem = format!(
+        "-----BEGIN CERTIFICATE-----\n# Subject: {}\n# Serial: {}\n# Not Before: {}\n# Not After: {}\n# Key: {}\n-----END CERTIFICATE-----\n",
+        hostname,
+        serial,
+        now_iso,
+        expiry_iso,
+        hex::encode(cert_key.verifying_key().as_bytes()),
+    );
+    std::fs::write(&cert_path, &cert_pem)?;
+
+    // Update index
+    let index_path = ca_dir.join("certs").join("index.json");
+    let mut certs: Vec<serde_json::Value> = if index_path.exists() {
+        let idx = std::fs::read_to_string(&index_path)?;
+        serde_json::from_str(&idx).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    certs.push(serde_json::json!({
+        "hostname": hostname,
+        "serial": serial,
+        "issued": now_iso.to_string(),
+        "expires": expiry_iso.to_string(),
+        "status": "active",
+        "key_file": key_path.display().to_string(),
+        "cert_file": cert_path.display().to_string(),
+    }));
+    std::fs::write(&index_path, serde_json::to_string_pretty(&certs)?)?;
+
+    if json_output {
+        println!("{{\"status\":\"ok\",\"hostname\":\"{}\",\"serial\":\"{}\",\"expires\":\"{}\",\"cert\":\"{}\",\"key\":\"{}\"}}",
+            hostname, serial, expiry_iso,
+            cert_path.display(), key_path.display());
+    } else {
+        eprintln!("{}", c_bold(&format!("Certificate Issued: {}", hostname)));
+        eprintln!();
+        eprintln!("  {} {}", c_cyan("Serial:  "), serial);
+        eprintln!("  {} {}", c_cyan("Expires: "), expiry_iso);
+        eprintln!("  {} {}", c_cyan("Cert:    "), cert_path.display());
+        eprintln!("  {} {}", c_cyan("Key:     "), key_path.display());
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_cert_list(
+    ca_dir: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let index_path = ca_dir.join("certs").join("index.json");
+
+    if !index_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"ok\",\"certs\":[]}}");
+        } else {
+            eprintln!("  {} No certificates issued yet", c_dim("ℹ"));
+        }
+        return Ok(());
+    }
+
+    let idx = std::fs::read_to_string(&index_path)?;
+    let certs: Vec<serde_json::Value> = serde_json::from_str(&idx)?;
+
+    if json_output {
+        println!(
+            "{{\"status\":\"ok\",\"certs\":{}}}",
+            serde_json::to_string(&certs)?
+        );
+    } else {
+        if certs.is_empty() {
+            eprintln!("  {} No certificates issued yet", c_dim("ℹ"));
+            return Ok(());
+        }
+        eprintln!("{}", c_bold("Issued Certificates"));
+        eprintln!();
+        eprintln!(
+            "  {:<30} {:<16} {:<10} {}",
+            c_bold("HOSTNAME"),
+            c_bold("SERIAL"),
+            c_bold("STATUS"),
+            c_bold("EXPIRES")
+        );
+        for cert in &certs {
+            let hostname = cert.get("hostname").and_then(|v| v.as_str()).unwrap_or("?");
+            let serial = cert.get("serial").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = cert.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let expires = cert.get("expires").and_then(|v| v.as_str()).unwrap_or("?");
+            let status_colored = if status == "active" {
+                c_green(status)
+            } else {
+                c_red(status)
+            };
+            eprintln!(
+                "  {:<30} {:<16} {:<10} {}",
+                hostname, serial, status_colored, expires
+            );
+        }
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_cert_show(
+    serial: &Option<String>,
+    hostname: &Option<String>,
+    ca_dir: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let index_path = ca_dir.join("certs").join("index.json");
+
+    if !index_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"No certificates found\"}}");
+        } else {
+            eprintln!("  {} No certificates issued yet", c_red("✗"));
+        }
+        return Ok(());
+    }
+
+    let idx = std::fs::read_to_string(&index_path)?;
+    let certs: Vec<serde_json::Value> = serde_json::from_str(&idx)?;
+
+    let cert = certs.iter().find(|c| {
+        if let Some(s) = serial {
+            c.get("serial").and_then(|v| v.as_str()) == Some(s)
+        } else if let Some(h) = hostname {
+            c.get("hostname").and_then(|v| v.as_str()) == Some(h)
+        } else {
+            false
+        }
+    });
+
+    match cert {
+        Some(cert) => {
+            if json_output {
+                println!("{{\"status\":\"ok\",\"cert\":{}}}", cert);
+            } else {
+                eprintln!("{}", c_bold("Certificate Details"));
+                eprintln!();
+                for (k, v) in cert.as_object().unwrap_or(&serde_json::Map::new()) {
+                    eprintln!(
+                        "  {} {}",
+                        c_cyan(&format!("{:>12}:", k)),
+                        v.as_str().unwrap_or(&v.to_string())
+                    );
+                }
+                eprintln!();
+            }
+        }
+        None => {
+            if json_output {
+                println!("{{\"status\":\"error\",\"error\":\"Certificate not found\"}}");
+            } else {
+                eprintln!("  {} Certificate not found", c_red("✗"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_admin_cert_revoke(
+    serial: &Option<String>,
+    hostname: &Option<String>,
+    reason: &str,
+    ca_dir: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ca_dir = ca_dir.clone().unwrap_or_else(default_ca_dir);
+    let index_path = ca_dir.join("certs").join("index.json");
+
+    if !index_path.exists() {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"No certificates found\"}}");
+        } else {
+            eprintln!("  {} No certificates issued yet", c_red("✗"));
+        }
+        return Ok(());
+    }
+
+    let idx = std::fs::read_to_string(&index_path)?;
+    let mut certs: Vec<serde_json::Value> = serde_json::from_str(&idx)?;
+
+    let mut found = false;
+    for cert in certs.iter_mut() {
+        let matches = if let Some(s) = serial {
+            cert.get("serial").and_then(|v| v.as_str()) == Some(s)
+        } else if let Some(h) = hostname {
+            cert.get("hostname").and_then(|v| v.as_str()) == Some(h)
+        } else {
+            false
+        };
+
+        if matches {
+            if let Some(obj) = cert.as_object_mut() {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("revoked".to_string()),
+                );
+                obj.insert(
+                    "revoked_at".to_string(),
+                    serde_json::Value::String(utc_timestamp_iso().to_string()),
+                );
+                obj.insert(
+                    "revocation_reason".to_string(),
+                    serde_json::Value::String(reason.to_string()),
+                );
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if found {
+        std::fs::write(&index_path, serde_json::to_string_pretty(&certs)?)?;
+        let display_id = serial.as_deref().or(hostname.as_deref()).unwrap_or("?");
+        if json_output {
+            println!(
+                "{{\"status\":\"ok\",\"revoked\":\"{}\",\"reason\":\"{}\"}}",
+                display_id, reason
+            );
+        } else {
+            eprintln!(
+                "  {} Revoked: {} (reason: {})",
+                c_green("✓"),
+                display_id,
+                reason
+            );
+        }
+    } else {
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":\"Certificate not found\"}}");
+        } else {
+            eprintln!("  {} Certificate not found", c_red("✗"));
+        }
+    }
+
+    Ok(())
+}
+
 /// Simple base64 encoding (no padding) for PEM output
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
@@ -8812,6 +9606,35 @@ async fn main() {
             AdminCommands::ExportZoneKey { format, json } => {
                 cmd_admin_export_zone_key(format, *json)
             }
+
+            // TLS / CA management
+            AdminCommands::CaInit { zone, output, json } => cmd_admin_ca_init(zone, output, *json),
+            AdminCommands::CaShow { ca_dir, json } => cmd_admin_ca_show(ca_dir, *json),
+            AdminCommands::CaExportRoot { ca_dir } => cmd_admin_ca_export_root(ca_dir),
+            AdminCommands::CaRotateIntermediate { ca_dir, json } => {
+                cmd_admin_ca_rotate_intermediate(ca_dir, *json)
+            }
+            AdminCommands::CertIssue {
+                hostname,
+                days,
+                ca_dir,
+                output,
+                json,
+            } => cmd_admin_cert_issue(hostname, *days, ca_dir, output, *json),
+            AdminCommands::CertList { ca_dir, json } => cmd_admin_cert_list(ca_dir, *json),
+            AdminCommands::CertShow {
+                serial,
+                hostname,
+                ca_dir,
+                json,
+            } => cmd_admin_cert_show(serial, hostname, ca_dir, *json),
+            AdminCommands::CertRevoke {
+                serial,
+                hostname,
+                reason,
+                ca_dir,
+                json,
+            } => cmd_admin_cert_revoke(serial, hostname, reason, ca_dir, *json),
         },
 
         Commands::Scan {

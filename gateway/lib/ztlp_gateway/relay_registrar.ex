@@ -70,17 +70,20 @@ defmodule ZtlpGateway.RelayRegistrar do
         # traversal — the relay will forward HELLOs to our listener port,
         # not an ephemeral registration port.
         # Delay first registration slightly to let the Listener start first.
+        # Accept an optional test_socket for testing without a running Listener
+        test_socket = Keyword.get(opts, :test_socket)
+
         state = %{
           relay: relay_addr,
           ttl: ttl,
-          socket: nil,
           node_id: node_id,
           services: Config.service_names(),
-          secret: Config.registration_secret()
+          secret: Config.registration_secret(),
+          test_socket: test_socket
         }
 
         # Give the Listener time to start and bind its socket
-        Process.send_after(self(), :register, 500)
+        Process.send_after(self(), :register, 2_000)
 
         {:ok, state}
     end
@@ -97,30 +100,35 @@ defmodule ZtlpGateway.RelayRegistrar do
   end
 
   def handle_info(:register, state) do
-    # Get the main listener socket (shared with handshake traffic).
-    # This ensures the relay sees our listener port as the source,
-    # so forwarded HELLOs arrive on the right socket/NAT mapping.
+    # Use an injected test socket if provided, otherwise get the main listener
+    # socket so the relay sees our listener port (e.g. 23098) for NAT traversal.
     socket =
-      state.socket ||
-        try do
-          ZtlpGateway.Listener.socket()
-        catch
-          :exit, _ -> nil
-        end
+      case Map.get(state, :test_socket) do
+        nil ->
+          try do
+            ZtlpGateway.Listener.socket()
+          catch
+            :exit, _ -> nil
+          end
+
+        sock ->
+          sock
+      end
 
     if socket do
       for service <- state.services do
         send_registration(socket, state.relay, state.node_id, service, state.ttl, state.secret)
       end
+
+      # Re-register at TTL/2
+      interval = div(state.ttl * 1000, 2)
+      Process.send_after(self(), :register, interval)
     else
-      Logger.warning("[RelayRegistrar] Listener socket not available yet, will retry")
+      Logger.warning("[RelayRegistrar] Listener socket not available yet, retrying in 1s")
+      Process.send_after(self(), :register, 1_000)
     end
 
-    # Re-register at TTL/2
-    interval = div(state.ttl * 1000, 2)
-    Process.send_after(self(), :register, interval)
-
-    {:noreply, %{state | socket: socket}}
+    {:noreply, state}
   end
 
   def handle_info(_msg, state) do

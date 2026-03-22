@@ -111,10 +111,15 @@ defmodule ZtlpGateway.RelayRegistrarTest do
         :gen_udp.close(relay_sock)
       end)
 
-      {:ok, pid} = GenServer.start_link(RelayRegistrar, [ttl: 10], name: :test_registrar_with_relay)
+      # Open a sender socket for the registrar to use (replaces Listener.socket())
+      {:ok, sender_sock} = :gen_udp.open(0, [:binary, {:active, false}])
+
+      on_exit(fn -> :gen_udp.close(sender_sock) end)
+
+      {:ok, pid} = GenServer.start_link(RelayRegistrar, [ttl: 10, test_socket: sender_sock], name: :test_registrar_with_relay)
 
       # Wait for the registration packet
-      assert_receive {:udp, ^relay_sock, _ip, _port, packet}, 2000
+      assert_receive {:udp, ^relay_sock, _ip, _port, packet}, 3000
 
       # Verify packet structure
       assert <<0x5A, 0x37, 0x0A, _rest::binary-size(76)>> = packet
@@ -142,14 +147,18 @@ defmodule ZtlpGateway.RelayRegistrarTest do
         :gen_udp.close(relay_sock)
       end)
 
+      {:ok, sender_sock} = :gen_udp.open(0, [:binary, {:active, false}])
+
+      on_exit(fn -> :gen_udp.close(sender_sock) end)
+
       # TTL of 2 seconds → re-register every 1 second
-      {:ok, pid} = GenServer.start_link(RelayRegistrar, [ttl: 2], name: :test_registrar_reregister)
+      {:ok, pid} = GenServer.start_link(RelayRegistrar, [ttl: 2, test_socket: sender_sock], name: :test_registrar_reregister)
 
       # First registration
-      assert_receive {:udp, ^relay_sock, _ip, _port, _packet1}, 2000
+      assert_receive {:udp, ^relay_sock, _ip, _port, _packet1}, 3000
 
       # Second registration (after TTL/2 = 1 second)
-      assert_receive {:udp, ^relay_sock, _ip, _port, _packet2}, 2000
+      assert_receive {:udp, ^relay_sock, _ip, _port, _packet2}, 3000
 
       GenServer.stop(pid)
     end

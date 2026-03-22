@@ -169,7 +169,14 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
         return Err("invalid NS response (expected response opcode 0x02)".into());
     }
 
-    let record = &data[1..];
+    // Skip optional truncation flag (0x01) inserted by NS amplification prevention.
+    // Truncated format: [0x02 | 0x01 | type_byte | rname_len(2) | ...]
+    // Normal format:    [0x02 | type_byte | rname_len(2) | ...]
+    let record = if data.len() > 1 && data[1] == 0x01 {
+        &data[2..]
+    } else {
+        &data[1..]
+    };
     if record.len() < 4 {
         return Err("NS response too short".into());
     }
@@ -210,7 +217,12 @@ fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + 
         return Err("invalid NS response".into());
     }
 
-    let record = &data[1..];
+    // Skip optional truncation flag (0x01) from NS amplification prevention.
+    let record = if data.len() > 1 && data[1] == 0x01 {
+        &data[2..]
+    } else {
+        &data[1..]
+    };
     if record.len() < 4 {
         return Err("NS response too short".into());
     }

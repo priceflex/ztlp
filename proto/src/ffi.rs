@@ -1501,42 +1501,59 @@ pub extern "C" fn ztlp_ns_resolve(
 
     let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
 
-    // Run the async NS resolution on the tokio runtime
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            set_last_error(&format!("failed to create runtime: {e}"));
-            return std::ptr::null_mut();
-        }
-    };
+    // Run NS resolution on a dedicated thread to avoid nesting tokio runtimes.
+    // The FFI may be called from Swift's async context which already has a runtime.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name_for_err = name.clone();
+    let server_for_err = server.clone();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(Err(format!("failed to create runtime: {e}")));
+                return;
+            }
+        };
 
-    let result = rt.block_on(async {
-        tokio::time::timeout(
-            std::time::Duration::from_millis(timeout),
-            crate::agent::proxy::ns_resolve(&name, &server),
-        )
-        .await
+        let result = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(timeout),
+                crate::agent::proxy::ns_resolve(&name, &server),
+            )
+            .await
+        });
+
+        let _ = match result {
+            Ok(Ok(resolution)) => tx.send(Ok(resolution.addr.to_string())),
+            Ok(Err(e)) => tx.send(Err(format!("NS resolution failed: {e}"))),
+            Err(_) => tx.send(Err(format!(
+                "NS resolution timed out after {}ms (server: {}, name: {})",
+                timeout, server, name
+            ))),
+        };
     });
 
-    match result {
-        Ok(Ok(resolution)) => {
-            let addr_str = resolution.addr.to_string();
-            match CString::new(addr_str) {
-                Ok(cs) => cs.into_raw(),
-                Err(_) => {
-                    set_last_error("resolved address contains null byte");
-                    std::ptr::null_mut()
-                }
+    // Wait for the thread to complete (with extra margin for thread startup)
+    let wait_time = std::time::Duration::from_millis(timeout + 2000);
+    match rx.recv_timeout(wait_time) {
+        Ok(Ok(addr_str)) => match CString::new(addr_str) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => {
+                set_last_error("resolved address contains null byte");
+                std::ptr::null_mut()
             }
-        }
+        },
         Ok(Err(e)) => {
-            set_last_error(&format!("NS resolution failed: {e}"));
+            set_last_error(&e);
             std::ptr::null_mut()
         }
         Err(_) => {
             set_last_error(&format!(
-                "NS resolution timed out after {}ms (server: {}, name: {})",
-                timeout, server, name
+                "NS resolution thread timed out (server: {}, name: {})",
+                server_for_err, name_for_err
             ));
             std::ptr::null_mut()
         }

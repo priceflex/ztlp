@@ -16,7 +16,7 @@ defmodule ZtlpGateway.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :public_key, :ssl],
       mod: {ZtlpGateway.Application, []}
     ]
   end

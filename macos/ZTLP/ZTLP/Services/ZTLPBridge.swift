@@ -379,30 +379,37 @@ final class ZTLPBridge {
         ztlp_dns_stop(c)
     }
 
-    /// Set up macOS resolver for .ztlp domain (requires admin privileges).
-    func setupDNSResolver() throws {
-        let resolverDir = "/etc/resolver"
-        let resolverFile = "\(resolverDir)/ztlp"
-        let content = "nameserver 127.0.55.53\nport 53\n"
+    /// Set up loopback aliases + DNS resolver (one admin prompt).
+    func setupNetworking(vips: [String]) throws {
+        // Build commands: add loopback aliases + create resolver config
+        var cmds: [String] = []
+        for vip in vips {
+            cmds.append("ifconfig lo0 alias \(vip) up")
+        }
+        cmds.append("mkdir -p /etc/resolver")
+        cmds.append("printf 'nameserver 127.0.55.53\\nport 53\\n' > /etc/resolver/ztlp")
 
-        // Use AppleScript to get admin privileges for writing resolver config
-        let script = """
-        do shell script "mkdir -p \(resolverDir) && echo '\(content)' > \(resolverFile)" with administrator privileges
-        """
+        let combined = cmds.joined(separator: " && ")
+        let script = "do shell script \"\(combined)\" with administrator privileges"
 
         let appleScript = NSAppleScript(source: script)
         var error: NSDictionary?
         appleScript?.executeAndReturnError(&error)
         if let error = error {
-            throw ZTLPError.connectionError("Failed to setup DNS: \(error)")
+            throw ZTLPError.connectionError("Failed to setup networking: \(error)")
         }
     }
 
-    /// Remove macOS resolver for .ztlp domain.
-    func teardownDNSResolver() {
-        let script = """
-        do shell script "rm -f /etc/resolver/ztlp" with administrator privileges
-        """
+    /// Remove loopback aliases + DNS resolver.
+    func teardownNetworking(vips: [String]) {
+        var cmds: [String] = []
+        for vip in vips {
+            cmds.append("ifconfig lo0 -alias \(vip)")
+        }
+        cmds.append("rm -f /etc/resolver/ztlp")
+
+        let combined = cmds.joined(separator: " ; ")
+        let script = "do shell script \"\(combined)\" with administrator privileges"
         let appleScript = NSAppleScript(source: script)
         var error: NSDictionary?
         appleScript?.executeAndReturnError(&error)

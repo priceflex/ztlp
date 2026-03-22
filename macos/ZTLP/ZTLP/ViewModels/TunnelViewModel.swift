@@ -465,17 +465,17 @@ final class TunnelViewModel: ObservableObject {
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 80)
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 443)
 
+            // Set up loopback aliases + DNS resolver (prompts for admin password once)
+            try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+
             // Start TCP proxy listeners
             try bridge.vipStart()
 
             // Start DNS resolver
             try bridge.dnsStart()
 
-            // Set up macOS resolver config (will prompt for admin password)
-            try bridge.setupDNSResolver()
-
             await MainActor.run {
-                vipStatus = "VIP proxy active — browse to http://beta.techrockstars.ztlp"
+                vipStatus = "VIP proxy active \u{2014} browse to http://beta.techrockstars.ztlp"
             }
         } catch {
             await MainActor.run {
@@ -487,7 +487,7 @@ final class TunnelViewModel: ObservableObject {
     private func stopVipProxy() {
         bridge.vipStop()
         bridge.dnsStop()
-        bridge.teardownDNSResolver()
+        bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.53"])
         vipStatus = nil
     }
 

@@ -46,6 +46,7 @@ final class TunnelViewModel: ObservableObject {
     @Published private(set) var zoneName: String = ""
     @Published private(set) var peerAddress: String = ""
     @Published private(set) var lastError: String?
+    @Published private(set) var testResult: String?
     @Published private(set) var isVPNConfigInstalled: Bool = false
     @Published private(set) var connectionMode: ConnectionMode = .directConnect
     @Published var preferVPN: Bool = false
@@ -410,6 +411,49 @@ final class TunnelViewModel: ObservableObject {
     private func refreshDirectStats() {
         stats.bytesSent = bridge.bytesSent
         stats.bytesReceived = bridge.bytesReceived
+    }
+
+
+    // MARK: - Service Test
+
+    /// Send an HTTP GET through the ZTLP tunnel and display the response.
+    func testService() async {
+        guard status == .connected else {
+            testResult = "Not connected"
+            return
+        }
+        testResult = "Testing..."
+        
+        let httpRequest = "GET / HTTP/1.1
+Host: beta.local
+Connection: close
+
+"
+        guard let requestData = httpRequest.data(using: .utf8) else {
+            testResult = "Failed to encode request"
+            return
+        }
+        
+        do {
+            try bridge.send(data: requestData)
+            await MainActor.run {
+                testResult = "Sent \(requestData.count) bytes through tunnel. Check gateway logs for response."
+            }
+            // Wait a moment for response via recv callback
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await MainActor.run {
+                let rx = bridge.bytesReceived
+                if rx > 0 {
+                    testResult = "✅ Sent \(requestData.count)B, Received \(rx)B"
+                } else {
+                    testResult = "⚠️ Sent \(requestData.count)B, Received 0B (gateway may not be forwarding yet)"
+                }
+            }
+        } catch {
+            await MainActor.run {
+                testResult = "Error: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Identity Path

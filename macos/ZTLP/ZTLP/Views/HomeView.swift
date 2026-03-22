@@ -51,6 +51,32 @@ struct HomeView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            // Test Service button
+            if viewModel.status == .connected {
+                Button(action: {
+                    Task { await viewModel.testService() }
+                }) {
+                    HStack {
+                        Image(systemName: "network")
+                        Text("Test Service")
+                    }
+                    .font(.system(.body, design: .rounded))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.blue.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                if let result = viewModel.testResult {
+                    Text(result)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(result.hasPrefix("✅") ? .green : result.hasPrefix("⚠️") ? .orange : .secondary)
+                        .padding(.horizontal)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            
             // Network indicator
             networkIndicator
 

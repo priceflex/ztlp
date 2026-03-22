@@ -87,6 +87,20 @@ Rails.application.routes.draw do
     end
     resources :enrollment, only: [:index, :create]
     resources :identity_providers, path: "idp"
+
+    # TLS Certificate Authority
+    resource :ca, only: [:show], controller: "ca" do
+      post :init
+      get :export_root
+      post :rotate_intermediate
+    end
+
+    # TLS Certificate Management
+    resources :certificates do
+      member do
+        post :revoke
+      end
+    end
   end
 
   # Self-service enrollment via IdP

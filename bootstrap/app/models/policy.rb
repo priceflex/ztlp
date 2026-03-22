@@ -3,11 +3,13 @@
 class Policy < ApplicationRecord
   belongs_to :network
 
-  POLICY_TYPES   = %w[access time_based network_segment].freeze
-  PRIORITIES     = %w[high normal low].freeze
-  SUBJECT_TYPES  = %w[user group role everyone].freeze
-  RESOURCE_TYPES = %w[service zone ip_range].freeze
-  ACTIONS        = %w[allow deny].freeze
+  POLICY_TYPES     = %w[access time_based network_segment].freeze
+  PRIORITIES       = %w[high normal low].freeze
+  SUBJECT_TYPES    = %w[user group role everyone].freeze
+  RESOURCE_TYPES   = %w[service zone ip_range].freeze
+  ACTIONS          = %w[allow deny].freeze
+  AUTH_MODES       = %w[passthrough identity enforce].freeze
+  ASSURANCE_LEVELS = %w[unknown software device-bound hardware].freeze
 
   PRIORITY_WEIGHTS = { "high" => 100, "normal" => 50, "low" => 10 }.freeze
 
@@ -19,6 +21,8 @@ class Policy < ApplicationRecord
   validates :resource_type, presence: true, inclusion: { in: RESOURCE_TYPES }
   validates :resource_value, presence: true
   validates :action, presence: true, inclusion: { in: ACTIONS }
+  validates :auth_mode, inclusion: { in: AUTH_MODES }, allow_nil: true
+  validates :min_assurance, inclusion: { in: ASSURANCE_LEVELS }, allow_nil: true
   validates :timezone, presence: true
   validate :validate_cidr_notation, if: -> { resource_type == "ip_range" }
   validate :validate_time_schedule, if: -> { time_schedule.present? }
@@ -83,13 +87,38 @@ class Policy < ApplicationRecord
   end
 
   def to_gateway_rule
-    {
+    base = {
       subject: { type: subject_type, value: subject_value },
       resource: { type: resource_type, value: resource_value },
       action: action,
       schedule: time_schedule,
       priority: priority_weight
     }
+    base[:auth_mode] = auth_mode if auth_mode.present?
+    base[:min_assurance] = min_assurance if min_assurance.present?
+    base
+  end
+
+  def passwordless_enabled?
+    auth_mode.present? && auth_mode != "passthrough"
+  end
+
+  def auth_mode_display
+    case auth_mode
+    when "enforce" then "🔒 Enforce (mTLS required)"
+    when "identity" then "🪪 Identity (inject headers)"
+    when "passthrough" then "🔓 Passthrough"
+    else "—"
+    end
+  end
+
+  def min_assurance_display
+    case min_assurance
+    when "hardware" then "🔑 Hardware"
+    when "device-bound" then "📱 Device-bound"
+    when "software" then "💻 Software"
+    else "—"
+    end
   end
 
   # Duplicate this policy with a new name

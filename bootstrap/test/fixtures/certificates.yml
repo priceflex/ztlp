@@ -1,0 +1,30 @@
+webapp:
+  network: office
+  hostname: webapp.office.acme.ztlp
+  serial: WEBAPP001
+  subject: "CN=webapp.office.acme.ztlp"
+  issuer: "ZTLP Intermediate CA"
+  status: active
+  assurance_level: software
+  issued_at: <%= 30.days.ago.to_fs(:db) %>
+  expires_at: <%= 60.days.from_now.to_fs(:db) %>
+
+expiring:
+  network: office
+  hostname: expiring.office.acme.ztlp
+  serial: EXPIRING001
+  status: active
+  assurance_level: device-bound
+  issued_at: <%= 80.days.ago.to_fs(:db) %>
+  expires_at: <%= 10.days.from_now.to_fs(:db) %>
+
+revoked:
+  network: office
+  hostname: revoked.office.acme.ztlp
+  serial: REVOKED001
+  status: revoked
+  assurance_level: software
+  issued_at: <%= 60.days.ago.to_fs(:db) %>
+  expires_at: <%= 30.days.from_now.to_fs(:db) %>
+  revoked_at: <%= 5.days.ago.to_fs(:db) %>
+  revocation_reason: key compromise

@@ -1,0 +1,90 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <span class="text-gray-700">Certificate Authority</span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Certificate Authority</h1>
+      <p class="mt-1 text-sm text-gray-500">Internal TLS CA for <%= @network.zone %></p>
+    </div>
+  </div>
+</div>
+
+<% if @status[:initialized] %>
+  <!-- CA Status -->
+  <div class="bg-white shadow rounded-lg p-6 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">CA Status</h2>
+    <dl class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Zone</dt>
+        <dd class="text-sm text-gray-900"><%= @status[:zone] %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Created</dt>
+        <dd class="text-sm text-gray-900"><%= @status[:created_at] %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Active Certificates</dt>
+        <dd class="text-sm text-gray-900"><%= @status[:active_certs] %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Expiring Soon (30d)</dt>
+        <dd class="text-sm <%= @status[:expiring_soon].to_i > 0 ? 'text-amber-600 font-semibold' : 'text-gray-900' %>">
+          <%= @status[:expiring_soon] %>
+        </dd>
+      </div>
+      <% if @status[:root_key] %>
+        <div class="sm:col-span-2">
+          <dt class="text-sm font-medium text-gray-500">Root Key (Public)</dt>
+          <dd class="text-xs font-mono text-gray-600 break-all"><%= @status[:root_key] %></dd>
+        </div>
+      <% end %>
+    </dl>
+  </div>
+
+  <!-- Actions -->
+  <div class="flex space-x-4 mb-6">
+    <%= link_to "Export Root Certificate", export_root_network_ca_path(@network),
+        class: "inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50" %>
+    <%= button_to "Rotate Intermediate CA", rotate_intermediate_network_ca_path(@network),
+        method: :post,
+        data: { confirm: "This will generate a new intermediate CA. Existing certs remain valid. Continue?" },
+        class: "inline-flex items-center px-4 py-2 border border-amber-300 rounded-md shadow-sm text-sm font-medium text-amber-700 bg-amber-50 hover:bg-amber-100" %>
+    <%= link_to "Issue Certificate", new_network_certificate_path(@network),
+        class: "inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-ztlp-600 hover:bg-ztlp-700" %>
+  </div>
+
+  <!-- Expiring Certificates Warning -->
+  <% if @expiring_certs.any? %>
+    <div class="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+      <h3 class="text-sm font-semibold text-amber-800 mb-2">⚠️ Certificates Expiring Soon</h3>
+      <ul class="space-y-1">
+        <% @expiring_certs.each do |cert| %>
+          <li class="text-sm text-amber-700">
+            <%= link_to cert.hostname, network_certificate_path(@network, cert), class: "underline hover:text-amber-900" %>
+            — expires in <%= cert.days_until_expiry %> days (<%= cert.expires_at.strftime("%Y-%m-%d") %>)
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+
+<% else %>
+  <!-- Not Initialized -->
+  <div class="bg-white shadow rounded-lg p-8 text-center">
+    <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+    </svg>
+    <h3 class="mt-2 text-sm font-semibold text-gray-900">No Certificate Authority</h3>
+    <p class="mt-1 text-sm text-gray-500">Initialize the internal CA to enable TLS certificate management and passwordless authentication.</p>
+    <% if @status[:error] %>
+      <p class="mt-2 text-sm text-red-600"><%= @status[:error] %></p>
+    <% end %>
+    <div class="mt-6">
+      <%= button_to "Initialize CA", init_network_ca_path(@network),
+          method: :post,
+          class: "inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-ztlp-600 hover:bg-ztlp-700" %>
+    </div>
+  </div>
+<% end %>

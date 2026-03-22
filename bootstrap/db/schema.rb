@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
+ActiveRecord::Schema[7.1].define(version: 2026_03_22_010000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -58,6 +58,30 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
     t.index ["action"], name: "index_audit_logs_on_action"
     t.index ["created_at"], name: "index_audit_logs_on_created_at"
     t.index ["target_type", "target_id"], name: "index_audit_logs_on_target_type_and_target_id"
+  end
+
+  create_table "certificates", force: :cascade do |t|
+    t.integer "network_id", null: false
+    t.string "hostname", null: false
+    t.string "serial", null: false
+    t.string "subject"
+    t.string "issuer"
+    t.string "status", default: "active", null: false
+    t.string "assurance_level", default: "software"
+    t.string "key_source"
+    t.datetime "issued_at", null: false
+    t.datetime "expires_at", null: false
+    t.datetime "revoked_at"
+    t.string "revocation_reason"
+    t.text "pem_data"
+    t.text "notes"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["expires_at"], name: "index_certificates_on_expires_at"
+    t.index ["network_id", "hostname"], name: "index_certificates_on_network_id_and_hostname"
+    t.index ["network_id"], name: "index_certificates_on_network_id"
+    t.index ["serial"], name: "index_certificates_on_serial", unique: true
+    t.index ["status"], name: "index_certificates_on_status"
   end
 
   create_table "connection_events", force: :cascade do |t|
@@ -262,6 +286,8 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
     t.datetime "expires_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "auth_mode", default: "passthrough"
+    t.string "min_assurance"
     t.index ["network_id", "enabled"], name: "index_policies_on_network_id_and_enabled"
     t.index ["network_id", "subject_type", "subject_value"], name: "index_policies_on_network_subject"
     t.index ["policy_type"], name: "index_policies_on_policy_type"
@@ -296,6 +322,9 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
     t.string "last_relay"
     t.string "client_version"
     t.string "os_info"
+    t.string "assurance_level", default: "software"
+    t.string "cert_serial"
+    t.datetime "cert_expires_at"
     t.index ["last_seen_at"], name: "index_ztlp_devices_on_last_seen_at"
     t.index ["machine_id"], name: "index_ztlp_devices_on_machine_id"
     t.index ["network_id", "name"], name: "index_ztlp_devices_on_network_id_and_name", unique: true
@@ -335,6 +364,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_20_080001) do
 
   add_foreign_key "alerts", "machines"
   add_foreign_key "alerts", "networks"
+  add_foreign_key "certificates", "networks"
   add_foreign_key "deployments", "machines"
   add_foreign_key "enrollment_tokens", "networks"
   add_foreign_key "group_memberships", "ztlp_groups"

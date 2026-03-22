@@ -1,0 +1,93 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <%= link_to "Certificates", network_certificates_path(@network), class: "hover:text-gray-700" %> /
+    <span class="text-gray-700"><%= @certificate.hostname %></span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900"><%= @certificate.hostname %></h1>
+      <p class="mt-1 text-sm text-gray-500">Certificate details</p>
+    </div>
+    <div class="mt-4 sm:mt-0 flex space-x-4">
+      <% if @certificate.active? %>
+        <%= button_to "Revoke", revoke_network_certificate_path(@network, @certificate),
+            method: :post,
+            data: { confirm: "Revoke certificate for #{@certificate.hostname}? This cannot be undone." },
+            class: "inline-flex items-center px-4 py-2 border border-red-300 rounded-md shadow-sm text-sm font-medium text-red-700 bg-white hover:bg-red-50" %>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg p-6">
+  <dl class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Hostname</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @certificate.hostname %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Serial</dt>
+      <dd class="mt-1 text-sm font-mono text-gray-900"><%= @certificate.serial %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Subject</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @certificate.subject || "—" %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Issuer</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @certificate.issuer || "—" %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Status</dt>
+      <dd class="mt-1">
+        <% color = @certificate.active? ? "green" : "red" %>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-<%= color %>-100 text-<%= color %>-800">
+          <%= @certificate.status %>
+        </span>
+      </dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Assurance Level</dt>
+      <dd class="mt-1">
+        <% assurance_color = case @certificate.assurance_level
+                             when "hardware" then "green"
+                             when "device-bound" then "blue"
+                             else "gray"
+                             end %>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-<%= assurance_color %>-100 text-<%= assurance_color %>-800">
+          <%= @certificate.assurance_level || "software" %>
+        </span>
+      </dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Issued At</dt>
+      <dd class="mt-1 text-sm text-gray-900"><%= @certificate.issued_at&.strftime("%Y-%m-%d %H:%M UTC") %></dd>
+    </div>
+    <div>
+      <dt class="text-sm font-medium text-gray-500">Expires At</dt>
+      <dd class="mt-1 text-sm <%= @certificate.expiring_soon? ? 'text-amber-600 font-semibold' : 'text-gray-900' %>">
+        <%= @certificate.expires_at&.strftime("%Y-%m-%d %H:%M UTC") %>
+        <% if @certificate.active? %>
+          (<%= @certificate.days_until_expiry %> days remaining)
+        <% end %>
+      </dd>
+    </div>
+    <% if @certificate.revoked_at %>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Revoked At</dt>
+        <dd class="mt-1 text-sm text-red-600"><%= @certificate.revoked_at.strftime("%Y-%m-%d %H:%M UTC") %></dd>
+      </div>
+      <div>
+        <dt class="text-sm font-medium text-gray-500">Revocation Reason</dt>
+        <dd class="mt-1 text-sm text-gray-900"><%= @certificate.revocation_reason || "Unspecified" %></dd>
+      </div>
+    <% end %>
+    <% if @certificate.notes.present? %>
+      <div class="sm:col-span-2">
+        <dt class="text-sm font-medium text-gray-500">Notes</dt>
+        <dd class="mt-1 text-sm text-gray-900"><%= @certificate.notes %></dd>
+      </div>
+    <% end %>
+  </dl>
+</div>

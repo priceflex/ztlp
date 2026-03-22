@@ -8,6 +8,7 @@ class Network < ApplicationRecord
   has_many :connection_events, dependent: :destroy
   has_many :machines, dependent: :destroy
   has_many :enrollment_tokens, dependent: :destroy
+  has_many :certificates, dependent: :destroy
   has_many :deployments, through: :machines
   has_many :health_checks, through: :machines
   has_many :alerts, dependent: :destroy

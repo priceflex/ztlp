@@ -1,0 +1,102 @@
+<div class="mb-6">
+  <nav class="text-sm text-gray-500 mb-2">
+    <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
+    <span class="text-gray-700">Certificates</span>
+  </nav>
+  <div class="sm:flex sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Certificates</h1>
+      <p class="mt-1 text-sm text-gray-500">TLS certificates issued by the internal CA</p>
+    </div>
+    <div class="mt-4 sm:mt-0">
+      <%= link_to "Issue Certificate", new_network_certificate_path(@network),
+          class: "inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-ztlp-600 hover:bg-ztlp-700" %>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="mt-4 flex space-x-4">
+    <%= link_to "All", network_certificates_path(@network),
+        class: "text-sm #{params[:status].blank? ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+    <%= link_to "Active", network_certificates_path(@network, status: "active"),
+        class: "text-sm #{params[:status] == 'active' ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+    <%= link_to "Expiring Soon", network_certificates_path(@network, status: "expiring"),
+        class: "text-sm #{params[:status] == 'expiring' ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+    <%= link_to "Revoked", network_certificates_path(@network, status: "revoked"),
+        class: "text-sm #{params[:status] == 'revoked' ? 'font-semibold text-ztlp-600' : 'text-gray-500 hover:text-gray-700'}" %>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead>
+      <tr>
+        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase">Hostname</th>
+        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase">Serial</th>
+        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase">Assurance</th>
+        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+        <th class="px-6 py-3 bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase">Expires</th>
+        <th class="px-6 py-3 bg-gray-50 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% @certificates.each do |cert| %>
+        <tr>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <%= link_to cert.hostname, network_certificate_path(@network, cert),
+                class: "text-sm font-medium text-ztlp-600 hover:text-ztlp-800" %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
+            <%= cert.serial.first(12) %>…
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <% color = case cert.assurance_level
+                       when "hardware" then "green"
+                       when "device-bound" then "blue"
+                       else "gray"
+                       end %>
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-<%= color %>-100 text-<%= color %>-800">
+              <%= cert.assurance_level || "software" %>
+            </span>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap">
+            <% status_color = case cert.expiry_status
+                              when "critical" then "red"
+                              when "warning" then "amber"
+                              when "expired" then "gray"
+                              else "green"
+                              end %>
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-<%= status_color %>-100 text-<%= status_color %>-800">
+              <%= cert.status %>
+            </span>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+            <% if cert.expired_cert? %>
+              <span class="text-red-600">Expired <%= cert.expires_at.strftime("%Y-%m-%d") %></span>
+            <% elsif cert.expiring_soon? %>
+              <span class="text-amber-600"><%= cert.days_until_expiry %> days (<%= cert.expires_at.strftime("%Y-%m-%d") %>)</span>
+            <% else %>
+              <%= cert.expires_at.strftime("%Y-%m-%d") %>
+            <% end %>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+            <% if cert.active? %>
+              <%= button_to "Revoke", revoke_network_certificate_path(@network, cert),
+                  method: :post,
+                  data: { confirm: "Revoke certificate for #{cert.hostname}?" },
+                  class: "text-red-600 hover:text-red-800" %>
+            <% end %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
+  <% if @certificates.empty? %>
+    <div class="text-center py-12">
+      <p class="text-sm text-gray-500">No certificates issued yet.</p>
+      <%= link_to "Issue your first certificate", new_network_certificate_path(@network),
+          class: "mt-2 inline-block text-sm text-ztlp-600 hover:text-ztlp-800" %>
+    </div>
+  <% end %>
+</div>

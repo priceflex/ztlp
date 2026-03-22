@@ -10,8 +10,11 @@ class ZtlpDevice < ApplicationRecord
   has_many :device_heartbeats, dependent: :destroy
   has_many :connection_events, dependent: :destroy
 
+  ASSURANCE_LEVELS = %w[unknown software device-bound hardware].freeze
+
   validates :name, presence: true, uniqueness: { scope: :network_id }
   validates :status, inclusion: { in: %w[enrolled revoked] }
+  validates :assurance_level, inclusion: { in: ASSURANCE_LEVELS }, allow_nil: true
 
   scope :enrolled, -> { where(status: "enrolled") }
   scope :revoked, -> { where(status: "revoked") }
@@ -47,5 +50,22 @@ class ZtlpDevice < ApplicationRecord
 
   def owner_name
     ztlp_user&.name || "Unassigned"
+  end
+
+  def assurance_display
+    case assurance_level
+    when "hardware" then "🔑 Hardware"
+    when "device-bound" then "📱 Device-bound"
+    when "software" then "💻 Software"
+    else "❓ Unknown"
+    end
+  end
+
+  def assurance_color
+    case assurance_level
+    when "hardware" then "green"
+    when "device-bound" then "blue"
+    else "gray"
+    end
   end
 end

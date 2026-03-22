@@ -100,6 +100,16 @@ defmodule ZtlpRelay.GatewayForwarder do
   end
 
   @doc """
+  Pick a gateway that handles the given service name.
+  Prefers dynamic gateways registered for this service; falls back to
+  static gateways if no dynamic match. Returns :error if none available.
+  """
+  @spec pick_gateway_for_service(String.t()) :: {:ok, {:inet.ip_address(), non_neg_integer()}} | :error
+  def pick_gateway_for_service(service_name) do
+    GenServer.call(__MODULE__, {:pick_gateway_for_service, service_name})
+  end
+
+  @doc """
   Register a dynamically-discovered gateway.
   Called when the relay receives a GATEWAY_REGISTER packet.
   The address is the source address of the UDP packet (works behind NAT).
@@ -214,6 +224,36 @@ defmodule ZtlpRelay.GatewayForwarder do
       _ ->
         index = rem(state.gateway_index, length(all_gateways))
         gateway = Enum.at(all_gateways, index)
+        {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
+    end
+  end
+
+  def handle_call({:pick_gateway_for_service, service_name}, _from, state) do
+    now = System.monotonic_time(:second)
+
+    # Find dynamic gateways registered for this specific service
+    service_gateways =
+      state.dynamic_gateways
+      |> Enum.filter(fn gw -> gw.expires_at > now and gw.service == service_name end)
+      |> Enum.map(fn gw -> gw.address end)
+      |> Enum.uniq()
+
+    case service_gateways do
+      [] ->
+        # No dynamic gateway for this service — fall back to static gateways
+        case state.gateways do
+          [] ->
+            {:reply, :error, state}
+
+          _ ->
+            index = rem(state.gateway_index, length(state.gateways))
+            gateway = Enum.at(state.gateways, index)
+            {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
+        end
+
+      _ ->
+        index = rem(state.gateway_index, length(service_gateways))
+        gateway = Enum.at(service_gateways, index)
         {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
     end
   end

@@ -375,7 +375,7 @@ defmodule ZtlpRelay.UdpListener do
       :error ->
         # New session — check if we should forward to a gateway
         if GatewayForwarder.enabled?() do
-          forward_hello_to_gateway(session_id, data, sender, state)
+          forward_hello_to_gateway(session_id, data, sender, parsed, state)
         else
           create_half_open_session(session_id, sender)
         end
@@ -516,8 +516,24 @@ defmodule ZtlpRelay.UdpListener do
   # Forward a HELLO to a configured gateway.
   # The relay registers the session as {client, gateway} so that responses
   # from the gateway are forwarded back to the client.
-  defp forward_hello_to_gateway(session_id, data, client_addr, state) do
-    case GatewayForwarder.pick_gateway() do
+  defp forward_hello_to_gateway(session_id, data, client_addr, parsed, state) do
+    # Extract service name from HELLO dst_svc_id (16 bytes, zero-padded)
+    service_name =
+      case Map.get(parsed, :dst_svc_id) do
+        nil -> nil
+        <<0::128>> -> nil
+        svc_raw ->
+          svc_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+      end
+
+    pick_result =
+      case service_name do
+        nil -> GatewayForwarder.pick_gateway()
+        "" -> GatewayForwarder.pick_gateway()
+        svc -> GatewayForwarder.pick_gateway_for_service(svc)
+      end
+
+    case pick_result do
       {:ok, gateway_addr} ->
         Logger.info(
           "[GatewayFwd] Forwarding HELLO for session #{Base.encode16(session_id)} " <>

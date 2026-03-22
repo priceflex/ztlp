@@ -65,20 +65,22 @@ defmodule ZtlpGateway.RelayRegistrar do
             "node_id=#{Base.encode16(node_id)} ttl=#{ttl}s"
         )
 
-        # Open a UDP socket for sending registration packets
-        {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
-
+        # Use the gateway's main listener socket so the relay sees the same
+        # source address:port as handshake traffic. This is critical for NAT
+        # traversal — the relay will forward HELLOs to our listener port,
+        # not an ephemeral registration port.
+        # Delay first registration slightly to let the Listener start first.
         state = %{
           relay: relay_addr,
           ttl: ttl,
-          socket: socket,
+          socket: nil,
           node_id: node_id,
           services: Config.service_names(),
           secret: Config.registration_secret()
         }
 
-        # Send first registration immediately
-        send(self(), :register)
+        # Give the Listener time to start and bind its socket
+        Process.send_after(self(), :register, 500)
 
         {:ok, state}
     end
@@ -95,15 +97,30 @@ defmodule ZtlpGateway.RelayRegistrar do
   end
 
   def handle_info(:register, state) do
-    for service <- state.services do
-      send_registration(state.socket, state.relay, state.node_id, service, state.ttl, state.secret)
+    # Get the main listener socket (shared with handshake traffic).
+    # This ensures the relay sees our listener port as the source,
+    # so forwarded HELLOs arrive on the right socket/NAT mapping.
+    socket =
+      state.socket ||
+        try do
+          ZtlpGateway.Listener.socket()
+        catch
+          :exit, _ -> nil
+        end
+
+    if socket do
+      for service <- state.services do
+        send_registration(socket, state.relay, state.node_id, service, state.ttl, state.secret)
+      end
+    else
+      Logger.warning("[RelayRegistrar] Listener socket not available yet, will retry")
     end
 
     # Re-register at TTL/2
     interval = div(state.ttl * 1000, 2)
     Process.send_after(self(), :register, interval)
 
-    {:noreply, state}
+    {:noreply, %{state | socket: socket}}
   end
 
   def handle_info(_msg, state) do
@@ -111,12 +128,10 @@ defmodule ZtlpGateway.RelayRegistrar do
   end
 
   @impl true
-  def terminate(_reason, %{socket: socket}) when socket != nil do
-    :gen_udp.close(socket)
+  def terminate(_reason, _state) do
+    # Socket is owned by Listener — don't close it here
     :ok
   end
-
-  def terminate(_reason, _state), do: :ok
 
   # Internal
 

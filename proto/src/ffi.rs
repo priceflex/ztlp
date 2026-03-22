@@ -1534,6 +1534,10 @@ pub extern "C" fn ztlp_ns_resolve(
                 timeout, server, name
             ))),
         };
+
+        // Explicitly shut down the runtime to avoid "Cannot drop a runtime
+        // in a context where blocking is not allowed" panics.
+        rt.shutdown_background();
     });
 
     // Wait for the thread to complete (with extra margin for thread startup)

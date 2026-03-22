@@ -182,36 +182,90 @@ Record.new_ca("ca.techrockstars.ztlp", root_cert_pem, opts)
 
 #### 1C — Client Certificate Issuance (for mTLS)
 
-**Goal:** Enrolled devices/users get client certificates that map to their ZTLP identity.
+**Goal:** Enrolled devices/users get client certificates that map to their ZTLP identity, with assurance level reflecting how securely the private key is stored.
 
 - During `ztlp setup` (enrollment), the agent also:
-  1. Generates a TLS client key pair
-  2. Sends a cert request to NS (authenticated by enrollment token)
-  3. Receives a client cert signed by the intermediate CA
-  4. Stores at `~/.ztlp/client.key` and `~/.ztlp/client.pem`
+  1. **Detects available hardware key storage** (in priority order):
+     - YubiKey connected? → generate key ON the YubiKey via PKCS#11/PIV
+     - TPM 2.0 available? → generate key in TPM (`tpm2-tss`)
+     - Secure Enclave (macOS)? → generate key via `SecKeyCreateRandomKey` with `.privateKeyUsage`
+     - Android StrongBox/Keystore? → hardware-backed key generation
+     - None of the above → generate key as file on disk (`~/.ztlp/client.key`)
+  2. **If hardware key: requests attestation certificate** from the hardware
+     - YubiKey: PIV attestation cert (slot 9a, signed by Yubico root)
+     - TPM: `TPM2_Certify` with endorsement key certificate chain
+     - Secure Enclave: Apple App Attest / DeviceCheck attestation
+     - StrongBox: Android Key Attestation certificate chain
+  3. Sends cert request to NS with attestation proof (if available)
+  4. NS verifies attestation against known manufacturer root CAs:
+     - Yubico PIV attestation root CA
+     - TPM manufacturer CAs (Intel, AMD, Infineon, STMicro, etc.)
+     - Apple attestation root CA
+     - Google hardware attestation root
+  5. NS issues client cert with **assurance level embedded as X.509 extensions**
+  6. Stores cert + key reference (file path, PKCS#11 URI, or keychain ref)
 - Certificate fields:
   - Subject: `CN=<node_name>, O=<zone>` (e.g., `CN=steve-laptop.corp.ztlp`)
   - SAN: `URI:ztlp://node/<node_id_hex>` (allows gateway to extract NodeID from cert)
   - Extended Key Usage: TLS Web Client Authentication
   - Validity: 30 days (auto-renewed by agent renewal daemon)
+  - **Custom X.509 Extensions (ZTLP Assurance):**
+    - `OID 1.3.6.1.4.1.XXXXX.1` — Assurance level: `4` (hardware) / `3` (device-bound) / `2` (software) / `1` (unknown)
+    - `OID 1.3.6.1.4.1.XXXXX.2` — Key source: `yubikey` / `tpm` / `secure-enclave` / `strongbox` / `file` / `unknown`
+    - `OID 1.3.6.1.4.1.XXXXX.3` — Attestation verified: `true` / `false`
+    - (XXXXX = ZTLP's IANA Private Enterprise Number, to be registered)
 - Client cert → ZTLP identity mapping:
   - Gateway extracts `URI:ztlp://node/<node_id>` from the SAN
   - Looks up NodeID in NS to get user/device/zone identity
-  - Passes identity to PolicyEngine — same as Noise_XX path
+  - Reads assurance extensions from cert
+  - Passes identity + assurance to PolicyEngine — same as Noise_XX path
+- **Hardware key CLI flags:**
+  ```
+  ztlp setup --token ztlp://enroll/AQ... --hardware-key          # auto-detect best available
+  ztlp setup --token ztlp://enroll/AQ... --key-source yubikey    # force YubiKey
+  ztlp setup --token ztlp://enroll/AQ... --key-source tpm        # force TPM
+  ztlp setup --token ztlp://enroll/AQ... --key-source file       # force software key
+  ```
 - **Browser installation:**
   - `ztlp setup` can optionally install the client cert in the OS keychain
   - macOS: `security import` into login keychain
   - Linux: `~/.pki/nssdb` (for Chrome/Firefox)
   - Windows: `certutil -importPFX` into CurrentUser\My
-  - Users prompted by browser to select client cert when connecting to mTLS-enabled services
+  - For hardware keys: browser uses PKCS#11 module to access key on YubiKey/TPM directly
+  - Users prompted by browser to select cert when connecting to mTLS-enabled services
+
+##### Assurance Levels Defined
+
+```
+Level 4: hardware       — Private key generated on and NEVER leaves a dedicated
+                          hardware security device (YubiKey, standalone TPM token,
+                          hardware HSM). Attestation verified by NS against
+                          manufacturer root CA. Strongest guarantee.
+                          
+Level 3: device-bound   — Private key stored in device-integrated secure hardware
+                          (Apple Secure Enclave, TPM 2.0 soldered to motherboard,
+                          Android StrongBox/Keystore with hardware backing).
+                          Key is non-exportable but tied to this specific device.
+                          Attestation verified where available.
+                          
+Level 2: software       — Private key is a file on disk (~/.ztlp/client.key).
+                          Encrypted at rest (AES-256-GCM) but technically
+                          extractable. Default for enrollments where no hardware
+                          key storage is detected.
+                          
+Level 1: unknown        — Cannot determine key storage. Legacy clients, manual
+                          cert imports, or clients that predate assurance tracking.
+```
 
 **Files:**
-- `ns/lib/ztlp_ns/cert_issuer.ex` — extend for client cert issuance
+- `ns/lib/ztlp_ns/cert_issuer.ex` — extend for client cert issuance with assurance extensions
+- `ns/lib/ztlp_ns/attestation.ex` — **new**: attestation verification (YubiKey, TPM, Secure Enclave manufacturer root CAs)
 - `proto/src/agent/cert.rs` — client cert request, storage, OS keychain install
-- `proto/src/agent/renewal.rs` — extend for client cert renewal
-- `proto/src/setup.rs` — extend enrollment flow
+- `proto/src/agent/hardware_key.rs` — **new**: hardware key detection, PKCS#11 interface, attestation request
+- `proto/src/agent/renewal.rs` — extend for client cert renewal (hardware keys: re-attest on renewal)
+- `proto/src/setup.rs` — extend enrollment flow with hardware key detection + `--hardware-key` / `--key-source` flags
 
-**Tests:** ~35
+**Tests:** ~50 (was ~35, +15 for hardware key detection, attestation verification, assurance extension parsing)
 
 ---
 
@@ -350,15 +404,15 @@ ZTLP_GATEWAY_MTLS_REQUIRED=false
 
 ---
 
-#### 2D — mTLS Identity Extraction
+#### 2D — mTLS Identity & Assurance Extraction
 
-**Goal:** Extract ZTLP identity from client certificates and feed it into the PolicyEngine.
+**Goal:** Extract ZTLP identity AND assurance level from client certificates and feed both into the PolicyEngine.
 
 - After TLS handshake, extract the peer certificate (if provided):
   ```elixir
   case :ssl.peercert(tls_socket) do
-    {:ok, der_cert} -> extract_identity(der_cert)
-    {:error, :no_peercert} -> :anonymous
+    {:ok, der_cert} -> extract_identity_and_assurance(der_cert)
+    {:error, :no_peercert} -> {:anonymous, :none}
   end
   ```
 - Identity extraction chain:
@@ -367,30 +421,65 @@ ZTLP_GATEWAY_MTLS_REQUIRED=false
   3. Check CN for `<name>.<zone>.ztlp` → NS lookup for identity
   4. Verify cert was issued by our CA (chain validation already done by `:ssl`)
   5. Check if cert serial is revoked (NS revocation lookup)
+  6. **Extract ZTLP assurance extensions from cert:**
+     - OID `1.3.6.1.4.1.XXXXX.1` → assurance level (4/3/2/1)
+     - OID `1.3.6.1.4.1.XXXXX.2` → key source (yubikey/tpm/secure-enclave/etc.)
+     - OID `1.3.6.1.4.1.XXXXX.3` → attestation verified (true/false)
+  7. **Check assurance level against `min_assurance` for the target service**
 - Map extracted identity to PolicyEngine format:
   ```elixir
-  # Same format as Noise_XX path:
+  # Same format as Noise_XX path, now with assurance:
   identity = Identity.resolve_or_hex(node_id_from_cert)
-  PolicyEngine.authorize?(identity, service_name)
+  assurance = TlsIdentity.extract_assurance(der_cert)
+  
+  # Policy check includes assurance level
+  PolicyEngine.authorize?(identity, service_name, assurance: assurance.level)
+  ```
+- **Assurance-based access control at the gateway level:**
+  ```elixir
+  # Gateway rejects BEFORE reaching the backend if assurance too low
+  min_assurance = Config.get_backend_min_assurance(service_name)
+  
+  if assurance.level < min_assurance do
+    # Return 403 with helpful message
+    send_assurance_rejection(tls_socket, assurance.level, min_assurance)
+  end
   ```
 - Anonymous TLS clients (no client cert):
   - If `mtls_required: true` → reject connection
-  - If `mtls_required: false` → identity is `:anonymous`
+  - If `mtls_required: false` → identity is `:anonymous`, assurance is `:none`
   - Policy can allow `:anonymous` access to specific public services
 
 **New module:** `ZtlpGateway.TlsIdentity`
 
 ```elixir
-# Extracts ZTLP identity from X.509 client certificates
-# Handles SAN parsing, NS lookups, revocation checks
+# Extracts ZTLP identity AND assurance level from X.509 client certificates
+# Handles SAN parsing, assurance extension parsing, NS lookups, revocation checks
+
+defmodule ZtlpGateway.TlsIdentity do
+  @ztlp_assurance_oid {1, 3, 6, 1, 4, 1, :XXXXX, 1}
+  @ztlp_key_source_oid {1, 3, 6, 1, 4, 1, :XXXXX, 2}
+  @ztlp_attestation_oid {1, 3, 6, 1, 4, 1, :XXXXX, 3}
+
+  @type assurance_info :: %{
+    level: :hardware | :device_bound | :software | :unknown | :none,
+    key_source: String.t(),
+    attestation_verified: boolean()
+  }
+
+  @spec extract(binary()) :: {identity :: term(), assurance_info()}
+  def extract(der_cert) do
+    # ...
+  end
+end
 ```
 
 **Files:**
-- `gateway/lib/ztlp_gateway/tls_identity.ex` — cert → identity extraction
-- Update `gateway/lib/ztlp_gateway/tls_session.ex` — identity extraction after handshake
-- Update `gateway/lib/ztlp_gateway/policy_engine.ex` — handle `:anonymous` identity
+- `gateway/lib/ztlp_gateway/tls_identity.ex` — cert → identity + assurance extraction
+- Update `gateway/lib/ztlp_gateway/tls_session.ex` — identity + assurance extraction after handshake
+- Update `gateway/lib/ztlp_gateway/policy_engine.ex` — handle `:anonymous` identity + `min_assurance` check
 
-**Tests:** ~40
+**Tests:** ~50 (was ~40, +10 for assurance extraction, level comparison, gateway-level rejection)
 
 ---
 
@@ -434,6 +523,9 @@ With identity headers:
 | `X-ZTLP-Groups` | Comma-separated group memberships | `admins,engineering` |
 | `X-ZTLP-Device` | Device name (if device cert) | `laptop-01.corp.ztlp` |
 | `X-ZTLP-Verified` | Whether mTLS identity was verified | `true` or `false` |
+| `X-ZTLP-Assurance` | Authentication strength level | `hardware` / `device-bound` / `software` / `unknown` |
+| `X-ZTLP-Key-Source` | Where the private key lives | `yubikey` / `tpm` / `secure-enclave` / `strongbox` / `file` / `unknown` |
+| `X-ZTLP-Key-Attestation` | Whether hardware attestation was verified | `true` / `false` |
 | `X-ZTLP-Timestamp` | Unix timestamp of header injection | `1711062600` |
 | `X-ZTLP-Signature` | HMAC-SHA256 of all above headers | `sha256=a1b2c3...` |
 
@@ -448,11 +540,13 @@ Client HTTP request arrives over TLS:
 
 Gateway processing:
     1. Extract mTLS identity → steve@corp.ztlp
-    2. Query NS for group memberships → [admins, engineering]
-    3. Strip ALL existing X-ZTLP-* headers from request  ← forgery prevention
-    4. Inject authenticated headers
-    5. Compute HMAC-SHA256 over injected headers
-    6. Forward modified request to backend
+    2. Extract assurance from cert extensions → hardware, yubikey, attested
+    3. Check min_assurance for this backend → passes (hardware ≥ software)
+    4. Query NS for group memberships → [admins, engineering]
+    5. Strip ALL existing X-ZTLP-* headers from request  ← forgery prevention
+    6. Inject authenticated headers (identity + assurance)
+    7. Compute HMAC-SHA256 over injected headers
+    8. Forward modified request to backend
 
 Backend receives:
     GET /dashboard HTTP/1.1
@@ -464,6 +558,9 @@ Backend receives:
     X-ZTLP-Groups: admins,engineering            ← gateway-injected
     X-ZTLP-Device: steve-macbook.corp.ztlp       ← gateway-injected
     X-ZTLP-Verified: true                        ← gateway-injected
+    X-ZTLP-Assurance: hardware                   ← gateway-injected (from cert)
+    X-ZTLP-Key-Source: yubikey                   ← gateway-injected (from cert)
+    X-ZTLP-Key-Attestation: true                 ← gateway-injected (from cert)
     X-ZTLP-Timestamp: 1711062600                 ← gateway-injected
     X-ZTLP-Signature: sha256=9f8e7d6c5b4a...    ← gateway-injected (HMAC proof)
 ```
@@ -474,12 +571,12 @@ Even though the backend should only be reachable through the gateway, defense in
 
 ```elixir
 # Gateway computes:
-payload = "#{identity}|#{node_id}|#{zone}|#{groups}|#{device}|#{verified}|#{timestamp}"
+payload = "#{identity}|#{node_id}|#{zone}|#{groups}|#{device}|#{verified}|#{assurance}|#{key_source}|#{key_attestation}|#{timestamp}"
 signature = :crypto.mac(:hmac, :sha256, shared_secret, payload) |> Base.encode16(case: :lower)
 
 # Backend verifies:
 # 1. Parse X-ZTLP-Signature header
-# 2. Recompute HMAC from the other X-ZTLP-* headers
+# 2. Recompute HMAC from the other X-ZTLP-* headers (including assurance fields)
 # 3. Constant-time compare
 # 4. Check timestamp is within acceptable window (e.g., ±60 seconds)
 ```
@@ -539,7 +636,7 @@ end
 
 ##### Backend Integration Examples
 
-**Rails — Passwordless auto-login middleware:**
+**Rails — Passwordless auto-login middleware with assurance checking:**
 
 ```ruby
 # config/initializers/ztlp_auth.rb
@@ -562,6 +659,10 @@ class ZtlpAuth
         env["warden"].set_user(user) if defined?(Warden)
         # Or for simple apps:
         env["rack.session"]["user_id"] = user.id
+
+        # Store assurance level for downstream use (step-up auth, audit, etc.)
+        env["ztlp.assurance"] = request.get_header("HTTP_X_ZTLP_ASSURANCE")
+        env["ztlp.key_source"] = request.get_header("HTTP_X_ZTLP_KEY_SOURCE")
       end
     end
 
@@ -585,6 +686,9 @@ class ZtlpAuth
       request.get_header("HTTP_X_ZTLP_GROUPS"),
       request.get_header("HTTP_X_ZTLP_DEVICE"),
       request.get_header("HTTP_X_ZTLP_VERIFIED"),
+      request.get_header("HTTP_X_ZTLP_ASSURANCE"),
+      request.get_header("HTTP_X_ZTLP_KEY_SOURCE"),
+      request.get_header("HTTP_X_ZTLP_KEY_ATTESTATION"),
       timestamp.to_s
     ].join("|")
     
@@ -592,6 +696,25 @@ class ZtlpAuth
     actual = request.get_header("HTTP_X_ZTLP_SIGNATURE")&.delete_prefix("sha256=")
     
     ActiveSupport::SecurityUtils.secure_compare(expected, actual || "")
+  end
+end
+
+# Example: require hardware key for sensitive actions
+class AdminController < ApplicationController
+  before_action :require_hardware_key
+
+  private
+
+  def require_hardware_key
+    assurance = request.env["ztlp.assurance"]
+
+    unless assurance == "hardware"
+      render status: 403, json: {
+        error: "Hardware security key required",
+        current_assurance: assurance,
+        hint: "Connect your YubiKey and re-enroll: ztlp setup --hardware-key"
+      }
+    end
   end
 end
 ```
@@ -617,6 +740,9 @@ function ztlpAuth(req, res, next) {
     req.headers['x-ztlp-groups'],
     req.headers['x-ztlp-device'],
     req.headers['x-ztlp-verified'],
+    req.headers['x-ztlp-assurance'],
+    req.headers['x-ztlp-key-source'],
+    req.headers['x-ztlp-key-attestation'],
     ts.toString()
   ].join('|');
   
@@ -627,6 +753,8 @@ function ztlpAuth(req, res, next) {
   if (crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) {
     req.ztlpIdentity = req.headers['x-ztlp-identity'];
     req.ztlpGroups = (req.headers['x-ztlp-groups'] || '').split(',');
+    req.ztlpAssurance = req.headers['x-ztlp-assurance'];
+    req.ztlpKeySource = req.headers['x-ztlp-key-source'];
     // Auto-login: set session, find user, etc.
   }
   
@@ -679,6 +807,7 @@ backends:
     hostnames:
       - bootstrap.corp.ztlp
     auth_mode: enforce          # mTLS required, headers injected, no login page
+    min_assurance: hardware     # YubiKey/TPM required for admin panel
     
   - name: lincx-tech
     host: 127.0.0.1
@@ -686,6 +815,7 @@ backends:
     hostnames:
       - support.corp.ztlp
     auth_mode: identity         # mTLS optional, headers if cert present
+    min_assurance: software     # any enrolled device is fine
     
   - name: lincx-customer
     host: 127.0.0.1
@@ -693,6 +823,7 @@ backends:
     hostnames:
       - chat.corp.ztlp
     auth_mode: passthrough      # no mTLS, no headers, app handles auth
+    # min_assurance: not applicable in passthrough mode
     
   - name: chooseforce
     host: 127.0.0.1
@@ -700,6 +831,16 @@ backends:
     hostnames:
       - crm.corp.ztlp
     auth_mode: enforce          # passwordless — open URL, you're in
+    min_assurance: device-bound # Secure Enclave / TPM minimum (no bare file keys)
+    
+  - name: prod-database
+    host: 127.0.0.1
+    port: 5432
+    hostnames:
+      - db.corp.ztlp
+    auth_mode: enforce
+    min_assurance: hardware     # dedicated hardware key ONLY
+    required_groups: [dba]      # AND must be in the dba group
 
 # HMAC signing secret (shared between gateway and backends)
 tls:
@@ -714,6 +855,43 @@ tls:
     backend_secrets:
       bootstrap: "${BOOTSTRAP_HMAC_SECRET}"
       chooseforce: "${CHOOSEFORCE_HMAC_SECRET}"
+```
+
+##### Step-Up Authentication (Future Enhancement)
+
+Assurance levels also enable **step-up auth** — access most things with a software key, but sensitive actions require presenting a hardware key:
+
+```
+Steve opens https://crm.corp.ztlp (min_assurance: software)
+→ Software cert → X-ZTLP-Assurance: software → auto-login ✅
+
+Steve clicks "Export all customer data"
+→ App checks: this action requires assurance >= hardware
+→ App redirects to gateway step-up endpoint: /ztlp/step-up?require=hardware
+→ Gateway initiates new TLS handshake requesting hardware-backed cert
+→ Steve taps YubiKey → browser presents hardware-backed cert
+→ X-ZTLP-Assurance: hardware → action permitted ✅
+→ Elevated session valid for configurable window (e.g., 15 minutes)
+```
+
+This mirrors how banks work — view your balance with a password, but wire $50K and you need a hardware token. Not in v1 scope, but the assurance headers make it possible without any protocol changes.
+
+##### Gateway Rejection Response
+
+When a client's assurance level is below `min_assurance`, the gateway returns a clear error before the request reaches the backend:
+
+```
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{
+  "error": "insufficient_assurance",
+  "required": "hardware",
+  "current": "software",
+  "key_source": "file",
+  "message": "This service requires a hardware security key (YubiKey, TPM, or Secure Enclave).",
+  "hint": "Re-enroll with: ztlp setup --hardware-key"
+}
 ```
 
 ##### SDK / Helper Libraries (Future)
@@ -1059,15 +1237,15 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 ```
 
 **Estimated scope:**
-- **Phase 1:** ~125 tests, ~2,500 lines (Elixir + Rust)
-- **Phase 2:** ~205 tests, ~2,800 lines (Elixir) — includes 2E identity headers
+- **Phase 1:** ~140 tests, ~3,100 lines (Elixir + Rust) — includes hardware key detection, attestation verification, assurance extensions
+- **Phase 2:** ~215 tests, ~3,000 lines (Elixir) — includes 2E identity headers + assurance headers + gateway min_assurance enforcement
 - **Phase 3:** ~25 tests, ~800 lines (Rust)
 - **Phase 4:** ~40 tests, ~1,200 lines (Elixir) — optional
 - **Phase 5:** ~35 tests, ~600 lines (Elixir)
 - **Phase 6:** ~15 tests, ~500 lines + docs
 
-**Total: ~445 tests, ~8,400 lines** (excluding Phase 4)
-**With Phase 4: ~485 tests, ~9,600 lines**
+**Total: ~470 tests, ~9,200 lines** (excluding Phase 4)
+**With Phase 4: ~510 tests, ~10,400 lines**
 
 ---
 
@@ -1089,6 +1267,10 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 | Header replay attack | Timestamp in HMAC payload; 60-second validity window |
 | HMAC secret compromise | Per-backend secret override; rotation without downtime; secret from env vars (not config files) |
 | User impersonation at login | `enforce` mode: identity comes from cert, no login form exists; `identity` mode: app can cross-check form input against header |
+| Fake assurance level claim | Assurance is embedded in cert at issuance time (X.509 extensions), verified by NS against manufacturer attestation roots; can't be modified client-side |
+| Software key claiming hardware | NS verifies attestation chain against known manufacturer root CAs (Yubico, Intel TPM, Apple, Google); no attestation = Level 2 max |
+| Stolen laptop with software key | `min_assurance: hardware` or `min_assurance: device-bound` blocks software keys from sensitive services; full-disk encryption is complementary |
+| Hardware key lost/stolen | Revocation via NS `:revoke` record; short-lived certs (30 days) limit blast radius; re-enrollment requires new enrollment token from admin |
 
 ### Key Decisions
 
@@ -1106,6 +1288,12 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 
 7. **HMAC-signed headers:** Defense in depth. Even if someone reaches the backend directly (misconfigured firewall, etc.), they can't produce valid HMAC signatures. Per-backend secrets supported for isolation.
 
+8. **Assurance is set at enrollment, not connection time.** The assurance level is baked into the X.509 cert when NS issues it. This means you can't "upgrade" assurance without re-enrolling. This is intentional — it forces the enrollment process to verify hardware attestation properly rather than trusting a runtime claim.
+
+9. **Attestation is verified against manufacturer roots.** We don't trust the client's word that a key is on a YubiKey. NS verifies the attestation certificate chain against Yubico's/Intel's/Apple's published root CAs. No valid attestation chain = maximum Level 2 (software), regardless of what the client claims.
+
+10. **Four assurance levels, not two.** "hardware" vs "software" isn't enough. A MacBook's Secure Enclave (device-bound, non-exportable) is meaningfully more secure than a key file, but meaningfully less secure than a removable YubiKey (which survives device compromise). Four levels let admins make nuanced policy decisions.
+
 ---
 
 ## Dependencies
@@ -1119,6 +1307,9 @@ Phase 4: ACME (independent, can be done anytime or skipped)
 - `rcgen` crate — X.509 certificate generation (for CLI cert commands)
 - `native-tls` or `rustls` — for TLS client cert installation verification
 - `keychain-services` (macOS), `winapi` (Windows) — for OS trust store operations
+- `yubikey` crate — YubiKey PIV interface and attestation (for hardware key enrollment)
+- `tss-esapi` crate — TPM 2.0 interface (key generation, attestation)
+- `x509-parser` crate — X.509 extension parsing (assurance OID extraction)
 
 ### No New Elixir Dependencies
 All X.509 work uses Erlang's built-in `:public_key` module. Zero external deps, consistent with the rest of the project.

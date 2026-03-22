@@ -234,7 +234,7 @@ defmodule ZtlpRelay.GatewayForwarder do
     # Find dynamic gateways registered for this specific service
     service_gateways =
       state.dynamic_gateways
-      |> Enum.filter(fn gw -> gw.expires_at > now and gw.service == service_name end)
+      |> Enum.filter(fn gw -> gw.expires_at > now and gw.service_name == service_name end)
       |> Enum.map(fn gw -> gw.address end)
       |> Enum.uniq()
 

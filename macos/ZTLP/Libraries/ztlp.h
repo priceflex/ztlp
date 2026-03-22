@@ -1,7 +1,7 @@
 /**
  * @file ztlp.h
  * @brief ZTLP (Zero Trust Layer Protocol) Mobile SDK — C FFI API
- * @version 0.3.1
+ * @version 0.10.0
  *
  * This header defines the complete C-compatible API for integrating the ZTLP
  * protocol into iOS and Android applications. The library is compiled as a
@@ -191,6 +191,8 @@ enum {
     ZTLP_ALREADY_CONNECTED = -9,
     /** Not connected — call ztlp_connect first. */
     ZTLP_NOT_CONNECTED     = -10,
+    /** Access rejected by gateway policy. */
+    ZTLP_REJECTED          = -11,
     /** Unspecified internal error. */
     ZTLP_INTERNAL_ERROR    = -99
 };
@@ -456,6 +458,18 @@ int32_t ztlp_config_set_nat_assist(ZtlpConfig *config, bool enabled);
 int32_t ztlp_config_set_timeout_ms(ZtlpConfig *config, uint64_t ms);
 
 /**
+ * @brief Set the target service name for gateway routing.
+ *
+ * The gateway uses this to determine which backend to forward traffic to.
+ * For example, "beta" would route to the "beta" backend.
+ *
+ * @param config   Valid config handle.
+ * @param service  Service name (max 16 bytes).
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_config_set_service(ZtlpConfig *config, const char *service);
+
+/**
  * @brief Free a configuration handle.
  *
  * @param config  Handle to free, or NULL (safe no-op).
@@ -537,6 +551,16 @@ int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
                                       ZtlpDisconnectCallback callback,
                                       void *user_data);
 
+/**
+ * @brief Disconnect from the current session.
+ *
+ * Stops the background recv loop and releases the active session.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_disconnect(ZtlpClient *client);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Session Info
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -593,6 +617,26 @@ int32_t ztlp_tunnel_start(ZtlpClient *client, uint16_t local_port,
  * @return ZTLP_OK on success.
  */
 int32_t ztlp_tunnel_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Statistics
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Get bytes sent through the active session.
+ *
+ * @param client  Valid client handle.
+ * @return Total bytes sent, or 0 if not connected.
+ */
+uint64_t ztlp_bytes_sent(const ZtlpClient *client);
+
+/**
+ * @brief Get bytes received through the active session.
+ *
+ * @param client  Valid client handle.
+ * @return Total bytes received, or 0 if not connected.
+ */
+uint64_t ztlp_bytes_received(const ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Utility

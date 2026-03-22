@@ -179,6 +179,12 @@ final class TunnelViewModel: ObservableObject {
             try config.setNatAssist(configuration.natAssist)
             try config.setTimeoutMs(15000)
 
+            // Set service name for gateway routing
+            let svcName = configuration.serviceName
+            if !svcName.isEmpty {
+                try config.setService(svcName)
+            }
+
             // Connect — target is the NS or relay address
             let target = relay.isEmpty ? configuration.targetNodeId : relay
             guard !target.isEmpty else {

@@ -24,6 +24,7 @@ final class ZTLPConfiguration: ObservableObject {
         static let useSecureEnclave = "config_use_secure_enclave"
         static let hasCompletedOnboarding = "config_onboarding_complete"
         static let isEnrolled = "config_is_enrolled"
+        static let serviceName = "config_service_name"
     }
 
     // MARK: - Storage
@@ -92,6 +93,11 @@ final class ZTLPConfiguration: ObservableObject {
         didSet { defaults.set(isEnrolled, forKey: Key.isEnrolled) }
     }
 
+    /// Target service name for gateway routing (e.g., "beta").
+    @Published var serviceName: String {
+        didSet { defaults.set(serviceName, forKey: Key.serviceName) }
+    }
+
     // MARK: - Init
 
     init(suiteName: String = "group.com.ztlp.shared.macos") {
@@ -110,6 +116,7 @@ final class ZTLPConfiguration: ObservableObject {
         self.useSecureEnclave = store.object(forKey: Key.useSecureEnclave) == nil ? true : store.bool(forKey: Key.useSecureEnclave)
         self.hasCompletedOnboarding = store.bool(forKey: Key.hasCompletedOnboarding)
         self.isEnrolled = store.bool(forKey: Key.isEnrolled)
+        self.serviceName = store.string(forKey: Key.serviceName) ?? "beta"
     }
 
     /// Create a TunnelConfiguration from the current app settings.
@@ -140,5 +147,6 @@ final class ZTLPConfiguration: ObservableObject {
         useSecureEnclave = true
         hasCompletedOnboarding = false
         isEnrolled = false
+        serviceName = "beta"
     }
 }

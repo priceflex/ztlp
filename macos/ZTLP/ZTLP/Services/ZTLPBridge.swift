@@ -71,6 +71,7 @@ enum ZTLPError: LocalizedError {
         case -8:  return .natError(message)
         case -9:  return .alreadyConnected
         case -10: return .notConnected
+        case -11: return .connectionError("access rejected: \(message)")
         case -99: return .internalError(message)
         default:  return .unknownError(code, message)
         }
@@ -153,6 +154,13 @@ final class ZTLPConfigHandle {
 
     func setTimeoutMs(_ ms: UInt64) throws {
         let result = ztlp_config_set_timeout_ms(pointer, ms)
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    func setService(_ name: String) throws {
+        let result = name.withCString { cName in
+            ztlp_config_set_service(pointer, cName)
+        }
         if let error = ZTLPError.from(code: result) { throw error }
     }
 

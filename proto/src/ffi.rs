@@ -521,12 +521,31 @@ pub extern "C" fn ztlp_connect(
             return ZtlpResult::AlreadyConnected as i32;
         }
 
-        // Extract the NodeIdentity for the handshake
+        // Extract the NodeIdentity for the handshake.
+        // If the identity is hardware-backed (Secure Enclave), we generate
+        // ephemeral X25519 keys for Noise_XX since hardware keys are Ed25519
+        // and can't be used directly in Noise. The hardware node_id is preserved
+        // for identification; the Noise static key is ephemeral-per-session.
         let node_identity = match guard.identity.as_node_identity() {
             Some(ni) => ni.clone(),
             None => {
-                set_last_error("hardware identity not yet supported for real handshake — use software identity");
-                return ZtlpResult::IdentityError as i32;
+                // Hardware identity — generate software X25519 keys for Noise,
+                // keeping the hardware-assigned node_id
+                let hw_node_id = *guard.identity.node_id();
+                match SoftwareIdentityProvider::generate() {
+                    Ok(sw) => {
+                        let mut ni = sw.as_node_identity()
+                            .expect("freshly generated software identity must have node_identity")
+                            .clone();
+                        // Override with hardware node_id
+                        ni.node_id = hw_node_id;
+                        ni
+                    }
+                    Err(e) => {
+                        set_last_error(&format!("failed to generate ephemeral keys for hardware identity: {e}"));
+                        return ZtlpResult::IdentityError as i32;
+                    }
+                }
             }
         };
 

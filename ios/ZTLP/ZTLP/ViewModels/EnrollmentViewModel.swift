@@ -138,9 +138,20 @@ final class EnrollmentViewModel: ObservableObject {
                 try bridge.initialize()
 
                 // Step 2: Generate or load identity
-                let identity: ZTLPIdentityHandle
+                // Try hardware identity first, fall back to software.
+                // Hardware keys (Secure Enclave) can't be exported to file,
+                // so if we need file-based persistence we use software keys.
+                var identity: ZTLPIdentityHandle
+                var isHardwareKey = false
+
                 if configuration.useSecureEnclave && SecureEnclaveService.shared.isAvailable {
-                    identity = try bridge.createHardwareIdentity(provider: 1)
+                    do {
+                        identity = try bridge.createHardwareIdentity(provider: 1)
+                        isHardwareKey = true
+                    } catch {
+                        // Secure Enclave failed — fall back to software key
+                        identity = try bridge.generateIdentity()
+                    }
                 } else {
                     identity = try bridge.generateIdentity()
                 }
@@ -150,11 +161,9 @@ final class EnrollmentViewModel: ObservableObject {
                     return
                 }
 
-                // Step 3: Save identity to keychain
-                // The identity JSON is saved to the shared app group container
-                // so the Network Extension can load it.
-                let identityPath = defaultIdentityPath()
-                if let path = identityPath {
+                // Step 3: Save identity to file
+                // Hardware keys stay in Secure Enclave; only software keys need file export.
+                if !isHardwareKey, let path = defaultIdentityPath() {
                     try identity.save(to: path)
                 }
 

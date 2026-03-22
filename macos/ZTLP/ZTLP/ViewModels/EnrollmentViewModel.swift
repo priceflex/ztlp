@@ -100,9 +100,20 @@ final class EnrollmentViewModel: ObservableObject {
             do {
                 try bridge.initialize()
 
-                let identity: ZTLPIdentityHandle
+                // Try hardware identity first, fall back to software.
+                // Hardware keys (Secure Enclave) can't be exported to file,
+                // so if we need file-based persistence we use software keys.
+                var identity: ZTLPIdentityHandle
+                var isHardwareKey = false
+
                 if configuration.useSecureEnclave {
-                    identity = try bridge.createHardwareIdentity(provider: 1)
+                    do {
+                        identity = try bridge.createHardwareIdentity(provider: 1)
+                        isHardwareKey = true
+                    } catch {
+                        // Secure Enclave not available or failed — use software key
+                        identity = try bridge.generateIdentity()
+                    }
                 } else {
                     identity = try bridge.generateIdentity()
                 }
@@ -112,8 +123,9 @@ final class EnrollmentViewModel: ObservableObject {
                     return
                 }
 
-                let identityPath = defaultIdentityPath()
-                if let path = identityPath {
+                // Save identity to file (only for software keys —
+                // hardware keys stay in Secure Enclave and are loaded via handle).
+                if !isHardwareKey, let path = defaultIdentityPath() {
                     try identity.save(to: path)
                 }
 

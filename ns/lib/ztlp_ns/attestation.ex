@@ -40,11 +40,9 @@ defmodule ZtlpNs.Attestation do
   }
 
   # Known manufacturer roots (fingerprints)
-  # In production these would be loaded from a configuration file
-  @yubikey_root_fingerprints [
-    # Yubico PIV attestation root (placeholder - real fingerprint would go here)
-    "yubico-piv-root-placeholder"
-  ]
+  # In production these would be loaded from a configuration file.
+  # Placeholder for future YubiKey PIV attestation root verification:
+  #   ["yubico-piv-root-placeholder"]
 
   # ── Public API ─────────────────────────────────────────────────────
 

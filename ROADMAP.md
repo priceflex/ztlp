@@ -101,6 +101,30 @@
 - Real Prometheus metrics fetched through encrypted ZTLP tunnel
 - Docker host networking for UDP, curl --http0.9 for tunnel HTTP, stderr-based readiness detection
 
+### TLS Termination & Passwordless Auth (v0.10.0) ✅
+- Internal Certificate Authority (NS CertAuthority, CertIssuer, X509 builder)
+- Attestation verification for hardware keys (TPM, YubiKey)
+- TLS listener with configurable acceptors and mTLS support
+- TLS session handler (full lifecycle: handshake → identity → policy → proxy)
+- mTLS identity extraction (NodeID, user, zone, assurance level from X.509)
+- SNI-based backend routing with per-backend auth modes
+- Identity header injection with HMAC-SHA256 signing
+- Header stripping (anti-spoofing)
+- Certificate cache with TTL
+- CRL distribution server
+- TLS audit events (connection, identity, policy, cert lifecycle)
+- Gateway YAML config: TLS section, per-backend auth_mode/min_assurance/hostnames/groups
+- OS trust store installation (macOS, Linux, Windows)
+- Browser certificate installation (Chrome, Firefox, Safari)
+- Hardware security key detection (YubiKey, TPM, Secure Enclave)
+- CLI: `ztlp admin ca-init/ca-show/ca-export-root/ca-rotate-intermediate`
+- CLI: `ztlp admin cert-issue/cert-list/cert-show/cert-revoke`
+- Bootstrap: CA management UI (status, init, export, rotate)
+- Bootstrap: Certificate management (list, issue, show, revoke, expiry warnings)
+- Bootstrap: Device assurance level tracking
+- Bootstrap: Policy auth_mode and min_assurance per service
+- Documentation: TLS architecture, passwordless guide, identity headers, internal CA, mTLS setup
+
 ---
 
 ## Known Issues
@@ -124,10 +148,11 @@ _None currently tracked._
 - Bootstrap Server handles IdP dance during enrollment
 - **Scope:** `FEATURE-USER-IDENTITY.md` Phase D (IdP portion)
 
-### Application-Layer User Authentication
-- AUTH_TOKEN frame for per-user identity at the tunnel level
-- Gateway-injected identity headers (X-ZTLP-User)
-- OIDC browser flow for enterprise SSO
+### Application-Layer User Authentication (Partially Done)
+- ✅ Gateway-injected identity headers (X-ZTLP-*) via TLS termination
+- ✅ HMAC-signed passwordless auth for backends
+- Remaining: AUTH_TOKEN frame for per-user identity at the tunnel level
+- Remaining: OIDC browser flow for enterprise SSO
 - **Spec:** `docs/SPEC-USER-AUTH.md`
 
 ### Post-Quantum Migration

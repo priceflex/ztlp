@@ -7,7 +7,7 @@
 #![deny(unsafe_code)]
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -78,7 +78,19 @@ impl VipProxy {
     }
 
     /// Register a service with a VIP address and port.
-    pub fn add_service(&mut self, name: String, vip: Ipv4Addr, port: u16) {
+    ///
+    /// SECURITY: Only loopback addresses (127.0.0.0/8) are accepted. Binding
+    /// to non-loopback addresses would allow the VIP proxy to be abused for
+    /// port scanning or SSRF attacks against the local network.
+    pub fn add_service(&mut self, name: String, vip: Ipv4Addr, port: u16) -> Result<(), String> {
+        // SECURITY: Restrict VIP binding to loopback addresses only.
+        // 127.0.0.0/8 is the IPv4 loopback range.
+        if !vip.is_loopback() {
+            return Err(format!(
+                "VIP address {} is not a loopback address (must be 127.0.0.0/8)",
+                vip
+            ));
+        }
         let entry = self
             .services
             .entry(name.clone())
@@ -92,6 +104,7 @@ impl VipProxy {
         }
         // Update VIP if it changed
         entry.vip = vip;
+        Ok(())
     }
 
     /// Get the tunnel data sender (for the recv loop to push data into).
@@ -125,8 +138,17 @@ impl VipProxy {
 
         for service in self.services.values() {
             for &port in &service.ports {
-                let bind_addr: SocketAddr =
-                    SocketAddr::new(std::net::IpAddr::V4(service.vip), port);
+                let ip_addr = IpAddr::V4(service.vip);
+                // SECURITY: Double-check loopback restriction at bind time.
+                // This is defense-in-depth — add_service already validates,
+                // but we check again in case the service struct is mutated directly.
+                if !ip_addr.is_loopback() {
+                    return Err(format!(
+                        "refusing to bind non-loopback VIP address: {}",
+                        ip_addr
+                    ));
+                }
+                let bind_addr: SocketAddr = SocketAddr::new(ip_addr, port);
 
                 let listener = TcpListener::bind(bind_addr)
                     .await
@@ -293,7 +315,7 @@ mod tests {
     #[test]
     fn test_add_service() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
 
         assert_eq!(proxy.services().len(), 1);
         let svc = proxy
@@ -307,8 +329,8 @@ mod tests {
     #[test]
     fn test_add_service_multiple_ports() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 443);
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 443).unwrap();
 
         let svc = proxy.services().get("beta").expect("beta service");
         assert_eq!(svc.ports, vec![80, 443]);
@@ -317,8 +339,8 @@ mod tests {
     #[test]
     fn test_add_service_duplicate_port() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
 
         let svc = proxy.services().get("beta").expect("beta service");
         assert_eq!(svc.ports, vec![80]); // No duplicate
@@ -327,8 +349,8 @@ mod tests {
     #[test]
     fn test_resolve() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80);
-        proxy.add_service("backstage".to_string(), Ipv4Addr::new(127, 0, 55, 2), 80);
+        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
+        proxy.add_service("backstage".to_string(), Ipv4Addr::new(127, 0, 55, 2), 80).unwrap();
 
         assert_eq!(proxy.resolve("beta"), Some(Ipv4Addr::new(127, 0, 55, 1)));
         assert_eq!(
@@ -348,5 +370,62 @@ mod tests {
     fn test_stop_without_start() {
         let mut proxy = VipProxy::new();
         proxy.stop(); // Should not panic
+    }
+
+    // ── Security audit tests ────────────────────────────────────────────
+
+    /// SECURITY: Verify that non-loopback IPv4 addresses are rejected.
+    /// The VIP proxy must only bind to loopback addresses to prevent
+    /// SSRF and port scanning attacks.
+    #[test]
+    fn test_add_service_rejects_non_loopback() {
+        let mut proxy = VipProxy::new();
+
+        // Public IP
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(8, 8, 8, 8), 80);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("loopback"));
+
+        // Private network
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(192, 168, 1, 1), 80);
+        assert!(result.is_err());
+
+        // Link-local
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(169, 254, 1, 1), 80);
+        assert!(result.is_err());
+
+        // Wildcard (0.0.0.0)
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(0, 0, 0, 0), 80);
+        assert!(result.is_err());
+
+        // Broadcast
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(255, 255, 255, 255), 80);
+        assert!(result.is_err());
+    }
+
+    /// SECURITY: Verify that all loopback addresses in 127.0.0.0/8 are accepted.
+    #[test]
+    fn test_add_service_accepts_loopback_range() {
+        let mut proxy = VipProxy::new();
+
+        // 127.0.0.1 — standard loopback
+        assert!(proxy.add_service("svc1".to_string(), Ipv4Addr::new(127, 0, 0, 1), 80).is_ok());
+
+        // 127.0.55.1 — VIP range used by ZTLP
+        assert!(proxy.add_service("svc2".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).is_ok());
+
+        // 127.255.255.254 — end of loopback range
+        assert!(proxy.add_service("svc3".to_string(), Ipv4Addr::new(127, 255, 255, 254), 80).is_ok());
+    }
+
+    /// SECURITY: Verify that no services are registered when non-loopback is rejected.
+    #[test]
+    fn test_add_service_rejected_leaves_no_state() {
+        let mut proxy = VipProxy::new();
+
+        let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(10, 0, 0, 1), 80);
+        assert!(result.is_err());
+        assert!(proxy.services().is_empty(), "rejected service should not be registered");
+        assert_eq!(proxy.resolve("evil"), None);
     }
 }

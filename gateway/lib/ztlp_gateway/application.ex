@@ -8,6 +8,7 @@ defmodule ZtlpGateway.Application do
       ├── ZtlpGateway.Stats              (counters — no deps)
       ├── ZtlpGateway.AuditLog           (ETS table — no deps)
       ├── ZtlpGateway.SessionRegistry    (ETS table — no deps)
+      ├── ZtlpGateway.HeaderSigner.NonceCache (ETS nonce cache)
       ├── ZtlpGateway.PolicyEngine       (loads config — depends on Config module)
       ├── ZtlpGateway.NsClient           (UDP client for ZTLP-NS queries — optional)
       ├── ZtlpGateway.SessionSupervisor  (DynamicSupervisor for Session GenServers)
@@ -40,6 +41,7 @@ defmodule ZtlpGateway.Application do
       ZtlpGateway.MetricsServer,
       ZtlpGateway.AuditLog,
       ZtlpGateway.SessionRegistry,
+      ZtlpGateway.HeaderSigner.NonceCache,
       ZtlpGateway.PolicyEngine,
       ZtlpGateway.NsClient,
       {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
@@ -48,6 +50,16 @@ defmodule ZtlpGateway.Application do
     ]
 
     opts = [strategy: :one_for_one, name: ZtlpGateway.Supervisor]
-    Supervisor.start_link(children, opts)
+    result = Supervisor.start_link(children, opts)
+
+    # Run post-startup validation (after supervision tree is running)
+    case result do
+      {:ok, _pid} ->
+        Task.start(fn -> ZtlpGateway.HeaderSigner.validate_secret!() end)
+      _ ->
+        :ok
+    end
+
+    result
   end
 end

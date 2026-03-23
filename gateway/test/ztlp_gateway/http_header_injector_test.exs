@@ -43,12 +43,14 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
   end
 
   describe "build_headers/1" do
-    test "builds all 11 identity headers" do
+    test "builds 12 identity headers without signing secret (no signature)" do
+      # Without a configured signing secret, signature is omitted
       identity = make_identity()
       headers = HttpHeaderInjector.build_headers(identity)
-      assert length(headers) == 11
 
+      # 10 identity + timestamp + nonce + request_id = 12 (no signature when secret is nil)
       header_map = Map.new(headers)
+
       assert header_map["X-ZTLP-Node-ID"] == "abcdef1234567890"
       assert header_map["X-ZTLP-Node-Name"] == "test-node.corp.ztlp"
       assert header_map["X-ZTLP-Zone"] == "corp.ztlp"
@@ -59,7 +61,38 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
       assert header_map["X-ZTLP-Cert-Fingerprint"] != nil
       assert header_map["X-ZTLP-Cert-Serial"] == "12345"
       assert header_map["X-ZTLP-Timestamp"] != nil
+      assert header_map["X-ZTLP-Nonce"] != nil
+      assert header_map["X-ZTLP-Request-ID"] != nil
+
+      # Without signing secret, no signature header
+      if is_nil(ZtlpGateway.HeaderSigner.default_secret()) do
+        assert is_nil(header_map["X-ZTLP-Signature"])
+        assert length(headers) == 12
+      else
+        assert header_map["X-ZTLP-Signature"] != nil
+        assert length(headers) == 13
+      end
+    end
+
+    test "builds all 13 headers with signing secret configured" do
+      prev = Application.get_env(:ztlp_gateway, :header_signing_secret)
+      Application.put_env(:ztlp_gateway, :header_signing_secret, "test-secret-key")
+
+      identity = make_identity()
+      headers = HttpHeaderInjector.build_headers(identity)
+      assert length(headers) == 13
+
+      header_map = Map.new(headers)
       assert header_map["X-ZTLP-Signature"] != nil
+      assert header_map["X-ZTLP-Nonce"] != nil
+      assert header_map["X-ZTLP-Request-ID"] != nil
+
+      # Restore
+      if prev do
+        Application.put_env(:ztlp_gateway, :header_signing_secret, prev)
+      else
+        Application.delete_env(:ztlp_gateway, :header_signing_secret)
+      end
     end
 
     test "hardware assurance shows 'hardware'" do
@@ -84,6 +117,57 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
       headers = Map.new(HttpHeaderInjector.build_headers(nil))
       assert headers["X-ZTLP-Authenticated"] == "false"
       assert headers["X-ZTLP-Assurance"] == "unknown"
+    end
+  end
+
+  describe "nonce generation" do
+    test "generates 32-char hex nonce" do
+      nonce = HttpHeaderInjector.generate_nonce()
+      assert byte_size(nonce) == 32
+      assert Regex.match?(~r/^[0-9a-f]{32}$/, nonce)
+    end
+
+    test "nonces are unique" do
+      nonce1 = HttpHeaderInjector.generate_nonce()
+      nonce2 = HttpHeaderInjector.generate_nonce()
+      refute nonce1 == nonce2
+    end
+  end
+
+  describe "request ID generation" do
+    test "generates UUID v4 format" do
+      request_id = HttpHeaderInjector.generate_request_id()
+      # UUID v4 format: 8-4-4-4-12 hex chars
+      assert Regex.match?(~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, request_id)
+    end
+
+    test "request IDs are unique" do
+      id1 = HttpHeaderInjector.generate_request_id()
+      id2 = HttpHeaderInjector.generate_request_id()
+      refute id1 == id2
+    end
+  end
+
+  describe "nonce included in signature" do
+    test "nonce value affects the signature" do
+      prev = Application.get_env(:ztlp_gateway, :header_signing_secret)
+      Application.put_env(:ztlp_gateway, :header_signing_secret, "test-secret")
+
+      identity = make_identity()
+      headers1 = HttpHeaderInjector.build_headers(identity)
+      headers2 = HttpHeaderInjector.build_headers(identity)
+
+      sig1 = Enum.find_value(headers1, fn {k, v} -> if k == "X-ZTLP-Signature", do: v end)
+      sig2 = Enum.find_value(headers2, fn {k, v} -> if k == "X-ZTLP-Signature", do: v end)
+
+      # Signatures should differ because nonce and request-id are different
+      refute sig1 == sig2
+
+      if prev do
+        Application.put_env(:ztlp_gateway, :header_signing_secret, prev)
+      else
+        Application.delete_env(:ztlp_gateway, :header_signing_secret)
+      end
     end
   end
 
@@ -129,6 +213,8 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
       result = HttpHeaderInjector.inject(request, make_identity(), "web.corp.ztlp")
       assert String.contains?(result, "X-ZTLP-Node-ID: abcdef1234567890")
       assert String.contains?(result, "X-ZTLP-Authenticated: true")
+      assert String.contains?(result, "X-ZTLP-Nonce:")
+      assert String.contains?(result, "X-ZTLP-Request-ID:")
     end
 
     test "strips forged X-ZTLP headers from client" do

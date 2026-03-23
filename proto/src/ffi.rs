@@ -16,10 +16,22 @@ use std::ffi::{CStr, CString};
 use std::net::SocketAddr;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+// ── Security constants ──────────────────────────────────────────────────
+
+/// Maximum allowed length for target address strings passed via FFI.
+/// Prevents unbounded allocations from malicious or buggy callers.
+const MAX_FFI_ADDRESS_LEN: usize = 256;
+
+/// Maximum allowed decrypted packet size in the recv loop.
+/// Packets larger than this are dropped to prevent memory exhaustion.
+/// 65535 is the maximum UDP payload size.
+const MAX_RECV_PACKET_SIZE: usize = 65535;
 
 use tokio::sync::RwLock as TokioRwLock;
 
@@ -509,6 +521,18 @@ pub extern "C" fn ztlp_connect(
         }
     };
 
+    // SECURITY: Reject oversized target addresses to prevent unbounded allocations
+    // from malicious or buggy FFI callers. 256 bytes is generous for any valid
+    // socket address (IPv6 + port is at most ~47 chars).
+    if target_string.len() > MAX_FFI_ADDRESS_LEN {
+        set_last_error(&format!(
+            "target address too long ({} bytes, max {})",
+            target_string.len(),
+            MAX_FFI_ADDRESS_LEN
+        ));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
     // Read config
     let (service_name, timeout_ms) = if !config.is_null() {
         let cfg = unsafe { &*config };
@@ -806,6 +830,98 @@ async fn do_connect(
 }
 
 /// Background receive loop — decrypts incoming packets and invokes the recv callback.
+/// Action to take after processing a received packet.
+enum RecvAction {
+    /// Continue the recv loop (e.g., keepalive frame processed).
+    Continue,
+    /// Break the recv loop (e.g., server rejected connection).
+    Break,
+    /// No special action — fall through normally.
+    Noop,
+}
+
+/// Process a single received packet, extracting the logic from recv_loop
+/// so it can be wrapped in `catch_unwind` for panic safety.
+///
+/// SECURITY: This function is called inside catch_unwind. A panic here
+/// (e.g., from a malicious server response) will be caught and logged
+/// rather than aborting the process.
+fn process_recv_packet(
+    plaintext: &[u8],
+    session_id: SessionId,
+    peer_node_id: NodeId,
+    peer_addr: SocketAddr,
+    inner: &Arc<std::sync::Mutex<ZtlpClientInner>>,
+) -> RecvAction {
+    // Check if it's a disconnect/reject
+    if RejectFrame::is_reject(plaintext) {
+        if let Some(reject) = RejectFrame::decode(plaintext) {
+            set_last_error(&format!("server rejected: {}", reject.message));
+            // Invoke disconnect callback
+            if let Ok(guard) = inner.lock() {
+                if let Some((cb, ud)) = guard.disconnect_callback {
+                    let mut session_handle = ZtlpSession {
+                        session_id,
+                        peer_node_id,
+                        peer_addr,
+                        session_id_str: CString::new(hex::encode(session_id.as_bytes()))
+                            .unwrap_or_default(),
+                        peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes()))
+                            .unwrap_or_default(),
+                        peer_addr_str: CString::new(peer_addr.to_string()).unwrap_or_default(),
+                    };
+                    cb(
+                        ud,
+                        &mut session_handle as *mut ZtlpSession,
+                        ZtlpResult::Rejected as i32,
+                    );
+                }
+            }
+            return RecvAction::Break;
+        }
+    }
+
+    // Skip keepalive frames (frame_type 0x01) — they're just NAT pings
+    if plaintext.len() == 1 && plaintext[0] == 0x01 {
+        return RecvAction::Continue;
+    }
+
+    // Invoke recv callback
+    if let Ok(guard) = inner.lock() {
+        if let Some((cb, ud)) = guard.recv_callback {
+            let mut session_handle = ZtlpSession {
+                session_id,
+                peer_node_id,
+                peer_addr,
+                session_id_str: CString::new(hex::encode(session_id.as_bytes()))
+                    .unwrap_or_default(),
+                peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes()))
+                    .unwrap_or_default(),
+                peer_addr_str: CString::new(peer_addr.to_string()).unwrap_or_default(),
+            };
+            cb(
+                ud,
+                plaintext.as_ptr(),
+                plaintext.len(),
+                &mut session_handle as *mut ZtlpSession,
+            );
+        }
+
+        // Forward to VIP proxy if running.
+        // Strip tunnel frame header: [frame_type(1) | data_seq(8) | payload]
+        if plaintext.len() > 9 && plaintext[0] == 0x00 {
+            let payload = plaintext[9..].to_vec();
+            if let Some(ref proxy) = guard.vip_proxy {
+                let tx = proxy.tunnel_sender();
+                // Non-blocking send — drop data if channel is full
+                let _ = tx.try_send(crate::vip::TunnelData { payload });
+            }
+        }
+    }
+
+    RecvAction::Noop
+}
+
 async fn recv_loop(
     transport: Arc<TransportNode>,
     bytes_received: Arc<AtomicU64>,
@@ -851,76 +967,53 @@ async fn recv_loop(
 
         match tokio::time::timeout(Duration::from_secs(1), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
-                bytes_received.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
-
-                // Check if it's a disconnect/reject
-                if RejectFrame::is_reject(&plaintext) {
-                    if let Some(reject) = RejectFrame::decode(&plaintext) {
-                        set_last_error(&format!("server rejected: {}", reject.message));
-                        // Invoke disconnect callback
-                        if let Ok(guard) = inner.lock() {
-                            if let Some((cb, ud)) = guard.disconnect_callback {
-                                let mut session_handle = ZtlpSession {
-                                    session_id,
-                                    peer_node_id,
-                                    peer_addr,
-                                    session_id_str: CString::new(hex::encode(
-                                        session_id.as_bytes(),
-                                    ))
-                                    .unwrap_or_default(),
-                                    peer_node_id_str: CString::new(hex::encode(
-                                        peer_node_id.as_bytes(),
-                                    ))
-                                    .unwrap_or_default(),
-                                    peer_addr_str: CString::new(peer_addr.to_string())
-                                        .unwrap_or_default(),
-                                };
-                                cb(
-                                    ud,
-                                    &mut session_handle as *mut ZtlpSession,
-                                    ZtlpResult::Rejected as i32,
-                                );
-                            }
-                        }
-                        break;
-                    }
-                }
-
-                // Skip keepalive frames (frame_type 0x01) — they're just NAT pings
-                if plaintext.len() == 1 && plaintext[0] == 0x01 {
+                // SECURITY: Reject oversized packets to prevent memory exhaustion.
+                // Maximum UDP payload is 65535 bytes; anything larger indicates a
+                // bug or attack. Drop silently and continue.
+                if plaintext.len() > MAX_RECV_PACKET_SIZE {
+                    tracing::warn!(
+                        "recv_loop: dropping oversized packet ({} bytes, max {})",
+                        plaintext.len(),
+                        MAX_RECV_PACKET_SIZE,
+                    );
                     continue;
                 }
 
-                // Invoke recv callback
-                if let Ok(guard) = inner.lock() {
-                    if let Some((cb, ud)) = guard.recv_callback {
-                        let mut session_handle = ZtlpSession {
-                            session_id,
-                            peer_node_id,
-                            peer_addr,
-                            session_id_str: CString::new(hex::encode(session_id.as_bytes()))
-                                .unwrap_or_default(),
-                            peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes()))
-                                .unwrap_or_default(),
-                            peer_addr_str: CString::new(peer_addr.to_string()).unwrap_or_default(),
-                        };
-                        cb(
-                            ud,
-                            plaintext.as_ptr(),
-                            plaintext.len(),
-                            &mut session_handle as *mut ZtlpSession,
-                        );
-                    }
+                bytes_received.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
 
-                    // Forward to VIP proxy if running.
-                    // Strip tunnel frame header: [frame_type(1) | data_seq(8) | payload]
-                    if plaintext.len() > 9 && plaintext[0] == 0x00 {
-                        let payload = plaintext[9..].to_vec();
-                        if let Some(ref proxy) = guard.vip_proxy {
-                            let tx = proxy.tunnel_sender();
-                            // Non-blocking send — drop data if channel is full
-                            let _ = tx.try_send(crate::vip::TunnelData { payload });
-                        }
+                // SECURITY: Wrap the decrypt+process path in catch_unwind to
+                // prevent a panic from a malicious server response from aborting
+                // the entire process. On panic, log the error and continue the
+                // recv loop so the session can recover or be cleanly shut down.
+                let process_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    process_recv_packet(
+                        &plaintext,
+                        session_id,
+                        peer_node_id,
+                        peer_addr,
+                        &inner,
+                    )
+                }));
+
+                match process_result {
+                    Ok(RecvAction::Continue) => continue,
+                    Ok(RecvAction::Break) => break,
+                    Ok(RecvAction::Noop) => {}
+                    Err(panic_info) => {
+                        // A panic occurred during packet processing — log and continue.
+                        // This prevents a malicious server response from killing the client.
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(
+                            "recv_loop: panic during packet processing (recovered): {}",
+                            msg,
+                        );
+                        continue;
                     }
                 }
             }
@@ -1294,7 +1387,10 @@ pub extern "C" fn ztlp_vip_add_service(
     }
 
     if let Some(ref mut proxy) = guard.vip_proxy {
-        proxy.add_service(name_string.clone(), vip_addr, port);
+        if let Err(e) = proxy.add_service(name_string.clone(), vip_addr, port) {
+            set_last_error(&e);
+            return ZtlpResult::InvalidArgument as i32;
+        }
     }
 
     // Also update the shared DNS registry
@@ -2503,5 +2599,165 @@ mod tests {
         // Should have a timeout error
         let err = ztlp_last_error();
         assert!(!err.is_null());
+    }
+
+    // ── Security audit tests ────────────────────────────────────────────
+
+    /// SECURITY: Verify that oversized target addresses are rejected.
+    /// Without this check, a malicious FFI caller could pass an extremely
+    /// long string causing unbounded allocation.
+    #[test]
+    fn test_connect_rejects_oversized_address() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        // Create an address longer than MAX_FFI_ADDRESS_LEN (256 bytes)
+        let long_addr = "A".repeat(300);
+        let target = CString::new(long_addr).unwrap();
+
+        extern "C" fn noop_callback(_ud: *mut c_void, _result: i32, _addr: *const c_char) {}
+
+        let result = ztlp_connect(
+            client,
+            target.as_ptr(),
+            std::ptr::null(),
+            noop_callback,
+            std::ptr::null_mut(),
+        );
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+
+        // Verify the error message mentions the length
+        let err = ztlp_last_error();
+        assert!(!err.is_null());
+        let err_str = unsafe { CStr::from_ptr(err) }.to_str().unwrap();
+        assert!(
+            err_str.contains("too long"),
+            "error should mention address is too long, got: {}",
+            err_str
+        );
+
+        ztlp_client_free(client);
+    }
+
+    /// SECURITY: Verify that valid-length addresses are NOT rejected.
+    /// Ensures the length check doesn't break normal operation.
+    #[test]
+    fn test_connect_accepts_normal_address() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+
+        // A normal IPv6 address with port — well under 256 bytes
+        let target = CString::new("[::1]:12345").unwrap();
+
+        extern "C" fn noop_callback(_ud: *mut c_void, _result: i32, _addr: *const c_char) {}
+
+        // This will fail to connect (no server), but it should NOT fail
+        // with InvalidArgument — it should attempt the connection.
+        let result = ztlp_connect(
+            client,
+            target.as_ptr(),
+            std::ptr::null(),
+            noop_callback,
+            std::ptr::null_mut(),
+        );
+        // Should be Ok (async connection attempt started) or a connection error,
+        // but NOT InvalidArgument
+        assert_ne!(result, ZtlpResult::InvalidArgument as i32);
+
+        ztlp_client_free(client);
+    }
+
+    /// SECURITY: Verify that non-loopback VIP addresses are rejected.
+    /// This prevents the VIP proxy from being used for SSRF/port scanning.
+    #[test]
+    fn test_vip_add_service_rejects_non_loopback() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("evil").unwrap();
+
+        // Try to bind to a non-loopback address
+        let vip = CString::new("10.0.0.1").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+
+        // Verify the error message mentions loopback
+        let err = ztlp_last_error();
+        assert!(!err.is_null());
+        let err_str = unsafe { CStr::from_ptr(err) }.to_str().unwrap();
+        assert!(
+            err_str.contains("loopback"),
+            "error should mention loopback requirement, got: {}",
+            err_str
+        );
+
+        ztlp_client_free(client);
+    }
+
+    /// SECURITY: Verify that 0.0.0.0 is rejected as a VIP address.
+    #[test]
+    fn test_vip_add_service_rejects_wildcard() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("evil").unwrap();
+        let vip = CString::new("0.0.0.0").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        ztlp_client_free(client);
+    }
+
+    /// SECURITY: Verify that private network addresses are rejected as VIPs.
+    #[test]
+    fn test_vip_add_service_rejects_private_network() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        let name = CString::new("evil").unwrap();
+
+        // 192.168.x.x is private but NOT loopback
+        let vip = CString::new("192.168.1.1").unwrap();
+        let result = ztlp_vip_add_service(client, name.as_ptr(), vip.as_ptr(), 80);
+        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+
+        ztlp_client_free(client);
+    }
+
+    /// SECURITY: Verify that process_recv_packet handles all frame types.
+    #[test]
+    fn test_process_recv_packet_keepalive() {
+        // Keepalive frame (single byte 0x01) should result in Continue
+        let keepalive = vec![0x01u8];
+        let inner = Arc::new(std::sync::Mutex::new(create_test_inner()));
+        let session_id = crate::packet::SessionId::generate();
+        let peer_node_id = crate::identity::NodeId::from_bytes([0u8; 16]);
+        let peer_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+        let action = process_recv_packet(
+            &keepalive,
+            session_id,
+            peer_node_id,
+            peer_addr,
+            &inner,
+        );
+        assert!(matches!(action, RecvAction::Continue));
+    }
+
+    /// Helper to create a minimal ZtlpClientInner for testing.
+    fn create_test_inner() -> ZtlpClientInner {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let identity = crate::mobile::SoftwareIdentityProvider::generate().unwrap();
+        ZtlpClientInner {
+            runtime,
+            identity: Box::new(identity),
+            state: ConnectionState::Disconnected,
+            config: crate::mobile::MobileConfig::default(),
+            active_session: None,
+            recv_callback: None,
+            disconnect_callback: None,
+            vip_proxy: None,
+            dns_server: None,
+            vip_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
     }
 }

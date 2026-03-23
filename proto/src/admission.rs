@@ -708,4 +708,111 @@ mod tests {
         let ext = HandshakeExtension::AdmissionToken(token);
         assert_eq!(ext.wire_len(), 94);
     }
+
+    // ── Security audit tests ────────────────────────────────────────────
+
+    /// SECURITY: Verify that HMAC comparison uses constant-time equality
+    /// (subtle::ConstantTimeEq). This test confirms the verify() method
+    /// correctly rejects invalid MACs — the constant-time property is
+    /// ensured by the use of ct_eq from the `subtle` crate.
+    #[test]
+    fn test_verify_uses_constant_time_comparison() {
+        let secret = [0x42u8; 32];
+        let token = RelayAdmissionToken::issue([0x11; 16], [0x22; 16], [0u8; 12], 300, &secret);
+
+        // Valid MAC should pass
+        assert!(token.verify(&secret));
+
+        // Flip each byte of the MAC — every single-byte change must be detected.
+        // This exercises the constant-time compare path for near-match MACs.
+        for byte_idx in 0..32 {
+            let mut tampered = token.clone();
+            tampered.mac[byte_idx] ^= 0x01; // flip just one bit
+            assert!(
+                !tampered.verify(&secret),
+                "flipping MAC byte {} should fail verification",
+                byte_idx
+            );
+        }
+    }
+
+    /// SECURITY: Verify that an expired token with a manipulated timestamp
+    /// still has a valid MAC (preventing the "extend expiry" attack).
+    /// Changing expires_at invalidates the MAC.
+    #[test]
+    fn test_expired_token_cannot_extend_expiry() {
+        let secret = [0x42u8; 32];
+
+        // Issue an expired token
+        let token = RelayAdmissionToken::issue_at(
+            [0x11; 16],
+            [0x22; 16],
+            [0u8; 12],
+            1000000,
+            1000010, // expired long ago
+            &secret,
+        );
+        assert!(token.verify(&secret));
+        assert!(token.is_expired());
+
+        // Try to extend the expiry by modifying the timestamp
+        let mut bytes = token.serialize();
+        // Set expires_at to far future (year 2100)
+        let far_future: u64 = 4102444800;
+        bytes[41..49].copy_from_slice(&far_future.to_be_bytes());
+
+        let tampered = RelayAdmissionToken::parse(&bytes).unwrap();
+        // The MAC must be invalid because expires_at is covered by the MAC
+        assert!(
+            !tampered.verify(&secret),
+            "extending expires_at must invalidate the MAC"
+        );
+    }
+
+    /// SECURITY: Verify that timestamp overflow doesn't cause issues.
+    #[test]
+    fn test_timestamp_boundary_values() {
+        let secret = [0x42u8; 32];
+
+        // Max u64 timestamps
+        let token = RelayAdmissionToken::issue_at(
+            [0x11; 16],
+            [0x22; 16],
+            [0u8; 12],
+            u64::MAX - 1,
+            u64::MAX,
+            &secret,
+        );
+        assert!(token.verify(&secret));
+        // This token is "expired" because expires_at (u64::MAX) < now in practice
+        // Actually u64::MAX > any reasonable now, so it's NOT expired
+        // The important thing is it doesn't panic
+
+        // Zero timestamps
+        let token_zero = RelayAdmissionToken::issue_at(
+            [0x11; 16],
+            [0x22; 16],
+            [0u8; 12],
+            0,
+            0,
+            &secret,
+        );
+        assert!(token_zero.verify(&secret));
+        assert!(token_zero.is_expired()); // expires_at = 0 is definitely expired
+    }
+
+    /// SECURITY: Verify that an empty extension payload is properly rejected.
+    #[test]
+    fn test_extension_parse_empty_data() {
+        let result = HandshakeExtension::parse(&[]);
+        assert!(result.is_err());
+    }
+
+    /// SECURITY: Verify that a truncated extension payload is rejected.
+    #[test]
+    fn test_extension_parse_truncated() {
+        // Just the type byte, no token data
+        let result = HandshakeExtension::parse(&[EXT_TYPE_RAT]);
+        assert!(result.is_err());
+    }
 }

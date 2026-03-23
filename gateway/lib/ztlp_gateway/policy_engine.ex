@@ -105,15 +105,13 @@ defmodule ZtlpGateway.PolicyEngine do
   """
   @spec put_rule(String.t(), :all | [String.t()]) :: :ok
   def put_rule(service, allow) do
-    :ets.insert(@table, {service, allow})
-    :ok
+    GenServer.call(__MODULE__, {:put_rule, service, allow})
   end
 
   @doc "Remove a policy rule."
   @spec delete_rule(String.t()) :: :ok
   def delete_rule(service) do
-    :ets.delete(@table, service)
-    :ok
+    GenServer.call(__MODULE__, {:delete_rule, service})
   end
 
   @doc "List all current policy rules."
@@ -128,7 +126,9 @@ defmodule ZtlpGateway.PolicyEngine do
 
   @impl true
   def init(_opts) do
-    :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    # Protected table: only this GenServer process can write.
+    # All other processes can read (authorize?/2 uses read_concurrency).
+    :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
 
     # Load policies from config
     policies = ZtlpGateway.Config.get(:policies)
@@ -138,6 +138,17 @@ defmodule ZtlpGateway.PolicyEngine do
     end)
 
     {:ok, %{}}
+  end
+
+  @impl true
+  def handle_call({:put_rule, service, allow}, _from, state) do
+    :ets.insert(@table, {service, allow})
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:delete_rule, service}, _from, state) do
+    :ets.delete(@table, service)
+    {:reply, :ok, state}
   end
 
   # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ defmodule ZtlpGateway.HttpHeaderInjector do
 
   ## Identity Headers
 
-  All 11 identity headers:
+  All 13 identity headers:
 
   | Header | Description |
   |--------|-------------|
@@ -30,6 +30,8 @@ defmodule ZtlpGateway.HttpHeaderInjector do
   | `X-ZTLP-Cert-Fingerprint` | SHA-256 fingerprint (hex) |
   | `X-ZTLP-Cert-Serial` | X.509 serial number |
   | `X-ZTLP-Timestamp` | ISO8601 timestamp of header injection |
+  | `X-ZTLP-Nonce` | Cryptographically random nonce (32 hex chars) |
+  | `X-ZTLP-Request-ID` | UUID v4 request identifier for audit trails |
   | `X-ZTLP-Signature` | HMAC-SHA256 signature of all other X-ZTLP headers |
 
   ## Anti-Forgery
@@ -37,6 +39,8 @@ defmodule ZtlpGateway.HttpHeaderInjector do
   All client-provided `X-ZTLP-*` headers are stripped before injection
   to prevent clients from forging identity headers.
   """
+
+  require Logger
 
   @ztlp_header_prefix "x-ztlp-"
 
@@ -80,11 +84,15 @@ defmodule ZtlpGateway.HttpHeaderInjector do
   Build identity headers from an identity map.
 
   Returns a list of `{header_name, header_value}` tuples.
+  Includes nonce and request ID for replay protection and audit trails.
+  If no signing secret is configured, the signature header is omitted.
   """
   @spec build_headers(map() | nil) :: [{String.t(), String.t()}]
   def build_headers(nil), do: build_headers(ZtlpGateway.TlsIdentity.anonymous_identity())
   def build_headers(identity) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
+    nonce = generate_nonce()
+    request_id = generate_request_id()
 
     headers = [
       {"X-ZTLP-Node-ID", Map.get(identity, :node_id) || ""},
@@ -96,13 +104,24 @@ defmodule ZtlpGateway.HttpHeaderInjector do
       {"X-ZTLP-Key-Attestation", if(Map.get(identity, :attestation_verified, false), do: "verified", else: "unverified")},
       {"X-ZTLP-Cert-Fingerprint", Map.get(identity, :cert_fingerprint) || ""},
       {"X-ZTLP-Cert-Serial", Map.get(identity, :cert_serial) || ""},
-      {"X-ZTLP-Timestamp", now}
+      {"X-ZTLP-Timestamp", now},
+      {"X-ZTLP-Nonce", nonce},
+      {"X-ZTLP-Request-ID", request_id}
     ]
 
-    # Add signature
+    # Add signature if a signing secret is configured
     secret = ZtlpGateway.HeaderSigner.default_secret()
-    sig = ZtlpGateway.HeaderSigner.sign(headers, secret)
-    headers ++ [{"X-ZTLP-Signature", sig}]
+
+    if secret do
+      sig = ZtlpGateway.HeaderSigner.sign(headers, secret)
+      headers ++ [{"X-ZTLP-Signature", sig}]
+    else
+      Logger.warning(
+        "[HttpHeaderInjector] No signing secret configured — X-ZTLP-Signature header omitted. " <>
+          "Set ZTLP_HEADER_HMAC_SECRET or :header_signing_secret to enable signing."
+      )
+      headers
+    end
   end
 
   @doc """
@@ -122,7 +141,37 @@ defmodule ZtlpGateway.HttpHeaderInjector do
     end
   end
 
+  @doc """
+  Generate a cryptographically random nonce.
+
+  Returns 16 bytes hex-encoded (32 hex characters).
+  """
+  @spec generate_nonce() :: String.t()
+  def generate_nonce do
+    :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  end
+
+  @doc """
+  Generate a UUID v4 request identifier.
+  """
+  @spec generate_request_id() :: String.t()
+  def generate_request_id do
+    <<a::48, _v::4, b::12, _r::2, c::62>> = :crypto.strong_rand_bytes(16)
+
+    <<a::48, 4::4, b::12, 2::2, c::62>>
+    |> uuid_to_string()
+  end
+
   # ── Internal ───────────────────────────────────────────────────────
+
+  defp uuid_to_string(<<a::binary-4, b::binary-2, c::binary-2, d::binary-2, e::binary-6>>) do
+    [Base.encode16(a, case: :lower),
+     Base.encode16(b, case: :lower),
+     Base.encode16(c, case: :lower),
+     Base.encode16(d, case: :lower),
+     Base.encode16(e, case: :lower)]
+    |> Enum.join("-")
+  end
 
   defp inject_headers(data, identity) do
     case split_http_request(data) do

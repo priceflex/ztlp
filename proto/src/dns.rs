@@ -18,8 +18,16 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
-/// Maximum DNS UDP packet size.
+/// Maximum DNS UDP packet size per RFC 1035 §2.3.4.
+/// UDP DNS messages are limited to 512 bytes. Responses larger than this
+/// must use TCP (not supported in this minimal implementation).
 const DNS_MAX_PACKET: usize = 512;
+
+/// Maximum length of a single DNS label (63 bytes per RFC 1035 §2.3.4).
+const DNS_MAX_LABEL_LEN: usize = 63;
+
+/// Maximum total length of a DNS name (253 characters per RFC 1035 §2.3.4).
+const DNS_MAX_NAME_LEN: usize = 253;
 
 /// DNS header flags
 const DNS_FLAG_QR: u16 = 0x8000; // Response
@@ -112,6 +120,13 @@ async fn dns_server_loop(socket: UdpSocket, registry: VipRegistry, stop: Arc<Ato
 
         if len < 12 {
             continue; // Too short to be a DNS packet
+        }
+
+        // SECURITY: Reject queries larger than 512 bytes per RFC 1035 §4.2.1.
+        // UDP DNS messages must not exceed 512 bytes.
+        if len > DNS_MAX_PACKET {
+            tracing::warn!("DNS: rejecting oversized query ({} bytes) from {}", len, src);
+            continue;
         }
 
         let query = &buf[..len];
@@ -222,11 +237,16 @@ fn extract_service_name(qname: &str) -> Option<String> {
 /// Parse a DNS name from wire format.
 ///
 /// Returns (name_string, next_offset).
+///
+/// SECURITY: Validates label length (max 63 bytes) and total name length
+/// (max 253 bytes) per RFC 1035 §2.3.4 to prevent buffer over-reads and
+/// excessively long name allocations from malicious queries.
 fn parse_dns_name(data: &[u8], start: usize) -> Option<(String, usize)> {
     let mut labels: Vec<String> = Vec::new();
     let mut pos = start;
     let mut jumps = 0;
     let mut return_pos: Option<usize> = None;
+    let mut total_len: usize = 0;
 
     loop {
         if pos >= data.len() || jumps > 10 {
@@ -256,12 +276,29 @@ fn parse_dns_name(data: &[u8], start: usize) -> Option<(String, usize)> {
             continue;
         }
 
+        // SECURITY: Reject labels longer than 63 bytes per RFC 1035 §2.3.4.
+        // A label length > 63 that isn't a compression pointer (0xC0) is invalid.
+        if len > DNS_MAX_LABEL_LEN {
+            return None;
+        }
+
         pos += 1;
         if pos + len > data.len() {
             return None;
         }
 
         let label = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
+
+        // SECURITY: Track total name length and reject names > 253 bytes.
+        // Total includes label lengths + dots between labels.
+        total_len += len;
+        if !labels.is_empty() {
+            total_len += 1; // dot separator
+        }
+        if total_len > DNS_MAX_NAME_LEN {
+            return None;
+        }
+
         labels.push(label);
         pos += len;
     }
@@ -271,6 +308,10 @@ fn parse_dns_name(data: &[u8], start: usize) -> Option<(String, usize)> {
 }
 
 /// Build a DNS response packet.
+///
+/// SECURITY: The response is truncated to DNS_MAX_PACKET (512 bytes) per
+/// RFC 1035 §2.3.4. If the question section is too large for an answer to
+/// fit, the answer is omitted and NXDOMAIN is returned instead.
 fn build_dns_response(
     id: u16,
     question_section: &[u8],
@@ -279,25 +320,45 @@ fn build_dns_response(
 ) -> Vec<u8> {
     let mut response = Vec::with_capacity(DNS_MAX_PACKET);
 
+    // Calculate if the answer will fit within 512 bytes.
+    // Header (12) + question + answer_record (2+2+2+4+2+4 = 16 bytes).
+    let header_size = 12;
+    let answer_size: usize = if answer_ip.is_some() { 16 } else { 0 };
+    let total_size = header_size + question_section.len() + answer_size;
+
+    // SECURITY: If the response would exceed 512 bytes, omit the answer.
+    // This prevents generating oversized UDP DNS responses.
+    let (effective_answer, effective_rcode, effective_ancount) =
+        if total_size > DNS_MAX_PACKET {
+            (None, DNS_FLAG_RCODE_NXDOMAIN, 0u16)
+        } else {
+            (answer_ip, rcode, if answer_ip.is_some() { 1u16 } else { 0u16 })
+        };
+
     // Header
     response.extend_from_slice(&id.to_be_bytes()); // Transaction ID
 
-    let flags = DNS_FLAG_QR | DNS_FLAG_AA | rcode;
+    let flags = DNS_FLAG_QR | DNS_FLAG_AA | effective_rcode;
     response.extend_from_slice(&flags.to_be_bytes()); // Flags
 
     response.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT = 1
 
-    let ancount: u16 = if answer_ip.is_some() { 1 } else { 0 };
-    response.extend_from_slice(&ancount.to_be_bytes()); // ANCOUNT
+    response.extend_from_slice(&effective_ancount.to_be_bytes()); // ANCOUNT
 
     response.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     response.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
 
-    // Question section (echo back)
-    response.extend_from_slice(question_section);
+    // Question section (echo back) — truncate if it alone exceeds limit
+    let max_question_len = DNS_MAX_PACKET.saturating_sub(header_size);
+    let question_to_write = if question_section.len() > max_question_len {
+        &question_section[..max_question_len]
+    } else {
+        question_section
+    };
+    response.extend_from_slice(question_to_write);
 
-    // Answer section (if we have an IP)
-    if let Some(ip) = answer_ip {
+    // Answer section (if we have an IP and it fits)
+    if let Some(ip) = effective_answer {
         // Name pointer to the question name (offset 12)
         response.extend_from_slice(&[0xC0, 0x0C]);
 
@@ -312,6 +373,9 @@ fn build_dns_response(
         // RDATA (IPv4 address)
         response.extend_from_slice(&ip.octets());
     }
+
+    // Final safety truncation — should never trigger with correct logic above
+    response.truncate(DNS_MAX_PACKET);
 
     response
 }
@@ -503,5 +567,137 @@ mod tests {
         let registry: VipRegistry = Arc::new(RwLock::new(HashMap::new()));
         let mut dns = ZtlpDns::new(registry);
         dns.stop(); // Should not panic
+    }
+
+    // ── Security audit tests ────────────────────────────────────────────
+
+    /// SECURITY: Verify that DNS labels longer than 63 bytes are rejected.
+    /// RFC 1035 §2.3.4 limits each label to 63 octets.
+    #[test]
+    fn test_parse_dns_name_rejects_overlength_label() {
+        let mut packet = vec![0u8; 12]; // fake header
+
+        // Build a label with 64 bytes (exceeds 63-byte limit)
+        let label_len: u8 = 64;
+        packet.push(label_len);
+        packet.extend_from_slice(&vec![b'a'; 64]);
+        packet.push(0); // root
+
+        let result = parse_dns_name(&packet, 12);
+        assert!(result.is_none(), "should reject label > 63 bytes");
+    }
+
+    /// SECURITY: Verify that labels at exactly 63 bytes are accepted.
+    #[test]
+    fn test_parse_dns_name_accepts_max_label() {
+        let mut packet = vec![0u8; 12]; // fake header
+
+        // Build a label with exactly 63 bytes (the maximum)
+        let label_len: u8 = 63;
+        packet.push(label_len);
+        packet.extend_from_slice(&vec![b'a'; 63]);
+        // Add .ztlp suffix
+        packet.push(4);
+        packet.extend_from_slice(b"ztlp");
+        packet.push(0); // root
+
+        let result = parse_dns_name(&packet, 12);
+        assert!(result.is_some(), "should accept label of exactly 63 bytes");
+        let (name, _) = result.unwrap();
+        assert_eq!(name.len(), 63 + 1 + 4); // 63 a's + dot + "ztlp"
+    }
+
+    /// SECURITY: Verify that DNS names longer than 253 bytes total are rejected.
+    /// RFC 1035 §2.3.4 limits the total name to 253 octets.
+    #[test]
+    fn test_parse_dns_name_rejects_overlength_total() {
+        let mut packet = vec![0u8; 12]; // fake header
+
+        // Build many 10-byte labels to exceed 253 bytes total.
+        // Each label contributes 10 chars + 1 dot = 11 chars to the name.
+        // 24 labels × 11 = 264 characters > 253.
+        for _ in 0..24 {
+            packet.push(10); // label length
+            packet.extend_from_slice(b"abcdefghij"); // 10-byte label
+        }
+        packet.push(0); // root
+
+        let result = parse_dns_name(&packet, 12);
+        assert!(result.is_none(), "should reject name > 253 bytes total");
+    }
+
+    /// SECURITY: Verify that DNS responses never exceed 512 bytes.
+    /// RFC 1035 §4.2.1 limits UDP DNS messages to 512 bytes.
+    #[test]
+    fn test_build_dns_response_max_size() {
+        // Build an oversized question section
+        let mut question = Vec::new();
+        // Create a very long name that takes up most of the 512-byte budget
+        for _ in 0..40 {
+            question.push(10);
+            question.extend_from_slice(b"abcdefghij");
+        }
+        question.push(0); // root
+        question.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+        question.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+        let response = build_dns_response(
+            0x1234,
+            &question,
+            0,
+            Some(Ipv4Addr::new(127, 0, 55, 1)),
+        );
+
+        assert!(
+            response.len() <= DNS_MAX_PACKET,
+            "response ({} bytes) must not exceed {} bytes",
+            response.len(),
+            DNS_MAX_PACKET,
+        );
+    }
+
+    /// SECURITY: Verify that normal responses are well within 512 bytes.
+    #[test]
+    fn test_build_dns_response_normal_size() {
+        let question = encode_dns_name("beta.ztlp");
+        let mut question_section = question;
+        question_section.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+        question_section.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+        let response = build_dns_response(
+            0x1234,
+            &question_section,
+            0,
+            Some(Ipv4Addr::new(127, 0, 55, 1)),
+        );
+
+        assert!(response.len() <= DNS_MAX_PACKET);
+        // Normal response should be quite small
+        assert!(response.len() < 100, "normal response should be compact");
+    }
+
+    /// SECURITY: Verify that compression pointer loops don't cause infinite loops.
+    #[test]
+    fn test_parse_dns_name_compression_loop() {
+        let mut packet = vec![0u8; 12]; // fake header
+        // Create a compression pointer that points to itself (offset 12)
+        packet.push(0xC0); // compression marker
+        packet.push(12);   // points back to offset 12 — infinite loop!
+
+        let result = parse_dns_name(&packet, 12);
+        // Should return None after hitting the jump limit (10), not loop forever
+        assert!(result.is_none(), "should reject compression pointer loops");
+    }
+
+    /// SECURITY: Verify that truncated compression pointers are rejected.
+    #[test]
+    fn test_parse_dns_name_truncated_compression() {
+        let mut packet = vec![0u8; 12]; // fake header
+        // Compression pointer with missing second byte
+        packet.push(0xC0);
+        // No second byte — packet ends here
+
+        let result = parse_dns_name(&packet, 12);
+        assert!(result.is_none(), "should reject truncated compression pointer");
     }
 }

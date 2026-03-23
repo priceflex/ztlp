@@ -394,6 +394,11 @@ pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8]) -> [u8; 16] {
 }
 
 /// Verify a HeaderAuthTag against the header AAD bytes.
+///
+/// SECURITY: This uses AEAD decryption (ChaCha20-Poly1305) for verification,
+/// which is inherently constant-time because the Poly1305 MAC comparison
+/// inside the AEAD implementation uses constant-time primitives. This avoids
+/// timing side-channels that could leak information about the expected tag.
 fn verify_header_auth_tag(key: &[u8; 32], aad: &[u8], tag: &[u8]) -> bool {
     if tag.len() != 16 {
         return false;
@@ -404,4 +409,200 @@ fn verify_header_auth_tag(key: &[u8; 32], aad: &[u8], tag: &[u8]) -> bool {
     cipher
         .decrypt(&nonce, chacha20poly1305::aead::Payload { msg: tag, aad })
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::NodeId;
+    use crate::session::SessionState;
+
+    /// Helper: build a minimal valid ZTLP packet with magic bytes.
+    fn make_magic_packet(magic: u16, remaining: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&magic.to_be_bytes());
+        pkt.extend_from_slice(remaining);
+        pkt
+    }
+
+    /// Helper: create a test session state.
+    fn make_test_session(session_id: SessionId, recv_key: [u8; 32]) -> SessionState {
+        SessionState::new(
+            session_id,
+            NodeId::from_bytes([0u8; 16]),
+            [0u8; 32],   // send_key
+            recv_key,
+            false,        // multipath
+        )
+    }
+
+    // ── Layer 1: Magic byte tests ───────────────────────────────────────
+
+    #[test]
+    fn test_layer1_accepts_valid_magic() {
+        let pipeline = Pipeline::new();
+        let pkt = make_magic_packet(MAGIC, &[0u8; 10]);
+        assert_eq!(pipeline.layer1_magic_check(&pkt), AdmissionResult::Pass);
+    }
+
+    #[test]
+    fn test_layer1_rejects_invalid_magic() {
+        let pipeline = Pipeline::new();
+        let pkt = make_magic_packet(0xDEAD, &[0u8; 10]);
+        assert_eq!(pipeline.layer1_magic_check(&pkt), AdmissionResult::Drop);
+    }
+
+    #[test]
+    fn test_layer1_rejects_empty_packet() {
+        let pipeline = Pipeline::new();
+        assert_eq!(pipeline.layer1_magic_check(&[]), AdmissionResult::Drop);
+    }
+
+    #[test]
+    fn test_layer1_rejects_single_byte() {
+        let pipeline = Pipeline::new();
+        assert_eq!(pipeline.layer1_magic_check(&[0x5A]), AdmissionResult::Drop);
+    }
+
+    // ── Layer 2: Session check tests ────────────────────────────────────
+
+    #[test]
+    fn test_layer2_rejects_too_short() {
+        let pipeline = Pipeline::new();
+        let pkt = [0u8; 3]; // Less than 4 bytes
+        assert_eq!(pipeline.layer2_session_check(&pkt), AdmissionResult::Drop);
+    }
+
+    #[test]
+    fn test_layer2_rejects_unknown_session() {
+        let pipeline = Pipeline::new();
+        // Build a data header (HdrLen = 11) with unknown session ID
+        let mut pkt = vec![0u8; packet::DATA_HEADER_SIZE];
+        pkt[0] = (MAGIC >> 8) as u8;
+        pkt[1] = (MAGIC & 0xFF) as u8;
+        // VerHdrLen: version 0, hdrlen 11
+        pkt[2] = 0x00;
+        pkt[3] = 0x0B; // HdrLen = 11
+        // Unknown session ID at bytes 6..18
+        for i in 6..18 {
+            pkt[i] = 0xFF;
+        }
+        assert_eq!(pipeline.layer2_session_check(&pkt), AdmissionResult::Drop);
+    }
+
+    // ── Layer 3: Auth tag tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_layer3_rejects_too_short() {
+        let pipeline = Pipeline::new();
+        assert_eq!(pipeline.layer3_auth_check(&[0u8; 3]), AdmissionResult::Drop);
+    }
+
+    // ── Header auth tag tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_compute_and_verify_auth_tag() {
+        let key = [0x42u8; 32];
+        let aad = b"test header data";
+
+        let tag = compute_header_auth_tag(&key, aad);
+        assert_eq!(tag.len(), 16);
+        assert!(verify_header_auth_tag(&key, aad, &tag));
+    }
+
+    #[test]
+    fn test_auth_tag_rejects_wrong_key() {
+        let key = [0x42u8; 32];
+        let wrong_key = [0x99u8; 32];
+        let aad = b"test header data";
+
+        let tag = compute_header_auth_tag(&key, aad);
+        assert!(!verify_header_auth_tag(&wrong_key, aad, &tag));
+    }
+
+    #[test]
+    fn test_auth_tag_rejects_wrong_aad() {
+        let key = [0x42u8; 32];
+        let aad = b"test header data";
+        let wrong_aad = b"wrong header data";
+
+        let tag = compute_header_auth_tag(&key, aad);
+        assert!(!verify_header_auth_tag(&key, wrong_aad, &tag));
+    }
+
+    /// SECURITY: Verify that tags of wrong length are rejected.
+    #[test]
+    fn test_auth_tag_rejects_wrong_length() {
+        let key = [0x42u8; 32];
+        let aad = b"test";
+
+        // Too short
+        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 15]));
+        // Too long
+        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 17]));
+        // Empty
+        assert!(!verify_header_auth_tag(&key, aad, &[]));
+    }
+
+    /// SECURITY: Verify that a tampered tag is rejected (single-bit flip).
+    #[test]
+    fn test_auth_tag_rejects_single_bit_flip() {
+        let key = [0x42u8; 32];
+        let aad = b"test header data for tamper check";
+
+        let tag = compute_header_auth_tag(&key, aad);
+
+        // Flip each bit in each byte of the tag
+        for byte_idx in 0..16 {
+            let mut tampered_tag = tag;
+            tampered_tag[byte_idx] ^= 0x01;
+            assert!(
+                !verify_header_auth_tag(&key, aad, &tampered_tag),
+                "flipping bit in tag byte {} should fail",
+                byte_idx
+            );
+        }
+    }
+
+    // ── Pipeline integration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_pipeline_counters_new() {
+        let counters = PipelineCounters::new();
+        let snap = counters.snapshot();
+        assert_eq!(snap.layer1_drops, 0);
+        assert_eq!(snap.layer2_drops, 0);
+        assert_eq!(snap.layer3_drops, 0);
+        assert_eq!(snap.passed, 0);
+    }
+
+    #[test]
+    fn test_pipeline_snapshot_display() {
+        let counters = PipelineCounters::new();
+        counters.layer1_drops.fetch_add(5, Ordering::Relaxed);
+        let snap = counters.snapshot();
+        let display = format!("{}", snap);
+        assert!(display.contains("L1(magic) drops=5"));
+    }
+
+    #[test]
+    fn test_pipeline_process_bad_magic() {
+        let pipeline = Pipeline::new();
+        let pkt = make_magic_packet(0xDEAD, &[0u8; 50]);
+        assert_eq!(pipeline.process(&pkt), AdmissionResult::Drop);
+        let snap = pipeline.counters.snapshot();
+        assert_eq!(snap.layer1_drops, 1);
+    }
+
+    #[test]
+    fn test_pipeline_register_remove_session() {
+        let mut pipeline = Pipeline::new();
+        let sid = SessionId::generate();
+        let session = make_test_session(sid, [0x42; 32]);
+        pipeline.register_session(session);
+        assert!(pipeline.get_session(&sid).is_some());
+
+        pipeline.remove_session(&sid);
+        assert!(pipeline.get_session(&sid).is_none());
+    }
 }

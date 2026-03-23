@@ -611,7 +611,7 @@
       <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">☰</button>
       <a href="#overview" class="topbar-left" style="text-decoration:none;gap:10px;">
         <span class="logo-badge">ZTLP</span>
-        <span class="logo-title">Documentation <span>v0.9.2</span></span>
+        <span class="logo-title">Documentation <span>v0.11.1</span></span>
       </a>
     </div>
     <div class="topbar-right">
@@ -663,6 +663,7 @@
     <a class="sidebar-link sub" href="#comp-relay" data-page="components">Elixir Relay</a>
     <a class="sidebar-link sub" href="#comp-ns" data-page="components">ZTLP-NS Namespace</a>
     <a class="sidebar-link sub" href="#comp-gateway" data-page="components">Gateway</a>
+    <a class="sidebar-link sub" href="#comp-identity-headers" data-page="components">Identity Headers</a>
     <a class="sidebar-link sub" href="#comp-ebpf" data-page="components">eBPF/XDP Filter</a>
   </div>
 
@@ -701,7 +702,14 @@
 
   <div class="callout">
     <div class="callout-title">🔬 Prototype Status</div>
-    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,000+ passing tests across Rust, Elixir, and C — including the v0.9.0 identity model.</p>
+    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,500+ passing tests across Rust, Elixir, and C — including the v0.11.1 security-hardened implementation.</p>
+  </div>
+
+  <div class="callout success">
+    <div class="callout-title">🆕 New in v0.11.1 — Security Hardening</div>
+    <p><strong>Gateway:</strong> Identity header signing (HMAC-SHA256), nonce replay protection, timestamp expiry, UUID v4 request IDs, backend verification library. PolicyEngine hardened with protected ETS.</p>
+    <p><strong>Client:</strong> FFI input validation, panic recovery in recv loop, DNS RFC 1035 compliance, VIP loopback-only binding.</p>
+    <p><strong>2,526 total tests</strong> across all components, 0 failures.</p>
   </div>
 
   <h2>What is ZTLP?</h2>
@@ -765,11 +773,12 @@ graph TB
       <tr><th>Component</th><th>Language</th><th>Role</th><th>Tests</th><th>Status</th></tr>
     </thead>
     <tbody>
-      <tr><td><strong>Client</strong> (<code>proto/</code>)</td><td>Rust</td><td>Identity, Noise_XX handshake, encrypted transport</td><td>91</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding (zero-trust)</td><td>73</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr><td><strong>ZTLP-NS</strong> (<code>ns/</code>)</td><td>Elixir/OTP</td><td>Distributed trust namespace, Ed25519-signed records</td><td>105</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge with policy enforcement</td><td>97</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Client</strong> (<code>proto/</code>)</td><td>Rust</td><td>Identity, Noise_XX handshake, encrypted transport</td><td>781</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding (zero-trust)</td><td>565</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>ZTLP-NS</strong> (<code>ns/</code>)</td><td>Elixir/OTP</td><td>Distributed trust namespace, Ed25519-signed records</td><td>722</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge with policy enforcement</td><td>458</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>eBPF/XDP</strong> (<code>ebpf/</code>)</td><td>C</td><td>Kernel-level Layer 1+2 at NIC driver speed</td><td>—</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr style="font-weight:bold;background:var(--bg2,#f0fdf4);"><td colspan="3"><strong>Total</strong></td><td><strong>2,526</strong></td><td><span class="badge badge-green">All passing</span></td></tr>
     </tbody>
   </table>
 
@@ -878,23 +887,23 @@ ZtlpRelay.Stats.get_stats()
   </ol>
 
   <h2>Run All Tests</h2>
-  <div class="code-block-wrapper"><pre><code class="language-bash"># Rust client — 91 tests
+  <div class="code-block-wrapper"><pre><code class="language-bash"># Rust client — 781 tests
 cd proto && cargo test && cd ..
 
-# Elixir relay — 73 tests
+# Elixir relay — 565 tests
 cd relay && mix test && cd ..
 
-# ZTLP-NS namespace — 105 tests
+# ZTLP-NS namespace — 722 tests
 cd ns && mix test && cd ..
 
-# Gateway — 97 tests
+# Gateway — 458 tests
 cd gateway && mix test && cd ..
 
 # Cross-language interop — 5 tests
 bash interop/run_test.sh</code></pre></div>
 
   <div class="callout success">
-    <div class="callout-title">✅ 2,000+ tests, 0 failures</div>
+    <div class="callout-title">✅ 2,526 tests, 0 failures</div>
     <p>The full test suite covers packet serialization, pipeline admission, Noise_XX handshake, identity model, group-based policy, edge cases, integration tests, and cross-language interop.</p>
   </div>
 </section>
@@ -1150,7 +1159,7 @@ r2i_key = BLAKE2s(shared_material || "ztlp_responder_to_initiator" || session_id
   <h2 id="comp-proto">Rust Client <code>proto/</code></h2>
   <div class="component-header">
     <span class="component-lang">Rust</span>
-    <span class="badge badge-green">91 tests</span>
+    <span class="badge badge-green">781 tests</span>
     <span style="font-size:.85rem;color:var(--text3);">Phase 1 — Identity, handshake, encrypted transport</span>
   </div>
 
@@ -1170,7 +1179,7 @@ cargo run --bin ztlp-relay-demo
 cargo run --bin ztlp-node -- --listen 0.0.0.0:23095</code></pre></div>
 
   <h3>Test</h3>
-  <div class="code-block-wrapper"><pre><code class="language-bash">cargo test                           # All 91 tests
+  <div class="code-block-wrapper"><pre><code class="language-bash">cargo test                           # All 781 tests
 cargo test -- --nocapture            # With output visible
 cargo test --test integration_tests  # Just integration
 cargo test --test edge_case_tests    # Boundaries, replay window (10K packets)
@@ -1205,7 +1214,7 @@ cargo test --test relay_tests        # Relay support</code></pre></div>
 │   ├── ztlp-demo.rs         # Two-node direct demo
 │   ├── ztlp-relay-demo.rs   # Two-node relay demo
 │   └── ztlp-node.rs         # Standalone node binary
-└── tests/                    # 91 tests across 6 suites</code></pre></div>
+└── tests/                    # 781 tests across 6 suites</code></pre></div>
 
   <h3>Key Design Decisions</h3>
   <ul>
@@ -1213,6 +1222,10 @@ cargo test --test relay_tests        # Relay support</code></pre></div>
     <li><strong>HdrLen-based discrimination</strong> — not packet size. Reliable for all payload sizes.</li>
     <li><strong>Separate send/recv keys</strong> — directional isolation prevents reflection attacks.</li>
     <li><strong>Bitmap anti-replay</strong> — 64-packet sliding window, extensible to 1024.</li>
+    <li><strong>FFI input validation</strong> <span class="badge badge-blue">v0.11.1</span> — all C-boundary inputs validated; null pointers, buffer lengths, and UTF-8 checked before processing.</li>
+    <li><strong>Panic recovery in recv loop</strong> <span class="badge badge-blue">v0.11.1</span> — <code>catch_unwind</code> around packet processing prevents a malformed packet from crashing the recv task.</li>
+    <li><strong>DNS RFC 1035 compliance</strong> <span class="badge badge-blue">v0.11.1</span> — name validation enforces label length (≤63), total length (≤253), and character restrictions.</li>
+    <li><strong>VIP loopback-only binding</strong> <span class="badge badge-blue">v0.11.1</span> — virtual IP addresses bind only to <code>127.0.0.0/8</code> to prevent unintended exposure.</li>
   </ul>
 
   <h3>API Reference</h3>
@@ -1271,8 +1284,8 @@ pub async fn send_data_via_relay(socket: &UdpSocket, session: &mut Session,
   <h2 id="comp-relay">Elixir Relay <code>relay/</code></h2>
   <div class="component-header">
     <span class="component-lang">Elixir/OTP</span>
-    <span class="badge badge-green">73 tests</span>
-    <span style="font-size:.85rem;color:var(--text3);">Phase 2 — SessionID-based packet forwarding</span>
+    <span class="badge badge-green">565 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 2 — SessionID-based packet forwarding, mesh architecture</span>
   </div>
 
   <p>The relay forwards encrypted ZTLP packets between peers by SessionID. It <strong>never sees plaintext</strong> — the zero-trust relay property.</p>
@@ -1288,7 +1301,7 @@ iex -S mix
 mix run --no-halt</code></pre></div>
 
   <h3>Test</h3>
-  <div class="code-block-wrapper"><pre><code class="language-bash">mix test   # All 73 tests</code></pre></div>
+  <div class="code-block-wrapper"><pre><code class="language-bash">mix test   # All 565 tests</code></pre></div>
 
   <h3>Configuration</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir"># config/config.exs
@@ -1301,9 +1314,28 @@ config :ztlp_relay,
   <h3>Supervision Tree</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir">ZtlpRelay.Application (Supervisor)
 ├── ZtlpRelay.Stats              — Pipeline counters (Agent)
+├── ZtlpRelay.StatsReporter      — Periodic stats logging
 ├── ZtlpRelay.SessionRegistry    — ETS-backed session routing table
+├── ZtlpRelay.AdmissionController — RAT validation + rate limiting
+├── ZtlpRelay.MeshManager        — Consistent hash ring, peer discovery
+│   └── ZtlpRelay.MeshConnector  — TCP connections to peer relays
+├── ZtlpRelay.PathScorer         — Latency-aware path selection
+├── ZtlpRelay.NsClient           — NS-based relay discovery
+├── ZtlpRelay.MnesiaStore        — Mnesia persistent session storage
 ├── ZtlpRelay.SessionSupervisor  — DynamicSupervisor for sessions
+│   └── ZtlpRelay.Session        — GenServer per session (multi-hop capable)
 └── ZtlpRelay.UdpListener        — GenServer wrapping :gen_udp</code></pre></div>
+
+  <h3>Mesh Architecture <span class="badge badge-blue">v0.10.0+</span></h3>
+  <p>Relays form a mesh network for multi-hop forwarding and high availability:</p>
+  <ul>
+    <li><strong>Relay Admission Tokens (RAT)</strong> — cryptographically signed tokens issued by ZTLP-NS. Relays validate RATs before accepting session registrations, preventing unauthorized relay usage.</li>
+    <li><strong>Consistent hash ring</strong> — sessions are distributed across relay peers using a consistent hash ring, enabling horizontal scaling with minimal session migration on topology changes.</li>
+    <li><strong>PathScore</strong> — latency-aware path selection ranks relay paths by measured RTT, jitter, and packet loss. Clients receive ranked path suggestions during session setup.</li>
+    <li><strong>Multi-hop forwarding</strong> — packets can traverse multiple relays when direct connectivity is unavailable. Each hop is zero-trust (relays never see plaintext).</li>
+    <li><strong>NS-based discovery</strong> — relays register as <code>ZTLP_RELAY</code> records in the namespace with capacity, region, and health metadata. Clients discover relays through NS queries.</li>
+    <li><strong>Mnesia storage</strong> — session state persisted to Mnesia for crash recovery and cluster replication across relay nodes.</li>
+  </ul>
 
   <h3>API Reference</h3>
   <h4><code>ZtlpRelay.SessionRegistry</code> — Session Routing</h4>
@@ -1345,7 +1377,9 @@ def compute_header_auth_tag(aad, session_key) :: binary()</code></pre></div>
     <li><strong>GenServer per session</strong> — maps ZTLP sessions 1:1 to BEAM processes. Millions of concurrent sessions possible.</li>
     <li><strong>Layer 3 skipped in relay mode</strong> — pass <code>nil</code> as session key. Zero-trust property: relay has no keys.</li>
     <li><strong>:gen_udp active mode</strong> — packets arrive as Erlang messages, natural BEAM scheduler integration.</li>
-    <li><strong>Zero external dependencies</strong> — only OTP and Erlang's <code>:crypto</code> module.</li>
+    <li><strong>Zero external dependencies</strong> — only OTP, Mnesia, and Erlang's <code>:crypto</code> module.</li>
+    <li><strong>Consistent hash ring</strong> <span class="badge badge-blue">v0.10.0</span> — session affinity with minimal redistribution on relay join/leave.</li>
+    <li><strong>RAT-based admission</strong> <span class="badge badge-blue">v0.10.0</span> — relay admission tokens prevent unauthorized session registration.</li>
   </ul>
 
   <hr/>
@@ -1354,8 +1388,8 @@ def compute_header_auth_tag(aad, session_key) :: binary()</code></pre></div>
   <h2 id="comp-ns">ZTLP-NS Namespace <code>ns/</code></h2>
   <div class="component-header">
     <span class="component-lang">Elixir/OTP</span>
-    <span class="badge badge-green">105 tests</span>
-    <span style="font-size:.85rem;color:var(--text3);">Phase 4 — Distributed trust namespace</span>
+    <span class="badge badge-green">722 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 4 — Distributed trust namespace, federation</span>
   </div>
 
   <p>ZTLP-NS is the control-plane identity and discovery layer. Think DNS meets a certificate authority, but purpose-built for ZTLP's identity-first model. Every record is Ed25519-signed. Unsigned records are rejected.</p>
@@ -1395,7 +1429,7 @@ mix compile
 # Interactive
 iex -S mix
 
-# Run tests — 105 tests, 0 failures
+# Run tests — 722 tests, 0 failures
 mix test</code></pre></div>
 
   <h3>Usage Examples</h3>
@@ -1447,14 +1481,32 @@ def delegate(parent, child) :: signed_delegation_record</code></pre></div>
     <li><strong>Bootstrap discovery</strong> — three-step fallback: HTTPS → DNS-SRV → hardcoded relays.</li>
   </ul>
 
+  <h3>Federation <span class="badge badge-blue">v0.10.0+</span></h3>
+  <p>ZTLP-NS supports multi-node clusters for high availability and geographic distribution:</p>
+  <ul>
+    <li><strong>Cluster management</strong> — nodes discover peers via configured seed list or NS relay records. Automatic join/leave with graceful handoff.</li>
+    <li><strong>Merkle tree anti-entropy</strong> — each node maintains a Merkle tree over its record store. Periodic tree exchange detects and repairs divergence without full data transfer.</li>
+    <li><strong>Conflict resolution</strong> — concurrent writes resolved by highest serial number; ties broken by Ed25519 signature comparison (deterministic, reproducible).</li>
+    <li><strong>Worker pool</strong> — query processing distributed across a pool of workers for throughput scaling on multi-core systems.</li>
+    <li><strong>Structured logging</strong> — all operations emit structured log events with correlation IDs for distributed tracing.</li>
+  </ul>
+
+  <h3>Security Hardening <span class="badge badge-blue">v0.11.0+</span></h3>
+  <ul>
+    <li><strong>Registration authentication</strong> — self-registration requires a valid zone delegation token, preventing unauthorized record creation.</li>
+    <li><strong>Rate limiting</strong> — per-source query and registration rate limits (token bucket) with configurable burst and refill rates.</li>
+    <li><strong>Name validation</strong> — strict FQDN validation: label length (≤63), total length (≤253), character restrictions, no empty labels.</li>
+    <li><strong>Amplification prevention</strong> — response size capped relative to query size; truncated responses include a TC flag for TCP retry.</li>
+  </ul>
+
   <hr/>
 
   <!-- ─── Gateway ─────────────────────────────────────── -->
   <h2 id="comp-gateway">Gateway <code>gateway/</code></h2>
   <div class="component-header">
     <span class="component-lang">Elixir/OTP</span>
-    <span class="badge badge-green">97 tests</span>
-    <span style="font-size:.85rem;color:var(--text3);">Phase 5 — ZTLP ↔ legacy TCP bridge</span>
+    <span class="badge badge-green">458 tests</span>
+    <span style="font-size:.85rem;color:var(--text3);">Phase 5 — ZTLP ↔ legacy TCP bridge, identity headers</span>
   </div>
 
   <p>The gateway bridges between ZTLP's identity-first overlay and legacy TCP services. It terminates ZTLP sessions, verifies client identity, enforces access policy, and forwards authorized traffic to backend services.</p>
@@ -1463,7 +1515,7 @@ def delegate(parent, child) :: signed_delegation_record</code></pre></div>
   <div class="code-block-wrapper"><pre><code class="language-bash">cd gateway
 mix compile
 iex -S mix    # Interactive
-mix test      # 97 tests, 0 failures</code></pre></div>
+mix test      # 458 tests, 0 failures</code></pre></div>
 
   <h3>Configuration</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir"># config/config.exs
@@ -1481,18 +1533,28 @@ config :ztlp_gateway, :policies, [
 ]
 
 config :ztlp_gateway, :session_timeout_ms, 300_000
-config :ztlp_gateway, :max_sessions, 10_000</code></pre></div>
+config :ztlp_gateway, :max_sessions, 10_000
+
+# Header signing (v0.11.1)
+config :ztlp_gateway, :header_signing_enabled, true
+config :ztlp_gateway, :header_signing_secret, System.get_env("ZTLP_HEADER_HMAC_SECRET")
+config :ztlp_gateway, :header_signing_timestamp_window, 60</code></pre></div>
 
   <h3>Supervision Tree</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir">ZtlpGateway.Application
 ├── ZtlpGateway.Stats              — Lock-free atomic counters
+├── ZtlpGateway.StatsReporter      — Periodic stats logging
+├── ZtlpGateway.MetricsServer      — Prometheus metrics endpoint
 ├── ZtlpGateway.AuditLog           — ETS audit trail
 ├── ZtlpGateway.SessionRegistry    — ETS SessionID → pid mapping
-├── ZtlpGateway.PolicyEngine       — ETS policy rules + evaluation
+├── ZtlpGateway.HeaderSigner.NonceCache — Nonce replay protection
+├── ZtlpGateway.PolicyEngine       — Protected ETS policy rules
+├── ZtlpGateway.NsClient           — ZTLP-NS identity resolution
 ├── ZtlpGateway.SessionSupervisor  — DynamicSupervisor for sessions
 │   └── ZtlpGateway.Session        — GenServer per active session
 │       └── ZtlpGateway.Backend    — TCP connection to backend service
-└── ZtlpGateway.Listener           — UDP socket, admission pipeline</code></pre></div>
+├── ZtlpGateway.Listener           — UDP socket, admission pipeline
+└── ZtlpGateway.RelayRegistrar     — Dynamic relay registration</code></pre></div>
 
   <h3>Policy Rules</h3>
   <table>
@@ -1538,6 +1600,102 @@ def process_message(state, message) :: {:ok, new_state, response} | {:error, rea
 
 @doc "Finalize and extract session keys (i2r_key + r2i_key)"
 def finalize(state) :: {:ok, session_keys}</code></pre></div>
+
+  <hr/>
+
+  <!-- ─── Identity Headers ────────────────────────────── -->
+  <h2 id="comp-identity-headers">Identity Headers <span class="badge badge-blue">v0.11.1</span></h2>
+  <p>The gateway injects cryptographically signed identity headers into HTTP requests forwarded to backend services. Headers are derived from the client's X.509 certificate and ZTLP session, providing rich identity context to backends without requiring them to understand ZTLP directly.</p>
+
+  <h3>Anti-Forgery Flow</h3>
+  <p>The gateway enforces a strict <strong>strip → inject → sign</strong> pipeline:</p>
+  <ol>
+    <li><strong>Strip</strong> — all incoming <code>X-ZTLP-*</code> headers from the client are unconditionally removed</li>
+    <li><strong>Inject</strong> — the gateway populates headers from the verified certificate and session state</li>
+    <li><strong>Sign</strong> — an HMAC-SHA256 signature is computed over all injected headers</li>
+  </ol>
+  <p>This ensures backends can trust that <code>X-ZTLP-*</code> headers were set exclusively by the gateway.</p>
+
+  <h3>Header Reference</h3>
+  <table>
+    <thead><tr><th>Header</th><th>Description</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td><code>X-ZTLP-Node-ID</code></td><td>128-bit NodeID (hex) from cert SAN URI</td><td><code>a1b2c3d4e5f67890a1b2c3d4e5f67890</code></td></tr>
+      <tr><td><code>X-ZTLP-Node-Name</code></td><td>Node FQDN from cert CN</td><td><code>laptop.office.ztlp</code></td></tr>
+      <tr><td><code>X-ZTLP-Zone</code></td><td>Zone name from cert Organization</td><td><code>office.ztlp</code></td></tr>
+      <tr><td><code>X-ZTLP-Authenticated</code></td><td>"true" or "false"</td><td><code>true</code></td></tr>
+      <tr><td><code>X-ZTLP-Assurance</code></td><td>Key assurance level</td><td><code>hardware</code></td></tr>
+      <tr><td><code>X-ZTLP-Key-Source</code></td><td>Key storage backend</td><td><code>yubikey</code></td></tr>
+      <tr><td><code>X-ZTLP-Key-Attestation</code></td><td>Attestation status</td><td><code>verified</code></td></tr>
+      <tr><td><code>X-ZTLP-Cert-Fingerprint</code></td><td>SHA-256 fingerprint (hex)</td><td><code>b94d27b9...e3b0c442</code></td></tr>
+      <tr><td><code>X-ZTLP-Cert-Serial</code></td><td>X.509 serial number</td><td><code>1234567890</code></td></tr>
+      <tr><td><code>X-ZTLP-Timestamp</code></td><td>ISO 8601 timestamp of injection</td><td><code>2026-03-23T21:15:00Z</code></td></tr>
+      <tr><td><code>X-ZTLP-Nonce</code></td><td>16 random bytes hex-encoded (replay protection)</td><td><code>3a7f9c2e1d4b8a6f...</code></td></tr>
+      <tr><td><code>X-ZTLP-Request-ID</code></td><td>UUID v4 (audit trail)</td><td><code>550e8400-e29b-41d4-a716-446655440000</code></td></tr>
+      <tr><td><code>X-ZTLP-Signature</code></td><td>HMAC-SHA256 of all other X-ZTLP-* headers</td><td><code>a1b2c3d4...</code> (64 hex chars)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Assurance Levels</h3>
+  <table>
+    <thead><tr><th>Level</th><th>Description</th><th>Key Sources</th></tr></thead>
+    <tbody>
+      <tr><td><code>hardware</code></td><td>Key stored in tamper-resistant hardware</td><td>YubiKey, TPM 2.0, Secure Enclave</td></tr>
+      <tr><td><code>device-bound</code></td><td>Key bound to device, extractable with effort</td><td>Keychain, credential manager</td></tr>
+      <tr><td><code>software</code></td><td>Key stored in a file on disk</td><td>PEM file, JSON keyfile</td></tr>
+      <tr><td><code>unknown</code></td><td>Key source cannot be determined</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Auth Modes</h3>
+  <table>
+    <thead><tr><th>Mode</th><th>Headers Injected?</th><th>Certificate Required?</th><th>Use Case</th></tr></thead>
+    <tbody>
+      <tr><td><code>passthrough</code></td><td>No</td><td>No</td><td>Non-HTTP or binary protocols</td></tr>
+      <tr><td><code>identity</code></td><td>Yes (if cert present)</td><td>No</td><td>Enrich with identity when available</td></tr>
+      <tr><td><code>enforce</code></td><td>Yes</td><td>Yes (with <code>min_assurance</code>)</td><td>Require verified identity</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Signature Algorithm</h3>
+  <p>The <code>X-ZTLP-Signature</code> header is computed as follows:</p>
+  <ol>
+    <li>Collect all <code>X-ZTLP-*</code> headers <strong>except</strong> <code>X-ZTLP-Signature</code></li>
+    <li>Sort alphabetically by <strong>lowercase header name</strong></li>
+    <li>Build a canonical string: each header as <code>name:value</code>, joined by newline (<code>\n</code>)</li>
+    <li>Compute <code>HMAC-SHA256(secret, canonical_string)</code></li>
+    <li>Hex-encode the result (64 characters)</li>
+  </ol>
+  <div class="code-block-wrapper"><pre><code class="language-elixir"># Example canonical string (sorted by lowercase name):
+# x-ztlp-assurance:hardware
+# x-ztlp-authenticated:true
+# x-ztlp-cert-fingerprint:b94d27b9...
+# x-ztlp-cert-serial:1234567890
+# x-ztlp-key-attestation:verified
+# x-ztlp-key-source:yubikey
+# x-ztlp-node-id:a1b2c3d4e5f67890a1b2c3d4e5f67890
+# x-ztlp-node-name:laptop.office.ztlp
+# x-ztlp-nonce:3a7f9c2e1d4b8a6f...
+# x-ztlp-request-id:550e8400-e29b-41d4-a716-446655440000
+# x-ztlp-timestamp:2026-03-23T21:15:00Z
+# x-ztlp-zone:office.ztlp
+#
+# signature = HMAC-SHA256(secret, canonical_string) |> hex_encode()</code></pre></div>
+
+  <h3>Replay Protection</h3>
+  <ul>
+    <li><strong>Timestamp expiry</strong> — backends should reject requests where <code>X-ZTLP-Timestamp</code> is more than 60 seconds old (configurable via <code>:header_signing_timestamp_window</code>).</li>
+    <li><strong>Nonce replay detection</strong> — the gateway's <code>NonceCache</code> GenServer maintains a sliding window of recently seen nonces. Duplicate nonces within the timestamp window are rejected. The cache is implemented as an ETS table with periodic pruning.</li>
+    <li><strong>Request-ID</strong> — UUID v4 per request for audit trail correlation. Backends can log this for distributed tracing.</li>
+  </ul>
+
+  <h3>Backend Verification</h3>
+  <p>Backends must verify the HMAC signature to trust identity headers. See <a href="IDENTITY-HEADERS.md">Identity Headers Reference</a> for verification examples in Ruby, Python, and Go.</p>
+
+  <div class="callout warning">
+    <div class="callout-title">⚠️ Always Verify Signatures</div>
+    <p>Never trust <code>X-ZTLP-*</code> headers without verifying the HMAC signature. Without verification, an attacker who can bypass the gateway (e.g., direct backend access) can forge any identity. Recommended: firewall backends to accept connections only from the gateway + verify HMAC.</p>
+  </div>
 
   <hr/>
 
@@ -1634,8 +1792,8 @@ sudo ./ztlp-xdp-loader eth0 --detach</code></pre></div>
   <p class="page-subtitle">First-class user, device, and group identity with role-based access and revocation cascade.</p>
 
   <div class="callout">
-    <div class="callout-title">🆕 New in v0.9.0</div>
-    <p>The identity model adds three new record types (DEVICE, USER, GROUP) to ZTLP-NS, enabling group-based policy, role-based access control, and device-user ownership binding.</p>
+    <div class="callout-title">🆕 Identity Model (v0.9.0+)</div>
+    <p>The identity model adds three new record types (DEVICE, USER, GROUP) to ZTLP-NS, enabling group-based policy, role-based access control, and device-user ownership binding. In v0.11.1, the gateway gained <a href="#comp-identity-headers">identity header injection</a> to pass verified identity context to backend services.</p>
   </div>
 
   <h2>Overview</h2>
@@ -2000,8 +2158,15 @@ docker run -d --name ztlp-gateway \
       <tr><td>Reflection/amplification</td><td>Handshake requires three messages; no unauthenticated responses</td></tr>
       <tr><td>State exhaustion</td><td>No state allocated before Layer 2; session limits enforced</td></tr>
       <tr><td>HELLO flood</td><td>eBPF rate limiting: 10 tokens/sec per source IP</td></tr>
+      <tr><td>Header injection/forgery</td><td>HMAC-SHA256 signed headers; client headers stripped; nonce replay detection; timestamp expiry (60s default)</td></tr>
+      <tr><td>Policy bypass via direct backend access</td><td>Backend verification library validates HMAC; recommended: firewall + HMAC verification</td></tr>
     </tbody>
   </table>
+
+  <div class="callout">
+    <div class="callout-title">🔒 PolicyEngine Hardening (v0.11.1)</div>
+    <p>The <code>PolicyEngine</code> now uses <code>:protected</code> ETS tables — only the owning GenServer process can write rules. This prevents other processes (including compromised session handlers) from modifying access control policies. Read access remains available to all processes for fast policy evaluation.</p>
+  </div>
 
   <h2>Safety Properties</h2>
   <ul>
@@ -2058,10 +2223,10 @@ mix credo</code></pre></div>
   <table>
     <thead><tr><th>Component</th><th>Minimum Tests</th><th>Command</th></tr></thead>
     <tbody>
-      <tr><td>Rust Client</td><td>91</td><td><code>cargo test</code></td></tr>
-      <tr><td>Elixir Relay</td><td>73</td><td><code>mix test</code></td></tr>
-      <tr><td>ZTLP-NS</td><td>105</td><td><code>mix test</code></td></tr>
-      <tr><td>Gateway</td><td>97</td><td><code>mix test</code></td></tr>
+      <tr><td>Rust Client</td><td>781</td><td><code>cargo test</code></td></tr>
+      <tr><td>Elixir Relay</td><td>565</td><td><code>mix test</code></td></tr>
+      <tr><td>ZTLP-NS</td><td>722</td><td><code>mix test</code></td></tr>
+      <tr><td>Gateway</td><td>458</td><td><code>mix test</code></td></tr>
       <tr><td>Interop</td><td>5</td><td><code>bash interop/run_test.sh</code></td></tr>
     </tbody>
   </table>

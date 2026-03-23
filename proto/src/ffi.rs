@@ -986,13 +986,7 @@ async fn recv_loop(
                 // the entire process. On panic, log the error and continue the
                 // recv loop so the session can recover or be cleanly shut down.
                 let process_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    process_recv_packet(
-                        &plaintext,
-                        session_id,
-                        peer_node_id,
-                        peer_addr,
-                        &inner,
-                    )
+                    process_recv_packet(&plaintext, session_id, peer_node_id, peer_addr, &inner)
                 }));
 
                 match process_result {
@@ -2730,13 +2724,7 @@ mod tests {
         let peer_node_id = crate::identity::NodeId::from_bytes([0u8; 16]);
         let peer_addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
 
-        let action = process_recv_packet(
-            &keepalive,
-            session_id,
-            peer_node_id,
-            peer_addr,
-            &inner,
-        );
+        let action = process_recv_packet(&keepalive, session_id, peer_node_id, peer_addr, &inner);
         assert!(matches!(action, RecvAction::Continue));
     }
 

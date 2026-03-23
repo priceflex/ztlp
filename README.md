@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/priceflex/ztlp/actions/workflows/ci.yml/badge.svg)](https://github.com/priceflex/ztlp/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Spec: v0.9.13](https://img.shields.io/badge/Spec-v0.9.13-green.svg)](https://ztlp.org)
+[![Spec: v0.11.1](https://img.shields.io/badge/Spec-v0.11.1-green.svg)](https://ztlp.org)
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](proto/)
 [![Elixir](https://img.shields.io/badge/Elixir-1.15%2B-purple.svg)](relay/)
 
-**Version 0.9.13 | Experimental / Informational**
+**Version 0.11.1 | Experimental / Informational**
 
 > 🌐 **[ztlp.org](https://ztlp.org)** — Live specification & documentation &nbsp;|&nbsp; 📄 **[Whitepaper](https://ztlp.org/whitepaper/)** ([PDF](https://ztlp.org/whitepaper/ZTLP-Whitepaper.pdf)) &nbsp;|&nbsp; **[LinkedIn](https://www.linkedin.com/in/steven-e-price)**
 

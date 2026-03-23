@@ -125,7 +125,11 @@ async fn dns_server_loop(socket: UdpSocket, registry: VipRegistry, stop: Arc<Ato
         // SECURITY: Reject queries larger than 512 bytes per RFC 1035 §4.2.1.
         // UDP DNS messages must not exceed 512 bytes.
         if len > DNS_MAX_PACKET {
-            tracing::warn!("DNS: rejecting oversized query ({} bytes) from {}", len, src);
+            tracing::warn!(
+                "DNS: rejecting oversized query ({} bytes) from {}",
+                len,
+                src
+            );
             continue;
         }
 
@@ -328,12 +332,15 @@ fn build_dns_response(
 
     // SECURITY: If the response would exceed 512 bytes, omit the answer.
     // This prevents generating oversized UDP DNS responses.
-    let (effective_answer, effective_rcode, effective_ancount) =
-        if total_size > DNS_MAX_PACKET {
-            (None, DNS_FLAG_RCODE_NXDOMAIN, 0u16)
-        } else {
-            (answer_ip, rcode, if answer_ip.is_some() { 1u16 } else { 0u16 })
-        };
+    let (effective_answer, effective_rcode, effective_ancount) = if total_size > DNS_MAX_PACKET {
+        (None, DNS_FLAG_RCODE_NXDOMAIN, 0u16)
+    } else {
+        (
+            answer_ip,
+            rcode,
+            if answer_ip.is_some() { 1u16 } else { 0u16 },
+        )
+    };
 
     // Header
     response.extend_from_slice(&id.to_be_bytes()); // Transaction ID
@@ -641,12 +648,7 @@ mod tests {
         question.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
         question.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
 
-        let response = build_dns_response(
-            0x1234,
-            &question,
-            0,
-            Some(Ipv4Addr::new(127, 0, 55, 1)),
-        );
+        let response = build_dns_response(0x1234, &question, 0, Some(Ipv4Addr::new(127, 0, 55, 1)));
 
         assert!(
             response.len() <= DNS_MAX_PACKET,
@@ -680,9 +682,9 @@ mod tests {
     #[test]
     fn test_parse_dns_name_compression_loop() {
         let mut packet = vec![0u8; 12]; // fake header
-        // Create a compression pointer that points to itself (offset 12)
+                                        // Create a compression pointer that points to itself (offset 12)
         packet.push(0xC0); // compression marker
-        packet.push(12);   // points back to offset 12 — infinite loop!
+        packet.push(12); // points back to offset 12 — infinite loop!
 
         let result = parse_dns_name(&packet, 12);
         // Should return None after hitting the jump limit (10), not loop forever
@@ -693,11 +695,14 @@ mod tests {
     #[test]
     fn test_parse_dns_name_truncated_compression() {
         let mut packet = vec![0u8; 12]; // fake header
-        // Compression pointer with missing second byte
+                                        // Compression pointer with missing second byte
         packet.push(0xC0);
         // No second byte — packet ends here
 
         let result = parse_dns_name(&packet, 12);
-        assert!(result.is_none(), "should reject truncated compression pointer");
+        assert!(
+            result.is_none(),
+            "should reject truncated compression pointer"
+        );
     }
 }

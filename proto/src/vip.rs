@@ -315,7 +315,9 @@ mod tests {
     #[test]
     fn test_add_service() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .unwrap();
 
         assert_eq!(proxy.services().len(), 1);
         let svc = proxy
@@ -329,8 +331,12 @@ mod tests {
     #[test]
     fn test_add_service_multiple_ports() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 443).unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 443)
+            .unwrap();
 
         let svc = proxy.services().get("beta").expect("beta service");
         assert_eq!(svc.ports, vec![80, 443]);
@@ -339,8 +345,12 @@ mod tests {
     #[test]
     fn test_add_service_duplicate_port() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .unwrap();
 
         let svc = proxy.services().get("beta").expect("beta service");
         assert_eq!(svc.ports, vec![80]); // No duplicate
@@ -349,8 +359,12 @@ mod tests {
     #[test]
     fn test_resolve() {
         let mut proxy = VipProxy::new();
-        proxy.add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).unwrap();
-        proxy.add_service("backstage".to_string(), Ipv4Addr::new(127, 0, 55, 2), 80).unwrap();
+        proxy
+            .add_service("beta".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .unwrap();
+        proxy
+            .add_service("backstage".to_string(), Ipv4Addr::new(127, 0, 55, 2), 80)
+            .unwrap();
 
         assert_eq!(proxy.resolve("beta"), Some(Ipv4Addr::new(127, 0, 55, 1)));
         assert_eq!(
@@ -409,13 +423,19 @@ mod tests {
         let mut proxy = VipProxy::new();
 
         // 127.0.0.1 — standard loopback
-        assert!(proxy.add_service("svc1".to_string(), Ipv4Addr::new(127, 0, 0, 1), 80).is_ok());
+        assert!(proxy
+            .add_service("svc1".to_string(), Ipv4Addr::new(127, 0, 0, 1), 80)
+            .is_ok());
 
         // 127.0.55.1 — VIP range used by ZTLP
-        assert!(proxy.add_service("svc2".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80).is_ok());
+        assert!(proxy
+            .add_service("svc2".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
+            .is_ok());
 
         // 127.255.255.254 — end of loopback range
-        assert!(proxy.add_service("svc3".to_string(), Ipv4Addr::new(127, 255, 255, 254), 80).is_ok());
+        assert!(proxy
+            .add_service("svc3".to_string(), Ipv4Addr::new(127, 255, 255, 254), 80)
+            .is_ok());
     }
 
     /// SECURITY: Verify that no services are registered when non-loopback is rejected.
@@ -425,7 +445,10 @@ mod tests {
 
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(10, 0, 0, 1), 80);
         assert!(result.is_err());
-        assert!(proxy.services().is_empty(), "rejected service should not be registered");
+        assert!(
+            proxy.services().is_empty(),
+            "rejected service should not be registered"
+        );
         assert_eq!(proxy.resolve("evil"), None);
     }
 }

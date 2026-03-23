@@ -745,11 +745,7 @@ mod tests {
 
         // Issue an expired token
         let token = RelayAdmissionToken::issue_at(
-            [0x11; 16],
-            [0x22; 16],
-            [0u8; 12],
-            1000000,
-            1000010, // expired long ago
+            [0x11; 16], [0x22; 16], [0u8; 12], 1000000, 1000010, // expired long ago
             &secret,
         );
         assert!(token.verify(&secret));
@@ -789,14 +785,8 @@ mod tests {
         // The important thing is it doesn't panic
 
         // Zero timestamps
-        let token_zero = RelayAdmissionToken::issue_at(
-            [0x11; 16],
-            [0x22; 16],
-            [0u8; 12],
-            0,
-            0,
-            &secret,
-        );
+        let token_zero =
+            RelayAdmissionToken::issue_at([0x11; 16], [0x22; 16], [0u8; 12], 0, 0, &secret);
         assert!(token_zero.verify(&secret));
         assert!(token_zero.is_expired()); // expires_at = 0 is definitely expired
     }

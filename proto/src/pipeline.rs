@@ -430,9 +430,9 @@ mod tests {
         SessionState::new(
             session_id,
             NodeId::from_bytes([0u8; 16]),
-            [0u8; 32],   // send_key
+            [0u8; 32], // send_key
             recv_key,
-            false,        // multipath
+            false, // multipath
         )
     }
 
@@ -483,7 +483,7 @@ mod tests {
         // VerHdrLen: version 0, hdrlen 11
         pkt[2] = 0x00;
         pkt[3] = 0x0B; // HdrLen = 11
-        // Unknown session ID at bytes 6..18
+                       // Unknown session ID at bytes 6..18
         for i in 6..18 {
             pkt[i] = 0xFF;
         }

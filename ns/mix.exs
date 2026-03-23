@@ -4,7 +4,7 @@ defmodule ZtlpNs.MixProject do
   def project do
     [
       app: :ztlp_ns,
-      version: "0.9.13",
+      version: "0.9.14",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

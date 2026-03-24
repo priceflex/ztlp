@@ -43,6 +43,32 @@
     </dl>
   </div>
 
+  <!-- Key Storage Warning -->
+  <div class="bg-amber-50 border-l-4 border-amber-500 p-4 mt-4">
+    <div class="flex">
+      <div class="flex-shrink-0">
+        <svg class="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+          <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 8a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+        </svg>
+      </div>
+      <div class="ml-3">
+        <h3 class="text-sm font-medium text-amber-800">Root CA Key Stored on Filesystem</h3>
+        <p class="mt-1 text-sm text-amber-700">
+          The root CA private key is currently stored as an encrypted file on the NS server.
+          For production deployments, we strongly recommend using a 
+          <strong>hardware security module</strong> (YubiKey, TPM) via the ZTLP Signing Oracle
+          to ensure the root key never exists on disk.
+        </p>
+        <p class="mt-2 text-sm text-amber-700">
+          <a href="https://github.com/priceflex/ztlp/blob/main/docs/SIGNING-ORACLE.md" 
+             target="_blank" class="font-medium text-amber-800 underline hover:text-amber-900">
+            Read the Signing Oracle documentation →
+          </a>
+        </p>
+      </div>
+    </div>
+  </div>
+
   <!-- Actions -->
   <div class="flex space-x-4 mb-6">
     <%= link_to "Export Root Certificate", export_root_network_ca_path(@network),
@@ -69,6 +95,83 @@
       </ul>
     </div>
   <% end %>
+
+  <!-- TLS Configuration -->
+  <div class="bg-white shadow rounded-lg p-6 mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">🔒 TLS Configuration</h2>
+    <p class="text-sm text-gray-500 mb-4">
+      ZTLP provides double encryption: TLS on the client device (browser ↔ agent) plus Noise_XX encryption 
+      in the tunnel (agent ↔ gateway). Configure TLS settings for your deployment.
+    </p>
+    
+    <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+      <!-- Agent-Side TLS -->
+      <div class="border border-gray-200 rounded-lg p-4">
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Agent-Side TLS (Client Devices)</h3>
+        <p class="text-xs text-gray-500 mb-3">
+          Local HTTPS between the browser/app and the ZTLP agent on the same device.
+          Certs are automatically issued by the ZTLP CA and trusted via the installed root cert.
+        </p>
+        <dl class="space-y-2">
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Status</dt>
+            <dd class="text-xs font-medium text-green-600">Enabled by default</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Cert directory</dt>
+            <dd class="text-xs font-mono text-gray-600">~/.ztlp/certs/</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Auto-issue</dt>
+            <dd class="text-xs font-medium text-green-600">Yes</dd>
+          </div>
+        </dl>
+      </div>
+      
+      <!-- Internal TLS (Gateway → Backend) -->
+      <div class="border border-gray-200 rounded-lg p-4">
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Internal TLS (Gateway → Backend)</h3>
+        <p class="text-xs text-gray-500 mb-3">
+          Optional encrypted last-mile between the gateway and backend services inside your Docker network.
+          Eliminates plaintext even on internal networks.
+        </p>
+        <dl class="space-y-2">
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Status</dt>
+            <dd class="text-xs font-medium text-gray-500">Optional</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Config key</dt>
+            <dd class="text-xs font-mono text-gray-600">tls_enabled: true</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-xs text-gray-500">Port</dt>
+            <dd class="text-xs font-mono text-gray-600">8443 (internal only)</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+    
+    <!-- Signing Oracle -->
+    <div class="mt-6 border border-indigo-200 rounded-lg p-4 bg-indigo-50">
+      <h3 class="text-sm font-semibold text-indigo-900 mb-2">🔐 Signing Oracle (Hardware-Backed CA)</h3>
+      <p class="text-xs text-indigo-700 mb-3">
+        For production deployments, use the Signing Oracle to keep the root CA key on a 
+        YubiKey or TPM. The root key never exists on disk — signing operations go through
+        the hardware via a ZTLP tunnel.
+      </p>
+      <div class="flex items-center space-x-4">
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          Not configured
+        </span>
+        <a href="https://github.com/priceflex/ztlp/blob/main/docs/SIGNING-ORACLE.md"
+           target="_blank"
+           class="text-xs font-medium text-indigo-700 underline hover:text-indigo-900">
+          Setup guide →
+        </a>
+      </div>
+    </div>
+  </div>
 
 <% else %>
   <!-- Not Initialized -->

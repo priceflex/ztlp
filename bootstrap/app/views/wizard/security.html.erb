@@ -1,0 +1,185 @@
+<%# Step 3: Security & TLS Configuration %>
+<div class="max-w-3xl mx-auto">
+  <%= render "wizard/step_indicator", current_step: 3 %>
+
+  <div class="bg-white shadow rounded-lg p-6">
+    <h2 class="text-xl font-bold text-gray-900 mb-1">Security & TLS</h2>
+    <p class="text-sm text-gray-500 mb-6">
+      Configure encryption and certificate settings for <strong><%= @network.name %></strong>.
+    </p>
+
+    <%# Double Encryption Diagram %>
+    <div class="bg-blue-50 rounded-lg p-4 border border-blue-200 mb-6">
+      <h3 class="text-sm font-semibold text-blue-800 mb-3">🔐 ZTLP Double Encryption</h3>
+      <div class="flex items-center justify-center space-x-2 text-xs text-blue-700 font-mono">
+        <div class="bg-white border border-blue-300 rounded px-3 py-2 text-center">
+          <div class="font-bold">Browser</div>
+          <div class="text-blue-500">Client</div>
+        </div>
+        <div class="text-blue-400">
+          <div class="border-t-2 border-blue-300 w-8 relative top-0"></div>
+          <div class="text-center text-xs mt-1">TLS</div>
+        </div>
+        <div class="bg-white border border-blue-300 rounded px-3 py-2 text-center">
+          <div class="font-bold">Agent</div>
+          <div class="text-blue-500">Device</div>
+        </div>
+        <div class="text-blue-400">
+          <div class="border-t-2 border-green-400 w-8 relative top-0"></div>
+          <div class="text-center text-xs mt-1">Noise_XX</div>
+        </div>
+        <div class="bg-white border border-blue-300 rounded px-3 py-2 text-center">
+          <div class="font-bold">Relay</div>
+          <div class="text-blue-500">Tunnel</div>
+        </div>
+        <div class="text-blue-400">
+          <div class="border-t-2 border-green-400 w-8 relative top-0"></div>
+          <div class="text-center text-xs mt-1">Noise_XX</div>
+        </div>
+        <div class="bg-white border border-blue-300 rounded px-3 py-2 text-center">
+          <div class="font-bold">Gateway</div>
+          <div class="text-blue-500">Server</div>
+        </div>
+        <div class="text-blue-400">
+          <div class="border-t-2 border-gray-300 w-8 relative top-0"></div>
+          <div class="text-center text-xs mt-1">Optional TLS</div>
+        </div>
+        <div class="bg-white border border-blue-300 rounded px-3 py-2 text-center">
+          <div class="font-bold">Backend</div>
+          <div class="text-blue-500">Service</div>
+        </div>
+      </div>
+      <p class="text-xs text-blue-600 mt-3 text-center">
+        Layer 1: TLS (browser ↔ agent) &nbsp;|&nbsp; Layer 2: Noise_XX (agent ↔ gateway) &nbsp;|&nbsp; Layer 3: Optional internal TLS
+      </p>
+    </div>
+
+    <%= form_with url: wizard_update_security_path, method: :post, local: true do |f| %>
+
+      <div class="space-y-6">
+        <%# Agent-Side TLS %>
+        <div class="border border-gray-200 rounded-lg p-4">
+          <div class="flex items-start justify-between">
+            <div class="flex-1">
+              <h3 class="text-sm font-semibold text-gray-900">Agent-Side TLS (Client Devices)</h3>
+              <p class="text-xs text-gray-500 mt-1">
+                Local HTTPS between the browser/app and the ZTLP agent on the same device.
+                Certificates are automatically issued by the ZTLP CA and trusted via the installed root cert.
+              </p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer ml-4">
+              <input type="hidden" name="agent_tls" value="0">
+              <input type="checkbox" name="agent_tls" value="1" class="sr-only peer"
+                     <%= "checked" if @tls_config[:agent_tls] || @tls_config["agent_tls"] %>>
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-ztlp-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-ztlp-600"></div>
+            </label>
+          </div>
+        </div>
+
+        <%# Internal TLS %>
+        <div class="border border-gray-200 rounded-lg p-4">
+          <div class="flex items-start justify-between">
+            <div class="flex-1">
+              <h3 class="text-sm font-semibold text-gray-900">Internal TLS (Gateway → Backend)</h3>
+              <p class="text-xs text-gray-500 mt-1">
+                Optional encrypted last-mile between the gateway and backend services inside your Docker network.
+                Eliminates plaintext even on internal networks. This is defense-in-depth — the Noise_XX tunnel
+                already provides end-to-end encryption.
+              </p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer ml-4">
+              <input type="hidden" name="internal_tls" value="0">
+              <input type="checkbox" name="internal_tls" value="1" class="sr-only peer"
+                     <%= "checked" if @tls_config[:internal_tls] || @tls_config["internal_tls"] %>>
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-ztlp-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-ztlp-600"></div>
+            </label>
+          </div>
+        </div>
+
+        <%# Signing Oracle %>
+        <div class="border border-indigo-200 rounded-lg p-4 bg-indigo-50">
+          <div class="flex items-start justify-between">
+            <div class="flex-1">
+              <h3 class="text-sm font-semibold text-indigo-900">🔐 Signing Oracle (Hardware-Backed CA)</h3>
+              <p class="text-xs text-indigo-700 mt-1">
+                Keep the root CA key on a YubiKey or TPM. The root key never exists on disk — signing
+                operations go through the hardware via a ZTLP tunnel.
+              </p>
+              <p class="mt-2">
+                <a href="https://github.com/priceflex/ztlp/blob/main/docs/SIGNING-ORACLE.md"
+                   target="_blank" class="text-xs font-medium text-indigo-700 underline hover:text-indigo-900">
+                  Read the Signing Oracle documentation →
+                </a>
+              </p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer ml-4">
+              <input type="hidden" name="oracle_mode" value="0">
+              <input type="checkbox" name="oracle_mode" value="1" class="sr-only peer"
+                     id="oracle_mode_toggle"
+                     data-action="change->wizard#toggleOracle"
+                     <%= "checked" if @tls_config[:oracle_mode] || @tls_config["oracle_mode"] %>>
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+          <div id="oracle-details" class="mt-3 pt-3 border-t border-indigo-200 text-xs text-indigo-700" style="<%= "display:none" unless @tls_config[:oracle_mode] || @tls_config["oracle_mode"] %>">
+            <p class="mb-2">
+              <strong>Setup required:</strong> The Signing Oracle must be running on a machine with a YubiKey
+              or TPM before deploying. Ensure the hardware device is connected and the oracle process is accessible
+              via a ZTLP tunnel.
+            </p>
+          </div>
+        </div>
+
+        <%# Software Key Warning (shown when oracle is NOT enabled) %>
+        <% unless @tls_config[:oracle_mode] || @tls_config["oracle_mode"] %>
+          <div class="bg-amber-50 border-l-4 border-amber-500 p-4">
+            <div class="flex">
+              <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 8a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                </svg>
+              </div>
+              <div class="ml-3">
+                <h3 class="text-sm font-medium text-amber-800">Software Key Mode</h3>
+                <p class="text-xs text-amber-700 mt-1">
+                  The root CA private key will be stored as an encrypted file on the NS server.
+                  If the server is compromised, an attacker can extract the root CA key.
+                  For production deployments, enable the Signing Oracle above to keep the key in hardware.
+                </p>
+              </div>
+            </div>
+          </div>
+        <% end %>
+
+        <%# Certificate Settings %>
+        <div class="border border-gray-200 rounded-lg p-4">
+          <h3 class="text-sm font-semibold text-gray-900 mb-3">Certificate Settings</h3>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label for="cert_validity_days" class="block text-xs font-medium text-gray-700">Certificate Validity (days)</label>
+              <input type="number" name="cert_validity_days" id="cert_validity_days"
+                     value="<%= @tls_config[:cert_validity_days] || @tls_config["cert_validity_days"] || 90 %>"
+                     min="7" max="365"
+                     class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm p-2 border">
+              <p class="mt-1 text-xs text-gray-400">How long issued certificates are valid (7–365 days)</p>
+            </div>
+            <div>
+              <label for="intermediate_rotation_days" class="block text-xs font-medium text-gray-700">Intermediate CA Rotation (days)</label>
+              <input type="number" name="intermediate_rotation_days" id="intermediate_rotation_days"
+                     value="<%= @tls_config[:intermediate_rotation_days] || @tls_config["intermediate_rotation_days"] || 90 %>"
+                     min="30" max="365"
+                     class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm p-2 border">
+              <p class="mt-1 text-xs text-gray-400">How often to rotate the intermediate CA key (30–365 days)</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <%# Navigation %>
+      <div class="mt-6 flex justify-between">
+        <%= link_to "← Back to Machines", wizard_machines_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
+        <%= f.submit "Next: Review →", class: "rounded-md bg-ztlp-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-500 cursor-pointer" %>
+      </div>
+    <% end %>
+  </div>
+</div>

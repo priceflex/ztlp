@@ -133,6 +133,8 @@ Rails.application.routes.draw do
   get  "wizard/review",    to: "wizard#review",         as: :wizard_review
   get  "wizard/deploy",    to: "wizard#deploy",         as: :wizard_deploy
   post "wizard/deploy",    to: "wizard#start_deploy",   as: :wizard_start_deploy
+  get  "wizard/security", to: "wizard#security", as: :wizard_security
+  post "wizard/security", to: "wizard#update_security", as: :wizard_update_security
   get  "wizard/suggest_zone", to: "wizard#suggest_zone", as: :wizard_suggest_zone
 
   # API endpoints (JSON)

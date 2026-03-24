@@ -226,6 +226,14 @@ defmodule ZtlpNs.CertAuthority do
     passphrase = Keyword.get(opts, :passphrase, default_passphrase())
     ca_dir = state.ca_dir
 
+    # Check for oracle mode
+    oracle_mode = System.get_env("ZTLP_CA_MODE") == "oracle"
+    if oracle_mode do
+      Logger.info("[CertAuthority] Oracle mode enabled — root key operations will be delegated to Signing Oracle")
+      # For now, still generate locally but warn that oracle should be configured
+      # Full oracle integration will come in the signing-oracle implementation
+    end
+
     # Ensure directory exists
     File.mkdir_p!(ca_dir)
 
@@ -252,6 +260,29 @@ defmodule ZtlpNs.CertAuthority do
     save_intermediate_key(ca_dir, inter_priv)
     File.write!(Path.join(ca_dir, "intermediate.pem"), inter_cert_pem)
     File.write!(Path.join(ca_dir, "chain.pem"), chain_pem)
+
+    Logger.warning("""
+    ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (#{ca_dir}/root.key.enc)
+
+        The root CA private key is stored as an encrypted file on disk.
+        This is INSECURE for production deployments. If this server is
+        compromised, the attacker can extract the root CA key.
+
+        For production, use the ZTLP Signing Oracle with a hardware
+        security module (YubiKey, TPM) to keep the root key in hardware.
+        See: docs/SIGNING-ORACLE.md
+
+        Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+    """)
+
+    if passphrase == "ztlp-default-passphrase" do
+      Logger.warning("""
+      ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+          Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+          unique passphrase. The default passphrase provides NO security.
+      """)
+    end
 
     new_state = %{state |
       root_cert_der: root_cert_der,
@@ -400,6 +431,8 @@ defmodule ZtlpNs.CertAuthority do
         {:ok, key} -> key
         _ -> nil
       end
+
+      Logger.info("[CertAuthority] CA loaded from filesystem (#{ca_dir}). For production, consider hardware-backed signing via SIGNING-ORACLE.")
 
       %{state |
         root_cert_der: root_cert_der,

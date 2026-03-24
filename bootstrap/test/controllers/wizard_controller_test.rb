@@ -180,7 +180,57 @@ class WizardControllerTest < ActionDispatch::IntegrationTest
     assert_equal %w[ns relay], machine.role_list.sort
   end
 
-  # ── Step 3: Review ──────────────────────────────────────────────────
+  # ── Step 3: Security & TLS ────────────────────────────────────────
+
+  test "GET wizard/security redirects if no network in session" do
+    get wizard_security_path
+    assert_redirected_to wizard_new_path
+  end
+
+  test "GET wizard/security renders security step" do
+    setup_wizard_network
+    get wizard_security_path
+    assert_response :success
+    assert_select "h2", /Security & TLS/
+  end
+
+  test "GET wizard/security shows software key warning" do
+    setup_wizard_network
+    get wizard_security_path
+    assert_response :success
+    assert_match /Software Key Mode/, response.body
+  end
+
+  test "POST wizard/security saves TLS config to session and redirects to review" do
+    setup_wizard_network
+    post wizard_update_security_path, params: {
+      agent_tls: "1",
+      internal_tls: "1",
+      oracle_mode: "0",
+      cert_validity_days: "60",
+      intermediate_rotation_days: "45"
+    }
+    assert_redirected_to wizard_review_path
+  end
+
+  test "POST wizard/security clamps cert_validity_days" do
+    setup_wizard_network
+    post wizard_update_security_path, params: {
+      agent_tls: "1",
+      internal_tls: "0",
+      oracle_mode: "0",
+      cert_validity_days: "1000",
+      intermediate_rotation_days: "10"
+    }
+    assert_redirected_to wizard_review_path
+    # Follow redirect and check the values are clamped in the review
+    get wizard_review_path
+    assert_response :success
+    assert_match /365/, response.body   # clamped from 1000
+    assert_match /30/, response.body    # clamped from 10
+  end
+
+  # ── Step 4: Review ──────────────────────────────────────────────────
 
   test "GET wizard/review redirects if no network in session" do
     get wizard_review_path
@@ -209,6 +259,15 @@ class WizardControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "div.text-xs", /ns/i
     assert_select "div.text-xs", /relay/i
+  end
+
+  test "GET wizard/review shows TLS configuration section" do
+    setup_wizard_network_with_machines
+    get wizard_review_path
+    assert_response :success
+    assert_match /Security & TLS/, response.body
+    assert_match /Agent-Side TLS/, response.body
+    assert_match /Signing Oracle/, response.body
   end
 
   # ── Step 4: Deploy ──────────────────────────────────────────────────
@@ -320,13 +379,22 @@ class WizardControllerTest < ActionDispatch::IntegrationTest
     }
     assert_redirected_to wizard_machines_path
 
-    # Step 3: Review
+    # Step 3: Security & TLS
+    get wizard_security_path
+    assert_response :success
+    post wizard_update_security_path, params: {
+      agent_tls: "1", internal_tls: "0", oracle_mode: "0",
+      cert_validity_days: "90", intermediate_rotation_days: "90"
+    }
+    assert_redirected_to wizard_review_path
+
+    # Step 4: Review
     get wizard_review_path
     assert_response :success
     assert_match /flow-ns1/, response.body
     assert_match /flow-relay1/, response.body
 
-    # Step 4: Deploy
+    # Step 5: Deploy
     get wizard_deploy_path
     assert_response :success
 

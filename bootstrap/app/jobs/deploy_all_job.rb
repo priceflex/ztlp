@@ -6,7 +6,8 @@
 class DeployAllJob < ApplicationJob
   queue_as :default
 
-  def perform(network_id)
+  def perform(network_id, tls_config: {})
+    @tls_config = tls_config.with_indifferent_access
     network = Network.find(network_id)
     network.update!(status: "deploying")
 

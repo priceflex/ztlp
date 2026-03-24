@@ -1,6 +1,6 @@
-<%# Step 3: Review & Deploy %>
+<%# Step 4: Review & Deploy %>
 <div class="max-w-3xl mx-auto">
-  <%= render "wizard/step_indicator", current_step: 3 %>
+  <%= render "wizard/step_indicator", current_step: 4 %>
 
   <div class="bg-white shadow rounded-lg p-6">
     <h2 class="text-xl font-bold text-gray-900 mb-1">Review Configuration</h2>
@@ -52,6 +52,41 @@
       </div>
     </div>
 
+    <%# Security & TLS Configuration %>
+    <div class="bg-gray-50 rounded-lg p-4 border border-gray-200 mb-6">
+      <h3 class="text-sm font-semibold text-gray-700 mb-2">🔒 Security & TLS</h3>
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <dt class="text-gray-500">Agent-Side TLS</dt>
+        <dd class="text-gray-900 font-medium">
+          <% if @tls_config["agent_tls"] || @tls_config[:agent_tls] %>
+            <span class="text-green-600">✓ Enabled</span>
+          <% else %>
+            <span class="text-gray-500">Disabled</span>
+          <% end %>
+        </dd>
+        <dt class="text-gray-500">Internal TLS (Gateway → Backend)</dt>
+        <dd class="text-gray-900 font-medium">
+          <% if @tls_config["internal_tls"] || @tls_config[:internal_tls] %>
+            <span class="text-green-600">✓ Enabled</span>
+          <% else %>
+            <span class="text-gray-500">Disabled</span>
+          <% end %>
+        </dd>
+        <dt class="text-gray-500">Signing Oracle (Hardware CA)</dt>
+        <dd class="text-gray-900 font-medium">
+          <% if @tls_config["oracle_mode"] || @tls_config[:oracle_mode] %>
+            <span class="text-green-600">✓ Enabled</span>
+          <% else %>
+            <span class="text-amber-600">⚠ Software key (filesystem)</span>
+          <% end %>
+        </dd>
+        <dt class="text-gray-500">Certificate Validity</dt>
+        <dd class="text-gray-900 font-mono text-xs"><%= @tls_config["cert_validity_days"] || @tls_config[:cert_validity_days] || 90 %> days</dd>
+        <dt class="text-gray-500">Intermediate Rotation</dt>
+        <dd class="text-gray-900 font-mono text-xs"><%= @tls_config["intermediate_rotation_days"] || @tls_config[:intermediate_rotation_days] || 90 %> days</dd>
+      </dl>
+    </div>
+
     <%# Deploy Plan %>
     <div class="bg-blue-50 rounded-lg p-4 border border-blue-200 mb-6">
       <h3 class="text-sm font-semibold text-blue-800 mb-2">📋 Deploy Plan</h3>
@@ -70,7 +105,7 @@
 
     <%# Navigation %>
     <div class="flex justify-between">
-      <%= link_to "← Back to Machines", wizard_machines_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
+      <%= link_to "← Back to Security", wizard_security_path, class: "rounded-md bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200" %>
       <%= link_to "Deploy All 🚀", wizard_deploy_path, class: "rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500" %>
     </div>
   </div>

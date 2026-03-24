@@ -1,9 +1,10 @@
-<%# Wizard step indicator — shows progress through 4 steps %>
+<%# Wizard step indicator — shows progress through 5 steps %>
 <% steps = [
   { name: "Network", path: wizard_new_path, number: 1 },
   { name: "Machines", path: wizard_machines_path, number: 2 },
-  { name: "Review", path: wizard_review_path, number: 3 },
-  { name: "Deploy", path: wizard_deploy_path, number: 4 }
+  { name: "Security & TLS", path: wizard_security_path, number: 3 },
+  { name: "Review", path: wizard_review_path, number: 4 },
+  { name: "Deploy", path: wizard_deploy_path, number: 5 }
 ] %>
 
 <nav aria-label="Progress" class="mb-8">

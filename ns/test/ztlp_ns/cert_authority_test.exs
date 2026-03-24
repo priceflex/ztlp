@@ -1,6 +1,8 @@
 defmodule ZtlpNs.CertAuthorityTest do
   use ExUnit.Case
 
+  import ExUnit.CaptureLog
+
   alias ZtlpNs.CertAuthority
   alias ZtlpNs.X509
 
@@ -242,6 +244,53 @@ defmodule ZtlpNs.CertAuthorityTest do
       assert CertAuthority.initialized?()
       {:ok, info} = CertAuthority.show()
       assert info.root.fingerprint == initial_root_fp
+    end
+  end
+
+  describe "software key warnings" do
+    test "init_ca logs filesystem key warning" do
+      log = capture_log(fn ->
+        {:ok, _} = CertAuthority.init_ca(org: "Warn Test")
+      end)
+
+      assert log =~ "ROOT CA KEY SAVED TO FILESYSTEM"
+      assert log =~ "ZTLP Signing Oracle"
+      assert log =~ "ZTLP_CA_MODE=oracle"
+    end
+
+    test "init_ca logs default passphrase warning when using default" do
+      log = capture_log(fn ->
+        {:ok, _} = CertAuthority.init_ca(org: "Default Pass Test")
+      end)
+
+      assert log =~ "ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE"
+      assert log =~ "ZTLP_CA_PASSPHRASE"
+    end
+
+    test "init_ca does not log default passphrase warning when custom passphrase is used" do
+      log = capture_log(fn ->
+        {:ok, _} = CertAuthority.init_ca(org: "Custom Pass Test", passphrase: "my-strong-passphrase-123!")
+      end)
+
+      assert log =~ "ROOT CA KEY SAVED TO FILESYSTEM"
+      refute log =~ "ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE"
+    end
+
+    test "loading CA from disk logs info message", %{ca_dir: dir, pid: pid} do
+      # First initialize
+      {:ok, _} = CertAuthority.init_ca(org: "Load Test")
+
+      # Stop and restart, capturing log on restart
+      GenServer.stop(pid, :normal, 5000)
+      Process.sleep(50)
+
+      log = capture_log(fn ->
+        {:ok, _new_pid} = CertAuthority.start_link(ca_dir: dir)
+        Process.sleep(50)
+      end)
+
+      assert log =~ "CA loaded from filesystem"
+      assert log =~ "SIGNING-ORACLE"
     end
   end
 end

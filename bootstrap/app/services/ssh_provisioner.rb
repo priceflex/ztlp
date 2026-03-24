@@ -44,9 +44,10 @@ class SshProvisioner
 
   attr_reader :machine, :deployment, :log_lines
 
-  def initialize(machine, deployment: nil)
+  def initialize(machine, deployment: nil, tls_config: {})
     @machine = machine
     @deployment = deployment
+    @tls_config = (tls_config || {}).with_indifferent_access
     @log_lines = []
     @sudo_prefix = nil
   end
@@ -346,7 +347,7 @@ class SshProvisioner
     ns_machines = network.ns_machines
     relay_machines = network.relay_machines
 
-    case component
+    config_output = case component
     when "ns"
       lines = [
         "ZTLP_NS_ZONE=#{network.zone}",
@@ -413,6 +414,24 @@ class SshProvisioner
       lines.join("\n")
     else
       raise ProvisionError, "Unknown component: #{component}"
+    end
+
+    # Append TLS configuration env vars from wizard
+    tls_lines = []
+    if @tls_config["internal_tls"]
+      tls_lines << "ZTLP_GATEWAY_TLS_ENABLED=true" if component == "gateway"
+    end
+    if @tls_config["oracle_mode"]
+      tls_lines << "ZTLP_CA_MODE=oracle" if component == "ns"
+    end
+    if @tls_config["cert_validity_days"].to_i > 0
+      tls_lines << "ZTLP_CERT_VALIDITY_DAYS=#{@tls_config["cert_validity_days"]}" if component == "ns"
+    end
+
+    if tls_lines.any?
+      config_output + "\n" + tls_lines.join("\n")
+    else
+      config_output
     end
   end
 

@@ -3,7 +3,7 @@
 # Multi-step setup wizard for creating a network, adding machines,
 # reviewing the configuration, and triggering a live deploy.
 class WizardController < ApplicationController
-  before_action :load_wizard_network, only: [:machines, :add_machine, :remove_machine, :review, :deploy, :start_deploy]
+  before_action :load_wizard_network, only: [:machines, :add_machine, :remove_machine, :security, :update_security, :review, :deploy, :start_deploy]
 
   # Step 1: Create Network
   def new
@@ -82,10 +82,40 @@ class WizardController < ApplicationController
     end
   end
 
-  # Step 3: Review & Deploy
+  # Step 3: Security & TLS Configuration
+  def security
+    @tls_config = session[:wizard_tls_config] || {
+      agent_tls: true,
+      internal_tls: false,
+      oracle_mode: false,
+      cert_validity_days: 90,
+      intermediate_rotation_days: 90
+    }
+  end
+
+  def update_security
+    # Store TLS preferences in session for deploy step
+    session[:wizard_tls_config] = {
+      agent_tls: params[:agent_tls] == "1",
+      internal_tls: params[:internal_tls] == "1",
+      oracle_mode: params[:oracle_mode] == "1",
+      cert_validity_days: params[:cert_validity_days].to_i.clamp(7, 365),
+      intermediate_rotation_days: params[:intermediate_rotation_days].to_i.clamp(30, 365)
+    }
+    redirect_to wizard_review_path
+  end
+
+  # Step 4: Review & Deploy
   def review
     @machines = @network.machines.includes(:deployments).to_a
     @role_counts = @network.machine_count_by_role
+    @tls_config = session[:wizard_tls_config] || {
+      "agent_tls" => true,
+      "internal_tls" => false,
+      "oracle_mode" => false,
+      "cert_validity_days" => 90,
+      "intermediate_rotation_days" => 90
+    }
   end
 
   # Step 4: Live Deploy
@@ -93,7 +123,7 @@ class WizardController < ApplicationController
     @machines = @network.machines.includes(:deployments).to_a
   end
 
-  # Step 4: Kick off deployment (POST)
+  # Step 5: Kick off deployment (POST)
   def start_deploy
     @network.update!(status: "deploying")
 
@@ -108,8 +138,9 @@ class WizardController < ApplicationController
       end
     end
 
-    # Enqueue the background job
-    DeployAllJob.perform_later(@network.id)
+    # Enqueue the background job with TLS config
+    tls_config = session[:wizard_tls_config] || {}
+    DeployAllJob.perform_later(@network.id, tls_config: tls_config)
 
     respond_to do |format|
       format.turbo_stream do

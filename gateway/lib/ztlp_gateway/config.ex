@@ -142,11 +142,31 @@ defmodule ZtlpGateway.Config do
   end
 
   def get(:tls_acceptors) do
-    Application.get_env(:ztlp_gateway, :tls_acceptors, 10)
+    case System.get_env("ZTLP_GATEWAY_TLS_ACCEPTORS") do
+      nil -> Application.get_env(:ztlp_gateway, :tls_acceptors, 100)
+      n -> String.to_integer(n)
+    end
   end
 
   def get(:tls_mtls_required) do
-    Application.get_env(:ztlp_gateway, :tls_mtls_required, false)
+    case System.get_env("ZTLP_GATEWAY_MTLS_REQUIRED") do
+      nil -> Application.get_env(:ztlp_gateway, :tls_mtls_required, false)
+      "true" -> true
+      "1" -> true
+      _ -> false
+    end
+  end
+
+  def get(:tls_cert_file) do
+    Application.get_env(:ztlp_gateway, :tls_cert_file)
+  end
+
+  def get(:tls_key_file) do
+    Application.get_env(:ztlp_gateway, :tls_key_file)
+  end
+
+  def get(:tls_ca_cert_file) do
+    Application.get_env(:ztlp_gateway, :tls_ca_cert_file)
   end
 
   def get(:tls_mtls_optional) do

@@ -9,19 +9,22 @@ defmodule ZtlpGateway.TlsSession do
   3. Determine backend via SNI routing
   4. Check policy (PolicyEngine.authorize?/2)
   5. Check assurance level against backend min_assurance
-  6. Inject identity headers into HTTP requests
-  7. Bidirectional proxy to backend
-  8. Track connection stats + audit log
+  6. Open persistent backend TCP connection
+  7. Bidirectional streaming proxy: client ↔ gateway ↔ backend
+  8. HTTP mode: inject identity headers on first data chunk
+  9. Non-HTTP mode: pure TCP passthrough
+  10. Audit logging for all events
+  11. Proper cleanup on disconnect
 
   ## Architecture
 
       TlsListener
-        └── TlsSession (one per connection)
+        └── TlsSession (one per connection, runs as linked process)
               ├── TlsIdentity.extract_from_socket/1
               ├── SniRouter.resolve/1
               ├── PolicyEngine.authorize?/2
               ├── HttpHeaderInjector.inject/3
-              └── Backend TCP proxy (bidirectional)
+              └── Backend TCP proxy (bidirectional, active sockets)
 
   Sessions are started by `TlsListener` and run as independent processes.
   Each session tracks bytes transferred and connection duration for audit.
@@ -37,9 +40,7 @@ defmodule ZtlpGateway.TlsSession do
     TlsIdentity
   }
 
-  @recv_timeout 30_000
   @backend_connect_timeout 5_000
-  @backend_recv_timeout 30_000
 
   @typedoc "TLS session state"
   @type t :: %{
@@ -52,7 +53,10 @@ defmodule ZtlpGateway.TlsSession do
           started_at: integer(),
           bytes_in: non_neg_integer(),
           bytes_out: non_neg_integer(),
-          conn_info: map()
+          conn_info: map(),
+          first_chunk: boolean(),
+          listener_pid: pid() | nil,
+          config: map()
         }
 
   # ── Public API ─────────────────────────────────────────────────────
@@ -78,11 +82,16 @@ defmodule ZtlpGateway.TlsSession do
       |> check_assurance()
       |> audit_connection_established()
       |> connect_backend()
-      |> proxy_loop()
+      |> start_bidirectional_proxy()
     catch
-      :throw, {:session_reject, reason, state} ->
-        handle_rejection(reason, state)
+      :throw, {:session_reject, reason, reject_state} ->
+        handle_rejection(reason, reject_state)
         {:error, reason}
+
+      kind, reason ->
+        Logger.error("[TlsSession] Unexpected error: #{kind} #{inspect(reason)}")
+        Logger.error("[TlsSession] Stacktrace: #{inspect(__STACKTRACE__)}")
+        {:error, {kind, reason}}
     after
       cleanup(state)
     end
@@ -91,12 +100,21 @@ defmodule ZtlpGateway.TlsSession do
   @doc """
   Start a TLS session as a linked process.
 
-  Returns `{:ok, pid}`.
+  Returns `{:ok, pid}`. The session waits for a `:proceed` message
+  before accessing the socket, allowing the caller to transfer
+  socket ownership first.
   """
   @spec start_link(ssl_socket :: :ssl.sslsocket(), opts :: keyword()) :: {:ok, pid()}
   def start_link(ssl_socket, opts \\ []) do
     pid =
       spawn_link(fn ->
+        # Wait for controlling_process to be transferred
+        receive do
+          :proceed -> :ok
+        after
+          5_000 -> exit(:timeout_waiting_for_proceed)
+        end
+
         handle(ssl_socket, opts)
       end)
 
@@ -123,6 +141,7 @@ defmodule ZtlpGateway.TlsSession do
       bytes_in: 0,
       bytes_out: 0,
       conn_info: %{},
+      first_chunk: true,
       listener_pid: Keyword.get(opts, :listener_pid),
       config: Keyword.get(opts, :config, %{})
     }
@@ -168,10 +187,8 @@ defmodule ZtlpGateway.TlsSession do
   end
 
   defp check_policy(state) do
-    # Determine identity string for policy check
     identity_str = identity_string(state.identity)
 
-    # If identity is present, check policy; otherwise allow (mTLS may be optional)
     if identity_str do
       unless PolicyEngine.authorize?(identity_str, state.service || "") do
         AuditLog.tls_auth_failed(state.sni, :policy_denied, state.source)
@@ -217,18 +234,45 @@ defmodule ZtlpGateway.TlsSession do
   end
 
   defp connect_backend(state) do
+    backend_mode = get_backend_mode(state.service, state.config)
+
     case SniRouter.backend_for(state.service) do
       {:ok, {host, port}} ->
-        case :gen_tcp.connect(host, port, [:binary, {:active, false}], @backend_connect_timeout) do
-          {:ok, socket} ->
-            %{state | backend_socket: socket}
+        case backend_mode do
+          :tls ->
+            tls_opts = [
+              :binary,
+              {:active, true},
+              {:packet, :raw},
+              {:verify, :verify_none}
+            ]
 
-          {:error, reason} ->
-            Logger.warning(
-              "[TlsSession] Backend connection failed for #{state.service}: #{inspect(reason)}"
-            )
+            case :ssl.connect(host, port, tls_opts, @backend_connect_timeout) do
+              {:ok, socket} ->
+                %{state | backend_socket: {:ssl, socket}}
 
-            throw({:session_reject, {:backend_unavailable, reason}, state})
+              {:error, reason} ->
+                Logger.warning(
+                  "[TlsSession] Backend TLS connection failed for #{state.service}: #{inspect(reason)}"
+                )
+
+                throw({:session_reject, {:backend_unavailable, reason}, state})
+            end
+
+          _tcp ->
+            case :gen_tcp.connect(host, port, [:binary, {:active, true}, {:packet, :raw}],
+                   @backend_connect_timeout
+                 ) do
+              {:ok, socket} ->
+                %{state | backend_socket: {:tcp, socket}}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "[TlsSession] Backend connection failed for #{state.service}: #{inspect(reason)}"
+                )
+
+                throw({:session_reject, {:backend_unavailable, reason}, state})
+            end
         end
 
       {:error, _} = err ->
@@ -237,55 +281,116 @@ defmodule ZtlpGateway.TlsSession do
     end
   end
 
-  defp proxy_loop(state) do
-    case :ssl.recv(state.ssl_socket, 0, @recv_timeout) do
-      {:ok, data} ->
+  defp start_bidirectional_proxy(state) do
+    # Switch SSL socket to active mode for bidirectional streaming
+    :ssl.setopts(state.ssl_socket, [{:active, true}])
+
+    # Enter the message receive loop
+    proxy_receive_loop(state)
+  end
+
+  defp proxy_receive_loop(state) do
+    client_socket = state.ssl_socket
+    backend_raw = backend_raw_socket(state.backend_socket)
+
+    receive do
+      # Data from TLS client → forward to backend
+      {:ssl, ^client_socket, data} ->
         state = %{state | bytes_in: state.bytes_in + byte_size(data)}
 
-        # Inject identity headers if this looks like HTTP
-        data =
-          if http_request?(data) do
-            HttpHeaderInjector.inject(data, state.identity, state.service)
+        # On first chunk, inject headers if HTTP
+        {data, state} =
+          if state.first_chunk and http_request?(data) do
+            {HttpHeaderInjector.inject(data, state.identity, state.service),
+             %{state | first_chunk: false}}
           else
-            data
+            {data, %{state | first_chunk: false}}
           end
 
-        # Forward to backend
-        case :gen_tcp.send(state.backend_socket, data) do
+        case backend_send(state.backend_socket, data) do
           :ok ->
-            # Read response from backend and send back to client
-            state = relay_backend_response(state)
-            proxy_loop(state)
+            proxy_receive_loop(state)
 
           {:error, reason} ->
-            audit_connection_closed(state, :backend_error)
+            audit_connection_closed(state, {:backend_send_error, reason})
             {:error, reason}
         end
 
-      {:error, :closed} ->
+      # Data from TCP backend → forward to TLS client
+      {:tcp, ^backend_raw, data} ->
+        state = %{state | bytes_out: state.bytes_out + byte_size(data)}
+
+        case :ssl.send(state.ssl_socket, data) do
+          :ok ->
+            proxy_receive_loop(state)
+
+          {:error, reason} ->
+            audit_connection_closed(state, {:client_send_error, reason})
+            {:error, reason}
+        end
+
+      # Data from TLS backend → forward to TLS client
+      {:ssl, ^backend_raw, data} ->
+        state = %{state | bytes_out: state.bytes_out + byte_size(data)}
+
+        case :ssl.send(state.ssl_socket, data) do
+          :ok ->
+            proxy_receive_loop(state)
+
+          {:error, reason} ->
+            audit_connection_closed(state, {:client_send_error, reason})
+            {:error, reason}
+        end
+
+      # Client closed TLS connection
+      {:ssl_closed, ^client_socket} ->
         audit_connection_closed(state, :client_close)
         :ok
 
-      {:error, :timeout} ->
-        audit_connection_closed(state, :timeout)
+      # Backend TCP closed
+      {:tcp_closed, ^backend_raw} ->
+        audit_connection_closed(state, :backend_close)
         :ok
 
-      {:error, reason} ->
-        audit_connection_closed(state, reason)
+      # Backend TLS closed
+      {:ssl_closed, ^backend_raw} ->
+        audit_connection_closed(state, :backend_close)
+        :ok
+
+      # SSL error on client side
+      {:ssl_error, ^client_socket, reason} ->
+        audit_connection_closed(state, {:ssl_error, reason})
         {:error, reason}
+
+      # TCP error on backend
+      {:tcp_error, ^backend_raw, reason} ->
+        audit_connection_closed(state, {:tcp_error, reason})
+        {:error, reason}
+
+      # SSL error on backend
+      {:ssl_error, ^backend_raw, reason} ->
+        audit_connection_closed(state, {:tcp_error, reason})
+        {:error, reason}
+    after
+      # Idle timeout — close session after 5 minutes of inactivity
+      300_000 ->
+        audit_connection_closed(state, :timeout)
+        :ok
     end
   end
 
-  defp relay_backend_response(state) do
-    case :gen_tcp.recv(state.backend_socket, 0, @backend_recv_timeout) do
-      {:ok, response} ->
-        :ssl.send(state.ssl_socket, response)
-        %{state | bytes_out: state.bytes_out + byte_size(response)}
+  # ── Backend Socket Helpers ─────────────────────────────────────────
 
-      {:error, _reason} ->
-        state
-    end
-  end
+  defp backend_send({:tcp, socket}, data), do: :gen_tcp.send(socket, data)
+  defp backend_send({:ssl, socket}, data), do: :ssl.send(socket, data)
+
+  defp backend_close({:tcp, socket}), do: :gen_tcp.close(socket)
+  defp backend_close({:ssl, socket}), do: :ssl.close(socket)
+  defp backend_close(nil), do: :ok
+
+  defp backend_raw_socket({:tcp, socket}), do: socket
+  defp backend_raw_socket({:ssl, socket}), do: socket
+  defp backend_raw_socket(nil), do: nil
 
   # ── Audit & Cleanup ────────────────────────────────────────────────
 
@@ -306,7 +411,6 @@ defmodule ZtlpGateway.TlsSession do
   end
 
   defp handle_rejection(reason, state) do
-    # Send a 403 response for HTTP-like connections
     response =
       case reason do
         :policy_denied ->
@@ -322,14 +426,17 @@ defmodule ZtlpGateway.TlsSession do
         :insufficient_assurance ->
           min = get_min_assurance(state.service, state.config)
           actual = state.identity && Map.get(state.identity, :assurance, :unknown)
-
           build_assurance_error_response(min, actual)
 
         _ ->
           build_error_response(502, "backend_error", "Service unavailable")
       end
 
-    :ssl.send(state.ssl_socket, response)
+    try do
+      :ssl.send(state.ssl_socket, response)
+    catch
+      _, _ -> :ok
+    end
 
     # Notify listener of close
     if state.listener_pid do
@@ -339,20 +446,13 @@ defmodule ZtlpGateway.TlsSession do
 
   defp cleanup(state) do
     # Close backend socket if open
-    if state.backend_socket do
-      :gen_tcp.close(state.backend_socket)
-    end
+    backend_close(state[:backend_socket])
 
     # Close SSL socket
     try do
       :ssl.close(state.ssl_socket)
     catch
       _, _ -> :ok
-    end
-
-    # Notify listener
-    if state[:listener_pid] do
-      send(state.listener_pid, {:connection_closed, :normal})
     end
   end
 
@@ -385,20 +485,58 @@ defmodule ZtlpGateway.TlsSession do
   end
 
   defp to_assurance_atom(val) when is_atom(val), do: val
-  defp to_assurance_atom(val) when is_binary(val), do: String.to_existing_atom(val)
+
+  defp to_assurance_atom(val) when is_binary(val) do
+    try do
+      String.to_existing_atom(val)
+    rescue
+      _ -> :unknown
+    end
+  end
+
   defp to_assurance_atom(_), do: :unknown
 
-  defp get_min_assurance(_service, config) when is_map(config) do
-    Map.get(config, :min_assurance)
+  defp get_min_assurance(service, config) when is_map(config) do
+    case Map.get(config, :min_assurance) do
+      nil -> get_route_min_assurance(service)
+      val -> val
+    end
   end
 
-  defp get_min_assurance(_service, _config), do: nil
+  defp get_min_assurance(service, _config), do: get_route_min_assurance(service)
 
-  defp get_auth_mode(_service, config) when is_map(config) do
-    Map.get(config, :auth_mode, :passthrough)
+  defp get_route_min_assurance(nil), do: nil
+
+  defp get_route_min_assurance(service) do
+    case SniRouter.get_route(service) do
+      {:ok, route} -> Map.get(route, :min_assurance)
+      _ -> nil
+    end
   end
 
-  defp get_auth_mode(_service, _config), do: :passthrough
+  defp get_auth_mode(service, config) when is_map(config) do
+    case Map.get(config, :auth_mode) do
+      nil -> get_route_auth_mode(service)
+      val -> val
+    end
+  end
+
+  defp get_auth_mode(service, _config), do: get_route_auth_mode(service)
+
+  defp get_route_auth_mode(nil), do: :passthrough
+
+  defp get_route_auth_mode(service) do
+    case SniRouter.get_route(service) do
+      {:ok, route} -> Map.get(route, :auth_mode, :passthrough)
+      _ -> :passthrough
+    end
+  end
+
+  defp get_backend_mode(_service, config) when is_map(config) do
+    Map.get(config, :backend_mode, :tcp)
+  end
+
+  defp get_backend_mode(_service, _config), do: :tcp
 
   defp http_request?(<<method, _::binary>>) when method in [?G, ?P, ?H, ?D, ?O, ?T, ?C],
     do: true
@@ -406,8 +544,11 @@ defmodule ZtlpGateway.TlsSession do
   defp http_request?(_), do: false
 
   defp format_cipher(nil), do: nil
+  defp format_cipher(cipher) when is_map(cipher), do: inspect(cipher)
   defp format_cipher(cipher) when is_tuple(cipher), do: inspect(cipher)
-  defp format_cipher(cipher), do: to_string(cipher)
+  defp format_cipher(cipher) when is_binary(cipher), do: cipher
+  defp format_cipher(cipher) when is_atom(cipher), do: Atom.to_string(cipher)
+  defp format_cipher(cipher), do: inspect(cipher)
 
   defp build_error_response(status, error, message) do
     body =

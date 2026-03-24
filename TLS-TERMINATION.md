@@ -1,6 +1,6 @@
 # TLS Termination at the Gateway — Full Scope
 
-**Status:** Planned
+**Status:** In Progress (Phase 2 — Gateway TLS Listener)
 **Priority:** 1
 **Author:** Steve Price / ZTLP Project
 **Date:** 2026-03-21

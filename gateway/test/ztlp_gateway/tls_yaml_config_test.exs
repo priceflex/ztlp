@@ -239,9 +239,9 @@ defmodule ZtlpGateway.TlsYamlConfigTest do
       assert ZtlpGateway.Config.get(:tls_port) == 8443
     end
 
-    test "tls_acceptors defaults to 10" do
+    test "tls_acceptors defaults to 100" do
       Application.delete_env(:ztlp_gateway, :tls_acceptors)
-      assert ZtlpGateway.Config.get(:tls_acceptors) == 10
+      assert ZtlpGateway.Config.get(:tls_acceptors) == 100
     end
 
     test "tls_mtls_required defaults to false" do

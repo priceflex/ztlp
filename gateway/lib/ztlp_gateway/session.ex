@@ -487,8 +487,15 @@ defmodule ZtlpGateway.Session do
 
   defp find_backend(backends, service) do
     case Enum.find(backends, fn b -> b.name == service end) do
-      nil -> :error
-      backend -> {:ok, backend}
+      nil ->
+        # Fall back to "default" backend if the requested service isn't found
+        case Enum.find(backends, fn b -> b.name == "default" end) do
+          nil -> :error
+          backend -> {:ok, backend}
+        end
+
+      backend ->
+        {:ok, backend}
     end
   end
 

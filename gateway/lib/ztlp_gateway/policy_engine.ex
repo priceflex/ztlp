@@ -91,8 +91,14 @@ defmodule ZtlpGateway.PolicyEngine do
         Enum.any?(allowed, fn pattern -> matches?(identity, pattern, opts) end)
 
       [] ->
-        # No rule for this service — deny by default (zero trust!)
-        false
+        # No explicit rule for this service — fall back to "default" policy
+        # This allows a catch-all "default" policy to cover dynamically-named
+        # services (e.g., "tcp:8080") without requiring explicit per-port rules.
+        if service != "default" do
+          authorize?(identity, "default", opts)
+        else
+          false
+        end
     end
   end
 

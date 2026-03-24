@@ -587,7 +587,7 @@ mod tests {
         // Build a label with 64 bytes (exceeds 63-byte limit)
         let label_len: u8 = 64;
         packet.push(label_len);
-        packet.extend_from_slice(&vec![b'a'; 64]);
+        packet.extend_from_slice(&[b'a'; 64]);
         packet.push(0); // root
 
         let result = parse_dns_name(&packet, 12);
@@ -602,7 +602,7 @@ mod tests {
         // Build a label with exactly 63 bytes (the maximum)
         let label_len: u8 = 63;
         packet.push(label_len);
-        packet.extend_from_slice(&vec![b'a'; 63]);
+        packet.extend_from_slice(&[b'a'; 63]);
         // Add .ztlp suffix
         packet.push(4);
         packet.extend_from_slice(b"ztlp");

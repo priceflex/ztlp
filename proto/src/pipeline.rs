@@ -484,8 +484,8 @@ mod tests {
         pkt[2] = 0x00;
         pkt[3] = 0x0B; // HdrLen = 11
                        // Unknown session ID at bytes 6..18
-        for i in 6..18 {
-            pkt[i] = 0xFF;
+        for byte in pkt.iter_mut().take(18).skip(6) {
+            *byte = 0xFF;
         }
         assert_eq!(pipeline.layer2_session_check(&pkt), AdmissionResult::Drop);
     }

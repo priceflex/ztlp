@@ -611,7 +611,7 @@
       <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">☰</button>
       <a href="#overview" class="topbar-left" style="text-decoration:none;gap:10px;">
         <span class="logo-badge">ZTLP</span>
-        <span class="logo-title">Documentation <span>v0.11.2</span></span>
+        <span class="logo-title">Documentation <span>v0.11.3</span></span>
       </a>
     </div>
     <div class="topbar-right">
@@ -707,11 +707,11 @@
 
   <div class="callout">
     <div class="callout-title">🔬 Prototype Status</div>
-    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,600+ passing tests across Rust, Elixir, and C — including the v0.11.2 TLS termination and security-hardened implementation.</p>
+    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,600+ passing tests across Rust, Elixir, and C — including the v0.11.3 TLS termination and security-hardened implementation.</p>
   </div>
 
   <div class="callout success">
-    <div class="callout-title">🆕 New in v0.11.2 — TLS Termination & Passwordless Auth</div>
+    <div class="callout-title">🆕 New in v0.11.3 — TLS Termination & Passwordless Auth</div>
     <p><strong>Gateway TLS:</strong> Full HTTPS reverse proxy with mTLS client certificate authentication, SNI-based routing, identity header injection (HMAC-SHA256 signed), CRL-based certificate revocation, assurance-level enforcement (hardware/device-bound/software), and passwordless auth for backend services.</p>
     <p><strong>Internal CA:</strong> ZTLP-NS acts as its own Certificate Authority — issues short-lived X.509 certs with custom assurance extensions, attestation verification for YubiKey/TPM/Secure Enclave.</p>
     <p><strong>YAML Config:</strong> Complete TLS configuration via <code>gateway.yaml</code> — cert source, mTLS settings, min TLS version, per-backend auth modes and assurance requirements.</p>
@@ -1546,7 +1546,7 @@ config :ztlp_gateway, :header_signing_enabled, true
 config :ztlp_gateway, :header_signing_secret, System.get_env("ZTLP_HEADER_HMAC_SECRET")
 config :ztlp_gateway, :header_signing_timestamp_window, 60</code></pre></div>
 
-  <h3>YAML Configuration — TLS Termination <span class="badge badge-blue">v0.11.2</span></h3>
+  <h3>YAML Configuration — TLS Termination <span class="badge badge-blue">v0.11.3</span></h3>
   <div class="code-block-wrapper"><pre><code class="language-yaml"># gateway.yaml — TLS termination with mTLS and passwordless auth
 gateway:
   port: 23097
@@ -1585,10 +1585,10 @@ gateway:
 │       └── ZtlpGateway.Backend    — TCP connection to backend service
 ├── ZtlpGateway.Listener           — UDP socket, admission pipeline
 ├── ZtlpGateway.RelayRegistrar     — Dynamic relay registration
-├── ZtlpGateway.CrlServer          — Certificate Revocation List (v0.11.2)
-├── ZtlpGateway.CertCache          — TLS certificate cache (v0.11.2)
-├── ZtlpGateway.SniRouter          — SNI-based backend routing (v0.11.2)
-└── ZtlpGateway.TlsListener        — TLS acceptor pool + mTLS (v0.11.2)
+├── ZtlpGateway.CrlServer          — Certificate Revocation List (v0.11.3)
+├── ZtlpGateway.CertCache          — TLS certificate cache (v0.11.3)
+├── ZtlpGateway.SniRouter          — SNI-based backend routing (v0.11.3)
+└── ZtlpGateway.TlsListener        — TLS acceptor pool + mTLS (v0.11.3)
     └── ZtlpGateway.TlsSession     — Per-connection: identity → CRL → policy → proxy</code></pre></div>
 
   <h3>Policy Rules</h3>

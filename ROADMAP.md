@@ -1,6 +1,6 @@
 # ZTLP Roadmap
 
-## Current Release: v0.11.2
+## Current Release: v0.11.3
 
 ---
 
@@ -101,7 +101,7 @@
 - Real Prometheus metrics fetched through encrypted ZTLP tunnel
 - Docker host networking for UDP, curl --http0.9 for tunnel HTTP, stderr-based readiness detection
 
-### TLS Termination & Passwordless Auth (v0.10.0–v0.11.2) ✅
+### TLS Termination & Passwordless Auth (v0.10.0–v0.11.3) ✅
 - Internal Certificate Authority (NS CertAuthority, CertIssuer, X509 builder)
 - Attestation verification for hardware keys (TPM, YubiKey)
 - TLS listener with configurable acceptors and mTLS support
@@ -111,10 +111,10 @@
 - Identity header injection with HMAC-SHA256 signing
 - Header stripping (anti-spoofing)
 - Certificate cache with TTL
-- CRL distribution server with certificate revocation integration (v0.11.2)
-- CRL check in mTLS session pipeline — revoked certs rejected before reaching backend (v0.11.2)
+- CRL distribution server with certificate revocation integration (v0.11.3)
+- CRL check in mTLS session pipeline — revoked certs rejected before reaching backend (v0.11.3)
 - TLS audit events (connection, identity, policy, cert lifecycle, revocation checks)
-- Gateway YAML config: full TLS section with cert_source, min_version, mtls sub-section (v0.11.2)
+- Gateway YAML config: full TLS section with cert_source, min_version, mtls sub-section (v0.11.3)
 - Per-backend: auth_mode, min_assurance, hostnames, required_groups
 - OS trust store installation (macOS, Linux, Windows)
 - Browser certificate installation (Chrome, Firefox, Safari)

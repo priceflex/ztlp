@@ -5,12 +5,12 @@
 # Run a self-hosted password manager with ZERO exposed HTTP ports.
 # The only way to reach Vaultwarden is through the ZTLP tunnel.
 #
-# Two access modes:
-#   1. ZTLP/UDP (primary) — Devices run the ztlp agent.
-#      Zero exposed HTTP ports. Maximum security.
-#   2. TLS/HTTPS (optional) — Browsers connect directly via mTLS.
-#      Exposes port 443 but requires a client certificate.
-#      Uncomment the TLS port and env vars below to enable.
+# Access is via ZTLP/UDP only — devices run the ztlp agent.
+# Zero exposed HTTP/HTTPS ports. Maximum security.
+#
+# For defense-in-depth, you can optionally enable internal TLS
+# between the gateway and Vaultwarden on the Docker network.
+# See the README for details.
 #
 # Usage:
 #   cp .env.example .env          # Configure secrets
@@ -18,13 +18,9 @@
 #   docker compose logs -f        # Follow all logs
 #   docker compose ps             # Check health
 #
-# What's exposed (default — UDP only):
+# What's exposed:
 #   23097/udp — ZTLP gateway (encrypted, identity-required)
-#   That's it. No HTTP. No HTTPS. No ports to scan.
-#
-# What's exposed (with TLS enabled):
-#   23097/udp — ZTLP gateway (encrypted, identity-required)
-#   443/tcp   — TLS listener (mTLS client cert required)
+#   That's it. No HTTP. No HTTPS. No TCP ports to scan.
 
 services:
   # ── Vaultwarden ─────────────────────────────────────────
@@ -95,18 +91,16 @@ services:
   # enforces group-based policy, injects identity headers, and
   # forwards to Vaultwarden on the internal network.
   #
-  # Supports two listeners:
-  #   - UDP (always) — ZTLP native protocol for agent-based access
-  #   - TLS (optional) — HTTPS with mTLS for direct browser access
+  # For defense-in-depth, the gateway can optionally use TLS
+  # when connecting to Vaultwarden on the internal Docker network.
+  # This encrypts the last hop so there's zero plaintext anywhere.
   gateway:
     build:
       context: ../../
       dockerfile: gateway/Dockerfile
     container_name: ztlp-gateway
     ports:
-      - "23097:23097/udp"          # ZTLP protocol (always on)
-      # ── Uncomment to enable direct browser access via mTLS ──
-      # - "443:8443/tcp"           # TLS listener (optional — browser access)
+      - "23097:23097/udp"          # ZTLP protocol — the ONLY exposed port
     depends_on:
       ns:
         condition: service_healthy
@@ -124,15 +118,20 @@ services:
       ZTLP_GATEWAY_METRICS_PORT: "9102"
       ZTLP_GATEWAY_CIRCUIT_BREAKER_THRESHOLD: "5"
       ZTLP_GATEWAY_CIRCUIT_BREAKER_TIMEOUT_MS: "30000"
-      # ── TLS termination (optional — uncomment to enable) ──
-      # ZTLP_GATEWAY_TLS_ENABLED: "true"
-      # ZTLP_GATEWAY_TLS_PORT: "8443"
-      # ZTLP_GATEWAY_TLS_CERT_FILE: "/etc/ztlp/certs/vault.home.ztlp.pem"
-      # ZTLP_GATEWAY_TLS_KEY_FILE: "/etc/ztlp/certs/vault.home.ztlp-key.pem"
-      # ZTLP_GATEWAY_TLS_CA_CERT_FILE: "/etc/ztlp/ca/chain.pem"
+      # ── Internal TLS to backend (optional — defense-in-depth) ──
+      # Encrypts the gateway→Vaultwarden hop on the Docker network.
+      # Without this, traffic inside Docker is plaintext HTTP (fine
+      # for most cases since it's an isolated internal network).
+      # With this, there's zero plaintext anywhere in the path.
+      # See README for setup instructions.
+      # ZTLP_GATEWAY_BACKEND_TLS_ENABLED: "true"
+      # ZTLP_GATEWAY_BACKEND_TLS_CERT_FILE: "/etc/ztlp/certs/gateway.home.ztlp.pem"
+      # ZTLP_GATEWAY_BACKEND_TLS_KEY_FILE: "/etc/ztlp/certs/gateway.home.ztlp-key.pem"
+      # ZTLP_GATEWAY_BACKEND_TLS_CA_FILE: "/etc/ztlp/ca/chain.pem"
+      # ZTLP_GATEWAY_BACKEND_TLS_VERIFY: "true"
     volumes:
       - ./policy.toml:/etc/ztlp/policy.toml:ro
-      # ── Uncomment to mount TLS certificates ──
+      # ── Uncomment to mount internal TLS certificates ──
       # - ./certs:/etc/ztlp/certs:ro
       # - ./ca:/etc/ztlp/ca:ro
     networks:

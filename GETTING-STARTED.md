@@ -208,3 +208,9 @@ You've seen the basics — identity generation, authenticated connections, relay
 - **[Full Specification](#spec)** — The complete protocol spec with wire formats, cryptographic details, and deployment models
 - **[GitHub Repository](https://github.com/priceflex/ztlp)** — Source code, issues, and discussions
 - **[CLI Reference](https://github.com/priceflex/ztlp/blob/main/CLI.md)** — Full documentation of every `ztlp` subcommand
+
+## Real-World Examples
+
+### [Zero-Trust Password Manager](examples/vaultwarden/README.md)
+
+Run Vaultwarden (self-hosted Bitwarden) behind ZTLP with zero exposed ports. Access your passwords from iOS, macOS, Windows, and Linux — all through encrypted ZTLP tunnels with cryptographic device identity. Includes Docker Compose, group-based policy, and step-by-step setup for all platforms.

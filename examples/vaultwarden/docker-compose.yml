@@ -1,0 +1,167 @@
+# ─────────────────────────────────────────────────────────────
+# Vaultwarden + ZTLP — Zero-Trust Password Manager
+# ─────────────────────────────────────────────────────────────
+#
+# Run a self-hosted password manager with ZERO exposed HTTP ports.
+# The only way to reach Vaultwarden is through the ZTLP tunnel.
+#
+# Usage:
+#   cp .env.example .env          # Configure secrets
+#   docker compose up -d          # Start the stack
+#   docker compose logs -f        # Follow all logs
+#   docker compose ps             # Check health
+#
+# What's exposed:
+#   23097/udp — ZTLP gateway (encrypted, identity-required)
+#   That's it. No HTTP. No HTTPS. No ports to scan.
+
+services:
+  # ── Vaultwarden ─────────────────────────────────────────
+  # Self-hosted Bitwarden-compatible password manager.
+  # Runs on the internal network ONLY — no port mappings.
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    # ⚠ NO ports: section — this service is NOT exposed to the host!
+    # It is only reachable through the ZTLP gateway on the internal network.
+    environment:
+      DOMAIN: "${DOMAIN:-https://vault.home.ztlp}"
+      ADMIN_TOKEN: "${VAULTWARDEN_ADMIN_TOKEN}"
+      SIGNUPS_ALLOWED: "true"
+      WEBSOCKET_ENABLED: "true"
+      LOG_LEVEL: "info"
+      # Vaultwarden listens on port 80 inside the container
+      ROCKET_PORT: "80"
+    volumes:
+      - vaultwarden-data:/data
+    networks:
+      - internal
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── ZTLP Namespace Server ──────────────────────────────
+  # Identity registry — stores DEVICE, USER, and GROUP records.
+  # Needed for enrollment and identity resolution.
+  ns:
+    build:
+      context: ../../
+      dockerfile: ns/Dockerfile
+    container_name: ztlp-ns
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "10000"
+      ZTLP_NS_STORAGE_MODE: "disc_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "true"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "${ZTLP_LOG_LEVEL:-info}"
+      ZTLP_NS_METRICS_ENABLED: "true"
+      ZTLP_NS_METRICS_PORT: "9103"
+      ZTLP_NS_RATE_LIMIT_PER_SEC: "50"
+      ZTLP_NS_RATE_LIMIT_BURST: "100"
+      ZTLP_ENROLLMENT_SECRET: "${ZTLP_ENROLLMENT_SECRET}"
+    volumes:
+      - ns-data:/app/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ── ZTLP Gateway ───────────────────────────────────────
+  # The ONLY entry point to the stack. Terminates ZTLP tunnels,
+  # enforces group-based policy, injects identity headers, and
+  # forwards to Vaultwarden on the internal network.
+  gateway:
+    build:
+      context: ../../
+      dockerfile: gateway/Dockerfile
+    container_name: ztlp-gateway
+    ports:
+      - "23097:23097/udp"          # The ONLY exposed port — ZTLP protocol
+    depends_on:
+      ns:
+        condition: service_healthy
+    environment:
+      ZTLP_GATEWAY_PORT: "23097"
+      ZTLP_GATEWAY_NS_HOST: "ns"
+      ZTLP_GATEWAY_NS_PORT: "23096"
+      ZTLP_GATEWAY_MAX_SESSIONS: "1000"
+      ZTLP_GATEWAY_BACKEND_HOST: "vaultwarden"
+      ZTLP_GATEWAY_BACKEND_PORT: "80"
+      ZTLP_HEADER_HMAC_SECRET: "${ZTLP_HEADER_HMAC_SECRET}"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "${ZTLP_LOG_LEVEL:-info}"
+      ZTLP_GATEWAY_METRICS_ENABLED: "true"
+      ZTLP_GATEWAY_METRICS_PORT: "9102"
+      ZTLP_GATEWAY_CIRCUIT_BREAKER_THRESHOLD: "5"
+      ZTLP_GATEWAY_CIRCUIT_BREAKER_TIMEOUT_MS: "30000"
+    volumes:
+      - ./policy.toml:/etc/ztlp/policy.toml:ro
+    networks:
+      - default
+      - internal
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── ZTLP Relay (optional) ─────────────────────────────
+  # NAT traversal relay — enables devices behind double-NAT,
+  # carrier-grade NAT, or restrictive firewalls to reach the
+  # gateway. Remove this if all your devices have direct UDP
+  # connectivity to the gateway.
+  relay:
+    build:
+      context: ../../
+      dockerfile: relay/Dockerfile
+    container_name: ztlp-relay
+    ports:
+      - "23095:23095/udp"          # Relay port for NAT traversal
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "${ZTLP_LOG_LEVEL:-info}"
+      ZTLP_RELAY_METRICS_ENABLED: "true"
+      ZTLP_RELAY_METRICS_PORT: "9101"
+      ZTLP_RELAY_BACKPRESSURE_SOFT_PCT: "80"
+      ZTLP_RELAY_BACKPRESSURE_HARD_PCT: "95"
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+networks:
+  internal:
+    internal: true                   # No external access — fully isolated
+
+volumes:
+  vaultwarden-data:                  # Vaultwarden database, attachments, keys
+  ns-data:                           # ZTLP namespace records (Mnesia)

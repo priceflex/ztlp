@@ -1,0 +1,15 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP Gateway Access Policy — Vaultwarden
+# ─────────────────────────────────────────────────────────────
+#
+# Default: deny all. Only identities in the listed groups can
+# access the password manager through the ZTLP gateway.
+
+default = "deny"
+
+[[services]]
+name = "vault"
+allow = [
+  "family@home.ztlp",
+  "team@home.ztlp",
+]

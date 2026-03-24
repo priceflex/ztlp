@@ -1944,10 +1944,10 @@ where
 
                         let reasm = reassembly.get_or_insert_with(|| {
                             debug!(
-                                "reassembly: initialized from prefetched with first data_seq {}",
+                                "reassembly: initialized at seq 0 from prefetch (first data_seq={})",
                                 data_seq
                             );
-                            ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
+                            ReassemblyBuffer::new(0, REASSEMBLY_MAX_BUFFERED)
                         });
 
                         if let Some(deliverable) = reasm.insert(data_seq, tcp_payload.to_vec()) {
@@ -2129,13 +2129,16 @@ where
                                 let tcp_payload = &frame_payload[8..];
 
                                 // Initialize reassembly buffer on first data packet.
+                                // Always start at seq 0 — the gateway's data_seq starts at 0.
+                                // If we initialize from the first received data_seq and seq 0
+                                // was lost, we'd never detect the gap or request retransmission.
                                 let reassembly_start = Instant::now();
                                 let reasm = reassembly.get_or_insert_with(|| {
                                     debug!(
-                                        "reassembly: initialized with first data_seq {}",
+                                        "reassembly: initialized at seq 0 (first received data_seq={})",
                                         data_seq
                                     );
-                                    ReassemblyBuffer::new(data_seq, REASSEMBLY_MAX_BUFFERED)
+                                    ReassemblyBuffer::new(0, REASSEMBLY_MAX_BUFFERED)
                                 });
 
                                 // Insert into reassembly buffer keyed by data_seq

@@ -60,6 +60,9 @@ defmodule ZtlpGateway.Session do
   @max_rto_ms 10_000
   @max_retransmits 8
   @retransmit_check_interval_ms 50
+  # Linger timeout: how long to keep session alive after backend closes
+  # to allow retransmission of unacked data
+  @linger_timeout_ms 10_000
 
   # ---------------------------------------------------------------------------
   # Types
@@ -155,7 +158,9 @@ defmodule ZtlpGateway.Session do
       rto_ms: @initial_rto_ms,
       srtt_ms: nil,
       rttvar_ms: nil,
-      retransmit_timer_ref: nil
+      retransmit_timer_ref: nil,
+      # Draining: backend closed, but we keep the session alive to retransmit
+      draining: false
     }
 
     {:ok, state}
@@ -204,9 +209,32 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # Backend closed the TCP connection
+  # Backend closed the TCP connection — enter draining mode
+  # Keep session alive to retransmit unacked data + FIN
   def handle_info(:backend_closed, state) do
-    terminate_session(state, :backend_close)
+    if map_size(state.send_buffer) == 0 do
+      # Nothing to retransmit, terminate immediately
+      terminate_session(state, :backend_close)
+    else
+      Logger.info("[Session] Backend closed, entering drain mode (#{map_size(state.send_buffer)} packets in send_buffer)")
+      # Send FIN now
+      state = if state.r2i_key, do: send_fin(state), else: state
+      # Schedule linger timeout
+      Process.send_after(self(), :linger_timeout, @linger_timeout_ms)
+      # Ensure retransmit timer is running
+      retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
+      {:noreply, %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}}
+    end
+  end
+
+  # Linger timeout expired — terminate even if send_buffer not empty
+  def handle_info(:linger_timeout, state) do
+    if state.draining do
+      Logger.info("[Session] Linger timeout expired, #{map_size(state.send_buffer)} unacked packets remaining")
+      terminate_session(state, :linger_timeout)
+    else
+      {:noreply, state}
+    end
   end
 
   # Backend error
@@ -493,7 +521,15 @@ defmodule ZtlpGateway.Session do
 
     Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, removed #{length(acked_entries)} from send_buffer, #{map_size(send_buffer)} remaining")
 
-    {:noreply, %{state | send_buffer: send_buffer}}
+    state = %{state | send_buffer: send_buffer}
+
+    # If draining and send_buffer is empty, all data has been ACKed — terminate
+    if state.draining and map_size(send_buffer) == 0 do
+      Logger.info("[Session] All data ACKed during drain, terminating cleanly")
+      terminate_session(state, :drain_complete)
+    else
+      {:noreply, state}
+    end
   end
 
   defp handle_tunnel_frame(<<@frame_ack, _rest::binary>>, state) do
@@ -670,9 +706,10 @@ defmodule ZtlpGateway.Session do
   end
 
   defp terminate_session(state, reason) do
-    # Send FIN to client if we have transport keys
+    # Send FIN to client if we have transport keys and not already draining
+    # (draining already sent FIN on entry)
     state =
-      if state.r2i_key do
+      if state.r2i_key && !state.draining do
         send_fin(state)
       else
         state

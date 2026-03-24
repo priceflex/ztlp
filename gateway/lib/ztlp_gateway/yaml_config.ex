@@ -143,6 +143,39 @@ defmodule ZtlpGateway.YamlConfig do
         {config, errors} = validate_field(config, errors, tls, "mtls_required", :tls_mtls_required, :boolean, false, nil)
         {config, errors} = validate_field(config, errors, tls, "mtls_optional", :tls_mtls_optional, :boolean, true, nil)
 
+        # cert_source: internal | acme | manual
+        {config, errors} = case Map.get(tls, "cert_source") do
+          nil -> {Map.put(config, :tls_cert_source, :internal), errors}
+          val when val in ["internal", "acme", "manual"] ->
+            {Map.put(config, :tls_cert_source, String.to_atom(val)), errors}
+          val when is_atom(val) and val in [:internal, :acme, :manual] ->
+            {Map.put(config, :tls_cert_source, val), errors}
+          other ->
+            {config, ["tls.cert_source: expected 'internal', 'acme', or 'manual', got: #{inspect(other)}" | errors]}
+        end
+
+        # min_version: "1.2" or "1.3"
+        {config, errors} = case Map.get(tls, "min_version") do
+          nil -> {Map.put(config, :tls_min_version, :"tlsv1.2"), errors}
+          "1.2" -> {Map.put(config, :tls_min_version, :"tlsv1.2"), errors}
+          "1.3" -> {Map.put(config, :tls_min_version, :"tlsv1.3"), errors}
+          other ->
+            {config, ["tls.min_version: expected '1.2' or '1.3', got: #{inspect(other)}" | errors]}
+        end
+
+        # mTLS sub-section (newer nested format, complements flat mtls_required/mtls_optional)
+        # Only override tls_mtls_required if explicitly set in the mtls sub-section
+        {config, errors} = case Map.get(tls, "mtls") do
+          mtls when is_map(mtls) ->
+            {config, errors} = validate_field(config, errors, mtls, "enabled", :tls_mtls_enabled, :boolean, true, nil)
+            case Map.get(mtls, "required") do
+              nil -> {config, errors}
+              _ -> validate_field(config, errors, mtls, "required", :tls_mtls_required, :boolean, false, nil)
+            end
+          nil -> {config, errors}
+          other -> {config, ["tls.mtls: expected a map, got: #{inspect(other)}" | errors]}
+        end
+
         # Header signing sub-section
         {config, errors} = case Map.get(tls, "header_signing", %{}) do
           hs when is_map(hs) ->

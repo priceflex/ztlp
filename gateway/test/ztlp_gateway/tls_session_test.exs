@@ -121,6 +121,15 @@ defmodule ZtlpGateway.TlsSessionTest do
     end
   end
 
+  describe "revocation error response" do
+    test "cert_revoked produces 403 with correct error" do
+      response = build_error_response(403, "cert_revoked", "Client certificate has been revoked")
+      assert response =~ "HTTP/1.1 403 Forbidden"
+      assert response =~ "cert_revoked"
+      assert response =~ "Client certificate has been revoked"
+    end
+  end
+
   describe "format_cipher/1" do
     test "nil returns nil" do
       assert format_cipher(nil) == nil

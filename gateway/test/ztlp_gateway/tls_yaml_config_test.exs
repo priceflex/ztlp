@@ -81,6 +81,133 @@ defmodule ZtlpGateway.TlsYamlConfigTest do
       assert config[:header_signing_secret_env] == "ZTLP_HEADER_HMAC_SECRET"
     end
 
+    test "parses cert_source as internal" do
+      raw = %{"tls" => %{"cert_source" => "internal"}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_cert_source] == :internal
+    end
+
+    test "parses cert_source as acme" do
+      raw = %{"tls" => %{"cert_source" => "acme"}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_cert_source] == :acme
+    end
+
+    test "parses cert_source as manual" do
+      raw = %{"tls" => %{"cert_source" => "manual"}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_cert_source] == :manual
+    end
+
+    test "defaults cert_source to internal" do
+      raw = %{"tls" => %{"enabled" => true}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_cert_source] == :internal
+    end
+
+    test "rejects invalid cert_source" do
+      raw = %{"tls" => %{"cert_source" => "invalid"}}
+      assert {:error, errors} = YamlConfig.validate(raw)
+      assert Enum.any?(errors, &String.contains?(&1, "cert_source"))
+    end
+
+    test "parses min_version 1.2" do
+      raw = %{"tls" => %{"min_version" => "1.2"}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_min_version] == :"tlsv1.2"
+    end
+
+    test "parses min_version 1.3" do
+      raw = %{"tls" => %{"min_version" => "1.3"}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_min_version] == :"tlsv1.3"
+    end
+
+    test "defaults min_version to 1.2" do
+      raw = %{"tls" => %{"enabled" => true}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_min_version] == :"tlsv1.2"
+    end
+
+    test "rejects invalid min_version" do
+      raw = %{"tls" => %{"min_version" => "1.1"}}
+      assert {:error, errors} = YamlConfig.validate(raw)
+      assert Enum.any?(errors, &String.contains?(&1, "min_version"))
+    end
+
+    test "parses mtls sub-section" do
+      raw = %{
+        "tls" => %{
+          "mtls" => %{
+            "enabled" => true,
+            "required" => true
+          }
+        }
+      }
+
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_mtls_enabled] == true
+      assert config[:tls_mtls_required] == true
+    end
+
+    test "defaults mtls enabled to true" do
+      raw = %{"tls" => %{"mtls" => %{}}}
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_mtls_enabled] == true
+    end
+
+    test "rejects non-map mtls section" do
+      raw = %{"tls" => %{"mtls" => "invalid"}}
+      assert {:error, errors} = YamlConfig.validate(raw)
+      assert Enum.any?(errors, &String.contains?(&1, "tls.mtls"))
+    end
+
+    test "full TLS config with all new fields" do
+      raw = %{
+        "tls" => %{
+          "enabled" => true,
+          "port" => 443,
+          "acceptors" => 100,
+          "cert_source" => "internal",
+          "min_version" => "1.2",
+          "mtls" => %{
+            "enabled" => true,
+            "required" => false
+          },
+          "header_signing" => %{
+            "enabled" => true,
+            "secret_env" => "ZTLP_HEADER_HMAC_SECRET"
+          }
+        },
+        "backends" => [
+          %{
+            "name" => "webapp",
+            "host" => "127.0.0.1",
+            "port" => 8080,
+            "hostnames" => ["webapp.corp.ztlp"],
+            "auth_mode" => "enforce",
+            "min_assurance" => "software"
+          }
+        ]
+      }
+
+      assert {:ok, config} = YamlConfig.validate(raw)
+      assert config[:tls_enabled] == true
+      assert config[:tls_port] == 443
+      assert config[:tls_acceptors] == 100
+      assert config[:tls_cert_source] == :internal
+      assert config[:tls_min_version] == :"tlsv1.2"
+      assert config[:tls_mtls_enabled] == true
+      assert config[:tls_mtls_required] == false
+      assert config[:header_signing_enabled] == true
+
+      [backend] = config[:backends]
+      assert backend.name == "webapp"
+      assert backend.hostnames == ["webapp.corp.ztlp"]
+      assert backend.auth_mode == :enforce
+      assert backend.min_assurance == :software
+    end
+
     test "rejects invalid TLS port" do
       raw = %{"tls" => %{"port" => 99999}}
       assert {:error, errors} = YamlConfig.validate(raw)

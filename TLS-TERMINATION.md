@@ -1,9 +1,13 @@
 # TLS Termination at the Gateway — Full Scope
 
-**Status:** In Progress (Phase 2 — Gateway TLS Listener)
+**Status:** Complete (Phases 1–3, 5–6)
 **Priority:** 1
 **Author:** Steve Price / ZTLP Project
 **Date:** 2026-03-21
+**Completed:** 2026-03-24
+
+> **Phase 4 (ACME/Let's Encrypt):** Deferred — not needed for internal deployments.
+> Internal CA covers all zero-trust use cases. ACME can be added later for public-facing edges.
 
 ---
 
@@ -1387,8 +1391,67 @@ For apps in `identity` mode (supporting both), you keep the login page as fallba
 
 ## Version Target
 
-This feature set targets **v0.11.0** (or v1.0.0 if we're feeling bold).
+Released as **v0.11.2**.
 
 ---
 
-_Last updated: 2026-03-21_
+## Implementation Notes (v0.11.2)
+
+### What Was Implemented
+
+**Phase 1 — Internal Certificate Authority**
+- `ZtlpNs.CertAuthority` — Root + intermediate CA generation, key management
+- `ZtlpNs.CertIssuer` — Service and client certificate issuance with ZTLP extensions
+- `ZtlpNs.X509` — Pure Erlang `:public_key`-based X.509 builder (zero external deps)
+- Attestation verification for YubiKey, TPM, Secure Enclave
+- Custom X.509 extensions: assurance level (OID ...59999.1), key source (...59999.2), attestation (...59999.3)
+
+**Phase 2 — Gateway TLS Listener & Session**
+- `ZtlpGateway.TlsListener` — Production TLS acceptor pool with mTLS support
+- `ZtlpGateway.TlsSession` — Full session lifecycle: handshake → identity → CRL check → policy → assurance → proxy
+- `ZtlpGateway.TlsIdentity` — mTLS identity extraction (NodeID, zone, assurance from X.509 cert)
+- `ZtlpGateway.SniRouter` — SNI-based backend routing with per-backend auth config
+- `ZtlpGateway.HttpHeaderInjector` — Identity header injection with HMAC-SHA256 signing
+- `ZtlpGateway.CertCache` — Certificate cache with TTL
+
+**Phase 3 — Client-Side CA Trust**
+- Rust agent: OS trust store installation (macOS, Linux, Windows)
+- Browser certificate installation (Chrome, Firefox, Safari)
+- Hardware key detection (YubiKey, TPM, Secure Enclave)
+
+**Phase 5A — TLS Audit Logging**
+- TLS events in `AuditLog`: connection established/closed, identity, policy, cert lifecycle
+- Structured JSON audit trail
+
+**Phase 5B — Prometheus Metrics**
+- TLS connection counters, handshake duration, bytes in/out
+- mTLS auth metrics, cert expiry tracking
+
+**Phase 5C — Certificate Revocation Integration**
+- `ZtlpGateway.CrlServer` — ETS-backed CRL with fingerprint + serial lookup
+- `TlsSession.check_revocation/1` — CRL check in the mTLS session pipeline
+- Revoked certs rejected with HTTP 403 `cert_revoked` before reaching backend
+- CRL changes take effect immediately on new connections (no caching delay)
+- Resilient to CrlServer not being started (graceful degradation)
+
+**Phase 6 — CLI, Config & Documentation**
+- YAML config: full TLS section with `cert_source`, `min_version`, `mtls` sub-section
+- Per-backend: `auth_mode`, `min_assurance`, `hostnames`, `required_groups`
+- CLI: `ztlp admin ca-init/ca-show/ca-export-root/ca-rotate-intermediate`
+- CLI: `ztlp admin cert-issue/cert-list/cert-show/cert-revoke`
+- Documentation: TLS architecture, passwordless guide, identity headers, internal CA
+
+### Phase 4 (ACME) — Deferred
+
+ACME/Let's Encrypt integration is not needed for internal zero-trust deployments where all clients install the ZTLP root CA via `ztlp setup`. The internal CA provides all necessary trust. ACME may be revisited for public-facing edges in a future release.
+
+### Test Coverage
+
+- Gateway: 555 tests (was 531 pre-revocation integration)
+- NS: 722 tests
+- Relay: 565 tests
+- Total: 1,842+ tests, 0 failures
+
+---
+
+_Last updated: 2026-03-24_

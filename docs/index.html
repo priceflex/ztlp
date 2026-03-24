@@ -611,7 +611,7 @@
       <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">☰</button>
       <a href="#overview" class="topbar-left" style="text-decoration:none;gap:10px;">
         <span class="logo-badge">ZTLP</span>
-        <span class="logo-title">Documentation <span>v0.11.1</span></span>
+        <span class="logo-title">Documentation <span>v0.11.2</span></span>
       </a>
     </div>
     <div class="topbar-right">
@@ -707,14 +707,15 @@
 
   <div class="callout">
     <div class="callout-title">🔬 Prototype Status</div>
-    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,500+ passing tests across Rust, Elixir, and C — including the v0.11.1 security-hardened implementation.</p>
+    <p>ZTLP is an experimental protocol with a working reference implementation. All 5 phases are complete with 2,600+ passing tests across Rust, Elixir, and C — including the v0.11.2 TLS termination and security-hardened implementation.</p>
   </div>
 
   <div class="callout success">
-    <div class="callout-title">🆕 New in v0.11.1 — Security Hardening</div>
-    <p><strong>Gateway:</strong> Identity header signing (HMAC-SHA256), nonce replay protection, timestamp expiry, UUID v4 request IDs, backend verification library. PolicyEngine hardened with protected ETS.</p>
-    <p><strong>Client:</strong> FFI input validation, panic recovery in recv loop, DNS RFC 1035 compliance, VIP loopback-only binding.</p>
-    <p><strong>2,526 total tests</strong> across all components, 0 failures.</p>
+    <div class="callout-title">🆕 New in v0.11.2 — TLS Termination & Passwordless Auth</div>
+    <p><strong>Gateway TLS:</strong> Full HTTPS reverse proxy with mTLS client certificate authentication, SNI-based routing, identity header injection (HMAC-SHA256 signed), CRL-based certificate revocation, assurance-level enforcement (hardware/device-bound/software), and passwordless auth for backend services.</p>
+    <p><strong>Internal CA:</strong> ZTLP-NS acts as its own Certificate Authority — issues short-lived X.509 certs with custom assurance extensions, attestation verification for YubiKey/TPM/Secure Enclave.</p>
+    <p><strong>YAML Config:</strong> Complete TLS configuration via <code>gateway.yaml</code> — cert source, mTLS settings, min TLS version, per-backend auth modes and assurance requirements.</p>
+    <p><strong>2,623 total tests</strong> across all components, 0 failures.</p>
   </div>
 
   <h2>What is ZTLP?</h2>
@@ -781,9 +782,9 @@ graph TB
       <tr><td><strong>Client</strong> (<code>proto/</code>)</td><td>Rust</td><td>Identity, Noise_XX handshake, encrypted transport</td><td>781</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding (zero-trust)</td><td>565</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>ZTLP-NS</strong> (<code>ns/</code>)</td><td>Elixir/OTP</td><td>Distributed trust namespace, Ed25519-signed records</td><td>722</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge with policy enforcement</td><td>458</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge, TLS termination, mTLS, policy enforcement</td><td>555</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>eBPF/XDP</strong> (<code>ebpf/</code>)</td><td>C</td><td>Kernel-level Layer 1+2 at NIC driver speed</td><td>—</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr style="font-weight:bold;background:var(--bg2,#f0fdf4);"><td colspan="3"><strong>Total</strong></td><td><strong>2,526</strong></td><td><span class="badge badge-green">All passing</span></td></tr>
+      <tr style="font-weight:bold;background:var(--bg2,#f0fdf4);"><td colspan="3"><strong>Total</strong></td><td><strong>2,623</strong></td><td><span class="badge badge-green">All passing</span></td></tr>
     </tbody>
   </table>
 
@@ -901,14 +902,14 @@ cd relay && mix test && cd ..
 # ZTLP-NS namespace — 722 tests
 cd ns && mix test && cd ..
 
-# Gateway — 458 tests
+# Gateway — 555 tests
 cd gateway && mix test && cd ..
 
 # Cross-language interop — 5 tests
 bash interop/run_test.sh</code></pre></div>
 
   <div class="callout success">
-    <div class="callout-title">✅ 2,526 tests, 0 failures</div>
+    <div class="callout-title">✅ 2,623 tests, 0 failures</div>
     <p>The full test suite covers packet serialization, pipeline admission, Noise_XX handshake, identity model, group-based policy, edge cases, integration tests, and cross-language interop.</p>
   </div>
 </section>
@@ -1510,7 +1511,7 @@ def delegate(parent, child) :: signed_delegation_record</code></pre></div>
   <h2 id="comp-gateway">Gateway <code>gateway/</code></h2>
   <div class="component-header">
     <span class="component-lang">Elixir/OTP</span>
-    <span class="badge badge-green">458 tests</span>
+    <span class="badge badge-green">555 tests</span>
     <span style="font-size:.85rem;color:var(--text3);">Phase 5 — ZTLP ↔ legacy TCP bridge, identity headers</span>
   </div>
 
@@ -1520,7 +1521,7 @@ def delegate(parent, child) :: signed_delegation_record</code></pre></div>
   <div class="code-block-wrapper"><pre><code class="language-bash">cd gateway
 mix compile
 iex -S mix    # Interactive
-mix test      # 458 tests, 0 failures</code></pre></div>
+mix test      # 555 tests, 0 failures</code></pre></div>
 
   <h3>Configuration</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir"># config/config.exs
@@ -1545,6 +1546,30 @@ config :ztlp_gateway, :header_signing_enabled, true
 config :ztlp_gateway, :header_signing_secret, System.get_env("ZTLP_HEADER_HMAC_SECRET")
 config :ztlp_gateway, :header_signing_timestamp_window, 60</code></pre></div>
 
+  <h3>YAML Configuration — TLS Termination <span class="badge badge-blue">v0.11.2</span></h3>
+  <div class="code-block-wrapper"><pre><code class="language-yaml"># gateway.yaml — TLS termination with mTLS and passwordless auth
+gateway:
+  port: 23097
+
+  tls:
+    enabled: true
+    port: 443
+    acceptors: 100
+    cert_source: internal         # internal | acme | manual
+    min_version: "1.2"            # "1.2" or "1.3"
+    mtls:
+      enabled: true
+      required: false             # true = reject clients without certs
+
+  backends:
+    - name: webapp
+      host: 127.0.0.1
+      port: 8080
+      hostnames:
+        - webapp.corp.ztlp
+      auth_mode: enforce          # passthrough | identity | enforce
+      min_assurance: software     # unknown | software | device_bound | hardware</code></pre></div>
+
   <h3>Supervision Tree</h3>
   <div class="code-block-wrapper"><pre><code class="language-elixir">ZtlpGateway.Application
 ├── ZtlpGateway.Stats              — Lock-free atomic counters
@@ -1559,7 +1584,12 @@ config :ztlp_gateway, :header_signing_timestamp_window, 60</code></pre></div>
 │   └── ZtlpGateway.Session        — GenServer per active session
 │       └── ZtlpGateway.Backend    — TCP connection to backend service
 ├── ZtlpGateway.Listener           — UDP socket, admission pipeline
-└── ZtlpGateway.RelayRegistrar     — Dynamic relay registration</code></pre></div>
+├── ZtlpGateway.RelayRegistrar     — Dynamic relay registration
+├── ZtlpGateway.CrlServer          — Certificate Revocation List (v0.11.2)
+├── ZtlpGateway.CertCache          — TLS certificate cache (v0.11.2)
+├── ZtlpGateway.SniRouter          — SNI-based backend routing (v0.11.2)
+└── ZtlpGateway.TlsListener        — TLS acceptor pool + mTLS (v0.11.2)
+    └── ZtlpGateway.TlsSession     — Per-connection: identity → CRL → policy → proxy</code></pre></div>
 
   <h3>Policy Rules</h3>
   <table>
@@ -2231,7 +2261,7 @@ mix credo</code></pre></div>
       <tr><td>Rust Client</td><td>781</td><td><code>cargo test</code></td></tr>
       <tr><td>Elixir Relay</td><td>565</td><td><code>mix test</code></td></tr>
       <tr><td>ZTLP-NS</td><td>722</td><td><code>mix test</code></td></tr>
-      <tr><td>Gateway</td><td>458</td><td><code>mix test</code></td></tr>
+      <tr><td>Gateway</td><td>555</td><td><code>mix test</code></td></tr>
       <tr><td>Interop</td><td>5</td><td><code>bash interop/run_test.sh</code></td></tr>
     </tbody>
   </table>

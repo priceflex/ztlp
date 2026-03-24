@@ -1,6 +1,6 @@
 # ZTLP Roadmap
 
-## Current Release: v0.9.13
+## Current Release: v0.11.2
 
 ---
 
@@ -101,19 +101,21 @@
 - Real Prometheus metrics fetched through encrypted ZTLP tunnel
 - Docker host networking for UDP, curl --http0.9 for tunnel HTTP, stderr-based readiness detection
 
-### TLS Termination & Passwordless Auth (v0.10.0) ✅
+### TLS Termination & Passwordless Auth (v0.10.0–v0.11.2) ✅
 - Internal Certificate Authority (NS CertAuthority, CertIssuer, X509 builder)
 - Attestation verification for hardware keys (TPM, YubiKey)
 - TLS listener with configurable acceptors and mTLS support
-- TLS session handler (full lifecycle: handshake → identity → policy → proxy)
+- TLS session handler (full lifecycle: handshake → identity → CRL check → policy → proxy)
 - mTLS identity extraction (NodeID, user, zone, assurance level from X.509)
 - SNI-based backend routing with per-backend auth modes
 - Identity header injection with HMAC-SHA256 signing
 - Header stripping (anti-spoofing)
 - Certificate cache with TTL
-- CRL distribution server
-- TLS audit events (connection, identity, policy, cert lifecycle)
-- Gateway YAML config: TLS section, per-backend auth_mode/min_assurance/hostnames/groups
+- CRL distribution server with certificate revocation integration (v0.11.2)
+- CRL check in mTLS session pipeline — revoked certs rejected before reaching backend (v0.11.2)
+- TLS audit events (connection, identity, policy, cert lifecycle, revocation checks)
+- Gateway YAML config: full TLS section with cert_source, min_version, mtls sub-section (v0.11.2)
+- Per-backend: auth_mode, min_assurance, hostnames, required_groups
 - OS trust store installation (macOS, Linux, Windows)
 - Browser certificate installation (Chrome, Firefox, Safari)
 - Hardware security key detection (YubiKey, TPM, Secure Enclave)
@@ -124,6 +126,7 @@
 - Bootstrap: Device assurance level tracking
 - Bootstrap: Policy auth_mode and min_assurance per service
 - Documentation: TLS architecture, passwordless guide, identity headers, internal CA, mTLS setup
+- Phase 4 (ACME/Let's Encrypt): Deferred — not needed for internal deployments
 
 ---
 

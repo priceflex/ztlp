@@ -34,6 +34,7 @@ defmodule ZtlpGateway.TlsSession do
 
   alias ZtlpGateway.{
     AuditLog,
+    CrlServer,
     HttpHeaderInjector,
     PolicyEngine,
     SniRouter,
@@ -76,6 +77,7 @@ defmodule ZtlpGateway.TlsSession do
     try do
       state
       |> extract_identity()
+      |> check_revocation()
       |> extract_connection_info()
       |> resolve_backend()
       |> check_policy()
@@ -150,6 +152,40 @@ defmodule ZtlpGateway.TlsSession do
   defp extract_identity(state) do
     identity = TlsIdentity.extract_from_socket(state.ssl_socket)
     %{state | identity: identity}
+  end
+
+  defp check_revocation(state) do
+    # Only check revocation if we have an authenticated identity with a fingerprint
+    case state.identity do
+      %{authenticated: true, cert_fingerprint: fp} when is_binary(fp) ->
+        # Check CRL if the CrlServer is running
+        revoked = crl_revoked?(fp)
+
+        try do
+          AuditLog.cert_revocation_checked(fp, revoked)
+        catch
+          _, _ -> :ok
+        end
+
+        if revoked do
+          throw({:session_reject, :cert_revoked, state})
+        else
+          state
+        end
+
+      _ ->
+        # No identity or no fingerprint — nothing to check
+        state
+    end
+  end
+
+  defp crl_revoked?(fingerprint) do
+    case GenServer.whereis(CrlServer) do
+      nil -> false
+      _pid -> CrlServer.revoked?(fingerprint)
+    end
+  catch
+    :exit, _ -> false
   end
 
   defp extract_connection_info(state) do
@@ -421,6 +457,13 @@ defmodule ZtlpGateway.TlsSession do
             403,
             "mtls_required",
             "Client certificate required for this service"
+          )
+
+        :cert_revoked ->
+          build_error_response(
+            403,
+            "cert_revoked",
+            "Client certificate has been revoked"
           )
 
         :insufficient_assurance ->

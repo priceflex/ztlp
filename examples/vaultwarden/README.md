@@ -16,9 +16,10 @@ graph LR
     end
 
     subgraph Server["Your Server"]
-        FW["Firewall<br/>Only 23097/udp open"]
+        FW["Firewall<br/>23097/udp + optional 443/tcp"]
         subgraph ZTLP["ZTLP Stack"]
             GW["ZTLP Gateway<br/>23097/udp"]
+            TLS["TLS Listener<br/>443/tcp (optional)"]
             NS["ZTLP-NS<br/>(internal)"]
             RL["ZTLP Relay<br/>23095/udp"]
         end
@@ -31,16 +32,27 @@ graph LR
         M["💻 MacBook<br/>ztlp agent"]
         P["📱 iPhone<br/>Bitwarden app"]
         L["🐧 Linux<br/>ztlp agent"]
+        Chrome["🌐 Browser<br/>mTLS client cert"]
     end
 
     M -->|"Encrypted ZTLP tunnel"| GW
     P -->|"Encrypted ZTLP tunnel"| GW
     L -->|"Encrypted ZTLP tunnel"| GW
+    Chrome -->|"HTTPS + mTLS"| TLS
     GW -->|"Identity verified ✓"| VW
+    TLS -->|"Identity verified ✓"| VW
     GW <-->|"Identity lookup"| NS
+    TLS <-->|"Identity lookup"| NS
 ```
 
-Your Bitwarden apps connect to `vault.home.ztlp` through the local ZTLP agent. The agent encrypts traffic and sends it through a ZTLP tunnel to the gateway. The gateway verifies the device's cryptographic identity, checks group policy, and only then forwards the request to Vaultwarden on the internal Docker network. Vaultwarden has **zero exposed ports** — it's invisible to the outside world.
+There are **two ways** to reach Vaultwarden — choose one or both:
+
+| Path | How it works | Port exposed | Best for |
+|------|-------------|-------------|----------|
+| **ZTLP/UDP** (primary) | Bitwarden apps connect via the local ZTLP agent | 23097/udp only | Maximum security — zero HTTP surface |
+| **TLS/HTTPS** (optional) | Any browser connects directly via mTLS client cert | 443/tcp | Convenience — browser access without an agent |
+
+Both paths use the **same gateway**, **same policy engine**, **same identity model**, and **same audit log**. The ZTLP/UDP path is the default — zero exposed HTTP ports, invisible to the internet. The TLS path is optional and trades some attack surface (exposing port 443) for the convenience of direct browser access. See [Browser Access via TLS](#browser-access-via-tls-optional) below.
 
 ### What's Different from a VPN?
 
@@ -55,6 +67,8 @@ Your Bitwarden apps connect to `vault.home.ztlp` through the local ZTLP agent. T
 | **Service isolation** | VPN gives network access (lateral movement risk) | Per-service authorization — each service has its own policy |
 
 With a VPN, once you're connected you have network-level access. With ZTLP, each service (Vaultwarden, SSH, whatever) has its own access policy — compromising one device doesn't give access to services it's not authorized for.
+
+> **New in v0.11.2:** The TLS/HTTPS path adds browser access with mTLS client certificates. Even on this path, ZTLP enforces per-service policy and cryptographic identity — unlike a VPN which gives broad network access. The mTLS certificate IS the login — no passwords, no MFA tokens.
 
 ---
 
@@ -278,6 +292,148 @@ Your passwords sync through the encrypted ZTLP tunnel. No ports exposed on your 
 
 ---
 
+## Browser Access via TLS (Optional)
+
+> **New in v0.11.2.** This section is entirely optional — skip it if you only want the ZTLP agent path.
+
+With TLS termination, you can access Vaultwarden directly from any browser via HTTPS — no ZTLP agent needed. The gateway uses **mTLS (mutual TLS)** to verify the browser's identity using a client certificate, then injects trusted identity headers into the request. Same policy engine, same audit trail, same cryptographic identity — just a different transport.
+
+This is useful for:
+- Accessing your vault from a device without the ZTLP agent installed
+- Using the Vaultwarden web UI directly in a browser
+- Sharing access with someone who doesn't want to install the agent (yet)
+
+### How It Works (TLS Path)
+
+```mermaid
+sequenceDiagram
+    participant Browser as 🌐 Browser<br/>(with client cert)
+    participant GW as ZTLP Gateway<br/>(443/tcp)
+    participant NS as ZTLP-NS
+    participant VW as Vaultwarden<br/>(internal:80)
+
+    Browser->>GW: TLS ClientHello + client cert<br/>SNI: vault.home.ztlp
+    Note over GW: mTLS handshake<br/>Verify client cert against CA
+    GW->>NS: Extract NodeID from cert SAN<br/>Look up identity + groups
+    NS-->>GW: ✓ macbook.home.ztlp<br/>Owner: steve@home.ztlp<br/>Groups: [family@home.ztlp]
+    Note over GW: Policy check: family@home.ztlp<br/>→ allowed for vault service ✓
+    Note over GW: Inject X-ZTLP-* headers<br/>(HMAC-signed)
+    Browser->>GW: GET /api/sync<br/>Host: vault.home.ztlp
+    GW->>VW: GET /api/sync<br/>X-ZTLP-Identity: steve@home.ztlp<br/>X-ZTLP-Device: macbook.home.ztlp<br/>X-ZTLP-Assurance: software<br/>X-ZTLP-Signature: sha256=a1b2c3...
+    VW-->>GW: 200 OK (vault data)
+    GW-->>Browser: 200 OK (HTTPS response)
+```
+
+### Step 1: Initialize the Certificate Authority
+
+The ZTLP gateway acts as its own internal CA. Initialize it once:
+
+```bash
+# Initialize the CA (creates root + intermediate certificates)
+ztlp admin ca init --org "Home Lab"
+
+# Verify it was created
+ztlp admin ca show
+```
+
+### Step 2: Issue a Service Certificate
+
+Issue a TLS certificate for the Vaultwarden service:
+
+```bash
+# Issue a cert for vault.home.ztlp
+ztlp admin cert issue --service vault.home.ztlp
+
+# The cert and key are saved to ~/.ztlp/certs/
+# Copy them to the certs/ directory for Docker:
+mkdir -p certs ca
+cp ~/.ztlp/certs/vault.home.ztlp.pem certs/
+cp ~/.ztlp/certs/vault.home.ztlp-key.pem certs/
+cp ~/.ztlp/ca/chain.pem ca/
+```
+
+### Step 3: Enable TLS in Docker Compose
+
+Uncomment the TLS settings in `docker-compose.yml`:
+
+```yaml
+# In the gateway service:
+ports:
+  - "23097:23097/udp"          # ZTLP protocol (always on)
+  - "443:8443/tcp"             # TLS listener (browser access)
+
+environment:
+  # ... existing vars ...
+  ZTLP_GATEWAY_TLS_ENABLED: "true"
+  ZTLP_GATEWAY_TLS_PORT: "8443"
+  ZTLP_GATEWAY_TLS_CERT_FILE: "/etc/ztlp/certs/vault.home.ztlp.pem"
+  ZTLP_GATEWAY_TLS_KEY_FILE: "/etc/ztlp/certs/vault.home.ztlp-key.pem"
+  ZTLP_GATEWAY_TLS_CA_CERT_FILE: "/etc/ztlp/ca/chain.pem"
+
+volumes:
+  - ./policy.toml:/etc/ztlp/policy.toml:ro
+  - ./certs:/etc/ztlp/certs:ro
+  - ./ca:/etc/ztlp/ca:ro
+```
+
+Or uncomment them in `.env`:
+
+```bash
+ZTLP_GATEWAY_TLS_ENABLED=true
+ZTLP_GATEWAY_TLS_PORT=8443
+ZTLP_GATEWAY_TLS_CERT_FILE=/etc/ztlp/certs/vault.home.ztlp.pem
+ZTLP_GATEWAY_TLS_KEY_FILE=/etc/ztlp/certs/vault.home.ztlp-key.pem
+ZTLP_GATEWAY_TLS_CA_CERT_FILE=/etc/ztlp/ca/chain.pem
+```
+
+Then restart:
+
+```bash
+docker compose up -d
+```
+
+### Step 4: Trust the CA and Install Client Cert on Your Device
+
+On each device that needs browser access:
+
+```bash
+# Install the ZTLP root CA into your system trust store
+# AND install your client certificate into the browser keychain
+ztlp setup --trust-ca --install-client-cert
+```
+
+This does two things:
+1. **Trusts the CA** — your browser will show a green lock for `vault.home.ztlp`
+2. **Installs a client cert** — your browser can prove your identity via mTLS
+
+### Step 5: Open Vaultwarden in Your Browser
+
+Navigate to `https://vault.home.ztlp` in Chrome, Safari, or Firefox. Your browser will:
+
+1. Prompt you to select a client certificate (first time only — most browsers remember)
+2. Complete the mTLS handshake
+3. Load Vaultwarden — you're in
+
+That's it. No password, no VPN, no agent. The mTLS certificate proves your identity at the network layer. The gateway injects `X-ZTLP-Identity` headers so Vaultwarden knows who you are.
+
+> **Tip:** For DNS resolution, either add `vault.home.ztlp` to your `/etc/hosts` pointing to your server's IP, or run `sudo ztlp dns install` (the same DNS resolver works for both paths).
+
+### UDP-Only vs UDP + TLS
+
+| | UDP Only (default) | UDP + TLS |
+|---|---|---|
+| **Ports exposed** | 23097/udp | 23097/udp + 443/tcp |
+| **Attack surface** | Zero HTTP surface | mTLS on 443 (client cert required) |
+| **Requires agent** | Yes | Agent OR browser with client cert |
+| **DDoS resistance** | Maximum (UDP pipeline) | TCP 443 is more attackable than UDP |
+| **Passwordless** | Via ZTLP headers (always) | Via mTLS + ZTLP headers |
+| **Setup complexity** | Agent install per device | Agent OR CA trust + client cert |
+| **Best for** | Maximum security | Convenience + good security |
+
+**Our recommendation:** Start with UDP-only. Add TLS when you need browser access. Both paths share the same policy, so you can enable TLS at any time without changing your access rules.
+
+---
+
 ## How It Works
 
 Here's the full request flow when the Bitwarden app on your MacBook syncs passwords:
@@ -302,6 +458,31 @@ sequenceDiagram
     GW-->>Agent: Encrypted ZTLP response
     Agent-->>BW: 200 OK
 ```
+
+### TLS Path (Browser → HTTPS)
+
+When you open `https://vault.home.ztlp` directly in a browser with a client certificate:
+
+```mermaid
+sequenceDiagram
+    participant Browser as 🌐 Chrome
+    participant GW as ZTLP Gateway<br/>(443/tcp TLS)
+    participant NS as ZTLP-NS
+    participant VW as Vaultwarden<br/>(internal:80)
+
+    Browser->>GW: TLS ClientHello<br/>SNI: vault.home.ztlp<br/>+ client certificate
+    Note over GW: Verify cert chain<br/>Extract NodeID from SAN<br/>Read assurance from X.509 extensions
+    GW->>NS: Resolve NodeID<br/>+ group membership
+    NS-->>GW: ✓ steve-macbook.home.ztlp<br/>Groups: [family@home.ztlp]<br/>Assurance: software
+    Note over GW: Policy check: family@home.ztlp<br/>→ allowed for vault ✓<br/>Assurance: software ≥ software ✓
+    Browser->>GW: GET /vault<br/>Host: vault.home.ztlp
+    Note over GW: Strip forged X-ZTLP-* headers<br/>Inject authenticated headers<br/>Sign with HMAC
+    GW->>VW: GET /vault<br/>X-ZTLP-Identity: steve@home.ztlp<br/>X-ZTLP-Device: steve-macbook.home.ztlp<br/>X-ZTLP-Groups: family<br/>X-ZTLP-Assurance: software<br/>X-ZTLP-Signature: sha256=9f8e7d...
+    VW-->>GW: 200 OK
+    GW-->>Browser: 200 OK (HTTPS)
+```
+
+Both paths produce identical `X-ZTLP-*` headers. Vaultwarden can't tell (and doesn't need to know) whether the request came via UDP or TLS.
 
 ### The Identity Headers
 
@@ -335,14 +516,25 @@ allow = [
   "family@home.ztlp",
   "team@home.ztlp",
 ]
+auth_mode = "identity"       # inject headers if mTLS cert present
+min_assurance = "software"   # any enrolled device accepted
 ```
 
-When a connection arrives:
-1. Gateway extracts the device's NodeID from the ZTLP session
+When a connection arrives (via either UDP or TLS):
+1. Gateway extracts the device's identity — NodeID from the ZTLP session **or** client cert SAN
 2. Queries NS for the device record, owner user, and group memberships
 3. Checks if any of the device's groups match the `allow` list for the `vault` service
-4. If no match → connection rejected (the device never reaches Vaultwarden)
-5. If match → connection allowed, headers injected, traffic forwarded
+4. If TLS path: checks `min_assurance` — is the client cert's key assurance level sufficient?
+5. If no match → connection rejected (the device never reaches Vaultwarden)
+6. If match → connection allowed, headers injected, traffic forwarded
+
+The `auth_mode` controls what happens with the identity on the TLS path:
+
+| Mode | mTLS Required | Headers Injected | Use Case |
+|------|:---:|:---:|------|
+| `passthrough` | No | No | Legacy apps, public services |
+| `identity` | Optional | Yes (if cert present) | Apps that support both password and passwordless login |
+| `enforce` | **Yes** | Yes | Pure passwordless — the cert IS the login |
 
 This is **default-deny**. If you remove someone from the `family@home.ztlp` group, they immediately lose access to the vault. No VPN reconfiguration, no firewall changes — just remove them from the group.
 
@@ -362,31 +554,49 @@ graph LR
         Note1["Attack surface:<br/>• TLS bugs<br/>• HTTP exploits<br/>• Brute force<br/>• DDoS"]
     end
 
-    subgraph ZTLP_Setup["ZTLP Setup"]
+    subgraph ZTLP_Setup["ZTLP Setup (UDP-only)"]
         B["Authorized Device<br/>with crypto identity"] -->|"ZTLP :23097/udp"| GW2["ZTLP Gateway"]
         GW2 -->|"Identity verified"| VW2["Vaultwarden"]
         C["Anyone else"] -.->|"❌ Dropped in 19ns"| GW2
         Note2["Attack surface:<br/>• None visible<br/>• No TCP to exploit<br/>• No HTTP to abuse"]
     end
+
+    subgraph ZTLP_TLS["ZTLP Setup (UDP + TLS)"]
+        D["Enrolled Device<br/>with mTLS client cert"] -->|"HTTPS :443 (mTLS)"| GW3["ZTLP Gateway"]
+        GW3 -->|"Identity verified"| VW3["Vaultwarden"]
+        E["No client cert"] -.->|"❌ TLS rejected"| GW3
+        Note3["Attack surface:<br/>• Port 443 visible<br/>• But mTLS required<br/>• No anonymous access"]
+    end
 ```
 
-| Threat | Traditional (port-forwarded) | ZTLP |
-|--------|------------------------------|------|
-| **Port scanning** | Ports 80/443 visible to the world | No ports to discover — service is invisible |
-| **TLS vulnerabilities** | Must keep TLS stack patched | No TLS facing the internet — tunnel is Noise_XX |
-| **Credential stuffing** | Login page is public | Can't even reach the login page without device identity |
-| **Zero-day HTTP exploits** | Any HTTP request reaches your server | Invalid packets dropped at Layer 1 before any HTTP parsing |
-| **DDoS** | Server must handle flood traffic | Three-layer pipeline: magic byte (19ns) → session lookup → AEAD verify |
-| **Compromised device** | Revoke password, hope they don't know it | Revoke device identity → instant, cryptographic lockout |
+| Threat | Traditional (port-forwarded) | ZTLP (UDP only) | ZTLP (UDP + TLS) |
+|--------|------------------------------|------------------|-------------------|
+| **Port scanning** | Ports 80/443 visible | Service invisible — no ports | 443/tcp visible, but mTLS-only |
+| **TLS vulnerabilities** | Must keep TLS patched | No TLS facing internet | TLS facing internet, but client cert required |
+| **Credential stuffing** | Login page is public | Can't reach login without device identity | Can't reach login without client cert |
+| **Zero-day HTTP exploits** | Any HTTP request reaches server | Dropped at Layer 1 in 19ns | Only mTLS-authenticated requests reach HTTP |
+| **DDoS** | Must handle flood traffic | Three-layer UDP pipeline | TCP is more attackable than UDP pipeline |
+| **Compromised device** | Revoke password, hope they don't know it | Revoke device identity → instant lockout | Revoke cert → instant lockout |
 
-### Zero Attack Surface
+### Zero Attack Surface (UDP Mode)
 
-With ZTLP, Vaultwarden has literally zero attack surface from the internet:
+In the default UDP-only mode, Vaultwarden has literally zero attack surface from the internet:
 
 - **No TCP ports open** — nothing for nmap to find
 - **No HTTP/HTTPS** — no web vulnerabilities to exploit
 - **No DNS records** — `vault.home.ztlp` doesn't exist in public DNS
 - The ZTLP gateway accepts only authenticated ZTLP packets over UDP — everything else is dropped before any state is allocated
+
+### Reduced Attack Surface (TLS Mode)
+
+If you enable the optional TLS listener, port 443 becomes visible — but it's **not an open door**:
+
+- **mTLS required** — connections without a valid client certificate are rejected during the TLS handshake, before any HTTP is parsed
+- **Certificate must be issued by YOUR CA** — self-signed or random certs don't work
+- **Identity checked against policy** — even with a valid cert, you still need to be in the right group
+- **No anonymous access** — there's no login page to brute-force because there's no login page at all (in `enforce` mode)
+
+It's a meaningful tradeoff: you expose one TCP port, but an attacker needs a valid client certificate from your private CA just to complete the handshake. That's a much smaller attack surface than traditional port forwarding where anyone with a browser can reach your login page.
 
 ### Cryptographic Device Identity
 
@@ -614,6 +824,42 @@ The Vaultwarden admin panel is at `https://vault.home.ztlp/admin`. It's only acc
 2. `VAULTWARDEN_ADMIN_TOKEN` is set in `.env`
 3. You're accessing it via `vault.home.ztlp` (not `localhost`)
 
+### Browser shows "certificate required" or connection refused (TLS)
+
+**Symptom:** Browser can't connect to `https://vault.home.ztlp` or shows a certificate error.
+
+**Checks:**
+1. Is TLS enabled on the gateway?
+   ```bash
+   docker compose logs gateway | grep -i tls
+   ```
+2. Is the client cert installed in your browser?
+   ```bash
+   # macOS — check keychain
+   security find-certificate -a -c "home.ztlp" ~/Library/Keychains/login.keychain-db
+   
+   # Linux — check NSS db (Chrome)
+   certutil -d sql:$HOME/.pki/nssdb -L
+   ```
+3. Is the ZTLP root CA trusted?
+   ```bash
+   ztlp admin ca show
+   ```
+4. Re-install if needed:
+   ```bash
+   ztlp setup --trust-ca --install-client-cert
+   ```
+
+### "Insufficient assurance" error (TLS)
+
+**Symptom:** Gateway returns 403 with `insufficient_assurance`.
+
+**Fix:** Your `min_assurance` in `policy.toml` is higher than your key's assurance level. Either lower `min_assurance` or re-enroll with a hardware key:
+
+```bash
+ztlp setup --hardware-key    # Use YubiKey, TPM, or Secure Enclave
+```
+
 ### NAT traversal issues
 
 If your devices are behind carrier-grade NAT or restrictive firewalls:
@@ -636,7 +882,12 @@ If your devices are behind carrier-grade NAT or restrictive firewalls:
 examples/vaultwarden/
 ├── docker-compose.yml   # The complete stack
 ├── .env.example         # Environment variable template
-├── policy.toml          # Gateway access policy
+├── policy.toml          # Gateway access policy (groups, auth_mode, min_assurance)
+├── certs/               # TLS certificates (created during TLS setup)
+│   ├── vault.home.ztlp.pem
+│   └── vault.home.ztlp-key.pem
+├── ca/                  # CA chain (created during TLS setup)
+│   └── chain.pem
 └── README.md            # This file
 ```
 

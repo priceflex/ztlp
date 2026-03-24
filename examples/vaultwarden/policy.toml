@@ -4,6 +4,11 @@
 #
 # Default: deny all. Only identities in the listed groups can
 # access the password manager through the ZTLP gateway.
+#
+# Two access paths share this policy:
+#   1. ZTLP/UDP (agent) — Noise_XX identity from tunnel session
+#   2. TLS/HTTPS (browser) — mTLS identity from client certificate
+# Both paths use the same allow list, audit log, and identity model.
 
 default = "deny"
 
@@ -13,3 +18,19 @@ allow = [
   "family@home.ztlp",
   "team@home.ztlp",
 ]
+auth_mode = "identity"       # inject X-ZTLP-* headers if mTLS cert present; passthrough otherwise
+min_assurance = "software"   # any enrolled device accepted (software key or better)
+
+# ── Pure passwordless mode (optional) ─────────────────────
+# Uncomment below and remove the section above to REQUIRE mTLS
+# for all connections. No login page — the certificate IS the login.
+# Only use this if all your devices have client certs enrolled.
+#
+# [[services]]
+# name = "vault"
+# allow = [
+#   "family@home.ztlp",
+#   "team@home.ztlp",
+# ]
+# auth_mode = "enforce"        # mTLS required — reject clients without certs
+# min_assurance = "software"   # "device-bound" or "hardware" for stricter security

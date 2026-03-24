@@ -44,6 +44,24 @@ defmodule ZtlpGateway.Session do
   }
 
   # ---------------------------------------------------------------------------
+  # Constants
+  # ---------------------------------------------------------------------------
+
+  # Tunnel frame types (must match Rust tunnel.rs constants)
+  @frame_data 0x00
+  @frame_ack 0x01
+  @frame_fin 0x02
+  @frame_nack 0x03
+  @frame_reset 0x04
+
+  # ARQ constants (KCP-inspired)
+  @initial_rto_ms 500
+  @min_rto_ms 200
+  @max_rto_ms 10_000
+  @max_retransmits 8
+  @retransmit_check_interval_ms 50
+
+  # ---------------------------------------------------------------------------
   # Types
   # ---------------------------------------------------------------------------
 
@@ -130,7 +148,14 @@ defmodule ZtlpGateway.Session do
       timeout_ms: timeout_ms,
       timer_ref: schedule_timeout(timeout_ms),
       # Buffer for packets that arrive before handshake completes
-      pending_packets: []
+      pending_packets: [],
+      # Send buffer for retransmission (KCP-inspired ARQ)
+      # %{packet_seq => {packet_binary, sent_at_mono, retransmit_count, data_seq}}
+      send_buffer: %{},
+      rto_ms: @initial_rto_ms,
+      srtt_ms: nil,
+      rttvar_ms: nil,
+      retransmit_timer_ref: nil
     }
 
     {:ok, state}
@@ -193,6 +218,47 @@ defmodule ZtlpGateway.Session do
   # Idle timeout
   def handle_info(:session_timeout, state) do
     terminate_session(state, :timeout)
+  end
+
+  # Retransmit timer — check send_buffer for timed-out packets
+  def handle_info(:retransmit_check, state) do
+    now = System.monotonic_time(:millisecond)
+
+    {state, expired_count} =
+      Enum.reduce(state.send_buffer, {state, 0}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, exp_count} ->
+        elapsed = now - sent_at
+
+        cond do
+          retransmit_count >= @max_retransmits ->
+            Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
+
+          elapsed > acc.rto_ms ->
+            Logger.debug("[Session] RTO retransmit data_seq=#{ds} packet_seq=#{seq} elapsed=#{elapsed}ms rto=#{acc.rto_ms}ms attempt=#{retransmit_count + 1}")
+            send_udp(acc, packet)
+            updated_entry = {packet, now, retransmit_count + 1, ds}
+            {%{acc | send_buffer: Map.put(acc.send_buffer, seq, updated_entry)}, exp_count}
+
+          true ->
+            {acc, exp_count}
+        end
+      end)
+
+    if expired_count > 0 do
+      Logger.debug("[Session] RTO: dropped #{expired_count} packets exceeding max retransmits")
+    end
+
+    # Reschedule if buffer is non-empty
+    retransmit_timer_ref =
+      if map_size(state.send_buffer) > 0 do
+        interval = min(div(state.rto_ms, 2), @retransmit_check_interval_ms)
+        interval = max(interval, 10)
+        Process.send_after(self(), :retransmit_check, interval)
+      else
+        nil
+      end
+
+    {:noreply, %{state | retransmit_timer_ref: retransmit_timer_ref}}
   end
 
   # Ignore stale timers
@@ -344,12 +410,6 @@ defmodule ZtlpGateway.Session do
   # Data packets — decrypt and forward to backend
   # ---------------------------------------------------------------------------
 
-  # Tunnel frame types (must match Rust tunnel.rs constants)
-  @frame_data 0x00
-  @frame_ack 0x01
-  @frame_nack 0x03
-  @frame_reset 0x04
-
   defp handle_data_packet(packet_data, _from_addr, state) do
     case Packet.parse(packet_data) do
       {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}} when type in [:data, :data_compact] ->
@@ -410,13 +470,70 @@ defmodule ZtlpGateway.Session do
     {:noreply, state}
   end
 
+  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, _rest::binary>>, state) do
+    # Cumulative ACK from client: "I've received everything up to and including data_seq N"
+    now = System.monotonic_time(:millisecond)
+
+    {acked_entries, remaining} =
+      Enum.split_with(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
+        is_integer(ds) and ds <= acked_data_seq
+      end)
+
+    # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
+    state =
+      Enum.reduce(acked_entries, state, fn {_seq, {_pkt, sent_at, retransmit_count, _ds}}, acc ->
+        if retransmit_count == 0 do
+          update_rtt(acc, now - sent_at)
+        else
+          acc
+        end
+      end)
+
+    send_buffer = Map.new(remaining)
+
+    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, removed #{length(acked_entries)} from send_buffer, #{map_size(send_buffer)} remaining")
+
+    {:noreply, %{state | send_buffer: send_buffer}}
+  end
+
   defp handle_tunnel_frame(<<@frame_ack, _rest::binary>>, state) do
-    # ACK from client — ignore for now (gateway doesn't retransmit)
+    # Malformed ACK (too short) — ignore
+    {:noreply, state}
+  end
+
+  defp handle_tunnel_frame(<<@frame_nack, count::big-16, rest::binary>>, state) do
+    # NACK from client: list of missing data_seqs to retransmit immediately
+    nacked_data_seqs = parse_nack_seqs(rest, count, [])
+    Logger.info("[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}")
+
+    now = System.monotonic_time(:millisecond)
+
+    state =
+      Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->
+        # Find the send_buffer entry matching this data_seq
+        case Enum.find(acc.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == nacked_ds end) do
+          {seq, {packet, _sent_at, retransmit_count, ds}} ->
+            if retransmit_count < @max_retransmits do
+              Logger.info("[Session] NACK retransmit data_seq=#{ds} packet_seq=#{seq} attempt=#{retransmit_count + 1}")
+              send_udp(acc, packet)
+              updated_entry = {packet, now, retransmit_count + 1, ds}
+              %{acc | send_buffer: Map.put(acc.send_buffer, seq, updated_entry)}
+            else
+              Logger.warning("[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping")
+              %{acc | send_buffer: Map.delete(acc.send_buffer, seq)}
+            end
+
+          nil ->
+            Logger.debug("[Session] NACK for unknown data_seq=#{nacked_ds}, ignoring")
+            acc
+        end
+      end)
+
     {:noreply, state}
   end
 
   defp handle_tunnel_frame(<<@frame_nack, _rest::binary>>, state) do
-    # NACK from client — ignore for now
+    # Malformed NACK (too short for count) — ignore
     {:noreply, state}
   end
 
@@ -493,7 +610,20 @@ defmodule ZtlpGateway.Session do
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))
 
-    {:ok, %{state | send_seq: seq, send_data_seq: data_seq + 1, bytes_out: state.bytes_out + byte_size(packet)}}
+    # Store in send buffer for retransmission
+    now = System.monotonic_time(:millisecond)
+    send_buffer = Map.put(state.send_buffer, seq, {packet, now, 0, data_seq})
+
+    # Schedule retransmit timer if not already scheduled
+    retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
+
+    {:ok, %{state |
+      send_seq: seq,
+      send_data_seq: data_seq + 1,
+      bytes_out: state.bytes_out + byte_size(packet),
+      send_buffer: send_buffer,
+      retransmit_timer_ref: retransmit_timer_ref
+    }}
   end
 
   # ---------------------------------------------------------------------------
@@ -540,6 +670,14 @@ defmodule ZtlpGateway.Session do
   end
 
   defp terminate_session(state, reason) do
+    # Send FIN to client if we have transport keys
+    state =
+      if state.r2i_key do
+        send_fin(state)
+      else
+        state
+      end
+
     duration = System.monotonic_time(:millisecond) - state.started_at
 
     AuditLog.session_terminated(
@@ -552,4 +690,76 @@ defmodule ZtlpGateway.Session do
 
     {:stop, :normal, state}
   end
+
+  # ---------------------------------------------------------------------------
+  # ARQ helpers — send buffer, retransmit, RTT estimation
+  # ---------------------------------------------------------------------------
+
+  # Send FIN frame to client with final data_seq
+  defp send_fin(state) do
+    seq = state.send_seq + 1
+    nonce = <<0::32, seq::little-64>>
+    fin_frame = <<@frame_fin, state.send_data_seq::big-64>>
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, fin_frame, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+
+    send_udp(state, packet)
+
+    # Buffer the FIN for retransmission
+    now = System.monotonic_time(:millisecond)
+    send_buffer = Map.put(state.send_buffer, seq, {packet, now, 0, :fin})
+    retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
+
+    Logger.info("[Session] Sent FIN with final data_seq=#{state.send_data_seq}")
+
+    %{state | send_seq: seq, send_buffer: send_buffer, retransmit_timer_ref: retransmit_timer_ref}
+  end
+
+  # Update RTT estimates using TCP-style EWMA (RFC 6298)
+  defp update_rtt(state, rtt) when rtt > 0 do
+    case state.srtt_ms do
+      nil ->
+        # First RTT measurement
+        srtt = rtt
+        rttvar = div(rtt, 2)
+        rto = srtt + max(100, 4 * rttvar)
+        rto = clamp_rto(rto)
+        %{state | srtt_ms: srtt, rttvar_ms: rttvar, rto_ms: rto}
+
+      srtt ->
+        # Subsequent measurements: EWMA
+        rttvar = div(3 * state.rttvar_ms, 4) + div(abs(rtt - srtt), 4)
+        new_srtt = div(7 * srtt, 8) + div(rtt, 8)
+        rto = new_srtt + max(100, 4 * rttvar)
+        rto = clamp_rto(rto)
+        %{state | srtt_ms: new_srtt, rttvar_ms: rttvar, rto_ms: rto}
+    end
+  end
+
+  defp update_rtt(state, _rtt), do: state
+
+  defp clamp_rto(rto) do
+    rto |> max(@min_rto_ms) |> min(@max_rto_ms)
+  end
+
+  # Parse NACK payload: N x 8-byte big-endian data_seqs
+  defp parse_nack_seqs(_rest, 0, acc), do: Enum.reverse(acc)
+  defp parse_nack_seqs(<<ds::big-64, rest::binary>>, remaining, acc) when remaining > 0 do
+    parse_nack_seqs(rest, remaining - 1, [ds | acc])
+  end
+  defp parse_nack_seqs(_rest, _remaining, acc), do: Enum.reverse(acc)
+
+  # Schedule retransmit timer if not already scheduled
+  defp schedule_retransmit_timer(nil, rto_ms) do
+    interval = min(div(rto_ms, 2), @retransmit_check_interval_ms)
+    interval = max(interval, 10)
+    Process.send_after(self(), :retransmit_check, interval)
+  end
+  defp schedule_retransmit_timer(existing_ref, _rto_ms), do: existing_ref
 end

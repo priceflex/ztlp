@@ -83,6 +83,54 @@ pub struct NsConfig {
     pub cache_ttl_override: u64,
 }
 
+/// Relay addresses — accepts a single string or a list of strings in TOML.
+///
+/// ```toml
+/// relay = "host:port"           # single relay
+/// relays = ["h1:p1", "h2:p2"]  # multiple relays
+/// ```
+#[derive(Debug, Clone)]
+pub struct RelayAddrs(pub Vec<String>);
+
+impl Default for RelayAddrs {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<'de> Deserialize<'de> for RelayAddrs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct RelayAddrsVisitor;
+
+        impl<'de> de::Visitor<'de> for RelayAddrsVisitor {
+            type Value = RelayAddrs;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a relay address string or list of strings")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<RelayAddrs, E> {
+                Ok(RelayAddrs(vec![v.to_string()]))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<RelayAddrs, A::Error> {
+                let mut addrs = Vec::new();
+                while let Some(s) = seq.next_element::<String>()? {
+                    addrs.push(s);
+                }
+                Ok(RelayAddrs(addrs))
+            }
+        }
+
+        deserializer.deserialize_any(RelayAddrsVisitor)
+    }
+}
+
 /// Tunnel configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -109,7 +157,9 @@ pub struct TunnelConfig {
     pub prefer_relay: bool,
 
     /// Static relay addresses.
-    pub relays: Vec<String>,
+    /// Accepts either `relays = [...]` (array) or `relay = "addr"` (single string).
+    #[serde(alias = "relay")]
+    pub relays: RelayAddrs,
 
     /// Maximum concurrent tunnels.
     pub max_tunnels: usize,
@@ -193,7 +243,7 @@ impl Default for TunnelConfig {
             reconnect_backoff_initial: "1s".to_string(),
             reconnect_backoff_max: "60s".to_string(),
             prefer_relay: false,
-            relays: Vec::new(),
+            relays: RelayAddrs::default(),
             max_tunnels: 256,
         }
     }

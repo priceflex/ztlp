@@ -128,7 +128,9 @@ defmodule ZtlpGateway.Session do
       started_at: System.monotonic_time(:millisecond),
       # Timeout
       timeout_ms: timeout_ms,
-      timer_ref: schedule_timeout(timeout_ms)
+      timer_ref: schedule_timeout(timeout_ms),
+      # Buffer for packets that arrive before handshake completes
+      pending_packets: []
     }
 
     {:ok, state}
@@ -144,10 +146,21 @@ defmodule ZtlpGateway.Session do
 
     case state.phase do
       :awaiting_msg1 ->
-        handle_handshake_msg1(packet_data, from_addr, state)
+        # Check if it's a handshake packet; buffer data packets for later
+        if Packet.handshake?(packet_data) do
+          handle_handshake_msg1(packet_data, from_addr, state)
+        else
+          Logger.debug("[Session] Buffering #{byte_size(packet_data)} byte packet during msg1 phase")
+          {:noreply, %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+        end
 
       :awaiting_msg3 ->
-        handle_handshake_msg3(packet_data, from_addr, state)
+        if Packet.handshake?(packet_data) do
+          handle_handshake_msg3(packet_data, from_addr, state)
+        else
+          Logger.debug("[Session] Buffering #{byte_size(packet_data)} byte packet during msg3 phase")
+          {:noreply, %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+        end
 
       :established ->
         handle_data_packet(packet_data, from_addr, state)
@@ -279,15 +292,21 @@ defmodule ZtlpGateway.Session do
                         state.service
                       )
 
-                      {:noreply,
-                       %{
-                         state
-                         | handshake: hs,
-                           phase: :established,
-                           i2r_key: keys.i2r_key,
-                           r2i_key: keys.r2i_key,
-                           backend_pid: backend_pid
-                       }}
+                      new_state =
+                        %{
+                          state
+                          | handshake: hs,
+                            phase: :established,
+                            i2r_key: keys.i2r_key,
+                            r2i_key: keys.r2i_key,
+                            backend_pid: backend_pid,
+                            pending_packets: []
+                        }
+
+                      # Process any packets that arrived during handshake
+                      new_state = process_pending_packets(Enum.reverse(state.pending_packets), new_state)
+
+                      {:noreply, new_state}
 
                     {:error, reason} ->
                       Logger.warning("[Session] Backend connect failed: #{inspect(reason)}")
@@ -506,6 +525,18 @@ defmodule ZtlpGateway.Session do
   defp reset_timeout(state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
     %{state | timer_ref: schedule_timeout(state.timeout_ms)}
+  end
+
+  defp process_pending_packets([], state), do: state
+  defp process_pending_packets([{packet_data, from_addr} | rest], state) do
+    Logger.info("[Session] Processing buffered #{byte_size(packet_data)} byte packet")
+    case handle_data_packet(packet_data, from_addr, state) do
+      {:noreply, new_state} ->
+        process_pending_packets(rest, new_state)
+      {:stop, _reason, new_state} ->
+        # Session terminating, stop processing
+        new_state
+    end
   end
 
   defp terminate_session(state, reason) do

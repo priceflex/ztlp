@@ -186,6 +186,12 @@ pub async fn run_daemon(
     let proxy_bind = config.tunnel.bind.clone();
     let proxy_ns_server = config.ns_server().to_string();
     let proxy_tls_acceptor = tls_acceptor.clone();
+    let proxy_relay = config.tunnel.relays.0.first().cloned();
+    if let Some(ref r) = proxy_relay {
+        info!("relay configured: {}", r);
+    } else {
+        info!("no relay configured, using direct connections");
+    }
     let proxy_handle = tokio::spawn(async move {
         run_tcp_proxy(
             proxy_dns_state,
@@ -193,6 +199,7 @@ pub async fn run_daemon(
             proxy_bind,
             proxy_ns_server,
             proxy_tls_acceptor,
+            proxy_relay,
         )
         .await;
     });
@@ -282,6 +289,7 @@ async fn run_tcp_proxy(
     bind_addr: String,
     ns_server: String,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    relay_addr: Option<String>,
 ) {
     // Track which VIPs we're already listening on
     let active_listeners: Arc<Mutex<std::collections::HashSet<Ipv4Addr>>> =
@@ -356,6 +364,7 @@ async fn run_tcp_proxy(
                 let dns_st = dns_state.clone();
                 let bind = bind_addr.clone();
                 let tls = tls_acceptor.clone();
+                let relay = relay_addr.clone();
 
                 tokio::spawn(async move {
                     match TcpListener::bind(addr).await {
@@ -387,18 +396,19 @@ async fn run_tcp_proxy(
                                         let bind = bind.clone();
                                         let dns_st = dns_st.clone();
                                         let tls = tls.clone();
+                                        let relay = relay.clone();
 
                                         tokio::spawn(async move {
                                             let result = if let Some(ref acceptor) = tls {
                                                 handle_tcp_connection_with_tls(
                                                     tcp_stream, &name, port, peer, &identity,
-                                                    &bind, &ns, acceptor,
+                                                    &bind, &ns, acceptor, relay.as_deref(),
                                                 )
                                                 .await
                                             } else {
                                                 handle_tcp_connection(
                                                     tcp_stream, &name, port, peer, &identity,
-                                                    &bind, &ns,
+                                                    &bind, &ns, relay.as_deref(),
                                                 )
                                                 .await
                                             };
@@ -448,17 +458,18 @@ async fn handle_tcp_connection_with_tls(
     bind_addr: &str,
     ns_server: &str,
     tls_acceptor: &tokio_rustls::TlsAcceptor,
+    relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match local_tls::maybe_wrap_tls(tcp_stream, port, tls_acceptor).await {
         Ok(local_tls::MaybeWrapped::Tls(tls_stream)) => {
             info!("TLS handshake OK for {} (port {})", ztlp_name, port);
-            handle_tcp_connection_bridged(tls_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+            handle_tcp_connection_bridged(tls_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server, relay_addr).await
         }
         Ok(local_tls::MaybeWrapped::Plain(stream)) => {
-            handle_tcp_connection_bridged(stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+            handle_tcp_connection_bridged(stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server, relay_addr).await
         }
         Ok(local_tls::MaybeWrapped::PlainWithPeek(peek_stream)) => {
-            handle_tcp_connection_bridged(peek_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+            handle_tcp_connection_bridged(peek_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server, relay_addr).await
         }
         Err(e) => {
             warn!("TLS wrapping failed for {} port {}: {}", ztlp_name, port, e);
@@ -476,6 +487,7 @@ async fn handle_tcp_connection_bridged<S>(
     identity: &NodeIdentity,
     bind_addr: &str,
     ns_server: &str,
+    relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -487,6 +499,15 @@ where
             let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
             resolution.addr
         }
+    };
+
+    // If relay is configured, route all ZTLP packets through the relay
+    let send_addr: SocketAddr = match relay_addr {
+        Some(relay) => {
+            info!("routing tunnel through relay {}", relay);
+            relay.parse().map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
+        }
+        None => peer,
     };
 
     debug!(
@@ -519,7 +540,7 @@ where
     hello_hdr.dst_svc_id = dst_svc_id;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
-    node.send_raw(&pkt1, peer).await?;
+    node.send_raw(&pkt1, send_addr).await?;
 
     let (recv2, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
         .await
@@ -542,7 +563,7 @@ where
     final_hdr.payload_len = msg3.len() as u16;
     let mut pkt3 = final_hdr.serialize();
     pkt3.extend_from_slice(&msg3);
-    node.send_raw(&pkt3, peer).await?;
+    node.send_raw(&pkt3, send_addr).await?;
 
     if !ctx.is_finished() {
         return Err("handshake incomplete".into());
@@ -567,7 +588,7 @@ where
         node.socket.clone(),
         node.pipeline.clone(),
         session_id,
-        peer,
+        send_addr,
     )
     .await
     {
@@ -591,6 +612,7 @@ async fn handle_tcp_connection(
     identity: &NodeIdentity,
     bind_addr: &str,
     ns_server: &str,
+    relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve peer address (use cached or query NS)
     let peer = match peer_addr {
@@ -599,6 +621,15 @@ async fn handle_tcp_connection(
             let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
             resolution.addr
         }
+    };
+
+    // If relay is configured, route all ZTLP packets through the relay
+    let send_addr: SocketAddr = match relay_addr {
+        Some(relay) => {
+            info!("routing tunnel through relay {}", relay);
+            relay.parse().map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
+        }
+        None => peer,
     };
 
     debug!(
@@ -631,7 +662,7 @@ async fn handle_tcp_connection(
     hello_hdr.dst_svc_id = dst_svc_id;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
-    node.send_raw(&pkt1, peer).await?;
+    node.send_raw(&pkt1, send_addr).await?;
 
     let (recv2, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
         .await
@@ -654,7 +685,7 @@ async fn handle_tcp_connection(
     final_hdr.payload_len = msg3.len() as u16;
     let mut pkt3 = final_hdr.serialize();
     pkt3.extend_from_slice(&msg3);
-    node.send_raw(&pkt3, peer).await?;
+    node.send_raw(&pkt3, send_addr).await?;
 
     if !ctx.is_finished() {
         return Err("handshake incomplete".into());
@@ -679,7 +710,7 @@ async fn handle_tcp_connection(
         node.socket.clone(),
         node.pipeline.clone(),
         session_id,
-        peer,
+        send_addr,
     )
     .await
     {

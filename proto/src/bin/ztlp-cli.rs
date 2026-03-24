@@ -569,6 +569,25 @@ enum AgentCommands {
         #[arg(long)]
         binary: Option<PathBuf>,
     },
+
+    /// Pull TLS certificates for all known service hostnames
+    ///
+    /// Queries the ZTLP-NS for service records in the zone, issues local
+    /// TLS certs for each hostname, and saves them to ~/.ztlp/certs/.
+    /// The agent uses these certs for local TLS termination so browsers
+    /// can connect via HTTPS to ZTLP services.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp agent pull-certs\n  \
+            ztlp agent pull-certs --ca-dir ~/.ztlp/ca")]
+    PullCerts {
+        /// CA directory (default: ~/.ztlp/ca)
+        #[arg(long)]
+        ca_dir: Option<PathBuf>,
+
+        /// Output directory for certs (default: ~/.ztlp/certs)
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -9347,6 +9366,116 @@ async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// `ztlp agent pull-certs` — Pull TLS certs for service hostnames.
+///
+/// Scans the CA cert directory for issued certs, and copies them to the
+/// agent's cert directory (~/.ztlp/certs/) for local TLS termination.
+/// If a CA directory exists with issued certs, those are used directly.
+async fn cmd_agent_pull_certs(
+    ca_dir_arg: &Option<PathBuf>,
+    output_arg: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ztlp_dir = get_ztlp_dir()?;
+    let ca_dir = ca_dir_arg.clone().unwrap_or_else(|| ztlp_dir.join("ca"));
+    let cert_output_dir = output_arg.clone().unwrap_or_else(|| ztlp_dir.join("certs"));
+
+    std::fs::create_dir_all(&cert_output_dir)
+        .map_err(|e| format!("failed to create {}: {}", cert_output_dir.display(), e))?;
+
+    eprintln!("{} Pulling TLS certificates...", c_cyan("→"));
+    eprintln!("  {} {}", c_dim("CA dir:"), ca_dir.display());
+    eprintln!("  {} {}", c_dim("Output:"), cert_output_dir.display());
+    eprintln!();
+
+    // Look for issued certs in the CA directory
+    let ca_certs_dir = ca_dir.join("certs");
+    let index_path = ca_certs_dir.join("index.json");
+
+    if !index_path.exists() {
+        eprintln!(
+            "  {} No certificates found in CA directory",
+            c_yellow("⚠")
+        );
+        eprintln!(
+            "  {} Issue certs first: ztlp admin cert-issue --hostname <name>",
+            c_dim("Hint:")
+        );
+        return Ok(());
+    }
+
+    let index_data = std::fs::read_to_string(&index_path)?;
+    let certs: Vec<serde_json::Value> = serde_json::from_str(&index_data)?;
+
+    let mut copied = 0;
+    for cert_entry in &certs {
+        let hostname = match cert_entry.get("hostname").and_then(|v| v.as_str()) {
+            Some(h) => h,
+            None => continue,
+        };
+
+        let status = cert_entry
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if status == "revoked" {
+            eprintln!("  {} {} (revoked, skipping)", c_dim("·"), hostname);
+            continue;
+        }
+
+        let cert_file = cert_entry.get("cert_file").and_then(|v| v.as_str());
+        let key_file = cert_entry.get("key_file").and_then(|v| v.as_str());
+
+        if let (Some(cert_src), Some(key_src)) = (cert_file, key_file) {
+            let cert_src_path = PathBuf::from(cert_src);
+            let key_src_path = PathBuf::from(key_src);
+
+            if !cert_src_path.exists() || !key_src_path.exists() {
+                eprintln!(
+                    "  {} {} (source files missing, skipping)",
+                    c_yellow("⚠"),
+                    hostname
+                );
+                continue;
+            }
+
+            let sanitized = hostname.replace('.', "_");
+            let cert_dst = cert_output_dir.join(format!("{}.pem", sanitized));
+            let key_dst = cert_output_dir.join(format!("{}.key", sanitized));
+
+            std::fs::copy(&cert_src_path, &cert_dst)?;
+            std::fs::copy(&key_src_path, &key_dst)?;
+
+            // Restrict key file permissions
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_dst, std::fs::Permissions::from_mode(0o600)).ok();
+            }
+
+            eprintln!("  {} {} → {}", c_green("✓"), hostname, cert_dst.display());
+            copied += 1;
+        }
+    }
+
+    eprintln!();
+    if copied > 0 {
+        eprintln!(
+            "  {} Copied {} certificate(s) to {}",
+            c_green("✓"),
+            copied,
+            cert_output_dir.display()
+        );
+        eprintln!(
+            "  {} Restart the agent to pick up new certs: ztlp agent stop && ztlp agent start",
+            c_dim("Hint:")
+        );
+    } else {
+        eprintln!("  {} No certificates to copy", c_yellow("⚠"));
+    }
+
+    Ok(())
+}
+
 /// Format seconds into human-readable duration.
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
@@ -9669,6 +9798,9 @@ async fn main() {
             AgentCommands::DnsTeardown => cmd_agent_dns_teardown().await,
             #[cfg(unix)]
             AgentCommands::Install { binary } => cmd_agent_install(binary).await,
+            AgentCommands::PullCerts { ca_dir, output } => {
+                cmd_agent_pull_certs(ca_dir, output).await
+            }
             #[cfg(not(unix))]
             AgentCommands::DnsSetup { .. }
             | AgentCommands::DnsTeardown

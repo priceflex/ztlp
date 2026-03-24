@@ -24,6 +24,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use tokio::io::{AsyncRead, AsyncWrite};
+
 use crate::handshake::HandshakeContext;
 use crate::identity::{NodeId, NodeIdentity};
 use crate::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
@@ -34,6 +36,7 @@ use super::config::AgentConfig;
 use super::control::{self, AgentState};
 use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
+use super::local_tls::{self, SniCertResolver};
 use super::proxy;
 use super::tunnel_pool::TunnelPool;
 use super::vip_pool::VipPool;
@@ -139,6 +142,41 @@ pub async fn run_daemon(
         }
     });
 
+    // ── Initialize local TLS ──────────────────────────────────────────
+    let tls_acceptor = if config.tls.enabled {
+        let cert_dir = config.tls.cert_dir_path();
+        if let Err(e) = std::fs::create_dir_all(&cert_dir) {
+            warn!("failed to create cert dir {}: {}", cert_dir.display(), e);
+        }
+
+        let resolver = Arc::new(SniCertResolver::new(cert_dir.clone()));
+        let loaded = resolver.preload_all();
+        if loaded > 0 {
+            info!("local TLS: loaded {} cert(s) from {}", loaded, cert_dir.display());
+        } else {
+            info!(
+                "local TLS: enabled but no certs found in {} — \
+                 HTTPS connections will fail until certs are provisioned \
+                 (run: ztlp admin cert-issue --hostname <name>)",
+                cert_dir.display()
+            );
+        }
+
+        match local_tls::create_tls_acceptor(resolver) {
+            Ok(acceptor) => {
+                info!("local TLS: acceptor ready");
+                Some(Arc::new(acceptor))
+            }
+            Err(e) => {
+                error!("local TLS: failed to create acceptor: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("local TLS: disabled");
+        None
+    };
+
     // ── Spawn TCP proxy listener ────────────────────────────────────────
     // The TCP proxy task watches for new VIP allocations and spawns
     // TCP listeners on each VIP address. When a TCP connection arrives,
@@ -147,8 +185,16 @@ pub async fn run_daemon(
     let proxy_identity = identity.clone();
     let proxy_bind = config.tunnel.bind.clone();
     let proxy_ns_server = config.ns_server().to_string();
+    let proxy_tls_acceptor = tls_acceptor.clone();
     let proxy_handle = tokio::spawn(async move {
-        run_tcp_proxy(proxy_dns_state, proxy_identity, proxy_bind, proxy_ns_server).await;
+        run_tcp_proxy(
+            proxy_dns_state,
+            proxy_identity,
+            proxy_bind,
+            proxy_ns_server,
+            proxy_tls_acceptor,
+        )
+        .await;
     });
 
     // ── Spawn GC task ───────────────────────────────────────────────────
@@ -179,6 +225,14 @@ pub async fn run_daemon(
         eprintln!("  Control:  {}", socket_path.display());
         eprintln!("  NS:       {}", config.ns_server());
         eprintln!("  VIP pool: {}", config.dns.vip_range);
+        if config.tls.enabled {
+            eprintln!(
+                "  TLS:      enabled (certs: {})",
+                config.tls.cert_dir_path().display()
+            );
+        } else {
+            eprintln!("  TLS:      disabled");
+        }
         eprintln!();
         eprintln!("Agent running. Press Ctrl+C to stop.");
     }
@@ -227,6 +281,7 @@ async fn run_tcp_proxy(
     identity: NodeIdentity,
     bind_addr: String,
     ns_server: String,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 ) {
     // Track which VIPs we're already listening on
     let active_listeners: Arc<Mutex<std::collections::HashSet<Ipv4Addr>>> =
@@ -300,6 +355,7 @@ async fn run_tcp_proxy(
                 let peer = peer_addr;
                 let dns_st = dns_state.clone();
                 let bind = bind_addr.clone();
+                let tls = tls_acceptor.clone();
 
                 tokio::spawn(async move {
                     match TcpListener::bind(addr).await {
@@ -330,14 +386,24 @@ async fn run_tcp_proxy(
                                         let identity = identity.clone();
                                         let bind = bind.clone();
                                         let dns_st = dns_st.clone();
+                                        let tls = tls.clone();
 
                                         tokio::spawn(async move {
-                                            if let Err(e) = handle_tcp_connection(
-                                                tcp_stream, &name, port, peer, &identity, &bind,
-                                                &ns,
-                                            )
-                                            .await
-                                            {
+                                            let result = if let Some(ref acceptor) = tls {
+                                                handle_tcp_connection_with_tls(
+                                                    tcp_stream, &name, port, peer, &identity,
+                                                    &bind, &ns, acceptor,
+                                                )
+                                                .await
+                                            } else {
+                                                handle_tcp_connection(
+                                                    tcp_stream, &name, port, peer, &identity,
+                                                    &bind, &ns,
+                                                )
+                                                .await
+                                            };
+
+                                            if let Err(e) = result {
                                                 warn!("tunnel error for {}: {}", name, e);
                                             }
 
@@ -365,7 +431,158 @@ async fn run_tcp_proxy(
     }
 }
 
-/// Handle a single TCP connection by establishing a ZTLP tunnel.
+/// Handle a TCP connection with TLS termination, then establish a ZTLP tunnel.
+///
+/// The TLS mode is determined by port number:
+/// - Port 443, 8443 → always TLS
+/// - Port 80, 8080, 22 → never TLS
+/// - Other ports → detect by peeking at first bytes
+///
+/// After TLS (if applicable), the decrypted stream is bridged through a ZTLP tunnel.
+async fn handle_tcp_connection_with_tls(
+    tcp_stream: tokio::net::TcpStream,
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    tls_acceptor: &tokio_rustls::TlsAcceptor,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match local_tls::maybe_wrap_tls(tcp_stream, port, tls_acceptor).await {
+        Ok(local_tls::MaybeWrapped::Tls(tls_stream)) => {
+            info!("TLS handshake OK for {} (port {})", ztlp_name, port);
+            handle_tcp_connection_bridged(tls_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+        }
+        Ok(local_tls::MaybeWrapped::Plain(stream)) => {
+            handle_tcp_connection_bridged(stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+        }
+        Ok(local_tls::MaybeWrapped::PlainWithPeek(peek_stream)) => {
+            handle_tcp_connection_bridged(peek_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server).await
+        }
+        Err(e) => {
+            warn!("TLS wrapping failed for {} port {}: {}", ztlp_name, port, e);
+            Err(e.into())
+        }
+    }
+}
+
+/// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
+async fn handle_tcp_connection_bridged<S>(
+    stream: S,
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // Resolve peer address (use cached or query NS)
+    let peer = match peer_addr {
+        Some(addr) => addr,
+        None => {
+            let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
+            resolution.addr
+        }
+    };
+
+    debug!(
+        "establishing tunnel to {} ({}) port {}",
+        ztlp_name, peer, port
+    );
+
+    // Establish ZTLP tunnel
+    let node = TransportNode::bind(bind_addr).await?;
+    let session_id = SessionId::generate();
+    let mut ctx = HandshakeContext::new_initiator(identity)?;
+
+    // Encode port as service name
+    let service_name = format!("tcp:{}", port);
+    let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
+        let mut svc = [0u8; 16];
+        let port_str = port.to_string();
+        let bytes = port_str.as_bytes();
+        let len = bytes.len().min(16);
+        svc[..len].copy_from_slice(&bytes[..len]);
+        svc
+    });
+
+    // Noise_XX handshake
+    let msg1 = ctx.write_message(&[])?;
+    let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
+    hello_hdr.session_id = session_id;
+    hello_hdr.src_node_id = *identity.node_id.as_bytes();
+    hello_hdr.payload_len = msg1.len() as u16;
+    hello_hdr.dst_svc_id = dst_svc_id;
+    let mut pkt1 = hello_hdr.serialize();
+    pkt1.extend_from_slice(&msg1);
+    node.send_raw(&pkt1, peer).await?;
+
+    let (recv2, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
+        .await
+        .map_err(|_| "handshake timeout")??;
+
+    if recv2.len() < HANDSHAKE_HEADER_SIZE {
+        return Err("response too short".into());
+    }
+    let recv2_hdr = HandshakeHeader::deserialize(&recv2)?;
+    if recv2_hdr.msg_type != MsgType::HelloAck {
+        return Err(format!("expected HELLO_ACK, got {:?}", recv2_hdr.msg_type).into());
+    }
+
+    ctx.read_message(&recv2[HANDSHAKE_HEADER_SIZE..])?;
+
+    let msg3 = ctx.write_message(&[])?;
+    let mut final_hdr = HandshakeHeader::new(MsgType::Data);
+    final_hdr.session_id = session_id;
+    final_hdr.src_node_id = *identity.node_id.as_bytes();
+    final_hdr.payload_len = msg3.len() as u16;
+    let mut pkt3 = final_hdr.serialize();
+    pkt3.extend_from_slice(&msg3);
+    node.send_raw(&pkt3, peer).await?;
+
+    if !ctx.is_finished() {
+        return Err("handshake incomplete".into());
+    }
+
+    let peer_node_id = NodeId::from_bytes(recv2_hdr.src_node_id);
+    let (_, session) = ctx.finalize(peer_node_id, session_id)?;
+
+    {
+        let mut pl = node.pipeline.lock().await;
+        pl.register_session(session);
+    }
+
+    info!(
+        "tunnel active: {} → {} (session {})",
+        ztlp_name, peer, session_id
+    );
+
+    // Bridge the (potentially TLS-unwrapped) stream ↔ ZTLP tunnel
+    match tunnel::run_bridge_io(
+        stream,
+        node.socket.clone(),
+        node.pipeline.clone(),
+        session_id,
+        peer,
+    )
+    .await
+    {
+        Ok(_) => {
+            debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
+        }
+        Err(e) => {
+            warn!("tunnel error: {} — {}", ztlp_name, e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a single TCP connection by establishing a ZTLP tunnel (no TLS).
 async fn handle_tcp_connection(
     tcp_stream: tokio::net::TcpStream,
     ztlp_name: &str,

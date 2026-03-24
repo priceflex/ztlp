@@ -27,6 +27,7 @@ pub mod dns;
 pub mod dns_setup;
 pub mod domain_map;
 pub mod hardware_key;
+pub mod local_tls;
 pub mod proxy;
 pub mod renewal;
 pub mod stream;

@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::local_tls::TlsConfig;
+
 /// Top-level agent configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -28,6 +30,9 @@ pub struct AgentConfig {
 
     /// Logging settings.
     pub log: LogConfig,
+
+    /// Local TLS termination settings.
+    pub tls: TlsConfig,
 }
 
 /// Identity file location.

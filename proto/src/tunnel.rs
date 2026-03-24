@@ -984,9 +984,26 @@ pub async fn run_bridge_demuxed(
     .await
 }
 
+/// Like [`run_bridge`] but accepts any `AsyncRead + AsyncWrite` stream
+/// instead of requiring a `TcpStream`. Used by the agent daemon to bridge
+/// TLS-terminated streams through ZTLP tunnels.
+pub async fn run_bridge_io<S>(
+    stream: S,
+    udp_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    run_bridge_inner(stream, udp_socket, None, pipeline, session_id, peer_addr, false, Vec::new())
+        .await
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn run_bridge_inner(
-    tcp_stream: TcpStream,
+async fn run_bridge_inner<S>(
+    tcp_stream: S,
     udp_socket: Arc<UdpSocket>,
     udp_recv_override: Option<Arc<UdpSocket>>,
     pipeline: Arc<Mutex<Pipeline>>,
@@ -994,7 +1011,10 @@ async fn run_bridge_inner(
     peer_addr: SocketAddr,
     send_initial_reset: bool,
     prefetched_packets: Vec<Vec<u8>>,
-) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     info!(
         "run_bridge: starting for session {} peer={} local_udp={:?}",
         session_id,
@@ -1068,7 +1088,7 @@ async fn run_bridge_inner(
         udp_socket.send_to(&packet, peer_addr).await?;
     }
 
-    let (mut tcp_reader, tcp_writer) = tcp_stream.into_split();
+    let (mut tcp_reader, tcp_writer) = tokio::io::split(tcp_stream);
 
     let udp_send = udp_socket.clone();
     // For sending ACKs/NACKs back to the peer, always use the shared socket.

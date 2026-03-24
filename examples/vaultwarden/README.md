@@ -9,14 +9,26 @@ This example deploys [Vaultwarden](https://github.com/dani-garcia/vaultwarden) (
 ## What You're Building
 
 ```mermaid
-graph LR
-    subgraph Internet["Public Internet"]
+graph TB
+    subgraph Internet["☁️ Public Internet"]
         A["🔍 Port Scanner"] -.->|"❌ Nothing to find"| FW
         B["🤖 Bot / Attacker"] -.->|"❌ No HTTP/HTTPS"| FW
     end
 
+    subgraph Devices["Your Devices"]
+        subgraph Mac["💻 MacBook"]
+            BW_M["Bitwarden App"] -->|"🔒 HTTPS (TLS)"| AG_M["ZTLP Agent"]
+        end
+        subgraph Phone["📱 iPhone"]
+            BW_P["Bitwarden App"] -->|"🔒 HTTPS (TLS)"| AG_P["ZTLP Agent"]
+        end
+        subgraph Lin["🐧 Linux"]
+            BW_L["Browser"] -->|"🔒 HTTPS (TLS)"| AG_L["ZTLP Agent"]
+        end
+    end
+
     subgraph Server["Your Server"]
-        FW["Firewall<br/>23097/udp only"]
+        FW["Firewall<br/>23097/udp + 23095/udp only"]
         subgraph ZTLP["ZTLP Stack"]
             GW["ZTLP Gateway<br/>23097/udp"]
             NS["ZTLP-NS<br/>(internal)"]
@@ -27,20 +39,30 @@ graph LR
         end
     end
 
-    subgraph Devices["Your Devices"]
-        M["💻 MacBook<br/>ztlp agent"]
-        P["📱 iPhone<br/>Bitwarden app"]
-        L["🐧 Linux<br/>ztlp agent"]
-    end
-
-    M -->|"Encrypted ZTLP tunnel"| GW
-    P -->|"Encrypted ZTLP tunnel"| GW
-    L -->|"Encrypted ZTLP tunnel"| GW
+    AG_M ==>|"🔒 Encrypted ZTLP tunnel<br/>(Noise_XX)"| GW
+    AG_P ==>|"🔒 Encrypted ZTLP tunnel<br/>(Noise_XX)"| GW
+    AG_L -.->|"🔒 Encrypted ZTLP tunnel<br/>(via Relay — NAT traversal)"| RL
+    RL ==>|"Forward"| GW
     GW -->|"Identity verified ✓"| VW
     GW <-->|"Identity lookup"| NS
 ```
 
+> **Two encryption layers protect every request.** The Bitwarden app connects via HTTPS to the ZTLP agent running locally on your device (Layer 1: TLS). The agent wraps the traffic in an authenticated Noise_XX tunnel to the gateway (Layer 2: ZTLP). Devices that can reach the gateway directly connect over 23097/udp; devices behind NAT or restrictive firewalls connect via the ZTLP Relay on 23095/udp — same encryption, same security, just a different path.
+
 All devices connect through the ZTLP agent. The gateway is the single entry point — it terminates the encrypted tunnel, verifies cryptographic identity, enforces group policy, injects identity headers, and forwards to Vaultwarden on the isolated internal network.
+
+### 🔐 Double Encryption
+
+Every request from your Bitwarden app to Vaultwarden is encrypted **twice**:
+
+| Layer | What | How | Protects Against |
+|-------|------|-----|------------------|
+| **Layer 1: Local TLS** | Browser/App ↔ ZTLP Agent (same device) | TLS 1.3 with ZTLP CA-issued certificate | Local network sniffing, rogue processes inspecting loopback traffic |
+| **Layer 2: ZTLP Tunnel** | ZTLP Agent ↔ ZTLP Gateway (over Internet) | Noise_XX authenticated encryption | Internet-level interception, MITM, replay attacks |
+
+- **TLS layer:** During device enrollment (`ztlp setup`), the agent automatically downloads and trusts the ZTLP root CA. Service certificates are automatically provisioned for known hostnames like `vault.home.ztlp`. Your browser sees a valid, trusted HTTPS site — no certificate warnings, no manual cert installation.
+- **ZTLP layer:** The Noise_XX handshake authenticates both the agent and the gateway using Ed25519 keys. Each session has unique ephemeral keys — even if one session were somehow compromised, past and future sessions remain secure (forward secrecy).
+- **Defense in depth:** Even if an attacker could somehow intercept the ZTLP tunnel (they can't without the session key), the payload inside is *also* TLS-encrypted. They'd need to break both layers.
 
 ### What's Different from a VPN?
 
@@ -52,6 +74,7 @@ All devices connect through the ZTLP agent. The gateway is the single entry poin
 | **DDoS resistance** | VPN server is a target — must process every packet | Three-layer pipeline drops invalid packets in nanoseconds |
 | **Always-on** | Must toggle VPN on/off | Agent runs as a system service, transparent |
 | **Audit trail** | IP-based logs | Cryptographic identity in every header — signed with HMAC |
+| **Encryption** | Single layer (WireGuard/IPsec) | Double: TLS (app↔agent) + Noise_XX (agent↔gateway) |
 | **Service isolation** | VPN gives network access (lateral movement risk) | Per-service authorization — each service has its own policy |
 
 With a VPN, once you're connected you have network-level access. With ZTLP, each service (Vaultwarden, SSH, whatever) has its own access policy — compromising one device doesn't give access to services it's not authorized for.
@@ -123,7 +146,7 @@ ztlp-gateway     Up (healthy)            0.0.0.0:23097->23097/udp
 ztlp-relay       Up (healthy)            0.0.0.0:23095->23095/udp
 ```
 
-Notice: Vaultwarden has **no ports** exposed. The only externally accessible port is 23097/udp (the ZTLP gateway).
+Notice: Vaultwarden has **no ports** exposed. The only externally accessible ports are 23097/udp (the ZTLP gateway) and 23095/udp (the ZTLP relay for NAT traversal).
 
 ### Step 4: Initialize the Zone
 
@@ -218,6 +241,8 @@ echo "nameserver 127.0.0.1
 port 5354" | sudo tee /etc/resolver/ztlp
 ```
 
+> **Automatic certificate trust:** During `ztlp setup`, the agent downloads the ZTLP root CA and adds it to the macOS Keychain. Service certificates for hostnames like `vault.home.ztlp` are automatically provisioned. Your browser and the Bitwarden app see `https://vault.home.ztlp` as a valid, trusted HTTPS site — no certificate warnings, no manual installation.
+
 Then configure Bitwarden:
 
 1. Open the Bitwarden app (or any Bitwarden-compatible client)
@@ -225,7 +250,7 @@ Then configure Bitwarden:
 3. Set Server URL to: `https://vault.home.ztlp`
 4. Save and log in
 
-The Bitwarden app resolves `vault.home.ztlp` via the ZTLP DNS resolver, which returns the local VIP address. Traffic flows through the ZTLP agent, through the encrypted tunnel, to the gateway, and finally to Vaultwarden — all transparently.
+The Bitwarden app resolves `vault.home.ztlp` via the ZTLP DNS resolver, which returns the local VIP address. Traffic flows through the ZTLP agent — the app connects via HTTPS (TLS) to the local agent, which wraps it in an encrypted ZTLP tunnel to the gateway, and finally to Vaultwarden. Both encryption layers are completely transparent.
 
 ### Linux
 
@@ -237,6 +262,8 @@ sudo systemctl start ztlp-agent
 # Verify it's running
 ztlp status
 ```
+
+> **Automatic certificate trust:** During `ztlp setup`, the agent downloads the ZTLP root CA and installs it into the system trust store (`/usr/local/share/ca-certificates/` on Debian/Ubuntu, `update-ca-trust` on Fedora/RHEL). Service certificates for `vault.home.ztlp` are auto-provisioned. Browsers and apps see valid HTTPS — no manual cert installation needed.
 
 For DNS, configure systemd-resolved:
 
@@ -274,13 +301,17 @@ DNS configuration on Windows will use the NRPT (Name Resolution Policy Table) to
 4. Open the Bitwarden iOS app → **Settings** → **Self-hosted**
 5. Server URL: `https://vault.home.ztlp`
 
-Your passwords sync through the encrypted ZTLP tunnel. No ports exposed on your server, no VPN to toggle — just works.
+> **Automatic certificate trust:** During enrollment, the ZTLP iOS app installs the ZTLP root CA as a trusted profile on your device. Service certs are provisioned automatically. The Bitwarden app connects via HTTPS to the local agent — valid cert, no warnings, no manual configuration.
+
+Your passwords sync through the double-encrypted ZTLP tunnel. No ports exposed on your server, no VPN to toggle — just works.
 
 ---
 
 ## How It Works
 
 Here's the full request flow when the Bitwarden app on your MacBook syncs passwords:
+
+#### Direct Connection (device can reach gateway)
 
 ```mermaid
 sequenceDiagram
@@ -290,9 +321,11 @@ sequenceDiagram
     participant NS as ZTLP-NS
     participant VW as Vaultwarden<br/>(internal:80)
 
-    BW->>Agent: GET /api/sync<br/>Host: vault.home.ztlp
-    Note over Agent: Resolves vault.home.ztlp<br/>via ZTLP-NS → local VIP
+    BW->>Agent: HTTPS GET /api/sync<br/>Host: vault.home.ztlp
+    Note over BW,Agent: Layer 1: TLS (ZTLP CA cert)<br/>App sees valid HTTPS ✓
+    Note over Agent: Decrypt TLS → extract HTTP request<br/>Resolves vault.home.ztlp → local VIP
     Agent->>GW: Encrypted ZTLP packet<br/>(Noise_XX session)
+    Note over Agent,GW: Layer 2: ZTLP Noise_XX encryption
     GW->>NS: Verify device identity<br/>+ group membership
     NS-->>GW: ✓ macbook.home.ztlp<br/>Groups: [family@home.ztlp]
     Note over GW: Policy check: family@home.ztlp<br/>→ allowed for vault service ✓
@@ -300,8 +333,34 @@ sequenceDiagram
     GW->>VW: GET /api/sync<br/>X-ZTLP-Identity: steve@home.ztlp<br/>X-ZTLP-Device: macbook.home.ztlp<br/>X-ZTLP-Groups: family<br/>X-ZTLP-Signature: sha256=a1b2c3...
     VW-->>GW: 200 OK (encrypted vault data)
     GW-->>Agent: Encrypted ZTLP response
-    Agent-->>BW: 200 OK
+    Agent-->>BW: HTTPS 200 OK (TLS-encrypted)
 ```
+
+#### Via Relay (device behind NAT / restrictive firewall)
+
+```mermaid
+sequenceDiagram
+    participant BW as Bitwarden App
+    participant Agent as ZTLP Agent<br/>(127.0.55.1)
+    participant RL as ZTLP Relay<br/>(23095/udp)
+    participant GW as ZTLP Gateway<br/>(23097/udp)
+    participant VW as Vaultwarden<br/>(internal:80)
+
+    BW->>Agent: HTTPS GET /api/sync<br/>Host: vault.home.ztlp
+    Note over BW,Agent: Layer 1: TLS (ZTLP CA cert)
+    Agent->>RL: Encrypted ZTLP packet<br/>(Noise_XX session)
+    Note over Agent,RL: Layer 2: ZTLP Noise_XX encryption
+    Note over RL: Relay forwards opaque packet<br/>(cannot read contents)
+    RL->>GW: Forward encrypted packet
+    Note over GW: Decrypt, verify identity,<br/>inject headers (same as direct)
+    GW->>VW: GET /api/sync + X-ZTLP-* headers
+    VW-->>GW: 200 OK
+    GW-->>RL: Encrypted ZTLP response
+    RL-->>Agent: Forward encrypted response
+    Agent-->>BW: HTTPS 200 OK (TLS-encrypted)
+```
+
+> **The relay is a dumb pipe.** It forwards encrypted packets between agents and the gateway without being able to read or modify them. Both encryption layers (TLS + Noise_XX) remain intact end-to-end. The relay just solves the NAT traversal problem — it never sees plaintext.
 
 ### The Identity Headers
 
@@ -376,7 +435,7 @@ graph LR
 | Threat | Traditional (port-forwarded) | ZTLP |
 |--------|------------------------------|------|
 | **Port scanning** | Ports 80/443 visible | Service invisible — no TCP ports |
-| **TLS vulnerabilities** | Must keep TLS patched | No TLS facing the internet |
+| **TLS vulnerabilities** | Must keep TLS patched, exposed to the internet | TLS is local-only (device loopback) — not internet-facing |
 | **Credential stuffing** | Login page is public | Can't reach login without device identity |
 | **Zero-day HTTP exploits** | Any HTTP request reaches server | Dropped at Layer 1 in 19ns |
 | **DDoS** | Must handle flood traffic | Three-layer UDP pipeline |
@@ -387,9 +446,9 @@ graph LR
 Vaultwarden has literally zero attack surface from the internet:
 
 - **No TCP ports open** — nothing for nmap to find
-- **No HTTP/HTTPS** — no web vulnerabilities to exploit
+- **No HTTP/HTTPS facing the internet** — TLS only runs locally between the app and the agent on your device
 - **No DNS records** — `vault.home.ztlp` doesn't exist in public DNS
-- The ZTLP gateway accepts only authenticated ZTLP packets over UDP — everything else is dropped before any state is allocated
+- The ZTLP gateway and relay accept only authenticated ZTLP packets over UDP — everything else is dropped before any state is allocated
 
 ### Cryptographic Device Identity
 
@@ -437,13 +496,16 @@ But if you want **zero plaintext anywhere** in the entire request path — even 
 
 ### Encryption Layers
 
+With agent-side TLS termination, there are already **two encryption layers** before traffic even leaves your device. Internal TLS adds a third on the server side.
+
 ```mermaid
 graph LR
     subgraph Client["Your Device"]
+        App["Bitwarden App"]
         Agent["ZTLP Agent"]
     end
 
-    subgraph Tunnel["Internet"]
+    subgraph Tunnel["Internet (or via Relay)"]
         T["Encrypted ZTLP Tunnel<br/>(Noise_XX)"]
     end
 
@@ -452,43 +514,47 @@ graph LR
         VW["Vaultwarden"]
     end
 
+    App ==>|"🔒 HTTPS (TLS)"| Agent
     Agent ==>|"🔒 ZTLP encryption"| T
     T ==>|"🔒 ZTLP encryption"| GW
     GW -->|"🔓 Plaintext HTTP<br/>(Docker internal network)"| VW
 ```
 
-**Without internal TLS** (default): The ZTLP tunnel encrypts everything between your device and the gateway. The gateway decrypts, injects identity headers, and forwards to Vaultwarden as plaintext HTTP over the isolated Docker bridge. The last hop is unencrypted but it's on a network that only the gateway and Vaultwarden can see.
+**Without internal TLS** (default): Two encryption layers protect the traffic — TLS between the app and the local agent, and Noise_XX between the agent and the gateway. The gateway decrypts, injects identity headers, and forwards to Vaultwarden as plaintext HTTP over the isolated Docker bridge. The last hop is unencrypted but it's on a network that only the gateway and Vaultwarden can see.
 
 ```mermaid
 graph LR
     subgraph Client["Your Device"]
-        Agent["ZTLP Agent"]
+        App2["Bitwarden App"]
+        Agent2["ZTLP Agent"]
     end
 
-    subgraph Tunnel["Internet"]
-        T["Encrypted ZTLP Tunnel<br/>(Noise_XX)"]
+    subgraph Tunnel["Internet (or via Relay)"]
+        T2["Encrypted ZTLP Tunnel<br/>(Noise_XX)"]
     end
 
     subgraph Server["Your Server (Docker)"]
-        GW["ZTLP Gateway"]
-        VW["Vaultwarden"]
+        GW2["ZTLP Gateway"]
+        VW2["Vaultwarden"]
     end
 
-    Agent ==>|"🔒 ZTLP encryption"| T
-    T ==>|"🔒 ZTLP encryption"| GW
-    GW ==>|"🔒 Internal TLS<br/>(ZTLP CA-issued cert)"| VW
+    App2 ==>|"🔒 HTTPS (TLS)"| Agent2
+    Agent2 ==>|"🔒 ZTLP encryption"| T2
+    T2 ==>|"🔒 ZTLP encryption"| GW2
+    GW2 ==>|"🔒 Internal TLS<br/>(ZTLP CA-issued cert)"| VW2
 ```
 
-**With internal TLS**: The gateway re-encrypts with TLS when connecting to Vaultwarden. The ZTLP CA issues a certificate for Vaultwarden, and the gateway verifies it — so the gateway can confirm it's talking to the real Vaultwarden (not a compromised container). Zero plaintext anywhere.
+**With internal TLS**: Three encryption layers — TLS on the device, Noise_XX in the tunnel, and TLS again inside Docker. The gateway re-encrypts with TLS when connecting to Vaultwarden. The ZTLP CA issues a certificate for Vaultwarden, and the gateway verifies it — so the gateway can confirm it's talking to the real Vaultwarden (not a compromised container). Zero plaintext anywhere.
 
 ### Without vs With Internal TLS
 
 | | Without Internal TLS (default) | With Internal TLS |
 |---|---|---|
-| **Entry point** | ZTLP agent → gateway | ZTLP agent → gateway |
-| **Tunnel encryption** | Noise_XX (agent ↔ gateway) | Noise_XX (agent ↔ gateway) |
+| **Entry point** | App → TLS → ZTLP agent → gateway | App → TLS → ZTLP agent → gateway |
+| **Device-side encryption** | TLS (app ↔ agent) + Noise_XX (agent ↔ gateway) | TLS (app ↔ agent) + Noise_XX (agent ↔ gateway) |
 | **Last hop (gateway → Vaultwarden)** | Plaintext HTTP on Docker network | TLS-encrypted on Docker network |
-| **Exposed ports** | 23097/udp | 23097/udp (same) |
+| **Total encryption layers** | 2 (TLS + Noise_XX) | 3 (TLS + Noise_XX + internal TLS) |
+| **Exposed ports** | 23097/udp + 23095/udp | 23097/udp + 23095/udp (same) |
 | **Backend identity verification** | None (Docker DNS) | Gateway verifies Vaultwarden's TLS cert |
 | **Protection against** | External threats | External threats + compromised containers on Docker network |
 | **Setup complexity** | None (works out of the box) | Initialize CA, issue certs, configure gateway |

@@ -643,11 +643,18 @@ defmodule ZtlpGateway.Session do
   end
 
   defp handle_tunnel_frame(<<@frame_reset, _rest::binary>>, state) do
-    # Client is starting a new TCP stream — reconnect backend
-    Logger.info("[Session] Received RESET frame, reconnecting backend")
+    # Client is starting a new TCP stream — reconnect backend.
+    # Clear ALL pending send state: the old backend's response data is
+    # irrelevant to the new TCP connection. Without clearing, old response
+    # chunks (with stale data_seqs) interleave with new response data,
+    # causing out-of-order delivery to the client's VIP proxy.
+    Logger.info("[Session] Received RESET frame, reconnecting backend (clearing #{:queue.len(state.send_queue)} queued + #{map_size(state.send_buffer)} in-flight)")
     if state.backend_pid && Process.alive?(state.backend_pid) do
       Backend.close(state.backend_pid)
     end
+
+    # Cancel any pending retransmit/pacing timers
+    state = cancel_timers(state)
 
     backends = ZtlpGateway.Config.get(:backends)
 
@@ -655,7 +662,13 @@ defmodule ZtlpGateway.Session do
       {:ok, %{host: host, port: port}} ->
         case Backend.start_link({host, port, self()}) do
           {:ok, new_pid} ->
-            {:noreply, %{state | backend_pid: new_pid, send_data_seq: 0}}
+            {:noreply, %{state |
+              backend_pid: new_pid,
+              send_data_seq: 0,
+              send_queue: :queue.new(),
+              send_buffer: %{},
+              draining: false
+            }}
 
           {:error, _reason} ->
             terminate_session(state, :backend_reconnect_failed)
@@ -744,6 +757,13 @@ defmodule ZtlpGateway.Session do
     %{state | pacing_timer_ref: ref}
   end
   defp schedule_pacing_timer(state), do: state
+
+  # Cancel any pending retransmit and pacing timers (used on RESET/cleanup).
+  defp cancel_timers(state) do
+    if state.retransmit_timer_ref, do: Process.cancel_timer(state.retransmit_timer_ref)
+    if state.pacing_timer_ref, do: Process.cancel_timer(state.pacing_timer_ref)
+    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil}
+  end
 
   defp encrypt_and_send(plaintext, state) do
     seq = state.send_seq + 1

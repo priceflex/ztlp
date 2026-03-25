@@ -984,14 +984,47 @@ async fn recv_loop(
         }
     });
 
+    // Debug file logging for diagnosing tunnel issues on macOS
+    let debug_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/ztlp-recv-debug.log")
+        .ok();
+    let log_start = std::time::Instant::now();
+    let log_write = |file: &Option<std::fs::File>, start: std::time::Instant, msg: &str| {
+        if let Some(ref f) = file {
+            use std::io::Write;
+            let elapsed = start.elapsed().as_millis();
+            let _ = (&*f).write_all(format!("[+{}ms] {}\n", elapsed, msg).as_bytes());
+        }
+    };
+    log_write(
+        &debug_log,
+        log_start,
+        &format!(
+            "recv_loop started, session={}",
+            hex::encode(session_id.as_bytes())
+        ),
+    );
+
     loop {
         if stop_flag.load(Ordering::SeqCst) {
+            log_write(&debug_log, log_start, "recv_loop: stop_flag set, breaking");
             break;
         }
 
         match tokio::time::timeout(Duration::from_secs(1), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
                 last_recv_time = std::time::Instant::now();
+                log_write(
+                    &debug_log,
+                    log_start,
+                    &format!(
+                        "recv: {} bytes, first_byte=0x{:02x}",
+                        plaintext.len(),
+                        plaintext.first().copied().unwrap_or(0)
+                    ),
+                );
 
                 // SECURITY: Reject oversized packets to prevent memory exhaustion.
                 // Maximum UDP payload is 65535 bytes; anything larger indicates a
@@ -1035,6 +1068,18 @@ async fn recv_loop(
                         _last_data_seq = 0;
                         vip_next_deliver_seq = 0;
                     }
+
+                    log_write(
+                        &debug_log,
+                        log_start,
+                        &format!(
+                            "FRAME_DATA data_seq={} payload_len={} expected={} vip_deliver={}",
+                            data_seq,
+                            payload.len(),
+                            next_expected_seq,
+                            vip_next_deliver_seq
+                        ),
+                    );
 
                     // Update cumulative ACK tracking
                     if data_seq == next_expected_seq {
@@ -1100,6 +1145,11 @@ async fn recv_loop(
                         tracing::debug!("recv_loop: sent ACK data_seq={}", ack_seq);
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_FIN {
+                    log_write(
+                        &debug_log,
+                        log_start,
+                        &format!("FRAME_FIN received, next_expected={}", next_expected_seq),
+                    );
                     // FIN received — gateway finished sending. Send final ACK.
                     if next_expected_seq > 0 {
                         let ack_seq = next_expected_seq - 1;
@@ -1143,9 +1193,15 @@ async fn recv_loop(
             }
             Ok(Ok(None)) => {
                 // Packet dropped by pipeline — continue
+                log_write(
+                    &debug_log,
+                    log_start,
+                    "recv: packet dropped by pipeline (None)",
+                );
             }
-            Ok(Err(_)) => {
+            Ok(Err(e)) => {
                 // Socket error — clean up
+                log_write(&debug_log, log_start, &format!("recv: socket error: {}", e));
                 break;
             }
             Err(_) => {

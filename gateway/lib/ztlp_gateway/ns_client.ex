@@ -74,13 +74,13 @@ defmodule ZtlpGateway.NsClient do
   - `{:error, :untrusted_signer}` — signer is not a trust anchor
   """
   @spec query_key(binary()) :: {:ok, map()} | {:error, atom()}
-  def query_key(pubkey) when byte_size(pubkey) == 32 do
+  def query_key(pubkey, timeout \\ 10_000) when byte_size(pubkey) == 32 do
     pubkey_hex = Base.encode16(pubkey, case: :lower)
 
     # Check local NS cache first
     case cache_lookup(pubkey_hex) do
       {:ok, _} = hit -> hit
-      :miss -> GenServer.call(__MODULE__, {:query_key, pubkey_hex}, 10_000)
+      :miss -> GenServer.call(__MODULE__, {:query_key, pubkey_hex}, timeout)
     end
   end
 

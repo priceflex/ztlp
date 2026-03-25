@@ -1,4 +1,6 @@
 defmodule ZtlpGateway.Identity do
+  require Logger
+
   @moduledoc """
   Client identity extraction and verification.
 
@@ -103,15 +105,24 @@ defmodule ZtlpGateway.Identity do
         :unknown
 
       _pid ->
-        case ZtlpGateway.NsClient.query_key(pubkey) do
-          {:ok, record_map} ->
-            # Extract identity from the record's name field
-            identity = record_map.name
-            # Cache it locally
-            :ets.insert(@table, {pubkey, identity})
-            {:ok, identity}
+        # Use a short timeout (2s) to prevent session crashes when the NsClient
+        # is overloaded by concurrent handshakes.  The default GenServer.call
+        # timeout of 10s meant that 6+ simultaneous sessions would queue up in
+        # the NsClient and later callers would crash with EXIT timeout,
+        # killing the session before data exchange could begin.
+        try do
+          case ZtlpGateway.NsClient.query_key(pubkey, 2_000) do
+            {:ok, record_map} ->
+              identity = record_map.name
+              :ets.insert(@table, {pubkey, identity})
+              {:ok, identity}
 
-          {:error, _reason} ->
+            {:error, _reason} ->
+              :unknown
+          end
+        catch
+          :exit, {:timeout, _} ->
+            Logger.debug("[Identity] NS lookup timed out, falling back to hex identity")
             :unknown
         end
     end

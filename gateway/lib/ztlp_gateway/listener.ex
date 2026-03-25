@@ -66,7 +66,17 @@ defmodule ZtlpGateway.Listener do
     # For the prototype, generate fresh on startup.
     {static_pub, static_priv} = ZtlpGateway.Crypto.generate_keypair()
 
-    case :gen_udp.open(port, [:binary, active: true, reuseaddr: true]) do
+    # Use a large receive buffer (4 MB) so that bursts of concurrent sessions
+    # don't overflow the socket while the Listener GenServer is busy creating
+    # session processes.  Without this, 10+ simultaneous handshakes cause
+    # RcvbufErrors and silently dropped data packets.
+    case :gen_udp.open(port, [
+           :binary,
+           {:active, true},
+           {:reuseaddr, true},
+           {:recbuf, 4_194_304},
+           {:sndbuf, 4_194_304}
+         ]) do
       {:ok, socket} ->
         {:ok, actual_port} = :inet.port(socket)
         Logger.info("[Listener] ZTLP Gateway listening on UDP port #{actual_port}")
@@ -103,8 +113,14 @@ defmodule ZtlpGateway.Listener do
       {:ok, :known_session, pid} ->
         Session.handle_packet(pid, data, {ip, port})
 
-      {:reject, _reason} ->
-        # Silently drop — don't waste resources on bad traffic
+      {:reject, reason} ->
+        # Log rejections to diagnose concurrent session failures
+        session_hex =
+          case Packet.extract_session_id(data) do
+            {:ok, sid} -> Base.encode16(sid)
+            _ -> "??"
+          end
+        Logger.debug("[Listener] Rejected packet: reason=#{reason} session=#{session_hex} len=#{byte_size(data)} from=#{:inet.ntoa(ip)}:#{port}")
         :ok
     end
 

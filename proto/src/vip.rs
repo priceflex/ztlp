@@ -19,6 +19,11 @@ use tokio::sync::Mutex;
 use crate::packet::SessionId;
 use crate::transport::TransportNode;
 
+// TLS support for HTTPS VIP ports (443, 8443).
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::rustls::pki_types::CertificateDer;
+
 /// Maximum read buffer size for TCP proxy connections.
 const TCP_READ_BUF_SIZE: usize = 65536;
 
@@ -167,6 +172,22 @@ impl VipProxy {
                 let bytes_sent = bytes_sent.clone();
                 let tunnel_rx = self.tunnel_rx.clone();
 
+                // Build TLS acceptor for HTTPS ports
+                let tls_acceptor = if is_tls_port(port) {
+                    match build_tls_acceptor(&service.name) {
+                        Ok(acceptor) => {
+                            tracing::info!("VIP TLS enabled for {}:{}", service.vip, port);
+                            Some(acceptor)
+                        }
+                        Err(e) => {
+                            tracing::warn!("VIP TLS not available for {}:{}: {}", service.vip, port, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let handle = tokio::spawn(async move {
                     vip_listener_task(
                         listener,
@@ -177,6 +198,7 @@ impl VipProxy {
                         data_seq,
                         bytes_sent,
                         tunnel_rx,
+                        tls_acceptor,
                     )
                     .await;
                 });
@@ -198,6 +220,77 @@ impl VipProxy {
     }
 }
 
+/// Check if a port should use TLS termination.
+fn is_tls_port(port: u16) -> bool {
+    matches!(port, 443 | 8443)
+}
+
+/// Build a TLS acceptor from cert/key files in `~/.ztlp/certs/`.
+///
+/// Looks for `<hostname>.pem` (cert chain) and `<hostname>.key` (private key)
+/// where hostname is derived from the first registered service name + zone.
+fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
+    let cert_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ztlp")
+        .join("certs");
+
+    // Try multiple cert file patterns
+    let patterns = [
+        format!("{}.techrockstars.ztlp", service_name),
+        service_name.to_string(),
+    ];
+
+    let mut cert_path = None;
+    let mut key_path = None;
+
+    for pattern in &patterns {
+        let cp = cert_dir.join(format!("{}.pem", pattern));
+        let kp = cert_dir.join(format!("{}.key", pattern));
+        if cp.exists() && kp.exists() {
+            cert_path = Some(cp);
+            key_path = Some(kp);
+            break;
+        }
+    }
+
+    let cert_path = cert_path.ok_or_else(|| {
+        format!(
+            "no TLS cert found in {:?} for service '{}' (tried: {})",
+            cert_dir,
+            service_name,
+            patterns.join(", ")
+        )
+    })?;
+    let key_path = key_path.unwrap();
+
+    tracing::info!("VIP TLS: loading cert from {:?}", cert_path);
+
+    // Read cert chain
+    let cert_data = std::fs::read(&cert_path)
+        .map_err(|e| format!("failed to read cert {:?}: {}", cert_path, e))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_data.as_slice())
+        .filter_map(|r| r.ok())
+        .collect();
+    if certs.is_empty() {
+        return Err(format!("no certificates found in {:?}", cert_path));
+    }
+
+    // Read private key
+    let key_data = std::fs::read(&key_path)
+        .map_err(|e| format!("failed to read key {:?}: {}", key_path, e))?;
+    let key = rustls_pemfile::private_key(&mut key_data.as_slice())
+        .map_err(|e| format!("failed to parse key {:?}: {}", key_path, e))?
+        .ok_or_else(|| format!("no private key found in {:?}", key_path))?;
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("TLS config error: {}", e))?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
 /// TCP listener task for a single VIP:port.
 ///
 /// Accepts one connection at a time. For each connection:
@@ -216,6 +309,7 @@ async fn vip_listener_task(
     data_seq: Arc<AtomicU64>,
     bytes_sent: Arc<AtomicU64>,
     tunnel_rx: Arc<Mutex<mpsc::Receiver<TunnelData>>>,
+    tls_acceptor: Option<TlsAcceptor>,
 ) {
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -238,7 +332,7 @@ async fn vip_listener_task(
             }
         };
 
-        tracing::info!("VIP connection from {}", client_addr);
+        tracing::info!("VIP connection from {} (tls={})", client_addr, tls_acceptor.is_some());
 
         // Send FRAME_RESET to tell the gateway to open a new backend TCP
         // connection. Without this, subsequent TCP connections through the
@@ -253,9 +347,65 @@ async fn vip_listener_task(
             }
         }
 
-        // Handle the connection — pipe TCP ↔ tunnel
-        let (mut read_half, mut write_half) = stream.into_split();
+        // Handle TLS or plain TCP
+        if let Some(ref acceptor) = tls_acceptor {
+            // TLS handshake
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("VIP TLS handshake failed from {}: {}", client_addr, e);
+                    continue;
+                }
+            };
+            tracing::info!("VIP TLS handshake complete from {}", client_addr);
 
+            let (read_half, write_half) = tokio::io::split(tls_stream);
+            handle_vip_connection(
+                read_half,
+                write_half,
+                &stop,
+                &transport,
+                session_id,
+                peer_addr,
+                &data_seq,
+                &bytes_sent,
+                &tunnel_rx,
+            )
+            .await;
+        } else {
+            // Plain TCP
+            let (read_half, write_half) = tokio::io::split(stream);
+            handle_vip_connection(
+                read_half,
+                write_half,
+                &stop,
+                &transport,
+                session_id,
+                peer_addr,
+                &data_seq,
+                &bytes_sent,
+                &tunnel_rx,
+            )
+            .await;
+        }
+    }
+}
+
+/// Handle a single VIP connection (TLS or plain) — pipe data bidirectionally.
+async fn handle_vip_connection<R, W>(
+    mut read_half: R,
+    mut write_half: W,
+    stop: &Arc<AtomicBool>,
+    transport: &Arc<TransportNode>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    data_seq: &Arc<AtomicU64>,
+    bytes_sent: &Arc<AtomicU64>,
+    tunnel_rx: &Arc<Mutex<mpsc::Receiver<TunnelData>>>,
+) where
+    R: AsyncReadExt + Unpin + Send + 'static,
+    W: AsyncWriteExt + Unpin + Send + 'static,
+{
         // Spawn a task to read from tunnel_rx and write to TCP client
         let tunnel_rx_clone = tunnel_rx.clone();
         let stop_clone = stop.clone();
@@ -282,6 +432,10 @@ async fn vip_listener_task(
         });
 
         // Read from TCP client and send through tunnel
+        let transport = transport.clone();
+        let data_seq = data_seq.clone();
+        let bytes_sent = bytes_sent.clone();
+        let stop = stop.clone();
         let mut buf = vec![0u8; TCP_READ_BUF_SIZE];
         loop {
             if stop.load(Ordering::SeqCst) {
@@ -316,8 +470,7 @@ async fn vip_listener_task(
         }
 
         write_task.abort();
-        tracing::info!("VIP connection from {} closed", client_addr);
-    }
+        tracing::info!("VIP connection closed");
 }
 
 #[cfg(test)]

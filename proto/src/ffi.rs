@@ -931,10 +931,28 @@ async fn recv_loop(
     peer_addr: SocketAddr,
     inner: Arc<std::sync::Mutex<ZtlpClientInner>>,
 ) {
+    // Tunnel frame types (must match gateway session.ex constants)
+    const FRAME_DATA: u8 = 0x00;
+    const FRAME_ACK: u8 = 0x01;
+    const FRAME_FIN: u8 = 0x02;
+
+    // Track highest contiguous data_seq received for cumulative ACKs.
+    // Uses a simple approach: track next_expected and a set of
+    // out-of-order seqs received ahead.
+    let mut next_expected_seq: u64 = 0;
+    let mut received_ahead: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    // Track last seen data_seq to detect gateway send_data_seq reset (after FRAME_RESET).
+    // When data_seq drops to 0 while next_expected > 0, the gateway started
+    // a new stream — reset our tracking.
+    let mut _last_data_seq: u64 = 0;
+
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
-    // Frame type 0x01 = KEEPALIVE (distinct from 0x00 = DATA)
+    // Single-byte 0x01 — gateway sees <<@frame_ack, rest::binary>> with
+    // empty rest, which it silently ignores (malformed ACK). This is fine
+    // for keepalive purposes; it just needs to be an encrypted packet that
+    // keeps the NAT mapping alive.
     const KEEPALIVE_FRAME: [u8; 1] = [0x01];
 
     let keepalive_transport = transport.clone();
@@ -980,6 +998,73 @@ async fn recv_loop(
                 }
 
                 bytes_received.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
+
+                // ── ACK logic: track received data_seqs and send cumulative ACKs ──
+                //
+                // The gateway uses a windowed ARQ protocol: it sends up to
+                // @send_window_size packets, then waits for ACKs before sending
+                // more. Without ACKs, only the first window (~8 × 1200B = 9.6KB)
+                // gets delivered, causing large responses to stall.
+                //
+                // ACK frame format: [FRAME_ACK(0x01) | data_seq(8 bytes BE)]
+                // This tells the gateway: "I've received everything up to and
+                // including data_seq N" — it can remove those from its send
+                // buffer and advance the window.
+                if plaintext.len() > 9 && plaintext[0] == FRAME_DATA {
+                    let data_seq = u64::from_be_bytes(
+                        plaintext[1..9].try_into().unwrap_or([0u8; 8])
+                    );
+
+                    // Detect gateway send_data_seq reset (new stream after FRAME_RESET).
+                    // When the gateway opens a new backend TCP connection, it resets
+                    // send_data_seq to 0. If we see data_seq=0 while we expected
+                    // a higher seq, reset our tracking.
+                    if data_seq == 0 && next_expected_seq > 0 {
+                        tracing::info!("recv_loop: detected stream reset (data_seq=0, expected={}), resetting ACK tracking", next_expected_seq);
+                        next_expected_seq = 0;
+                        received_ahead.clear();
+                        _last_data_seq = 0;
+                    }
+
+                    // Update cumulative ACK tracking
+                    if data_seq == next_expected_seq {
+                        // In-order: advance next_expected past any contiguous seqs
+                        next_expected_seq = data_seq + 1;
+                        while received_ahead.remove(&next_expected_seq) {
+                            next_expected_seq += 1;
+                        }
+                    } else if data_seq > next_expected_seq {
+                        // Out-of-order: remember for later
+                        received_ahead.insert(data_seq);
+                    }
+                    // else: duplicate (data_seq < next_expected_seq), ignore
+                    _last_data_seq = data_seq;
+
+                    // Send cumulative ACK for highest contiguous seq received
+                    let ack_seq = next_expected_seq.saturating_sub(1);
+                    let mut ack_frame = Vec::with_capacity(9);
+                    ack_frame.push(FRAME_ACK);
+                    ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+
+                    if let Err(e) = transport
+                        .send_data(session_id, &ack_frame, peer_addr)
+                        .await
+                    {
+                        tracing::warn!("recv_loop: failed to send ACK for data_seq={}: {}", ack_seq, e);
+                    } else {
+                        tracing::debug!("recv_loop: sent ACK data_seq={}", ack_seq);
+                    }
+                } else if plaintext.len() >= 1 && plaintext[0] == FRAME_FIN {
+                    // FIN received — gateway finished sending. Send final ACK.
+                    if next_expected_seq > 0 {
+                        let ack_seq = next_expected_seq - 1;
+                        let mut ack_frame = Vec::with_capacity(9);
+                        ack_frame.push(FRAME_ACK);
+                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+                        let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
+                        tracing::debug!("recv_loop: sent final ACK data_seq={} after FIN", ack_seq);
+                    }
+                }
 
                 // SECURITY: Wrap the decrypt+process path in catch_unwind to
                 // prevent a panic from a malicious server response from aborting

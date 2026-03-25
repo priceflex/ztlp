@@ -25,6 +25,11 @@ const TCP_READ_BUF_SIZE: usize = 65536;
 /// Frame type for tunnel data frames.
 const FRAME_DATA: u8 = 0x00;
 
+/// Frame type for stream reset — signals a new TCP connection within the same
+/// ZTLP session. The gateway opens a fresh backend TCP connection and resets
+/// its response data_seq to 0.
+const FRAME_RESET: u8 = 0x04;
+
 /// A registered VIP service.
 #[derive(Debug, Clone)]
 pub struct VipService {
@@ -234,6 +239,19 @@ async fn vip_listener_task(
         };
 
         tracing::info!("VIP connection from {}", client_addr);
+
+        // Send FRAME_RESET to tell the gateway to open a new backend TCP
+        // connection. Without this, subsequent TCP connections through the
+        // VIP proxy would try to reuse the gateway's existing (possibly
+        // closed) backend connection.
+        {
+            let reset_frame = vec![FRAME_RESET];
+            if let Err(e) = transport.send_data(session_id, &reset_frame, peer_addr).await {
+                tracing::warn!("VIP: failed to send RESET for new connection: {}", e);
+            } else {
+                tracing::info!("VIP: sent RESET for new connection from {}", client_addr);
+            }
+        }
 
         // Handle the connection — pipe TCP ↔ tunnel
         let (mut read_half, mut write_half) = stream.into_split();

@@ -176,6 +176,18 @@ impl VipProxy {
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
     ) -> Result<(), String> {
+        // Stop any existing listeners first (idempotent for reconnect)
+        if !self.listener_handles.is_empty() {
+            self.stop();
+            // Give OS time to release sockets
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Create fresh channel for this session (avoids stale data from old session)
+        let (tx, rx) = mpsc::channel(1024);
+        self.tunnel_tx = tx;
+        self.tunnel_rx = Arc::new(Mutex::new(rx));
+
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active_connection.store(false, Ordering::SeqCst);
 
@@ -261,8 +273,13 @@ impl VipProxy {
         }
         // Reset active connection state so reconnect can start fresh
         self.active_connection.store(false, Ordering::SeqCst);
+        // Drain any remaining data from the tunnel channel
+        if let Ok(mut rx) = self.tunnel_rx.try_lock() {
+            while rx.try_recv().is_ok() {}
+        }
         // Note: Don't clear services — they're configuration, not runtime state.
         // They need to persist across reconnect cycles.
+        tracing::info!("VIP proxy stopped");
     }
 }
 

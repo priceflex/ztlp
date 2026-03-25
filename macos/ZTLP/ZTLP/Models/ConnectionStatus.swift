@@ -53,7 +53,7 @@ enum ConnectionStatus: Int, Equatable, Identifiable {
 
     /// Whether the user can initiate a connect action.
     var canConnect: Bool {
-        self == .disconnected
+        self == .disconnected || self == .reconnecting
     }
 
     /// Whether the user can initiate a disconnect action.

@@ -372,14 +372,16 @@ final class TunnelViewModel: ObservableObject {
                 case .disconnected(let reason):
                     if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
                         // Keepalive timeout — schedule auto-reconnect
+                        // Don't clear stats/polling — reconnect will restore them
+                        self.stopStatsPolling()
                         self.scheduleReconnect()
                     } else {
                         self.status = .disconnected
                         self.reconnectAttempt = 0
                         self.reconnectTask?.cancel()
+                        self.stats = TrafficStats()
+                        self.stopStatsPolling()
                     }
-                    self.stats = TrafficStats()
-                    self.stopStatsPolling()
                 case .error(let error):
                     self.lastError = error.localizedDescription
                 default:
@@ -508,6 +510,7 @@ final class TunnelViewModel: ObservableObject {
     // MARK: - VIP Proxy + DNS
 
     @Published private(set) var vipStatus: String?
+    private var networkingConfigured = false
 
     private func startVipProxy() async {
         do {
@@ -516,12 +519,16 @@ final class TunnelViewModel: ObservableObject {
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)
 
             // Set up loopback aliases + pf redirect + DNS resolver (prompts for admin password once)
-            try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+            // Skip on reconnect — networking config persists across tunnel sessions
+            if !networkingConfigured {
+                try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+                networkingConfigured = true
+            }
 
             // Start TCP proxy listeners on high ports (pf handles 80/443 redirect)
             try bridge.vipStart()
 
-            // Start DNS resolver
+            // Start DNS resolver (safe to call again — re-binds on new port)
             try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
 
             await MainActor.run {
@@ -538,6 +545,7 @@ final class TunnelViewModel: ObservableObject {
         bridge.vipStop()
         bridge.dnsStop()
         bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+        networkingConfigured = false
         vipStatus = nil
     }
 

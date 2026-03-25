@@ -1174,8 +1174,14 @@ async fn recv_loop(
                             cb(ud, &mut session_handle, DISCONNECT_KEEPALIVE_TIMEOUT);
                         }
                     }
-                    // Update state
+                    // Update state and stop VIP proxy (it holds refs to old transport)
                     if let Ok(mut guard) = inner.lock() {
+                        if let Some(ref mut proxy) = guard.vip_proxy {
+                            proxy.stop();
+                        }
+                        if let Some(ref mut dns) = guard.dns_server {
+                            dns.stop();
+                        }
                         guard.state = ConnectionState::Disconnected;
                         guard.active_session = None;
                     }

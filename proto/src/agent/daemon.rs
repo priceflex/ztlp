@@ -466,6 +466,7 @@ async fn run_tcp_proxy(
 /// - Other ports → detect by peeking at first bytes
 ///
 /// After TLS (if applicable), the decrypted stream is bridged through a ZTLP tunnel.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_with_tls(
     tcp_stream: tokio::net::TcpStream,
     ztlp_name: &str,
@@ -512,6 +513,7 @@ async fn handle_tcp_connection_with_tls(
 }
 
 /// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_bridged<S>(
     stream: S,
     ztlp_name: &str,
@@ -639,6 +641,7 @@ where
 }
 
 /// Handle a single TCP connection by establishing a ZTLP tunnel (no TLS).
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection(
     tcp_stream: tokio::net::TcpStream,
     ztlp_name: &str,

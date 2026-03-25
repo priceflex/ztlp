@@ -587,6 +587,7 @@ async fn handle_serialized_connection<R, W>(
 ///
 /// This is the core data pump: reads from TCP, sends through tunnel; reads
 /// from tunnel, writes to TCP. Both directions run concurrently.
+#[allow(clippy::too_many_arguments)]
 async fn handle_vip_connection<R, W>(
     mut read_half: R,
     mut write_half: W,

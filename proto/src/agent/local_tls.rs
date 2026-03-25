@@ -313,7 +313,7 @@ pub fn create_tls_acceptor(resolver: Arc<SniCertResolver>) -> Result<TlsAcceptor
 /// The result of attempting to wrap a TCP stream with TLS.
 pub enum MaybeWrapped {
     /// TLS handshake succeeded — stream is now encrypted.
-    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
     /// No TLS — pass through the raw TCP stream.
     /// Includes any bytes that were peeked during detection.
     Plain(TcpStream),
@@ -390,7 +390,7 @@ pub async fn maybe_wrap_tls(
         TlsMode::Always => {
             debug!("port {} → TLS (always)", port);
             match acceptor.accept(stream).await {
-                Ok(tls) => Ok(MaybeWrapped::Tls(tls)),
+                Ok(tls) => Ok(MaybeWrapped::Tls(Box::new(tls))),
                 Err(e) => {
                     warn!("TLS handshake failed on port {}: {}", port, e);
                     Err(e)
@@ -410,7 +410,7 @@ pub async fn maybe_wrap_tls(
                 Ok(n) if n >= 2 && looks_like_tls_client_hello(&peek_buf) => {
                     debug!("port {} → TLS (detected ClientHello)", port);
                     match acceptor.accept(stream).await {
-                        Ok(tls) => Ok(MaybeWrapped::Tls(tls)),
+                        Ok(tls) => Ok(MaybeWrapped::Tls(Box::new(tls))),
                         Err(e) => {
                             warn!("TLS handshake failed on port {}: {}", port, e);
                             Err(e)

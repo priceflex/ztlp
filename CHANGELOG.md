@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.12.0 — 2026-03-25
+
+### Tunnel Reliability (100% sequential, large & small responses)
+- **Path MTU fix** — capped ZTLP data payload to 1200 bytes (1271 on wire) to avoid silent drops from DF-bit retransmit packets exceeding intermediate hop MTU. Root cause of large-response (23KB+) failures.
+- **Gateway KCP-inspired ARQ** — send buffer with retransmit (RTO backoff), paced send queue (window_size=8, 2ms interval), FIN-triggered drain mode, re-encryption on retransmit (fresh nonce per packet, no anti-replay violations).
+- **Client reassembly buffer** — `BTreeMap<u64, Vec<u8>>` in recv_loop delivers data to VIP proxy in strict data_seq order. Stream reset detection when data_seq drops to 0.
+- **Gateway FRAME_RESET state cleanup** — clears send_queue, send_buffer, draining flag, cancels pending timers on RESET.
+- **Relay address migration** — known_gateway_ips set + peer_b update for VPC/EIP mismatch.
+- **NsClient timeout fix** — 2s timeout with graceful fallback to hex identity (prevents cascading timeouts).
+- **4MB UDP socket buffers** on gateway listener.
+
+### VIP Proxy v2 (production-ready)
+- **Concurrent TCP connections** — up to 64 simultaneous connections via semaphore (was single-connection blocking).
+- **Serialized tunnel access** — AtomicBool + Notify queuing system for fair tunnel sharing (gateway doesn't support stream mux yet).
+- **TLS termination** — HTTPS on ports 443/8443 with self-signed certs from `~/.ztlp/certs/`. RSA 2048 (LibreSSL ECDSA explicit-parameter incompatibility with rustls worked around).
+- **TLS handshake timeout** — 10s max prevents frozen listeners.
+- **Connection idle timeout** — 5min, prevents zombie connections.
+- **Stale data drain** — each new connection drains leftover tunnel_rx data.
+- **TCP flush after write** — reduces page load latency.
+- **Larger channel buffer** — 1024 capacity (was 256).
+
+### macOS App
+- **End-to-end verified**: browser → TLS 1.3 (ChaCha20) → VIP proxy → ZTLP tunnel (Noise_XX) → relay → gateway → Vaultwarden → back. ~170ms round trip.
+- **DNS resolution**: `*.techrockstars.ztlp` → `127.0.55.x` via local resolver on port 5354.
+- **rustls 0.23 FFI fix**: explicit `aws_lc_rs::default_provider().install_default()` required in Swift → Rust FFI context.
+
+### Code Quality
+- `cargo fmt` applied across all source files.
+- Clippy fixes: derive Default for RelayAddrs, reduce manual impls.
+- Fix flaky `test_is_agent_running_no_pid_file` — environment-dependent assertion replaced with no-panic check.
+
+### Test Results
+- **794 Rust** (proto) — 0 failures
+- **565 Elixir** (relay) — 0 failures
+- **555 Elixir** (gateway) — 0 failures
+- **726 Elixir** (NS) — 0 failures
+- **Total: 2,640 tests, 0 failures**
+
 ## v0.9.0 — 2026-03-15
 
 ### Identity Model & Groups

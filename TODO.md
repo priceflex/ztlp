@@ -133,6 +133,15 @@ be tightened:
 - [x] NsClient timeout fix: 2s timeout + graceful fallback to hex identity
 - [x] 4MB UDP socket buffers on gateway listener
 - [x] Reject logging on gateway listener (debug level)
+- [x] v0.12.0 release — all 2,640 tests passing, CI green, binaries published
+- [x] VIP proxy v2: concurrent connections, TLS termination, idle timeout
+- [x] macOS app: end-to-end Vaultwarden HTTP + HTTPS + DNS resolution
+- [x] Disconnect cleanup: stop VIP proxy + DNS before clearing session
+- [x] Keepalive watchdog: 45s timeout, fires disconnect callback, cleans up VIP/DNS
+- [x] Auto-reconnect: exponential backoff (1s base, 30s max) on keepalive timeout
+- [x] VIP proxy idempotent start: stop existing listeners + fresh channels on reconnect
+- [x] First-request fix: 200ms delay after VIP proxy start
+- [x] Reconnect-safe networking: skip OS loopback/pf setup on reconnect (persists)
 
 ## Commits
 - `9e86f50` — relay address migration, gateway paced ARQ, re-encrypt retransmits

@@ -50,6 +50,14 @@ final class TunnelViewModel: ObservableObject {
     @Published private(set) var isVPNConfigInstalled: Bool = false
     @Published private(set) var connectionMode: ConnectionMode = .directConnect
     @Published var preferVPN: Bool = false
+    @Published var autoReconnectEnabled: Bool = true
+    @Published private(set) var reconnectAttempt: Int = 0
+
+    // MARK: - Auto-Reconnect
+
+    private var reconnectTask: Task<Void, Never>?
+    private let maxReconnectDelay: TimeInterval = 30
+    private let baseReconnectDelay: TimeInterval = 1
 
     // MARK: - Dependencies
 
@@ -121,6 +129,10 @@ final class TunnelViewModel: ObservableObject {
 
     func disconnect() {
         guard status.canDisconnect else { return }
+
+        // Cancel any pending auto-reconnect
+        reconnectTask?.cancel()
+        reconnectAttempt = 0
 
         status = .disconnecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
@@ -231,6 +243,9 @@ final class TunnelViewModel: ObservableObject {
             peerAddress = target
             startDirectStatsPolling()
             await startVipProxy()
+
+            // Give gateway time to set up session before marking fully connected
+            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
 
             NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
 
@@ -354,8 +369,15 @@ final class TunnelViewModel: ObservableObject {
                         self.status = .connected
                         self.stats.connectedSince = Date()
                     }
-                case .disconnected:
-                    self.status = .disconnected
+                case .disconnected(let reason):
+                    if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
+                        // Keepalive timeout — schedule auto-reconnect
+                        self.scheduleReconnect()
+                    } else {
+                        self.status = .disconnected
+                        self.reconnectAttempt = 0
+                        self.reconnectTask?.cancel()
+                    }
                     self.stats = TrafficStats()
                     self.stopStatsPolling()
                 case .error(let error):
@@ -517,6 +539,21 @@ final class TunnelViewModel: ObservableObject {
         bridge.dnsStop()
         bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.53"])
         vipStatus = nil
+    }
+
+    // MARK: - Auto-Reconnect
+
+    private func scheduleReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = Task {
+            let delay = min(baseReconnectDelay * pow(2, Double(reconnectAttempt)), maxReconnectDelay)
+            reconnectAttempt += 1
+            status = .reconnecting
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if !Task.isCancelled {
+                connect()
+            }
+        }
     }
 
     // MARK: - Identity Path

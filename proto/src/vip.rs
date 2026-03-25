@@ -259,9 +259,10 @@ impl VipProxy {
         for handle in self.listener_handles.drain(..) {
             handle.abort();
         }
-        // Drain the tunnel_rx channel to prevent stale data on restart
-        // (do this synchronously since stop() isn't async)
-        // The channel will be naturally drained when the senders are dropped
+        // Reset active connection state so reconnect can start fresh
+        self.active_connection.store(false, Ordering::SeqCst);
+        // Note: Don't clear services — they're configuration, not runtime state.
+        // They need to persist across reconnect cycles.
     }
 }
 

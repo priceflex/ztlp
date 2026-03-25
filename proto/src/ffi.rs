@@ -929,6 +929,11 @@ async fn recv_loop(
     const FRAME_ACK: u8 = 0x01;
     const FRAME_FIN: u8 = 0x02;
 
+    // Keepalive watchdog: if no data arrives for this long, treat connection as dead
+    let mut last_recv_time = std::time::Instant::now();
+    const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
+    const DISCONNECT_KEEPALIVE_TIMEOUT: i32 = 100;
+
     // Track highest contiguous data_seq received for cumulative ACKs.
     // Uses a simple approach: track next_expected and a set of
     // out-of-order seqs received ahead.
@@ -986,6 +991,8 @@ async fn recv_loop(
 
         match tokio::time::timeout(Duration::from_secs(1), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
+                last_recv_time = std::time::Instant::now();
+
                 // SECURITY: Reject oversized packets to prevent memory exhaustion.
                 // Maximum UDP payload is 65535 bytes; anything larger indicates a
                 // bug or attack. Drop silently and continue.
@@ -1142,7 +1149,38 @@ async fn recv_loop(
                 break;
             }
             Err(_) => {
-                // Timeout — just loop again (allows checking stop_flag)
+                // Timeout — check keepalive watchdog
+                if last_recv_time.elapsed() > KEEPALIVE_TIMEOUT {
+                    tracing::warn!(
+                        "recv_loop: keepalive timeout ({}s without data)",
+                        KEEPALIVE_TIMEOUT.as_secs()
+                    );
+                    // Invoke disconnect callback
+                    if let Ok(guard) = inner.lock() {
+                        if let Some((cb, ud)) = guard.disconnect_callback {
+                            let mut session_handle = ZtlpSession {
+                                session_id,
+                                peer_node_id,
+                                peer_addr,
+                                session_id_str: CString::new(hex::encode(session_id.as_bytes()))
+                                    .unwrap_or_default(),
+                                peer_node_id_str: CString::new(hex::encode(
+                                    peer_node_id.as_bytes(),
+                                ))
+                                .unwrap_or_default(),
+                                peer_addr_str: CString::new(peer_addr.to_string())
+                                    .unwrap_or_default(),
+                            };
+                            cb(ud, &mut session_handle, DISCONNECT_KEEPALIVE_TIMEOUT);
+                        }
+                    }
+                    // Update state
+                    if let Ok(mut guard) = inner.lock() {
+                        guard.state = ConnectionState::Disconnected;
+                        guard.active_session = None;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -1168,6 +1206,11 @@ pub extern "C" fn ztlp_disconnect(client: *mut ZtlpClient) -> i32 {
             return ZtlpResult::InternalError as i32;
         }
     };
+
+    // Stop VIP proxy first (before clearing session)
+    if let Some(ref mut proxy) = guard.vip_proxy {
+        proxy.stop();
+    }
 
     if let Some(ref session) = guard.active_session {
         session.stop_flag.store(true, Ordering::SeqCst);

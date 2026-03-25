@@ -84,6 +84,16 @@ defmodule ZtlpRelay.Session do
   end
 
   @doc """
+  Update peer_b address for an established session (gateway address migration).
+  Used when a gateway's packets arrive from a different IP than originally
+  registered (e.g., AWS VPC internal IP vs public Elastic IP).
+  """
+  @spec update_peer_b(pid(), {tuple(), non_neg_integer()}) :: :ok
+  def update_peer_b(pid, new_peer_b) do
+    GenServer.cast(pid, {:update_peer_b, new_peer_b})
+  end
+
+  @doc """
   Close the session.
   """
   @spec close(pid()) :: :ok
@@ -155,6 +165,10 @@ defmodule ZtlpRelay.Session do
 
     {:noreply,
      %{state | packet_count: state.packet_count + 1, last_activity: now, timer_ref: timer_ref}}
+  end
+
+  def handle_cast({:update_peer_b, new_peer_b}, state) do
+    {:noreply, %{state | peer_b: new_peer_b}}
   end
 
   def handle_cast(:close, state) do

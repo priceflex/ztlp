@@ -489,16 +489,42 @@ defmodule ZtlpRelay.UdpListener do
 
             :ok
 
-          # Unknown sender on existing session — drop or mesh route
+          # Unknown sender on existing session — check if it's a known gateway
+          # whose IP changed (e.g., AWS VPC internal IP vs public Elastic IP).
+          # This is the classic dual-NIC / Elastic IP problem: the relay registered
+          # peer_b from the public IP seen in the HELLO_ACK, but subsequent data
+          # packets may arrive from the VPC-internal IP.
           true ->
-            if state.mesh_enabled do
-              mesh_route_packet(session_id, data, sender, state)
-            else
-              Logger.debug(
-                "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)}"
+            {sender_ip, _sender_port} = sender
+            gateway_ips = GatewayForwarder.known_gateway_ips()
+
+            if sender_ip in gateway_ips do
+              # Sender is a registered gateway — update peer_b and forward
+              Logger.info(
+                "Gateway address migration: session #{Base.encode16(session_id)} " <>
+                  "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP)"
               )
 
-              :ok
+              # Update session registry so future packets match on first check
+              if is_pid(pid), do: Session.update_peer_b(pid, sender)
+              SessionRegistry.update_peer_b(session_id, sender)
+
+              # Forward to client
+              {dest_ip, dest_port} = peer_a
+              :gen_udp.send(state.socket, dest_ip, dest_port, data)
+              Stats.increment(:forwarded)
+              if is_pid(pid), do: Session.forward(pid)
+            else
+              if state.mesh_enabled do
+                mesh_route_packet(session_id, data, sender, state)
+              else
+                Logger.debug(
+                  "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)} " <>
+                    "(peer_a=#{inspect(peer_a)} peer_b=#{inspect(peer_b)})"
+                )
+
+                :ok
+              end
             end
         end
 

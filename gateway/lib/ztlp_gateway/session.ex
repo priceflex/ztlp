@@ -58,11 +58,16 @@ defmodule ZtlpGateway.Session do
   @initial_rto_ms 500
   @min_rto_ms 200
   @max_rto_ms 10_000
-  @max_retransmits 8
+  @max_retransmits 15
   @retransmit_check_interval_ms 50
   # Linger timeout: how long to keep session alive after backend closes
   # to allow retransmission of unacked data
-  @linger_timeout_ms 10_000
+  @linger_timeout_ms 15_000
+
+  # Pacing: max unacked packets in flight (send window)
+  @send_window_size 8
+  # Pacing interval: ms between packet sends (spreads burst across time)
+  @pacing_interval_ms 2
 
   # ---------------------------------------------------------------------------
   # Types
@@ -153,14 +158,18 @@ defmodule ZtlpGateway.Session do
       # Buffer for packets that arrive before handshake completes
       pending_packets: [],
       # Send buffer for retransmission (KCP-inspired ARQ)
-      # %{packet_seq => {packet_binary, sent_at_mono, retransmit_count, data_seq}}
+      # %{packet_seq => {plaintext_frame, sent_at_mono, retransmit_count, data_seq}}
       send_buffer: %{},
       rto_ms: @initial_rto_ms,
       srtt_ms: nil,
       rttvar_ms: nil,
       retransmit_timer_ref: nil,
       # Draining: backend closed, but we keep the session alive to retransmit
-      draining: false
+      draining: false,
+      # Paced send queue: list of plaintext chunks waiting to be sent
+      # Each entry is a raw plaintext (not yet framed/encrypted)
+      send_queue: :queue.new(),
+      pacing_timer_ref: nil
     }
 
     {:ok, state}
@@ -197,33 +206,38 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # Backend sent data — encrypt and send back to client
+  # Backend sent data — enqueue for paced sending
   @impl true
   def handle_info({:backend_data, data}, state) do
-    case encrypt_and_send(data, state) do
-      {:ok, new_state} ->
-        {:noreply, new_state}
+    # Enqueue the plaintext data; the pacing timer will send it
+    send_queue = :queue.in(data, state.send_queue)
+    state = %{state | send_queue: send_queue}
 
-      {:error, _reason} ->
-        terminate_session(state, :encrypt_error)
-    end
+    # Try to send immediately if window allows
+    state = flush_send_queue(state)
+    {:noreply, state}
   end
 
   # Backend closed the TCP connection — enter draining mode
-  # Keep session alive to retransmit unacked data + FIN
+  # Keep session alive to drain send_queue + retransmit unacked data + FIN
   def handle_info(:backend_closed, state) do
-    if map_size(state.send_buffer) == 0 do
-      # Nothing to retransmit, terminate immediately
+    queue_len = :queue.len(state.send_queue)
+    buf_len = map_size(state.send_buffer)
+
+    if queue_len == 0 and buf_len == 0 do
+      # Nothing queued or in flight — send FIN and terminate
+      state = if state.r2i_key, do: send_fin(state), else: state
       terminate_session(state, :backend_close)
     else
-      Logger.info("[Session] Backend closed, entering drain mode (#{map_size(state.send_buffer)} packets in send_buffer)")
-      # Send FIN now
-      state = if state.r2i_key, do: send_fin(state), else: state
+      Logger.info("[Session] Backend closed, entering drain mode (#{queue_len} queued, #{buf_len} in send_buffer)")
       # Schedule linger timeout
       Process.send_after(self(), :linger_timeout, @linger_timeout_ms)
       # Ensure retransmit timer is running
       retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
-      {:noreply, %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}}
+      state = %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}
+      # Try to flush the queue — FIN will be sent when queue + buffer are both empty
+      state = flush_send_queue(state)
+      {:noreply, state}
     end
   end
 
@@ -248,6 +262,13 @@ defmodule ZtlpGateway.Session do
     terminate_session(state, :timeout)
   end
 
+  # Pacing timer — send next packet from queue if window allows
+  def handle_info(:pacing_tick, state) do
+    state = %{state | pacing_timer_ref: nil}
+    state = flush_send_queue(state)
+    {:noreply, state}
+  end
+
   # Retransmit timer — check send_buffer for timed-out packets
   def handle_info(:retransmit_check, state) do
     now = System.monotonic_time(:millisecond)
@@ -261,11 +282,27 @@ defmodule ZtlpGateway.Session do
             Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
 
-          elapsed > acc.rto_ms ->
-            Logger.debug("[Session] RTO retransmit data_seq=#{ds} packet_seq=#{seq} elapsed=#{elapsed}ms rto=#{acc.rto_ms}ms attempt=#{retransmit_count + 1}")
-            send_udp(acc, packet)
-            updated_entry = {packet, now, retransmit_count + 1, ds}
-            {%{acc | send_buffer: Map.put(acc.send_buffer, seq, updated_entry)}, exp_count}
+          elapsed > per_packet_rto(acc.rto_ms, retransmit_count) ->
+            # Re-encrypt with a NEW packet_seq to avoid anti-replay rejection
+            # and nonce reuse. The stored `packet` is actually the plaintext frame.
+            new_seq = acc.send_seq + 1
+            new_nonce = <<0::32, new_seq::little-64>>
+            {ct, tag} = Crypto.encrypt(acc.r2i_key, new_nonce, packet, <<>>)
+            encrypted = ct <> tag
+            new_pkt = Packet.build_data(acc.session_id, new_seq,
+              payload: encrypted,
+              payload_len: byte_size(encrypted)
+            )
+            new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
+
+            Logger.debug("[Session] RTO retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
+            send_udp(acc, new_packet)
+
+            # Remove old entry, add new one with new seq
+            updated_buffer = acc.send_buffer
+              |> Map.delete(seq)
+              |> Map.put(new_seq, {packet, now, retransmit_count + 1, ds})
+            {%{acc | send_buffer: updated_buffer, send_seq: new_seq}, exp_count}
 
           true ->
             {acc, exp_count}
@@ -523,8 +560,11 @@ defmodule ZtlpGateway.Session do
 
     state = %{state | send_buffer: send_buffer}
 
-    # If draining and send_buffer is empty, all data has been ACKed — terminate
-    if state.draining and map_size(send_buffer) == 0 do
+    # ACK freed window space — try to flush more from the queue
+    state = flush_send_queue(state)
+
+    # If draining with empty queue and empty send_buffer, all data delivered
+    if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
       Logger.info("[Session] All data ACKed during drain, terminating cleanly")
       terminate_session(state, :drain_complete)
     else
@@ -548,12 +588,25 @@ defmodule ZtlpGateway.Session do
       Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->
         # Find the send_buffer entry matching this data_seq
         case Enum.find(acc.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == nacked_ds end) do
-          {seq, {packet, _sent_at, retransmit_count, ds}} ->
+          {seq, {plaintext_frame, _sent_at, retransmit_count, ds}} ->
             if retransmit_count < @max_retransmits do
-              Logger.info("[Session] NACK retransmit data_seq=#{ds} packet_seq=#{seq} attempt=#{retransmit_count + 1}")
-              send_udp(acc, packet)
-              updated_entry = {packet, now, retransmit_count + 1, ds}
-              %{acc | send_buffer: Map.put(acc.send_buffer, seq, updated_entry)}
+              # Re-encrypt with new packet_seq (same reason as RTO retransmit)
+              new_seq = acc.send_seq + 1
+              new_nonce = <<0::32, new_seq::little-64>>
+              {ct, tag} = Crypto.encrypt(acc.r2i_key, new_nonce, plaintext_frame, <<>>)
+              encrypted = ct <> tag
+              new_pkt = Packet.build_data(acc.session_id, new_seq,
+                payload: encrypted,
+                payload_len: byte_size(encrypted)
+              )
+              new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
+
+              Logger.info("[Session] NACK retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} attempt=#{retransmit_count + 1}")
+              send_udp(acc, new_packet)
+              updated_buffer = acc.send_buffer
+                |> Map.delete(seq)
+                |> Map.put(new_seq, {plaintext_frame, now, retransmit_count + 1, ds})
+              %{acc | send_buffer: updated_buffer, send_seq: new_seq}
             else
               Logger.warning("[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping")
               %{acc | send_buffer: Map.delete(acc.send_buffer, seq)}
@@ -626,6 +679,56 @@ defmodule ZtlpGateway.Session do
   # Encrypt and send response to client
   # ---------------------------------------------------------------------------
 
+  # Flush the send queue: send packets as long as the send window allows.
+  # Paces sends by scheduling a timer for the next packet if the queue
+  # is non-empty but the window is full.
+  defp flush_send_queue(state) do
+    inflight = map_size(state.send_buffer)
+    cond do
+      :queue.is_empty(state.send_queue) ->
+        # Nothing to send. If draining with empty buffer, we're done.
+        if state.draining and inflight == 0 do
+          Logger.info("[Session] Send queue and buffer both empty during drain, sending FIN")
+          send_fin(state)
+        else
+          state
+        end
+
+      inflight >= @send_window_size ->
+        # Window full — schedule pacing timer to retry
+        state = schedule_pacing_timer(state)
+        state
+
+      true ->
+        # Send one packet from the queue
+        {{:value, plaintext}, remaining} = :queue.out(state.send_queue)
+        state = %{state | send_queue: remaining}
+        case encrypt_and_send(plaintext, state) do
+          {:ok, new_state} ->
+            # If more in queue and window allows, schedule next send
+            if not :queue.is_empty(remaining) do
+              schedule_pacing_timer(new_state)
+            else
+              # Queue empty. If draining, check if we should send FIN
+              if new_state.draining do
+                # FIN will be sent when all buffered packets are ACKed
+                new_state
+              else
+                new_state
+              end
+            end
+          {:error, _reason} ->
+            state
+        end
+    end
+  end
+
+  defp schedule_pacing_timer(%{pacing_timer_ref: nil} = state) do
+    ref = Process.send_after(self(), :pacing_tick, @pacing_interval_ms)
+    %{state | pacing_timer_ref: ref}
+  end
+  defp schedule_pacing_timer(state), do: state
+
   defp encrypt_and_send(plaintext, state) do
     seq = state.send_seq + 1
     data_seq = state.send_data_seq
@@ -646,9 +749,13 @@ defmodule ZtlpGateway.Session do
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))
 
-    # Store in send buffer for retransmission
+    # Store plaintext frame in send buffer for retransmission.
+    # We store the plaintext (not encrypted packet) because retransmits
+    # need a NEW packet_seq (nonce) — reusing the same nonce would be
+    # a nonce-reuse violation AND the client's anti-replay window would
+    # reject duplicate packet_seqs.
     now = System.monotonic_time(:millisecond)
-    send_buffer = Map.put(state.send_buffer, seq, {packet, now, 0, data_seq})
+    send_buffer = Map.put(state.send_buffer, seq, {framed, now, 0, data_seq})
 
     # Schedule retransmit timer if not already scheduled
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
@@ -748,9 +855,9 @@ defmodule ZtlpGateway.Session do
 
     send_udp(state, packet)
 
-    # Buffer the FIN for retransmission
+    # Buffer the FIN plaintext frame for retransmission (not encrypted packet)
     now = System.monotonic_time(:millisecond)
-    send_buffer = Map.put(state.send_buffer, seq, {packet, now, 0, :fin})
+    send_buffer = Map.put(state.send_buffer, seq, {fin_frame, now, 0, :fin})
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
 
     Logger.info("[Session] Sent FIN with final data_seq=#{state.send_data_seq}")
@@ -799,4 +906,13 @@ defmodule ZtlpGateway.Session do
     Process.send_after(self(), :retransmit_check, interval)
   end
   defp schedule_retransmit_timer(existing_ref, _rto_ms), do: existing_ref
+
+  # Per-packet RTO with mild backoff (1.5x per attempt, KCP-style).
+  # Pure exponential (2x) is too aggressive for high-loss paths — the later
+  # retransmits are spaced too far apart. 1.5x is the KCP default.
+  # Capped at @max_rto_ms.
+  defp per_packet_rto(base_rto, retransmit_count) do
+    backed_off = base_rto * :math.pow(1.5, retransmit_count) |> round()
+    min(backed_off, @max_rto_ms)
+  end
 end

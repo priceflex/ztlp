@@ -136,6 +136,26 @@ defmodule ZtlpRelay.GatewayForwarder do
     GenServer.call(__MODULE__, :count)
   end
 
+  @doc """
+  Returns the set of all known gateway IP addresses (both static config
+  and dynamically registered). Used by the relay to recognize packets from
+  gateways whose source IP differs from the registered peer_b (e.g., AWS
+  VPC internal IP vs public Elastic IP).
+  """
+  @spec known_gateway_ips() :: MapSet.t(:inet.ip_address())
+  def known_gateway_ips do
+    case GenServer.whereis(__MODULE__) do
+      nil ->
+        # Not started — fall back to static config
+        Config.gateway_addresses()
+        |> Enum.map(fn {ip, _port} -> ip end)
+        |> MapSet.new()
+
+      _pid ->
+        GenServer.call(__MODULE__, :known_gateway_ips)
+    end
+  end
+
   @doc "Clear all dynamic gateways and forwarded sessions (for testing)."
   @spec clear_all() :: :ok
   def clear_all do
@@ -279,6 +299,21 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   def handle_call(:count, _from, state) do
     {:reply, map_size(state.sessions), state}
+  end
+
+  def handle_call(:known_gateway_ips, _from, state) do
+    now = System.monotonic_time(:second)
+
+    # Static gateway IPs
+    static_ips = Enum.map(state.gateways, fn {ip, _port} -> ip end)
+
+    # Dynamic (non-expired) gateway IPs
+    dynamic_ips =
+      state.dynamic_gateways
+      |> Enum.filter(fn gw -> gw.expires_at > now end)
+      |> Enum.map(fn gw -> elem(gw.address, 0) end)
+
+    {:reply, MapSet.new(static_ips ++ dynamic_ips), state}
   end
 
   def handle_call(:clear_all, _from, state) do

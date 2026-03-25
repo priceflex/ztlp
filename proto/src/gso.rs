@@ -465,11 +465,6 @@ impl GroReceiver {
         use std::os::unix::io::AsRawFd;
 
         loop {
-            // Wait for the socket to become readable, then attempt a
-            // synchronous recvmsg with GRO support. Using try_io()
-            // instead of readable() + raw syscall ensures that tokio
-            // properly clears readiness on WouldBlock, preventing a
-            // busy-loop that would starve timers (NACK, ACK, stall).
             let fd = self.socket.as_raw_fd();
             let buf = &mut self.buf;
 
@@ -488,7 +483,6 @@ impl GroReceiver {
                         addr
                     );
 
-                    // Copy the received data into the RecvBatch's own buffer
                     let mut batch_buf = vec![0u8; total_len];
                     batch_buf.copy_from_slice(&self.buf[..total_len]);
 

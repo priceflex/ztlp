@@ -226,7 +226,7 @@ const MAX_RTO_RETRANSMIT_CYCLES: u32 = 10;
 
 /// After sending FIN, wait this long for remaining buffered packets to drain.
 #[allow(dead_code)]
-const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const FIN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 // ─── RTT probe parameters ───────────────────────────────────────────────────
 

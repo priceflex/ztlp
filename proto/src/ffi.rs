@@ -942,20 +942,14 @@ async fn recv_loop(
     let mut received_ahead: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     // Reassembly buffer: holds payloads for out-of-order data_seqs so we
     // can deliver to the VIP proxy in the correct order.
-    let mut reassembly_buf: std::collections::BTreeMap<u64, Vec<u8>> =
-        std::collections::BTreeMap::new();
-    // Track last seen data_seq to detect gateway send_data_seq reset (after FRAME_RESET).
-    // When data_seq drops to 0 while next_expected > 0, the gateway started
-    // a new stream — reset our tracking.
-    let mut _last_data_seq: u64 = 0;
-    // VIP delivery seq: next data_seq to deliver to the VIP proxy TCP socket.
-    // This tracks independently from ACK tracking because we need strict
-    // ordered delivery to TCP even if ACKs can be cumulative.
+    // For multiplexed streams, we dispatch by stream_id immediately after
+    // reassembly — the global data_seq ensures transport-level ordering
+    // and ACK correctness, while per-stream dispatch to separate channels
+    // allows independent delivery.
+    let mut reassembly_buf: std::collections::BTreeMap<u64, (u32, Vec<u8>)> =
+        std::collections::BTreeMap::new(); // data_seq → (stream_id, payload)
     let mut vip_next_deliver_seq: u64 = 0;
-    // Stream ID tracking for reassembly: maps data_seq → stream_id so we
-    // know which stream each buffered packet belongs to when flushing.
-    let mut reassembly_stream_ids: std::collections::BTreeMap<u64, u32> =
-        std::collections::BTreeMap::new();
+    let mut _last_data_seq: u64 = 0;
 
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
@@ -1085,8 +1079,11 @@ async fn recv_loop(
                         &debug_log,
                         log_start,
                         &format!(
-                            "FRAME_DATA stream={} data_seq={} payload_len={} expected={} vip_deliver={}",
-                            stream_id, data_seq, payload.len(), next_expected_seq, vip_next_deliver_seq
+                            "FRAME_DATA stream={} data_seq={} payload_len={} expected={}",
+                            stream_id,
+                            data_seq,
+                            payload.len(),
+                            next_expected_seq
                         ),
                     );
 
@@ -1102,64 +1099,37 @@ async fn recv_loop(
                     _last_data_seq = data_seq;
 
                     // ── Delivery to VIP proxy ──
-                    if stream_id > 0 {
-                        // Multiplexed: dispatch to the stream's channel via dispatcher
-                        // Data must still be delivered in data_seq order globally,
-                        // but each stream gets its own data independently.
-                        // Buffer and flush in order.
-                        reassembly_buf.insert(data_seq, payload);
-                        // Tag reassembly entries with stream_id using a side map
-                        reassembly_stream_ids.insert(data_seq, stream_id);
+                    // Buffer for ordered delivery, then flush contiguous.
+                    // For mux: dispatch to per-stream channel.
+                    // For legacy: dispatch to stream_id=0.
+                    if stream_id == 0 && data_seq == 0 && vip_next_deliver_seq > 0 {
+                        tracing::info!(
+                            "recv_loop: detected stream reset (data_seq=0, expected={})",
+                            vip_next_deliver_seq
+                        );
+                        reassembly_buf.clear();
+                        vip_next_deliver_seq = 0;
+                    }
 
-                        // Flush contiguous packets
-                        if let Ok(guard) = inner.lock() {
-                            if let Some(ref proxy) = guard.vip_proxy {
-                                let disp = proxy.dispatcher();
-                                while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq)
-                                {
-                                    let sid = reassembly_stream_ids
-                                        .remove(&vip_next_deliver_seq)
-                                        .unwrap_or(0);
-                                    if !disp.dispatch(sid, data) {
-                                        tracing::warn!(
-                                            "recv_loop: dispatch failed for stream={} data_seq={}",
-                                            sid,
-                                            vip_next_deliver_seq
-                                        );
-                                    }
-                                    vip_next_deliver_seq += 1;
+                    if data_seq >= vip_next_deliver_seq {
+                        reassembly_buf.insert(data_seq, (stream_id, payload));
+                    }
+
+                    // Flush contiguous packets
+                    if let Ok(guard) = inner.lock() {
+                        if let Some(ref proxy) = guard.vip_proxy {
+                            let disp = proxy.dispatcher();
+                            while let Some((sid, data)) =
+                                reassembly_buf.remove(&vip_next_deliver_seq)
+                            {
+                                if !disp.dispatch(sid, data) {
+                                    tracing::warn!(
+                                        "recv_loop: dispatch failed for stream={} data_seq={}",
+                                        sid,
+                                        vip_next_deliver_seq
+                                    );
                                 }
-                            }
-                        }
-                    } else {
-                        // Legacy single-stream: buffer and deliver in order
-                        // Detect gateway send_data_seq reset (new stream after FRAME_RESET)
-                        if data_seq == 0 && vip_next_deliver_seq > 0 {
-                            tracing::info!(
-                                "recv_loop: detected stream reset (data_seq=0, expected={})",
-                                vip_next_deliver_seq
-                            );
-                            reassembly_buf.clear();
-                            vip_next_deliver_seq = 0;
-                        }
-                        if data_seq >= vip_next_deliver_seq {
-                            reassembly_buf.insert(data_seq, payload);
-                        }
-                        if let Ok(guard) = inner.lock() {
-                            if let Some(ref proxy) = guard.vip_proxy {
-                                let disp = proxy.dispatcher();
-                                while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq)
-                                {
-                                    // Legacy mode: dispatch to stream_id=0
-                                    if !disp.dispatch(0, data) {
-                                        tracing::warn!(
-                                            "recv_loop: VIP dispatch failed for data_seq={}",
-                                            vip_next_deliver_seq
-                                        );
-                                        break;
-                                    }
-                                    vip_next_deliver_seq += 1;
-                                }
+                                vip_next_deliver_seq += 1;
                             }
                         }
                     }

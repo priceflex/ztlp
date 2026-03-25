@@ -57,8 +57,8 @@ defmodule ZtlpGateway.Session do
   @frame_open 0x06
 
   # ARQ constants (KCP-inspired)
-  @initial_rto_ms 500
-  @min_rto_ms 200
+  @initial_rto_ms 200
+  @min_rto_ms 100
   @max_rto_ms 10_000
   @max_retransmits 15
   @retransmit_check_interval_ms 50
@@ -67,9 +67,9 @@ defmodule ZtlpGateway.Session do
   @linger_timeout_ms 15_000
 
   # Pacing: max unacked packets in flight (send window)
-  @send_window_size 8
+  @send_window_size 64
   # Pacing interval: ms between packet sends (spreads burst across time)
-  @pacing_interval_ms 2
+  @pacing_interval_ms 1
 
   # Maximum plaintext payload per ZTLP data packet.
   # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.
@@ -928,6 +928,8 @@ defmodule ZtlpGateway.Session do
     data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
 
+    # Frame format: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+    # data_seq is the global transport sequence — used by client for ACKs.
     framed = <<@frame_data, stream_id::big-32, data_seq::big-64, plaintext::binary>>
 
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)

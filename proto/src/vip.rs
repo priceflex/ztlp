@@ -283,6 +283,10 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
         .map_err(|e| format!("failed to parse key {:?}: {}", key_path, e))?
         .ok_or_else(|| format!("no private key found in {:?}", key_path))?;
 
+    // Ensure the default crypto provider is installed (rustls 0.23 requires this).
+    // Ignore the error if it's already installed from a previous call.
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)

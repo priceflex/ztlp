@@ -494,15 +494,27 @@ defmodule ZtlpRelay.UdpListener do
           # This is the classic dual-NIC / Elastic IP problem: the relay registered
           # peer_b from the public IP seen in the HELLO_ACK, but subsequent data
           # packets may arrive from the VPC-internal IP.
+          #
+          # IMPORTANT: Only migrate if the IP changed but the port stayed the
+          # same, OR if the full {ip, port} matches a registered gateway address.
+          # We must NOT migrate when the gateway's registration packet arrives
+          # from an ephemeral source port — that would redirect session traffic
+          # to a port the gateway isn't listening on.
           true ->
-            {sender_ip, _sender_port} = sender
+            {sender_ip, sender_port} = sender
+            {_peer_b_ip, peer_b_port} = peer_b
             gateway_ips = GatewayForwarder.known_gateway_ips()
 
-            if sender_ip in gateway_ips do
-              # Sender is a registered gateway — update peer_b and forward
+            # Allow migration only if:
+            # 1. The IP is a known gateway IP, AND
+            # 2. The port matches peer_b's original port (IP-only change, e.g. VPC→EIP)
+            same_port = sender_port == peer_b_port
+
+            if sender_ip in gateway_ips and same_port do
+              # Sender is a registered gateway with matching port — safe to migrate
               Logger.info(
                 "Gateway address migration: session #{Base.encode16(session_id)} " <>
-                  "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP)"
+                  "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP, same port)"
               )
 
               # Update session registry so future packets match on first check

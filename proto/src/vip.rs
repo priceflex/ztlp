@@ -323,7 +323,7 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
             format!("TLS config error: {}", e)
         })?;
 
-    tls_log(&format!("ServerConfig OK, versions={:?}", config.protocol_versions));
+    tls_log("ServerConfig OK, TlsAcceptor created");
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 

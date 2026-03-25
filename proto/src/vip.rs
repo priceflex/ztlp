@@ -4,34 +4,36 @@
 //! listeners on each VIP:port. Incoming TCP connections are piped through
 //! the encrypted ZTLP tunnel.
 //!
-//! ## Architecture (v2 — production-ready)
+//! ## Architecture (v3 — stream multiplexing)
 //!
-//! Each TCP connection gets its own ZTLP stream identified by a `stream_id`.
-//! The listener spawns connections concurrently (not one-at-a-time). A central
-//! dispatcher routes incoming tunnel data to the correct connection based on
-//! the `stream_id` embedded in each frame.
+//! Each TCP connection gets its own stream_id. The client sends FRAME_OPEN
+//! to create a backend connection on the gateway, FRAME_DATA with stream_id
+//! to forward data, and FRAME_CLOSE to tear down. The gateway responds with
+//! FRAME_DATA tagged by stream_id, and FRAME_FIN/FRAME_CLOSE per stream.
 //!
-//! Frame format (tunnel → gateway):
-//!   `[frame_type(1) | stream_id(4 BE) | data_seq(8 BE) | payload]` for DATA
-//!   `[FRAME_RESET(0x04) | stream_id(4 BE)]` to open/close streams
+//! A `StreamDispatcher` routes incoming tunnel data to per-connection channels
+//! based on stream_id. No serialization — all connections run concurrently.
 //!
-//! Frame format (gateway → tunnel):
-//!   `[FRAME_DATA(0x00) | data_seq(8 BE) | payload]` — current single-stream
+//! Frame format (client → gateway):
+//!   `[FRAME_OPEN(0x06) | stream_id(4 BE)]` — open stream
+//!   `[FRAME_DATA(0x00) | stream_id(4 BE) | payload]` — data
+//!   `[FRAME_CLOSE(0x05) | stream_id(4 BE)]` — close stream
 //!
-//! NOTE: The gateway currently doesn't support stream_id multiplexing yet,
-//! so v2 still serializes connections through the tunnel. But the local
-//! proxy is now concurrent and robust.
+//! Frame format (gateway → client):
+//!   `[FRAME_DATA(0x00) | stream_id(4 BE) | data_seq(8 BE) | payload]` — data
+//!   `[FRAME_FIN(0x02) | stream_id(4 BE)]` — stream finished (backend closed)
+//!   `[FRAME_CLOSE(0x05) | stream_id(4 BE)]` — stream error/closed
 
 #![deny(unsafe_code)]
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::mpsc;
 
 use crate::packet::SessionId;
 use crate::transport::TransportNode;
@@ -56,10 +58,11 @@ const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
 /// Frame type for tunnel data frames.
 const FRAME_DATA: u8 = 0x00;
 
-/// Frame type for stream reset — signals a new TCP connection within the same
-/// ZTLP session. The gateway opens a fresh backend TCP connection and resets
-/// its response data_seq to 0.
-const FRAME_RESET: u8 = 0x04;
+/// Frame type for closing a multiplexed stream.
+const FRAME_CLOSE: u8 = 0x05;
+
+/// Frame type for opening a new multiplexed stream.
+const FRAME_OPEN: u8 = 0x06;
 
 /// A registered VIP service.
 #[derive(Debug, Clone)]
@@ -75,27 +78,82 @@ pub struct VipService {
 /// Data received from the tunnel, to be forwarded to the TCP client.
 #[derive(Debug)]
 pub struct TunnelData {
+    /// Stream ID this data belongs to (0 = legacy single-stream).
+    pub stream_id: u32,
     /// The raw payload (after stripping the frame header).
     pub payload: Vec<u8>,
+}
+
+/// Stream dispatcher: routes incoming tunnel data to per-connection channels.
+///
+/// Each TCP connection registers with a stream_id and gets a dedicated
+/// mpsc::Sender. The recv_loop dispatches tunnel data by stream_id.
+pub struct StreamDispatcher {
+    streams: std::sync::Mutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>,
+}
+
+impl Default for StreamDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamDispatcher {
+    pub fn new() -> Self {
+        Self {
+            streams: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a new stream and return the receiver for it.
+    pub fn register(&self, stream_id: u32) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(256);
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.insert(stream_id, tx);
+        }
+        rx
+    }
+
+    /// Unregister a stream (called when connection closes).
+    pub fn unregister(&self, stream_id: u32) {
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.remove(&stream_id);
+        }
+    }
+
+    /// Dispatch data to the appropriate stream. Returns false if stream not found.
+    pub fn dispatch(&self, stream_id: u32, data: Vec<u8>) -> bool {
+        if let Ok(streams) = self.streams.lock() {
+            if let Some(tx) = streams.get(&stream_id) {
+                return tx.try_send(data).is_ok();
+            }
+        }
+        false
+    }
+
+    /// Signal that a stream has been closed by the remote side (drop the sender).
+    pub fn close_stream(&self, stream_id: u32) {
+        self.unregister(stream_id);
+    }
+
+    /// Number of active streams.
+    pub fn stream_count(&self) -> usize {
+        self.streams.lock().map(|s| s.len()).unwrap_or(0)
+    }
 }
 
 /// The VIP proxy manager. Holds the service registry and manages TCP listeners.
 pub struct VipProxy {
     /// Registered services keyed by name.
     services: HashMap<String, VipService>,
-    /// Channel sender for tunnel data → TCP client direction.
-    /// The recv loop pushes data here; the active TCP connection reads from it.
-    tunnel_tx: mpsc::Sender<TunnelData>,
-    /// Channel receiver (wrapped in Mutex for shared access).
-    tunnel_rx: Arc<Mutex<mpsc::Receiver<TunnelData>>>,
+    /// Stream dispatcher for routing tunnel data to per-connection channels.
+    dispatcher: Arc<StreamDispatcher>,
+    /// Atomic counter for assigning stream IDs to new connections.
+    next_stream_id: Arc<AtomicU32>,
     /// Stop flag for all proxy tasks.
     stop_flag: Arc<AtomicBool>,
     /// Join handles for spawned listener tasks.
     listener_handles: Vec<tokio::task::JoinHandle<()>>,
-    /// Notify when the active connection finishes (allows queued connections to proceed).
-    connection_done: Arc<Notify>,
-    /// Whether there is an active connection using the tunnel.
-    active_connection: Arc<AtomicBool>,
 }
 
 impl Default for VipProxy {
@@ -105,17 +163,14 @@ impl Default for VipProxy {
 }
 
 impl VipProxy {
-    /// Create a new VIP proxy with default channel buffer size.
+    /// Create a new VIP proxy with stream multiplexing support.
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(1024); // Larger buffer for bursts
         Self {
             services: HashMap::new(),
-            tunnel_tx: tx,
-            tunnel_rx: Arc::new(Mutex::new(rx)),
+            dispatcher: Arc::new(StreamDispatcher::new()),
+            next_stream_id: Arc::new(AtomicU32::new(1)), // Start at 1 (0 = legacy)
             stop_flag: Arc::new(AtomicBool::new(false)),
             listener_handles: Vec::new(),
-            connection_done: Arc::new(Notify::new()),
-            active_connection: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -148,9 +203,9 @@ impl VipProxy {
         Ok(())
     }
 
-    /// Get the tunnel data sender (for the recv loop to push data into).
-    pub fn tunnel_sender(&self) -> mpsc::Sender<TunnelData> {
-        self.tunnel_tx.clone()
+    /// Get the stream dispatcher (for the recv loop to dispatch data by stream_id).
+    pub fn dispatcher(&self) -> Arc<StreamDispatcher> {
+        self.dispatcher.clone()
     }
 
     /// Get a snapshot of all registered services.
@@ -165,9 +220,8 @@ impl VipProxy {
 
     /// Start TCP listeners for all registered services.
     ///
-    /// Each listener accepts concurrent TCP connections and serializes them
-    /// through the single ZTLP tunnel session. Connections queue when another
-    /// is active, with a configurable concurrency limit.
+    /// Each listener accepts concurrent TCP connections. Each connection
+    /// gets its own stream_id and communicates through the multiplexed tunnel.
     pub async fn start(
         &mut self,
         transport: Arc<TransportNode>,
@@ -183,13 +237,10 @@ impl VipProxy {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // Create fresh channel for this session (avoids stale data from old session)
-        let (tx, rx) = mpsc::channel(1024);
-        self.tunnel_tx = tx;
-        self.tunnel_rx = Arc::new(Mutex::new(rx));
-
+        // Fresh dispatcher for this session
+        self.dispatcher = Arc::new(StreamDispatcher::new());
+        self.next_stream_id.store(1, Ordering::SeqCst);
         self.stop_flag.store(false, Ordering::SeqCst);
-        self.active_connection.store(false, Ordering::SeqCst);
 
         for service in self.services.values() {
             for &port in &service.ports {
@@ -213,9 +264,8 @@ impl VipProxy {
                 let svc_peer_addr = peer_addr;
                 let data_seq = data_seq.clone();
                 let bytes_sent = bytes_sent.clone();
-                let tunnel_rx = self.tunnel_rx.clone();
-                let connection_done = self.connection_done.clone();
-                let active_connection = self.active_connection.clone();
+                let dispatcher = self.dispatcher.clone();
+                let next_stream_id = self.next_stream_id.clone();
 
                 // Build TLS acceptor for HTTPS ports
                 let tls_acceptor = if is_tls_port(port) {
@@ -247,10 +297,9 @@ impl VipProxy {
                         svc_peer_addr,
                         data_seq,
                         bytes_sent,
-                        tunnel_rx,
+                        dispatcher,
+                        next_stream_id,
                         tls_acceptor,
-                        connection_done,
-                        active_connection,
                     )
                     .await;
                 });
@@ -266,16 +315,8 @@ impl VipProxy {
     /// Stop all VIP proxy listeners and release resources.
     pub fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        // Wake any waiting connections so they can see the stop flag
-        self.connection_done.notify_waiters();
         for handle in self.listener_handles.drain(..) {
             handle.abort();
-        }
-        // Reset active connection state so reconnect can start fresh
-        self.active_connection.store(false, Ordering::SeqCst);
-        // Drain any remaining data from the tunnel channel
-        if let Ok(mut rx) = self.tunnel_rx.try_lock() {
-            while rx.try_recv().is_ok() {}
         }
         // Note: Don't clear services — they're configuration, not runtime state.
         // They need to persist across reconnect cycles.
@@ -289,16 +330,12 @@ fn is_tls_port(port: u16) -> bool {
 }
 
 /// Build a TLS acceptor from cert/key files in `~/.ztlp/certs/`.
-///
-/// Looks for `<hostname>.pem` (cert chain) and `<hostname>.key` (private key)
-/// where hostname is derived from the first registered service name + zone.
 fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
     let cert_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".ztlp")
         .join("certs");
 
-    // Try multiple cert file patterns
     let patterns = [
         format!("{}.techrockstars.ztlp", service_name),
         service_name.to_string(),
@@ -329,7 +366,6 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
 
     tracing::info!("VIP TLS: loading cert from {:?}", cert_path);
 
-    // Read cert chain
     let cert_data = std::fs::read(&cert_path)
         .map_err(|e| format!("failed to read cert {:?}: {}", cert_path, e))?;
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_data.as_slice())
@@ -339,16 +375,12 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
         return Err(format!("no certificates found in {:?}", cert_path));
     }
 
-    // Read private key
     let key_data = std::fs::read(&key_path)
         .map_err(|e| format!("failed to read key {:?}: {}", key_path, e))?;
     let key = rustls_pemfile::private_key(&mut key_data.as_slice())
         .map_err(|e| format!("failed to parse key {:?}: {}", key_path, e))?
         .ok_or_else(|| format!("no private key found in {:?}", key_path))?;
 
-    // Ensure the default crypto provider is installed (rustls 0.23 requires this).
-    // In FFI contexts (Swift → Rust static lib), the auto-install doesn't
-    // work reliably. Ignore AlreadyInstalled errors from subsequent calls.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let config = ServerConfig::builder()
@@ -359,12 +391,12 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+// ─── Listener + Connection Handling ─────────────────────────────────────────
+
 /// TCP listener task for a single VIP:port.
 ///
-/// Accepts concurrent TCP connections up to MAX_CONCURRENT_CONNECTIONS.
-/// Since the gateway doesn't support stream multiplexing yet, connections
-/// are serialized through the tunnel: only one connection actively uses
-/// the tunnel at a time, others wait for their turn.
+/// Accepts concurrent TCP connections. Each gets a unique stream_id and
+/// runs independently through the multiplexed tunnel.
 #[allow(clippy::too_many_arguments)]
 async fn vip_listener_task(
     listener: TcpListener,
@@ -374,12 +406,10 @@ async fn vip_listener_task(
     peer_addr: SocketAddr,
     data_seq: Arc<AtomicU64>,
     bytes_sent: Arc<AtomicU64>,
-    tunnel_rx: Arc<Mutex<mpsc::Receiver<TunnelData>>>,
+    dispatcher: Arc<StreamDispatcher>,
+    next_stream_id: Arc<AtomicU32>,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
-    connection_done: Arc<Notify>,
-    active_connection: Arc<AtomicBool>,
 ) {
-    // Semaphore to limit concurrent connections
     let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     loop {
@@ -387,7 +417,6 @@ async fn vip_listener_task(
             break;
         }
 
-        // Accept connections with timeout to check stop flag periodically
         let accept_result = tokio::select! {
             result = listener.accept() => result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
@@ -403,7 +432,6 @@ async fn vip_listener_task(
             }
         };
 
-        // Acquire semaphore permit (limits concurrent connections)
         let permit = match semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
@@ -413,26 +441,26 @@ async fn vip_listener_task(
             }
         };
 
+        // Assign a unique stream_id for this connection
+        let stream_id = next_stream_id.fetch_add(1, Ordering::SeqCst);
+
         tracing::info!(
-            "VIP connection from {} (tls={})",
+            "VIP connection from {} stream_id={} (tls={})",
             client_addr,
+            stream_id,
             tls_acceptor.is_some()
         );
 
-        // Spawn connection handler as a separate task
         let stop = stop.clone();
         let transport = transport.clone();
         let data_seq = data_seq.clone();
         let bytes_sent = bytes_sent.clone();
-        let tunnel_rx = tunnel_rx.clone();
-        let connection_done = connection_done.clone();
-        let active_connection = active_connection.clone();
+        let dispatcher = dispatcher.clone();
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            let _permit = permit; // Hold permit for connection lifetime
+            let _permit = permit;
 
-            // Handle TLS handshake if needed (with timeout)
             if let Some(ref acceptor) = tls_acceptor {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(TLS_HANDSHAKE_TIMEOUT_SECS),
@@ -441,11 +469,16 @@ async fn vip_listener_task(
                 .await
                 {
                     Ok(Ok(tls_stream)) => {
-                        tracing::info!("VIP TLS handshake complete from {}", client_addr);
+                        tracing::info!(
+                            "VIP TLS handshake complete from {} stream_id={}",
+                            client_addr,
+                            stream_id
+                        );
                         let (read_half, write_half) = tokio::io::split(tls_stream);
-                        handle_serialized_connection(
+                        handle_mux_connection(
                             read_half,
                             write_half,
+                            stream_id,
                             client_addr,
                             &stop,
                             &transport,
@@ -453,9 +486,7 @@ async fn vip_listener_task(
                             peer_addr,
                             &data_seq,
                             &bytes_sent,
-                            &tunnel_rx,
-                            &connection_done,
-                            &active_connection,
+                            &dispatcher,
                         )
                         .await;
                     }
@@ -471,11 +502,11 @@ async fn vip_listener_task(
                     }
                 }
             } else {
-                // Plain TCP
                 let (read_half, write_half) = tokio::io::split(stream);
-                handle_serialized_connection(
+                handle_mux_connection(
                     read_half,
                     write_half,
+                    stream_id,
                     client_addr,
                     &stop,
                     &transport,
@@ -483,9 +514,7 @@ async fn vip_listener_task(
                     peer_addr,
                     &data_seq,
                     &bytes_sent,
-                    &tunnel_rx,
-                    &connection_done,
-                    &active_connection,
+                    &dispatcher,
                 )
                 .await;
             }
@@ -493,16 +522,18 @@ async fn vip_listener_task(
     }
 }
 
-/// Acquire exclusive tunnel access, handle the connection, then release.
+/// Handle a multiplexed VIP connection.
 ///
-/// Since the gateway doesn't support stream multiplexing yet, only one
-/// TCP connection can use the tunnel at a time. This function waits for
-/// the tunnel to become available, sends FRAME_RESET to start a fresh
-/// backend connection, then pipes data bidirectionally.
+/// 1. Register stream with dispatcher
+/// 2. Send FRAME_OPEN to gateway
+/// 3. Pipe data bidirectionally with stream_id tagging
+/// 4. Send FRAME_CLOSE on teardown
+/// 5. Unregister stream
 #[allow(clippy::too_many_arguments)]
-async fn handle_serialized_connection<R, W>(
-    read_half: R,
-    write_half: W,
+async fn handle_mux_connection<R, W>(
+    mut read_half: R,
+    mut write_half: W,
+    stream_id: u32,
     client_addr: SocketAddr,
     stop: &Arc<AtomicBool>,
     transport: &Arc<TransportNode>,
@@ -510,120 +541,43 @@ async fn handle_serialized_connection<R, W>(
     peer_addr: SocketAddr,
     data_seq: &Arc<AtomicU64>,
     bytes_sent: &Arc<AtomicU64>,
-    tunnel_rx: &Arc<Mutex<mpsc::Receiver<TunnelData>>>,
-    connection_done: &Arc<Notify>,
-    active_connection: &Arc<AtomicBool>,
+    dispatcher: &Arc<StreamDispatcher>,
 ) where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
-    // Wait for exclusive tunnel access (spin with notification)
-    let mut wait_count = 0u32;
-    loop {
-        if stop.load(Ordering::SeqCst) {
+    // 1. Register stream with dispatcher to receive tunnel data
+    let mut stream_rx = dispatcher.register(stream_id);
+
+    // 2. Send FRAME_OPEN to gateway to create backend connection
+    {
+        let open_frame = vec![
+            FRAME_OPEN,
+            (stream_id >> 24) as u8,
+            (stream_id >> 16) as u8,
+            (stream_id >> 8) as u8,
+            stream_id as u8,
+        ];
+        if let Err(e) = transport
+            .send_data(session_id, &open_frame, peer_addr)
+            .await
+        {
+            tracing::warn!("VIP: failed to send OPEN for stream {}: {}", stream_id, e);
+            dispatcher.unregister(stream_id);
             return;
         }
-        // Try to claim active connection
-        if active_connection
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            break;
-        }
-        // Another connection is active — wait for it to finish
-        wait_count += 1;
-        if wait_count == 1 {
-            tracing::info!(
-                "VIP: connection from {} waiting for tunnel access",
-                client_addr
-            );
-        }
-        tokio::select! {
-            _ = connection_done.notified() => continue,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                tracing::warn!("VIP: connection from {} timed out waiting for tunnel", client_addr);
-                return;
-            }
-        }
-    }
-
-    if wait_count > 0 {
         tracing::info!(
-            "VIP: connection from {} acquired tunnel after {} waits",
-            client_addr,
-            wait_count
+            "VIP: sent OPEN for stream {} from {}",
+            stream_id,
+            client_addr
         );
     }
 
-    // Send FRAME_RESET to start a fresh backend TCP connection
-    {
-        let reset_frame = vec![FRAME_RESET];
-        if let Err(e) = transport
-            .send_data(session_id, &reset_frame, peer_addr)
-            .await
-        {
-            tracing::warn!("VIP: failed to send RESET for {}: {}", client_addr, e);
-            active_connection.store(false, Ordering::SeqCst);
-            connection_done.notify_waiters();
-            return;
-        }
-        tracing::info!("VIP: sent RESET for new connection from {}", client_addr);
-    }
+    // Small delay for gateway to set up backend
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Reset data_seq for the new stream
-    data_seq.store(0, Ordering::SeqCst);
-
-    // Drain any stale data from tunnel_rx before starting
-    {
-        let mut rx = tunnel_rx.lock().await;
-        let mut drained = 0;
-        while rx.try_recv().is_ok() {
-            drained += 1;
-        }
-        if drained > 0 {
-            tracing::info!("VIP: drained {} stale packets from tunnel_rx", drained);
-        }
-    }
-
-    // Handle the connection
-    handle_vip_connection(
-        read_half, write_half, stop, transport, session_id, peer_addr, data_seq, bytes_sent,
-        tunnel_rx,
-    )
-    .await;
-
-    // Release tunnel access
-    active_connection.store(false, Ordering::SeqCst);
-    connection_done.notify_waiters();
-    tracing::info!(
-        "VIP: connection from {} finished, tunnel released",
-        client_addr
-    );
-}
-
-/// Handle a single VIP connection (TLS or plain) — pipe data bidirectionally.
-///
-/// This is the core data pump: reads from TCP, sends through tunnel; reads
-/// from tunnel, writes to TCP. Both directions run concurrently.
-#[allow(clippy::too_many_arguments)]
-async fn handle_vip_connection<R, W>(
-    mut read_half: R,
-    mut write_half: W,
-    stop: &Arc<AtomicBool>,
-    transport: &Arc<TransportNode>,
-    session_id: SessionId,
-    peer_addr: SocketAddr,
-    data_seq: &Arc<AtomicU64>,
-    bytes_sent: &Arc<AtomicU64>,
-    tunnel_rx: &Arc<Mutex<mpsc::Receiver<TunnelData>>>,
-) where
-    R: AsyncReadExt + Unpin + Send + 'static,
-    W: AsyncWriteExt + Unpin + Send + 'static,
-{
-    let tunnel_rx_clone = tunnel_rx.clone();
+    // 3. Bidirectional data pump
     let stop_clone = stop.clone();
-
-    // Track last activity for idle timeout
     let last_activity = Arc::new(AtomicU64::new(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -632,16 +586,16 @@ async fn handle_vip_connection<R, W>(
     ));
     let last_activity_write = last_activity.clone();
 
-    // Task: tunnel → TCP (read from channel, write to TCP client)
+    // Task: tunnel → TCP (receive from dispatcher channel, write to TCP)
     let write_task = tokio::spawn(async move {
         loop {
             if stop_clone.load(Ordering::SeqCst) {
                 break;
             }
-            let mut rx = tunnel_rx_clone.lock().await;
-            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), stream_rx.recv())
+                .await
+            {
                 Ok(Some(data)) => {
-                    drop(rx); // Release lock before writing
                     last_activity_write.store(
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -649,20 +603,25 @@ async fn handle_vip_connection<R, W>(
                             .as_secs(),
                         Ordering::Relaxed,
                     );
-                    if let Err(e) = write_half.write_all(&data.payload).await {
-                        tracing::debug!("VIP: TCP write error: {}", e);
+                    if let Err(e) = write_half.write_all(&data).await {
+                        tracing::debug!("VIP: TCP write error stream {}: {}", stream_id, e);
                         break;
                     }
-                    // Flush after each write to reduce latency
                     if let Err(e) = write_half.flush().await {
-                        tracing::debug!("VIP: TCP flush error: {}", e);
+                        tracing::debug!("VIP: TCP flush error stream {}: {}", stream_id, e);
                         break;
                     }
                 }
-                Ok(None) => break, // Channel closed
+                Ok(None) => {
+                    // Channel closed — stream ended by remote
+                    tracing::info!(
+                        "VIP: stream {} channel closed (remote FIN/CLOSE)",
+                        stream_id
+                    );
+                    break;
+                }
                 Err(_) => {
-                    drop(rx);
-                    // Check idle timeout
+                    // Timeout — check idle
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -670,7 +629,8 @@ async fn handle_vip_connection<R, W>(
                     let last = last_activity.load(Ordering::Relaxed);
                     if now.saturating_sub(last) > CONNECTION_IDLE_TIMEOUT_SECS {
                         tracing::info!(
-                            "VIP: connection idle timeout ({}s)",
+                            "VIP: stream {} idle timeout ({}s)",
+                            stream_id,
                             CONNECTION_IDLE_TIMEOUT_SECS
                         );
                         break;
@@ -681,7 +641,7 @@ async fn handle_vip_connection<R, W>(
         }
     });
 
-    // Main loop: TCP → tunnel (read from TCP, send through tunnel)
+    // Main loop: TCP → tunnel (read from TCP, send through tunnel with stream_id)
     let transport = transport.clone();
     let data_seq = data_seq.clone();
     let bytes_sent = bytes_sent.clone();
@@ -698,31 +658,51 @@ async fn handle_vip_connection<R, W>(
         {
             Ok(Ok(0)) => break, // Connection closed
             Ok(Ok(n)) => {
-                let seq = data_seq.fetch_add(1, Ordering::Relaxed);
-
-                // Build tunnel frame: [FRAME_DATA(1) | data_seq(8 BE) | payload]
-                let mut framed = Vec::with_capacity(1 + 8 + n);
+                // Build multiplexed tunnel frame: [FRAME_DATA | stream_id(4 BE) | payload]
+                let mut framed = Vec::with_capacity(1 + 4 + n);
                 framed.push(FRAME_DATA);
-                framed.extend_from_slice(&seq.to_be_bytes());
+                framed.extend_from_slice(&stream_id.to_be_bytes());
                 framed.extend_from_slice(&buf[..n]);
 
                 if let Err(e) = transport.send_data(session_id, &framed, peer_addr).await {
-                    tracing::warn!("VIP tunnel send error: {}", e);
+                    tracing::warn!("VIP tunnel send error stream {}: {}", stream_id, e);
                     break;
                 }
                 bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+
+                // Legacy: also bump data_seq for global ACK tracking
+                data_seq.fetch_add(1, Ordering::Relaxed);
             }
             Ok(Err(e)) => {
-                tracing::debug!("VIP TCP read error: {}", e);
+                tracing::debug!("VIP TCP read error stream {}: {}", stream_id, e);
                 break;
             }
-            Err(_) => continue, // Read timeout, loop again
+            Err(_) => continue,
         }
     }
 
     write_task.abort();
-    tracing::info!("VIP connection closed");
+
+    // 4. Send FRAME_CLOSE to gateway
+    {
+        let close_frame = vec![
+            FRAME_CLOSE,
+            (stream_id >> 24) as u8,
+            (stream_id >> 16) as u8,
+            (stream_id >> 8) as u8,
+            stream_id as u8,
+        ];
+        let _ = transport
+            .send_data(session_id, &close_frame, peer_addr)
+            .await;
+        tracing::info!("VIP: stream {} closed from {}", stream_id, client_addr);
+    }
+
+    // 5. Unregister from dispatcher
+    dispatcher.unregister(stream_id);
 }
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -797,9 +777,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tunnel_sender() {
+    fn test_dispatcher() {
         let proxy = VipProxy::new();
-        let _tx = proxy.tunnel_sender(); // Should not panic
+        let _disp = proxy.dispatcher(); // Should not panic
     }
 
     #[test]
@@ -808,58 +788,92 @@ mod tests {
         proxy.stop(); // Should not panic
     }
 
+    #[test]
+    fn test_stream_dispatcher_register_dispatch() {
+        let disp = StreamDispatcher::new();
+        let mut rx = disp.register(1);
+        assert!(disp.dispatch(1, vec![1, 2, 3]));
+        assert_eq!(rx.try_recv().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_stream_dispatcher_unknown_stream() {
+        let disp = StreamDispatcher::new();
+        assert!(!disp.dispatch(99, vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_stream_dispatcher_unregister() {
+        let disp = StreamDispatcher::new();
+        let _rx = disp.register(1);
+        assert_eq!(disp.stream_count(), 1);
+        disp.unregister(1);
+        assert_eq!(disp.stream_count(), 0);
+        assert!(!disp.dispatch(1, vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_stream_dispatcher_close_stream() {
+        let disp = StreamDispatcher::new();
+        let _rx = disp.register(1);
+        disp.close_stream(1);
+        assert_eq!(disp.stream_count(), 0);
+    }
+
+    #[test]
+    fn test_stream_dispatcher_multiple_streams() {
+        let disp = StreamDispatcher::new();
+        let mut rx1 = disp.register(1);
+        let mut rx2 = disp.register(2);
+        assert_eq!(disp.stream_count(), 2);
+
+        assert!(disp.dispatch(1, vec![10]));
+        assert!(disp.dispatch(2, vec![20]));
+
+        assert_eq!(rx1.try_recv().unwrap(), vec![10]);
+        assert_eq!(rx2.try_recv().unwrap(), vec![20]);
+    }
+
     // ── Security audit tests ────────────────────────────────────────────
 
-    /// SECURITY: Verify that non-loopback IPv4 addresses are rejected.
     #[test]
     fn test_add_service_rejects_non_loopback() {
         let mut proxy = VipProxy::new();
 
-        // Public IP
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(8, 8, 8, 8), 80);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("loopback"));
 
-        // Private network
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(192, 168, 1, 1), 80);
         assert!(result.is_err());
 
-        // Link-local
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(169, 254, 1, 1), 80);
         assert!(result.is_err());
 
-        // Wildcard (0.0.0.0)
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(0, 0, 0, 0), 80);
         assert!(result.is_err());
 
-        // Broadcast
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(255, 255, 255, 255), 80);
         assert!(result.is_err());
     }
 
-    /// SECURITY: Verify that all loopback addresses in 127.0.0.0/8 are accepted.
     #[test]
     fn test_add_service_accepts_loopback_range() {
         let mut proxy = VipProxy::new();
-
         assert!(proxy
             .add_service("svc1".to_string(), Ipv4Addr::new(127, 0, 0, 1), 80)
             .is_ok());
-
         assert!(proxy
             .add_service("svc2".to_string(), Ipv4Addr::new(127, 0, 55, 1), 80)
             .is_ok());
-
         assert!(proxy
             .add_service("svc3".to_string(), Ipv4Addr::new(127, 255, 255, 254), 80)
             .is_ok());
     }
 
-    /// SECURITY: Verify that no services are registered when non-loopback is rejected.
     #[test]
     fn test_add_service_rejected_leaves_no_state() {
         let mut proxy = VipProxy::new();
-
         let result = proxy.add_service("evil".to_string(), Ipv4Addr::new(10, 0, 0, 1), 80);
         assert!(result.is_err());
         assert!(

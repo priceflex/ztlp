@@ -41,9 +41,13 @@ defmodule ZtlpGateway.Backend do
   - `port` — TCP port number
   - `owner` — pid of the Session process that will receive responses
   """
-  @spec start_link({tuple(), non_neg_integer(), pid()}) :: GenServer.on_start()
+  @spec start_link({tuple(), non_neg_integer(), pid()} | {tuple(), non_neg_integer(), pid(), non_neg_integer()}) :: GenServer.on_start()
   def start_link({host, port, owner}) do
-    GenServer.start_link(__MODULE__, {host, port, owner})
+    GenServer.start_link(__MODULE__, {host, port, owner, nil})
+  end
+
+  def start_link({host, port, owner, stream_id}) do
+    GenServer.start_link(__MODULE__, {host, port, owner, stream_id})
   end
 
   @doc """
@@ -67,13 +71,13 @@ defmodule ZtlpGateway.Backend do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def init({host, port, owner}) do
+  def init({host, port, owner, stream_id}) do
     # Connect to the backend. 5-second timeout for the TCP handshake.
     case :gen_tcp.connect(host, port, [:binary, active: true, packet: :raw], 5_000) do
       {:ok, socket} ->
         # Monitor the owner (Session process) — if it dies, we clean up
         Process.monitor(owner)
-        {:ok, %{socket: socket, owner: owner}}
+        {:ok, %{socket: socket, owner: owner, stream_id: stream_id}}
 
       {:error, reason} ->
         {:stop, {:connect_failed, reason}}
@@ -98,22 +102,39 @@ defmodule ZtlpGateway.Backend do
   end
 
   # TCP data from the backend → forward to the Session process
+  # Include stream_id when available (multiplexed mode)
   @impl true
-  def handle_info({:tcp, _socket, data}, %{owner: owner} = state) do
+  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: nil} = state) do
     send(owner, {:backend_data, data})
     {:noreply, state}
   end
 
+  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: stream_id} = state) do
+    send(owner, {:backend_data, stream_id, data})
+    {:noreply, state}
+  end
+
   # TCP connection closed by the backend
-  def handle_info({:tcp_closed, _socket}, %{owner: owner} = state) do
+  def handle_info({:tcp_closed, _socket}, %{owner: owner, stream_id: nil} = state) do
     send(owner, :backend_closed)
     {:stop, :normal, state}
   end
 
+  def handle_info({:tcp_closed, _socket}, %{owner: owner, stream_id: stream_id} = state) do
+    send(owner, {:backend_closed, stream_id})
+    {:stop, :normal, state}
+  end
+
   # TCP error
-  def handle_info({:tcp_error, _socket, reason}, %{owner: owner} = state) do
+  def handle_info({:tcp_error, _socket, reason}, %{owner: owner, stream_id: nil} = state) do
     Logger.error("[Backend] TCP error: #{inspect(reason)}")
     send(owner, {:backend_error, reason})
+    {:stop, {:tcp_error, reason}, state}
+  end
+
+  def handle_info({:tcp_error, _socket, reason}, %{owner: owner, stream_id: stream_id} = state) do
+    Logger.error("[Backend] TCP error on stream #{stream_id}: #{inspect(reason)}")
+    send(owner, {:backend_error, stream_id, reason})
     {:stop, {:tcp_error, reason}, state}
   end
 

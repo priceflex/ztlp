@@ -53,6 +53,8 @@ defmodule ZtlpGateway.Session do
   @frame_fin 0x02
   @frame_nack 0x03
   @frame_reset 0x04
+  @frame_close 0x05
+  @frame_open 0x06
 
   # ARQ constants (KCP-inspired)
   @initial_rto_ms 500
@@ -178,6 +180,9 @@ defmodule ZtlpGateway.Session do
       # Paced send queue: list of plaintext chunks waiting to be sent
       # Each entry is a raw plaintext (not yet framed/encrypted)
       send_queue: :queue.new(),
+      # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
+      # When populated, the session is in multiplexed mode.
+      streams: %{},
       pacing_timer_ref: nil
     }
 
@@ -267,10 +272,45 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # Backend error
+  # Backend error (legacy single-stream)
   def handle_info({:backend_error, _reason}, state) do
     Stats.backend_error()
     terminate_session(state, :backend_error)
+  end
+
+  # ── Multiplexed stream backend messages ──
+
+  # Backend sent data on a specific stream — enqueue with stream_id tag
+  def handle_info({:backend_data, stream_id, data}, state) when is_integer(stream_id) do
+    chunks = chunk_data(data, @max_payload_bytes - 4)  # 4 bytes for stream_id header
+    send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
+      :queue.in({:stream, stream_id, chunk}, q)
+    end)
+    state = %{state | send_queue: send_queue}
+    state = flush_send_queue(state)
+    {:noreply, state}
+  end
+
+  # Backend closed on a specific stream — send stream FIN, clean up stream
+  def handle_info({:backend_closed, stream_id}, state) when is_integer(stream_id) do
+    Logger.info("[Session] Stream #{stream_id} backend closed")
+    # Enqueue a stream-FIN marker so it gets sent after all pending data for this stream
+    send_queue = :queue.in({:stream_fin, stream_id}, state.send_queue)
+    streams = Map.delete(state.streams, stream_id)
+    state = %{state | send_queue: send_queue, streams: streams}
+    state = flush_send_queue(state)
+    {:noreply, state}
+  end
+
+  # Backend error on a specific stream — close that stream, keep session alive
+  def handle_info({:backend_error, stream_id, reason}, state) when is_integer(stream_id) do
+    Logger.warning("[Session] Stream #{stream_id} backend error: #{inspect(reason)}")
+    # Send stream close to client
+    send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+    streams = Map.delete(state.streams, stream_id)
+    state = %{state | send_queue: send_queue, streams: streams}
+    state = flush_send_queue(state)
+    {:noreply, state}
   end
 
   # Idle timeout
@@ -536,19 +576,35 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # Parse tunnel frame: [frame_type(1) | data_seq(8) | payload(...)]
-  defp handle_tunnel_frame(<<@frame_data, data_seq::big-64, payload::binary>>, state) do
-    Logger.info("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
-    # Strip tunnel framing, forward raw TCP data to backend
-    if state.backend_pid && byte_size(payload) > 0 do
-      Logger.info("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
-      Backend.send_data(state.backend_pid, payload)
+  # Parse tunnel frame
+  # Multiplexed mode: [FRAME_DATA | stream_id(4 BE) | payload]
+  # Legacy mode: [FRAME_DATA | data_seq(8 BE) | payload]
+  defp handle_tunnel_frame(<<@frame_data, rest::binary>>, state) do
+    if map_size(state.streams) > 0 do
+      # Multiplexed mode: [stream_id(4) | payload]
+      <<stream_id::big-32, payload::binary>> = rest
+      case Map.get(state.streams, stream_id) do
+        %{backend_pid: pid} when pid != nil ->
+          if byte_size(payload) > 0 do
+            Logger.info("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+            Backend.send_data(pid, payload)
+          end
+        _ ->
+          Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
+      end
+      state = send_ack(state.recv_seq, state)
+      {:noreply, state}
+    else
+      # Legacy single-stream mode: [data_seq(8) | payload]
+      <<data_seq::big-64, payload::binary>> = rest
+      Logger.info("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
+      if state.backend_pid && byte_size(payload) > 0 do
+        Logger.info("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+        Backend.send_data(state.backend_pid, payload)
+      end
+      state = send_ack(state.recv_seq, state)
+      {:noreply, state}
     end
-
-    # Send ACK for this packet
-    state = send_ack(state.recv_seq, state)
-
-    {:noreply, state}
   end
 
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, _rest::binary>>, state) do
@@ -679,6 +735,47 @@ defmodule ZtlpGateway.Session do
     end
   end
 
+  # FRAME_OPEN: client wants to open a new multiplexed stream
+  defp handle_tunnel_frame(<<@frame_open, stream_id::big-32>>, state) do
+    Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id}")
+    backends = ZtlpGateway.Config.get(:backends)
+
+    case find_backend(backends, state.service) do
+      {:ok, %{host: host, port: port}} ->
+        case Backend.start_link({host, port, self(), stream_id}) do
+          {:ok, pid} ->
+            streams = Map.put(state.streams, stream_id, %{backend_pid: pid})
+            Logger.info("[Session] Stream #{stream_id} opened, backend=#{inspect(pid)}, total_streams=#{map_size(streams)}")
+            {:noreply, %{state | streams: streams}}
+
+          {:error, reason} ->
+            Logger.warning("[Session] Stream #{stream_id} backend connect failed: #{inspect(reason)}")
+            # Send FRAME_CLOSE back to client for this stream
+            send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+            state = %{state | send_queue: send_queue}
+            state = flush_send_queue(state)
+            {:noreply, state}
+        end
+
+      :error ->
+        Logger.warning("[Session] No backend for service #{state.service}")
+        {:noreply, state}
+    end
+  end
+
+  # FRAME_CLOSE: client is closing a stream
+  defp handle_tunnel_frame(<<@frame_close, stream_id::big-32>>, state) do
+    Logger.info("[Session] FRAME_CLOSE stream_id=#{stream_id}")
+    case Map.get(state.streams, stream_id) do
+      %{backend_pid: pid} when pid != nil ->
+        if Process.alive?(pid), do: Backend.close(pid)
+      _ ->
+        :ok
+    end
+    streams = Map.delete(state.streams, stream_id)
+    {:noreply, %{state | streams: streams}}
+  end
+
   defp handle_tunnel_frame(_other, state) do
     # Unknown frame type — ignore
     {:noreply, state}
@@ -729,10 +826,29 @@ defmodule ZtlpGateway.Session do
         state
 
       true ->
-        # Send one packet from the queue
-        {{:value, plaintext}, remaining} = :queue.out(state.send_queue)
+        # Send one item from the queue
+        {{:value, item}, remaining} = :queue.out(state.send_queue)
         state = %{state | send_queue: remaining}
-        case encrypt_and_send(plaintext, state) do
+
+        result = case item do
+          {:stream, stream_id, plaintext} ->
+            # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+            encrypt_and_send_stream(stream_id, plaintext, state)
+
+          {:stream_fin, stream_id} ->
+            # Stream FIN: [FRAME_FIN | stream_id(4 BE)]
+            encrypt_and_send_control(<<@frame_fin, stream_id::big-32>>, state)
+
+          {:stream_close, stream_id} ->
+            # Stream close: [FRAME_CLOSE | stream_id(4 BE)]
+            encrypt_and_send_control(<<@frame_close, stream_id::big-32>>, state)
+
+          plaintext when is_binary(plaintext) ->
+            # Legacy single-stream data
+            encrypt_and_send(plaintext, state)
+        end
+
+        case result do
           {:ok, new_state} ->
             # If more in queue and window allows, schedule next send
             if not :queue.is_empty(remaining) do
@@ -805,6 +921,63 @@ defmodule ZtlpGateway.Session do
     }}
   end
 
+  # Encrypt and send a multiplexed stream data frame.
+  # Wire format: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+  defp encrypt_and_send_stream(stream_id, plaintext, state) do
+    seq = state.send_seq + 1
+    data_seq = state.send_data_seq
+    nonce = <<0::32, seq::little-64>>
+
+    framed = <<@frame_data, stream_id::big-32, data_seq::big-64, plaintext::binary>>
+
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+
+    send_udp(state, packet)
+    Stats.bytes_sent(byte_size(packet))
+
+    now = System.monotonic_time(:millisecond)
+    send_buffer = Map.put(state.send_buffer, seq, {framed, now, 0, data_seq})
+    retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
+
+    {:ok, %{state |
+      send_seq: seq,
+      send_data_seq: data_seq + 1,
+      bytes_out: state.bytes_out + byte_size(packet),
+      send_buffer: send_buffer,
+      retransmit_timer_ref: retransmit_timer_ref
+    }}
+  end
+
+  # Encrypt and send a control frame (FIN/CLOSE per stream — no retransmit needed).
+  defp encrypt_and_send_control(control_frame, state) do
+    seq = state.send_seq + 1
+    nonce = <<0::32, seq::little-64>>
+
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, control_frame, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+
+    send_udp(state, packet)
+    Stats.bytes_sent(byte_size(packet))
+
+    {:ok, %{state |
+      send_seq: seq,
+      bytes_out: state.bytes_out + byte_size(packet)
+    }}
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
@@ -849,6 +1022,11 @@ defmodule ZtlpGateway.Session do
   end
 
   defp terminate_session(state, reason) do
+    # Close all multiplexed stream backends
+    Enum.each(state.streams, fn {_sid, %{backend_pid: pid}} ->
+      if pid && Process.alive?(pid), do: Backend.close(pid)
+    end)
+
     # Send FIN to client if we have transport keys and not already draining
     # (draining already sent FIN on entry)
     state =

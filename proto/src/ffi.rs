@@ -928,6 +928,7 @@ async fn recv_loop(
     const FRAME_DATA: u8 = 0x00;
     const FRAME_ACK: u8 = 0x01;
     const FRAME_FIN: u8 = 0x02;
+    const FRAME_CLOSE: u8 = 0x05;
 
     // Keepalive watchdog: if no data arrives for this long, treat connection as dead
     let mut last_recv_time = std::time::Instant::now();
@@ -951,6 +952,10 @@ async fn recv_loop(
     // This tracks independently from ACK tracking because we need strict
     // ordered delivery to TCP even if ACKs can be cumulative.
     let mut vip_next_deliver_seq: u64 = 0;
+    // Stream ID tracking for reassembly: maps data_seq → stream_id so we
+    // know which stream each buffered packet belongs to when flushing.
+    let mut reassembly_stream_ids: std::collections::BTreeMap<u64, u32> =
+        std::collections::BTreeMap::new();
 
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
@@ -1052,79 +1057,109 @@ async fn recv_loop(
                 // including data_seq N" — it can remove those from its send
                 // buffer and advance the window.
                 if plaintext.len() > 9 && plaintext[0] == FRAME_DATA {
-                    let data_seq =
-                        u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
-                    let payload = plaintext[9..].to_vec();
-
-                    // Detect gateway send_data_seq reset (new stream after FRAME_RESET).
-                    // When the gateway opens a new backend TCP connection, it resets
-                    // send_data_seq to 0. If we see data_seq=0 while we expected
-                    // a higher seq, reset our tracking.
-                    if data_seq == 0 && next_expected_seq > 0 {
-                        tracing::info!("recv_loop: detected stream reset (data_seq=0, expected={}), resetting ACK tracking", next_expected_seq);
-                        next_expected_seq = 0;
-                        received_ahead.clear();
-                        reassembly_buf.clear();
-                        _last_data_seq = 0;
-                        vip_next_deliver_seq = 0;
-                    }
+                    // Parse FRAME_DATA — two formats:
+                    // Multiplexed: [0x00 | stream_id(4 BE) | data_seq(8 BE) | payload] (13+ bytes)
+                    // Legacy:      [0x00 | data_seq(8 BE) | payload] (9+ bytes)
+                    // Detection: if stream_id > 0, it's multiplexed (stream IDs start at 1)
+                    let (stream_id, data_seq, payload) = if plaintext.len() >= 13 {
+                        let candidate_stream_id =
+                            u32::from_be_bytes(plaintext[1..5].try_into().unwrap_or([0u8; 4]));
+                        if candidate_stream_id > 0 {
+                            // Multiplexed format
+                            let ds =
+                                u64::from_be_bytes(plaintext[5..13].try_into().unwrap_or([0u8; 8]));
+                            (candidate_stream_id, ds, plaintext[13..].to_vec())
+                        } else {
+                            // Legacy format (stream_id bytes happen to look like 0)
+                            let ds =
+                                u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
+                            (0u32, ds, plaintext[9..].to_vec())
+                        }
+                    } else {
+                        // Short packet — must be legacy format
+                        let ds = u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
+                        (0u32, ds, plaintext[9..].to_vec())
+                    };
 
                     log_write(
                         &debug_log,
                         log_start,
                         &format!(
-                            "FRAME_DATA data_seq={} payload_len={} expected={} vip_deliver={}",
-                            data_seq,
-                            payload.len(),
-                            next_expected_seq,
-                            vip_next_deliver_seq
+                            "FRAME_DATA stream={} data_seq={} payload_len={} expected={} vip_deliver={}",
+                            stream_id, data_seq, payload.len(), next_expected_seq, vip_next_deliver_seq
                         ),
                     );
 
-                    // Update cumulative ACK tracking
+                    // Update cumulative ACK tracking (global across all streams)
                     if data_seq == next_expected_seq {
-                        // In-order: advance next_expected past any contiguous seqs
                         next_expected_seq = data_seq + 1;
                         while received_ahead.remove(&next_expected_seq) {
                             next_expected_seq += 1;
                         }
                     } else if data_seq > next_expected_seq {
-                        // Out-of-order: remember for later
                         received_ahead.insert(data_seq);
                     }
-                    // else: duplicate (data_seq < next_expected_seq), ignore
                     _last_data_seq = data_seq;
 
-                    // ── Ordered VIP proxy delivery ──
-                    // Buffer this payload and flush all contiguous data_seqs
-                    // to the VIP proxy in order. This ensures the TCP client
-                    // receives HTTP response bytes in the correct sequence.
-                    if data_seq >= vip_next_deliver_seq {
+                    // ── Delivery to VIP proxy ──
+                    if stream_id > 0 {
+                        // Multiplexed: dispatch to the stream's channel via dispatcher
+                        // Data must still be delivered in data_seq order globally,
+                        // but each stream gets its own data independently.
+                        // Buffer and flush in order.
                         reassembly_buf.insert(data_seq, payload);
-                    }
-                    // Flush contiguous packets to VIP proxy
-                    if let Ok(guard) = inner.lock() {
-                        if let Some(ref proxy) = guard.vip_proxy {
-                            let tx = proxy.tunnel_sender();
-                            while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq) {
-                                match tx.try_send(crate::vip::TunnelData { payload: data }) {
-                                    Ok(()) => {
-                                        tracing::debug!(
-                                            "recv_loop: delivered data_seq={} to VIP proxy",
+                        // Tag reassembly entries with stream_id using a side map
+                        reassembly_stream_ids.insert(data_seq, stream_id);
+
+                        // Flush contiguous packets
+                        if let Ok(guard) = inner.lock() {
+                            if let Some(ref proxy) = guard.vip_proxy {
+                                let disp = proxy.dispatcher();
+                                while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq)
+                                {
+                                    let sid = reassembly_stream_ids
+                                        .remove(&vip_next_deliver_seq)
+                                        .unwrap_or(0);
+                                    if !disp.dispatch(sid, data) {
+                                        tracing::warn!(
+                                            "recv_loop: dispatch failed for stream={} data_seq={}",
+                                            sid,
                                             vip_next_deliver_seq
                                         );
                                     }
-                                    Err(e) => {
+                                    vip_next_deliver_seq += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy single-stream: buffer and deliver in order
+                        // Detect gateway send_data_seq reset (new stream after FRAME_RESET)
+                        if data_seq == 0 && vip_next_deliver_seq > 0 {
+                            tracing::info!(
+                                "recv_loop: detected stream reset (data_seq=0, expected={})",
+                                vip_next_deliver_seq
+                            );
+                            reassembly_buf.clear();
+                            vip_next_deliver_seq = 0;
+                        }
+                        if data_seq >= vip_next_deliver_seq {
+                            reassembly_buf.insert(data_seq, payload);
+                        }
+                        if let Ok(guard) = inner.lock() {
+                            if let Some(ref proxy) = guard.vip_proxy {
+                                let disp = proxy.dispatcher();
+                                while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq)
+                                {
+                                    // Legacy mode: dispatch to stream_id=0
+                                    if !disp.dispatch(0, data) {
                                         tracing::warn!(
-                                            "recv_loop: VIP proxy send failed for data_seq={}: {}",
-                                            vip_next_deliver_seq,
-                                            e
+                                            "recv_loop: VIP dispatch failed for data_seq={}",
+                                            vip_next_deliver_seq
                                         );
-                                        // Don't advance — data is lost
                                         break;
                                     }
+                                    vip_next_deliver_seq += 1;
                                 }
-                                vip_next_deliver_seq += 1;
                             }
                         }
                     }
@@ -1144,20 +1179,55 @@ async fn recv_loop(
                     } else {
                         tracing::debug!("recv_loop: sent ACK data_seq={}", ack_seq);
                     }
-                } else if !plaintext.is_empty() && plaintext[0] == FRAME_FIN {
-                    log_write(
-                        &debug_log,
-                        log_start,
-                        &format!("FRAME_FIN received, next_expected={}", next_expected_seq),
-                    );
-                    // FIN received — gateway finished sending. Send final ACK.
-                    if next_expected_seq > 0 {
-                        let ack_seq = next_expected_seq - 1;
-                        let mut ack_frame = Vec::with_capacity(9);
-                        ack_frame.push(FRAME_ACK);
-                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                        let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
-                        tracing::debug!("recv_loop: sent final ACK data_seq={} after FIN", ack_seq);
+                } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
+                    // Per-stream FIN or legacy FIN
+                    let fin_stream_id = if plaintext.len() >= 5 {
+                        u32::from_be_bytes(plaintext[1..5].try_into().unwrap_or([0u8; 4]))
+                    } else {
+                        0
+                    };
+                    if fin_stream_id > 0 {
+                        // Multiplexed stream FIN — close the stream's dispatcher channel
+                        log_write(
+                            &debug_log,
+                            log_start,
+                            &format!("FRAME_FIN stream={}", fin_stream_id),
+                        );
+                        if let Ok(guard) = inner.lock() {
+                            if let Some(ref proxy) = guard.vip_proxy {
+                                proxy.dispatcher().close_stream(fin_stream_id);
+                            }
+                        }
+                    } else {
+                        // Legacy FIN (entire session)
+                        log_write(
+                            &debug_log,
+                            log_start,
+                            &format!("FRAME_FIN (legacy), next_expected={}", next_expected_seq),
+                        );
+                        if next_expected_seq > 0 {
+                            let ack_seq = next_expected_seq - 1;
+                            let mut ack_frame = Vec::with_capacity(9);
+                            ack_frame.push(FRAME_ACK);
+                            ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+                            let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
+                        }
+                    }
+                } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
+                    // FRAME_CLOSE: remote closed a stream
+                    if plaintext.len() >= 5 {
+                        let close_stream_id =
+                            u32::from_be_bytes(plaintext[1..5].try_into().unwrap_or([0u8; 4]));
+                        log_write(
+                            &debug_log,
+                            log_start,
+                            &format!("FRAME_CLOSE stream={}", close_stream_id),
+                        );
+                        if let Ok(guard) = inner.lock() {
+                            if let Some(ref proxy) = guard.vip_proxy {
+                                proxy.dispatcher().close_stream(close_stream_id);
+                            }
+                        }
                     }
                 }
 

@@ -907,16 +907,9 @@ fn process_recv_packet(
             );
         }
 
-        // Forward to VIP proxy if running.
-        // Strip tunnel frame header: [frame_type(1) | data_seq(8) | payload]
-        if plaintext.len() > 9 && plaintext[0] == 0x00 {
-            let payload = plaintext[9..].to_vec();
-            if let Some(ref proxy) = guard.vip_proxy {
-                let tx = proxy.tunnel_sender();
-                // Non-blocking send — drop data if channel is full
-                let _ = tx.try_send(crate::vip::TunnelData { payload });
-            }
-        }
+        // NOTE: VIP proxy forwarding is now handled in recv_loop (after ACK
+        // tracking) so we can deliver data in data_seq order. The recv_loop
+        // buffers out-of-order packets and flushes them in sequence.
     }
 
     RecvAction::Noop
@@ -941,10 +934,17 @@ async fn recv_loop(
     // out-of-order seqs received ahead.
     let mut next_expected_seq: u64 = 0;
     let mut received_ahead: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    // Reassembly buffer: holds payloads for out-of-order data_seqs so we
+    // can deliver to the VIP proxy in the correct order.
+    let mut reassembly_buf: std::collections::BTreeMap<u64, Vec<u8>> = std::collections::BTreeMap::new();
     // Track last seen data_seq to detect gateway send_data_seq reset (after FRAME_RESET).
     // When data_seq drops to 0 while next_expected > 0, the gateway started
     // a new stream — reset our tracking.
     let mut _last_data_seq: u64 = 0;
+    // VIP delivery seq: next data_seq to deliver to the VIP proxy TCP socket.
+    // This tracks independently from ACK tracking because we need strict
+    // ordered delivery to TCP even if ACKs can be cumulative.
+    let mut vip_next_deliver_seq: u64 = 0;
 
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
@@ -1014,6 +1014,7 @@ async fn recv_loop(
                     let data_seq = u64::from_be_bytes(
                         plaintext[1..9].try_into().unwrap_or([0u8; 8])
                     );
+                    let payload = plaintext[9..].to_vec();
 
                     // Detect gateway send_data_seq reset (new stream after FRAME_RESET).
                     // When the gateway opens a new backend TCP connection, it resets
@@ -1023,7 +1024,9 @@ async fn recv_loop(
                         tracing::info!("recv_loop: detected stream reset (data_seq=0, expected={}), resetting ACK tracking", next_expected_seq);
                         next_expected_seq = 0;
                         received_ahead.clear();
+                        reassembly_buf.clear();
                         _last_data_seq = 0;
+                        vip_next_deliver_seq = 0;
                     }
 
                     // Update cumulative ACK tracking
@@ -1039,6 +1042,33 @@ async fn recv_loop(
                     }
                     // else: duplicate (data_seq < next_expected_seq), ignore
                     _last_data_seq = data_seq;
+
+                    // ── Ordered VIP proxy delivery ──
+                    // Buffer this payload and flush all contiguous data_seqs
+                    // to the VIP proxy in order. This ensures the TCP client
+                    // receives HTTP response bytes in the correct sequence.
+                    if data_seq >= vip_next_deliver_seq {
+                        reassembly_buf.insert(data_seq, payload);
+                    }
+                    // Flush contiguous packets to VIP proxy
+                    if let Ok(guard) = inner.lock() {
+                        if let Some(ref proxy) = guard.vip_proxy {
+                            let tx = proxy.tunnel_sender();
+                            while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq) {
+                                match tx.try_send(crate::vip::TunnelData { payload: data }) {
+                                    Ok(()) => {
+                                        tracing::debug!("recv_loop: delivered data_seq={} to VIP proxy", vip_next_deliver_seq);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("recv_loop: VIP proxy send failed for data_seq={}: {}", vip_next_deliver_seq, e);
+                                        // Don't advance — data is lost
+                                        break;
+                                    }
+                                }
+                                vip_next_deliver_seq += 1;
+                            }
+                        }
+                    }
 
                     // Send cumulative ACK for highest contiguous seq received
                     let ack_seq = next_expected_seq.saturating_sub(1);

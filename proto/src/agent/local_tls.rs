@@ -118,7 +118,10 @@ impl std::fmt::Debug for SniCertResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SniCertResolver")
             .field("cert_dir", &self.cert_dir)
-            .field("cached_certs", &self.certs.read().map(|c| c.len()).unwrap_or(0))
+            .field(
+                "cached_certs",
+                &self.certs.read().map(|c| c.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -137,7 +140,10 @@ impl SniCertResolver {
     /// Expects `<cert_dir>/<hostname>.pem` and `<cert_dir>/<hostname>.key`.
     pub fn preload_cert(&self, hostname: &str) -> Result<(), CertLoadError> {
         let key = load_certified_key(&self.cert_dir, hostname)?;
-        let mut certs = self.certs.write().map_err(|_| CertLoadError::LockPoisoned)?;
+        let mut certs = self
+            .certs
+            .write()
+            .map_err(|_| CertLoadError::LockPoisoned)?;
         certs.insert(hostname.to_string(), Arc::new(key));
         Ok(())
     }
@@ -282,9 +288,8 @@ fn load_certified_key(cert_dir: &Path, hostname: &str) -> Result<CertifiedKey, C
         .ok_or(CertLoadError::NoKey)?;
 
     // Create signing key from the private key using the default crypto provider
-    let signing_key =
-        tokio_rustls::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
-            .map_err(|e| CertLoadError::InvalidKey(format!("{}", e)))?;
+    let signing_key = tokio_rustls::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
+        .map_err(|e| CertLoadError::InvalidKey(format!("{}", e)))?;
 
     Ok(CertifiedKey::new(certs, signing_key))
 }
@@ -465,9 +470,9 @@ mod tests {
         assert!(looks_like_tls_client_hello(&[0x16, 0x03, 0x00]));
         // Not TLS — HTTP
         assert!(!looks_like_tls_client_hello(&[0x47, 0x45, 0x54])); // "GET"
-        // Not TLS — SSH
+                                                                    // Not TLS — SSH
         assert!(!looks_like_tls_client_hello(&[0x53, 0x53, 0x48])); // "SSH"
-        // Too short
+                                                                    // Too short
         assert!(!looks_like_tls_client_hello(&[0x16]));
         // Empty
         assert!(!looks_like_tls_client_hello(&[]));

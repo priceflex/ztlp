@@ -936,7 +936,8 @@ async fn recv_loop(
     let mut received_ahead: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     // Reassembly buffer: holds payloads for out-of-order data_seqs so we
     // can deliver to the VIP proxy in the correct order.
-    let mut reassembly_buf: std::collections::BTreeMap<u64, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut reassembly_buf: std::collections::BTreeMap<u64, Vec<u8>> =
+        std::collections::BTreeMap::new();
     // Track last seen data_seq to detect gateway send_data_seq reset (after FRAME_RESET).
     // When data_seq drops to 0 while next_expected > 0, the gateway started
     // a new stream — reset our tracking.
@@ -1011,9 +1012,8 @@ async fn recv_loop(
                 // including data_seq N" — it can remove those from its send
                 // buffer and advance the window.
                 if plaintext.len() > 9 && plaintext[0] == FRAME_DATA {
-                    let data_seq = u64::from_be_bytes(
-                        plaintext[1..9].try_into().unwrap_or([0u8; 8])
-                    );
+                    let data_seq =
+                        u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
                     let payload = plaintext[9..].to_vec();
 
                     // Detect gateway send_data_seq reset (new stream after FRAME_RESET).
@@ -1057,10 +1057,17 @@ async fn recv_loop(
                             while let Some(data) = reassembly_buf.remove(&vip_next_deliver_seq) {
                                 match tx.try_send(crate::vip::TunnelData { payload: data }) {
                                     Ok(()) => {
-                                        tracing::debug!("recv_loop: delivered data_seq={} to VIP proxy", vip_next_deliver_seq);
+                                        tracing::debug!(
+                                            "recv_loop: delivered data_seq={} to VIP proxy",
+                                            vip_next_deliver_seq
+                                        );
                                     }
                                     Err(e) => {
-                                        tracing::warn!("recv_loop: VIP proxy send failed for data_seq={}: {}", vip_next_deliver_seq, e);
+                                        tracing::warn!(
+                                            "recv_loop: VIP proxy send failed for data_seq={}: {}",
+                                            vip_next_deliver_seq,
+                                            e
+                                        );
                                         // Don't advance — data is lost
                                         break;
                                     }
@@ -1076,15 +1083,16 @@ async fn recv_loop(
                     ack_frame.push(FRAME_ACK);
                     ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                    if let Err(e) = transport
-                        .send_data(session_id, &ack_frame, peer_addr)
-                        .await
-                    {
-                        tracing::warn!("recv_loop: failed to send ACK for data_seq={}: {}", ack_seq, e);
+                    if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                        tracing::warn!(
+                            "recv_loop: failed to send ACK for data_seq={}: {}",
+                            ack_seq,
+                            e
+                        );
                     } else {
                         tracing::debug!("recv_loop: sent ACK data_seq={}", ack_seq);
                     }
-                } else if plaintext.len() >= 1 && plaintext[0] == FRAME_FIN {
+                } else if !plaintext.is_empty() && plaintext[0] == FRAME_FIN {
                     // FIN received — gateway finished sending. Send final ACK.
                     if next_expected_seq > 0 {
                         let ack_seq = next_expected_seq - 1;

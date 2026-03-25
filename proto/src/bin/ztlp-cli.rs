@@ -9392,10 +9392,7 @@ async fn cmd_agent_pull_certs(
     let index_path = ca_certs_dir.join("index.json");
 
     if !index_path.exists() {
-        eprintln!(
-            "  {} No certificates found in CA directory",
-            c_yellow("⚠")
-        );
+        eprintln!("  {} No certificates found in CA directory", c_yellow("⚠"));
         eprintln!(
             "  {} Issue certs first: ztlp admin cert-issue --hostname <name>",
             c_dim("Hint:")

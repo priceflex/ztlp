@@ -37,9 +37,9 @@ use crate::packet::SessionId;
 use crate::transport::TransportNode;
 
 // TLS support for HTTPS VIP ports (443, 8443).
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::TlsAcceptor;
 
 /// Maximum read buffer size for TCP proxy connections.
 const TCP_READ_BUF_SIZE: usize = 65536;
@@ -213,7 +213,12 @@ impl VipProxy {
                             Some(Arc::new(acceptor))
                         }
                         Err(e) => {
-                            tracing::warn!("VIP TLS not available for {}:{}: {}", service.vip, port, e);
+                            tracing::warn!(
+                                "VIP TLS not available for {}:{}: {}",
+                                service.vip,
+                                port,
+                                e
+                            );
                             None
                         }
                     }
@@ -390,7 +395,11 @@ async fn vip_listener_task(
             }
         };
 
-        tracing::info!("VIP connection from {} (tls={})", client_addr, tls_acceptor.is_some());
+        tracing::info!(
+            "VIP connection from {} (tls={})",
+            client_addr,
+            tls_acceptor.is_some()
+        );
 
         // Spawn connection handler as a separate task
         let stop = stop.clone();
@@ -436,7 +445,11 @@ async fn vip_listener_task(
                         tracing::warn!("VIP TLS handshake failed from {}: {}", client_addr, e);
                     }
                     Err(_) => {
-                        tracing::warn!("VIP TLS handshake timeout from {} ({}s)", client_addr, TLS_HANDSHAKE_TIMEOUT_SECS);
+                        tracing::warn!(
+                            "VIP TLS handshake timeout from {} ({}s)",
+                            client_addr,
+                            TLS_HANDSHAKE_TIMEOUT_SECS
+                        );
                     }
                 }
             } else {
@@ -502,7 +515,10 @@ async fn handle_serialized_connection<R, W>(
         // Another connection is active — wait for it to finish
         wait_count += 1;
         if wait_count == 1 {
-            tracing::info!("VIP: connection from {} waiting for tunnel access", client_addr);
+            tracing::info!(
+                "VIP: connection from {} waiting for tunnel access",
+                client_addr
+            );
         }
         tokio::select! {
             _ = connection_done.notified() => continue,
@@ -514,13 +530,20 @@ async fn handle_serialized_connection<R, W>(
     }
 
     if wait_count > 0 {
-        tracing::info!("VIP: connection from {} acquired tunnel after {} waits", client_addr, wait_count);
+        tracing::info!(
+            "VIP: connection from {} acquired tunnel after {} waits",
+            client_addr,
+            wait_count
+        );
     }
 
     // Send FRAME_RESET to start a fresh backend TCP connection
     {
         let reset_frame = vec![FRAME_RESET];
-        if let Err(e) = transport.send_data(session_id, &reset_frame, peer_addr).await {
+        if let Err(e) = transport
+            .send_data(session_id, &reset_frame, peer_addr)
+            .await
+        {
             tracing::warn!("VIP: failed to send RESET for {}: {}", client_addr, e);
             active_connection.store(false, Ordering::SeqCst);
             connection_done.notify_waiters();
@@ -546,14 +569,7 @@ async fn handle_serialized_connection<R, W>(
 
     // Handle the connection
     handle_vip_connection(
-        read_half,
-        write_half,
-        stop,
-        transport,
-        session_id,
-        peer_addr,
-        data_seq,
-        bytes_sent,
+        read_half, write_half, stop, transport, session_id, peer_addr, data_seq, bytes_sent,
         tunnel_rx,
     )
     .await;
@@ -561,7 +577,10 @@ async fn handle_serialized_connection<R, W>(
     // Release tunnel access
     active_connection.store(false, Ordering::SeqCst);
     connection_done.notify_waiters();
-    tracing::info!("VIP: connection from {} finished, tunnel released", client_addr);
+    tracing::info!(
+        "VIP: connection from {} finished, tunnel released",
+        client_addr
+    );
 }
 
 /// Handle a single VIP connection (TLS or plain) — pipe data bidirectionally.
@@ -631,7 +650,10 @@ async fn handle_vip_connection<R, W>(
                         .as_secs();
                     let last = last_activity.load(Ordering::Relaxed);
                     if now.saturating_sub(last) > CONNECTION_IDLE_TIMEOUT_SECS {
-                        tracing::info!("VIP: connection idle timeout ({}s)", CONNECTION_IDLE_TIMEOUT_SECS);
+                        tracing::info!(
+                            "VIP: connection idle timeout ({}s)",
+                            CONNECTION_IDLE_TIMEOUT_SECS
+                        );
                         break;
                     }
                     continue;

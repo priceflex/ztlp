@@ -997,8 +997,17 @@ pub async fn run_bridge_io<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    run_bridge_inner(stream, udp_socket, None, pipeline, session_id, peer_addr, false, Vec::new())
-        .await
+    run_bridge_inner(
+        stream,
+        udp_socket,
+        None,
+        pipeline,
+        session_id,
+        peer_addr,
+        false,
+        Vec::new(),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

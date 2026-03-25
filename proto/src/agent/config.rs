@@ -89,14 +89,8 @@ pub struct NsConfig {
 /// relay = "host:port"           # single relay
 /// relays = ["h1:p1", "h2:p2"]  # multiple relays
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RelayAddrs(pub Vec<String>);
-
-impl Default for RelayAddrs {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
 
 impl<'de> Deserialize<'de> for RelayAddrs {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

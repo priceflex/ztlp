@@ -230,6 +230,19 @@ fn is_tls_port(port: u16) -> bool {
 /// Looks for `<hostname>.pem` (cert chain) and `<hostname>.key` (private key)
 /// where hostname is derived from the first registered service name + zone.
 fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
+    // Debug logging to file (temporary — remove after TLS works)
+    fn tls_log(msg: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/ztlp-tls-debug.log")
+        {
+            let _ = writeln!(f, "{}", msg);
+        }
+    }
+    tls_log(&format!("build_tls_acceptor called for service '{}'", service_name));
+
     let cert_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".ztlp")
@@ -254,16 +267,21 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
         }
     }
 
+    tls_log(&format!("cert_dir={:?}, cert_path={:?}, key_path={:?}", cert_dir, cert_path, key_path));
+
     let cert_path = cert_path.ok_or_else(|| {
-        format!(
+        let msg = format!(
             "no TLS cert found in {:?} for service '{}' (tried: {})",
             cert_dir,
             service_name,
             patterns.join(", ")
-        )
+        );
+        tls_log(&format!("ERROR: {}", msg));
+        msg
     })?;
     let key_path = key_path.unwrap();
 
+    tls_log(&format!("loading cert from {:?}", cert_path));
     tracing::info!("VIP TLS: loading cert from {:?}", cert_path);
 
     // Read cert chain
@@ -272,7 +290,9 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_data.as_slice())
         .filter_map(|r| r.ok())
         .collect();
+    tls_log(&format!("parsed {} certs from {:?}", certs.len(), cert_path));
     if certs.is_empty() {
+        tls_log("ERROR: no certs found");
         return Err(format!("no certificates found in {:?}", cert_path));
     }
 
@@ -280,18 +300,30 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
     let key_data = std::fs::read(&key_path)
         .map_err(|e| format!("failed to read key {:?}: {}", key_path, e))?;
     let key = rustls_pemfile::private_key(&mut key_data.as_slice())
-        .map_err(|e| format!("failed to parse key {:?}: {}", key_path, e))?
-        .ok_or_else(|| format!("no private key found in {:?}", key_path))?;
+        .map_err(|e| {
+            tls_log(&format!("ERROR parsing key: {}", e));
+            format!("failed to parse key {:?}: {}", key_path, e)
+        })?
+        .ok_or_else(|| {
+            tls_log("ERROR: no key found in file");
+            format!("no private key found in {:?}", key_path)
+        })?;
+    tls_log("key parsed OK");
 
     // Ensure the default crypto provider is installed (rustls 0.23 requires this).
     // Ignore the error if it's already installed from a previous call.
     let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    tls_log("building ServerConfig...");
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| format!("TLS config error: {}", e))?;
+        .map_err(|e| {
+            tls_log(&format!("ERROR ServerConfig: {}", e));
+            format!("TLS config error: {}", e)
+        })?;
 
+    tls_log(&format!("ServerConfig OK, versions={:?}", config.protocol_versions));
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 

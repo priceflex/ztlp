@@ -69,6 +69,15 @@ defmodule ZtlpGateway.Session do
   # Pacing interval: ms between packet sends (spreads burst across time)
   @pacing_interval_ms 2
 
+  # Maximum plaintext payload per ZTLP data packet.
+  # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.
+  # To keep the UDP datagram under 1280 bytes (IPv6 minimum MTU, safe for
+  # any internet path including PPPoE, tunnels, and VPN encapsulation):
+  #   1280 - 8 (UDP) - 20 (IP) = 1252 max UDP payload
+  #   1252 - 71 (ZTLP overhead) = 1181 max plaintext
+  # We round down to 1200 for a comfortable margin (wire = ~1271 bytes).
+  @max_payload_bytes 1200
+
   # ---------------------------------------------------------------------------
   # Types
   # ---------------------------------------------------------------------------
@@ -209,8 +218,15 @@ defmodule ZtlpGateway.Session do
   # Backend sent data — enqueue for paced sending
   @impl true
   def handle_info({:backend_data, data}, state) do
-    # Enqueue the plaintext data; the pacing timer will send it
-    send_queue = :queue.in(data, state.send_queue)
+    # Chunk the plaintext data to keep each ZTLP packet under the path MTU.
+    # Without chunking, a single TCP read can produce a 1460-byte payload
+    # that becomes a 1531-byte ZTLP packet (1559 bytes on wire), requiring
+    # IP fragmentation. Fragmented retransmits are unreliable on paths with
+    # broken PMTUD or low MTU (PPPoE, tunnels).
+    chunks = chunk_data(data, @max_payload_bytes)
+    send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
+      :queue.in(chunk, q)
+    end)
     state = %{state | send_queue: send_queue}
 
     # Try to send immediately if window allows
@@ -914,5 +930,20 @@ defmodule ZtlpGateway.Session do
   defp per_packet_rto(base_rto, retransmit_count) do
     backed_off = base_rto * :math.pow(1.5, retransmit_count) |> round()
     min(backed_off, @max_rto_ms)
+  end
+
+  # Split binary data into chunks of at most `max_size` bytes.
+  defp chunk_data(data, max_size) when byte_size(data) <= max_size, do: [data]
+  defp chunk_data(data, max_size) do
+    chunk_data_acc(data, max_size, [])
+  end
+
+  defp chunk_data_acc(<<>>, _max_size, acc), do: Enum.reverse(acc)
+  defp chunk_data_acc(data, max_size, acc) when byte_size(data) <= max_size do
+    Enum.reverse([data | acc])
+  end
+  defp chunk_data_acc(data, max_size, acc) do
+    <<chunk::binary-size(max_size), rest::binary>> = data
+    chunk_data_acc(rest, max_size, [chunk | acc])
   end
 end

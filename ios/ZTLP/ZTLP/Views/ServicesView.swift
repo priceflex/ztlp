@@ -8,6 +8,7 @@ import SwiftUI
 
 struct ServicesView: View {
     @ObservedObject var viewModel: ServicesViewModel
+    @ObservedObject var tunnelViewModel: TunnelViewModel
 
     var body: some View {
         NavigationStack {
@@ -209,12 +210,17 @@ private struct TagsView: View {
 // MARK: - Previews
 
 #Preview("With Services") {
-    ServicesView(viewModel: {
-        let vm = ServicesViewModel(configuration: ZTLPConfiguration())
-        return vm
-    }())
+    let config = ZTLPConfiguration()
+    ServicesView(
+        viewModel: ServicesViewModel(configuration: config),
+        tunnelViewModel: TunnelViewModel(configuration: config)
+    )
 }
 
 #Preview("Empty") {
-    ServicesView(viewModel: ServicesViewModel(configuration: ZTLPConfiguration()))
+    let config = ZTLPConfiguration()
+    ServicesView(
+        viewModel: ServicesViewModel(configuration: config),
+        tunnelViewModel: TunnelViewModel(configuration: config)
+    )
 }

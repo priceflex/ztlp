@@ -281,11 +281,172 @@ struct SettingsView: View {
 
     // MARK: - About
 
+    @State private var showLicenses = false
+
     private var aboutSection: some View {
         Section("About") {
-            infoRow(icon: "info.circle", label: "ZTLP Library", value: "v\(viewModel.libraryVersion)")
+            // App info
+            VStack(spacing: 12) {
+                Image(systemName: "shield.checkered")
+                    .font(.system(size: 36))
+                    .foregroundStyle(Color.ztlpBlue)
+
+                Text("ZTLP")
+                    .font(.title2.weight(.bold))
+
+                Text("Zero Trust Layer Protocol")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                Text("v\(viewModel.libraryVersion)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+
+            // Author
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Author", systemImage: "person.fill")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Steven Price")
+                        .font(.callout)
+                }
+                HStack {
+                    Label("Organization", systemImage: "building.2")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Tech Rockstar Academy")
+                        .font(.callout)
+                }
+            }
+
+            // Links
+            HStack {
+                Label("Website", systemImage: "globe")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Link("ztlp.org", destination: URL(string: "https://ztlp.org")!)
+                    .font(.callout)
+            }
+
+            HStack {
+                Label("Source", systemImage: "chevron.left.forwardslash.chevron.right")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Link("GitHub", destination: URL(string: "https://github.com/priceflex/ztlp")!)
+                    .font(.callout)
+            }
+
+            HStack {
+                Label("License", systemImage: "doc.text")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Apache 2.0")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Version info
             infoRow(icon: "app", label: "App Version", value: appVersion)
             infoRow(icon: "desktopcomputer", label: "macOS", value: ProcessInfo.processInfo.operatingSystemVersionString)
+
+            // Open Source
+            Button {
+                showLicenses.toggle()
+            } label: {
+                HStack {
+                    Label("Open Source Licenses", systemImage: "heart.fill")
+                        .foregroundStyle(Color.ztlpBlue)
+                    Spacer()
+                    Image(systemName: showLicenses ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showLicenses {
+                openSourceCredits
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: showLicenses)
+    }
+
+    // MARK: - Open Source Credits
+
+    private var openSourceCredits: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("ZTLP is built with these outstanding open source projects:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+
+            // Cryptography
+            licenseSectionHeader("Cryptography")
+            licenseRow("snow", desc: "Noise Protocol Framework", license: "Apache-2.0", url: "https://github.com/mcginty/snow")
+            licenseRow("chacha20poly1305", desc: "AEAD cipher", license: "Apache-2.0/MIT", url: "https://github.com/RustCrypto/AEADs")
+            licenseRow("ed25519-dalek", desc: "Ed25519 signatures", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/ed25519-dalek")
+            licenseRow("curve25519-dalek", desc: "Elliptic curve operations", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/curve25519-dalek")
+            licenseRow("blake2", desc: "BLAKE2 hash function", license: "Apache-2.0/MIT", url: "https://github.com/RustCrypto/hashes")
+            licenseRow("subtle", desc: "Constant-time operations", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/subtle")
+
+            // Runtime & Async
+            licenseSectionHeader("Runtime")
+            licenseRow("tokio", desc: "Async runtime for Rust", license: "MIT", url: "https://github.com/tokio-rs/tokio")
+            licenseRow("tokio-rustls", desc: "TLS for async I/O", license: "Apache-2.0/MIT", url: "https://github.com/rustls/tokio-rustls")
+            licenseRow("tracing", desc: "Structured logging", license: "MIT", url: "https://github.com/tokio-rs/tracing")
+
+            // Serialization
+            licenseSectionHeader("Serialization & CLI")
+            licenseRow("serde", desc: "Serialization framework", license: "Apache-2.0/MIT", url: "https://github.com/serde-rs/serde")
+            licenseRow("clap", desc: "Command-line argument parser", license: "Apache-2.0/MIT", url: "https://github.com/clap-rs/clap")
+            licenseRow("toml", desc: "TOML parser", license: "Apache-2.0/MIT", url: "https://github.com/toml-rs/toml")
+            licenseRow("base64", desc: "Base64 encoding", license: "Apache-2.0/MIT", url: "https://github.com/marshallpierce/rust-base64")
+            licenseRow("hex", desc: "Hex encoding", license: "Apache-2.0/MIT", url: "https://github.com/KokaKiwi/rust-hex")
+
+            // Utilities
+            licenseSectionHeader("Utilities")
+            licenseRow("rand", desc: "Random number generation", license: "Apache-2.0/MIT", url: "https://github.com/rust-random/rand")
+            licenseRow("thiserror", desc: "Error derive macros", license: "Apache-2.0/MIT", url: "https://github.com/dtolnay/thiserror")
+            licenseRow("dialoguer", desc: "Terminal prompts", license: "MIT", url: "https://github.com/console-rs/dialoguer")
+            licenseRow("indicatif", desc: "Progress bars", license: "MIT", url: "https://github.com/console-rs/indicatif")
+            licenseRow("colored", desc: "Terminal colors", license: "MPL-2.0", url: "https://github.com/mackwic/colored")
+            licenseRow("qr2term", desc: "QR codes in terminal", license: "MIT", url: "https://github.com/nickel-org/qr2term")
+            licenseRow("dirs", desc: "Platform directories", license: "Apache-2.0/MIT", url: "https://github.com/dirs-dev/dirs-rs")
+            licenseRow("hostname", desc: "System hostname", license: "MIT", url: "https://github.com/svartalf/hostname")
+            licenseRow("libc", desc: "C library bindings", license: "Apache-2.0/MIT", url: "https://github.com/rust-lang/libc")
+
+            // Elixir / OTP
+            licenseSectionHeader("Server (Elixir/OTP)")
+            licenseRow("Elixir", desc: "Dynamic, functional language", license: "Apache-2.0", url: "https://github.com/elixir-lang/elixir")
+            licenseRow("Erlang/OTP", desc: "Concurrent runtime system", license: "Apache-2.0", url: "https://github.com/erlang/otp")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func licenseSectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.top, 4)
+    }
+
+    private func licenseRow(_ name: String, desc: String, license: String, url: String) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Link(name, destination: URL(string: url)!)
+                    .font(.caption.weight(.medium))
+                Text(desc)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(license)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
         }
     }
 

@@ -1,7 +1,7 @@
 /**
  * @file ztlp.h
  * @brief ZTLP (Zero Trust Layer Protocol) Mobile SDK — C FFI API
- * @version 0.3.1
+ * @version 0.10.0
  *
  * This header defines the complete C-compatible API for integrating the ZTLP
  * protocol into iOS and Android applications. The library is compiled as a
@@ -191,6 +191,8 @@ enum {
     ZTLP_ALREADY_CONNECTED = -9,
     /** Not connected — call ztlp_connect first. */
     ZTLP_NOT_CONNECTED     = -10,
+    /** Access rejected by gateway policy. */
+    ZTLP_REJECTED          = -11,
     /** Unspecified internal error. */
     ZTLP_INTERNAL_ERROR    = -99
 };
@@ -456,6 +458,18 @@ int32_t ztlp_config_set_nat_assist(ZtlpConfig *config, bool enabled);
 int32_t ztlp_config_set_timeout_ms(ZtlpConfig *config, uint64_t ms);
 
 /**
+ * @brief Set the target service name for gateway routing.
+ *
+ * The gateway uses this to determine which backend to forward traffic to.
+ * For example, "beta" would route to the "beta" backend.
+ *
+ * @param config   Valid config handle.
+ * @param service  Service name (max 16 bytes).
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_config_set_service(ZtlpConfig *config, const char *service);
+
+/**
  * @brief Free a configuration handle.
  *
  * @param config  Handle to free, or NULL (safe no-op).
@@ -537,6 +551,31 @@ int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
                                       ZtlpDisconnectCallback callback,
                                       void *user_data);
 
+/**
+ * @brief Disconnect from the current session.
+ *
+ * Stops the background recv loop and releases the active session.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_disconnect(ZtlpClient *client);
+
+/**
+ * @brief Disconnect the tunnel transport only (keep VIP proxy listeners alive).
+ *
+ * Used for reconnect flows — stops the recv loop and clears the session,
+ * but preserves VIP proxy TCP listeners and the runtime. After calling this,
+ * call ztlp_connect() again and then ztlp_vip_start() to hot-swap the
+ * tunnel session into the existing proxy listeners.
+ *
+ * Sets state to Reconnecting (not Disconnected).
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_disconnect_transport(ZtlpClient *client);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Session Info
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -593,6 +632,116 @@ int32_t ztlp_tunnel_start(ZtlpClient *client, uint16_t local_port,
  * @return ZTLP_OK on success.
  */
 int32_t ztlp_tunnel_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * VIP Proxy (Virtual IP — Local TCP → Tunnel)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Register a service with a VIP (Virtual IP) address and port.
+ *
+ * The VIP proxy will listen on vip:port and forward TCP traffic through
+ * the ZTLP tunnel. Call multiple times to register multiple ports for
+ * the same service (e.g., 80 and 443).
+ *
+ * @param client  Valid client handle.
+ * @param name    Service name (e.g., "beta"). Null-terminated.
+ * @param vip     VIP IPv4 address (e.g., "127.0.55.1"). Null-terminated.
+ * @param port    TCP port to listen on (e.g., 80).
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_vip_add_service(ZtlpClient *client, const char *name,
+                              const char *vip, uint16_t port);
+
+/**
+ * @brief Start VIP proxy listeners for all registered services.
+ *
+ * Requires an active ZTLP session (call ztlp_connect first). Each
+ * registered service gets TCP listeners on its VIP:port that pipe data
+ * bidirectionally through the tunnel.
+ *
+ * @param client  Valid, connected client handle.
+ * @return ZTLP_OK on success, ZTLP_NOT_CONNECTED if no active session.
+ */
+int32_t ztlp_vip_start(ZtlpClient *client);
+
+/**
+ * @brief Stop all VIP proxy listeners.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_vip_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * DNS Resolver (*.ztlp → VIP Address)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Start the ZTLP DNS resolver.
+ *
+ * Resolves *.ztlp domain queries to VIP addresses based on services
+ * registered with ztlp_vip_add_service(). Typically bound to
+ * "127.0.55.53:53".
+ *
+ * macOS setup: create /etc/resolver/ztlp with:
+ *   nameserver 127.0.55.53
+ *
+ * @param client       Valid client handle.
+ * @param listen_addr  Bind address (e.g., "127.0.55.53:53"). Null-terminated.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_dns_start(ZtlpClient *client, const char *listen_addr);
+
+/**
+ * @brief Stop the ZTLP DNS resolver.
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_dns_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NS Resolution
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Resolve a ZTLP service name via ZTLP-NS.
+ *
+ * Queries the NS server for a SVC record matching the given name.
+ * Returns the resolved endpoint address (e.g., "10.42.42.112:23098").
+ *
+ * The caller must free the returned string with ztlp_string_free().
+ * Returns NULL on failure — check ztlp_last_error() for details.
+ *
+ * @param service_name  ZTLP-NS name (e.g., "beta.techrockstars.ztlp").
+ * @param ns_server     NS server address (e.g., "52.39.59.34:23096").
+ * @param timeout_ms    Query timeout in ms (0 = default 5000ms).
+ * @return Heap-allocated address string, or NULL on failure.
+ */
+char *ztlp_ns_resolve(const char *service_name,
+                       const char *ns_server,
+                       uint32_t timeout_ms);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Statistics
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Get bytes sent through the active session.
+ *
+ * @param client  Valid client handle.
+ * @return Total bytes sent, or 0 if not connected.
+ */
+uint64_t ztlp_bytes_sent(const ZtlpClient *client);
+
+/**
+ * @brief Get bytes received through the active session.
+ *
+ * @param client  Valid client handle.
+ * @return Total bytes received, or 0 if not connected.
+ */
+uint64_t ztlp_bytes_received(const ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Utility

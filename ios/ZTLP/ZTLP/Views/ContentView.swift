@@ -1,57 +1,71 @@
 // ContentView.swift
 // ZTLP
 //
-// Root tab navigation for the main app experience.
+// Root tab navigation — 3 tabs: Home, Services, Settings.
+// Clean layout matching the macOS app structure.
 
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var configuration: ZTLPConfiguration
 
-    /// Tab selection state.
     @State private var selectedTab: Tab = .home
+
+    /// We initialize view models lazily on first appearance,
+    /// since @EnvironmentObject isn't available in init().
+    @State private var tunnelVM: TunnelViewModel?
+    @State private var servicesVM: ServicesViewModel?
+    @State private var settingsVM: SettingsViewModel?
+    @State private var enrollmentVM: EnrollmentViewModel?
 
     enum Tab: String {
         case home
         case services
-        case identity
         case settings
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            HomeView(
-                viewModel: TunnelViewModel(configuration: configuration)
-            )
-            .tabItem {
-                Label("Connect", systemImage: "shield.checkered")
-            }
-            .tag(Tab.home)
+        Group {
+            if let tunnelVM, let servicesVM, let settingsVM, let enrollmentVM {
+                TabView(selection: $selectedTab) {
+                    HomeView(viewModel: tunnelVM)
+                        .tabItem {
+                            Label("Home", systemImage: "shield.checkered")
+                        }
+                        .tag(Tab.home)
 
-            ServicesView(
-                viewModel: ServicesViewModel(configuration: configuration)
-            )
-            .tabItem {
-                Label("Services", systemImage: "server.rack")
-            }
-            .tag(Tab.services)
+                    ServicesView(
+                        viewModel: servicesVM,
+                        tunnelViewModel: tunnelVM
+                    )
+                        .tabItem {
+                            Label("Services", systemImage: "server.rack")
+                        }
+                        .tag(Tab.services)
 
-            IdentityView()
-            .tabItem {
-                Label("Identity", systemImage: "person.badge.key")
+                    SettingsView(
+                        viewModel: settingsVM,
+                        enrollmentViewModel: enrollmentVM,
+                        configuration: configuration
+                    )
+                        .tabItem {
+                            Label("Settings", systemImage: "gear")
+                        }
+                        .tag(Tab.settings)
+                }
+                .tint(Color.ztlpBlue)
+            } else {
+                ProgressView("Loading…")
+                    .onAppear { initializeViewModels() }
             }
-            .tag(Tab.identity)
-
-            SettingsView(
-                viewModel: SettingsViewModel(configuration: configuration),
-                configuration: configuration
-            )
-            .tabItem {
-                Label("Settings", systemImage: "gear")
-            }
-            .tag(Tab.settings)
         }
-        .tint(Color.ztlpBlue)
+    }
+
+    private func initializeViewModels() {
+        tunnelVM = TunnelViewModel(configuration: configuration)
+        servicesVM = ServicesViewModel(configuration: configuration)
+        settingsVM = SettingsViewModel(configuration: configuration)
+        enrollmentVM = EnrollmentViewModel(configuration: configuration)
     }
 }
 

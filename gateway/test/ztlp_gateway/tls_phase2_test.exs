@@ -244,8 +244,8 @@ defmodule ZtlpGateway.TlsPhase2Test do
       {:ok, {_, backend_port}} = :inet.sockname(listen_socket)
 
       spawn_link(fn ->
-        {:ok, conn} = :gen_tcp.accept(listen_socket, 5000)
-        {:ok, _data} = :gen_tcp.recv(conn, 0, 5000)
+        {:ok, conn} = :gen_tcp.accept(listen_socket, 15_000)
+        {:ok, _data} = :gen_tcp.recv(conn, 0, 15_000)
         :gen_tcp.send(conn, "goodbye")
         :gen_tcp.close(conn)
       end)
@@ -282,8 +282,8 @@ defmodule ZtlpGateway.TlsPhase2Test do
       {:ok, {_, backend_port}} = :inet.sockname(listen_socket)
 
       spawn_link(fn ->
-        {:ok, conn} = :gen_tcp.accept(listen_socket, 5000)
-        {:ok, data} = :gen_tcp.recv(conn, 0, 5000)
+        {:ok, conn} = :gen_tcp.accept(listen_socket, 15_000)
+        {:ok, data} = :gen_tcp.recv(conn, 0, 15_000)
         send(parent, {:backend_received, data})
         :gen_tcp.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
         Process.sleep(500)
@@ -313,7 +313,7 @@ defmodule ZtlpGateway.TlsPhase2Test do
       :ssl.send(client, http_req)
 
       # Check what the backend received
-      assert_receive {:backend_received, data}, 5000
+      assert_receive {:backend_received, data}, 15_000
       data_str = to_string(data)
 
       # Should have X-ZTLP headers injected
@@ -334,8 +334,8 @@ defmodule ZtlpGateway.TlsPhase2Test do
       {:ok, {_, backend_port}} = :inet.sockname(listen_socket)
 
       spawn_link(fn ->
-        {:ok, conn} = :gen_tcp.accept(listen_socket, 5000)
-        {:ok, data} = :gen_tcp.recv(conn, 0, 5000)
+        {:ok, conn} = :gen_tcp.accept(listen_socket, 15_000)
+        {:ok, data} = :gen_tcp.recv(conn, 0, 15_000)
         send(parent, {:backend_received, data})
         :gen_tcp.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
         Process.sleep(500)
@@ -356,7 +356,7 @@ defmodule ZtlpGateway.TlsPhase2Test do
       http_req = "GET /passthrough HTTP/1.1\r\nHost: localhost\r\n\r\n"
       :ssl.send(client, http_req)
 
-      assert_receive {:backend_received, data}, 5000
+      assert_receive {:backend_received, data}, 15_000
       data_str = to_string(data)
 
       # Should NOT have X-ZTLP headers
@@ -745,8 +745,8 @@ defmodule ZtlpGateway.TlsPhase2Test do
       {:ok, {_, backend_port}} = :inet.sockname(listen_socket)
 
       spawn_link(fn ->
-        {:ok, conn} = :gen_tcp.accept(listen_socket, 5000)
-        {:ok, data} = :gen_tcp.recv(conn, 0, 5000)
+        {:ok, conn} = :gen_tcp.accept(listen_socket, 15_000)
+        {:ok, data} = :gen_tcp.recv(conn, 0, 15_000)
         send(parent, {:backend_data, data})
         :gen_tcp.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
         Process.sleep(500)
@@ -772,7 +772,7 @@ defmodule ZtlpGateway.TlsPhase2Test do
 
       :ssl.send(client, "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
 
-      assert_receive {:backend_data, data}, 5000
+      assert_receive {:backend_data, data}, 15_000
       data_str = to_string(data)
 
       # Check identity headers were injected

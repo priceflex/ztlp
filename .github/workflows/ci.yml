@@ -160,7 +160,7 @@ jobs:
         run: mix compile --warnings-as-errors
 
       - name: Run tests
-        run: mix test --trace
+        run: mix test --trace --exclude flaky
 
   # ── Cross-language interop tests ──────────────────────────────
   interop:

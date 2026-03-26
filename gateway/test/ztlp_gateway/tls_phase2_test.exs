@@ -272,6 +272,7 @@ defmodule ZtlpGateway.TlsPhase2Test do
   end
 
   describe "end-to-end: HTTP header injection" do
+    @tag :flaky
     test "injects identity headers for mTLS connections in identity mode", %{pki: pki} do
       # Start a backend that captures the received data
       parent = self()

@@ -12,6 +12,7 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     ENABLE_BITCODE: false
     EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    DEVELOPMENT_TEAM: 5527A7TH5P
   configs:
     Debug:
       SWIFT_OPTIMIZATION_LEVEL: "-Onone"

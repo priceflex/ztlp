@@ -145,7 +145,7 @@ final class TunnelViewModel: ObservableObject {
         case .vpnTunnel:
             tunnelManager?.connection.stopVPNTunnel()
         case .directConnect:
-            stopVipProxy()
+            teardownAll()  // Full teardown including networking on explicit disconnect
             bridge.disconnect()
         }
 
@@ -586,12 +586,19 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
+    /// Stop VIP proxy listeners and DNS. Does NOT tear down networking (loopback/pf/DNS resolver)
+    /// — those persist across reconnects to avoid repeated admin password prompts.
     private func stopVipProxy() {
         bridge.vipStop()
         bridge.dnsStop()
+        vipStatus = nil
+    }
+
+    /// Full teardown including networking — only called on explicit user disconnect.
+    private func teardownAll() {
+        stopVipProxy()
         bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.53"])
         networkingConfigured = false
-        vipStatus = nil
     }
 
     // MARK: - Auto-Reconnect

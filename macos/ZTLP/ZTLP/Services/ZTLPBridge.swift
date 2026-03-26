@@ -460,10 +460,19 @@ final class ZTLPBridge {
         }
         script += "PFEOF\n"
 
-        // Load pf anchor
-        script += "if ! grep -q ztlp /etc/pf.conf; then\n"
-        script += "  echo 'rdr-anchor \"ztlp\"' >> /etc/pf.conf\n"
-        script += "  echo 'load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"' >> /etc/pf.conf\n"
+        // Load pf anchor — insert BEFORE dummynet/filter anchors (pf requires rdr before filter)
+        script += "if ! grep -q 'rdr-anchor \"ztlp\"' /etc/pf.conf; then\n"
+        script += "  sed -i '' '/^dummynet-anchor/i\\\n"
+        script += "rdr-anchor \"ztlp\"\\\n"
+        script += "load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"\n"
+        script += "' /etc/pf.conf\n"
+        script += "  # Fallback: if no dummynet-anchor line, insert before anchor \"com.apple\"\n"
+        script += "  if ! grep -q 'rdr-anchor \"ztlp\"' /etc/pf.conf; then\n"
+        script += "    sed -i '' '/^anchor/i\\\n"
+        script += "rdr-anchor \"ztlp\"\\\n"
+        script += "load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"\n"
+        script += "' /etc/pf.conf\n"
+        script += "  fi\n"
         script += "fi\n"
         script += "pfctl -f /etc/pf.conf 2>/dev/null || true\n"
         script += "pfctl -e 2>/dev/null || true\n"
@@ -518,6 +527,13 @@ final class ZTLPBridge {
             s += "rdr pass on lo0 proto tcp from any to \(vip) port 443 -> \(vip) port 8443\n"
         }
         s += "PF\n"
+        // Ensure anchor is in pf.conf before dummynet/filter rules
+        s += "if ! grep -q 'rdr-anchor \"ztlp\"' /etc/pf.conf; then\n"
+        s += "  sed -i '' '/^dummynet-anchor/i\\\\\n"
+        s += "rdr-anchor \"ztlp\"\\\\\n"
+        s += "load anchor \"ztlp\" from \"/etc/pf.anchors/ztlp\"\n"
+        s += "' /etc/pf.conf\n"
+        s += "fi\n"
         s += "/sbin/pfctl -f /etc/pf.conf 2>/dev/null || true\n"
         s += "/sbin/pfctl -e 2>/dev/null || true\n"
         s += "mkdir -p /etc/resolver\n"

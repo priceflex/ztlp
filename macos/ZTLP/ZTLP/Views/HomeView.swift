@@ -152,7 +152,7 @@ struct HomeView: View {
         .buttonStyle(.plain)
         .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
         .onAppear { isPulsing = true }
-        .contentShape(Circle().size(width: 140, height: 140))
+        .contentShape(Circle())
     }
 
     // MARK: - Traffic Bar

@@ -402,8 +402,46 @@ final class ZTLPBridge {
         ztlp_dns_stop(c)
     }
 
-    /// Set up loopback aliases + pf redirect + DNS resolver (one admin prompt).
+    /// Check if networking (loopback aliases, pf, DNS resolver) is already configured.
+    func isNetworkingConfigured(vips: [String]) -> Bool {
+        // Check DNS resolver file
+        guard FileManager.default.fileExists(atPath: "/etc/resolver/ztlp") else { return false }
+        // Check pf anchor file
+        guard FileManager.default.fileExists(atPath: "/etc/pf.anchors/ztlp") else { return false }
+        // Check loopback aliases — run ifconfig and look for our VIPs
+        guard let ifconfigOutput = runShell("/sbin/ifconfig lo0") else { return false }
+        for vip in vips {
+            if !ifconfigOutput.contains(vip) { return false }
+        }
+        return true
+    }
+
+    /// Run a shell command and return stdout, or nil on failure.
+    private func runShell(_ command: String) -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", command]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Set up loopback aliases + pf redirect + DNS resolver.
+    /// Skips the admin password prompt if everything is already configured.
     func setupNetworking(vips: [String]) throws {
+        // Skip if already set up (survives across app restarts until reboot)
+        if isNetworkingConfigured(vips: vips) {
+            return
+        }
+
         // Write a temp shell script to avoid AppleScript escaping hell
         let tmpScript = "/tmp/ztlp_setup.sh"
         var script = "#!/bin/bash\nset -e\n"
@@ -437,6 +475,9 @@ final class ZTLPBridge {
         script += "port 5354\n"
         script += "DNSEOF\n"
 
+        // Install LaunchDaemon so setup persists across reboots (one-time)
+        script += installLaunchDaemonScript(vips: vips)
+
         // Write the script and make executable
         try script.write(toFile: tmpScript, atomically: true, encoding: .utf8)
 
@@ -454,7 +495,65 @@ final class ZTLPBridge {
         }
     }
 
-    /// Remove loopback aliases + pf rules + DNS resolver.
+    /// Generate shell commands to install a LaunchDaemon that re-applies networking on boot.
+    private func installLaunchDaemonScript(vips: [String]) -> String {
+        let serviceVips = vips.filter { $0 != "127.0.55.53" }
+        let daemonId = "com.ztlp.networking"
+        let scriptPath = "/usr/local/bin/ztlp-networking-setup.sh"
+        let plistPath = "/Library/LaunchDaemons/\(daemonId).plist"
+
+        // Only install if not already present
+        var s = "if [ ! -f \(plistPath) ]; then\n"
+
+        // Write the boot script
+        s += "cat > \(scriptPath) << 'BOOTEOF'\n"
+        s += "#!/bin/bash\n"
+        s += "# ZTLP networking setup — runs at boot via LaunchDaemon\n"
+        for vip in vips {
+            s += "/sbin/ifconfig lo0 alias \(vip) up\n"
+        }
+        s += "cat > /etc/pf.anchors/ztlp << 'PF'\n"
+        for vip in serviceVips {
+            s += "rdr pass on lo0 proto tcp from any to \(vip) port 80 -> \(vip) port 8080\n"
+            s += "rdr pass on lo0 proto tcp from any to \(vip) port 443 -> \(vip) port 8443\n"
+        }
+        s += "PF\n"
+        s += "/sbin/pfctl -f /etc/pf.conf 2>/dev/null || true\n"
+        s += "/sbin/pfctl -e 2>/dev/null || true\n"
+        s += "mkdir -p /etc/resolver\n"
+        s += "cat > /etc/resolver/ztlp << 'DNS'\n"
+        s += "nameserver 127.0.55.53\n"
+        s += "port 5354\n"
+        s += "DNS\n"
+        s += "BOOTEOF\n"
+        s += "chmod 755 \(scriptPath)\n"
+
+        // Write the LaunchDaemon plist
+        s += "cat > \(plistPath) << 'PLISTEOF'\n"
+        s += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        s += "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        s += "<plist version=\"1.0\">\n"
+        s += "<dict>\n"
+        s += "  <key>Label</key>\n"
+        s += "  <string>\(daemonId)</string>\n"
+        s += "  <key>ProgramArguments</key>\n"
+        s += "  <array>\n"
+        s += "    <string>/bin/bash</string>\n"
+        s += "    <string>\(scriptPath)</string>\n"
+        s += "  </array>\n"
+        s += "  <key>RunAtLoad</key>\n"
+        s += "  <true/>\n"
+        s += "</dict>\n"
+        s += "</plist>\n"
+        s += "PLISTEOF\n"
+        s += "chmod 644 \(plistPath)\n"
+        s += "launchctl load \(plistPath) 2>/dev/null || true\n"
+        s += "fi\n"
+
+        return s
+    }
+
+    /// Remove loopback aliases + pf rules + DNS resolver + LaunchDaemon.
     func teardownNetworking(vips: [String]) {
         let tmpScript = "/tmp/ztlp_teardown.sh"
         var script = "#!/bin/bash\n"
@@ -464,6 +563,9 @@ final class ZTLPBridge {
         script += "rm -f /etc/pf.anchors/ztlp /etc/resolver/ztlp\n"
         script += "sed -i \'\' \'/ztlp/d\' /etc/pf.conf 2>/dev/null || true\n"
         script += "pfctl -f /etc/pf.conf 2>/dev/null || true\n"
+        // Remove LaunchDaemon
+        script += "launchctl unload /Library/LaunchDaemons/com.ztlp.networking.plist 2>/dev/null || true\n"
+        script += "rm -f /Library/LaunchDaemons/com.ztlp.networking.plist /usr/local/bin/ztlp-networking-setup.sh\n"
 
         try? script.write(toFile: tmpScript, atomically: true, encoding: .utf8)
         let asSource = "do shell script \"/bin/bash \(tmpScript)\" with administrator privileges"

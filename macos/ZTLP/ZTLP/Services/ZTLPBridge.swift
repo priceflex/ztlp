@@ -203,6 +203,15 @@ final class ZTLPBridge {
 
     func initialize() throws {
         guard !isInitialized else { return }
+
+        // Configure tunnel log to ~/Library/Logs/ZTLP/ (persistent, visible in Console.app)
+        let logsDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Logs/ZTLP")
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        let logPath = logsDir.appendingPathComponent("tunnel.log").path
+        setenv("ZTLP_LOG_FILE", logPath, 0) // Don't override if already set
+        setenv("ZTLP_LOG_LEVEL", "info", 0) // Default to info; debug/trace via env override
+
         let result = ztlp_init()
         if let error = ZTLPError.from(code: result) { throw error }
         isInitialized = true

@@ -50,14 +50,14 @@ defmodule ZtlpRelay.ForwardingTest do
     :gen_udp.send(socket, relay_ip, relay_port, data)
   end
 
-  defp send_data(socket, relay_addr, session_id, seq, opts \\ []) do
+  defp send_data(socket, relay_addr, session_id, seq, opts) do
     pkt = Packet.build_data(session_id, seq, opts)
     data = Packet.serialize_data(pkt)
     {relay_ip, relay_port} = relay_addr
     :gen_udp.send(socket, relay_ip, relay_port, data)
   end
 
-  defp recv_packet(socket, timeout \\ 500) do
+  defp recv_packet(socket, timeout) do
     case :gen_udp.recv(socket, 0, timeout) do
       {:ok, {_ip, _port, data}} -> {:ok, data}
       {:error, :timeout} -> {:error, :timeout}

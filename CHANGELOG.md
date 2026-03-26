@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.14.0 — 2026-03-26
+
+### macOS Client — Production Hardening
+
+#### VIP Proxy Hot-Swap (zero-downtime reconnects)
+- **TCP listeners survive tunnel reconnects** — `TunnelSession` wrapped in `Arc<RwLock<>>` allows the tunnel session to be swapped atomically without restarting TCP listeners on `127.0.55.1:8080/8443`.
+- **New FFI: `ztlp_disconnect_transport()`** — stops the recv loop and clears the session while keeping the tokio runtime and VIP proxy alive. Sets state to `Reconnecting`.
+- **Swift reconnect path** uses `disconnectTransport()` instead of `destroyClient()`, preserving the client, runtime, and listener tasks across reconnects.
+- **VipProxy.start() hot-swap mode** — if listeners are already running, updates the session reference instead of rebinding ports.
+- **Result:** HTTP connections accepted during tunnel reconnect wait for the new session, then proceed normally. Zero TCP downtime.
+
+#### Tunnel Stability
+- **Debounced `NWPathMonitor`** — interface change events debounced by 2 seconds to absorb macOS Ethernet renegotiation and Wi-Fi↔Ethernet priority flapping.
+- **Activity-gated reconnect** — if tunnel data flowed within the last 30 seconds, skip reconnect even if interface changes. The keepalive watchdog (45s) handles real failures.
+- **`lastActivity` tracking** — added to `TrafficStats`, updated by stats polling whenever `bytesReceived`/`bytesSent` changes.
+- **Root cause fixed:** Mac Studio M4 Ultra with 10GbE Ethernet was triggering 3+ spurious reconnects per 30 seconds from `NWPathMonitor`.
+
+#### Admin Password Elimination
+- **Networking persists across reconnects** — `stopVipProxy()` no longer tears down loopback aliases, pf rules, or DNS resolver. Only an explicit disconnect button click runs full teardown via `teardownAll()`.
+- **LaunchDaemon (`com.ztlp.networking`)** — installed on first connect, runs at boot. No admin password ever again after initial setup.
+- **`isNetworkingConfigured()` checks actual system state** — verifies `/etc/resolver/ztlp`, ifconfig aliases, and pf anchor exist before prompting.
+
+### Leveled Logging
+- **`ZTLP_LOG_LEVEL` env var** — controls recv loop logging: `off`, `error`, `warn`, `info` (default), `debug`, `trace`.
+- **`ZTLP_LOG_FILE` env var** — override log path (default: `~/Library/Logs/ZTLP/tunnel.log` on macOS, `/tmp/ztlp-recv.log` elsewhere).
+- **Log rotation** — 2MB max, rotates to `.1` backup.
+- **Periodic summaries** at `debug` level — frame count, bytes, elapsed every 5 seconds instead of per-frame.
+- **Before:** 17MB in 42 seconds (trace-level per-packet). **After:** ~KB/hour at `info` level.
+
+### UI Redesign (macOS SwiftUI)
+- **3-tab sidebar** — Home, Services, Settings (from 5 tabs). Identity and Enrollment merged into Settings.
+- **Menu bar icon** — `shield.checkered` (connected), `shield.slash` (disconnected), `arrow.triangle.2.circlepath` (reconnecting). Fixed `@StateObject` initialization for proper state observation.
+- **Settings sections** — General → Identity → Enrollment → Advanced (collapsed) → About → Danger Zone.
+- **Test Service button** moved to Services toolbar.
+
+### CI & Testing
+- Fixed flaky TLS test timeout (5s → 15s for CI resource contention).
+- Removed unused `alias TlsSession` warning in gateway tests.
+- Removed unused default args warnings in gateway and relay test helpers.
+- **Test totals: 2,645** (799 Rust lib + relay 565 + NS 726 + gateway 555), 0 failures.
+- Stress test script: `tools/stress-test.sh` — 5-stage load test through the VIP proxy tunnel.
+
+---
+
 ## v0.12.0 — 2026-03-25
 
 ### Tunnel Reliability (100% sequential, large & small responses)

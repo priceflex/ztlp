@@ -537,7 +537,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             tunnelNetmask: providerConfig["tunnelNetmask"] as? String ?? "255.255.255.0",
             dnsServers: providerConfig["dnsServers"] as? [String] ?? ["1.1.1.1", "8.8.8.8"],
             mtu: providerConfig["mtu"] as? Int ?? 1400,
-            identityPath: providerConfig["identityPath"] as? String
+            identityPath: providerConfig["identityPath"] as? String,
+            fullTunnel: providerConfig["fullTunnel"] as? Bool ?? false
         )
     }
 

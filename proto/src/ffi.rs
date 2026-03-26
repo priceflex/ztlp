@@ -983,32 +983,104 @@ async fn recv_loop(
         }
     });
 
-    // Debug file logging for diagnosing tunnel issues on macOS
-    let debug_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/ztlp-recv-debug.log")
-        .ok();
+    // ── Leveled file logging for diagnosing tunnel issues ──
+    //
+    // ZTLP_LOG_LEVEL env var controls verbosity:
+    //   "off"   — no file logging at all
+    //   "error" — errors only
+    //   "warn"  — errors + warnings
+    //   "info"  — session lifecycle + errors + warnings (DEFAULT)
+    //   "debug" — info + frame summaries (periodic, not per-packet)
+    //   "trace" — every single recv/frame (17MB/min — diagnostic only!)
+    //
+    // ZTLP_LOG_FILE env var overrides the log path (default: /tmp/ztlp-recv.log)
+    // Log files are rotated at 2MB — previous log moved to .1 suffix.
+    const LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
+    #[derive(Clone, Copy, PartialEq, PartialOrd)]
+    enum LogLevel { Off = 0, Error = 1, Warn = 2, Info = 3, Debug = 4, Trace = 5 }
+    let log_level = match std::env::var("ZTLP_LOG_LEVEL")
+        .unwrap_or_else(|_| "info".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "off" | "none" => LogLevel::Off,
+        "error" => LogLevel::Error,
+        "warn" | "warning" => LogLevel::Warn,
+        "info" => LogLevel::Info,
+        "debug" => LogLevel::Debug,
+        "trace" | "all" => LogLevel::Trace,
+        _ => LogLevel::Info,
+    };
+    let log_path = std::env::var("ZTLP_LOG_FILE")
+        .unwrap_or_else(|_| "/tmp/ztlp-recv.log".to_string());
+    let open_log_file = |path: &str| -> Option<std::fs::File> {
+        if log_level == LogLevel::Off { return None; }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    };
+    let mut debug_log = open_log_file(&log_path);
+    let mut log_bytes_written: u64 = debug_log.as_ref()
+        .and_then(|f| f.metadata().ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
     let log_start = std::time::Instant::now();
-    let log_write = |file: &Option<std::fs::File>, start: std::time::Instant, msg: &str| {
-        if let Some(ref f) = file {
+    let log_write = |file: &mut Option<std::fs::File>, bytes_written: &mut u64, start: std::time::Instant, level: LogLevel, msg: &str, cur_level: LogLevel, log_path: &str| {
+        if level > cur_level { return; }
+        if let Some(ref mut f) = file {
             use std::io::Write;
+            let lvl_str = match level {
+                LogLevel::Off => return,
+                LogLevel::Error => "ERROR",
+                LogLevel::Warn => "WARN",
+                LogLevel::Info => "INFO",
+                LogLevel::Debug => "DEBUG",
+                LogLevel::Trace => "TRACE",
+            };
             let elapsed = start.elapsed().as_millis();
-            let _ = (&*f).write_all(format!("[+{}ms] {}\n", elapsed, msg).as_bytes());
+            let line = format!("[+{}ms] [{}] {}\n", elapsed, lvl_str, msg);
+            let _ = f.write_all(line.as_bytes());
+            *bytes_written += line.len() as u64;
+            // Rotate if over limit
+            if *bytes_written > LOG_ROTATE_BYTES {
+                let _ = f.flush();
+                drop(file.take());
+                let rotated = format!("{}.1", log_path);
+                let _ = std::fs::rename(log_path, &rotated);
+                if let Ok(new_f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                {
+                    *file = Some(new_f);
+                }
+                *bytes_written = 0;
+            }
         }
     };
+    // Frame stats for periodic debug-level summaries instead of per-packet logging
+    let mut frame_count: u64 = 0;
+    let mut frame_bytes: u64 = 0;
+    let mut last_frame_summary = std::time::Instant::now();
     log_write(
-        &debug_log,
+        &mut debug_log,
+        &mut log_bytes_written,
         log_start,
+        LogLevel::Info,
         &format!(
-            "recv_loop started, session={}",
-            hex::encode(session_id.as_bytes())
+            "recv_loop started, session={}, log_level={:?}",
+            hex::encode(session_id.as_bytes()),
+            match log_level { LogLevel::Off => "off", LogLevel::Error => "error", LogLevel::Warn => "warn", LogLevel::Info => "info", LogLevel::Debug => "debug", LogLevel::Trace => "trace" }
         ),
+        log_level,
+        &log_path,
     );
 
     loop {
         if stop_flag.load(Ordering::SeqCst) {
-            log_write(&debug_log, log_start, "recv_loop: stop_flag set, breaking");
+            log_write(&mut debug_log, &mut log_bytes_written, log_start, LogLevel::Info, "recv_loop: stop_flag set, breaking", log_level, &log_path);
             break;
         }
 
@@ -1016,13 +1088,17 @@ async fn recv_loop(
             Ok(Ok(Some((plaintext, _from)))) => {
                 last_recv_time = std::time::Instant::now();
                 log_write(
-                    &debug_log,
+                    &mut debug_log,
+                    &mut log_bytes_written,
                     log_start,
+                    LogLevel::Trace,
                     &format!(
                         "recv: {} bytes, first_byte=0x{:02x}",
                         plaintext.len(),
                         plaintext.first().copied().unwrap_or(0)
                     ),
+                    log_level,
+                    &log_path,
                 );
 
                 // SECURITY: Reject oversized packets to prevent memory exhaustion.
@@ -1075,9 +1151,12 @@ async fn recv_loop(
                         (0u32, ds, plaintext[9..].to_vec())
                     };
 
+                    // Per-frame trace logging (very verbose)
                     log_write(
-                        &debug_log,
+                        &mut debug_log,
+                        &mut log_bytes_written,
                         log_start,
+                        LogLevel::Trace,
                         &format!(
                             "FRAME_DATA stream={} data_seq={} payload_len={} expected={}",
                             stream_id,
@@ -1085,7 +1164,31 @@ async fn recv_loop(
                             payload.len(),
                             next_expected_seq
                         ),
+                        log_level,
+                        &log_path,
                     );
+                    // Periodic debug-level summary (every 5 seconds)
+                    frame_count += 1;
+                    frame_bytes += payload.len() as u64;
+                    if last_frame_summary.elapsed() >= Duration::from_secs(5) {
+                        log_write(
+                            &mut debug_log,
+                            &mut log_bytes_written,
+                            log_start,
+                            LogLevel::Debug,
+                            &format!(
+                                "frame_summary: {} frames, {} bytes in last {:.1}s",
+                                frame_count,
+                                frame_bytes,
+                                last_frame_summary.elapsed().as_secs_f64()
+                            ),
+                            log_level,
+                            &log_path,
+                        );
+                        frame_count = 0;
+                        frame_bytes = 0;
+                        last_frame_summary = std::time::Instant::now();
+                    }
 
                     // Update cumulative ACK tracking (global across all streams)
                     if data_seq == next_expected_seq {
@@ -1159,9 +1262,13 @@ async fn recv_loop(
                     if fin_stream_id > 0 {
                         // Multiplexed stream FIN — close the stream's dispatcher channel
                         log_write(
-                            &debug_log,
+                            &mut debug_log,
+                            &mut log_bytes_written,
                             log_start,
+                            LogLevel::Info,
                             &format!("FRAME_FIN stream={}", fin_stream_id),
+                            log_level,
+                            &log_path,
                         );
                         if let Ok(guard) = inner.lock() {
                             if let Some(ref proxy) = guard.vip_proxy {
@@ -1171,9 +1278,13 @@ async fn recv_loop(
                     } else {
                         // Legacy FIN (entire session)
                         log_write(
-                            &debug_log,
+                            &mut debug_log,
+                            &mut log_bytes_written,
                             log_start,
+                            LogLevel::Info,
                             &format!("FRAME_FIN (legacy), next_expected={}", next_expected_seq),
+                            log_level,
+                            &log_path,
                         );
                         if next_expected_seq > 0 {
                             let ack_seq = next_expected_seq - 1;
@@ -1189,9 +1300,13 @@ async fn recv_loop(
                         let close_stream_id =
                             u32::from_be_bytes(plaintext[1..5].try_into().unwrap_or([0u8; 4]));
                         log_write(
-                            &debug_log,
+                            &mut debug_log,
+                            &mut log_bytes_written,
                             log_start,
+                            LogLevel::Info,
                             &format!("FRAME_CLOSE stream={}", close_stream_id),
+                            log_level,
+                            &log_path,
                         );
                         if let Ok(guard) = inner.lock() {
                             if let Some(ref proxy) = guard.vip_proxy {
@@ -1234,14 +1349,18 @@ async fn recv_loop(
             Ok(Ok(None)) => {
                 // Packet dropped by pipeline — continue
                 log_write(
-                    &debug_log,
+                    &mut debug_log,
+                    &mut log_bytes_written,
                     log_start,
+                    LogLevel::Debug,
                     "recv: packet dropped by pipeline (None)",
+                    log_level,
+                    &log_path,
                 );
             }
             Ok(Err(e)) => {
                 // Socket error — clean up
-                log_write(&debug_log, log_start, &format!("recv: socket error: {}", e));
+                log_write(&mut debug_log, &mut log_bytes_written, log_start, LogLevel::Error, &format!("recv: socket error: {}", e), log_level, &log_path);
                 break;
             }
             Err(_) => {

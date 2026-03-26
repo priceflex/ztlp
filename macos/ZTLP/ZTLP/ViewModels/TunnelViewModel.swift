@@ -380,6 +380,7 @@ final class TunnelViewModel: ObservableObject {
                     } else if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
                         // Keepalive timeout — schedule auto-reconnect
                         self.stopStatsPolling()
+                        self.stopVipProxy()
                         self.scheduleReconnect()
                     } else {
                         self.status = .disconnected
@@ -411,6 +412,7 @@ final class TunnelViewModel: ObservableObject {
                 // Tear down current session and reconnect on new interface
                 self.isReconnecting = true
                 self.stopStatsPolling()
+                self.stopVipProxy()
                 self.bridge.destroyClient()
                 self.scheduleReconnect()
             }
@@ -531,6 +533,9 @@ final class TunnelViewModel: ObservableObject {
 
     private func startVipProxy() async {
         do {
+            // Stop any lingering listeners from a previous session (reconnect safety)
+            bridge.vipStop()
+
             // Register services with VIP addresses (high ports — pf redirects 80->8080, 443->8443)
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8080)
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)

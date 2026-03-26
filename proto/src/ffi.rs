@@ -1441,6 +1441,41 @@ pub extern "C" fn ztlp_disconnect(client: *mut ZtlpClient) -> i32 {
     ZtlpResult::Ok as i32
 }
 
+/// Disconnect the tunnel transport session only.
+///
+/// Unlike `ztlp_disconnect`, this keeps the VIP proxy listeners alive and
+/// the runtime running. Used for reconnect flows — after calling this,
+/// call `ztlp_connect` again and then `ztlp_vip_start` to hot-swap the
+/// tunnel session in the existing proxy listeners.
+///
+/// This avoids the need to rebind TCP ports (which drops in-flight connections)
+/// and prevents the admin password prompt that setupNetworking requires.
+#[no_mangle]
+pub extern "C" fn ztlp_disconnect_transport(client: *mut ZtlpClient) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    // Stop the recv loop but keep VIP proxy listeners running
+    if let Some(ref session) = guard.active_session {
+        session.stop_flag.store(true, Ordering::SeqCst);
+    }
+    guard.active_session = None;
+    // Set to reconnecting (not disconnected) — keeps VIP proxy ready
+    guard.state = ConnectionState::Reconnecting;
+    tracing::info!("transport disconnected (VIP proxy listeners preserved)");
+    ZtlpResult::Ok as i32
+}
+
 /// Listen for incoming ZTLP connections (placeholder — used by responder/server).
 #[no_mangle]
 pub extern "C" fn ztlp_listen(

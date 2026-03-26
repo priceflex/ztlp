@@ -33,10 +33,40 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::packet::SessionId;
 use crate::transport::TransportNode;
+
+/// Swappable tunnel session state.
+///
+/// Wrapped in `Arc<RwLock<>>` so listener tasks can read the current session
+/// and it can be swapped on reconnect without restarting TCP listeners.
+pub struct TunnelSession {
+    pub transport: Arc<TransportNode>,
+    pub session_id: SessionId,
+    pub peer_addr: SocketAddr,
+    pub data_seq: Arc<AtomicU64>,
+    pub bytes_sent: Arc<AtomicU64>,
+}
+
+impl TunnelSession {
+    pub fn new(
+        transport: Arc<TransportNode>,
+        session_id: SessionId,
+        peer_addr: SocketAddr,
+        data_seq: Arc<AtomicU64>,
+        bytes_sent: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            transport,
+            session_id,
+            peer_addr,
+            data_seq,
+            bytes_sent,
+        }
+    }
+}
 
 // TLS support for HTTPS VIP ports (443, 8443).
 use tokio_rustls::rustls::pki_types::CertificateDer;
@@ -154,6 +184,8 @@ pub struct VipProxy {
     stop_flag: Arc<AtomicBool>,
     /// Join handles for spawned listener tasks.
     listener_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Shared tunnel session — swapped on reconnect without restarting listeners.
+    session: Arc<RwLock<Option<TunnelSession>>>,
 }
 
 impl Default for VipProxy {
@@ -171,6 +203,7 @@ impl VipProxy {
             next_stream_id: Arc::new(AtomicU32::new(1)), // Start at 1 (0 = legacy)
             stop_flag: Arc::new(AtomicBool::new(false)),
             listener_handles: Vec::new(),
+            session: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -222,6 +255,10 @@ impl VipProxy {
     ///
     /// Each listener accepts concurrent TCP connections. Each connection
     /// gets its own stream_id and communicates through the multiplexed tunnel.
+    ///
+    /// The tunnel session (transport, session_id, peer_addr) is stored in a
+    /// shared `Arc<RwLock<>>` so it can be swapped on reconnect via
+    /// `update_session()` without restarting the TCP listeners.
     pub async fn start(
         &mut self,
         transport: Arc<TransportNode>,
@@ -230,14 +267,28 @@ impl VipProxy {
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
     ) -> Result<(), String> {
-        // Stop any existing listeners first (idempotent for reconnect)
-        if !self.listener_handles.is_empty() {
-            self.stop();
-            // Give OS time to release sockets
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Store the tunnel session
+        {
+            let mut sess = self.session.write().await;
+            *sess = Some(TunnelSession::new(
+                transport.clone(),
+                session_id,
+                peer_addr,
+                data_seq.clone(),
+                bytes_sent.clone(),
+            ));
         }
 
-        // Fresh dispatcher for this session
+        // If listeners are already running, just update the session (hot-swap)
+        if !self.listener_handles.is_empty() {
+            tracing::info!("VIP proxy: hot-swapping tunnel session (listeners stay up)");
+            // Fresh dispatcher for new session
+            self.dispatcher = Arc::new(StreamDispatcher::new());
+            self.next_stream_id.store(1, Ordering::SeqCst);
+            return Ok(());
+        }
+
+        // First start — create listeners
         self.dispatcher = Arc::new(StreamDispatcher::new());
         self.next_stream_id.store(1, Ordering::SeqCst);
         self.stop_flag.store(false, Ordering::SeqCst);
@@ -259,11 +310,7 @@ impl VipProxy {
                     .map_err(|e| format!("failed to bind {}: {}", bind_addr, e))?;
 
                 let stop = self.stop_flag.clone();
-                let transport = transport.clone();
-                let svc_session_id = session_id;
-                let svc_peer_addr = peer_addr;
-                let data_seq = data_seq.clone();
-                let bytes_sent = bytes_sent.clone();
+                let session = self.session.clone();
                 let dispatcher = self.dispatcher.clone();
                 let next_stream_id = self.next_stream_id.clone();
 
@@ -292,11 +339,7 @@ impl VipProxy {
                     vip_listener_task(
                         listener,
                         stop,
-                        transport,
-                        svc_session_id,
-                        svc_peer_addr,
-                        data_seq,
-                        bytes_sent,
+                        session,
                         dispatcher,
                         next_stream_id,
                         tls_acceptor,
@@ -310,6 +353,35 @@ impl VipProxy {
         }
 
         Ok(())
+    }
+
+    /// Hot-swap the tunnel session without restarting listeners.
+    ///
+    /// Called on tunnel reconnect — existing TCP listeners keep running
+    /// and new connections will use the updated transport/session.
+    pub async fn update_session(
+        &self,
+        transport: Arc<TransportNode>,
+        session_id: SessionId,
+        peer_addr: SocketAddr,
+        data_seq: Arc<AtomicU64>,
+        bytes_sent: Arc<AtomicU64>,
+    ) {
+        let mut sess = self.session.write().await;
+        *sess = Some(TunnelSession::new(
+            transport,
+            session_id,
+            peer_addr,
+            data_seq,
+            bytes_sent,
+        ));
+        // Fresh dispatcher for new session
+        tracing::info!("VIP proxy: tunnel session updated (hot-swap)");
+    }
+
+    /// Get the shared session reference (for FFI to check if session exists).
+    pub fn session_ref(&self) -> Arc<RwLock<Option<TunnelSession>>> {
+        self.session.clone()
     }
 
     /// Stop all VIP proxy listeners and release resources.
@@ -397,15 +469,13 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
 ///
 /// Accepts concurrent TCP connections. Each gets a unique stream_id and
 /// runs independently through the multiplexed tunnel.
-#[allow(clippy::too_many_arguments)]
+///
+/// The `session` reference is read-locked per connection — if the tunnel
+/// reconnects, new connections automatically use the new session.
 async fn vip_listener_task(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
-    transport: Arc<TransportNode>,
-    session_id: SessionId,
-    peer_addr: SocketAddr,
-    data_seq: Arc<AtomicU64>,
-    bytes_sent: Arc<AtomicU64>,
+    session: Arc<RwLock<Option<TunnelSession>>>,
     dispatcher: Arc<StreamDispatcher>,
     next_stream_id: Arc<AtomicU32>,
     tls_acceptor: Option<Arc<TlsAcceptor>>,
@@ -432,6 +502,28 @@ async fn vip_listener_task(
             }
         };
 
+        // Read the current tunnel session — reject if no active session
+        let (transport, session_id, peer_addr, data_seq, bytes_sent) = {
+            let sess_guard = session.read().await;
+            match sess_guard.as_ref() {
+                Some(s) => (
+                    s.transport.clone(),
+                    s.session_id,
+                    s.peer_addr,
+                    s.data_seq.clone(),
+                    s.bytes_sent.clone(),
+                ),
+                None => {
+                    tracing::warn!(
+                        "VIP: rejecting connection from {} — no active tunnel session",
+                        client_addr
+                    );
+                    drop(stream);
+                    continue;
+                }
+            }
+        };
+
         let permit = match semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
@@ -452,9 +544,6 @@ async fn vip_listener_task(
         );
 
         let stop = stop.clone();
-        let transport = transport.clone();
-        let data_seq = data_seq.clone();
-        let bytes_sent = bytes_sent.clone();
         let dispatcher = dispatcher.clone();
         let tls_acceptor = tls_acceptor.clone();
 

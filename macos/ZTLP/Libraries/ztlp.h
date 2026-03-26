@@ -561,6 +561,21 @@ int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
  */
 int32_t ztlp_disconnect(ZtlpClient *client);
 
+/**
+ * @brief Disconnect the tunnel transport only (keep VIP proxy listeners alive).
+ *
+ * Used for reconnect flows — stops the recv loop and clears the session,
+ * but preserves VIP proxy TCP listeners and the runtime. After calling this,
+ * call ztlp_connect() again and then ztlp_vip_start() to hot-swap the
+ * tunnel session into the existing proxy listeners.
+ *
+ * Sets state to Reconnecting (not Disconnected).
+ *
+ * @param client  Valid client handle.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_disconnect_transport(ZtlpClient *client);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Session Info
  * ═══════════════════════════════════════════════════════════════════════════ */

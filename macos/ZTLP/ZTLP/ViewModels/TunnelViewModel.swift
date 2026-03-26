@@ -161,32 +161,35 @@ final class TunnelViewModel: ObservableObject {
         connectionMode = .directConnect
 
         do {
-            try bridge.initialize()
+            // On reconnect, the client already exists — skip init/identity/create
+            if !bridge.hasClient {
+                try bridge.initialize()
 
-            // Load or create identity
-            let identity: ZTLPIdentityHandle
-            let identityPath = defaultIdentityPath()
+                // Load or create identity
+                let identity: ZTLPIdentityHandle
+                let identityPath = defaultIdentityPath()
 
-            if let path = identityPath,
-               FileManager.default.fileExists(atPath: path) {
-                identity = try bridge.loadIdentity(from: path)
-            } else {
-                identity = try bridge.generateIdentity()
-                if let path = identityPath {
-                    try identity.save(to: path)
+                if let path = identityPath,
+                   FileManager.default.fileExists(atPath: path) {
+                    identity = try bridge.loadIdentity(from: path)
+                } else {
+                    identity = try bridge.generateIdentity()
+                    if let path = identityPath {
+                        try identity.save(to: path)
+                    }
                 }
+
+                self.directIdentity = identity
+
+                guard identity.nodeId != nil else {
+                    status = .disconnected
+                    lastError = "Failed to get node ID from identity"
+                    return
+                }
+
+                // Create client
+                try bridge.createClient(identity: identity)
             }
-
-            self.directIdentity = identity
-
-            guard identity.nodeId != nil else {
-                status = .disconnected
-                lastError = "Failed to get node ID from identity"
-                return
-            }
-
-            // Create client
-            try bridge.createClient(identity: identity)
 
             // Build config
             let config = ZTLPConfigHandle()
@@ -380,8 +383,9 @@ final class TunnelViewModel: ObservableObject {
                         break
                     } else if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
                         // Keepalive timeout — schedule auto-reconnect
+                        // Don't stop VIP proxy — listeners stay alive for seamless reconnect
                         self.stopStatsPolling()
-                        self.stopVipProxy()
+                        self.isReconnecting = true
                         self.scheduleReconnect()
                     } else {
                         self.status = .disconnected
@@ -426,11 +430,10 @@ final class TunnelViewModel: ObservableObject {
                     return
                 }
                 print("[ZTLP] Interface changed to \(newInterface), last data \(Int(secondsSinceData))s ago — reconnecting")
-                // Tear down current session and reconnect on new interface
+                // Disconnect transport only — keep VIP proxy listeners alive
                 self.isReconnecting = true
                 self.stopStatsPolling()
-                self.stopVipProxy()
-                self.bridge.destroyClient()
+                self.bridge.disconnectTransport()
                 self.scheduleReconnect()
             }
             .store(in: &cancellables)
@@ -556,10 +559,8 @@ final class TunnelViewModel: ObservableObject {
 
     private func startVipProxy() async {
         do {
-            // Stop any lingering listeners from a previous session (reconnect safety)
-            bridge.vipStop()
-
             // Register services with VIP addresses (high ports — pf redirects 80->8080, 443->8443)
+            // Safe to call again on reconnect — add_service is idempotent
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8080)
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)
 
@@ -570,7 +571,9 @@ final class TunnelViewModel: ObservableObject {
                 networkingConfigured = true
             }
 
-            // Start TCP proxy listeners on high ports (pf handles 80/443 redirect)
+            // Start TCP proxy listeners on high ports OR hot-swap session if already running.
+            // On first connect: binds TCP listeners. On reconnect: updates the tunnel session
+            // inside existing listeners (no rebind, no port downtime).
             try bridge.vipStart()
 
             // Start DNS resolver (safe to call again — re-binds on new port)

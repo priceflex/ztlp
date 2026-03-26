@@ -260,6 +260,11 @@ final class ZTLPBridge {
 
     // MARK: - Client
 
+    /// Whether a client handle currently exists (may be disconnected).
+    var hasClient: Bool {
+        clientLock.sync { self.client != nil }
+    }
+
     func createClient(identity: ZTLPIdentityHandle) throws {
         try ensureInitialized()
         guard let idPtr = identity.transferOwnership() else {
@@ -316,6 +321,19 @@ final class ZTLPBridge {
     func disconnect() {
         destroyClient()
         eventSubject.send(.disconnected(reason: 0))
+    }
+
+    /// Disconnect the tunnel transport only, keeping VIP proxy listeners alive.
+    /// Used for reconnect flows — call connect() again to re-handshake,
+    /// then vipStart() to hot-swap the session into the existing listeners.
+    func disconnectTransport() {
+        clientLock.sync {
+            if let c = self.client {
+                ztlp_disconnect_transport(c)
+            }
+            self.bytesSent = 0
+            self.bytesReceived = 0
+        }
     }
 
     // MARK: - Data Transfer

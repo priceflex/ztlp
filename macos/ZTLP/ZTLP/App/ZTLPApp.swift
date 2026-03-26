@@ -12,20 +12,32 @@ struct ZTLPApp: App {
     @StateObject private var configuration = ZTLPConfiguration()
     @StateObject private var networkMonitor = NetworkMonitor.shared
 
-    @State private var tunnelViewModel: TunnelViewModel?
+    /// Shared tunnel view model — created eagerly so the menu bar icon
+    /// observes status changes immediately.
+    @StateObject private var tunnelVM: TunnelViewModel
+
     @State private var servicesViewModel: ServicesViewModel?
     @State private var settingsViewModel: SettingsViewModel?
     @State private var enrollmentViewModel: EnrollmentViewModel?
 
+    init() {
+        let config = ZTLPConfiguration()
+        _configuration = StateObject(wrappedValue: config)
+        _networkMonitor = StateObject(wrappedValue: NetworkMonitor.shared)
+        _tunnelVM = StateObject(wrappedValue: TunnelViewModel(configuration: config))
+    }
+
     var body: some Scene {
-        // Menu bar dropdown
+        // Menu bar dropdown — icon changes based on connection state
         MenuBarExtra {
             MenuBarView(
                 tunnelViewModel: tunnelVM,
                 configuration: configuration
             )
         } label: {
-            menuBarLabel
+            // macOS renders menu bar images as template (monochrome).
+            // Use distinct SF Symbols so users can tell connected vs disconnected at a glance.
+            Image(systemName: menuBarIconName)
         }
         .menuBarExtraStyle(.window)
 
@@ -55,13 +67,6 @@ struct ZTLPApp: App {
 
     // MARK: - Computed Properties
 
-    private var tunnelVM: TunnelViewModel {
-        if let vm = tunnelViewModel { return vm }
-        let vm = TunnelViewModel(configuration: configuration)
-        DispatchQueue.main.async { tunnelViewModel = vm }
-        return vm
-    }
-
     private var servicesVM: ServicesViewModel {
         if let vm = servicesViewModel { return vm }
         let vm = ServicesViewModel(configuration: configuration)
@@ -83,25 +88,19 @@ struct ZTLPApp: App {
         return vm
     }
 
-    /// Menu bar label — colored icon based on connection status.
-    @ViewBuilder
-    private var menuBarLabel: some View {
-        let status = tunnelViewModel?.status ?? .disconnected
-        switch status {
+    /// SF Symbol name for the menu bar icon.
+    /// Connected: filled shield (solid). Disconnected: slashed shield.
+    /// Transitioning: half-filled shield.
+    private var menuBarIconName: String {
+        switch tunnelVM.status {
         case .connected:
-            Image(systemName: "shield.checkered")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.green)
+            return "shield.checkered"
         case .connecting, .reconnecting:
-            Image(systemName: "shield.lefthalf.filled")
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.orange)
+            return "shield.lefthalf.filled"
         case .disconnecting:
-            Image(systemName: "shield.lefthalf.filled")
-                .symbolRenderingMode(.hierarchical)
+            return "shield.lefthalf.filled"
         case .disconnected:
-            Image(systemName: "shield.slash")
-                .symbolRenderingMode(.hierarchical)
+            return "shield.slash"
         }
     }
 }

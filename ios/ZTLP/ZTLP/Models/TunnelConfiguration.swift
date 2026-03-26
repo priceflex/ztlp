@@ -39,6 +39,10 @@ struct TunnelConfiguration {
     /// If nil, the extension uses the default path in the app group container.
     let identityPath: String?
 
+    /// Whether to route all traffic through the tunnel (full VPN).
+    /// Default is false (split-tunnel: only .ztlp domains).
+    let fullTunnel: Bool
+
     // MARK: - Serialization
 
     /// Serialize to a dictionary suitable for NETunnelProviderProtocol.providerConfiguration.
@@ -57,6 +61,7 @@ struct TunnelConfiguration {
         if let path = identityPath {
             dict["identityPath"] = path
         }
+        dict["fullTunnel"] = fullTunnel
         return dict
     }
 
@@ -73,7 +78,8 @@ struct TunnelConfiguration {
             tunnelNetmask: dict["tunnelNetmask"] as? String ?? "255.255.255.0",
             dnsServers: dict["dnsServers"] as? [String] ?? ["1.1.1.1", "8.8.8.8"],
             mtu: dict["mtu"] as? Int ?? 1400,
-            identityPath: dict["identityPath"] as? String
+            identityPath: dict["identityPath"] as? String,
+            fullTunnel: dict["fullTunnel"] as? Bool ?? false
         )
     }
 }

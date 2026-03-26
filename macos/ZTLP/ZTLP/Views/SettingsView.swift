@@ -1,28 +1,42 @@
 // SettingsView.swift
 // ZTLP macOS
 //
-// Settings screen: relay address config, STUN server, auto-reconnect,
-// identity management, and about section.
-// Adapted from iOS — macOS Form style, no UIKit.
+// Unified settings: General, Identity, Enrollment, Advanced (collapsed), About, Danger Zone.
+// Clean, professional layout. Advanced fields hidden by default.
 
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
 
+    @State private var showAdvanced = false
     @State private var showRegenConfirm = false
     @State private var showResetConfirm = false
+    @State private var showEnrollmentSheet = false
+    @State private var copiedField: String?
 
     var body: some View {
         Form {
-            connectionSection
-            tunnelSection
+            generalSection
             identitySection
+            enrollmentSection
+
+            if showAdvanced {
+                connectionSection
+                tunnelSection
+            }
+
+            advancedToggle
             aboutSection
             dangerZoneSection
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $showEnrollmentSheet) {
+            EnrollmentView(viewModel: enrollmentViewModel)
+                .frame(width: 500, height: 450)
+        }
         .toolbar {
             ToolbarItem(placement: .status) {
                 if let msg = viewModel.statusMessage {
@@ -33,10 +47,166 @@ struct SettingsView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if let field = copiedField {
+                copiedToast(field)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: showAdvanced)
         .animation(.easeInOut, value: viewModel.statusMessage)
     }
 
-    // MARK: - Sections
+    // MARK: - General
+
+    private var generalSection: some View {
+        Section("General") {
+            Toggle(isOn: $configuration.autoConnect) {
+                Label("Connect on Launch", systemImage: "bolt.fill")
+            }
+
+            Toggle(isOn: $configuration.natAssist) {
+                Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
+            }
+        }
+    }
+
+    // MARK: - Identity
+
+    private var identitySection: some View {
+        Section("Identity") {
+            if let identity = viewModel.identity {
+                HStack {
+                    Label("Node ID", systemImage: "number")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(identity.shortNodeId)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    copyButton(identity.nodeId, field: "Node ID")
+                }
+
+                HStack {
+                    Label("Public Key", systemImage: "key")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(identity.shortPublicKey)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    copyButton(identity.publicKey, field: "Public Key")
+                }
+
+                HStack {
+                    Label("Provider", systemImage: identity.isHardwareBacked ? "cpu" : "doc.text")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    HStack(spacing: 4) {
+                        if identity.isHardwareBacked {
+                            Image(systemName: "checkmark.shield.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.ztlpGreen)
+                        }
+                        Text(identity.providerType.replacingOccurrences(of: "_", with: " ").capitalized)
+                            .font(.caption)
+                    }
+                }
+
+                Button {
+                    showRegenConfirm = true
+                } label: {
+                    Label("Regenerate Identity", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.callout)
+                }
+                .confirmationDialog(
+                    "Regenerate Identity?",
+                    isPresented: $showRegenConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Regenerate", role: .destructive) {
+                        Task { await viewModel.regenerateIdentity() }
+                    }
+                } message: {
+                    Text("This will create a new Node ID. Your existing enrollment and connections will be lost.")
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Text("No identity generated")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    Button("Generate Identity") {
+                        Task { await viewModel.regenerateIdentity() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .controlSize(.small)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+        }
+    }
+
+    // MARK: - Enrollment
+
+    private var enrollmentSection: some View {
+        Section("Enrollment") {
+            HStack {
+                Label("Status", systemImage: "checkmark.seal")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if configuration.isEnrolled {
+                    Label("Enrolled", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Color.ztlpGreen)
+                        .font(.callout)
+                } else {
+                    Label("Not Enrolled", systemImage: "xmark.circle")
+                        .foregroundStyle(Color.ztlpOrange)
+                        .font(.callout)
+                }
+            }
+
+            if !configuration.zoneName.isEmpty {
+                HStack {
+                    Label("Zone", systemImage: "globe")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(configuration.zoneName)
+                        .font(.callout.monospaced())
+                }
+            }
+
+            Button {
+                showEnrollmentSheet = true
+            } label: {
+                Label(
+                    configuration.isEnrolled ? "Re-enroll Device" : "Enroll Device",
+                    systemImage: "ticket"
+                )
+                .font(.callout)
+            }
+        }
+    }
+
+    // MARK: - Advanced Toggle
+
+    private var advancedToggle: some View {
+        Section {
+            Button {
+                showAdvanced.toggle()
+            } label: {
+                HStack {
+                    Label("Advanced Settings", systemImage: "slider.horizontal.3")
+                    Spacer()
+                    Image(systemName: showAdvanced ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Connection (Advanced)
 
     private var connectionSection: some View {
         Section("Connection") {
@@ -69,16 +239,10 @@ struct SettingsView: View {
                     .textFieldStyle(.plain)
                     .frame(maxWidth: 250)
             }
-
-            Toggle(isOn: $configuration.natAssist) {
-                Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
-            }
-
-            Toggle(isOn: $configuration.autoConnect) {
-                Label("Auto-Connect on Launch", systemImage: "bolt.fill")
-            }
         }
     }
+
+    // MARK: - Tunnel (Advanced)
 
     private var tunnelSection: some View {
         Section("Tunnel") {
@@ -115,81 +279,17 @@ struct SettingsView: View {
         }
     }
 
-    private var identitySection: some View {
-        Section("Identity") {
-            if let identity = viewModel.identity {
-                HStack {
-                    Label("Node ID", systemImage: "number")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(identity.shortNodeId)
-                        .font(.caption.monospaced())
-                }
-
-                HStack {
-                    Label("Provider", systemImage: "shield.checkered")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(identity.providerType.replacingOccurrences(of: "_", with: " ").capitalized)
-                        .font(.caption)
-                }
-
-                Button {
-                    showRegenConfirm = true
-                } label: {
-                    Label("Regenerate Identity", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .confirmationDialog(
-                    "Regenerate Identity?",
-                    isPresented: $showRegenConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Regenerate", role: .destructive) {
-                        Task { await viewModel.regenerateIdentity() }
-                    }
-                } message: {
-                    Text("This will create a new Node ID. Your existing enrollment and connections will be lost.")
-                }
-            } else {
-                Button {
-                    Task { await viewModel.regenerateIdentity() }
-                } label: {
-                    Label("Generate Identity", systemImage: "plus.circle")
-                }
-            }
-        }
-    }
+    // MARK: - About
 
     private var aboutSection: some View {
         Section("About") {
-            HStack {
-                Label("ZTLP Library", systemImage: "info.circle")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("v\(viewModel.libraryVersion)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Label("App Version", systemImage: "app")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(appVersion)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Label("macOS", systemImage: "desktopcomputer")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(ProcessInfo.processInfo.operatingSystemVersionString)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
+            infoRow(icon: "info.circle", label: "ZTLP Library", value: "v\(viewModel.libraryVersion)")
+            infoRow(icon: "app", label: "App Version", value: appVersion)
+            infoRow(icon: "desktopcomputer", label: "macOS", value: ProcessInfo.processInfo.operatingSystemVersionString)
         }
     }
+
+    // MARK: - Danger Zone
 
     private var dangerZoneSection: some View {
         Section {
@@ -197,12 +297,14 @@ struct SettingsView: View {
                 Task { await viewModel.removeVPNConfiguration() }
             } label: {
                 Label("Remove VPN Configuration", systemImage: "xmark.shield")
+                    .font(.callout)
             }
 
             Button(role: .destructive) {
                 showResetConfirm = true
             } label: {
                 Label("Factory Reset", systemImage: "trash")
+                    .font(.callout)
             }
             .confirmationDialog(
                 "Factory Reset?",
@@ -221,6 +323,45 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    private func infoRow(icon: String, label: String, value: String) -> some View {
+        HStack {
+            Label(label, systemImage: icon)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.caption.monospaced())
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func copyButton(_ text: String, field: String) -> some View {
+        Button {
+            viewModel.copyToClipboard(text)
+            withAnimation(.easeInOut(duration: 0.2)) {
+                copiedField = field
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                withAnimation { copiedField = nil }
+            }
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .help("Copy \(field)")
+    }
+
+    private func copiedToast(_ field: String) -> some View {
+        Text("\(field) copied")
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .padding(.bottom, 12)
+    }
 
     private var appVersion: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"

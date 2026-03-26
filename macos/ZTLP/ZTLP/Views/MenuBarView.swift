@@ -1,8 +1,7 @@
 // MenuBarView.swift
 // ZTLP macOS
 //
-// The dropdown panel shown when clicking the menu bar icon.
-// Lightweight — shows status, toggle, and shortcuts.
+// Menu bar dropdown. Lightweight: status, toggle, zone info, and window launcher.
 
 import SwiftUI
 
@@ -14,10 +13,9 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            VStack(spacing: 8) {
+            // Status header
+            VStack(spacing: 10) {
                 HStack(spacing: 10) {
-                    // Status dot
                     Circle()
                         .fill(tunnelViewModel.status.color)
                         .frame(width: 10, height: 10)
@@ -27,7 +25,6 @@ struct MenuBarView: View {
 
                     Spacer()
 
-                    // Connect/Disconnect toggle
                     Toggle("", isOn: Binding(
                         get: { tunnelViewModel.status == .connected },
                         set: { _ in tunnelViewModel.toggleConnection() }
@@ -38,36 +35,20 @@ struct MenuBarView: View {
                     .controlSize(.small)
                 }
 
-                // Relay / zone info
-                if !configuration.relayAddress.isEmpty || !configuration.zoneName.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !configuration.zoneName.isEmpty {
-                            HStack(spacing: 4) {
-                                Image(systemName: "globe")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(configuration.zoneName)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        if !configuration.relayAddress.isEmpty {
-                            HStack(spacing: 4) {
-                                Image(systemName: "antenna.radiowaves.left.and.right")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(configuration.relayAddress)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        }
+                // Zone info
+                if !configuration.zoneName.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text(configuration.zoneName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                // Traffic stats when connected
+                // Traffic when connected
                 if tunnelViewModel.status.isActive {
                     HStack(spacing: 16) {
                         Label(tunnelViewModel.stats.formattedBytesSent, systemImage: "arrow.up")
@@ -76,8 +57,8 @@ struct MenuBarView: View {
                         Label(tunnelViewModel.stats.formattedBytesReceived, systemImage: "arrow.down")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
+                        Spacer()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Error
@@ -100,45 +81,37 @@ struct MenuBarView: View {
 
             // Actions
             VStack(spacing: 0) {
-                Button {
+                menuButton(icon: "macwindow", title: "Open ZTLP…", shortcut: "⌘O") {
                     openWindow(id: "main")
-                    // Bring the app to the foreground
                     NSApp.activate(ignoringOtherApps: true)
-                } label: {
-                    HStack {
-                        Image(systemName: "macwindow")
-                        Text("Open ZTLP…")
-                        Spacer()
-                        Text("⌘O")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
 
                 Divider()
 
-                Button {
+                menuButton(icon: "power", title: "Quit ZTLP", shortcut: "⌘Q") {
                     NSApp.terminate(nil)
-                } label: {
-                    HStack {
-                        Image(systemName: "power")
-                        Text("Quit ZTLP")
-                        Spacer()
-                        Text("⌘Q")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
             }
         }
-        .frame(width: 300)
+        .frame(width: 280)
+    }
+
+    // MARK: - Helpers
+
+    private func menuButton(icon: String, title: String, shortcut: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: icon)
+                Text(title)
+                Spacer()
+                Text(shortcut)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

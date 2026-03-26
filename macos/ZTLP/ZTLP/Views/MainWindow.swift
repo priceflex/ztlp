@@ -1,8 +1,7 @@
 // MainWindow.swift
 // ZTLP macOS
 //
-// Main settings/status window with sidebar navigation.
-// Opened from the menu bar dropdown or via Cmd+O.
+// Main window with simplified 3-tab sidebar: Home, Services, Settings.
 
 import SwiftUI
 
@@ -18,19 +17,15 @@ struct MainWindow: View {
     enum SidebarTab: String, CaseIterable, Identifiable {
         case home = "Home"
         case services = "Services"
-        case identity = "Identity"
-        case enrollment = "Enrollment"
         case settings = "Settings"
 
         var id: String { rawValue }
 
         var systemImage: String {
             switch self {
-            case .home:       return "shield.checkered"
-            case .services:   return "server.rack"
-            case .identity:   return "person.badge.key"
-            case .enrollment: return "ticket"
-            case .settings:   return "gearshape"
+            case .home:     return "shield.checkered"
+            case .services: return "server.rack"
+            case .settings: return "gearshape"
             }
         }
     }
@@ -42,22 +37,25 @@ struct MainWindow: View {
                     .tag(tab)
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .navigationSplitViewColumnWidth(min: 140, ideal: 160)
         } detail: {
             switch selectedTab {
             case .home:
                 HomeView(viewModel: tunnelViewModel)
             case .services:
-                ServicesView(viewModel: servicesViewModel)
-            case .identity:
-                IdentityView(settingsViewModel: settingsViewModel, configuration: configuration)
-            case .enrollment:
-                EnrollmentView(viewModel: enrollmentViewModel)
+                ServicesView(
+                    viewModel: servicesViewModel,
+                    tunnelViewModel: tunnelViewModel
+                )
             case .settings:
-                SettingsView(viewModel: settingsViewModel, configuration: configuration)
+                SettingsView(
+                    viewModel: settingsViewModel,
+                    enrollmentViewModel: enrollmentViewModel,
+                    configuration: configuration
+                )
             }
         }
         .navigationTitle("ZTLP")
-        .frame(minWidth: 600, minHeight: 400)
+        .frame(minWidth: 580, minHeight: 420)
     }
 }

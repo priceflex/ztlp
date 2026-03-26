@@ -1,9 +1,8 @@
 // OnboardingView.swift
 // ZTLP macOS
 //
-// First-run onboarding experience for macOS.
-// Adapted from iOS — no TabView paging, uses a step-based flow.
-// No camera/QR — enrollment is paste-based.
+// First-run onboarding: welcome → enroll → done.
+// Clean, focused. No camera — enrollment is paste-based on macOS.
 
 import SwiftUI
 
@@ -36,7 +35,7 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Steps
+    // MARK: - Welcome
 
     private var welcomeStep: some View {
         VStack(spacing: 24) {
@@ -44,15 +43,15 @@ struct OnboardingView: View {
 
             ZStack {
                 Circle()
-                    .fill(Color.ztlpBlue.opacity(0.1))
-                    .frame(width: 120, height: 120)
+                    .fill(Color.ztlpBlue.opacity(0.08))
+                    .frame(width: 110, height: 110)
 
                 Image(systemName: "shield.checkered")
-                    .font(.system(size: 50))
+                    .font(.system(size: 46, weight: .light))
                     .foregroundStyle(Color.ztlpBlue)
             }
 
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Text("Welcome to ZTLP")
                     .font(.largeTitle.weight(.bold))
                 Text("Zero Trust Layer Protocol")
@@ -60,16 +59,16 @@ struct OnboardingView: View {
                     .foregroundStyle(.secondary)
             }
 
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 featureRow(
                     icon: "lock.shield",
                     title: "End-to-End Encryption",
-                    description: "All traffic encrypted with Noise_XX protocol"
+                    description: "All traffic encrypted with Noise_XX"
                 )
                 featureRow(
                     icon: "point.3.filled.connected.trianglepath.dotted",
-                    title: "Peer-to-Peer",
-                    description: "Direct connections with NAT traversal"
+                    title: "Peer-to-Peer Mesh",
+                    description: "Direct connections with relay fallback"
                 )
                 featureRow(
                     icon: "desktopcomputer",
@@ -94,23 +93,25 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Enroll
+
     private var enrollStep: some View {
         VStack(spacing: 24) {
             Spacer()
 
             Image(systemName: "ticket")
-                .font(.system(size: 60))
+                .font(.system(size: 52, weight: .light))
                 .foregroundStyle(Color.ztlpBlue)
 
             VStack(spacing: 8) {
                 Text("Enroll Your Device")
                     .font(.title.weight(.bold))
 
-                Text("Paste the enrollment URI provided by your administrator to join a ZTLP zone.")
+                Text("Paste the enrollment URI from your administrator to join a ZTLP zone.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 400)
+                    .frame(maxWidth: 380)
             }
 
             Spacer()
@@ -129,41 +130,41 @@ struct OnboardingView: View {
                 Button {
                     withAnimation { currentStep = 2 }
                 } label: {
-                    Text("Set Up Manually Later")
+                    Text("Set Up Later")
                         .font(.callout)
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
             }
             .padding(.bottom, 32)
         }
     }
+
+    // MARK: - Complete
 
     private var completeStep: some View {
         VStack(spacing: 24) {
             Spacer()
 
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 64))
+                .font(.system(size: 56))
                 .foregroundStyle(Color.ztlpGreen)
 
             VStack(spacing: 8) {
-                Text("You're All Set!")
+                Text("You're All Set")
                     .font(.title.weight(.bold))
 
-                if configuration.isEnrolled {
-                    Text("Your device is enrolled in zone **\(configuration.zoneName)**. You can now connect to the ZTLP network.")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 400)
-                } else {
-                    Text("You can configure your connection manually in Settings, or enroll later.")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 400)
+                Group {
+                    if configuration.isEnrolled {
+                        Text("Enrolled in zone **\(configuration.zoneName)**. You can now connect to the ZTLP network.")
+                    } else {
+                        Text("You can configure your connection in Settings, or enroll later.")
+                    }
                 }
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
             }
 
             Spacer()
@@ -188,7 +189,7 @@ struct OnboardingView: View {
             Image(systemName: icon)
                 .font(.title3)
                 .foregroundStyle(Color.ztlpBlue)
-                .frame(width: 30, height: 30)
+                .frame(width: 28, height: 28)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)

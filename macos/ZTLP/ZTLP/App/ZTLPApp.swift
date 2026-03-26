@@ -48,6 +48,7 @@ struct ZTLPApp: App {
         Settings {
             SettingsView(
                 viewModel: settingsVM,
+                enrollmentViewModel: enrollmentVM,
                 configuration: configuration
             )
         }

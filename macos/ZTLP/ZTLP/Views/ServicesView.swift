@@ -2,12 +2,14 @@
 // ZTLP macOS
 //
 // Service discovery list with reachability indicators.
-// Adapted from iOS — macOS table style, no swipe actions, uses context menus.
+// Shows zone services discovered via ZTLP-NS.
+// Includes Test Service diagnostic (moved from Home).
 
 import SwiftUI
 
 struct ServicesView: View {
     @ObservedObject var viewModel: ServicesViewModel
+    @ObservedObject var tunnelViewModel: TunnelViewModel
 
     var body: some View {
         Group {
@@ -19,7 +21,18 @@ struct ServicesView: View {
         }
         .searchable(text: $viewModel.searchText, prompt: "Search services")
         .toolbar {
-            ToolbarItem {
+            ToolbarItemGroup {
+                // Test service connectivity
+                if tunnelViewModel.status == .connected {
+                    Button {
+                        Task { await tunnelViewModel.testService() }
+                    } label: {
+                        Image(systemName: "waveform.badge.magnifyingglass")
+                    }
+                    .help("Test tunnel connectivity")
+                }
+
+                // Refresh
                 if viewModel.isRefreshing {
                     ProgressView()
                         .scaleEffect(0.6)
@@ -42,6 +55,26 @@ struct ServicesView: View {
 
     private var serviceList: some View {
         List {
+            // Test result banner (if present)
+            if let result = tunnelViewModel.testResult {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: result.hasPrefix("✅") ? "checkmark.circle.fill"
+                              : result.hasPrefix("⚠️") ? "exclamationmark.triangle.fill"
+                              : "info.circle")
+                            .foregroundStyle(
+                                result.hasPrefix("✅") ? Color.ztlpGreen
+                                : result.hasPrefix("⚠️") ? Color.ztlpOrange
+                                : .secondary
+                            )
+                            .font(.caption)
+                        Text(result)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Section {
                 ForEach(viewModel.filteredServices) { service in
                     ServiceRow(service: service)
@@ -74,22 +107,32 @@ struct ServicesView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             Spacer()
+
             Image(systemName: "server.rack")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 36))
+                .foregroundStyle(.quaternary)
+
             Text("No Services")
-                .font(.title3.weight(.semibold))
-            Text("Services in your ZTLP zone will appear here.\nConnect to the tunnel and refresh.")
-                .font(.body)
+                .font(.headline)
                 .foregroundStyle(.secondary)
+
+            Text("Services in your ZTLP zone will appear here once connected.")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
-            Button("Refresh") {
-                Task { await viewModel.refresh() }
+                .frame(maxWidth: 300)
+
+            if tunnelViewModel.status == .connected {
+                Button("Refresh") {
+                    Task { await viewModel.refresh() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.top, 4)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.ztlpBlue)
+
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -130,7 +173,7 @@ private struct ServiceRow: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Image(systemName: iconForProtocol(service.protocolType))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
 
                 if let lastChecked = service.lastChecked {
                     Text(lastChecked, style: .relative)

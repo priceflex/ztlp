@@ -1,8 +1,9 @@
 // HomeView.swift
 // ZTLP macOS
 //
-// Main connection status and toggle view.
-// Adapted from iOS — macOS layout, no UIKit.
+// Clean connection screen. Big connect button as the hero CTA.
+// When disconnected: inviting call to action.
+// When connected: status ring + traffic stats.
 
 import SwiftUI
 
@@ -14,137 +15,121 @@ struct HomeView: View {
     @State private var currentDuration: String = "--:--:--"
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 0) {
             Spacer()
 
-            // Zone name
+            // Zone badge
             if !viewModel.zoneName.isEmpty {
                 Text(viewModel.zoneName)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+                    .font(.system(.subheadline, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 16)
             }
 
-            // Status indicator + connect button
-            statusButton
+            // Hero connect button
+            connectButton
+                .padding(.bottom, 20)
 
             // Status label
-            Text(viewModel.status.label)
-                .font(.title2.weight(.semibold))
+            Text(statusText)
+                .font(.title3.weight(.medium))
                 .foregroundStyle(viewModel.status.color)
-                .animation(.easeInOut, value: viewModel.status)
+                .animation(.easeInOut(duration: 0.3), value: viewModel.status)
 
-            // Connection duration
+            // Duration
             if viewModel.status == .connected {
                 Text(currentDuration)
-                    .font(.system(.title3, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.quaternary)
+                    .padding(.top, 4)
                     .onReceive(durationTimer) { _ in
                         currentDuration = viewModel.stats.formattedDuration
                     }
             }
 
+            // Connection mode (subtle)
+            if viewModel.status.isActive {
+                HStack(spacing: 5) {
+                    Image(systemName: viewModel.connectionMode.icon)
+                        .font(.caption2)
+                    Text(viewModel.connectionMode.rawValue)
+                        .font(.caption2.weight(.medium))
+                }
+                .foregroundStyle(.quaternary)
+                .padding(.top, 8)
+            }
+
             Spacer()
 
-            // Traffic stats
+            // Traffic stats (connected only)
             if viewModel.status.isActive {
-                trafficStatsView
+                trafficBar
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .padding(.bottom, 20)
             }
 
-            // Test Service button
-            if viewModel.status == .connected {
-                Button(action: {
-                    Task { await viewModel.testService() }
-                }) {
-                    HStack {
-                        Image(systemName: "network")
-                        Text("Test Service")
-                    }
-                    .font(.system(.body, design: .rounded))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(Color.blue.opacity(0.1))
-                    .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
-                
-                if let result = viewModel.testResult {
-                    Text(result)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(result.hasPrefix("✅") ? .green : result.hasPrefix("⚠️") ? .orange : .secondary)
-                        .padding(.horizontal)
-                        .multilineTextAlignment(.center)
-                }
-            }
-            
-            // VIP proxy status
-            if let vipStatus = viewModel.vipStatus {
-                Text(vipStatus)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.green)
-                    .padding(.horizontal)
-                    .multilineTextAlignment(.center)
-            }
-
-            // Network indicator
-            networkIndicator
-
-            // Connection mode indicator
-            if viewModel.status.isActive || viewModel.status.isTransitioning {
-                HStack(spacing: 6) {
-                    Image(systemName: viewModel.connectionMode.icon)
-                        .font(.caption)
-                    Text(viewModel.connectionMode.rawValue)
-                        .font(.caption.weight(.medium))
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: Capsule())
-            }
-
-            // Error message
+            // Error
             if let error = viewModel.lastError {
                 errorBanner(error)
+                    .padding(.bottom, 16)
             }
         }
-        .padding(24)
+        .padding(.horizontal, 32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(backgroundGradient)
         .animation(.spring(response: 0.4), value: viewModel.status)
     }
 
-    // MARK: - Subviews
+    // MARK: - Status Text
 
-    private var statusButton: some View {
+    private var statusText: String {
+        switch viewModel.status {
+        case .disconnected:
+            return "Tap to connect"
+        default:
+            return viewModel.status.label
+        }
+    }
+
+    // MARK: - Connect Button
+
+    private var connectButton: some View {
         Button {
             viewModel.toggleConnection()
         } label: {
             ZStack {
-                // Outer pulsing ring (when connected)
+                // Pulsing outer ring (connected)
                 if viewModel.status == .connected {
                     Circle()
-                        .stroke(viewModel.status.color.opacity(0.3), lineWidth: 3)
-                        .frame(width: 150, height: 150)
-                        .scaleEffect(isPulsing ? 1.15 : 1.0)
-                        .opacity(isPulsing ? 0.0 : 0.6)
+                        .stroke(Color.ztlpGreen.opacity(0.25), lineWidth: 2.5)
+                        .frame(width: 140, height: 140)
+                        .scaleEffect(isPulsing ? 1.2 : 1.0)
+                        .opacity(isPulsing ? 0.0 : 0.5)
                         .animation(
-                            .easeInOut(duration: 2.0).repeatForever(autoreverses: false),
+                            .easeOut(duration: 2.5).repeatForever(autoreverses: false),
                             value: isPulsing
                         )
                 }
 
-                // Status ring
+                // Main ring
                 Circle()
-                    .stroke(viewModel.status.color, lineWidth: 5)
-                    .frame(width: 130, height: 130)
+                    .stroke(
+                        viewModel.status == .disconnected
+                            ? Color.ztlpBlue.opacity(0.4)
+                            : viewModel.status.color,
+                        lineWidth: 4
+                    )
+                    .frame(width: 120, height: 120)
 
-                // Spinning ring (when transitioning)
+                // Spinning arc (transitions)
                 if viewModel.status.isTransitioning {
                     Circle()
-                        .trim(from: 0, to: 0.3)
-                        .stroke(viewModel.status.color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                        .frame(width: 130, height: 130)
+                        .trim(from: 0, to: 0.25)
+                        .stroke(
+                            viewModel.status.color,
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                        )
+                        .frame(width: 120, height: 120)
                         .rotationEffect(.degrees(isPulsing ? 360 : 0))
                         .animation(
                             .linear(duration: 1.0).repeatForever(autoreverses: false),
@@ -152,87 +137,84 @@ struct HomeView: View {
                         )
                 }
 
-                // Center icon
-                VStack(spacing: 8) {
+                // Center content
+                VStack(spacing: 6) {
                     Image(systemName: viewModel.status.systemImage)
-                        .font(.system(size: 40))
-                        .foregroundStyle(viewModel.status.color)
-
-                    Text(viewModel.status.canConnect ? "Connect" : "Disconnect")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 32, weight: .light))
+                        .foregroundStyle(
+                            viewModel.status == .disconnected
+                                ? Color.ztlpBlue
+                                : viewModel.status.color
+                        )
                 }
             }
         }
         .buttonStyle(.plain)
         .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
         .onAppear { isPulsing = true }
+        .contentShape(Circle().size(width: 140, height: 140))
     }
 
-    private var trafficStatsView: some View {
-        HStack(spacing: 32) {
-            VStack(spacing: 4) {
+    // MARK: - Traffic Bar
+
+    private var trafficBar: some View {
+        HStack(spacing: 28) {
+            HStack(spacing: 6) {
                 Image(systemName: "arrow.up")
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text(viewModel.stats.formattedBytesSent)
-                    .font(.system(.body, design: .monospaced))
-                Text("Sent")
-                    .font(.caption2)
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
 
             Rectangle()
                 .fill(.quaternary)
-                .frame(width: 1, height: 36)
+                .frame(width: 1, height: 16)
 
-            VStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Image(systemName: "arrow.down")
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text(viewModel.stats.formattedBytesReceived)
-                    .font(.system(.body, design: .monospaced))
-                Text("Received")
-                    .font(.caption2)
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
         }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var networkIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(NetworkMonitor.shared.isConnected ? .green : .red)
-                .frame(width: 8, height: 8)
-            Text(NetworkMonitor.shared.interfaceType.rawValue)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.bottom, 8)
-    }
+    // MARK: - Error Banner
 
     private func errorBanner(_ message: String) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
                 .foregroundStyle(.yellow)
             Text(message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 400)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
+
+    // MARK: - Background
 
     private var backgroundGradient: some View {
         LinearGradient(
             colors: [
                 viewModel.status == .connected
-                    ? Color.ztlpBlue.opacity(0.06)
-                    : Color.clear,
+                    ? Color.ztlpGreen.opacity(0.04)
+                    : viewModel.status == .disconnected
+                        ? Color.ztlpBlue.opacity(0.02)
+                        : Color.clear,
                 Color(nsColor: .windowBackgroundColor)
             ],
             startPoint: .top,

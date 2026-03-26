@@ -1,9 +1,8 @@
 // IdentityView.swift
 // ZTLP macOS
 //
-// Displays the device's ZTLP identity: Node ID, public key,
-// zone enrollment status, and provider type.
-// Adapted from iOS — uses NSPasteboard instead of UIPasteboard.
+// Standalone identity detail view. Available for deep-link or programmatic use.
+// Identity management is now integrated into SettingsView for the main UI.
 
 import SwiftUI
 

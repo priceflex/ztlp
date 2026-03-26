@@ -77,6 +77,8 @@ struct TrafficStats: Equatable {
     var bytesSent: UInt64 = 0
     var bytesReceived: UInt64 = 0
     var connectedSince: Date?
+    /// Last time traffic counters changed (tunnel data flowing).
+    var lastActivity: Date?
 
     /// Duration of the current connection.
     var duration: TimeInterval? {

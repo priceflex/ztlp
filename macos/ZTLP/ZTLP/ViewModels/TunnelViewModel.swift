@@ -244,6 +244,7 @@ final class TunnelViewModel: ObservableObject {
             // Connected! Start VIP proxy + DNS
             status = .connected
             stats.connectedSince = Date()
+            stats.lastActivity = Date()
             peerAddress = target
             startDirectStatsPolling()
             await startVipProxy()
@@ -398,8 +399,13 @@ final class TunnelViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Network changes — reconnect when interface switches
+        // IMPORTANT: NWPathMonitor fires spuriously on macOS (Ethernet renegotiation,
+        // Wi-Fi↔Ethernet priority shifts, power management). Don't tear down a working
+        // tunnel just because the interface type changed. Instead, debounce and verify
+        // connectivity is actually lost before reconnecting.
         networkMonitor.interfaceChangePublisher
             .receive(on: DispatchQueue.main)
+            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
             .sink { [weak self] newInterface in
                 guard let self = self else { return }
                 // Only reconnect if we were connected or already reconnecting
@@ -409,6 +415,17 @@ final class TunnelViewModel: ObservableObject {
                     self.status = .reconnecting
                     return
                 }
+                // If we're still connected, check if the tunnel is actually broken
+                // before tearing down. The keepalive watchdog (45s) handles real failures.
+                // Only force reconnect if the interface type genuinely changed AND we
+                // haven't received tunnel data recently (stats still updating = tunnel alive).
+                let secondsSinceData = Date().timeIntervalSince(self.stats.lastActivity ?? Date.distantPast)
+                if secondsSinceData < 30 {
+                    // Got tunnel data within the last 30s — tunnel is alive, skip reconnect
+                    print("[ZTLP] Interface changed to \(newInterface) but tunnel is alive (last data \(Int(secondsSinceData))s ago), skipping reconnect")
+                    return
+                }
+                print("[ZTLP] Interface changed to \(newInterface), last data \(Int(secondsSinceData))s ago — reconnecting")
                 // Tear down current session and reconnect on new interface
                 self.isReconnecting = true
                 self.stopStatsPolling()
@@ -482,8 +499,14 @@ final class TunnelViewModel: ObservableObject {
     }
 
     private func refreshDirectStats() {
+        let prevRx = stats.bytesReceived
+        let prevTx = stats.bytesSent
         stats.bytesSent = bridge.bytesSent
         stats.bytesReceived = bridge.bytesReceived
+        // Track last time traffic counters changed (tunnel data is flowing)
+        if stats.bytesReceived != prevRx || stats.bytesSent != prevTx {
+            stats.lastActivity = Date()
+        }
     }
 
 

@@ -58,6 +58,9 @@ final class TunnelViewModel: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private let maxReconnectDelay: TimeInterval = 30
     private let baseReconnectDelay: TimeInterval = 1
+    /// Set to true when we're intentionally tearing down for reconnect — suppresses the
+    /// disconnect event handler from cancelling the pending reconnect.
+    private var isReconnecting = false
 
     // MARK: - Dependencies
 
@@ -133,6 +136,7 @@ final class TunnelViewModel: ObservableObject {
         // Cancel any pending auto-reconnect
         reconnectTask?.cancel()
         reconnectAttempt = 0
+        isReconnecting = false
 
         status = .disconnecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
@@ -370,9 +374,11 @@ final class TunnelViewModel: ObservableObject {
                         self.stats.connectedSince = Date()
                     }
                 case .disconnected(let reason):
-                    if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
+                    if self.isReconnecting {
+                        // Intentional teardown for reconnect — don't cancel the pending reconnect
+                        break
+                    } else if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
                         // Keepalive timeout — schedule auto-reconnect
-                        // Don't clear stats/polling — reconnect will restore them
                         self.stopStatsPolling()
                         self.scheduleReconnect()
                     } else {
@@ -390,12 +396,23 @@ final class TunnelViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Network changes
+        // Network changes — reconnect when interface switches
         networkMonitor.interfaceChangePublisher
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self = self, self.status == .connected else { return }
-                self.status = .reconnecting
+            .sink { [weak self] newInterface in
+                guard let self = self else { return }
+                // Only reconnect if we were connected or already reconnecting
+                guard self.status == .connected || self.status == .reconnecting else { return }
+                // Don't reconnect if network dropped entirely — wait for it to come back
+                guard newInterface != .none else {
+                    self.status = .reconnecting
+                    return
+                }
+                // Tear down current session and reconnect on new interface
+                self.isReconnecting = true
+                self.stopStatsPolling()
+                self.bridge.destroyClient()
+                self.scheduleReconnect()
             }
             .store(in: &cancellables)
 
@@ -532,7 +549,7 @@ final class TunnelViewModel: ObservableObject {
             try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
 
             await MainActor.run {
-                vipStatus = "VIP proxy active \u{2014} browse to http://beta.techrockstars.ztlp:8080"
+                vipStatus = "VIP proxy active — http://beta.techrockstars.ztlp"
             }
         } catch {
             await MainActor.run {
@@ -559,6 +576,7 @@ final class TunnelViewModel: ObservableObject {
             status = .reconnecting
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             if !Task.isCancelled {
+                isReconnecting = false
                 connect()
             }
         }

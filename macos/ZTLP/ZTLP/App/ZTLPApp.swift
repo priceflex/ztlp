@@ -25,8 +25,7 @@ struct ZTLPApp: App {
                 configuration: configuration
             )
         } label: {
-            Image(systemName: menuBarIcon)
-                .symbolRenderingMode(.hierarchical)
+            menuBarLabel
         }
         .menuBarExtraStyle(.window)
 
@@ -84,12 +83,25 @@ struct ZTLPApp: App {
         return vm
     }
 
-    /// Menu bar icon changes based on connection status.
-    private var menuBarIcon: String {
-        switch tunnelViewModel?.status ?? .disconnected {
-        case .connected:    return "shield.checkered"
-        case .connecting, .reconnecting, .disconnecting: return "shield.lefthalf.filled"
-        case .disconnected: return "shield.slash"
+    /// Menu bar label — colored icon based on connection status.
+    @ViewBuilder
+    private var menuBarLabel: some View {
+        let status = tunnelViewModel?.status ?? .disconnected
+        switch status {
+        case .connected:
+            Image(systemName: "shield.checkered")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.green)
+        case .connecting, .reconnecting:
+            Image(systemName: "shield.lefthalf.filled")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.orange)
+        case .disconnecting:
+            Image(systemName: "shield.lefthalf.filled")
+                .symbolRenderingMode(.hierarchical)
+        case .disconnected:
+            Image(systemName: "shield.slash")
+                .symbolRenderingMode(.hierarchical)
         }
     }
 }

@@ -997,7 +997,14 @@ async fn recv_loop(
     // Log files are rotated at 2MB — previous log moved to .1 suffix.
     const LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
     #[derive(Clone, Copy, PartialEq, PartialOrd)]
-    enum LogLevel { Off = 0, Error = 1, Warn = 2, Info = 3, Debug = 4, Trace = 5 }
+    enum LogLevel {
+        Off = 0,
+        Error = 1,
+        Warn = 2,
+        Info = 3,
+        Debug = 4,
+        Trace = 5,
+    }
     let log_level = match std::env::var("ZTLP_LOG_LEVEL")
         .unwrap_or_else(|_| "info".to_string())
         .to_lowercase()
@@ -1011,10 +1018,12 @@ async fn recv_loop(
         "trace" | "all" => LogLevel::Trace,
         _ => LogLevel::Info,
     };
-    let log_path = std::env::var("ZTLP_LOG_FILE")
-        .unwrap_or_else(|_| "/tmp/ztlp-recv.log".to_string());
+    let log_path =
+        std::env::var("ZTLP_LOG_FILE").unwrap_or_else(|_| "/tmp/ztlp-recv.log".to_string());
     let open_log_file = |path: &str| -> Option<std::fs::File> {
-        if log_level == LogLevel::Off { return None; }
+        if log_level == LogLevel::Off {
+            return None;
+        }
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1022,13 +1031,22 @@ async fn recv_loop(
             .ok()
     };
     let mut debug_log = open_log_file(&log_path);
-    let mut log_bytes_written: u64 = debug_log.as_ref()
+    let mut log_bytes_written: u64 = debug_log
+        .as_ref()
         .and_then(|f| f.metadata().ok())
         .map(|m| m.len())
         .unwrap_or(0);
     let log_start = std::time::Instant::now();
-    let log_write = |file: &mut Option<std::fs::File>, bytes_written: &mut u64, start: std::time::Instant, level: LogLevel, msg: &str, cur_level: LogLevel, log_path: &str| {
-        if level > cur_level { return; }
+    let log_write = |file: &mut Option<std::fs::File>,
+                     bytes_written: &mut u64,
+                     start: std::time::Instant,
+                     level: LogLevel,
+                     msg: &str,
+                     cur_level: LogLevel,
+                     log_path: &str| {
+        if level > cur_level {
+            return;
+        }
         if let Some(ref mut f) = file {
             use std::io::Write;
             let lvl_str = match level {
@@ -1072,7 +1090,14 @@ async fn recv_loop(
         &format!(
             "recv_loop started, session={}, log_level={:?}",
             hex::encode(session_id.as_bytes()),
-            match log_level { LogLevel::Off => "off", LogLevel::Error => "error", LogLevel::Warn => "warn", LogLevel::Info => "info", LogLevel::Debug => "debug", LogLevel::Trace => "trace" }
+            match log_level {
+                LogLevel::Off => "off",
+                LogLevel::Error => "error",
+                LogLevel::Warn => "warn",
+                LogLevel::Info => "info",
+                LogLevel::Debug => "debug",
+                LogLevel::Trace => "trace",
+            }
         ),
         log_level,
         &log_path,
@@ -1080,7 +1105,15 @@ async fn recv_loop(
 
     loop {
         if stop_flag.load(Ordering::SeqCst) {
-            log_write(&mut debug_log, &mut log_bytes_written, log_start, LogLevel::Info, "recv_loop: stop_flag set, breaking", log_level, &log_path);
+            log_write(
+                &mut debug_log,
+                &mut log_bytes_written,
+                log_start,
+                LogLevel::Info,
+                "recv_loop: stop_flag set, breaking",
+                log_level,
+                &log_path,
+            );
             break;
         }
 
@@ -1360,7 +1393,15 @@ async fn recv_loop(
             }
             Ok(Err(e)) => {
                 // Socket error — clean up
-                log_write(&mut debug_log, &mut log_bytes_written, log_start, LogLevel::Error, &format!("recv: socket error: {}", e), log_level, &log_path);
+                log_write(
+                    &mut debug_log,
+                    &mut log_bytes_written,
+                    log_start,
+                    LogLevel::Error,
+                    &format!("recv: socket error: {}", e),
+                    log_level,
+                    &log_path,
+                );
                 break;
             }
             Err(_) => {

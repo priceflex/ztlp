@@ -369,11 +369,7 @@ impl VipProxy {
     ) {
         let mut sess = self.session.write().await;
         *sess = Some(TunnelSession::new(
-            transport,
-            session_id,
-            peer_addr,
-            data_seq,
-            bytes_sent,
+            transport, session_id, peer_addr, data_seq, bytes_sent,
         ));
         // Fresh dispatcher for new session
         tracing::info!("VIP proxy: tunnel session updated (hot-swap)");

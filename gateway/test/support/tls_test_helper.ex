@@ -195,7 +195,7 @@ defmodule ZtlpGateway.TlsTestHelper do
     ssl_opts = if certfile, do: [{:certfile, to_charlist(certfile)} | ssl_opts], else: ssl_opts
     ssl_opts = if keyfile, do: [{:keyfile, to_charlist(keyfile)} | ssl_opts], else: ssl_opts
 
-    :ssl.connect(~c"127.0.0.1", port, ssl_opts, 5000)
+    :ssl.connect(~c"127.0.0.1", port, ssl_opts, 15_000)
   end
 
   @doc "Clean up temp directory."

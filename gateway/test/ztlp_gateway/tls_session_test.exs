@@ -1,8 +1,6 @@
 defmodule ZtlpGateway.TlsSessionTest do
   use ExUnit.Case, async: true
 
-  alias ZtlpGateway.TlsSession
-
   describe "assurance_sufficient?/2 (via module internals)" do
     # We test the assurance comparison logic indirectly through the
     # public API, but also validate the level mapping directly.

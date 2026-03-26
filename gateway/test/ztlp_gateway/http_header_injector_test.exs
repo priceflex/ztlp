@@ -22,7 +22,7 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
     :ok
   end
 
-  defp make_http_request(method \\ "GET", path \\ "/", headers \\ []) do
+  defp make_http_request(method, path, headers) do
     header_lines = Enum.map(headers, fn {k, v} -> "#{k}: #{v}" end)
     lines = ["#{method} #{path} HTTP/1.1" | header_lines]
     Enum.join(lines, "\r\n") <> "\r\n\r\n"

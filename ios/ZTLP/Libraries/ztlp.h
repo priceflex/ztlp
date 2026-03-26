@@ -1,7 +1,7 @@
 /**
  * @file ztlp.h
  * @brief ZTLP (Zero Trust Layer Protocol) Mobile SDK — C FFI API
- * @version 0.10.0
+ * @version 0.15.0
  *
  * This header defines the complete C-compatible API for integrating the ZTLP
  * protocol into iOS and Android applications. The library is compiled as a

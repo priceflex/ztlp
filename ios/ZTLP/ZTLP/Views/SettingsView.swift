@@ -282,6 +282,15 @@ struct SettingsView: View {
             Stepper(value: $configuration.mtu, in: 1200...1500, step: 50) {
                 Label("MTU: \(configuration.mtu)", systemImage: "arrow.left.and.right")
             }
+
+            Toggle(isOn: $configuration.fullTunnel) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Full Tunnel", systemImage: "shield.fill")
+                    Text("Route all traffic through VPN (default: .ztlp domains only)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

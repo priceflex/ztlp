@@ -29,6 +29,8 @@ targets:
           - "**/*.plist"
     resources:
       - path: ZTLP/Resources/Assets.xcassets
+    entitlements:
+      path: ZTLP/ZTLP.entitlements
     settings:
       base:
         INFOPLIST_FILE: ZTLP/Resources/Info.plist
@@ -62,6 +64,8 @@ targets:
       - path: ZTLPTunnel
         excludes:
           - "**/*.plist"
+    entitlements:
+      path: ZTLPTunnel/ZTLPTunnel.entitlements
     settings:
       base:
         INFOPLIST_FILE: ZTLPTunnel/Info.plist

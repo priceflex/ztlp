@@ -24,6 +24,7 @@ final class ZTLPConfiguration: ObservableObject {
         static let useSecureEnclave = "config_use_secure_enclave"
         static let hasCompletedOnboarding = "config_onboarding_complete"
         static let isEnrolled = "config_is_enrolled"
+        static let fullTunnel = "config_full_tunnel"
     }
 
     // MARK: - Storage
@@ -92,6 +93,11 @@ final class ZTLPConfiguration: ObservableObject {
         didSet { defaults.set(isEnrolled, forKey: Key.isEnrolled) }
     }
 
+    /// Full tunnel mode (all traffic through VPN) vs split tunnel (.ztlp only).
+    @Published var fullTunnel: Bool {
+        didSet { defaults.set(fullTunnel, forKey: Key.fullTunnel) }
+    }
+
     // MARK: - Init
 
     init(suiteName: String = "group.com.ztlp.shared") {
@@ -110,6 +116,7 @@ final class ZTLPConfiguration: ObservableObject {
         self.useSecureEnclave = store.object(forKey: Key.useSecureEnclave) == nil ? true : store.bool(forKey: Key.useSecureEnclave)
         self.hasCompletedOnboarding = store.bool(forKey: Key.hasCompletedOnboarding)
         self.isEnrolled = store.bool(forKey: Key.isEnrolled)
+        self.fullTunnel = store.bool(forKey: Key.fullTunnel)
     }
 
     /// Create a TunnelConfiguration from the current app settings.
@@ -122,7 +129,8 @@ final class ZTLPConfiguration: ObservableObject {
             tunnelNetmask: "255.255.255.0",
             dnsServers: dnsServers,
             mtu: mtu,
-            identityPath: nil
+            identityPath: nil,
+            fullTunnel: fullTunnel
         )
     }
 
@@ -140,5 +148,6 @@ final class ZTLPConfiguration: ObservableObject {
         useSecureEnclave = true
         hasCompletedOnboarding = false
         isEnrolled = false
+        fullTunnel = false
     }
 }

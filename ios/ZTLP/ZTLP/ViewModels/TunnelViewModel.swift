@@ -99,6 +99,7 @@ final class TunnelViewModel: ObservableObject {
                     "tunnelAddress": configuration.tunnelAddress,
                     "dnsServers": configuration.dnsServers,
                     "mtu": configuration.mtu,
+                    "fullTunnel": configuration.fullTunnel,
                 ]
 
                 manager.protocolConfiguration = proto

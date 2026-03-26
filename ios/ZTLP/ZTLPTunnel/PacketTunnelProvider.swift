@@ -380,22 +380,117 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         packetFlow.writePackets([packetData], withProtocols: [proto])
     }
 
+    /// Current reconnect attempt counter.
+    private var reconnectAttempt = 0
+
+    /// Maximum reconnect attempts before giving up.
+    private static let maxReconnectAttempts = 10
+
+    /// Base reconnect delay in seconds (exponential backoff).
+    private static let baseReconnectDelay: TimeInterval = 1.0
+
+    /// Maximum reconnect delay cap.
+    private static let maxReconnectDelay: TimeInterval = 60.0
+
     /// Handle unexpected disconnection from the peer.
     private func handleDisconnect(reason: Int32) {
         guard isTunnelActive else { return }
 
+        // Reason 100 = network change (intentional teardown for reconnect)
+        // Other reasons = unexpected disconnect
         updateConnectionState(.reconnecting)
 
-        // Attempt to reconnect after a delay
-        tunnelQueue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self, self.isTunnelActive else { return }
+        scheduleReconnect()
+    }
 
-            // For now, cancel the tunnel — the system will show "disconnected".
-            // A production app would implement retry logic here.
-            self.cancelTunnelWithError(
-                self.makeError("Disconnected from peer (reason: \(reason))")
+    /// Schedule a reconnect attempt with exponential backoff.
+    private func scheduleReconnect() {
+        guard isTunnelActive else { return }
+
+        reconnectAttempt += 1
+
+        if reconnectAttempt > Self.maxReconnectAttempts {
+            // Give up — cancel the tunnel
+            cancelTunnelWithError(
+                makeError("Failed to reconnect after \(Self.maxReconnectAttempts) attempts")
             )
+            return
         }
+
+        let delay = min(
+            Self.baseReconnectDelay * pow(2.0, Double(reconnectAttempt - 1)),
+            Self.maxReconnectDelay
+        )
+        // Add jitter (±20%)
+        let jitter = delay * Double.random(in: -0.2...0.2)
+        let finalDelay = max(0.5, delay + jitter)
+
+        tunnelQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
+            guard let self = self, self.isTunnelActive else { return }
+            self.attemptReconnect()
+        }
+    }
+
+    /// Perform a reconnect attempt.
+    private func attemptReconnect() {
+        guard let client = ztlpClient else {
+            cancelTunnelWithError(makeError("Client lost during reconnect"))
+            return
+        }
+
+        // Disconnect transport but keep client alive
+        ztlp_disconnect_transport(client)
+
+        // Re-read configuration
+        guard let config = try? loadTunnelConfiguration() else {
+            cancelTunnelWithError(makeError("Failed to load config for reconnect"))
+            return
+        }
+
+        // Reconnect
+        let connectSemaphore = DispatchSemaphore(value: 0)
+        var connectError: Error?
+
+        let semPtr = Unmanaged.passRetained(
+            SemaphoreBox(semaphore: connectSemaphore, errorRef: &connectError)
+        ).toOpaque()
+
+        let target = config.targetNodeId
+        let connectResult = target.withCString { cTarget in
+            ztlp_connect(client, cTarget, nil, { userData, resultCode, peerAddr in
+                guard let userData = userData else { return }
+                let box_ = Unmanaged<SemaphoreBox>.fromOpaque(userData).takeRetainedValue()
+                if resultCode != 0 {
+                    let msg = ztlp_last_error().map { String(cString: $0) } ?? "unknown"
+                    box_.errorRef?.pointee = NSError(
+                        domain: "com.ztlp.tunnel",
+                        code: Int(resultCode),
+                        userInfo: [NSLocalizedDescriptionKey: msg]
+                    )
+                }
+                box_.semaphore.signal()
+            }, semPtr)
+        }
+
+        if connectResult != 0 {
+            let _ = Unmanaged<SemaphoreBox>.fromOpaque(semPtr).takeRetainedValue()
+            scheduleReconnect()
+            return
+        }
+
+        let waitResult = connectSemaphore.wait(timeout: .now() + 15)
+        if waitResult == .timedOut || connectError != nil {
+            scheduleReconnect()
+            return
+        }
+
+        // Success — reset counter and update state
+        reconnectAttempt = 0
+        updateConnectionState(.connected)
+        sharedDefaults?.set(
+            Date().timeIntervalSince1970,
+            forKey: SharedKey.connectedSince
+        )
     }
 
     // MARK: - Keepalive
@@ -487,6 +582,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Create NEPacketTunnelNetworkSettings for the TUN interface.
+    ///
+    /// By default, uses split-tunnel mode: only `.ztlp` domain traffic goes
+    /// through the tunnel. The rest of the user's traffic routes normally.
+    /// Full-tunnel mode can be enabled via configuration.
     private func createTunnelNetworkSettings(
         config: TunnelConfiguration
     ) -> NEPacketTunnelNetworkSettings {
@@ -494,20 +593,35 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             tunnelRemoteAddress: config.relayAddress ?? config.targetNodeId
         )
 
-        // IPv4 settings
+        // IPv4 settings — split tunnel by default
         let ipv4 = NEIPv4Settings(
             addresses: [config.tunnelAddress],
             subnetMasks: [config.tunnelNetmask]
         )
-        // Route all traffic through the tunnel (full tunnel mode)
-        ipv4.includedRoutes = [NEIPv4Route.default()]
+
+        if config.fullTunnel {
+            // Full tunnel: all traffic goes through VPN
+            ipv4.includedRoutes = [NEIPv4Route.default()]
+        } else {
+            // Split tunnel: only route the VIP loopback range through the tunnel
+            // 127.0.55.0/24 covers all ZTLP VIP addresses
+            ipv4.includedRoutes = [
+                NEIPv4Route(destinationAddress: "127.0.55.0", subnetMask: "255.255.255.0")
+            ]
+            // Exclude standard routes so normal traffic isn't captured
+            ipv4.excludedRoutes = [NEIPv4Route.default()]
+        }
         settings.ipv4Settings = ipv4
 
-        // DNS
+        // DNS — match only .ztlp domains in split tunnel mode
         let dns = NEDNSSettings(servers: config.dnsServers)
+        if !config.fullTunnel {
+            // Only intercept DNS queries for .ztlp domains
+            dns.matchDomains = ["ztlp"]
+        }
         settings.dnsSettings = dns
 
-        // MTU (account for ZTLP header overhead)
+        // MTU (account for ZTLP encryption + UDP overhead)
         settings.mtu = NSNumber(value: config.mtu)
 
         return settings

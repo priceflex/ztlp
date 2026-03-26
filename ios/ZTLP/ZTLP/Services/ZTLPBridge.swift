@@ -326,6 +326,11 @@ final class ZTLPBridge {
         try setupCallbacks()
     }
 
+    /// Whether a client handle currently exists.
+    var hasClient: Bool {
+        clientLock.sync { self.client != nil }
+    }
+
     /// Free the current client. Safe to call if no client exists.
     func destroyClient() {
         clientLock.sync {
@@ -336,6 +341,28 @@ final class ZTLPBridge {
             self.bytesSent = 0
             self.bytesReceived = 0
         }
+    }
+
+    /// Disconnect the transport session but keep the client and runtime alive.
+    /// On reconnect, call connect() again — the existing client + VIP proxy
+    /// listeners remain intact.
+    func disconnectTransport() {
+        clientLock.sync {
+            if let c = self.client {
+                ztlp_disconnect_transport(c)
+            }
+        }
+    }
+
+    /// Set the service name for the next connection (used by VIP proxy routing).
+    func setService(_ name: String) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = name.withCString { cName in
+            ztlp_config_set_service(c, cName)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
     }
 
     // MARK: - Connection

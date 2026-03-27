@@ -47,13 +47,13 @@ defmodule ZtlpGateway.ServiceRegistrar do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
   @doc "Get the current registrar state (for debugging/monitoring)."
   @spec state() :: map()
-  def state do
-    GenServer.call(__MODULE__, :state)
+  def state(name \\ __MODULE__) do
+    GenServer.call(name, :state)
   end
 
   @doc "Force an immediate re-registration cycle."

@@ -215,17 +215,15 @@ fn main() {
             );
             failed += 1;
         }
+    } else if !signed_data.is_empty() && signed_data[0] == 0xFF {
+        println!("⊘ Skipped (control command not supported)");
+        passed += 1;
     } else {
-        if !signed_data.is_empty() && signed_data[0] == 0xFF {
-            println!("⊘ Skipped (control command not supported)");
-            passed += 1;
-        } else {
-            println!(
-                "✗ Signed data response too short: {} bytes",
-                signed_data.len()
-            );
-            failed += 1;
-        }
+        println!(
+            "✗ Signed data response too short: {} bytes",
+            signed_data.len()
+        );
+        failed += 1;
     }
 
     // ── Test 6: Revoked name query returns REVOKED ──────────────

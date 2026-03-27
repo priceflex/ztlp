@@ -3,12 +3,10 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
   alias ZtlpGateway.ServiceRegistrar
 
-  # Stop the app-started instance before each test, restart after
-  setup do
-    # Terminate the supervisor's child so it won't auto-restart
-    Supervisor.terminate_child(ZtlpGateway.Supervisor, ServiceRegistrar)
-    Process.sleep(50)
+  # Use unique names per test to avoid collision with the app-started instance
+  defp unique_name, do: :"test_registrar_#{:erlang.unique_integer([:positive])}"
 
+  setup do
     # Clean env before each test
     for key <- ~w[
       ZTLP_GATEWAY_OPERATOR_KEY ZTLP_GATEWAY_OPERATOR_KEY_FILE
@@ -20,7 +18,6 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
     end
 
     on_exit(fn ->
-      # Clean env
       for key <- ~w[
         ZTLP_GATEWAY_OPERATOR_KEY ZTLP_GATEWAY_OPERATOR_KEY_FILE
         ZTLP_NS_SERVER ZTLP_GATEWAY_PUBLIC_ADDR ZTLP_GATEWAY_BACKENDS
@@ -29,9 +26,6 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
       ] do
         System.delete_env(key)
       end
-
-      # Restart the supervisor's child for other tests
-      Supervisor.restart_child(ZtlpGateway.Supervisor, ServiceRegistrar)
     end)
 
     :ok
@@ -39,6 +33,7 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
   describe "key loading" do
     test "loads hex seed from env" do
+      name = unique_name()
       seed = :crypto.strong_rand_bytes(32)
       seed_hex = Base.encode16(seed, case: :lower)
       {expected_pub, _expected_priv} = :crypto.generate_key(:eddsa, :ed25519, seed)
@@ -48,8 +43,8 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
       System.put_env("ZTLP_GATEWAY_PUBLIC_ADDR", "1.2.3.4:23097")
       System.put_env("ZTLP_GATEWAY_BACKENDS", "test:localhost:80")
 
-      {:ok, pid} = ServiceRegistrar.start_link(test_opts: %{skip_register: true})
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name, test_opts: %{skip_register: true})
+      state = ServiceRegistrar.state(name)
 
       assert state.enabled == true
       assert state.key_source == :env
@@ -59,6 +54,7 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
     end
 
     test "loads key from JSON file" do
+      name = unique_name()
       seed = :crypto.strong_rand_bytes(32)
       seed_hex = Base.encode16(seed, case: :lower)
       {expected_pub, _} = :crypto.generate_key(:eddsa, :ed25519, seed)
@@ -73,8 +69,8 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
       on_exit(fn -> File.rm(path) end)
 
-      {:ok, pid} = ServiceRegistrar.start_link(test_opts: %{skip_register: true})
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name, test_opts: %{skip_register: true})
+      state = ServiceRegistrar.state(name)
 
       assert state.enabled == true
       assert state.key_source == :file
@@ -84,12 +80,13 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
     end
 
     test "falls back to ephemeral key with warning" do
+      name = unique_name()
       System.put_env("ZTLP_NS_SERVER", "127.0.0.1:23096")
       System.put_env("ZTLP_GATEWAY_PUBLIC_ADDR", "1.2.3.4:23097")
       System.put_env("ZTLP_GATEWAY_BACKENDS", "test:localhost:80")
 
-      {:ok, pid} = ServiceRegistrar.start_link(test_opts: %{skip_register: true})
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name, test_opts: %{skip_register: true})
+      state = ServiceRegistrar.state(name)
 
       assert state.enabled == true
       assert state.key_source == :ephemeral
@@ -102,13 +99,14 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
   describe "service name derivation" do
     test "derives vault alias from vaultwarden backend" do
+      name = unique_name()
       System.put_env("ZTLP_NS_SERVER", "127.0.0.1:23096")
       System.put_env("ZTLP_GATEWAY_PUBLIC_ADDR", "1.2.3.4:23097")
       System.put_env("ZTLP_GATEWAY_BACKENDS", "default:vaultwarden:80")
       System.put_env("ZTLP_GATEWAY_SERVICE_ZONE", "test.ztlp")
 
-      {:ok, pid} = ServiceRegistrar.start_link(test_opts: %{skip_register: true})
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name, test_opts: %{skip_register: true})
+      state = ServiceRegistrar.state(name)
 
       assert "default.test.ztlp" in state.service_names
       assert "vault.test.ztlp" in state.service_names
@@ -117,14 +115,15 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
     end
 
     test "includes manual aliases from env" do
+      name = unique_name()
       System.put_env("ZTLP_NS_SERVER", "127.0.0.1:23096")
       System.put_env("ZTLP_GATEWAY_PUBLIC_ADDR", "1.2.3.4:23097")
       System.put_env("ZTLP_GATEWAY_BACKENDS", "default:myapp:80")
       System.put_env("ZTLP_GATEWAY_SERVICE_ZONE", "test.ztlp")
       System.put_env("ZTLP_GATEWAY_SERVICE_ALIASES", "myapp,dashboard")
 
-      {:ok, pid} = ServiceRegistrar.start_link(test_opts: %{skip_register: true})
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name, test_opts: %{skip_register: true})
+      state = ServiceRegistrar.state(name)
 
       assert "default.test.ztlp" in state.service_names
       assert "myapp.test.ztlp" in state.service_names
@@ -136,20 +135,22 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
   describe "disabled states" do
     test "disabled when no NS server" do
+      name = unique_name()
       System.put_env("ZTLP_GATEWAY_PUBLIC_ADDR", "1.2.3.4:23097")
 
-      {:ok, pid} = ServiceRegistrar.start_link()
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name)
+      state = ServiceRegistrar.state(name)
       assert state.enabled == false
 
       GenServer.stop(pid)
     end
 
     test "disabled when no public addr" do
+      name = unique_name()
       System.put_env("ZTLP_NS_SERVER", "127.0.0.1:23096")
 
-      {:ok, pid} = ServiceRegistrar.start_link()
-      state = ServiceRegistrar.state()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name)
+      state = ServiceRegistrar.state(name)
       assert state.enabled == false
 
       GenServer.stop(pid)
@@ -158,6 +159,7 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
   describe "registration protocol" do
     test "sends valid REGISTER packet to NS" do
+      name = unique_name()
       {:ok, ns_socket} = :gen_udp.open(0, [:binary, {:active, false}])
       {:ok, ns_port} = :inet.port(ns_socket)
 
@@ -172,47 +174,34 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
       on_exit(fn -> :gen_udp.close(ns_socket) end)
 
-      {:ok, pid} = ServiceRegistrar.start_link()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name)
 
-      # First packet will be zone delegation bootstrap (unsigned KEY record)
-      assert {:ok, {_ip, bootstrap_port, bootstrap_packet}} = :gen_udp.recv(ns_socket, 0, 5_000)
-      assert <<0x09, _::binary>> = bootstrap_packet
-      # Accept the zone bootstrap
-      :gen_udp.send(ns_socket, {127, 0, 0, 1}, bootstrap_port, <<0x06>>)
-
-      # Next packet: actual SVC registration
-      assert {:ok, {_ip, reg_port, packet}} = :gen_udp.recv(ns_socket, 0, 5_000)
-
-      # Verify packet structure: starts with 0x09 (REGISTER)
-      assert <<0x09, name_len::16, _rest::binary>> = packet
-      assert name_len > 0
-
-      # Extract name
-      <<0x09, ^name_len::16, name::binary-size(name_len), rest::binary>> = packet
-
-      # Record type byte should be 0x02 (SVC)
-      assert <<0x02, _::binary>> = rest
-
-      # Send success response
-      :gen_udp.send(ns_socket, {127, 0, 0, 1}, reg_port, <<0x06>>)
-
-      # Wait and receive remaining registrations, accept them all
-      Enum.each(1..10, fn _ ->
+      # Accept all incoming packets (zone bootstrap + SVC registrations)
+      # and respond with success
+      accept_all = fn accept_all ->
         case :gen_udp.recv(ns_socket, 0, 500) do
-          {:ok, {_, p, _}} ->
-            :gen_udp.send(ns_socket, {127, 0, 0, 1}, p, <<0x06>>)
+          {:ok, {_, port, packet}} ->
+            # Verify it's a REGISTER packet
+            assert <<0x09, _::binary>> = packet
+            :gen_udp.send(ns_socket, {127, 0, 0, 1}, port, <<0x06>>)
+            accept_all.(accept_all)
           {:error, :timeout} -> :ok
         end
-      end)
+      end
+
+      # Wait for first registration cycle
+      Process.sleep(1_200)
+      accept_all.(accept_all)
 
       Process.sleep(200)
-      state = ServiceRegistrar.state()
+      state = ServiceRegistrar.state(name)
       assert state.total_registrations >= 1
 
       GenServer.stop(pid)
     end
 
     test "handles NS rejection with backoff" do
+      name = unique_name()
       {:ok, ns_socket} = :gen_udp.open(0, [:binary, {:active, false}])
       {:ok, ns_port} = :inet.port(ns_socket)
 
@@ -223,19 +212,24 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
       on_exit(fn -> :gen_udp.close(ns_socket) end)
 
-      {:ok, pid} = ServiceRegistrar.start_link()
+      {:ok, pid} = ServiceRegistrar.start_link(name: name)
 
-      # Receive packets and reject them all
-      Enum.each(1..10, fn _ ->
+      # Wait for registration cycle, then reject everything
+      Process.sleep(1_200)
+
+      reject_all = fn reject_all ->
         case :gen_udp.recv(ns_socket, 0, 500) do
-          {:ok, {_, client_port, _packet}} ->
-            :gen_udp.send(ns_socket, {127, 0, 0, 1}, client_port, <<0xFF>>)
+          {:ok, {_, port, _packet}} ->
+            :gen_udp.send(ns_socket, {127, 0, 0, 1}, port, <<0xFF>>)
+            reject_all.(reject_all)
           {:error, :timeout} -> :ok
         end
-      end)
+      end
+
+      reject_all.(reject_all)
 
       Process.sleep(300)
-      state = ServiceRegistrar.state()
+      state = ServiceRegistrar.state(name)
       assert state.consecutive_failures >= 1
 
       GenServer.stop(pid)

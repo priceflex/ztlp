@@ -6,6 +6,8 @@
 //! - Apple Secure Enclave (via `SecKeyCreateRandomKey` availability)
 //! - Android StrongBox (via Android keystore attestation)
 
+#[allow(unused_imports)]
+use std::path::Path;
 use std::process::Command;
 use tracing::{debug, info};
 

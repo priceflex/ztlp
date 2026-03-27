@@ -7497,13 +7497,11 @@ async fn cmd_admin_groups(
                         }
                         eprintln!();
                     }
+                } else if json_output {
+                    println!("{{\"groups\":[]}}");
                 } else {
-                    if json_output {
-                        println!("{{\"groups\":[]}}");
-                    } else {
-                        eprintln!("  {} No groups found", c_dim("(empty)"));
-                        eprintln!();
-                    }
+                    eprintln!("  {} No groups found", c_dim("(empty)"));
+                    eprintln!();
                 }
             } else if json_output {
                 println!("{{\"groups\":[],\"error\":\"failed to decode response\"}}");
@@ -8598,12 +8596,10 @@ fn cmd_admin_cert_revoke(
                 reason
             );
         }
+    } else if json_output {
+        println!("{{\"status\":\"error\",\"error\":\"Certificate not found\"}}");
     } else {
-        if json_output {
-            println!("{{\"status\":\"error\",\"error\":\"Certificate not found\"}}");
-        } else {
-            eprintln!("  {} Certificate not found", c_red("✗"));
-        }
+        eprintln!("  {} Certificate not found", c_red("✗"));
     }
 
     Ok(())

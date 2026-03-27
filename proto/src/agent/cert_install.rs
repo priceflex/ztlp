@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
-use tracing::info;
+#[allow(unused_imports)]
+use tracing::{info, warn};
 
 /// Errors that can occur during certificate installation.
 #[derive(Debug, Error)]

@@ -61,6 +61,7 @@ final class EnrollmentViewModel: ObservableObject {
 
     private let configuration: ZTLPConfiguration
     private let bridge = ZTLPBridge.shared
+    private let logger = TunnelLogger.shared
 
     // MARK: - Init
 
@@ -111,10 +112,12 @@ final class EnrollmentViewModel: ObservableObject {
         }
 
         if tokenInfo.isExpired {
+            logger.warn("Enrollment token expired", source: "Enrollment")
             state = .error("This enrollment token has expired.")
             return
         }
 
+        logger.info("Parsed enrollment token for zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress)", source: "Enrollment")
         state = .tokenParsed(tokenInfo)
     }
 
@@ -161,6 +164,8 @@ final class EnrollmentViewModel: ObservableObject {
                     return
                 }
 
+                logger.info("Created \(isHardwareKey ? "hardware" : "software") identity: \(nodeId)", source: "Enrollment")
+
                 // Step 3: Save identity to file
                 // Hardware keys stay in Secure Enclave; only software keys need file export.
                 if !isHardwareKey, let path = defaultIdentityPath() {
@@ -176,6 +181,8 @@ final class EnrollmentViewModel: ObservableObject {
                 configuration.isEnrolled = true
                 configuration.hasCompletedOnboarding = true
 
+                logger.info("Enrollment config saved. Relay: \(tokenInfo.relayAddresses.first ?? "none"), Zone: \(tokenInfo.zone)", source: "Enrollment")
+
                 // Step 5: Create client and enroll with NS
                 // In a full implementation, this would:
                 //   1. Connect to the NS at tokenInfo.nsAddress
@@ -183,13 +190,17 @@ final class EnrollmentViewModel: ObservableObject {
                 //   3. NS validates the token and registers our node
                 //   4. NS returns our zone assignment + peer addresses
 
+                logger.warn("Enrollment stub: NS registration not yet implemented. Config saved locally only.", source: "Enrollment")
+
                 // For now, we store the config and succeed
+                logger.info("Enrollment complete for zone: \(tokenInfo.zone)", source: "Enrollment")
                 state = .success(zoneName: tokenInfo.zone)
 
                 // Haptic feedback
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
 
             } catch {
+                logger.error("Enrollment failed: \(error.localizedDescription)", source: "Enrollment")
                 state = .error("Enrollment failed: \(error.localizedDescription)")
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
             }

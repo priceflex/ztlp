@@ -76,6 +76,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         UserDefaults(suiteName: appGroupId)
     }()
 
+    /// Shared logger (writes to app group container).
+    private let logger = TunnelLogger.shared
+
     /// Traffic counters.
     private var bytesSent: UInt64 = 0
     private var bytesReceived: UInt64 = 0
@@ -102,6 +105,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler: @escaping (Error?) -> Void
     ) {
         updateConnectionState(.connecting)
+        logger.info("Starting tunnel...", source: "Tunnel")
 
         tunnelQueue.async { [weak self] in
             guard let self = self else {
@@ -115,18 +119,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             do {
                 // Step 1: Read tunnel configuration from the NETunnelProviderProtocol
+                self.logger.info("Loading tunnel config...", source: "Tunnel")
                 let config = try self.loadTunnelConfiguration()
+                self.logger.info("Config: target=\(config.targetNodeId) relay=\(config.relayAddress ?? "none")", source: "Tunnel")
 
                 // Step 2: Initialize the ZTLP library
                 let initResult = ztlp_init()
+                self.logger.info("ztlp_init result: \(initResult)", source: "Tunnel")
                 guard initResult == 0 else {
                     throw self.makeNSError("ztlp_init failed: \(self.lastCError())")
                 }
 
                 // Step 3: Load or generate identity
+                self.logger.info("Loading identity...", source: "Tunnel")
                 let identity = try self.loadOrCreateIdentity(config: config)
+                self.logger.info("Identity loaded", source: "Tunnel")
 
                 // Step 4: Create client (identity ownership transfers)
+                self.logger.info("Creating client...", source: "Tunnel")
                 guard let client = ztlp_client_new(identity) else {
                     throw self.makeNSError("ztlp_client_new failed: \(self.lastCError())")
                 }
@@ -160,6 +170,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 _ = ztlp_config_set_nat_assist(ztlpConfig, true)
 
                 // Step 7: Connect (async — we use a semaphore to bridge)
+                self.logger.info("Connecting to target=\(config.targetNodeId)...", source: "Tunnel")
                 let connectSemaphore = DispatchSemaphore(value: 0)
                 var connectError: Error?
 
@@ -194,9 +205,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // Wait for connection (with timeout)
                 let waitResult = connectSemaphore.wait(timeout: .now() + 15)
                 if waitResult == .timedOut {
+                    self.logger.error("Connection timeout", source: "Tunnel")
                     throw self.makeNSError("Connection timed out")
                 }
                 if let err = connectError {
+                    self.logger.error("Connection error: \(err.localizedDescription)", source: "Tunnel")
                     throw err
                 }
 
@@ -204,10 +217,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let tunSettings = self.createTunnelNetworkSettings(config: config)
                 self.setTunnelNetworkSettings(tunSettings) { error in
                     if let error = error {
+                        self.logger.error("Failed to apply TUN settings: \(error.localizedDescription)", source: "Tunnel")
                         self.updateConnectionState(.disconnected)
                         completionHandler(error)
                         return
                     }
+
+                    self.logger.info("TUN settings applied", source: "Tunnel")
 
                     // Step 9: Start reading packets from TUN
                     self.isTunnelActive = true
@@ -219,10 +235,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         Date().timeIntervalSince1970,
                         forKey: SharedKey.connectedSince
                     )
+                    self.logger.info("Tunnel active", source: "Tunnel")
                     completionHandler(nil)
                 }
 
             } catch {
+                self.logger.error("startTunnel failed: \(error.localizedDescription)", source: "Tunnel")
                 self.updateConnectionState(.disconnected)
                 self.sharedDefaults?.set(
                     error.localizedDescription,
@@ -238,6 +256,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
+        logger.info("Stopping tunnel (reason: \(reason))", source: "Tunnel")
         updateConnectionState(.disconnecting)
 
         tunnelQueue.async { [weak self] in
@@ -270,6 +289,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.updateConnectionState(.disconnected)
             self.connectedSince = nil
             self.sharedDefaults?.removeObject(forKey: SharedKey.connectedSince)
+            self.logger.info("Tunnel stopped", source: "Tunnel")
 
             completionHandler()
         }
@@ -396,6 +416,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handleDisconnect(reason: Int32) {
         guard isTunnelActive else { return }
 
+        logger.warn("Unexpected disconnect, scheduling reconnect", source: "Tunnel")
+
         // Reason 100 = network change (intentional teardown for reconnect)
         // Other reasons = unexpected disconnect
         updateConnectionState(.reconnecting)
@@ -410,6 +432,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt += 1
 
         if reconnectAttempt > Self.maxReconnectAttempts {
+            logger.error("Failed to reconnect after \(Self.maxReconnectAttempts) attempts", source: "Tunnel")
             // Give up — cancel the tunnel
             cancelTunnelWithError(
                 makeError("Failed to reconnect after \(Self.maxReconnectAttempts) attempts")
@@ -425,6 +448,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let jitter = delay * Double.random(in: -0.2...0.2)
         let finalDelay = max(0.5, delay + jitter)
 
+        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) in \(String(format: "%.1f", finalDelay))s", source: "Tunnel")
+
         tunnelQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
             guard let self = self, self.isTunnelActive else { return }
             self.attemptReconnect()
@@ -434,6 +459,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Perform a reconnect attempt.
     private func attemptReconnect() {
         guard let client = ztlpClient else {
+            logger.error("Client lost during reconnect", source: "Tunnel")
             cancelTunnelWithError(makeError("Client lost during reconnect"))
             return
         }
@@ -443,6 +469,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Re-read configuration
         guard let config = try? loadTunnelConfiguration() else {
+            logger.error("Failed to load config for reconnect", source: "Tunnel")
             cancelTunnelWithError(makeError("Failed to load config for reconnect"))
             return
         }
@@ -474,18 +501,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if connectResult != 0 {
             let _ = Unmanaged<SemaphoreBox>.fromOpaque(semPtr).takeRetainedValue()
+            logger.warn("Reconnect ztlp_connect failed, will retry", source: "Tunnel")
             scheduleReconnect()
             return
         }
 
         let waitResult = connectSemaphore.wait(timeout: .now() + 15)
         if waitResult == .timedOut || connectError != nil {
+            logger.warn("Reconnect timed out or errored, will retry", source: "Tunnel")
             scheduleReconnect()
             return
         }
 
         // Success — reset counter and update state
         reconnectAttempt = 0
+        logger.info("Reconnected successfully", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
             Date().timeIntervalSince1970,
@@ -551,11 +581,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     return identity
                 }
                 // File exists but is corrupt — fall through to generate
+                logger.warn("Identity file exists but failed to load, generating new", source: "Tunnel")
             }
         }
 
         // Try Secure Enclave identity
         if let identity = ztlp_identity_from_hardware(1) {
+            logger.info("Loaded hardware identity from Secure Enclave", source: "Tunnel")
             return identity
         }
 
@@ -571,6 +603,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
+        logger.info("Generated new software identity", source: "Tunnel")
         return identity
     }
 

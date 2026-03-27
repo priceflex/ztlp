@@ -39,6 +39,7 @@ final class TunnelViewModel: ObservableObject {
 
     private let configuration: ZTLPConfiguration
     private let networkMonitor = NetworkMonitor.shared
+    private let logger = TunnelLogger.shared
     private var cancellables = Set<AnyCancellable>()
     private var tunnelManager: NETunnelProviderManager?
     private var statsTimer: Timer?
@@ -76,6 +77,7 @@ final class TunnelViewModel: ObservableObject {
 
         lastError = nil
         status = .connecting
+        logger.info("Connecting... target=\(configuration.targetNodeId), relay=\(configuration.relayAddress)", source: "VPN")
 
         // Haptic feedback
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -107,11 +109,13 @@ final class TunnelViewModel: ObservableObject {
                 manager.isEnabled = true
 
                 try await manager.saveToPreferences()
+                logger.info("VPN configuration saved to iOS", source: "VPN")
                 try await manager.loadFromPreferences()
 
                 // Start the tunnel
                 let session = manager.connection as! NETunnelProviderSession
                 try session.startVPNTunnel()
+                logger.info("VPN tunnel start requested", source: "VPN")
 
                 // Start polling stats
                 startStatsPolling()
@@ -119,6 +123,7 @@ final class TunnelViewModel: ObservableObject {
             } catch {
                 status = .disconnected
                 lastError = error.localizedDescription
+                logger.error("VPN error: \(error.localizedDescription)", source: "VPN")
 
                 // Haptic feedback for error
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -131,6 +136,7 @@ final class TunnelViewModel: ObservableObject {
         guard status.canDisconnect else { return }
 
         status = .disconnecting
+        logger.info("Disconnecting VPN", source: "VPN")
 
         // Haptic feedback
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -166,10 +172,12 @@ final class TunnelViewModel: ObservableObject {
             ($0.protocolConfiguration as? NETunnelProviderProtocol)?
                 .providerBundleIdentifier == "com.ztlp.app.tunnel"
         }) {
+            logger.debug("Loaded existing VPN tunnel manager", source: "VPN")
             return existing
         }
 
         // Create a new one
+        logger.debug("Creating new VPN tunnel manager", source: "VPN")
         return NETunnelProviderManager()
     }
 
@@ -214,6 +222,7 @@ final class TunnelViewModel: ObservableObject {
                 guard let self = self, self.status == .connected else { return }
                 // Network changed while connected — the extension handles reconnection.
                 // We just note it in the UI.
+                self.logger.warn("Network interface changed, reconnecting...", source: "Network")
                 self.status = .reconnecting
             }
             .store(in: &cancellables)
@@ -228,19 +237,24 @@ final class TunnelViewModel: ObservableObject {
     private func updateStatusFromConnection(_ connection: NEVPNConnection) {
         switch connection.status {
         case .invalid, .disconnected:
+            logger.info("VPN status: disconnected", source: "VPN")
             status = .disconnected
             stats.connectedSince = nil
             stopStatsPolling()
         case .connecting:
+            logger.info("VPN status: connecting", source: "VPN")
             status = .connecting
         case .connected:
+            logger.info("VPN status: connected", source: "VPN")
             status = .connected
             stats.connectedSince = connection.connectedDate
             startStatsPolling()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .reasserting:
+            logger.info("VPN status: reasserting", source: "VPN")
             status = .reconnecting
         case .disconnecting:
+            logger.info("VPN status: disconnecting", source: "VPN")
             status = .disconnecting
         @unknown default:
             break

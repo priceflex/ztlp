@@ -67,6 +67,7 @@ final class TunnelViewModel: ObservableObject {
     private let networkMonitor = NetworkMonitor.shared
     private let bridge = ZTLPBridge.shared
     private let logger = TunnelLogger.shared
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var cancellables = Set<AnyCancellable>()
     private var statsTimer: Timer?
     private var directIdentity: ZTLPIdentityHandle?
@@ -118,6 +119,7 @@ final class TunnelViewModel: ObservableObject {
 
     /// Stop the tunnel.
     func disconnect() {
+        endBackgroundKeepAlive()
         guard status.canDisconnect else { return }
 
         // Cancel any pending auto-reconnect
@@ -322,6 +324,11 @@ final class TunnelViewModel: ObservableObject {
             }
 
             vipStatus = "VIP proxy active — \(svcName).techrockstars.ztlp"
+
+            // Begin background task to keep VIP proxy alive when user switches to Safari.
+            // iOS gives ~30 seconds of background execution time.
+            // We restart the task each time it expires to extend the window.
+            beginBackgroundKeepAlive()
             logger.info("VIP proxy active for \(svcName)", source: "VIP")
 
         } catch {
@@ -464,4 +471,33 @@ final class TunnelViewModel: ObservableObject {
         }
         return containerURL.appendingPathComponent("identity.json").path
     }
+
+    // MARK: - Background Keep-Alive
+
+    /// Begin a background task so the VIP proxy stays active when the user opens Safari.
+    /// iOS gives ~30 seconds per background task. We chain tasks to extend the window.
+    private func beginBackgroundKeepAlive() {
+        // End any existing task first
+        endBackgroundKeepAlive()
+
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "ZTLPVIPProxy") { [weak self] in
+            // Expiration handler — system is about to kill our background time.
+            // Chain a new task to buy more time (works for several minutes in practice).
+            self?.logger.warn("Background task expiring, attempting to extend", source: "Background")
+            self?.beginBackgroundKeepAlive()
+        }
+
+        if backgroundTaskID != .invalid {
+            logger.info("Background keep-alive started (remaining: \(String(format: "%.0f", UIApplication.shared.backgroundTimeRemaining))s)", source: "Background")
+        }
+    }
+
+    /// End the background task cleanly.
+    private func endBackgroundKeepAlive() {
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+    }
+
 }

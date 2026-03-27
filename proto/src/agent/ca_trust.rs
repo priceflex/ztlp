@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Errors that can occur during CA trust installation.
 #[derive(Debug, Error)]

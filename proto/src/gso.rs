@@ -1185,6 +1185,7 @@ mod tests {
         assert!(buf[..n].iter().all(|&b| b == 0xFF));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_gso_send_single_segment() {
         let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1311,6 +1312,7 @@ mod tests {
         assert_eq!(buf, vec![42; 10]);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_gso_cmsg_construction() {
         // Verify the cmsg buffer layout for UDP_SEGMENT

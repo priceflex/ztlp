@@ -174,6 +174,14 @@ final class ZTLPConfigHandle {
         if let error = ZTLPError.from(code: result) { throw error }
     }
 
+    /// Set the service name for gateway routing.
+    func setService(_ name: String) throws {
+        let result = name.withCString { cName in
+            ztlp_config_set_service(pointer, cName)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
     deinit {
         ztlp_config_free(pointer)
     }
@@ -354,7 +362,7 @@ final class ZTLPBridge {
         }
     }
 
-    /// Set the service name for the next connection (used by VIP proxy routing).
+    /// Set the service name on the client (legacy path — prefer ZTLPConfigHandle.setService).
     func setService(_ name: String) throws {
         guard let c = clientLock.sync(execute: { self.client }) else {
             throw ZTLPError.notConnected
@@ -363,6 +371,79 @@ final class ZTLPBridge {
             ztlp_config_set_service(c, cName)
         }
         if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    // MARK: - NS Resolution
+
+    /// Resolve a service name via ZTLP-NS.
+    ///
+    /// This is a static call — no client required. Contacts the NS server directly.
+    ///
+    /// - Parameters:
+    ///   - serviceName: The ZTLP-NS name (e.g., "vault.techrockstars.ztlp")
+    ///   - nsServer: The NS server address (e.g., "52.39.59.34:23096")
+    ///   - timeoutMs: Query timeout in ms (0 = default 5000ms)
+    /// - Returns: Resolved address string (e.g., "10.42.42.112:23098")
+    func nsResolve(serviceName: String, nsServer: String, timeoutMs: UInt32 = 5000) throws -> String {
+        let result = serviceName.withCString { cName in
+            nsServer.withCString { cServer in
+                ztlp_ns_resolve(cName, cServer, timeoutMs)
+            }
+        }
+        guard let cStr = result else {
+            let errMsg = String(cString: ztlp_last_error())
+            throw ZTLPError.connectionError("NS resolution failed: \(errMsg)")
+        }
+        let resolved = String(cString: cStr)
+        ztlp_string_free(cStr)
+        return resolved
+    }
+
+    // MARK: - VIP Proxy & DNS
+
+    /// Register a service with a VIP address for local proxy.
+    func vipAddService(name: String, vip: String, port: UInt16) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = name.withCString { cName in
+            vip.withCString { cVip in
+                ztlp_vip_add_service(c, cName, cVip, port)
+            }
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Start VIP TCP proxy listeners on all registered VIP:port combos.
+    func vipStart() throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = ztlp_vip_start(c)
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Stop all VIP proxy listeners.
+    func vipStop() {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+        ztlp_vip_stop(c)
+    }
+
+    /// Start local DNS resolver for *.ztlp domains.
+    func dnsStart(listenAddr: String = "127.0.55.53:5354") throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = listenAddr.withCString { cAddr in
+            ztlp_dns_start(c, cAddr)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Stop DNS resolver.
+    func dnsStop() {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+        ztlp_dns_stop(c)
     }
 
     // MARK: - Connection

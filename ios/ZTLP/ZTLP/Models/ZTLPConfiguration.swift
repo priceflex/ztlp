@@ -25,6 +25,8 @@ final class ZTLPConfiguration: ObservableObject {
         static let hasCompletedOnboarding = "config_onboarding_complete"
         static let isEnrolled = "config_is_enrolled"
         static let fullTunnel = "config_full_tunnel"
+        static let nsServer = "config_ns_server"
+        static let serviceName = "config_service_name"
     }
 
     // MARK: - Storage
@@ -98,6 +100,16 @@ final class ZTLPConfiguration: ObservableObject {
         didSet { defaults.set(fullTunnel, forKey: Key.fullTunnel) }
     }
 
+    /// NS server address for ZTLP-NS resolution (e.g., "52.39.59.34:23096").
+    @Published var nsServer: String {
+        didSet { defaults.set(nsServer, forKey: Key.nsServer) }
+    }
+
+    /// Service name for NS resolution and VIP proxy (e.g., "vault").
+    @Published var serviceName: String {
+        didSet { defaults.set(serviceName, forKey: Key.serviceName) }
+    }
+
     // MARK: - Init
 
     init(suiteName: String = "group.com.ztlp.shared") {
@@ -117,6 +129,8 @@ final class ZTLPConfiguration: ObservableObject {
         self.hasCompletedOnboarding = store.bool(forKey: Key.hasCompletedOnboarding)
         self.isEnrolled = store.bool(forKey: Key.isEnrolled)
         self.fullTunnel = store.bool(forKey: Key.fullTunnel)
+        self.nsServer = store.string(forKey: Key.nsServer) ?? ""
+        self.serviceName = store.string(forKey: Key.serviceName) ?? "vault"
     }
 
     /// Create a TunnelConfiguration from the current app settings.
@@ -149,5 +163,20 @@ final class ZTLPConfiguration: ObservableObject {
         hasCompletedOnboarding = false
         isEnrolled = false
         fullTunnel = false
+        nsServer = ""
+        serviceName = "vault"
+    }
+
+    /// Human-readable summary for debugging.
+    var summary: String {
+        """
+        Zone: \(zoneName.isEmpty ? "(none)" : zoneName)
+        Relay: \(relayAddress.isEmpty ? "(none)" : relayAddress)
+        NS Server: \(nsServer.isEmpty ? "(none)" : nsServer)
+        Service: \(serviceName.isEmpty ? "(none)" : serviceName)
+        Target: \(targetNodeId.isEmpty ? "(none)" : targetNodeId)
+        NAT Assist: \(natAssist)
+        Enrolled: \(isEnrolled)
+        """
     }
 }

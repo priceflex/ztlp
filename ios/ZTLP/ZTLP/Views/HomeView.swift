@@ -2,7 +2,10 @@
 // ZTLP
 //
 // Main connect/disconnect screen with status indicator,
-// connection timer, and traffic stats.
+// connection timer, traffic stats, and VIP proxy access.
+//
+// When connected via Direct Connect, shows the VIP proxy URL
+// (http://127.0.55.1:8080) with a tap-to-open button for Safari.
 
 import SwiftUI
 
@@ -17,6 +20,9 @@ struct HomeView: View {
     @State private var durationTimer = Timer.publish(every: 1, on: .main, in: .common)
         .autoconnect()
     @State private var currentDuration: String = "--:--:--"
+
+    /// VIP proxy URL for Safari access.
+    private let vipURL = "http://127.0.55.1:8080"
 
     var body: some View {
         NavigationStack {
@@ -52,6 +58,12 @@ struct HomeView: View {
                             .onReceive(durationTimer) { _ in
                                 currentDuration = viewModel.stats.formattedDuration
                             }
+                    }
+
+                    // VIP proxy access card (when connected)
+                    if viewModel.status == .connected {
+                        vipAccessCard
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
                     Spacer()
@@ -131,9 +143,68 @@ struct HomeView: View {
         }
         .buttonStyle(.plain)
         .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
-        .accessibilityLabel(viewModel.status.canConnect ? "Connect to VPN" : "Disconnect from VPN")
+        .accessibilityLabel(viewModel.status.canConnect ? "Connect" : "Disconnect")
         .accessibilityHint(viewModel.status.label)
         .onAppear { isPulsing = true }
+    }
+
+    /// VIP proxy access card — shows URL and tap-to-open button.
+    private var vipAccessCard: some View {
+        VStack(spacing: 12) {
+            // VIP status
+            if let vipStatus = viewModel.vipStatus {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Text(vipStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Access URL button
+            Button {
+                if let url = URL(string: vipURL) {
+                    UIApplication.shared.open(url)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "safari")
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Open in Safari")
+                            .font(.callout.weight(.semibold))
+                        Text(vipURL)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.ztlpBlue.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open service in Safari at \(vipURL)")
+
+            // Peer address
+            if !viewModel.peerAddress.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Text("Peer: \(viewModel.peerAddress)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// Traffic statistics (upload/download).

@@ -226,6 +226,27 @@ struct SettingsView: View {
             }
 
             HStack {
+                Label("NS Server", systemImage: "globe.americas")
+                Spacer()
+                TextField("52.39.59.34:23096", text: $configuration.nsServer)
+                    .multilineTextAlignment(.trailing)
+                    .font(.callout.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+            }
+
+            HStack {
+                Label("Service Name", systemImage: "server.rack")
+                Spacer()
+                TextField("vault", text: $configuration.serviceName)
+                    .multilineTextAlignment(.trailing)
+                    .font(.callout.monospaced())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+
+            HStack {
                 Label("STUN Server", systemImage: "network")
                 Spacer()
                 TextField("stun.l.google.com:19302", text: $configuration.stunServer)

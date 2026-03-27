@@ -134,16 +134,15 @@ final class EnrollmentViewModel: ObservableObject {
         guard case .tokenParsed(let tokenInfo) = state else { return }
 
         state = .enrolling
+        logger.info("Starting enrollment for zone: \(tokenInfo.zone)", source: "Enrollment")
 
         Task {
             do {
                 // Step 1: Initialize the ZTLP bridge if needed
+                logger.info("Initializing ZTLP bridge...", source: "Enrollment")
                 try bridge.initialize()
 
                 // Step 2: Generate or load identity
-                // Try hardware identity first, fall back to software.
-                // Hardware keys (Secure Enclave) can't be exported to file,
-                // so if we need file-based persistence we use software keys.
                 var identity: ZTLPIdentityHandle
                 var isHardwareKey = false
 
@@ -151,48 +150,55 @@ final class EnrollmentViewModel: ObservableObject {
                     do {
                         identity = try bridge.createHardwareIdentity(provider: 1)
                         isHardwareKey = true
+                        logger.info("Created Secure Enclave identity", source: "Enrollment")
                     } catch {
-                        // Secure Enclave failed — fall back to software key
                         identity = try bridge.generateIdentity()
+                        logger.info("Secure Enclave failed, generated software identity", source: "Enrollment")
                     }
                 } else {
                     identity = try bridge.generateIdentity()
+                    logger.info("Generated software identity", source: "Enrollment")
                 }
 
                 guard let nodeId = identity.nodeId else {
                     state = .error("Failed to get node ID from identity")
+                    logger.error("Identity has no node ID", source: "Enrollment")
                     return
                 }
 
-                logger.info("Created \(isHardwareKey ? "hardware" : "software") identity: \(nodeId)", source: "Enrollment")
+                logger.info("Identity created: nodeId=\(nodeId), hardware=\(isHardwareKey)", source: "Enrollment")
 
                 // Step 3: Save identity to file
-                // Hardware keys stay in Secure Enclave; only software keys need file export.
                 if !isHardwareKey, let path = defaultIdentityPath() {
                     try identity.save(to: path)
+                    logger.info("Identity saved to \(path)", source: "Enrollment")
                 }
 
                 // Step 4: Update configuration with enrollment info
                 configuration.zoneName = tokenInfo.zone
-                configuration.targetNodeId = tokenInfo.nsAddress // NS is the first target
+                configuration.nsServer = tokenInfo.nsAddress
+                configuration.targetNodeId = tokenInfo.nsAddress  // backward compat
+                configuration.serviceName = "vault"  // default service
+
                 if let relay = tokenInfo.relayAddresses.first {
                     configuration.relayAddress = relay
+                    logger.info("Relay address: \(relay)", source: "Enrollment")
                 }
+
                 configuration.isEnrolled = true
                 configuration.hasCompletedOnboarding = true
 
-                logger.info("Enrollment config saved. Relay: \(tokenInfo.relayAddresses.first ?? "none"), Zone: \(tokenInfo.zone)", source: "Enrollment")
+                logger.info("Enrollment config saved — Zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress), Relay: \(tokenInfo.relayAddresses.first ?? "none"), Service: vault", source: "Enrollment")
 
-                // Step 5: Create client and enroll with NS
+                // Step 5: NS registration stub
                 // In a full implementation, this would:
                 //   1. Connect to the NS at tokenInfo.nsAddress
                 //   2. Present the enrollment token + our public key
                 //   3. NS validates the token and registers our node
                 //   4. NS returns our zone assignment + peer addresses
-
                 logger.warn("Enrollment stub: NS registration not yet implemented. Config saved locally only.", source: "Enrollment")
 
-                // For now, we store the config and succeed
+                // Success!
                 logger.info("Enrollment complete for zone: \(tokenInfo.zone)", source: "Enrollment")
                 state = .success(zoneName: tokenInfo.zone)
 

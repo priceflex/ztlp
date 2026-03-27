@@ -2,25 +2,33 @@ defmodule ZtlpGateway.ServiceRegistrar do
   @moduledoc """
   Periodically registers gateway services with ZTLP-NS.
 
-  When `ZTLP_NS_SERVER` and `ZTLP_GATEWAY_PUBLIC_ADDR` are set, this
-  GenServer registers SVC records for each backend service on startup
-  and refreshes them every TTL/2 seconds.
+  Implements Section 9.6.8 (Service Registration Authorization) and
+  Section 25.1.1 (Gateway Service Registration) of the ZTLP specification.
+
+  On startup, the gateway registers SVC records for all backend services
+  and refreshes them at TTL/2 intervals. Registration requires an
+  operator signing key for production deployments.
 
   ## Environment Variables
 
-  - `ZTLP_NS_SERVER` — NS server address (host:port), e.g. "34.217.62.46:23096"
-  - `ZTLP_GATEWAY_PUBLIC_ADDR` — Gateway's public address for clients, e.g. "54.149.48.6:23097"
-  - `ZTLP_GATEWAY_SERVICE_ZONE` — Zone suffix for service names (default: "techrockstars.ztlp")
-  - `ZTLP_NS_REGISTRATION_TTL` — TTL in seconds for NS records (default: 300)
+  - `ZTLP_NS_SERVER` — NS server address (host:port)
+  - `ZTLP_GATEWAY_PUBLIC_ADDR` — Gateway's public endpoint for SVC records
+  - `ZTLP_GATEWAY_SERVICE_ZONE` — Zone suffix (default: from Config or "techrockstars.ztlp")
+  - `ZTLP_NS_REGISTRATION_TTL` — TTL in seconds (default: 300)
+  - `ZTLP_GATEWAY_OPERATOR_KEY` — Hex-encoded Ed25519 seed (32 bytes = 64 hex chars)
+  - `ZTLP_GATEWAY_OPERATOR_KEY_FILE` — Path to JSON key file (same format as `ztlp keygen`)
+  - `ZTLP_GATEWAY_SERVICE_ALIASES` — Comma-separated extra service names to register
 
-  ## Registration
+  ## Key Loading Priority
 
-  For each backend in `ZTLP_GATEWAY_BACKENDS` (e.g., "default:vaultwarden:80"),
-  the first service name "default" becomes "default.<zone>" in NS. But we also
-  register user-friendly aliases — if the backend host is "vaultwarden", we
-  register "vault.<zone>" as well.
+  1. `ZTLP_GATEWAY_OPERATOR_KEY_FILE` (file path — preferred for Docker secrets)
+  2. `ZTLP_GATEWAY_OPERATOR_KEY` (hex-encoded seed — simple deployments)
+  3. Ephemeral key generation (dev/demo mode only — logs a warning)
 
-  Uses the v2 NS registration protocol (0x09) with Ed25519 signatures.
+  ## Registration Protocol
+
+  Uses ZTLP-NS REGISTER (0x09) with Ed25519-signed SVC records (type 0x02).
+  See Section 9.5.7 for wire format.
   """
 
   use GenServer
@@ -32,6 +40,8 @@ defmodule ZtlpGateway.ServiceRegistrar do
   @svc_type_byte 0x02
   @default_ttl 300
   @default_zone "techrockstars.ztlp"
+  @initial_backoff 5_000
+  @max_backoff 60_000
 
   # ── Client API ──────────────────────────────────────────────
 
@@ -40,9 +50,17 @@ defmodule ZtlpGateway.ServiceRegistrar do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @doc "Get the current registrar state (for debugging/monitoring)."
   @spec state() :: map()
   def state do
     GenServer.call(__MODULE__, :state)
+  end
+
+  @doc "Force an immediate re-registration cycle."
+  @spec register_now() :: :ok
+  def register_now do
+    send(__MODULE__, :register)
+    :ok
   end
 
   # ── GenServer Callbacks ─────────────────────────────────────
@@ -64,14 +82,18 @@ defmodule ZtlpGateway.ServiceRegistrar do
         {:ok, %{enabled: false}}
 
       true ->
-        # Generate a persistent signing keypair for NS registration
-        {pubkey, privkey} = generate_keypair()
+        {pubkey, privkey, key_source} = load_operator_key()
         service_names = derive_service_names(zone)
 
         Logger.info(
-          "[ServiceRegistrar] Will register #{length(service_names)} services with NS " <>
-          "#{inspect(ns_server)}: #{inspect(service_names)} → #{public_addr} (TTL=#{ttl}s)"
+          "[ServiceRegistrar] Starting: #{length(service_names)} services, " <>
+            "NS=#{format_addr(ns_server)}, zone=#{zone}, TTL=#{ttl}s, " <>
+            "key_source=#{key_source}"
         )
+
+        for name <- service_names do
+          Logger.info("[ServiceRegistrar]   → #{name} → #{public_addr}")
+        end
 
         state = %{
           enabled: true,
@@ -81,11 +103,16 @@ defmodule ZtlpGateway.ServiceRegistrar do
           ttl: ttl,
           pubkey: pubkey,
           privkey: privkey,
+          key_source: key_source,
           service_names: service_names,
+          last_registration: nil,
+          last_error: nil,
+          consecutive_failures: 0,
+          total_registrations: 0,
           test_opts: Keyword.get(opts, :test_opts, %{})
         }
 
-        # Register immediately
+        # Register after a short delay to let other services start
         Process.send_after(self(), :register, 1_000)
 
         {:ok, state}
@@ -94,7 +121,13 @@ defmodule ZtlpGateway.ServiceRegistrar do
 
   @impl true
   def handle_call(:state, _from, state) do
-    {:reply, state, state}
+    # Return a safe subset (no private keys)
+    safe_state =
+      state
+      |> Map.drop([:privkey, :test_opts])
+      |> Map.put(:pubkey_hex, if(state[:pubkey], do: Base.encode16(state.pubkey, case: :lower), else: nil))
+
+    {:reply, safe_state, state}
   end
 
   @impl true
@@ -105,38 +138,149 @@ defmodule ZtlpGateway.ServiceRegistrar do
   def handle_info(:register, state) do
     case :gen_udp.open(0, [:binary, {:active, false}]) do
       {:ok, socket} ->
-        {ns_host, ns_port} = state.ns_server
-
-        for name <- state.service_names do
-          result = do_register(socket, {ns_host, ns_port}, name, state)
-
-          case result do
-            :ok ->
-              Logger.info("[ServiceRegistrar] Registered #{name} → #{state.public_addr}")
-            {:error, reason} ->
-              Logger.warning("[ServiceRegistrar] Failed to register #{name}: #{inspect(reason)}")
+        results =
+          for name <- state.service_names do
+            result = do_register(socket, state.ns_server, name, state)
+            {name, result}
           end
-        end
 
         :gen_udp.close(socket)
 
-        # Re-register at TTL/2
-        interval = div(state.ttl * 1000, 2)
+        successes = Enum.count(results, fn {_, r} -> r == :ok end)
+        failures = Enum.count(results, fn {_, r} -> r != :ok end)
+
+        state =
+          if failures == 0 do
+            for {name, :ok} <- results do
+              Logger.info("[ServiceRegistrar] Registered #{name} → #{state.public_addr}")
+            end
+
+            %{state |
+              last_registration: System.system_time(:second),
+              last_error: nil,
+              consecutive_failures: 0,
+              total_registrations: state.total_registrations + successes
+            }
+          else
+            for {name, {:error, reason}} <- results do
+              Logger.warning("[ServiceRegistrar] Failed to register #{name}: #{inspect(reason)}")
+            end
+
+            %{state |
+              last_error: List.first(Enum.filter(results, fn {_, r} -> r != :ok end)),
+              consecutive_failures: state.consecutive_failures + 1,
+              total_registrations: state.total_registrations + successes
+            }
+          end
+
+        # Schedule next registration
+        interval = next_interval(state)
         Process.send_after(self(), :register, interval)
 
-      {:error, reason} ->
-        Logger.warning("[ServiceRegistrar] Failed to open UDP socket: #{inspect(reason)}, retrying in 5s")
-        Process.send_after(self(), :register, 5_000)
-    end
+        {:noreply, state}
 
-    {:noreply, state}
+      {:error, reason} ->
+        Logger.warning("[ServiceRegistrar] Failed to open UDP socket: #{inspect(reason)}")
+        state = %{state | consecutive_failures: state.consecutive_failures + 1, last_error: {:socket, reason}}
+        interval = next_interval(state)
+        Process.send_after(self(), :register, interval)
+        {:noreply, state}
+    end
   end
 
   def handle_info(_msg, state) do
     {:noreply, state}
   end
 
-  # ── Private ─────────────────────────────────────────────────
+  # ── Private: Operator Key Loading ───────────────────────────
+
+  defp load_operator_key do
+    # Priority 1: Key file (Docker secret / mounted file)
+    case System.get_env("ZTLP_GATEWAY_OPERATOR_KEY_FILE") do
+      nil -> :skip
+      "" -> :skip
+      path ->
+        case load_key_file(path) do
+          {:ok, pub, priv} ->
+            Logger.info("[ServiceRegistrar] Loaded operator key from file: #{path}")
+            {pub, priv, :file}
+          {:error, reason} ->
+            Logger.warning("[ServiceRegistrar] Failed to load key file #{path}: #{inspect(reason)}")
+            :skip
+        end
+    end
+    |> case do
+      {_, _, _} = result -> result
+      :skip ->
+        # Priority 2: Hex-encoded seed env var
+        case System.get_env("ZTLP_GATEWAY_OPERATOR_KEY") do
+          nil -> :skip
+          "" -> :skip
+          hex_seed ->
+            case load_hex_seed(hex_seed) do
+              {:ok, pub, priv} ->
+                Logger.info("[ServiceRegistrar] Loaded operator key from ZTLP_GATEWAY_OPERATOR_KEY env")
+                {pub, priv, :env}
+              {:error, reason} ->
+                Logger.warning("[ServiceRegistrar] Invalid ZTLP_GATEWAY_OPERATOR_KEY: #{inspect(reason)}")
+                :skip
+            end
+        end
+        |> case do
+          {_, _, _} = result -> result
+          :skip ->
+            # Priority 3: Ephemeral key (dev/demo only)
+            Logger.warning(
+              "[ServiceRegistrar] No operator key configured — using ephemeral key. " <>
+                "This is acceptable for dev/demo but MUST NOT be used in production. " <>
+                "Set ZTLP_GATEWAY_OPERATOR_KEY_FILE or ZTLP_GATEWAY_OPERATOR_KEY."
+            )
+            {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+            {pub, priv, :ephemeral}
+        end
+    end
+  end
+
+  defp load_key_file(path) do
+    case File.read(path) do
+      {:ok, content} ->
+        trimmed = String.trim(content)
+        cond do
+          # JSON format from `ztlp keygen` — extract ed25519_seed with regex
+          # (no JSON library dependency — gateway is zero-dep)
+          String.contains?(trimmed, "ed25519_seed") ->
+            case Regex.run(~r/"ed25519_seed"\s*:\s*"([0-9a-fA-F]{64})"/, trimmed) do
+              [_, seed_hex] -> load_hex_seed(seed_hex)
+              _ -> {:error, :invalid_key_file_format}
+            end
+
+          # Raw hex seed (64 hex chars on a single line)
+          Regex.match?(~r/\A[0-9a-fA-F]{64}\z/, trimmed) ->
+            load_hex_seed(trimmed)
+
+          true ->
+            {:error, :unrecognized_key_file_format}
+        end
+
+      {:error, reason} ->
+        {:error, {:file_read_error, reason}}
+    end
+  end
+
+  defp load_hex_seed(hex_seed) do
+    trimmed = String.trim(hex_seed)
+    case Base.decode16(trimmed, case: :mixed) do
+      {:ok, seed} when byte_size(seed) == 32 ->
+        {pub, priv} = :crypto.generate_key(:eddsa, :ed25519, seed)
+        {:ok, pub, priv}
+      {:ok, _} ->
+        {:error, :invalid_seed_length}
+      :error ->
+        {:error, :invalid_hex}
+    end
+  end
+
+  # ── Private: Registration ───────────────────────────────────
 
   defp do_register(socket, {ns_host, ns_port}, name, state) do
     # Build SVC record data (CBOR-encoded)
@@ -152,11 +296,11 @@ defmodule ZtlpGateway.ServiceRegistrar do
         _ -> :erlang.term_to_binary(data)
       end
 
-    # Build canonical form for signing
+    # Build canonical form for signing (per Section 9.5.7)
     name_len = byte_size(name)
     canonical = <<@svc_type_byte::8, name_len::16, name::binary, data_bin::binary>>
 
-    # Sign with Ed25519
+    # Sign with Ed25519 operator key
     sig = :crypto.sign(:eddsa, :none, canonical, [state.privkey, :ed25519])
 
     # Build v2 registration packet (0x09)
@@ -172,6 +316,7 @@ defmodule ZtlpGateway.ServiceRegistrar do
         case :gen_udp.recv(socket, 0, 5_000) do
           {:ok, {_, _, <<0x06, _::binary>>}} -> :ok
           {:ok, {_, _, <<0xFF>>}} -> {:error, :rejected}
+          {:ok, {_, _, <<0x04, _::binary>>}} -> {:error, :policy_denied}
           {:ok, {_, _, resp}} -> {:error, {:unexpected_response, byte_size(resp)}}
           {:error, :timeout} -> {:error, :timeout}
           {:error, reason} -> {:error, reason}
@@ -182,12 +327,12 @@ defmodule ZtlpGateway.ServiceRegistrar do
     end
   end
 
+  # ── Private: Service Name Derivation ────────────────────────
+
   defp derive_service_names(zone) do
-    # Get backend service names from config
     backends = Config.get(:backends) || []
 
-    # Each backend has a service name (first element of the tuple)
-    # Also add common aliases
+    # Extract service names from backend config
     base_names =
       backends
       |> Enum.map(fn
@@ -198,19 +343,25 @@ defmodule ZtlpGateway.ServiceRegistrar do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    # Also add "vault" alias if any backend host contains "vaultwarden"
-    vault_alias =
+    # Auto-detect aliases from backend hostnames
+    auto_aliases =
       backends
-      |> Enum.any?(fn
-        %{host: host} -> String.contains?(to_string(host), "vaultwarden")
-        {_name, host, _port} -> String.contains?(to_string(host), "vaultwarden")
-        _ -> false
+      |> Enum.flat_map(fn
+        %{host: host} -> detect_aliases(to_string(host))
+        {_name, host, _port} -> detect_aliases(to_string(host))
+        _ -> []
       end)
 
-    aliases = if vault_alias, do: ["vault"], else: []
+    # Manual aliases from env var
+    manual_aliases =
+      case System.get_env("ZTLP_GATEWAY_SERVICE_ALIASES") do
+        nil -> []
+        "" -> []
+        aliases -> String.split(aliases, ",", trim: true) |> Enum.map(&String.trim/1)
+      end
 
     # Build fully-qualified names
-    (base_names ++ aliases)
+    (base_names ++ auto_aliases ++ manual_aliases)
     |> Enum.uniq()
     |> Enum.map(fn name ->
       if String.contains?(name, ".") do
@@ -220,6 +371,31 @@ defmodule ZtlpGateway.ServiceRegistrar do
       end
     end)
   end
+
+  defp detect_aliases(hostname) do
+    cond do
+      String.contains?(hostname, "vaultwarden") -> ["vault"]
+      String.contains?(hostname, "bitwarden") -> ["vault", "bitwarden"]
+      String.contains?(hostname, "grafana") -> ["grafana"]
+      String.contains?(hostname, "prometheus") -> ["metrics"]
+      true -> []
+    end
+  end
+
+  # ── Private: Scheduling ─────────────────────────────────────
+
+  defp next_interval(%{consecutive_failures: 0, ttl: ttl}) do
+    # Normal: re-register at TTL/2
+    div(ttl * 1000, 2)
+  end
+
+  defp next_interval(%{consecutive_failures: n}) do
+    # Exponential backoff on failure, capped at max_backoff
+    backoff = @initial_backoff * :math.pow(2, min(n - 1, 4)) |> trunc()
+    min(backoff, @max_backoff)
+  end
+
+  # ── Private: Utilities ──────────────────────────────────────
 
   defp get_ns_server do
     case System.get_env("ZTLP_NS_SERVER") do
@@ -237,11 +413,6 @@ defmodule ZtlpGateway.ServiceRegistrar do
     end
   end
 
-  defp generate_keypair do
-    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
-    {pub, priv}
-  end
-
   defp resolve_host(host) when is_list(host) do
     case :inet.getaddr(host, :inet) do
       {:ok, ip} -> {:ok, ip}
@@ -249,13 +420,11 @@ defmodule ZtlpGateway.ServiceRegistrar do
     end
   end
 
-  defp resolve_host(host) when is_binary(host) do
-    resolve_host(to_charlist(host))
-  end
+  defp resolve_host(host) when is_binary(host), do: resolve_host(to_charlist(host))
+  defp resolve_host(host) when is_tuple(host), do: {:ok, host}
 
-  defp resolve_host(host) when is_tuple(host) do
-    {:ok, host}
-  end
+  defp format_addr({host, port}) when is_list(host), do: "#{host}:#{port}"
+  defp format_addr({host, port}), do: "#{inspect(host)}:#{port}"
 
   defp parse_int(nil, default), do: default
   defp parse_int(str, default) do

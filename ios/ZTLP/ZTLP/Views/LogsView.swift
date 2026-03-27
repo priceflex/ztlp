@@ -109,7 +109,7 @@ struct LogsView: View {
                     .id(entry.id)
             }
             .listStyle(.plain)
-            .onChange(of: viewModel.filteredEntries.count) { _, _ in
+            .onChange(of: viewModel.filteredEntries.count) { _ in
                 if autoScroll, let last = viewModel.filteredEntries.last {
                     withAnimation {
                         proxy.scrollTo(last.id, anchor: .bottom)
@@ -122,15 +122,26 @@ struct LogsView: View {
     // MARK: - Empty State
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label("No Logs", systemImage: "doc.text.magnifyingglass")
-        } description: {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No Logs")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.secondary)
             if viewModel.entries.isEmpty {
                 Text("No logs yet. Connect to start logging.")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
             } else {
                 Text("No logs match the current filter.")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
             }
+            Spacer()
         }
+        .frame(maxWidth: .infinity)
     }
 }
 

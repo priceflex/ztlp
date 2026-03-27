@@ -112,8 +112,10 @@ defmodule ZtlpGateway.ServiceRegistrar do
           test_opts: Keyword.get(opts, :test_opts, %{})
         }
 
-        # Register after a short delay to let other services start
-        Process.send_after(self(), :register, 1_000)
+        # Register after a short delay unless test mode
+        unless Map.get(Keyword.get(opts, :test_opts, %{}), :skip_register, false) do
+          Process.send_after(self(), :register, 1_000)
+        end
 
         {:ok, state}
     end

@@ -144,7 +144,10 @@ final class ZTLPConfiguration: ObservableObject {
             dnsServers: dnsServers,
             mtu: mtu,
             identityPath: nil,
-            fullTunnel: fullTunnel
+            fullTunnel: fullTunnel,
+            nsServer: nsServer.isEmpty ? nil : nsServer,
+            serviceName: serviceName.isEmpty ? nil : serviceName,
+            zoneName: zoneName.isEmpty ? nil : zoneName
         )
     }
 

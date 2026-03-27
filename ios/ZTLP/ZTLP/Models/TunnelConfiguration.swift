@@ -12,7 +12,7 @@ import Foundation
 /// Configuration for the ZTLP packet tunnel.
 struct TunnelConfiguration {
 
-    /// The ZTLP Node ID of the target peer (hex string, 32 chars).
+    /// The ZTLP Node ID of the target peer (hex string, 32 chars) or gateway address.
     let targetNodeId: String
 
     /// Optional relay server address (e.g., "relay.ztlp.net:4433").
@@ -43,6 +43,18 @@ struct TunnelConfiguration {
     /// Default is false (split-tunnel: only .ztlp domains).
     let fullTunnel: Bool
 
+    /// NS server address for ZTLP-NS resolution (e.g., "52.39.59.34:23096").
+    /// Used by the extension to resolve service names to gateway addresses.
+    let nsServer: String?
+
+    /// Service name for NS resolution and VIP proxy (e.g., "vault").
+    /// The extension registers VIP proxy listeners for this service.
+    let serviceName: String?
+
+    /// Zone name (e.g., "techrockstars.ztlp").
+    /// Used to construct the full NS name: "{serviceName}.{zoneName}".
+    let zoneName: String?
+
     // MARK: - Serialization
 
     /// Serialize to a dictionary suitable for NETunnelProviderProtocol.providerConfiguration.
@@ -62,6 +74,15 @@ struct TunnelConfiguration {
             dict["identityPath"] = path
         }
         dict["fullTunnel"] = fullTunnel
+        if let ns = nsServer {
+            dict["nsServer"] = ns
+        }
+        if let svc = serviceName {
+            dict["serviceName"] = svc
+        }
+        if let zone = zoneName {
+            dict["zoneName"] = zone
+        }
         return dict
     }
 
@@ -79,7 +100,10 @@ struct TunnelConfiguration {
             dnsServers: dict["dnsServers"] as? [String] ?? ["1.1.1.1", "8.8.8.8"],
             mtu: dict["mtu"] as? Int ?? 1400,
             identityPath: dict["identityPath"] as? String,
-            fullTunnel: dict["fullTunnel"] as? Bool ?? false
+            fullTunnel: dict["fullTunnel"] as? Bool ?? false,
+            nsServer: dict["nsServer"] as? String,
+            serviceName: dict["serviceName"] as? String,
+            zoneName: dict["zoneName"] as? String
         )
     }
 }

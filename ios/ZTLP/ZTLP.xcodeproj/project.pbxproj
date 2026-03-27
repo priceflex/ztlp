@@ -42,6 +42,7 @@
 		E5F6A7B8C9D0E1F2A3B4C5D6 /* TunnelLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6A7B8C9D0E1F2 /* TunnelLogger.swift */; };
 		F6A7B8C9D0E1F2A3B4C5D6E7 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F6A7B8C9D0E1F2A3 /* LogsView.swift */; };
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
+		F9A8B7C6D5E4F3A2B1C0D9E8 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -371,6 +372,7 @@
 				18BB853C28A8642292ADFDCA /* PacketTunnelProvider.swift in Sources */,
 				C55BFBBE8FE867873AAFB378 /* TunnelConfiguration.swift in Sources */,
 				E5F6A7B8C9D0E1F2A3B4C5D6 /* TunnelLogger.swift in Sources */,
+				F9A8B7C6D5E4F3A2B1C0D9E8 /* ZTLPBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

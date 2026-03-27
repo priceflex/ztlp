@@ -138,6 +138,21 @@ defmodule ZtlpGateway.ServiceRegistrar do
   def handle_info(:register, state) do
     case :gen_udp.open(0, [:binary, {:active, false}]) do
       {:ok, socket} ->
+        # Ensure zone delegation key exists (self-healing bootstrap)
+        state =
+          if not Map.get(state, :zone_bootstrapped, false) do
+            case bootstrap_zone_delegation(socket, state) do
+              :ok ->
+                Logger.info("[ServiceRegistrar] Zone delegation key bootstrapped for #{state.zone}")
+                Map.put(state, :zone_bootstrapped, true)
+              {:error, reason} ->
+                Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(reason)}")
+                state
+            end
+          else
+            state
+          end
+
         results =
           for name <- state.service_names do
             result = do_register(socket, state.ns_server, name, state)
@@ -325,6 +340,89 @@ defmodule ZtlpGateway.ServiceRegistrar do
       {:error, reason} ->
         {:error, {:dns_error, reason}}
     end
+  end
+
+  # ── Private: Zone Delegation Bootstrap ────────────────────────
+
+  defp bootstrap_zone_delegation(socket, state) do
+    # Register an unsigned KEY record with delegation=true for the zone.
+    # This allows the operator's pubkey to register SVC records.
+    # Uses v1 (unsigned) format since we can't sign before the delegation
+    # record exists (chicken-and-egg). NS must have auth disabled for
+    # initial bootstrap, or the operator must pre-register the zone key.
+    name = state.zone
+    pubkey_hex = Base.encode16(state.pubkey, case: :lower)
+
+    # CBOR-encode the delegation data
+    data = %{
+      "delegation" => true,
+      "public_key" => pubkey_hex
+    }
+
+    data_bin = encode_delegation_cbor(data)
+
+    name_len = byte_size(name)
+    type_byte = 0x01  # KEY record
+
+    # Build unsigned v1 registration (no pubkey trailer)
+    fake_sig = :binary.copy(<<0>>, 64)
+    sig_len = byte_size(fake_sig)
+
+    packet =
+      <<0x09, name_len::16, name::binary, type_byte::8, byte_size(data_bin)::16,
+        data_bin::binary, sig_len::16, fake_sig::binary>>
+
+    {ns_host, ns_port} = state.ns_server
+
+    case resolve_host(ns_host) do
+      {:ok, ip} ->
+        :gen_udp.send(socket, ip, ns_port, packet)
+
+        case :gen_udp.recv(socket, 0, 5_000) do
+          {:ok, {_, _, <<0x06, _::binary>>}} -> :ok
+          {:ok, {_, _, <<0xFF>>}} -> {:error, :rejected}
+          {:ok, {_, _, resp}} -> {:error, {:unexpected, byte_size(resp)}}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, {:dns, reason}}
+    end
+  end
+
+  # Minimal deterministic CBOR encoder for zone delegation data.
+  # Only supports the specific shape: {"delegation": true, "public_key": "hex..."}
+  # Keys are sorted per RFC 8949 §4.2.1.
+  defp encode_delegation_cbor(data) do
+    # Sort keys, encode as CBOR map
+    items =
+      data
+      |> Enum.sort_by(fn {k, _} -> k end)
+      |> Enum.map(fn {k, v} -> encode_cbor_pair(k, v) end)
+      |> Enum.join()
+
+    <<0xA0 + map_size(data)::8>> <> items
+  end
+
+  defp encode_cbor_pair(key, value) when is_binary(key) do
+    encode_cbor_text(key) <> encode_cbor_value(value)
+  end
+
+  defp encode_cbor_text(s) do
+    len = byte_size(s)
+
+    if len < 24 do
+      <<0x60 + len::8>> <> s
+    else
+      <<0x78, len::8>> <> s
+    end
+  end
+
+  defp encode_cbor_value(true), do: <<0xF5>>
+  defp encode_cbor_value(false), do: <<0xF4>>
+
+  defp encode_cbor_value(s) when is_binary(s) do
+    encode_cbor_text(s)
   end
 
   # ── Private: Service Name Derivation ────────────────────────

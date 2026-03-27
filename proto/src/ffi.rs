@@ -534,11 +534,15 @@ pub extern "C" fn ztlp_connect(
     }
 
     // Read config
-    let (service_name, timeout_ms) = if !config.is_null() {
+    let (service_name, timeout_ms, relay_address) = if !config.is_null() {
         let cfg = unsafe { &*config };
-        (cfg.service_name.clone(), cfg.timeout_ms)
+        (
+            cfg.service_name.clone(),
+            cfg.timeout_ms,
+            cfg.relay_address.clone(),
+        )
     } else {
-        (None, 15000)
+        (None, 15000, None)
     };
 
     let inner = client.inner.clone();
@@ -597,6 +601,7 @@ pub extern "C" fn ztlp_connect(
                 &target_string,
                 service_name.as_deref(),
                 timeout_ms,
+                relay_address.as_deref(),
             )
             .await
             {
@@ -664,11 +669,22 @@ async fn do_connect(
     target: &str,
     service_name: Option<&str>,
     timeout_ms: u64,
+    relay_address: Option<&str>,
 ) -> Result<ActiveSession, String> {
-    // Parse target address
-    let send_addr: SocketAddr = target
+    // Parse target address (gateway/peer)
+    let target_addr: SocketAddr = target
         .parse()
         .map_err(|e| format!("invalid target address '{}': {}", target, e))?;
+
+    // If a relay is configured, send packets to the relay instead of directly to the target.
+    // The relay will forward based on the session/service info in the HELLO header.
+    let send_addr: SocketAddr = if let Some(relay) = relay_address {
+        relay
+            .parse()
+            .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
+    } else {
+        target_addr
+    };
 
     // Bind a UDP socket
     let node = TransportNode::bind("0.0.0.0:0")

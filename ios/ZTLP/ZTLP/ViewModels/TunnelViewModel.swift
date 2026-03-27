@@ -212,8 +212,10 @@ final class TunnelViewModel: ObservableObject {
                 logger.debug("Config: service=\(svcName)", source: "Direct")
             }
 
-            // Step 3: NS resolution
-            var target = relay
+            // Step 3: NS resolution — resolve gateway address
+            // target = gateway address (where handshake goes)
+            // relay = relay address (where packets are actually sent, set in config above)
+            var target = ""
             let nsServer = configuration.nsServer.isEmpty ? configuration.targetNodeId : configuration.nsServer
 
             if !svcName.isEmpty && !nsServer.isEmpty {
@@ -228,26 +230,34 @@ final class TunnelViewModel: ObservableObject {
                     target = resolved
                     logger.info("NS resolved: \(nsName) → \(resolved)", source: "Direct")
                 } catch {
-                    logger.warn("NS resolution failed: \(error.localizedDescription). Falling back to relay/NS address.", source: "Direct")
-                    if target.isEmpty {
-                        target = nsServer
-                    }
+                    logger.warn("NS resolution failed: \(error.localizedDescription)", source: "Direct")
                 }
             }
 
+            // Fallback: use targetNodeId if it looks like an address (contains :)
             if target.isEmpty {
-                target = nsServer
+                let fallback = configuration.targetNodeId
+                if fallback.contains(":") {
+                    target = fallback
+                    logger.info("Using targetNodeId as gateway address: \(target)", source: "Direct")
+                }
             }
 
+            // If we have a relay but no gateway target, the relay itself won't work
+            // as a handshake target. We need the actual gateway address.
             guard !target.isEmpty else {
                 status = .disconnected
-                lastError = "No target configured. Enroll first."
-                logger.error("No target address available", source: "Direct")
+                lastError = "Could not resolve gateway address. Check NS server and service name in Settings."
+                logger.error("No gateway address — NS resolution failed and no fallback available", source: "Direct")
                 return
             }
 
-            // Step 4: Connect
-            logger.info("Connecting to \(target)...", source: "Direct")
+            // Step 4: Connect — FFI routes through relay (from config) to target (gateway)
+            if !relay.isEmpty {
+                logger.info("Connecting to gateway \(target) via relay \(relay)...", source: "Direct")
+            } else {
+                logger.info("Connecting directly to \(target)...", source: "Direct")
+            }
             try await bridge.connect(target: target, config: config)
 
             // Step 5: Connected!

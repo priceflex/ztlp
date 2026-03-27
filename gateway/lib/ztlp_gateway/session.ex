@@ -56,18 +56,21 @@ defmodule ZtlpGateway.Session do
   @frame_close 0x05
   @frame_open 0x06
 
-  # ARQ constants (KCP-inspired)
-  @initial_rto_ms 200
-  @min_rto_ms 100
-  @max_rto_ms 10_000
-  @max_retransmits 15
-  @retransmit_check_interval_ms 50
+  # ARQ constants (KCP-inspired, tuned for relay paths)
+  # Default initial RTO accommodates full relay round-trip:
+  # phone → cell tower (50-200ms) → internet → relay → gateway → back.
+  # The adaptive EWMA (RFC 6298) converges to actual RTT within 3-4 packets.
+  @initial_rto_ms 1_000
+  @min_rto_ms 200
+  @max_rto_ms 30_000
+  @max_retransmits 20
+  @retransmit_check_interval_ms 100
   # Linger timeout: how long to keep session alive after backend closes
   # to allow retransmission of unacked data
   @linger_timeout_ms 15_000
 
   # Pacing: max unacked packets in flight (send window)
-  @send_window_size 64
+  @send_window_size 128
   # Pacing interval: ms between packet sends (spreads burst across time)
   @pacing_interval_ms 1
 

@@ -12,7 +12,8 @@ defmodule ZtlpGateway.Application do
       ├── ZtlpGateway.PolicyEngine       (loads config — depends on Config module)
       ├── ZtlpGateway.NsClient           (UDP client for ZTLP-NS queries — optional)
       ├── ZtlpGateway.SessionSupervisor  (DynamicSupervisor for Session GenServers)
-      └── ZtlpGateway.Listener           (UDP socket — starts last, depends on everything)
+      ├── ZtlpGateway.Listener           (UDP socket — starts last, depends on everything)
+      └── ZtlpGateway.ServiceRegistrar   (NS service registration — periodic)
 
   The Identity cache is initialized as a side effect during app start
   (it's a plain ETS table, not a GenServer).
@@ -47,7 +48,8 @@ defmodule ZtlpGateway.Application do
         ZtlpGateway.NsClient,
         {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
         ZtlpGateway.Listener,
-        ZtlpGateway.RelayRegistrar
+        ZtlpGateway.RelayRegistrar,
+        ZtlpGateway.ServiceRegistrar
       ] ++ tls_children()
 
     opts = [strategy: :one_for_one, name: ZtlpGateway.Supervisor]

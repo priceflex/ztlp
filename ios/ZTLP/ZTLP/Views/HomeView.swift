@@ -5,7 +5,7 @@
 // connection timer, traffic stats, and VIP proxy access.
 //
 // When connected via Direct Connect, shows the VIP proxy URL
-// (http://127.0.55.1:8080) with a tap-to-open button for Safari.
+// (http://127.0.0.1:8080) with a tap-to-open button for Safari.
 
 import SwiftUI
 
@@ -22,7 +22,7 @@ struct HomeView: View {
     @State private var currentDuration: String = "--:--:--"
 
     /// VIP proxy URL for Safari access.
-    private let vipURL = "http://127.0.55.1:8080"
+    private let vipURL = "http://127.0.0.1:8080"
 
     var body: some View {
         NavigationStack {

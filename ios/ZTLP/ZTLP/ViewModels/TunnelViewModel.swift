@@ -6,7 +6,7 @@
 // sets up VIP proxy on localhost for Safari access.
 //
 // No VPN/NetworkExtension dependency — accesses services via
-// http://127.0.55.1:8080 (VIP proxy).
+// http://127.0.0.1:8080 (VIP proxy).
 
 import Foundation
 import UIKit
@@ -259,7 +259,7 @@ final class TunnelViewModel: ObservableObject {
             // Set service URL for Safari access
             let svc = configuration.serviceName
             if !svc.isEmpty {
-                serviceURL = "http://127.0.55.1:8080"
+                serviceURL = "http://127.0.0.1:8080"
                 let zone = configuration.zoneName.isEmpty ? "techrockstars.ztlp" : configuration.zoneName
                 serviceDisplayName = "\(svc).\(zone)"
             }
@@ -293,10 +293,10 @@ final class TunnelViewModel: ObservableObject {
 
         do {
             // Register services with VIP addresses
-            // On iOS, Safari can reach 127.0.55.1:8080 directly without DNS
-            try bridge.vipAddService(name: svcName, vip: "127.0.55.1", port: 8080)
-            try bridge.vipAddService(name: svcName, vip: "127.0.55.1", port: 8443)
-            logger.info("VIP services registered: \(svcName) → 127.0.55.1:8080/8443", source: "VIP")
+            // On iOS, Safari can reach 127.0.0.1:8080 directly without DNS
+            try bridge.vipAddService(name: svcName, vip: "127.0.0.1", port: 8080)
+            try bridge.vipAddService(name: svcName, vip: "127.0.0.1", port: 8443)
+            logger.info("VIP services registered: \(svcName) → 127.0.0.1:8080/8443", source: "VIP")
 
             // Start TCP proxy listeners
             try bridge.vipStart()

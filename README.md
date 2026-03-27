@@ -80,6 +80,7 @@ Additional documentation:
 |   | 8.5 Payload |
 | 9 | ZTLP-NS — Distributed Trust Namespace |
 |   | 9.6 Identity Model (DEVICE, USER, GROUP) |
+|   | 9.6.8 Service Registration Authorization |
 |   | 9.7 Admin Wire Protocol (ADMIN\_QUERY) |
 | 10 | Node Initialization and Bootstrap Procedure |
 | 11 | Handshake and Session Establishment |
@@ -104,6 +105,7 @@ Additional documentation:
 | 23 | Trust and Authority Model |
 | 24 | Public Internet Interoperability and Overlay Architecture |
 | 25 | Commercial Adoption and Gateway Deployment Model |
+|   | 25.1.1 Gateway Service Registration |
 | 26 | Policy-Constrained Adaptive Path Selection |
 | 27 | Handshake Flood Resistance |
 | 28 | Identity-Gated Connectivity: No-Open-Port Networking |
@@ -1544,6 +1546,62 @@ present) during policy evaluation and session establishment.
 The revocation cascade is one level deep: revoking a user revokes their
 devices. Revoking a group does NOT revoke its members — it only removes
 the group from policy evaluation.
+
+### 9.6.8 Service Registration Authorization
+
+ZTLP\_SVC records bind a service name to a gateway endpoint address,
+enabling clients to discover services through ZTLP-NS. Because SVC
+records direct client traffic to specific endpoints, unauthorized SVC
+registration represents a traffic hijacking risk. Implementations MUST
+enforce authorization controls on SVC record registration.
+
+**Authorization Model**
+
+SVC record registration follows a zone-delegated trust model:
+
+1. **Zone signing key authorization.** The zone operator generates an
+   Ed25519 signing key pair (the "operator key") and configures ZTLP-NS
+   to trust it as a zone authority. Only REGISTER (0x09) messages for
+   SVC records signed by a trusted zone key are accepted. Unsigned SVC
+   registrations or registrations signed by unrecognized keys MUST be
+   rejected with POLICY\_DENIED (0x04).
+
+2. **Key provisioning.** The operator key is provisioned to authorized
+   gateways as a deployment secret (e.g., a mounted file, environment
+   variable, or secrets manager reference). Gateways use this key to
+   sign SVC registration messages. The key MUST NOT be embedded in
+   application code or container images.
+
+3. **Key rotation.** Operators SHOULD rotate the zone signing key
+   periodically. During rotation, ZTLP-NS MUST accept registrations
+   signed by both the current and previous key for a grace period of at
+   least 2× the registration TTL. After the grace period,
+   implementations SHOULD remove the old key from the trust set.
+
+**Registration Lifecycle**
+
+Gateways MUST register SVC records for all services they proxy on
+startup and refresh them at intervals no greater than TTL/2. If a
+gateway terminates gracefully, it SHOULD send a REVOKE (type 0x05) for
+its SVC records. If a gateway crashes, the SVC record expires naturally
+at TTL, and client NS resolution falls back to other gateways or
+returns NOT\_FOUND.
+
+**Multiple Gateways**
+
+Multiple gateways MAY register SVC records for the same service name.
+When multiple SVC records exist for a name, ZTLP-NS SHOULD return the
+record with the most recent timestamp (freshest registration). Future
+versions MAY support weighted or geographic load balancing across
+multiple SVC records.
+
+**Dev/Demo Mode**
+
+For development and testing, implementations MAY disable registration
+authentication (`ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`). This mode
+accepts unsigned SVC registrations and MUST NOT be used in production
+deployments. Implementations SHOULD log a warning at startup when
+registration authentication is disabled.
 
 ## 9.7 Admin Wire Protocol (ADMIN\_QUERY, 0x13)
 
@@ -3854,6 +3912,7 @@ The following issues remain open or are identified as future work areas:
 | Production relay operator economics | Open | SLA framework, compensation models, and operational requirements for production relay operators serving public ZTLP networks. |
 | Mobile platform SDK | Open | Native iOS and Android SDKs for ZTLP client integration, including hardware key support (Secure Enclave, Android Keystore). |
 | Browser integration | Open | ZTLP-aware `fetch()` and WebSocket support for browser-native zero trust connectivity without VPN or proxy intermediaries. |
+| Persistent NS records with health separation | Open | SVC records registered with a persistence flag that disables TTL expiry. Service health tracked separately via heartbeat probes rather than record expiry. Eliminates periodic re-registration overhead and decouples "service exists" from "service is currently reachable." See Section 9.6.8. |
 
 # 22. References
 
@@ -4070,6 +4129,84 @@ or gateway"| Y["✗"]
     style X fill:#7f8c8d,color:#fff
 ```
 *Only authenticated ZTLP sessions reach internal services. Unauthorized traffic is discarded at the relay or gateway before reaching the service.*
+
+### 25.1.1 Gateway Service Registration
+
+ZTLP gateways MUST register their proxied services with ZTLP-NS to
+enable client-side service discovery. Without NS registration, clients
+cannot resolve service names to gateway endpoints and must rely on
+out-of-band configuration.
+
+**Registration Flow**
+
+On startup, the gateway performs the following steps:
+
+1. Load the operator signing key from the configured secret store.
+2. For each backend service, construct a ZTLP\_SVC record containing
+   the gateway's public endpoint address and service metadata.
+3. Sign the SVC record with the operator key and send a REGISTER (0x09)
+   message to ZTLP-NS.
+4. Schedule periodic re-registration at TTL/2 intervals.
+
+```mermaid
+sequenceDiagram
+    participant GW as ZTLP Gateway
+    participant NS as ZTLP-NS
+    participant C as Client
+
+    Note over GW: Startup
+    GW->>NS: REGISTER vault.zone (SVC, signed by operator key)
+    NS-->>GW: SUCCESS (0x06)
+    Note over GW: Every TTL/2
+    GW->>NS: REGISTER vault.zone (SVC, refresh)
+    NS-->>GW: SUCCESS (0x06)
+
+    C->>NS: QUERY vault.zone (SVC)
+    NS-->>C: RESPONSE_FOUND (gateway endpoint)
+    C->>GW: HELLO (Noise_XX handshake via relay)
+```
+
+**Operator Key Management**
+
+The operator signing key is an Ed25519 key pair that authorizes a
+gateway to register SVC records within a zone. Production deployments
+MUST provision this key securely:
+
+| Method | Environment | Notes |
+|--------|-------------|-------|
+| Docker secret | Container deployments | Mounted as read-only file at runtime |
+| Environment variable | Simple deployments | `ZTLP_GATEWAY_OPERATOR_KEY` (hex-encoded seed) |
+| Secrets manager | Cloud deployments | AWS Secrets Manager, HashiCorp Vault, etc. |
+| File on disk | Bare-metal deployments | Restricted permissions (0400, root-owned) |
+
+The same operator key is shared across all gateways within an
+operator's zone. This enables any authorized gateway to register
+services while preventing unauthorized gateways from hijacking traffic
+(see Section 9.6.8).
+
+**Relay Registration vs. NS Registration**
+
+Gateways perform two distinct registrations that serve different
+purposes:
+
+| Registration | Target | Purpose | Protocol |
+|-------------|--------|---------|----------|
+| Relay registration | ZTLP Relay | Tells the relay where to forward client handshakes | GATEWAY\_REGISTER (0x0A) via UDP to relay |
+| NS service registration | ZTLP-NS | Tells clients which gateway hosts a service | REGISTER (0x09) via UDP to NS |
+
+Both registrations are required for end-to-end service discovery. A
+gateway registered with a relay but not with NS is reachable but not
+discoverable. A gateway registered with NS but not with a relay
+requires clients to connect directly (no relay-assisted NAT traversal).
+
+**Failure Handling**
+
+If NS registration fails (timeout, rejection, or network error), the
+gateway MUST retry with exponential backoff starting at 5 seconds and
+capping at 60 seconds. Registration failure MUST NOT prevent the
+gateway from accepting direct connections or relay-forwarded sessions.
+The gateway SHOULD log registration failures at WARNING level and
+expose a registration status metric for monitoring.
 
 ## 25.2 Node Identity Types for Commercial Services
 

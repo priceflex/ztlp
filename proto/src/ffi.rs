@@ -1783,7 +1783,7 @@ pub extern "C" fn ztlp_string_free(s: *mut c_char) {
 
 #[no_mangle]
 pub extern "C" fn ztlp_version() -> *const c_char {
-    static VERSION: &[u8] = b"0.10.0\0";
+    static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
     VERSION.as_ptr() as *const c_char
 }
 
@@ -2222,7 +2222,7 @@ mod tests {
         assert!(!ptr.is_null());
         let version = unsafe { CStr::from_ptr(ptr) };
         let version_str = version.to_str().expect("version should be valid UTF-8");
-        assert_eq!(version_str, "0.10.0");
+        assert_eq!(version_str, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

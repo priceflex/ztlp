@@ -70,8 +70,10 @@ defmodule ZtlpGateway.Session do
   @linger_timeout_ms 15_000
 
   # Congestion control (TCP-like AIMD)
-  # Initial congestion window — 32 covers up to ~38KB without slow start
-  @initial_cwnd 32
+  # Initial congestion window — 64 covers up to ~77KB without slow start.
+  # This handles concurrent 5x GET 10KB (45 packets) in a single burst,
+  # plus small requests without needing slow start at all.
+  @initial_cwnd 64
   # Maximum congestion window (packets). 256 × 1200 = 307KB.
   # Conservative max to avoid overwhelming cellular/relay paths.
   @max_cwnd 256
@@ -193,6 +195,8 @@ defmodule ZtlpGateway.Session do
       # Paced send queue: list of plaintext chunks waiting to be sent
       # Each entry is a raw plaintext (not yet framed/encrypted)
       send_queue: :queue.new(),
+      # Backend address for legacy reconnection on idle-close
+      backend_addr: nil,
       # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
       # When populated, the session is in multiplexed mode.
       streams: %{},
@@ -258,26 +262,36 @@ defmodule ZtlpGateway.Session do
     {:noreply, state}
   end
 
-  # Backend closed the TCP connection — enter draining mode
-  # Keep session alive to drain send_queue + retransmit unacked data + FIN
+  # Backend closed the TCP connection
+  # In mux mode: drain that stream's data and keep session alive (handled separately)
+  # In legacy mode: backend may close idle connections (e.g. vaultwarden HTTP timeout).
+  # Instead of killing the session, clear backend_pid so it reconnects on next data.
   def handle_info(:backend_closed, state) do
-    queue_len = :queue.len(state.send_queue)
-    buf_len = map_size(state.send_buffer)
-
-    if queue_len == 0 and buf_len == 0 do
-      # Nothing queued or in flight — send FIN and terminate
-      state = if state.r2i_key, do: send_fin(state), else: state
-      terminate_session(state, :backend_close)
-    else
-      Logger.info("[Session] Backend closed, entering drain mode (#{queue_len} queued, #{buf_len} in send_buffer)")
-      # Schedule linger timeout
-      Process.send_after(self(), :linger_timeout, @linger_timeout_ms)
-      # Ensure retransmit timer is running
-      retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
-      state = %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}
-      # Try to flush the queue — FIN will be sent when queue + buffer are both empty
-      state = flush_send_queue(state)
+    if state.mux_mode do
+      # Mux mode shouldn't get bare :backend_closed (uses {:backend_closed, stream_id}).
+      # If it does, ignore — individual stream closures handle their own cleanup.
+      Logger.warning("[Session] Unexpected bare :backend_closed in mux mode, ignoring")
       {:noreply, state}
+    else
+      queue_len = :queue.len(state.send_queue)
+      buf_len = map_size(state.send_buffer)
+
+      if queue_len == 0 and buf_len == 0 do
+        # Nothing pending — keep session alive but clear backend_pid.
+        # Next incoming data packet will reconnect to backend.
+        Logger.info("[Session] Legacy backend closed (idle), session stays alive for reconnect")
+        {:noreply, %{state | backend_pid: nil}}
+      else
+        Logger.info("[Session] Legacy backend closed, entering drain mode (#{queue_len} queued, #{buf_len} in send_buffer)")
+        # Schedule linger timeout
+        Process.send_after(self(), :linger_timeout, @linger_timeout_ms)
+        # Ensure retransmit timer is running
+        retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
+        state = %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}
+        # Try to flush the queue — FIN will be sent when queue + buffer are both empty
+        state = flush_send_queue(state)
+        {:noreply, state}
+      end
     end
   end
 
@@ -516,6 +530,7 @@ defmodule ZtlpGateway.Session do
                             i2r_key: keys.i2r_key,
                             r2i_key: keys.r2i_key,
                             backend_pid: backend_pid,
+                            backend_addr: {host, port, self()},
                             pending_packets: []
                         }
 
@@ -633,6 +648,23 @@ defmodule ZtlpGateway.Session do
       # Legacy single-stream mode: [data_seq(8) | payload]
       <<data_seq::big-64, payload::binary>> = rest
       Logger.info("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
+
+      # Reconnect backend if it was closed (e.g. idle timeout from vaultwarden)
+      state =
+        if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
+          Logger.info("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
+          case Backend.start_link(state.backend_addr) do
+            {:ok, pid} ->
+              Logger.info("[Session] Legacy backend reconnected: #{inspect(pid)}")
+              %{state | backend_pid: pid}
+            {:error, reason} ->
+              Logger.warning("[Session] Legacy backend reconnect failed: #{inspect(reason)}")
+              state
+          end
+        else
+          state
+        end
+
       if state.backend_pid && byte_size(payload) > 0 do
         Logger.info("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
         Backend.send_data(state.backend_pid, payload)

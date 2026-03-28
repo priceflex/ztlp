@@ -60,19 +60,22 @@ defmodule ZtlpGateway.Session do
   # Default initial RTO accommodates full relay round-trip:
   # phone → cell tower (50-200ms) → internet → relay → gateway → back.
   # The adaptive EWMA (RFC 6298) converges to actual RTT within 3-4 packets.
-  @initial_rto_ms 1_000
-  @min_rto_ms 200
+  @initial_rto_ms 300
+  @min_rto_ms 100
   @max_rto_ms 30_000
   @max_retransmits 20
-  @retransmit_check_interval_ms 100
+  @retransmit_check_interval_ms 50
   # Linger timeout: how long to keep session alive after backend closes
   # to allow retransmission of unacked data
   @linger_timeout_ms 15_000
 
   # Pacing: max unacked packets in flight (send window)
-  @send_window_size 128
-  # Pacing interval: ms between packet sends (spreads burst across time)
+  # 512 packets × 1200 bytes = 614KB. At 60ms RTT = ~10 MB/s theoretical max.
+  @send_window_size 512
+  # Pacing interval: ms between burst sends
   @pacing_interval_ms 1
+  # Max packets sent per pacing tick (burst size to reduce timer overhead)
+  @burst_size 32
 
   # Maximum plaintext payload per ZTLP data packet.
   # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.
@@ -823,6 +826,19 @@ defmodule ZtlpGateway.Session do
   # Paces sends by scheduling a timer for the next packet if the queue
   # is non-empty but the window is full.
   defp flush_send_queue(state) do
+    flush_send_queue(state, @burst_size)
+  end
+
+  defp flush_send_queue(state, 0) do
+    # Burst limit reached — schedule next tick if more to send
+    if not :queue.is_empty(state.send_queue) do
+      schedule_pacing_timer(state)
+    else
+      state
+    end
+  end
+
+  defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
     cond do
       :queue.is_empty(state.send_queue) ->
@@ -836,8 +852,7 @@ defmodule ZtlpGateway.Session do
 
       inflight >= @send_window_size ->
         # Window full — schedule pacing timer to retry
-        state = schedule_pacing_timer(state)
-        state
+        schedule_pacing_timer(state)
 
       true ->
         # Send one item from the queue
@@ -864,18 +879,8 @@ defmodule ZtlpGateway.Session do
 
         case result do
           {:ok, new_state} ->
-            # If more in queue and window allows, schedule next send
-            if not :queue.is_empty(remaining) do
-              schedule_pacing_timer(new_state)
-            else
-              # Queue empty. If draining, check if we should send FIN
-              if new_state.draining do
-                # FIN will be sent when all buffered packets are ACKed
-                new_state
-              else
-                new_state
-              end
-            end
+            # Continue burst — send more packets in this tick
+            flush_send_queue(new_state, remaining_burst - 1)
           {:error, _reason} ->
             state
         end

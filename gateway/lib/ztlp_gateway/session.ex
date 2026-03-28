@@ -69,13 +69,19 @@ defmodule ZtlpGateway.Session do
   # to allow retransmission of unacked data
   @linger_timeout_ms 15_000
 
-  # Pacing: max unacked packets in flight (send window)
-  # 512 packets × 1200 bytes = 614KB. At 60ms RTT = ~10 MB/s theoretical max.
-  @send_window_size 512
+  # Congestion control (TCP-like AIMD)
+  # Initial congestion window (RFC 6928 IW=10)
+  @initial_cwnd 10
+  # Maximum congestion window (packets). 512 × 1200 = 614KB.
+  @max_cwnd 512
+  # Minimum cwnd (never go below this)
+  @min_cwnd 2
+  # Slow-start threshold — start unlimited, let actual loss set it
+  @initial_ssthresh 512
   # Pacing interval: ms between burst sends
   @pacing_interval_ms 1
   # Max packets sent per pacing tick (burst size to reduce timer overhead)
-  @burst_size 32
+  @burst_size 16
 
   # Maximum plaintext payload per ZTLP data packet.
   # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.
@@ -190,7 +196,12 @@ defmodule ZtlpGateway.Session do
       # When populated, the session is in multiplexed mode.
       streams: %{},
       mux_mode: false,
-      pacing_timer_ref: nil
+      pacing_timer_ref: nil,
+      # Congestion control (AIMD)
+      cwnd: @initial_cwnd,
+      ssthresh: @initial_ssthresh,
+      # Track data_seq of last ACK for duplicate detection
+      last_acked_data_seq: -1
     }
 
     {:ok, state}
@@ -360,6 +371,16 @@ defmodule ZtlpGateway.Session do
 
             Logger.debug("[Session] RTO retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
             send_udp(acc, new_packet)
+
+            # Multiplicative decrease on loss (only once per loss event)
+            acc = if retransmit_count == 0 do
+              new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
+              new_cwnd = max(new_ssthresh, @min_cwnd)
+              Logger.debug("[Session] Loss detected: cwnd #{Float.round(acc.cwnd, 1)} → #{new_cwnd}, ssthresh → #{new_ssthresh}")
+              %{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}
+            else
+              acc
+            end
 
             # Remove old entry, add new one with new seq
             updated_buffer = acc.send_buffer
@@ -629,6 +650,8 @@ defmodule ZtlpGateway.Session do
         is_integer(ds) and ds <= acked_data_seq
       end)
 
+    newly_acked = length(acked_entries)
+
     # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
     state =
       Enum.reduce(acked_entries, state, fn {_seq, {_pkt, sent_at, retransmit_count, _ds}}, acc ->
@@ -641,7 +664,23 @@ defmodule ZtlpGateway.Session do
 
     send_buffer = Map.new(remaining)
 
-    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, removed #{length(acked_entries)} from send_buffer, #{map_size(send_buffer)} remaining")
+    # Congestion control: grow window on new ACKs
+    state = if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
+      cwnd = state.cwnd
+      ssthresh = state.ssthresh
+      new_cwnd = if cwnd < ssthresh do
+        # Slow start: grow by newly_acked (exponential)
+        min(cwnd + newly_acked, @max_cwnd)
+      else
+        # Congestion avoidance: grow by ~1 per RTT (linear)
+        min(cwnd + newly_acked / cwnd, @max_cwnd)
+      end
+      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
+    else
+      state
+    end
+
+    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")
 
     state = %{state | send_buffer: send_buffer}
 
@@ -668,6 +707,11 @@ defmodule ZtlpGateway.Session do
     Logger.info("[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}")
 
     now = System.monotonic_time(:millisecond)
+
+    # Fast retransmit loss event — reduce cwnd once
+    new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
+    new_cwnd = max(new_ssthresh, @min_cwnd)
+    state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh}
 
     state =
       Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->
@@ -840,6 +884,7 @@ defmodule ZtlpGateway.Session do
 
   defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
+    effective_window = min(trunc(state.cwnd), @max_cwnd)
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.
@@ -850,7 +895,7 @@ defmodule ZtlpGateway.Session do
           state
         end
 
-      inflight >= @send_window_size ->
+      inflight >= effective_window ->
         # Window full — schedule pacing timer to retry
         schedule_pacing_timer(state)
 

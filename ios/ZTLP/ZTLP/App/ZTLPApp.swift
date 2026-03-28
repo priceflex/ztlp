@@ -22,33 +22,52 @@ struct ZTLPApp: App {
             RootView()
                 .environmentObject(configuration)
                 .environmentObject(networkMonitor)
-                .onAppear {
-                    initializeZTLP()
-                }
-        }
-    }
-
-    /// Initialize the ZTLP C library on first launch.
-    private func initializeZTLP() {
-        do {
-            try ZTLPBridge.shared.initialize()
-        } catch {
-            // Non-fatal — the user can still browse settings.
-            // Connection attempts will fail with a clear error.
-            print("[ZTLP] Library initialization failed: \(error)")
         }
     }
 }
 
-/// Root view that switches between onboarding and the main tab view.
+/// Root view that shows a launch screen while initializing, then switches
+/// between onboarding and the main tab view.
 struct RootView: View {
     @EnvironmentObject var configuration: ZTLPConfiguration
+    @State private var isReady = false
 
     var body: some View {
-        if configuration.hasCompletedOnboarding {
-            ContentView()
+        if isReady {
+            if configuration.hasCompletedOnboarding {
+                ContentView()
+            } else {
+                OnboardingView()
+            }
         } else {
-            OnboardingView()
+            // Launch screen — shown while ZTLP library initializes
+            ZStack {
+                Color(.systemBackground)
+                    .ignoresSafeArea()
+                VStack(spacing: 16) {
+                    Image(systemName: "shield.checkered")
+                        .font(.system(size: 64))
+                        .foregroundColor(.accentColor)
+                    Text("ZTLP")
+                        .font(.title.bold())
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle())
+                    Text("Initializing...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .task {
+                // Move initialization off the immediate SwiftUI render path
+                do {
+                    try ZTLPBridge.shared.initialize()
+                } catch {
+                    print("[ZTLP] Library initialization failed: \(error)")
+                }
+                // Brief delay so the launch screen is visible (avoids flicker)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                isReady = true
+            }
         }
     }
 }

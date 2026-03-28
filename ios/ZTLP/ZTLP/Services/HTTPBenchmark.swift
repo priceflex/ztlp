@@ -40,21 +40,15 @@ final class HTTPBenchmark: ObservableObject {
 
     private let logger = TunnelLogger.shared
 
-    /// VIP proxy address for HTTP traffic.
-    /// Must be loopback (127.x.x.x). We use 127.0.0.2:8080 to avoid conflicting
-    /// with any existing VIP proxy on 127.0.0.1.
-    /// If the app already has a VIP proxy active (e.g., vault.techrockstars.ztlp
-    /// on 127.0.0.1:8080), we'll use that directly.
+    /// VIP proxy address for HTTP echo benchmark traffic.
+    /// Uses 127.0.0.2:8080 to avoid conflicting with the app's existing
+    /// VIP proxy on 127.0.0.1 (which maps to vault/Vaultwarden).
     private let vipAddress = "127.0.0.2"
     private let vipPort: UInt16 = 8080
-    private var baseURL: String {
-        // Check if there's already a VIP proxy on 127.0.0.1:8080
-        // (the app's default for vault.techrockstars.ztlp)
-        if ZTLPBridge.shared.hasClient {
-            return "http://127.0.0.1:\(vipPort)"
-        }
-        return "http://\(vipAddress):\(vipPort)"
-    }
+    private var baseURL: String { "http://\(vipAddress):\(vipPort)" }
+
+    /// Track whether we created our own connection (so we can clean up).
+    private var ownedConnection = false
 
     /// URLSession configured to not cache and use short timeouts.
     private lazy var session: URLSession = {
@@ -99,8 +93,8 @@ final class HTTPBenchmark: ObservableObject {
         logger.info("Date: \(ISO8601DateFormatter().string(from: Date()))", source: "HTTPBench")
         logger.info("Library: \(ZTLPBridge.shared.version)", source: "HTTPBench")
         logger.info("Relay: \(relayAddress)", source: "HTTPBench")
-        logger.info("HTTP Target: \(baseURL)", source: "HTTPBench")
-        logger.info("Existing connection: \(ZTLPBridge.shared.hasClient ? "yes" : "no")", source: "HTTPBench")
+        logger.info("HTTP VIP: \(baseURL) (separate from vault VIP)", source: "HTTPBench")
+        logger.info("Existing connection: \(ZTLPBridge.shared.hasClient ? "yes — will reuse" : "no — will create")", source: "HTTPBench")
         logger.info("═══════════════════════════════════════════", source: "HTTPBench")
 
         // Step 1: Establish ZTLP tunnel + VIP proxy
@@ -176,43 +170,50 @@ final class HTTPBenchmark: ObservableObject {
     // MARK: - Tunnel Setup
 
     private func setupTunnel() async -> Bool {
-        // If already connected with a VIP proxy (e.g., user toggled VPN on Home tab),
-        // just reuse that connection. The existing VIP on 127.0.0.1:8080 should work.
-        if ZTLPBridge.shared.hasClient {
-            connectionStatus = "Using existing connection"
-            logger.info("Reusing existing ZTLP connection + VIP proxy at \(baseURL)", source: "HTTPBench")
-            return true
+        // The existing connection routes to the "vault" service (Vaultwarden).
+        // HTTP benchmarks need the "http" service (echo server).
+        // We add a new VIP mapping on 127.0.0.2:8080 for the http service,
+        // reusing the existing ZTLP client connection.
+        //
+        // If no connection exists, we create a fresh one.
+
+        if !ZTLPBridge.shared.hasClient {
+            // No existing connection — create one
+            do {
+                let identity = try ZTLPBridge.shared.generateIdentity()
+                try ZTLPBridge.shared.createClient(identity: identity)
+
+                let config = ZTLPConfigHandle()
+                try config.setRelay(relayAddress)
+                try config.setTimeoutMs(15000)
+                try config.setService("http")
+
+                connectionStatus = "Handshaking..."
+                try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
+                ownedConnection = true
+            } catch {
+                logger.error("Connection failed: \(error.localizedDescription)", source: "HTTPBench")
+                return false
+            }
+        } else {
+            logger.info("Reusing existing ZTLP connection", source: "HTTPBench")
         }
 
-        // Otherwise, establish a fresh connection
-        do {
-            let identity = try ZTLPBridge.shared.generateIdentity()
-            try ZTLPBridge.shared.createClient(identity: identity)
-
-            let config = ZTLPConfigHandle()
-            try config.setRelay(relayAddress)
-            try config.setTimeoutMs(15000)
-            try config.setService("http")
-
-            connectionStatus = "Handshaking..."
-            try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
-        } catch {
-            logger.error("Connection failed: \(error.localizedDescription)", source: "HTTPBench")
-            return false
-        }
-
-        // Register VIP for HTTP service (loopback required)
+        // Register a VIP for "http" service on 127.0.0.2:8080
+        // This is separate from the existing vault VIP on 127.0.0.1:8080
         do {
             try ZTLPBridge.shared.vipAddService(name: "http", vip: vipAddress, port: vipPort)
             try ZTLPBridge.shared.vipStart()
-            connectionStatus = "VIP proxy active"
-            logger.info("VIP proxy started: \(baseURL) → http service through tunnel", source: "HTTPBench")
+            connectionStatus = "VIP proxy active (\(baseURL))"
+            logger.info("HTTP VIP proxy: \(baseURL) → 'http' service through tunnel", source: "HTTPBench")
             // Give VIP proxy a moment to bind
             try? await Task.sleep(nanoseconds: 500_000_000)
             return true
         } catch {
-            logger.error("VIP proxy setup failed: \(error.localizedDescription)", source: "HTTPBench")
-            return false
+            // If VIP add fails (e.g., already registered), try using it anyway
+            logger.warn("VIP setup note: \(error.localizedDescription) — trying anyway", source: "HTTPBench")
+            connectionStatus = "VIP setup warning — testing endpoint"
+            return true
         }
     }
 

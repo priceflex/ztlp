@@ -99,6 +99,17 @@ const FRAME_DATA: u8 = 0x00;
 /// Well under 1280 IPv6 minimum MTU and 1464 cellular MTU.
 const MAX_MUX_PAYLOAD: usize = 1195;
 
+/// Upload pacing: max packets to send before yielding.
+/// Prevents overwhelming the cellular/relay path with a burst of hundreds of
+/// packets. After sending this many packets, we yield briefly to let the
+/// network drain and ACKs arrive.
+const UPLOAD_BURST_SIZE: usize = 32;
+/// Microseconds to sleep between upload bursts.
+/// 1ms allows ~32 × 1195 = ~38KB per burst, ~38 MB/s theoretical max.
+/// In practice, cellular RTT (~60ms) limits effective throughput, but pacing
+/// prevents buffer bloat and packet drops.
+const UPLOAD_BURST_PAUSE_US: u64 = 1000;
+
 /// Frame type for closing a multiplexed stream.
 const FRAME_CLOSE: u8 = 0x05;
 
@@ -760,6 +771,7 @@ async fn handle_mux_connection<R, W>(
                 let data = &buf[..n];
                 let mut offset = 0;
                 let mut send_ok = true;
+                let mut burst_count = 0usize;
                 while offset < n {
                     let chunk_end = std::cmp::min(offset + MAX_MUX_PAYLOAD, n);
                     let chunk = &data[offset..chunk_end];
@@ -775,6 +787,15 @@ async fn handle_mux_connection<R, W>(
                     }
                     data_seq.fetch_add(1, Ordering::Relaxed);
                     offset = chunk_end;
+
+                    // Pace uploads to avoid overwhelming the network path.
+                    // Without pacing, 878 packets (1MB) would burst in <10ms,
+                    // causing massive packet loss on cellular/relay paths.
+                    burst_count += 1;
+                    if burst_count >= UPLOAD_BURST_SIZE {
+                        tokio::time::sleep(std::time::Duration::from_micros(UPLOAD_BURST_PAUSE_US)).await;
+                        burst_count = 0;
+                    }
                 }
                 if !send_ok {
                     break;

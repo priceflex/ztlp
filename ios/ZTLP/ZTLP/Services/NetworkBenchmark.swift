@@ -107,8 +107,7 @@ final class NetworkBenchmark: ObservableObject {
             try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
         }
 
-        // Cleanup
-        ZTLPBridge.shared.destroyClient()
+        // Don't destroy client — user may have an active VPN connection
         connectionStatus = "Complete"
         progress = 1.0
         currentBenchmark = "Done"

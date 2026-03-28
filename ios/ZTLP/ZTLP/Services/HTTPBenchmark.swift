@@ -41,10 +41,20 @@ final class HTTPBenchmark: ObservableObject {
     private let logger = TunnelLogger.shared
 
     /// VIP proxy address for HTTP traffic.
-    /// The ZTLP tunnel maps this local address to the remote HTTP echo server.
-    private let vipAddress = "10.0.0.10"
+    /// Must be loopback (127.x.x.x). We use 127.0.0.2:8080 to avoid conflicting
+    /// with any existing VIP proxy on 127.0.0.1.
+    /// If the app already has a VIP proxy active (e.g., vault.techrockstars.ztlp
+    /// on 127.0.0.1:8080), we'll use that directly.
+    private let vipAddress = "127.0.0.2"
     private let vipPort: UInt16 = 8080
-    private var baseURL: String { "http://\(vipAddress):\(vipPort)" }
+    private var baseURL: String {
+        // Check if there's already a VIP proxy on 127.0.0.1:8080
+        // (the app's default for vault.techrockstars.ztlp)
+        if ZTLPBridge.shared.hasClient {
+            return "http://127.0.0.1:\(vipPort)"
+        }
+        return "http://\(vipAddress):\(vipPort)"
+    }
 
     /// URLSession configured to not cache and use short timeouts.
     private lazy var session: URLSession = {
@@ -89,7 +99,8 @@ final class HTTPBenchmark: ObservableObject {
         logger.info("Date: \(ISO8601DateFormatter().string(from: Date()))", source: "HTTPBench")
         logger.info("Library: \(ZTLPBridge.shared.version)", source: "HTTPBench")
         logger.info("Relay: \(relayAddress)", source: "HTTPBench")
-        logger.info("VIP Proxy: \(baseURL)", source: "HTTPBench")
+        logger.info("HTTP Target: \(baseURL)", source: "HTTPBench")
+        logger.info("Existing connection: \(ZTLPBridge.shared.hasClient ? "yes" : "no")", source: "HTTPBench")
         logger.info("═══════════════════════════════════════════", source: "HTTPBench")
 
         // Step 1: Establish ZTLP tunnel + VIP proxy
@@ -165,26 +176,32 @@ final class HTTPBenchmark: ObservableObject {
     // MARK: - Tunnel Setup
 
     private func setupTunnel() async -> Bool {
-        // If not already connected, connect
-        if !ZTLPBridge.shared.hasClient {
-            do {
-                let identity = try ZTLPBridge.shared.generateIdentity()
-                try ZTLPBridge.shared.createClient(identity: identity)
-
-                let config = ZTLPConfigHandle()
-                try config.setRelay(relayAddress)
-                try config.setTimeoutMs(15000)
-                try config.setService("http")
-
-                connectionStatus = "Handshaking..."
-                try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
-            } catch {
-                logger.error("Connection failed: \(error.localizedDescription)", source: "HTTPBench")
-                return false
-            }
+        // If already connected with a VIP proxy (e.g., user toggled VPN on Home tab),
+        // just reuse that connection. The existing VIP on 127.0.0.1:8080 should work.
+        if ZTLPBridge.shared.hasClient {
+            connectionStatus = "Using existing connection"
+            logger.info("Reusing existing ZTLP connection + VIP proxy at \(baseURL)", source: "HTTPBench")
+            return true
         }
 
-        // Register VIP for HTTP service
+        // Otherwise, establish a fresh connection
+        do {
+            let identity = try ZTLPBridge.shared.generateIdentity()
+            try ZTLPBridge.shared.createClient(identity: identity)
+
+            let config = ZTLPConfigHandle()
+            try config.setRelay(relayAddress)
+            try config.setTimeoutMs(15000)
+            try config.setService("http")
+
+            connectionStatus = "Handshaking..."
+            try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
+        } catch {
+            logger.error("Connection failed: \(error.localizedDescription)", source: "HTTPBench")
+            return false
+        }
+
+        // Register VIP for HTTP service (loopback required)
         do {
             try ZTLPBridge.shared.vipAddService(name: "http", vip: vipAddress, port: vipPort)
             try ZTLPBridge.shared.vipStart()

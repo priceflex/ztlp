@@ -1,7 +1,7 @@
 // ContentView.swift
 // ZTLP
 //
-// Root tab navigation — 4 tabs: Home, Services, Logs, Settings.
+// Root tab navigation — 5 tabs: Home, Services, Logs, Bench, Settings.
 // Clean layout matching the macOS app structure.
 
 import SwiftUI
@@ -22,6 +22,7 @@ struct ContentView: View {
         case home
         case services
         case logs
+        case bench
         case settings
     }
 
@@ -49,6 +50,12 @@ struct ContentView: View {
                             Label("Logs", systemImage: "doc.text.magnifyingglass")
                         }
                         .tag(Tab.logs)
+
+                    BenchmarkView()
+                        .tabItem {
+                            Label("Bench", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                        }
+                        .tag(Tab.bench)
 
                     SettingsView(
                         viewModel: settingsVM,

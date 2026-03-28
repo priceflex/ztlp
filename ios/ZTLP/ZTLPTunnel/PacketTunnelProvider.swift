@@ -600,7 +600,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func createTunnelNetworkSettings(
         tunnelRemoteAddress: String
     ) -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: tunnelRemoteAddress)
+        // NEPacketTunnelNetworkSettings requires a bare IP address (no port).
+        // The address may contain a port (e.g., "34.219.64.205:23095"), so strip it.
+        let remoteAddress = tunnelRemoteAddress.components(separatedBy: ":").first ?? tunnelRemoteAddress
+
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
 
         // IPv4: split tunnel that captures no real traffic
         let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])

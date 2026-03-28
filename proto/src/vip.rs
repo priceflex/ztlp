@@ -88,6 +88,17 @@ const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
 /// Frame type for tunnel data frames.
 const FRAME_DATA: u8 = 0x00;
 
+/// Maximum TCP data bytes per ZTLP tunnel frame.
+///
+/// Calculation: gateway uses `@max_payload_bytes = 1200` as the max plaintext
+/// frame size (including mux header). The mux header is 5 bytes:
+/// `[FRAME_DATA(1) | stream_id(4)]`. So max TCP data = 1200 - 5 = 1195.
+///
+/// The resulting ZTLP packet on the wire:
+/// header(46) + encrypted(plaintext + 16) = 46 + 1200 + 16 = 1262 bytes
+/// Well under 1280 IPv6 minimum MTU and 1464 cellular MTU.
+const MAX_MUX_PAYLOAD: usize = 1195;
+
 /// Frame type for closing a multiplexed stream.
 const FRAME_CLOSE: u8 = 0x05;
 
@@ -743,20 +754,32 @@ async fn handle_mux_connection<R, W>(
         {
             Ok(Ok(0)) => break, // Connection closed
             Ok(Ok(n)) => {
-                // Build multiplexed tunnel frame: [FRAME_DATA | stream_id(4 BE) | payload]
-                let mut framed = Vec::with_capacity(1 + 4 + n);
-                framed.push(FRAME_DATA);
-                framed.extend_from_slice(&stream_id.to_be_bytes());
-                framed.extend_from_slice(&buf[..n]);
+                // Chunk TCP data into ZTLP-safe frames.
+                // Each frame: [FRAME_DATA | stream_id(4 BE) | payload]
+                // Max plaintext per ZTLP packet = 1200 bytes, so max payload = 1195.
+                let data = &buf[..n];
+                let mut offset = 0;
+                let mut send_ok = true;
+                while offset < n {
+                    let chunk_end = std::cmp::min(offset + MAX_MUX_PAYLOAD, n);
+                    let chunk = &data[offset..chunk_end];
+                    let mut framed = Vec::with_capacity(1 + 4 + chunk.len());
+                    framed.push(FRAME_DATA);
+                    framed.extend_from_slice(&stream_id.to_be_bytes());
+                    framed.extend_from_slice(chunk);
 
-                if let Err(e) = transport.send_data(session_id, &framed, peer_addr).await {
-                    tracing::warn!("VIP tunnel send error stream {}: {}", stream_id, e);
+                    if let Err(e) = transport.send_data(session_id, &framed, peer_addr).await {
+                        tracing::warn!("VIP tunnel send error stream {}: {}", stream_id, e);
+                        send_ok = false;
+                        break;
+                    }
+                    data_seq.fetch_add(1, Ordering::Relaxed);
+                    offset = chunk_end;
+                }
+                if !send_ok {
                     break;
                 }
                 bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
-
-                // Legacy: also bump data_seq for global ACK tracking
-                data_seq.fetch_add(1, Ordering::Relaxed);
             }
             Ok(Err(e)) => {
                 tracing::debug!("VIP TCP read error stream {}: {}", stream_id, e);

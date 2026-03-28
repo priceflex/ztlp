@@ -65,9 +65,8 @@ defmodule ZtlpGateway.Session do
   @max_rto_ms 30_000
   @max_retransmits 20
   @retransmit_check_interval_ms 50
-  # Linger timeout: how long to keep session alive after backend closes
-  # to allow retransmission of unacked data
-  @linger_timeout_ms 15_000
+  # Linger timeout removed — legacy sessions no longer drain on backend close.
+  # The :linger_timeout handler remains as a safety no-op.
 
   # Congestion control (TCP-like AIMD)
   # Initial congestion window — 64 covers up to ~77KB without slow start.
@@ -276,22 +275,11 @@ defmodule ZtlpGateway.Session do
       queue_len = :queue.len(state.send_queue)
       buf_len = map_size(state.send_buffer)
 
-      if queue_len == 0 and buf_len == 0 do
-        # Nothing pending — keep session alive but clear backend_pid.
-        # Next incoming data packet will reconnect to backend.
-        Logger.info("[Session] Legacy backend closed (idle), session stays alive for reconnect")
-        {:noreply, %{state | backend_pid: nil}}
-      else
-        Logger.info("[Session] Legacy backend closed, entering drain mode (#{queue_len} queued, #{buf_len} in send_buffer)")
-        # Schedule linger timeout
-        Process.send_after(self(), :linger_timeout, @linger_timeout_ms)
-        # Ensure retransmit timer is running
-        retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
-        state = %{state | draining: true, backend_pid: nil, retransmit_timer_ref: retransmit_timer_ref}
-        # Try to flush the queue — FIN will be sent when queue + buffer are both empty
-        state = flush_send_queue(state)
-        {:noreply, state}
-      end
+      # For legacy sessions, keep alive for backend reconnect instead of draining.
+      # Even if there are a few unacked packets in send_buffer, those will be
+      # retransmitted by the existing retransmit timer. No need to kill the session.
+      Logger.info("[Session] Legacy backend closed (#{queue_len} queued, #{buf_len} in send_buffer), keeping session alive for reconnect")
+      {:noreply, %{state | backend_pid: nil}}
     end
   end
 

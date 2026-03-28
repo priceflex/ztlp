@@ -75,8 +75,10 @@ final class HTTPBenchmark: ObservableObject {
     }
 
     private var gatewayTarget: String {
-        UserDefaults(suiteName: "group.com.ztlp.shared")?.string(forKey: "ztlp_target_node_id")
-            ?? "0000000000000000"
+        // The target for ztlp_connect is the relay address (IP:port).
+        // The node ID (ztlp_target_node_id) is for the VPN extension's
+        // tunnel configuration, not for direct in-process connections.
+        relayAddress
     }
 
     // MARK: - Run All

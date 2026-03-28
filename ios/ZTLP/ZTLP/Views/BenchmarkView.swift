@@ -140,7 +140,7 @@ struct BenchmarkResultRow: View {
                 Spacer()
                 Text("\(result.iterations) iter")
                     .font(.caption2)
-                    .foregroundColor(.tertiary)
+                    .foregroundColor(.secondary.opacity(0.7))
             }
         }
         .padding(.vertical, 2)

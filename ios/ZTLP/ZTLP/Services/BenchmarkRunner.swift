@@ -239,7 +239,7 @@ final class BenchmarkRunner: ObservableObject {
             framedPacket.withUnsafeBytes { _ in }
         }
 
-        if var r = result {
+        if let r = result {
             let bytesPerSec = Double(size) * Double(iterations) / (r.totalMs / 1000.0)
             return BenchmarkResult(
                 name: r.name,

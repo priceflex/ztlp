@@ -86,7 +86,10 @@ final class TunnelRemoteAddressTests: XCTestCase {
             dnsServers: [],
             mtu: 1400,
             identityPath: nil,
-            fullTunnel: false
+            fullTunnel: false,
+            nsServer: nil,
+            serviceName: nil,
+            zoneName: nil
         )
 
         let rawAddress = config.relayAddress ?? config.targetNodeId
@@ -104,7 +107,10 @@ final class TunnelRemoteAddressTests: XCTestCase {
             dnsServers: [],
             mtu: 1400,
             identityPath: nil,
-            fullTunnel: false
+            fullTunnel: false,
+            nsServer: nil,
+            serviceName: nil,
+            zoneName: nil
         )
 
         let rawAddress = config.relayAddress ?? config.targetNodeId

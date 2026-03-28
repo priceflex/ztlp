@@ -43,6 +43,12 @@
 		F6A7B8C9D0E1F2A3B4C5D6E7 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F6A7B8C9D0E1F2A3 /* LogsView.swift */; };
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
 		F9A8B7C6D5E4F3A2B1C0D9E8 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
+		BB11CC22DD33EE44FF550001 /* BenchmarkRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */; };
+		BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550002 /* BenchmarkView.swift */; };
+		BB11CC22DD33EE44FF550003 /* TunnelConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* TunnelConfigurationTests.swift */; };
+		BB11CC22DD33EE44FF550004 /* TunnelRemoteAddressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550004 /* TunnelRemoteAddressTests.swift */; };
+		BB11CC22DD33EE44FF550005 /* TunnelLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */; };
+		BB11CC22DD33EE44FF550006 /* BenchmarkResultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -117,6 +123,12 @@
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* TunnelLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLogger.swift; sourceTree = "<group>"; };
 		B2C3D4E5F6A7B8C9D0E1F2A3 /* LogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsView.swift; sourceTree = "<group>"; };
 		C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsViewModel.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkRunner.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550002 /* BenchmarkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkView.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550003 /* TunnelConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfigurationTests.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550004 /* TunnelRemoteAddressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelRemoteAddressTests.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLoggerTests.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkResultTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -135,6 +147,10 @@
 				ACE11ACE3E2B6FECE8814ABA /* EnrollmentViewModelTests.swift */,
 				58B9C9EC8CB94ADB100C3DB9 /* KeychainServiceTests.swift */,
 				80A0F034228B1159E45AAACD /* ZTLPBridgeTests.swift */,
+				AA11BB22CC33DD44EE550003 /* TunnelConfigurationTests.swift */,
+				AA11BB22CC33DD44EE550004 /* TunnelRemoteAddressTests.swift */,
+				AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */,
+				AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */,
 			);
 			path = ZTLPTests;
 			sourceTree = "<group>";
@@ -191,6 +207,7 @@
 				9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */,
 				9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */,
 				6A98A6B9F9DF87D848B72322 /* SettingsView.swift */,
+				AA11BB22CC33DD44EE550002 /* BenchmarkView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -215,6 +232,7 @@
 				45B4F28822E500B5DDB569CC /* SecureEnclaveService.swift */,
 				EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */,
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* TunnelLogger.swift */,
+				AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -384,6 +402,10 @@
 				53713F1323DDADBE526EC438 /* EnrollmentViewModelTests.swift in Sources */,
 				F725C92DFD88053274413C58 /* KeychainServiceTests.swift in Sources */,
 				FD0D15E637754BC1067D1839 /* ZTLPBridgeTests.swift in Sources */,
+				BB11CC22DD33EE44FF550003 /* TunnelConfigurationTests.swift in Sources */,
+				BB11CC22DD33EE44FF550004 /* TunnelRemoteAddressTests.swift in Sources */,
+				BB11CC22DD33EE44FF550005 /* TunnelLoggerTests.swift in Sources */,
+				BB11CC22DD33EE44FF550006 /* BenchmarkResultTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -417,6 +439,8 @@
 				D4E5F6A7B8C9D0E1F2A3B4C5 /* TunnelLogger.swift in Sources */,
 				F6A7B8C9D0E1F2A3B4C5D6E7 /* LogsView.swift in Sources */,
 				A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */,
+				BB11CC22DD33EE44FF550001 /* BenchmarkRunner.swift in Sources */,
+				BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -649,7 +673,16 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app.tests;
+								GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Libraries",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Libraries",
+				);
+PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ZTLP.app/ZTLP";
@@ -666,7 +699,16 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app.tests;
+								GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Libraries",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Libraries",
+				);
+PRODUCT_BUNDLE_IDENTIFIER = com.ztlp.app.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ZTLP.app/ZTLP";

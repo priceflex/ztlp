@@ -79,7 +79,10 @@ final class TunnelConfigurationTests: XCTestCase {
             dnsServers: ["1.1.1.1", "8.8.8.8"],
             mtu: 1400,
             identityPath: "/path/to/id.json",
-            fullTunnel: false
+            fullTunnel: false,
+            nsServer: "34.217.62.46:23096",
+            serviceName: "vault",
+            zoneName: "techrockstars.ztlp"
         )
 
         let dict = original.toDictionary()
@@ -95,6 +98,9 @@ final class TunnelConfigurationTests: XCTestCase {
         XCTAssertEqual(restored?.mtu, original.mtu)
         XCTAssertEqual(restored?.identityPath, original.identityPath)
         XCTAssertEqual(restored?.fullTunnel, original.fullTunnel)
+        XCTAssertEqual(restored?.nsServer, original.nsServer)
+        XCTAssertEqual(restored?.serviceName, original.serviceName)
+        XCTAssertEqual(restored?.zoneName, original.zoneName)
     }
 
     func testSerializationRoundtripWithoutOptionals() {
@@ -107,7 +113,10 @@ final class TunnelConfigurationTests: XCTestCase {
             dnsServers: ["1.1.1.1"],
             mtu: 1400,
             identityPath: nil,
-            fullTunnel: true
+            fullTunnel: true,
+            nsServer: nil,
+            serviceName: nil,
+            zoneName: nil
         )
 
         let dict = original.toDictionary()
@@ -131,7 +140,10 @@ final class TunnelConfigurationTests: XCTestCase {
             dnsServers: [],
             mtu: 1400,
             identityPath: "/path",
-            fullTunnel: false
+            fullTunnel: false,
+            nsServer: "1.2.3.4:23096",
+            serviceName: "web",
+            zoneName: "test.ztlp"
         )
 
         let dict = config.toDictionary()
@@ -157,7 +169,10 @@ final class TunnelConfigurationTests: XCTestCase {
             dnsServers: [],
             mtu: 1400,
             identityPath: nil,
-            fullTunnel: false
+            fullTunnel: false,
+            nsServer: nil,
+            serviceName: nil,
+            zoneName: nil
         )
 
         let dict = config.toDictionary()

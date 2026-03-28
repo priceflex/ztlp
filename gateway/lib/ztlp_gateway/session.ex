@@ -186,6 +186,7 @@ defmodule ZtlpGateway.Session do
       # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
       # When populated, the session is in multiplexed mode.
       streams: %{},
+      mux_mode: false,
       pacing_timer_ref: nil
     }
 
@@ -582,8 +583,14 @@ defmodule ZtlpGateway.Session do
   # Parse tunnel frame
   # Multiplexed mode: [FRAME_DATA | stream_id(4 BE) | payload]
   # Legacy mode: [FRAME_DATA | data_seq(8 BE) | payload]
+  #
+  # IMPORTANT: Use `mux_mode` flag (set on first FRAME_OPEN) instead of
+  # checking map_size(streams) > 0. There's a race between FRAME_CLOSE
+  # removing the last stream and the next FRAME_OPEN arriving — during that
+  # window, streams is empty but the client is still in mux mode. Without
+  # this flag, the FRAME_DATA gets misinterpreted as legacy format.
   defp handle_tunnel_frame(<<@frame_data, rest::binary>>, state) do
-    if map_size(state.streams) > 0 do
+    if state.mux_mode do
       # Multiplexed mode: [stream_id(4) | payload]
       <<stream_id::big-32, payload::binary>> = rest
       case Map.get(state.streams, stream_id) do
@@ -741,6 +748,10 @@ defmodule ZtlpGateway.Session do
   # FRAME_OPEN: client wants to open a new multiplexed stream
   defp handle_tunnel_frame(<<@frame_open, stream_id::big-32>>, state) do
     Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id}")
+    # Once we see a FRAME_OPEN, this session is permanently in mux mode.
+    # This prevents a race where all streams close temporarily and the next
+    # FRAME_DATA gets misinterpreted as legacy format.
+    state = %{state | mux_mode: true}
     backends = ZtlpGateway.Config.get(:backends)
 
     case find_backend(backends, state.service) do

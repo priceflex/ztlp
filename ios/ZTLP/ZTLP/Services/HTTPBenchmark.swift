@@ -41,10 +41,11 @@ final class HTTPBenchmark: ObservableObject {
     private let logger = TunnelLogger.shared
 
     /// VIP proxy address for HTTP echo benchmark traffic.
-    /// Uses 127.0.0.2:8080 to avoid conflicting with the app's existing
-    /// VIP proxy on 127.0.0.1 (which maps to vault/Vaultwarden).
-    private let vipAddress = "127.0.0.2"
-    private let vipPort: UInt16 = 8080
+    /// Uses 127.0.0.1:9080 — different port from the VPN extension's
+    /// VIP proxy (which uses 127.0.0.1:8080 for vault).
+    /// iOS only allows binding to 127.0.0.1 (not 127.0.0.2+).
+    private let vipAddress = "127.0.0.1"
+    private let vipPort: UInt16 = 9080
     private var baseURL: String { "http://\(vipAddress):\(vipPort)" }
 
     /// Track whether we created our own connection (so we can clean up).

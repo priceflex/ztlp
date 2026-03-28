@@ -13,10 +13,64 @@ struct BenchmarkView: View {
 
     @StateObject private var localRunner = BenchmarkRunner.shared
     @StateObject private var netRunner = NetworkBenchmark.shared
+    @StateObject private var httpRunner = HTTPBenchmark.shared
 
     var body: some View {
         NavigationView {
             List {
+                // HTTP Benchmarks (top — the real deal)
+                Section {
+                    if httpRunner.isRunning {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle())
+                                VStack(alignment: .leading) {
+                                    Text(httpRunner.currentBenchmark)
+                                        .font(.subheadline)
+                                    Text(httpRunner.connectionStatus)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            ProgressView(value: httpRunner.progress)
+                                .progressViewStyle(LinearProgressViewStyle())
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        Button {
+                            Task { await httpRunner.runAll() }
+                        } label: {
+                            HStack {
+                                Image(systemName: "globe")
+                                    .font(.title2)
+                                    .foregroundColor(.purple)
+                                VStack(alignment: .leading) {
+                                    Text("Run HTTP Benchmarks")
+                                        .font(.headline)
+                                    Text("Real web traffic through ZTLP tunnel")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .disabled(netRunner.isRunning || localRunner.isRunning)
+                    }
+                } header: {
+                    Text("🌍 HTTP (Through Tunnel)")
+                } footer: {
+                    Text("Connects to relay, starts VIP proxy, then makes real HTTP requests (GET, POST, download, upload) through the encrypted ZTLP tunnel.")
+                }
+
+                // HTTP Results
+                if !httpRunner.results.isEmpty {
+                    Section("HTTP Results") {
+                        ForEach(httpRunner.results) { result in
+                            BenchmarkResultRow(result: result)
+                        }
+                    }
+                }
+
                 // Network Benchmarks
                 Section {
                     if netRunner.isRunning {
@@ -120,9 +174,9 @@ struct BenchmarkView: View {
                 }
 
                 // Combined Summary
-                if !netRunner.results.isEmpty || !localRunner.results.isEmpty {
+                if !netRunner.results.isEmpty || !localRunner.results.isEmpty || !httpRunner.results.isEmpty {
                     Section("Summary") {
-                        let allResults = netRunner.results + localRunner.results
+                        let allResults = httpRunner.results + netRunner.results + localRunner.results
                         let totalTime = allResults.reduce(0) { $0 + $1.totalMs }
                         LabeledContent("Total Time", value: formatMs(totalTime))
                         LabeledContent("Benchmarks Run", value: "\(allResults.count)")
@@ -132,6 +186,19 @@ struct BenchmarkView: View {
                         }
                         if let slowest = allResults.filter({ $0.avgMs > 0 }).max(by: { $0.avgMs < $1.avgMs }) {
                             LabeledContent("Slowest", value: "\(slowest.name) (\(formatMs(slowest.avgMs)))")
+                        }
+
+                        // HTTP-specific summary
+                        if let ping = httpRunner.results.first(where: { $0.name.contains("Ping") }) {
+                            LabeledContent("HTTP Ping (avg)", value: formatMs(ping.avgMs))
+                        }
+                        if let download = httpRunner.results.first(where: { $0.name.contains("Download") }),
+                           let tp = download.throughputMBps {
+                            LabeledContent("HTTP Download", value: String(format: "%.1f MB/s", tp))
+                        }
+                        if let upload = httpRunner.results.first(where: { $0.name.contains("Upload") }),
+                           let tp = upload.throughputMBps {
+                            LabeledContent("HTTP Upload", value: String(format: "%.1f MB/s", tp))
                         }
 
                         // Network-specific summary
@@ -170,6 +237,14 @@ struct BenchmarkView: View {
         text += "Date: \(ISO8601DateFormatter().string(from: Date()))\n"
         text += "Library: \(ZTLPBridge.shared.version)\n"
         text += String(repeating: "=", count: 60) + "\n\n"
+
+        if !httpRunner.results.isEmpty {
+            text += "--- HTTP BENCHMARKS (Through Tunnel) ---\n"
+            for result in httpRunner.results {
+                text += result.summary + "\n"
+            }
+            text += "\n"
+        }
 
         if !netRunner.results.isEmpty {
             text += "--- NETWORK BENCHMARKS ---\n"

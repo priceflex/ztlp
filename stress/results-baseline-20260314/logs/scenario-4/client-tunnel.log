@@ -1,0 +1,44 @@
+[2m2026-03-14T22:24:15.980978Z[0m [32m INFO[0m loading identity from /home/ztlp/.ztlp/client-identity.json
+[2m2026-03-14T22:24:15.981037Z[0m [32m INFO[0m loaded NodeID: b417df82be38c9f9c88296bfc84115e0
+[2m2026-03-14T22:24:15.981066Z[0m [32m INFO[0m ZTLP node bound to 0.0.0.0:57192
+[36mBound to:[0m 0.0.0.0:57192
+[36mConnecting to:[0m 172.30.1.100:23095
+
+[2m→ Sending HELLO (message 1/3)...[0m
+  [36mService:[0m ssh
+[2m2026-03-14T22:24:15.981257Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m← Waiting for HELLO_ACK (message 2/3)...[0m
+[2m2026-03-14T22:24:16.477122Z[0m [34mDEBUG[0m received 192 bytes from 172.30.1.100:23095
+[2m→ Sending final confirmation (message 3/3)...[0m
+[2m2026-03-14T22:24:16.477387Z[0m [34mDEBUG[0m sent 160 bytes to 172.30.1.100:23095
+
+[32m✓ Handshake complete![0m
+  [36mRemote NodeID:[0m 64e0858cf40b9a4dc0c7abf3bc72634e
+  [36mSession ID:[0m 1bc396d8dea39892e306e84e
+  [36mHandshake latency:[0m 496.23ms
+
+--- [1mZTLP tunnel active[0m ---
+  [36mLocal listener:[0m 127.0.0.1:2222
+  [36mUsage:[0m Connect your TCP client to 127.0.0.1:2222
+  [2mStop:[0m Ctrl+C
+
+[32m✓ Listening for TCP connections on[0m 127.0.0.1:2222
+[36mTCP connection from[0m 127.0.0.1:39578 → tunnel
+[2m2026-03-14T22:24:18.354721Z[0m [32m INFO[0m run_bridge: starting for session 1bc396d8dea39892e306e84e peer=172.30.1.100:23095 local_udp=Ok(0.0.0.0:57192)
+[2m2026-03-14T22:24:18.354742Z[0m [32m INFO[0m system profile: recv_buf=14336KB, send_buf=14336KB, loopback=false, pacing=none (buffer-based), sub_batch=128
+[2m2026-03-14T22:24:18.354748Z[0m [34mDEBUG[0m run_bridge: pre-extracted crypto keys for session 1bc396d8dea39892e306e84e
+[2m2026-03-14T22:24:18.354807Z[0m [32m INFO[0m ztlp_to_tcp: starting (prefetched_packets=0)
+[2m2026-03-14T22:24:18.354804Z[0m [32m INFO[0m tcp_to_ztlp: starting, peer_addr=172.30.1.100:23095
+[2m2026-03-14T22:24:18.354816Z[0m [34mDEBUG[0m GRO detected: available (enabled on socket)
+[2m2026-03-14T22:24:18.354833Z[0m [34mDEBUG[0m GroReceiver created: mode=auto, gro_enabled=true
+[2m2026-03-14T22:24:18.354880Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:24:18.354888Z[0m [34mDEBUG[0m UdpSender created: mode=auto, capability=Unavailable
+[2m2026-03-14T22:24:18.354903Z[0m [34mDEBUG[0m TCP → ZTLP: 40 bytes
+[2m2026-03-14T22:24:18.354959Z[0m [34mDEBUG[0m ZTLP sent: 111 bytes (data_seq 0, packet_seq 0)
+[2m2026-03-14T22:24:18.354966Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=5µs encrypt=56µs send=56µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+[2m2026-03-14T22:24:18.699160Z[0m [34mDEBUG[0m reassembly: initialized with first data_seq 1
+[2m2026-03-14T22:24:18.699175Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 2, buffered 0
+[2m2026-03-14T22:24:18.699205Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=3.5ms pipeline=11µs decrypt=26µs reassembly=3µs tcp_write=21µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:24:18.699227Z[0m [34mDEBUG[0m sent ACK for delivered_seq 1 (packet seq 1)
+[2m2026-03-14T22:24:18.699631Z[0m [33m WARN[0m TCP read error: Connection reset by peer (os error 104)
+[2m2026-03-14T22:24:18.699664Z[0m [33m WARN[0m tunnel error (TCP→ZTLP): Connection reset by peer (os error 104)

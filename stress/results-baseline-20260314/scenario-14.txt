@@ -1,0 +1,16 @@
+scenario_id=14
+scenario_name=traffic-flood
+scenario_description=iperf3 background traffic flood competing for bandwidth
+handshake_time_ms=72
+ssh_echo=PASS
+scp_1mb_time_ms=10010
+scp_1mb_throughput_mbps=.79
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=759
+scp_10mb_throughput_mbps=106.66
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=1087
+scp_50mb_throughput_mbps=370.37
+scp_50mb_checksum=PASS
+retransmit_count=329
+scenario_duration_s=35

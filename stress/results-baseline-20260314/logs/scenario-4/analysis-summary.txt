@@ -1,0 +1,33 @@
+=== Handshake Events ===
+[32m✓ Handshake complete![0m
+  [36mHandshake latency:[0m 496.23ms
+
+=== Congestion Control ===
+[2m2026-03-14T22:24:18.354966Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=5µs encrypt=56µs send=56µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+
+=== Retransmissions ===
+
+=== SACK ===
+
+=== Anti-Replay ===
+
+=== PMTU ===
+
+=== Rekey ===
+
+=== Errors/Warnings ===
+[2m2026-03-14T22:24:18.354880Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:24:18.699205Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=3.5ms pipeline=11µs decrypt=26µs reassembly=3µs tcp_write=21µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:24:18.699631Z[0m [33m WARN[0m TCP read error: Connection reset by peer (os error 104)
+[2m2026-03-14T22:24:18.699664Z[0m [33m WARN[0m tunnel error (TCP→ZTLP): Connection reset by peer (os error 104)
+
+=== Summary Stats ===
+Total log lines: 44
+Handshake events: 2
+Retransmissions: 0
+0
+SACK events: 0
+0
+Anti-replay drops: 0
+0
+Errors: 3

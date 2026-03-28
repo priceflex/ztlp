@@ -1,0 +1,8 @@
+scenario_id=15
+scenario_name=gradual-degradation
+scenario_description=Network degrades from clean to 500ms/25% loss over 60 seconds
+handshake_time_ms=3288
+ssh_echo=PASS
+scp_1mb_time_ms=16790
+scp_1mb_throughput_mbps=.47
+scp_1mb_checksum=PASS

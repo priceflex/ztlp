@@ -1,0 +1,5 @@
+scenario_id=10
+scenario_name=bandwidth-starvation
+scenario_description=Bandwidth limiting: 56kbps, 256kbps, 1Mbps
+bw_56kbit_handshake_ms=612
+bw_56kbit_ssh_echo=FAIL

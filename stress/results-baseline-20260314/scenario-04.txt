@@ -1,0 +1,17 @@
+scenario_id=4
+scenario_name=jitter-storm
+scenario_description=50ms base delay with ±200ms jitter (normal distribution)
+handshake_time_ms=62
+ssh_echo=PASS
+scp_1mb_time_ms=8024
+scp_1mb_throughput_mbps=.99
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=92010
+scp_10mb_throughput_mbps=.86
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=TIMEOUT
+scp_50mb_throughput_mbps=0
+scp_50mb_checksum=FAIL
+retransmit_count=0
+0
+scenario_duration_s=126

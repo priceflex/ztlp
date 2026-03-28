@@ -38,5 +38,10 @@ echo "  Listening on port 22"
 echo "  User: testuser / Password: ztlptest"
 echo "═══════════════════════════════════════════════════════"
 
+# Start HTTP echo server in background
+echo "  Starting HTTP echo server on port 8080..."
+python3 /http-echo.py &
+echo "  ✓ HTTP echo server started"
+
 # Start sshd in foreground
 exec /usr/sbin/sshd -D -e

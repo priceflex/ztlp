@@ -50,6 +50,7 @@
 		BB11CC22DD33EE44FF550005 /* TunnelLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */; };
 		BB11CC22DD33EE44FF550006 /* BenchmarkResultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */; };
 		DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */; };
+		DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -131,6 +132,7 @@
 		AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLoggerTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkResultTests.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBenchmark.swift; sourceTree = "<group>"; };
+		CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPBenchmark.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -236,6 +238,7 @@
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* TunnelLogger.swift */,
 				AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */,
 				CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */,
+				CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -444,6 +447,7 @@
 				A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */,
 				BB11CC22DD33EE44FF550001 /* BenchmarkRunner.swift in Sources */,
 				DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */,
+				DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */,
 				BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

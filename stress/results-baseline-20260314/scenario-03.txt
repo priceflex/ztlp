@@ -1,0 +1,16 @@
+scenario_id=3
+scenario_name=extreme-latency
+scenario_description=2000ms RTT (1000ms one-way delay)
+handshake_time_ms=2215
+ssh_echo=PASS
+scp_1mb_time_ms=20253
+scp_1mb_throughput_mbps=.39
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=252429
+scp_10mb_throughput_mbps=.31
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=TIMEOUT
+scp_50mb_throughput_mbps=0
+scp_50mb_checksum=FAIL
+retransmit_count=354
+scenario_duration_s=499

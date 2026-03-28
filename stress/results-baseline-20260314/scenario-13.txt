@@ -1,0 +1,16 @@
+scenario_id=13
+scenario_name=asymmetric
+scenario_description=Asymmetric: uplink 20ms/1% loss, downlink 300ms/15% loss
+handshake_time_ms=73
+ssh_echo=PASS
+scp_1mb_time_ms=321
+scp_1mb_throughput_mbps=25.00
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=645
+scp_10mb_throughput_mbps=125.00
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=1162
+scp_50mb_throughput_mbps=344.82
+scp_50mb_checksum=PASS
+retransmit_count=306
+scenario_duration_s=24

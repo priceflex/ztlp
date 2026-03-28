@@ -1,0 +1,16 @@
+scenario_id=9
+scenario_name=duplication
+scenario_description=10% packet duplication (tests anti-replay window)
+handshake_time_ms=74
+ssh_echo=PASS
+scp_1mb_time_ms=10495
+scp_1mb_throughput_mbps=.76
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=657
+scp_10mb_throughput_mbps=123.07
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=1127
+scp_50mb_throughput_mbps=357.14
+scp_50mb_checksum=PASS
+retransmit_count=255
+scenario_duration_s=33

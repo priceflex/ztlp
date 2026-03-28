@@ -1,0 +1,376 @@
+=== Handshake Events ===
+[32m✓ Handshake complete![0m
+  [36mHandshake latency:[0m 0.92ms
+
+=== Congestion Control ===
+[2m2026-03-14T22:35:49.954355Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=5µs encrypt=142µs send=142µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+[2m2026-03-14T22:35:50.012884Z[0m [34mDEBUG[0m [TX] batch=2 pkts=1 tcp_bytes=1288 udp_bytes=1359 tcp_read=58.5ms encrypt=37µs send=37µs strategy=SendMmsg data_seq=2 cwnd=11 window=11 
+[2m2026-03-14T22:35:50.014576Z[0m [34mDEBUG[0m [TX] batch=3 pkts=1 tcp_bytes=48 udp_bytes=119 tcp_read=1.6ms encrypt=24µs send=24µs strategy=SendMmsg data_seq=3 cwnd=12 window=12 
+[2m2026-03-14T22:35:50.020331Z[0m [34mDEBUG[0m [TX] batch=4 pkts=1 tcp_bytes=16 udp_bytes=87 tcp_read=5.7ms encrypt=24µs send=24µs strategy=SendMmsg data_seq=4 cwnd=13 window=13 
+[2m2026-03-14T22:35:50.066517Z[0m [34mDEBUG[0m [TX] batch=5 pkts=1 tcp_bytes=44 udp_bytes=115 tcp_read=46.0ms encrypt=69µs send=69µs strategy=SendMmsg data_seq=5 cwnd=14 window=14 
+[2m2026-03-14T22:35:50.067475Z[0m [34mDEBUG[0m [TX] batch=6 pkts=1 tcp_bytes=68 udp_bytes=139 tcp_read=807µs encrypt=130µs send=130µs strategy=SendMmsg data_seq=6 cwnd=15 window=15 
+[2m2026-03-14T22:35:50.073299Z[0m [34mDEBUG[0m [TX] batch=7 pkts=1 tcp_bytes=148 udp_bytes=219 tcp_read=5.8ms encrypt=16µs send=16µs strategy=SendMmsg data_seq=7 cwnd=16 window=16 
+[2m2026-03-14T22:35:50.117021Z[0m [34mDEBUG[0m [TX] batch=8 pkts=1 tcp_bytes=112 udp_bytes=183 tcp_read=43.7ms encrypt=26µs send=26µs strategy=SendMmsg data_seq=8 cwnd=17 window=17 
+[2m2026-03-14T22:35:50.162809Z[0m [34mDEBUG[0m [TX] batch=9 pkts=1 tcp_bytes=116 udp_bytes=187 tcp_read=45.7ms encrypt=46µs send=46µs strategy=SendMmsg data_seq=9 cwnd=18 window=18 
+[2m2026-03-14T22:35:50.163834Z[0m [34mDEBUG[0m [TX] batch=10 pkts=3 tcp_bytes=32768 udp_bytes=32981 tcp_read=847µs encrypt=161µs send=161µs strategy=SendMmsg data_seq=12 cwnd=19 window=19 
+[2m2026-03-14T22:35:50.163882Z[0m [34mDEBUG[0m [TX] batch=11 pkts=1 tcp_bytes=36 udp_bytes=107 tcp_read=21µs encrypt=14µs send=14µs strategy=SendMmsg data_seq=13 cwnd=19 window=19 
+[2m2026-03-14T22:35:50.164735Z[0m [34mDEBUG[0m [TX] batch=12 pkts=3 tcp_bytes=32804 udp_bytes=33017 tcp_read=27µs encrypt=816µs send=816µs strategy=SendMmsg data_seq=16 cwnd=19 window=19 
+[2m2026-03-14T22:35:50.164988Z[0m [34mDEBUG[0m [TX] batch=13 pkts=3 tcp_bytes=32804 udp_bytes=33017 tcp_read=78µs encrypt=154µs send=154µs strategy=SendMmsg data_seq=19 cwnd=26 window=26 
+[2m2026-03-14T22:35:50.165517Z[0m [34mDEBUG[0m [TX] batch=14 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=23µs encrypt=495µs send=495µs strategy=SendMmsg data_seq=28 cwnd=26 window=26 
+[2m2026-03-14T22:35:50.165990Z[0m [34mDEBUG[0m [TX] batch=15 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=17µs encrypt=446µs send=446µs strategy=SendMmsg data_seq=37 cwnd=26 window=26 
+[2m2026-03-14T22:35:50.166517Z[0m [34mDEBUG[0m [TX] batch=16 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=23µs encrypt=495µs send=495µs strategy=SendMmsg data_seq=46 cwnd=31 window=31 
+[2m2026-03-14T22:35:50.168064Z[0m [34mDEBUG[0m [TX] batch=17 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=18µs encrypt=1.5ms send=1.5ms strategy=SendMmsg data_seq=55 cwnd=37 window=37 WINDOW_STALL
+[2m2026-03-14T22:35:50.168516Z[0m [34mDEBUG[0m [TX] batch=18 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=27µs encrypt=416µs send=416µs strategy=SendMmsg data_seq=64 cwnd=37 window=37 
+[2m2026-03-14T22:35:50.169009Z[0m [34mDEBUG[0m [TX] batch=19 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=15µs encrypt=469µs send=469µs strategy=SendMmsg data_seq=73 cwnd=43 window=43 WINDOW_STALL
+[2m2026-03-14T22:35:50.229919Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=43.0 → ssthresh=21.5, recovery_seq=Some(76))
+[2m2026-03-14T22:35:50.230020Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:35:50.230073Z[0m [34mDEBUG[0m retransmitted data_seq 34 (while waiting for window)
+[2m2026-03-14T22:35:50.230120Z[0m [34mDEBUG[0m retransmitted data_seq 35 (while waiting for window)
+[2m2026-03-14T22:35:50.230135Z[0m [34mDEBUG[0m retransmitted data_seq 36 (while waiting for window)
+[2m2026-03-14T22:35:50.230186Z[0m [34mDEBUG[0m retransmitted data_seq 37 (while waiting for window)
+[2m2026-03-14T22:35:50.230277Z[0m [34mDEBUG[0m retransmitted data_seq 38 (while waiting for window)
+[2m2026-03-14T22:35:50.230338Z[0m [34mDEBUG[0m retransmitted data_seq 39 (while waiting for window)
+[2m2026-03-14T22:35:50.230398Z[0m [34mDEBUG[0m retransmitted data_seq 40 (while waiting for window)
+[2m2026-03-14T22:35:50.230446Z[0m [34mDEBUG[0m retransmitted data_seq 41 (while waiting for window)
+[2m2026-03-14T22:35:50.230491Z[0m [34mDEBUG[0m retransmitted data_seq 42 (while waiting for window)
+[2m2026-03-14T22:35:50.230538Z[0m [34mDEBUG[0m retransmitted data_seq 43 (while waiting for window)
+[2m2026-03-14T22:35:50.230584Z[0m [34mDEBUG[0m retransmitted data_seq 44 (while waiting for window)
+[2m2026-03-14T22:35:50.230598Z[0m [34mDEBUG[0m retransmitted data_seq 45 (while waiting for window)
+[2m2026-03-14T22:35:50.230646Z[0m [34mDEBUG[0m retransmitted data_seq 46 (while waiting for window)
+[2m2026-03-14T22:35:50.230694Z[0m [34mDEBUG[0m retransmitted data_seq 47 (while waiting for window)
+[2m2026-03-14T22:35:50.230740Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.230787Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.230831Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.230878Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.231660Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 43.0
+[2m2026-03-14T22:35:50.231994Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=43.3 → ssthresh=21.7, recovery_seq=Some(76))
+[2m2026-03-14T22:35:50.232106Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232165Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232213Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232259Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232273Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.232374Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232430Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232472Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232518Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232523Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.232600Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232641Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232681Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232722Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232726Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.232805Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232845Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232886Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232928Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232932Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.233007Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.233052Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.233096Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.233142Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.233146Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.233215Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.233256Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.233296Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.233337Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.233341Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.233417Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.233457Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.233497Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.233543Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.233548Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.233613Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.233653Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.233693Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.233733Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.233737Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.233795Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.233836Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.233925Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.233998Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.234002Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234056Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.234091Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.234130Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.234168Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.234171Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234225Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.234332Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 43.3
+[2m2026-03-14T22:35:50.234662Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.234668Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=43.9 → ssthresh=22.0, recovery_seq=Some(76))
+[2m2026-03-14T22:35:50.234684Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234698Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234709Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234718Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:35:50.234725Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+
+=== Retransmissions ===
+[2m2026-03-14T22:35:50.223797Z[0m [34mDEBUG[0m received NACK for 19 missing seqs: [33, 34, 35, 36, 37]
+[2m2026-03-14T22:35:50.230020Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:35:50.230073Z[0m [34mDEBUG[0m retransmitted data_seq 34 (while waiting for window)
+[2m2026-03-14T22:35:50.230120Z[0m [34mDEBUG[0m retransmitted data_seq 35 (while waiting for window)
+[2m2026-03-14T22:35:50.230135Z[0m [34mDEBUG[0m retransmitted data_seq 36 (while waiting for window)
+[2m2026-03-14T22:35:50.230186Z[0m [34mDEBUG[0m retransmitted data_seq 37 (while waiting for window)
+[2m2026-03-14T22:35:50.230277Z[0m [34mDEBUG[0m retransmitted data_seq 38 (while waiting for window)
+[2m2026-03-14T22:35:50.230338Z[0m [34mDEBUG[0m retransmitted data_seq 39 (while waiting for window)
+[2m2026-03-14T22:35:50.230398Z[0m [34mDEBUG[0m retransmitted data_seq 40 (while waiting for window)
+[2m2026-03-14T22:35:50.230446Z[0m [34mDEBUG[0m retransmitted data_seq 41 (while waiting for window)
+[2m2026-03-14T22:35:50.230491Z[0m [34mDEBUG[0m retransmitted data_seq 42 (while waiting for window)
+[2m2026-03-14T22:35:50.230538Z[0m [34mDEBUG[0m retransmitted data_seq 43 (while waiting for window)
+[2m2026-03-14T22:35:50.230584Z[0m [34mDEBUG[0m retransmitted data_seq 44 (while waiting for window)
+[2m2026-03-14T22:35:50.230598Z[0m [34mDEBUG[0m retransmitted data_seq 45 (while waiting for window)
+[2m2026-03-14T22:35:50.230646Z[0m [34mDEBUG[0m retransmitted data_seq 46 (while waiting for window)
+[2m2026-03-14T22:35:50.230694Z[0m [34mDEBUG[0m retransmitted data_seq 47 (while waiting for window)
+[2m2026-03-14T22:35:50.230740Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.230787Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.230831Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.230878Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.231656Z[0m [34mDEBUG[0m spurious retransmit detected for seq 34: ack arrived in 1.6ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231682Z[0m [34mDEBUG[0m spurious retransmit detected for seq 35: ack arrived in 1.6ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231701Z[0m [34mDEBUG[0m spurious retransmit detected for seq 36: ack arrived in 1.6ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231721Z[0m [34mDEBUG[0m spurious retransmit detected for seq 37: ack arrived in 1.6ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231746Z[0m [34mDEBUG[0m spurious retransmit detected for seq 38: ack arrived in 1.6ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231766Z[0m [34mDEBUG[0m spurious retransmit detected for seq 39: ack arrived in 1.5ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231786Z[0m [34mDEBUG[0m spurious retransmit detected for seq 40: ack arrived in 1.4ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231805Z[0m [34mDEBUG[0m spurious retransmit detected for seq 41: ack arrived in 1.4ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231825Z[0m [34mDEBUG[0m spurious retransmit detected for seq 42: ack arrived in 1.4ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231844Z[0m [34mDEBUG[0m spurious retransmit detected for seq 43: ack arrived in 1.3ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231863Z[0m [34mDEBUG[0m spurious retransmit detected for seq 44: ack arrived in 1.3ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231939Z[0m [34mDEBUG[0m spurious retransmit detected for seq 45: ack arrived in 1.4ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231960Z[0m [34mDEBUG[0m spurious retransmit detected for seq 46: ack arrived in 1.4ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231979Z[0m [34mDEBUG[0m spurious retransmit detected for seq 47: ack arrived in 1.3ms, expected 3.3ms
+[2m2026-03-14T22:35:50.231999Z[0m [34mDEBUG[0m skipping retransmit for data_seq 34 (SACK'd)
+[2m2026-03-14T22:35:50.232009Z[0m [34mDEBUG[0m skipping retransmit for data_seq 35 (SACK'd)
+[2m2026-03-14T22:35:50.232012Z[0m [34mDEBUG[0m skipping retransmit for data_seq 36 (SACK'd)
+[2m2026-03-14T22:35:50.232015Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232018Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232021Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+[2m2026-03-14T22:35:50.232024Z[0m [34mDEBUG[0m skipping retransmit for data_seq 40 (SACK'd)
+[2m2026-03-14T22:35:50.232027Z[0m [34mDEBUG[0m skipping retransmit for data_seq 41 (SACK'd)
+[2m2026-03-14T22:35:50.232030Z[0m [34mDEBUG[0m skipping retransmit for data_seq 42 (SACK'd)
+[2m2026-03-14T22:35:50.232033Z[0m [34mDEBUG[0m skipping retransmit for data_seq 43 (SACK'd)
+[2m2026-03-14T22:35:50.232036Z[0m [34mDEBUG[0m skipping retransmit for data_seq 44 (SACK'd)
+[2m2026-03-14T22:35:50.232040Z[0m [34mDEBUG[0m skipping retransmit for data_seq 45 (SACK'd)
+[2m2026-03-14T22:35:50.232043Z[0m [34mDEBUG[0m skipping retransmit for data_seq 46 (SACK'd)
+[2m2026-03-14T22:35:50.232046Z[0m [34mDEBUG[0m skipping retransmit for data_seq 47 (SACK'd)
+[2m2026-03-14T22:35:50.232106Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232165Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232213Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232259Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232290Z[0m [34mDEBUG[0m skipping retransmit for data_seq 35 (SACK'd)
+[2m2026-03-14T22:35:50.232293Z[0m [34mDEBUG[0m skipping retransmit for data_seq 36 (SACK'd)
+[2m2026-03-14T22:35:50.232300Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232304Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232307Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+[2m2026-03-14T22:35:50.232310Z[0m [34mDEBUG[0m skipping retransmit for data_seq 40 (SACK'd)
+[2m2026-03-14T22:35:50.232313Z[0m [34mDEBUG[0m skipping retransmit for data_seq 41 (SACK'd)
+[2m2026-03-14T22:35:50.232316Z[0m [34mDEBUG[0m skipping retransmit for data_seq 42 (SACK'd)
+[2m2026-03-14T22:35:50.232319Z[0m [34mDEBUG[0m skipping retransmit for data_seq 43 (SACK'd)
+[2m2026-03-14T22:35:50.232322Z[0m [34mDEBUG[0m skipping retransmit for data_seq 44 (SACK'd)
+[2m2026-03-14T22:35:50.232325Z[0m [34mDEBUG[0m skipping retransmit for data_seq 45 (SACK'd)
+[2m2026-03-14T22:35:50.232328Z[0m [34mDEBUG[0m skipping retransmit for data_seq 46 (SACK'd)
+[2m2026-03-14T22:35:50.232331Z[0m [34mDEBUG[0m skipping retransmit for data_seq 47 (SACK'd)
+[2m2026-03-14T22:35:50.232374Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232430Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232472Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232518Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232526Z[0m [34mDEBUG[0m skipping retransmit for data_seq 36 (SACK'd)
+[2m2026-03-14T22:35:50.232530Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232533Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232536Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+[2m2026-03-14T22:35:50.232539Z[0m [34mDEBUG[0m skipping retransmit for data_seq 40 (SACK'd)
+[2m2026-03-14T22:35:50.232542Z[0m [34mDEBUG[0m skipping retransmit for data_seq 41 (SACK'd)
+[2m2026-03-14T22:35:50.232545Z[0m [34mDEBUG[0m skipping retransmit for data_seq 42 (SACK'd)
+[2m2026-03-14T22:35:50.232548Z[0m [34mDEBUG[0m skipping retransmit for data_seq 43 (SACK'd)
+[2m2026-03-14T22:35:50.232551Z[0m [34mDEBUG[0m skipping retransmit for data_seq 44 (SACK'd)
+[2m2026-03-14T22:35:50.232554Z[0m [34mDEBUG[0m skipping retransmit for data_seq 45 (SACK'd)
+[2m2026-03-14T22:35:50.232557Z[0m [34mDEBUG[0m skipping retransmit for data_seq 46 (SACK'd)
+[2m2026-03-14T22:35:50.232560Z[0m [34mDEBUG[0m skipping retransmit for data_seq 47 (SACK'd)
+[2m2026-03-14T22:35:50.232600Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232641Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232681Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232722Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:35:50.232730Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232733Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232736Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+[2m2026-03-14T22:35:50.232739Z[0m [34mDEBUG[0m skipping retransmit for data_seq 40 (SACK'd)
+[2m2026-03-14T22:35:50.232742Z[0m [34mDEBUG[0m skipping retransmit for data_seq 41 (SACK'd)
+[2m2026-03-14T22:35:50.232745Z[0m [34mDEBUG[0m skipping retransmit for data_seq 42 (SACK'd)
+[2m2026-03-14T22:35:50.232748Z[0m [34mDEBUG[0m skipping retransmit for data_seq 43 (SACK'd)
+[2m2026-03-14T22:35:50.232751Z[0m [34mDEBUG[0m skipping retransmit for data_seq 44 (SACK'd)
+[2m2026-03-14T22:35:50.232754Z[0m [34mDEBUG[0m skipping retransmit for data_seq 45 (SACK'd)
+[2m2026-03-14T22:35:50.232762Z[0m [34mDEBUG[0m skipping retransmit for data_seq 46 (SACK'd)
+[2m2026-03-14T22:35:50.232765Z[0m [34mDEBUG[0m skipping retransmit for data_seq 47 (SACK'd)
+[2m2026-03-14T22:35:50.232805Z[0m [34mDEBUG[0m retransmitted data_seq 48 (while waiting for window)
+[2m2026-03-14T22:35:50.232845Z[0m [34mDEBUG[0m retransmitted data_seq 49 (while waiting for window)
+[2m2026-03-14T22:35:50.232886Z[0m [34mDEBUG[0m retransmitted data_seq 50 (while waiting for window)
+[2m2026-03-14T22:35:50.232928Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+
+=== SACK ===
+[2m2026-03-14T22:35:50.223797Z[0m [34mDEBUG[0m received NACK for 19 missing seqs: [33, 34, 35, 36, 37]
+[2m2026-03-14T22:35:50.231604Z[0m [34mDEBUG[0m received SACK: cumulative_ack=33, 1 ranges
+[2m2026-03-14T22:35:50.231619Z[0m [34mDEBUG[0m SACK gap: 18 missing seqs: [34, 35, 36, 37, 38]
+[2m2026-03-14T22:35:50.231651Z[0m [34mDEBUG[0m received SACK: cumulative_ack=34, 1 ranges
+[2m2026-03-14T22:35:50.231666Z[0m [34mDEBUG[0m SACK gap: 17 missing seqs: [35, 36, 37, 38, 39]
+[2m2026-03-14T22:35:50.231678Z[0m [34mDEBUG[0m received SACK: cumulative_ack=35, 1 ranges
+[2m2026-03-14T22:35:50.231686Z[0m [34mDEBUG[0m SACK gap: 16 missing seqs: [36, 37, 38, 39, 40]
+[2m2026-03-14T22:35:50.231698Z[0m [34mDEBUG[0m received SACK: cumulative_ack=36, 1 ranges
+[2m2026-03-14T22:35:50.231706Z[0m [34mDEBUG[0m SACK gap: 15 missing seqs: [37, 38, 39, 40, 41]
+[2m2026-03-14T22:35:50.231717Z[0m [34mDEBUG[0m received SACK: cumulative_ack=37, 1 ranges
+[2m2026-03-14T22:35:50.231725Z[0m [34mDEBUG[0m SACK gap: 14 missing seqs: [38, 39, 40, 41, 42]
+[2m2026-03-14T22:35:50.231743Z[0m [34mDEBUG[0m received SACK: cumulative_ack=38, 1 ranges
+[2m2026-03-14T22:35:50.231750Z[0m [34mDEBUG[0m SACK gap: 13 missing seqs: [39, 40, 41, 42, 43]
+[2m2026-03-14T22:35:50.231762Z[0m [34mDEBUG[0m received SACK: cumulative_ack=39, 1 ranges
+[2m2026-03-14T22:35:50.231770Z[0m [34mDEBUG[0m SACK gap: 12 missing seqs: [40, 41, 42, 43, 44]
+[2m2026-03-14T22:35:50.231782Z[0m [34mDEBUG[0m received SACK: cumulative_ack=40, 1 ranges
+[2m2026-03-14T22:35:50.231790Z[0m [34mDEBUG[0m SACK gap: 11 missing seqs: [41, 42, 43, 44, 45]
+[2m2026-03-14T22:35:50.231801Z[0m [34mDEBUG[0m received SACK: cumulative_ack=41, 1 ranges
+[2m2026-03-14T22:35:50.231810Z[0m [34mDEBUG[0m SACK gap: 10 missing seqs: [42, 43, 44, 45, 46]
+[2m2026-03-14T22:35:50.231822Z[0m [34mDEBUG[0m received SACK: cumulative_ack=42, 1 ranges
+[2m2026-03-14T22:35:50.231829Z[0m [34mDEBUG[0m SACK gap: 9 missing seqs: [43, 44, 45, 46, 47]
+[2m2026-03-14T22:35:50.231841Z[0m [34mDEBUG[0m received SACK: cumulative_ack=43, 1 ranges
+[2m2026-03-14T22:35:50.231848Z[0m [34mDEBUG[0m SACK gap: 8 missing seqs: [44, 45, 46, 47, 48]
+[2m2026-03-14T22:35:50.231859Z[0m [34mDEBUG[0m received SACK: cumulative_ack=44, 1 ranges
+[2m2026-03-14T22:35:50.231867Z[0m [34mDEBUG[0m SACK gap: 7 missing seqs: [45, 46, 47, 48, 49]
+[2m2026-03-14T22:35:50.231935Z[0m [34mDEBUG[0m received SACK: cumulative_ack=45, 1 ranges
+[2m2026-03-14T22:35:50.231944Z[0m [34mDEBUG[0m SACK gap: 6 missing seqs: [46, 47, 48, 49, 50]
+[2m2026-03-14T22:35:50.231956Z[0m [34mDEBUG[0m received SACK: cumulative_ack=46, 1 ranges
+[2m2026-03-14T22:35:50.231964Z[0m [34mDEBUG[0m SACK gap: 5 missing seqs: [47, 48, 49, 50, 51]
+[2m2026-03-14T22:35:50.231976Z[0m [34mDEBUG[0m received SACK: cumulative_ack=47, 1 ranges
+[2m2026-03-14T22:35:50.231982Z[0m [34mDEBUG[0m SACK gap: 4 missing seqs: [48, 49, 50, 51]
+[2m2026-03-14T22:35:50.231999Z[0m [34mDEBUG[0m skipping retransmit for data_seq 34 (SACK'd)
+[2m2026-03-14T22:35:50.232009Z[0m [34mDEBUG[0m skipping retransmit for data_seq 35 (SACK'd)
+[2m2026-03-14T22:35:50.232012Z[0m [34mDEBUG[0m skipping retransmit for data_seq 36 (SACK'd)
+[2m2026-03-14T22:35:50.232015Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232018Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232021Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+[2m2026-03-14T22:35:50.232024Z[0m [34mDEBUG[0m skipping retransmit for data_seq 40 (SACK'd)
+[2m2026-03-14T22:35:50.232027Z[0m [34mDEBUG[0m skipping retransmit for data_seq 41 (SACK'd)
+[2m2026-03-14T22:35:50.232030Z[0m [34mDEBUG[0m skipping retransmit for data_seq 42 (SACK'd)
+[2m2026-03-14T22:35:50.232033Z[0m [34mDEBUG[0m skipping retransmit for data_seq 43 (SACK'd)
+[2m2026-03-14T22:35:50.232036Z[0m [34mDEBUG[0m skipping retransmit for data_seq 44 (SACK'd)
+[2m2026-03-14T22:35:50.232040Z[0m [34mDEBUG[0m skipping retransmit for data_seq 45 (SACK'd)
+[2m2026-03-14T22:35:50.232043Z[0m [34mDEBUG[0m skipping retransmit for data_seq 46 (SACK'd)
+[2m2026-03-14T22:35:50.232046Z[0m [34mDEBUG[0m skipping retransmit for data_seq 47 (SACK'd)
+[2m2026-03-14T22:35:50.232290Z[0m [34mDEBUG[0m skipping retransmit for data_seq 35 (SACK'd)
+[2m2026-03-14T22:35:50.232293Z[0m [34mDEBUG[0m skipping retransmit for data_seq 36 (SACK'd)
+[2m2026-03-14T22:35:50.232300Z[0m [34mDEBUG[0m skipping retransmit for data_seq 37 (SACK'd)
+[2m2026-03-14T22:35:50.232304Z[0m [34mDEBUG[0m skipping retransmit for data_seq 38 (SACK'd)
+[2m2026-03-14T22:35:50.232307Z[0m [34mDEBUG[0m skipping retransmit for data_seq 39 (SACK'd)
+
+=== Anti-Replay ===
+
+=== PMTU ===
+
+=== Rekey ===
+
+=== Errors/Warnings ===
+[2m2026-03-14T22:35:49.954184Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:35:50.006109Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=4.0ms pipeline=19µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.012592Z[0m [34mDEBUG[0m [RX] batch=2 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=111 tcp_bytes=40 recv=314µs pipeline=8µs decrypt=27µs reassembly=2µs tcp_write=27µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.013149Z[0m [34mDEBUG[0m [RX] batch=3 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=497µs pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.013598Z[0m [34mDEBUG[0m [RX] batch=4 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=291µs pipeline=7µs decrypt=24µs reassembly=3µs tcp_write=32µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.016017Z[0m [34mDEBUG[0m [RX] batch=5 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2.4ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.017868Z[0m [34mDEBUG[0m [RX] batch=6 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=595 tcp_bytes=524 recv=1.8ms pipeline=6µs decrypt=18µs reassembly=2µs tcp_write=13µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.020630Z[0m [34mDEBUG[0m [RX] batch=7 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2.7ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.067134Z[0m [34mDEBUG[0m [RX] batch=8 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=3.8ms pipeline=6µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.067242Z[0m [34mDEBUG[0m [RX] batch=9 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=115 tcp_bytes=44 recv=68µs pipeline=2µs decrypt=8µs reassembly=1µs tcp_write=18µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.067627Z[0m [34mDEBUG[0m [RX] batch=10 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=327µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.073094Z[0m [34mDEBUG[0m [RX] batch=11 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=123 tcp_bytes=52 recv=5.4ms pipeline=3µs decrypt=20µs reassembly=2µs tcp_write=12µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.073500Z[0m [34mDEBUG[0m [RX] batch=12 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=370µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.116863Z[0m [34mDEBUG[0m [RX] batch=13 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=99 tcp_bytes=28 recv=727µs pipeline=10µs decrypt=25µs reassembly=2µs tcp_write=16µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.117257Z[0m [34mDEBUG[0m [RX] batch=14 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=341µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.121346Z[0m [34mDEBUG[0m [RX] batch=15 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=699 tcp_bytes=628 recv=4.0ms pipeline=4µs decrypt=14µs reassembly=2µs tcp_write=12µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.162614Z[0m [34mDEBUG[0m [RX] batch=16 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=115 tcp_bytes=44 recv=4.7ms pipeline=7µs decrypt=26µs reassembly=2µs tcp_write=15µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.163028Z[0m [34mDEBUG[0m [RX] batch=17 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=370µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.163538Z[0m [34mDEBUG[0m [RX] batch=18 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=480µs pipeline=2µs decrypt=9µs reassembly=1µs tcp_write=10µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164760Z[0m [34mDEBUG[0m [RX] batch=19 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.2ms pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164769Z[0m [34mDEBUG[0m [RX] batch=20 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164778Z[0m [34mDEBUG[0m [RX] batch=21 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164786Z[0m [34mDEBUG[0m [RX] batch=22 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164795Z[0m [34mDEBUG[0m [RX] batch=23 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164803Z[0m [34mDEBUG[0m [RX] batch=24 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.164812Z[0m [34mDEBUG[0m [RX] batch=25 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.166303Z[0m [34mDEBUG[0m [RX] batch=26 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.5ms pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.166321Z[0m [34mDEBUG[0m [RX] batch=27 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.166332Z[0m [34mDEBUG[0m [RX] batch=28 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.166353Z[0m [34mDEBUG[0m [RX] batch=29 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.166364Z[0m [34mDEBUG[0m [RX] batch=30 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167845Z[0m [34mDEBUG[0m [RX] batch=31 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.5ms pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167856Z[0m [34mDEBUG[0m [RX] batch=32 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167865Z[0m [34mDEBUG[0m [RX] batch=33 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167874Z[0m [34mDEBUG[0m [RX] batch=34 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167886Z[0m [34mDEBUG[0m [RX] batch=35 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.167895Z[0m [34mDEBUG[0m [RX] batch=36 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168554Z[0m [34mDEBUG[0m [RX] batch=37 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=648µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168563Z[0m [34mDEBUG[0m [RX] batch=38 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168572Z[0m [34mDEBUG[0m [RX] batch=39 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168581Z[0m [34mDEBUG[0m [RX] batch=40 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168590Z[0m [34mDEBUG[0m [RX] batch=41 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168602Z[0m [34mDEBUG[0m [RX] batch=42 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168622Z[0m [34mDEBUG[0m [RX] batch=43 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=1µs pipeline=0µs decrypt=3µs reassembly=1µs tcp_write=9µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.168644Z[0m [34mDEBUG[0m [RX] batch=44 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=2µs reassembly=1µs tcp_write=1µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.223824Z[0m [34mDEBUG[0m [RX] batch=45 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=217 tcp_bytes=0 recv=502µs pipeline=8µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231639Z[0m [34mDEBUG[0m [RX] batch=46 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1.7ms pipeline=4µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231670Z[0m [34mDEBUG[0m [RX] batch=47 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231690Z[0m [34mDEBUG[0m [RX] batch=48 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231709Z[0m [34mDEBUG[0m [RX] batch=49 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231729Z[0m [34mDEBUG[0m [RX] batch=50 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231754Z[0m [34mDEBUG[0m [RX] batch=51 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231774Z[0m [34mDEBUG[0m [RX] batch=52 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231793Z[0m [34mDEBUG[0m [RX] batch=53 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231814Z[0m [34mDEBUG[0m [RX] batch=54 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231833Z[0m [34mDEBUG[0m [RX] batch=55 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231851Z[0m [34mDEBUG[0m [RX] batch=56 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231871Z[0m [34mDEBUG[0m [RX] batch=57 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231902Z[0m [34mDEBUG[0m [RX] batch=58 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=17µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231948Z[0m [34mDEBUG[0m [RX] batch=59 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231968Z[0m [34mDEBUG[0m [RX] batch=60 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.231986Z[0m [34mDEBUG[0m [RX] batch=61 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234343Z[0m [34mDEBUG[0m [RX] batch=62 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2.3ms pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234361Z[0m [34mDEBUG[0m [RX] batch=63 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234375Z[0m [34mDEBUG[0m [RX] batch=64 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234447Z[0m [34mDEBUG[0m [RX] batch=65 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234474Z[0m [34mDEBUG[0m [RX] batch=66 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=15µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234501Z[0m [34mDEBUG[0m [RX] batch=67 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=2µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234521Z[0m [34mDEBUG[0m [RX] batch=68 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=2µs reassembly=1µs tcp_write=1µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.234540Z[0m [34mDEBUG[0m [RX] batch=69 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235485Z[0m [34mDEBUG[0m [RX] batch=70 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=814µs pipeline=7µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235498Z[0m [34mDEBUG[0m [RX] batch=71 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235508Z[0m [34mDEBUG[0m [RX] batch=72 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235519Z[0m [34mDEBUG[0m [RX] batch=73 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235530Z[0m [34mDEBUG[0m [RX] batch=74 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235540Z[0m [34mDEBUG[0m [RX] batch=75 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235848Z[0m [34mDEBUG[0m [RX] batch=76 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=288µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.235945Z[0m [34mDEBUG[0m [RX] batch=77 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236169Z[0m [34mDEBUG[0m [RX] batch=78 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=3µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236274Z[0m [34mDEBUG[0m [RX] batch=79 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236292Z[0m [34mDEBUG[0m [RX] batch=80 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=6µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236630Z[0m [34mDEBUG[0m [RX] batch=81 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236736Z[0m [34mDEBUG[0m [RX] batch=82 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=4µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236831Z[0m [34mDEBUG[0m [RX] batch=83 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.236959Z[0m [34mDEBUG[0m [RX] batch=84 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237060Z[0m [34mDEBUG[0m [RX] batch=85 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237193Z[0m [34mDEBUG[0m [RX] batch=86 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237308Z[0m [34mDEBUG[0m [RX] batch=87 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237335Z[0m [34mDEBUG[0m [RX] batch=88 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=14µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237448Z[0m [34mDEBUG[0m [RX] batch=89 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237544Z[0m [34mDEBUG[0m [RX] batch=90 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237636Z[0m [34mDEBUG[0m [RX] batch=91 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237729Z[0m [34mDEBUG[0m [RX] batch=92 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237821Z[0m [34mDEBUG[0m [RX] batch=93 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.237913Z[0m [34mDEBUG[0m [RX] batch=94 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.238005Z[0m [34mDEBUG[0m [RX] batch=95 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.238364Z[0m [34mDEBUG[0m [RX] batch=96 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.238400Z[0m [34mDEBUG[0m [RX] batch=97 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=3µs pipeline=2µs decrypt=3µs reassembly=1µs tcp_write=16µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.238537Z[0m [34mDEBUG[0m [RX] batch=98 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:35:50.238618Z[0m [34mDEBUG[0m [RX] batch=99 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+
+=== Summary Stats ===
+Total log lines: 13201
+Handshake events: 2
+Retransmissions: 329
+SACK events: 242
+Anti-replay drops: 0
+0
+Errors: 1

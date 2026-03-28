@@ -1,17 +1,18 @@
 # ─────────────────────────────────────────────────────────────
-# ZTLP Full-Stack: Backend SSH server
-# Minimal Debian with OpenSSH — the "protected service"
+# ZTLP Full-Stack: Backend SSH + HTTP server
+# Minimal Debian with OpenSSH + Python HTTP echo server
 # ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server \
+    openssh-server python3-minimal \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
 COPY fullstack/backend-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY fullstack/http-echo.py /http-echo.py
+RUN chmod +x /entrypoint.sh /http-echo.py
 
-EXPOSE 22
+EXPOSE 22 8080
 
 ENTRYPOINT ["/entrypoint.sh"]

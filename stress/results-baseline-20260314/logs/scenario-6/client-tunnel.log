@@ -1,0 +1,1423 @@
+[2m2026-03-14T22:12:29.258565Z[0m [32m INFO[0m loading identity from /home/ztlp/.ztlp/client-identity.json
+[2m2026-03-14T22:12:29.258630Z[0m [32m INFO[0m loaded NodeID: b417df82be38c9f9c88296bfc84115e0
+[2m2026-03-14T22:12:29.258677Z[0m [32m INFO[0m ZTLP node bound to 0.0.0.0:34826
+[36mBound to:[0m 0.0.0.0:34826
+[36mConnecting to:[0m 172.30.1.100:23095
+
+[2m→ Sending HELLO (message 1/3)...[0m
+  [36mService:[0m ssh
+[2m2026-03-14T22:12:29.258879Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m← Waiting for HELLO_ACK (message 2/3)...[0m
+[2m2026-03-14T22:12:29.759607Z[0m [34mDEBUG[0m handshake: retransmitting HELLO (attempt 1/5)
+  [33m⟳[0m retransmitting HELLO (1/5)
+[2m2026-03-14T22:12:29.759732Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m2026-03-14T22:12:30.760938Z[0m [34mDEBUG[0m handshake: retransmitting HELLO (attempt 2/5)
+  [33m⟳[0m retransmitting HELLO (2/5)
+[2m2026-03-14T22:12:30.761047Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m2026-03-14T22:12:32.762202Z[0m [34mDEBUG[0m handshake: retransmitting HELLO (attempt 3/5)
+  [33m⟳[0m retransmitting HELLO (3/5)
+[2m2026-03-14T22:12:32.762326Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m2026-03-14T22:12:32.762863Z[0m [34mDEBUG[0m received 192 bytes from 172.30.1.100:23095
+[2m→ Sending final confirmation (message 3/3)...[0m
+[2m2026-03-14T22:12:32.763104Z[0m [34mDEBUG[0m sent 160 bytes to 172.30.1.100:23095
+
+[32m✓ Handshake complete![0m
+  [36mRemote NodeID:[0m 64e0858cf40b9a4dc0c7abf3bc72634e
+  [36mSession ID:[0m f3dce92491734b8b32ac2ce3
+  [36mHandshake latency:[0m 3504.33ms
+
+--- [1mZTLP tunnel active[0m ---
+  [36mLocal listener:[0m 127.0.0.1:2222
+  [36mUsage:[0m Connect your TCP client to 127.0.0.1:2222
+  [2mStop:[0m Ctrl+C
+
+[32m✓ Listening for TCP connections on[0m 127.0.0.1:2222
+[36mTCP connection from[0m 127.0.0.1:37136 → tunnel
+[2m2026-03-14T22:12:34.753280Z[0m [32m INFO[0m run_bridge: starting for session f3dce92491734b8b32ac2ce3 peer=172.30.1.100:23095 local_udp=Ok(0.0.0.0:34826)
+[2m2026-03-14T22:12:34.753299Z[0m [32m INFO[0m system profile: recv_buf=14336KB, send_buf=14336KB, loopback=false, pacing=none (buffer-based), sub_batch=128
+[2m2026-03-14T22:12:34.753305Z[0m [34mDEBUG[0m run_bridge: pre-extracted crypto keys for session f3dce92491734b8b32ac2ce3
+[2m2026-03-14T22:12:34.753355Z[0m [32m INFO[0m tcp_to_ztlp: starting, peer_addr=172.30.1.100:23095
+[2m2026-03-14T22:12:34.753364Z[0m [32m INFO[0m ztlp_to_tcp: starting (prefetched_packets=0)
+[2m2026-03-14T22:12:34.753452Z[0m [34mDEBUG[0m GRO detected: available (enabled on socket)
+[2m2026-03-14T22:12:34.753456Z[0m [34mDEBUG[0m GroReceiver created: mode=auto, gro_enabled=true
+[2m2026-03-14T22:12:34.753516Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:12:34.753523Z[0m [34mDEBUG[0m UdpSender created: mode=auto, capability=Unavailable
+[2m2026-03-14T22:12:34.753546Z[0m [34mDEBUG[0m TCP → ZTLP: 40 bytes
+[2m2026-03-14T22:12:34.753589Z[0m [34mDEBUG[0m ZTLP sent: 111 bytes (data_seq 0, packet_seq 0)
+[2m2026-03-14T22:12:34.753595Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=11µs encrypt=40µs send=40µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+[2m2026-03-14T22:12:34.805134Z[0m [34mDEBUG[0m received ACK for data_seq 0
+[2m2026-03-14T22:12:34.805163Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2.8ms pipeline=14µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.810964Z[0m [34mDEBUG[0m reassembly: initialized with first data_seq 0
+[2m2026-03-14T22:12:34.810983Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 1, buffered 0
+[2m2026-03-14T22:12:34.811019Z[0m [34mDEBUG[0m [RX] batch=2 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=111 tcp_bytes=40 recv=5.8ms pipeline=6µs decrypt=26µs reassembly=2µs tcp_write=27µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.811057Z[0m [34mDEBUG[0m sent ACK for delivered_seq 0 (packet seq 1)
+[2m2026-03-14T22:12:34.811268Z[0m [34mDEBUG[0m TCP → ZTLP: 1288 bytes
+[2m2026-03-14T22:12:34.811310Z[0m [34mDEBUG[0m ZTLP sent: 1359 bytes (data_seq 1, packet_seq 2)
+[2m2026-03-14T22:12:34.811321Z[0m [34mDEBUG[0m [TX] batch=2 pkts=1 tcp_bytes=1288 udp_bytes=1359 tcp_read=57.7ms encrypt=41µs send=41µs strategy=SendMmsg data_seq=2 cwnd=11 window=11 
+[2m2026-03-14T22:12:34.811579Z[0m [34mDEBUG[0m received ACK for data_seq 1
+[2m2026-03-14T22:12:34.811589Z[0m [34mDEBUG[0m [RX] batch=3 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=510µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.811683Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 2, buffered 0
+[2m2026-03-14T22:12:34.811707Z[0m [34mDEBUG[0m [RX] batch=4 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=83µs pipeline=1µs decrypt=5µs reassembly=2µs tcp_write=18µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.811727Z[0m [34mDEBUG[0m sent ACK for delivered_seq 1 (packet seq 3)
+[2m2026-03-14T22:12:34.812572Z[0m [34mDEBUG[0m TCP → ZTLP: 48 bytes
+[2m2026-03-14T22:12:34.812593Z[0m [34mDEBUG[0m ZTLP sent: 119 bytes (data_seq 2, packet_seq 4)
+[2m2026-03-14T22:12:34.812598Z[0m [34mDEBUG[0m [TX] batch=3 pkts=1 tcp_bytes=48 udp_bytes=119 tcp_read=1.2ms encrypt=18µs send=18µs strategy=SendMmsg data_seq=3 cwnd=12 window=12 
+[2m2026-03-14T22:12:34.812862Z[0m [34mDEBUG[0m received ACK for data_seq 2
+[2m2026-03-14T22:12:34.812869Z[0m [34mDEBUG[0m [RX] batch=5 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.1ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.815049Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 3, buffered 0
+[2m2026-03-14T22:12:34.815076Z[0m [34mDEBUG[0m [RX] batch=6 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=595 tcp_bytes=524 recv=2.2ms pipeline=2µs decrypt=9µs reassembly=1µs tcp_write=17µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.815097Z[0m [34mDEBUG[0m sent ACK for delivered_seq 2 (packet seq 5)
+[2m2026-03-14T22:12:34.817439Z[0m [34mDEBUG[0m TCP → ZTLP: 16 bytes
+[2m2026-03-14T22:12:34.817462Z[0m [34mDEBUG[0m ZTLP sent: 87 bytes (data_seq 3, packet_seq 6)
+[2m2026-03-14T22:12:34.817467Z[0m [34mDEBUG[0m [TX] batch=4 pkts=1 tcp_bytes=16 udp_bytes=87 tcp_read=4.8ms encrypt=20µs send=20µs strategy=SendMmsg data_seq=4 cwnd=13 window=13 
+[2m2026-03-14T22:12:34.817713Z[0m [34mDEBUG[0m received ACK for data_seq 3
+[2m2026-03-14T22:12:34.817724Z[0m [34mDEBUG[0m [RX] batch=7 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2.6ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.858359Z[0m [34mDEBUG[0m TCP → ZTLP: 44 bytes
+[2m2026-03-14T22:12:34.858443Z[0m [34mDEBUG[0m ZTLP sent: 115 bytes (data_seq 4, packet_seq 7)
+[2m2026-03-14T22:12:34.858456Z[0m [34mDEBUG[0m [TX] batch=5 pkts=1 tcp_bytes=44 udp_bytes=115 tcp_read=40.9ms encrypt=55µs send=55µs strategy=SendMmsg data_seq=5 cwnd=14 window=14 
+[2m2026-03-14T22:12:34.858894Z[0m [34mDEBUG[0m received ACK for data_seq 4
+[2m2026-03-14T22:12:34.858912Z[0m [34mDEBUG[0m [RX] batch=8 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=4.6ms pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.858926Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 4, buffered 0
+[2m2026-03-14T22:12:34.858947Z[0m [34mDEBUG[0m [RX] batch=9 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=115 tcp_bytes=44 recv=2µs pipeline=1µs decrypt=5µs reassembly=1µs tcp_write=16µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.858970Z[0m [34mDEBUG[0m sent ACK for delivered_seq 3 (packet seq 8)
+[2m2026-03-14T22:12:34.859027Z[0m [34mDEBUG[0m TCP → ZTLP: 68 bytes
+[2m2026-03-14T22:12:34.859048Z[0m [34mDEBUG[0m ZTLP sent: 139 bytes (data_seq 5, packet_seq 9)
+[2m2026-03-14T22:12:34.859062Z[0m [34mDEBUG[0m [TX] batch=6 pkts=1 tcp_bytes=68 udp_bytes=139 tcp_read=562µs encrypt=20µs send=20µs strategy=SendMmsg data_seq=6 cwnd=15 window=15 
+[2m2026-03-14T22:12:34.859241Z[0m [34mDEBUG[0m received ACK for data_seq 5
+[2m2026-03-14T22:12:34.859251Z[0m [34mDEBUG[0m [RX] batch=10 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=254µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.864879Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 5, buffered 0
+[2m2026-03-14T22:12:34.864918Z[0m [34mDEBUG[0m [RX] batch=11 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=123 tcp_bytes=52 recv=5.6ms pipeline=6µs decrypt=19µs reassembly=2µs tcp_write=19µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.864945Z[0m [34mDEBUG[0m sent ACK for delivered_seq 4 (packet seq 10)
+[2m2026-03-14T22:12:34.865119Z[0m [34mDEBUG[0m TCP → ZTLP: 148 bytes
+[2m2026-03-14T22:12:34.865141Z[0m [34mDEBUG[0m ZTLP sent: 219 bytes (data_seq 6, packet_seq 11)
+[2m2026-03-14T22:12:34.865148Z[0m [34mDEBUG[0m [TX] batch=7 pkts=1 tcp_bytes=148 udp_bytes=219 tcp_read=6.0ms encrypt=21µs send=21µs strategy=SendMmsg data_seq=7 cwnd=16 window=16 
+[2m2026-03-14T22:12:34.908792Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 6, buffered 0
+[2m2026-03-14T22:12:34.908841Z[0m [34mDEBUG[0m [RX] batch=12 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=99 tcp_bytes=28 recv=1.9ms pipeline=9µs decrypt=24µs reassembly=2µs tcp_write=17µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.908872Z[0m [34mDEBUG[0m sent ACK for delivered_seq 5 (packet seq 12)
+[2m2026-03-14T22:12:34.909001Z[0m [34mDEBUG[0m TCP → ZTLP: 112 bytes
+[2m2026-03-14T22:12:34.909082Z[0m [34mDEBUG[0m ZTLP sent: 183 bytes (data_seq 7, packet_seq 13)
+[2m2026-03-14T22:12:34.909094Z[0m [34mDEBUG[0m [TX] batch=8 pkts=1 tcp_bytes=112 udp_bytes=183 tcp_read=43.8ms encrypt=63µs send=63µs strategy=SendMmsg data_seq=8 cwnd=16 window=16 
+[2m2026-03-14T22:12:34.909352Z[0m [34mDEBUG[0m received ACK for data_seq 7
+[2m2026-03-14T22:12:34.909362Z[0m [34mDEBUG[0m [RX] batch=13 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=470µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.913901Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 7, buffered 0
+[2m2026-03-14T22:12:34.913924Z[0m [34mDEBUG[0m [RX] batch=14 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=699 tcp_bytes=628 recv=4.5ms pipeline=2µs decrypt=9µs reassembly=2µs tcp_write=12µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.913941Z[0m [34mDEBUG[0m sent ACK for delivered_seq 6 (packet seq 14)
+[2m2026-03-14T22:12:34.954635Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 8, buffered 0
+[2m2026-03-14T22:12:34.954680Z[0m [34mDEBUG[0m [RX] batch=15 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=115 tcp_bytes=44 recv=4.2ms pipeline=6µs decrypt=23µs reassembly=2µs tcp_write=20µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.954708Z[0m [34mDEBUG[0m sent ACK for delivered_seq 7 (packet seq 15)
+[2m2026-03-14T22:12:34.954793Z[0m [34mDEBUG[0m TCP → ZTLP: 116 bytes
+[2m2026-03-14T22:12:34.954811Z[0m [34mDEBUG[0m ZTLP sent: 187 bytes (data_seq 8, packet_seq 16)
+[2m2026-03-14T22:12:34.954815Z[0m [34mDEBUG[0m [TX] batch=9 pkts=1 tcp_bytes=116 udp_bytes=187 tcp_read=45.6ms encrypt=17µs send=17µs strategy=SendMmsg data_seq=9 cwnd=18 window=18 
+[2m2026-03-14T22:12:34.955722Z[0m [34mDEBUG[0m received ACK for data_seq 8
+[2m2026-03-14T22:12:34.955748Z[0m [34mDEBUG[0m [RX] batch=16 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=993µs pipeline=8µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.955803Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 9, buffered 0
+[2m2026-03-14T22:12:34.955841Z[0m [34mDEBUG[0m [RX] batch=17 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=32µs pipeline=3µs decrypt=7µs reassembly=1µs tcp_write=24µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.955860Z[0m [34mDEBUG[0m sent ACK for delivered_seq 8 (packet seq 17)
+[2m2026-03-14T22:12:34.956010Z[0m [34mDEBUG[0m TCP → ZTLP: 32768 bytes
+[2m2026-03-14T22:12:34.956112Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.956198Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 9, packet_seq 18)
+[2m2026-03-14T22:12:34.956203Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 10, packet_seq 19)
+[2m2026-03-14T22:12:34.956206Z[0m [34mDEBUG[0m ZTLP sent: 89 bytes (data_seq 11, packet_seq 20)
+[2m2026-03-14T22:12:34.956214Z[0m [34mDEBUG[0m [TX] batch=10 pkts=3 tcp_bytes=32768 udp_bytes=32981 tcp_read=1.2ms encrypt=187µs send=187µs strategy=SendMmsg data_seq=12 cwnd=19 window=19 
+[2m2026-03-14T22:12:34.956249Z[0m [34mDEBUG[0m TCP → ZTLP: 36 bytes
+[2m2026-03-14T22:12:34.956266Z[0m [34mDEBUG[0m ZTLP sent: 107 bytes (data_seq 12, packet_seq 21)
+[2m2026-03-14T22:12:34.956271Z[0m [34mDEBUG[0m [TX] batch=11 pkts=1 tcp_bytes=36 udp_bytes=107 tcp_read=28µs encrypt=16µs send=16µs strategy=SendMmsg data_seq=13 cwnd=19 window=19 
+[2m2026-03-14T22:12:34.956365Z[0m [34mDEBUG[0m TCP → ZTLP: 32804 bytes
+[2m2026-03-14T22:12:34.956439Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.956502Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 13, packet_seq 22)
+[2m2026-03-14T22:12:34.956505Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 14, packet_seq 23)
+[2m2026-03-14T22:12:34.956507Z[0m [34mDEBUG[0m ZTLP sent: 125 bytes (data_seq 15, packet_seq 24)
+[2m2026-03-14T22:12:34.956512Z[0m [34mDEBUG[0m [TX] batch=12 pkts=3 tcp_bytes=32804 udp_bytes=33017 tcp_read=88µs encrypt=138µs send=138µs strategy=SendMmsg data_seq=16 cwnd=19 window=19 
+[2m2026-03-14T22:12:34.956534Z[0m [34mDEBUG[0m TCP → ZTLP: 32804 bytes
+[2m2026-03-14T22:12:34.956575Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.956624Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 16, packet_seq 25)
+[2m2026-03-14T22:12:34.956627Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 17, packet_seq 26)
+[2m2026-03-14T22:12:34.956629Z[0m [34mDEBUG[0m ZTLP sent: 125 bytes (data_seq 18, packet_seq 27)
+[2m2026-03-14T22:12:34.956632Z[0m [34mDEBUG[0m [TX] batch=13 pkts=3 tcp_bytes=32804 udp_bytes=33017 tcp_read=17µs encrypt=95µs send=95µs strategy=SendMmsg data_seq=19 cwnd=19 window=19 
+[2m2026-03-14T22:12:34.956679Z[0m [34mDEBUG[0m TCP → ZTLP: 65536 bytes
+[2m2026-03-14T22:12:34.956774Z[0m [34mDEBUG[0m batch sending 5 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.956874Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 19, packet_seq 28)
+[2m2026-03-14T22:12:34.956877Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 20, packet_seq 29)
+[2m2026-03-14T22:12:34.956879Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 21, packet_seq 30)
+[2m2026-03-14T22:12:34.956882Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 22, packet_seq 31)
+[2m2026-03-14T22:12:34.956884Z[0m [34mDEBUG[0m ZTLP sent: 107 bytes (data_seq 23, packet_seq 32)
+[2m2026-03-14T22:12:34.956887Z[0m [34mDEBUG[0m [TX] batch=14 pkts=5 tcp_bytes=65536 udp_bytes=65891 tcp_read=43µs encrypt=205µs send=205µs strategy=SendMmsg data_seq=24 cwnd=19 window=19 
+[2m2026-03-14T22:12:34.956909Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:34.956993Z[0m [34mDEBUG[0m batch sending 4 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.957084Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 24, packet_seq 33)
+[2m2026-03-14T22:12:34.957092Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 25, packet_seq 34)
+[2m2026-03-14T22:12:34.957094Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 26, packet_seq 35)
+[2m2026-03-14T22:12:34.957097Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 27, packet_seq 36)
+[2m2026-03-14T22:12:34.957278Z[0m [34mDEBUG[0m received ACK for data_seq 9
+[2m2026-03-14T22:12:34.957286Z[0m [34mDEBUG[0m [RX] batch=18 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.4ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.957293Z[0m [34mDEBUG[0m received ACK for data_seq 10
+[2m2026-03-14T22:12:34.957296Z[0m [34mDEBUG[0m [RX] batch=19 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.957302Z[0m [34mDEBUG[0m received ACK for data_seq 11
+[2m2026-03-14T22:12:34.957305Z[0m [34mDEBUG[0m [RX] batch=20 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.957393Z[0m [34mDEBUG[0m batch sending 5 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.957480Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 28, packet_seq 37)
+[2m2026-03-14T22:12:34.957483Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 29, packet_seq 38)
+[2m2026-03-14T22:12:34.957485Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 30, packet_seq 39)
+[2m2026-03-14T22:12:34.957488Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 31, packet_seq 40)
+[2m2026-03-14T22:12:34.957490Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 32, packet_seq 41)
+[2m2026-03-14T22:12:34.957493Z[0m [34mDEBUG[0m [TX] batch=15 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=18µs encrypt=580µs send=580µs strategy=SendMmsg data_seq=33 cwnd=22 window=22 WINDOW_STALL
+[2m2026-03-14T22:12:34.957521Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:34.957555Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 33, packet_seq 42)
+[2m2026-03-14T22:12:34.958588Z[0m [34mDEBUG[0m received ACK for data_seq 13
+[2m2026-03-14T22:12:34.958598Z[0m [34mDEBUG[0m [RX] batch=21 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.3ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958605Z[0m [34mDEBUG[0m received ACK for data_seq 14
+[2m2026-03-14T22:12:34.958608Z[0m [34mDEBUG[0m [RX] batch=22 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958614Z[0m [34mDEBUG[0m received ACK for data_seq 15
+[2m2026-03-14T22:12:34.958617Z[0m [34mDEBUG[0m [RX] batch=23 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958623Z[0m [34mDEBUG[0m received ACK for data_seq 16
+[2m2026-03-14T22:12:34.958625Z[0m [34mDEBUG[0m [RX] batch=24 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958631Z[0m [34mDEBUG[0m received ACK for data_seq 17
+[2m2026-03-14T22:12:34.958634Z[0m [34mDEBUG[0m [RX] batch=25 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958640Z[0m [34mDEBUG[0m received ACK for data_seq 18
+[2m2026-03-14T22:12:34.958643Z[0m [34mDEBUG[0m [RX] batch=26 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958652Z[0m [34mDEBUG[0m received ACK for data_seq 19
+[2m2026-03-14T22:12:34.958655Z[0m [34mDEBUG[0m [RX] batch=27 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958661Z[0m [34mDEBUG[0m received ACK for data_seq 20
+[2m2026-03-14T22:12:34.958664Z[0m [34mDEBUG[0m [RX] batch=28 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958670Z[0m [34mDEBUG[0m received ACK for data_seq 21
+[2m2026-03-14T22:12:34.958672Z[0m [34mDEBUG[0m [RX] batch=29 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958678Z[0m [34mDEBUG[0m received ACK for data_seq 22
+[2m2026-03-14T22:12:34.958681Z[0m [34mDEBUG[0m [RX] batch=30 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958687Z[0m [34mDEBUG[0m received ACK for data_seq 23
+[2m2026-03-14T22:12:34.958689Z[0m [34mDEBUG[0m [RX] batch=31 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958695Z[0m [34mDEBUG[0m received ACK for data_seq 24
+[2m2026-03-14T22:12:34.958698Z[0m [34mDEBUG[0m [RX] batch=32 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958704Z[0m [34mDEBUG[0m received ACK for data_seq 25
+[2m2026-03-14T22:12:34.958707Z[0m [34mDEBUG[0m [RX] batch=33 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958712Z[0m [34mDEBUG[0m received ACK for data_seq 26
+[2m2026-03-14T22:12:34.958715Z[0m [34mDEBUG[0m [RX] batch=34 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958721Z[0m [34mDEBUG[0m received ACK for data_seq 27
+[2m2026-03-14T22:12:34.958723Z[0m [34mDEBUG[0m [RX] batch=35 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958730Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 10, buffered 0
+[2m2026-03-14T22:12:34.958740Z[0m [34mDEBUG[0m [RX] batch=36 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=2µs reassembly=1µs tcp_write=6µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:34.958755Z[0m [34mDEBUG[0m sent ACK for delivered_seq 9 (packet seq 43)
+[2m2026-03-14T22:12:34.958873Z[0m [34mDEBUG[0m batch sending 8 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.959070Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 34, packet_seq 44)
+[2m2026-03-14T22:12:34.959073Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 35, packet_seq 45)
+[2m2026-03-14T22:12:34.959076Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 36, packet_seq 46)
+[2m2026-03-14T22:12:34.959078Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 37, packet_seq 47)
+[2m2026-03-14T22:12:34.959080Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 38, packet_seq 48)
+[2m2026-03-14T22:12:34.959082Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 39, packet_seq 49)
+[2m2026-03-14T22:12:34.959084Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 40, packet_seq 50)
+[2m2026-03-14T22:12:34.959087Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 41, packet_seq 51)
+[2m2026-03-14T22:12:34.959120Z[0m [34mDEBUG[0m [TX] batch=16 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=24µs encrypt=1.6ms send=1.6ms strategy=SendMmsg data_seq=42 cwnd=38 window=38 WINDOW_STALL
+[2m2026-03-14T22:12:34.959150Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:34.959303Z[0m [34mDEBUG[0m batch sending 9 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.959526Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 42, packet_seq 52)
+[2m2026-03-14T22:12:34.959530Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 43, packet_seq 53)
+[2m2026-03-14T22:12:34.959533Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 44, packet_seq 54)
+[2m2026-03-14T22:12:34.959535Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 45, packet_seq 55)
+[2m2026-03-14T22:12:34.959537Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 46, packet_seq 56)
+[2m2026-03-14T22:12:34.959539Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 47, packet_seq 57)
+[2m2026-03-14T22:12:34.959541Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 48, packet_seq 58)
+[2m2026-03-14T22:12:34.959543Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 49, packet_seq 59)
+[2m2026-03-14T22:12:34.959546Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 50, packet_seq 60)
+[2m2026-03-14T22:12:34.959555Z[0m [34mDEBUG[0m [TX] batch=17 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=26µs encrypt=401µs send=401µs strategy=SendMmsg data_seq=51 cwnd=38 window=38 
+[2m2026-03-14T22:12:34.959574Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:34.959730Z[0m [34mDEBUG[0m batch sending 9 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.959954Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 51, packet_seq 61)
+[2m2026-03-14T22:12:34.959957Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 52, packet_seq 62)
+[2m2026-03-14T22:12:34.959959Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 53, packet_seq 63)
+[2m2026-03-14T22:12:34.959962Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 54, packet_seq 64)
+[2m2026-03-14T22:12:34.959964Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 55, packet_seq 65)
+[2m2026-03-14T22:12:34.959966Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 56, packet_seq 66)
+[2m2026-03-14T22:12:34.959968Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 57, packet_seq 67)
+[2m2026-03-14T22:12:34.959970Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 58, packet_seq 68)
+[2m2026-03-14T22:12:34.959972Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 59, packet_seq 69)
+[2m2026-03-14T22:12:34.959981Z[0m [34mDEBUG[0m [TX] batch=18 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=14µs encrypt=403µs send=403µs strategy=SendMmsg data_seq=60 cwnd=38 window=38 
+[2m2026-03-14T22:12:34.960001Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:34.960093Z[0m [34mDEBUG[0m batch sending 6 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:34.960248Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 60, packet_seq 70)
+[2m2026-03-14T22:12:34.960251Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 61, packet_seq 71)
+[2m2026-03-14T22:12:34.960253Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 62, packet_seq 72)
+[2m2026-03-14T22:12:34.960255Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 63, packet_seq 73)
+[2m2026-03-14T22:12:34.960257Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 64, packet_seq 74)
+[2m2026-03-14T22:12:34.960259Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 65, packet_seq 75)
+[2m2026-03-14T22:12:35.010028Z[0m [34mDEBUG[0m received NACK for 5 missing seqs: [28, 30, 31, 32, 33]
+[2m2026-03-14T22:12:35.010060Z[0m [34mDEBUG[0m [RX] batch=37 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=105 tcp_bytes=0 recv=2.6ms pipeline=11µs decrypt=0µs reassembly=4µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.015185Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.0 → ssthresh=19.0, recovery_seq=Some(66))
+[2m2026-03-14T22:12:35.015346Z[0m [34mDEBUG[0m retransmitted data_seq 28 (while waiting for window)
+[2m2026-03-14T22:12:35.015410Z[0m [34mDEBUG[0m retransmitted data_seq 30 (while waiting for window)
+[2m2026-03-14T22:12:35.015466Z[0m [34mDEBUG[0m retransmitted data_seq 31 (while waiting for window)
+[2m2026-03-14T22:12:35.015482Z[0m [34mDEBUG[0m retransmitted data_seq 32 (while waiting for window)
+[2m2026-03-14T22:12:35.015537Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:12:35.016140Z[0m [34mDEBUG[0m received SACK: cumulative_ack=29, 1 ranges
+[2m2026-03-14T22:12:35.016161Z[0m [34mDEBUG[0m SACK gap: 4 missing seqs: [30, 31, 32, 33]
+[2m2026-03-14T22:12:35.016171Z[0m [34mDEBUG[0m [RX] batch=38 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=949µs pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.016181Z[0m [34mDEBUG[0m received SACK: cumulative_ack=30, 1 ranges
+[2m2026-03-14T22:12:35.016185Z[0m [34mDEBUG[0m spurious retransmit detected for seq 30: ack arrived in 0.8ms, expected 3.6ms
+[2m2026-03-14T22:12:35.016189Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.0
+[2m2026-03-14T22:12:35.016193Z[0m [34mDEBUG[0m SACK gap: 3 missing seqs: [31, 32, 33]
+[2m2026-03-14T22:12:35.016196Z[0m [34mDEBUG[0m [RX] batch=39 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.016203Z[0m [34mDEBUG[0m received SACK: cumulative_ack=31, 1 ranges
+[2m2026-03-14T22:12:35.016205Z[0m [34mDEBUG[0m spurious retransmit detected for seq 31: ack arrived in 0.8ms, expected 3.6ms
+[2m2026-03-14T22:12:35.016209Z[0m [34mDEBUG[0m SACK gap: 2 missing seqs: [32, 33]
+[2m2026-03-14T22:12:35.016243Z[0m [34mDEBUG[0m [RX] batch=40 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.016261Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.0 → ssthresh=19.0, recovery_seq=Some(66))
+[2m2026-03-14T22:12:35.016266Z[0m [34mDEBUG[0m skipping retransmit for data_seq 30 (SACK'd)
+[2m2026-03-14T22:12:35.016268Z[0m [34mDEBUG[0m skipping retransmit for data_seq 31 (SACK'd)
+[2m2026-03-14T22:12:35.016294Z[0m [34mDEBUG[0m retransmitted data_seq 32 (while waiting for window)
+[2m2026-03-14T22:12:35.016337Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:12:35.016340Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.016342Z[0m [34mDEBUG[0m skipping retransmit for data_seq 31 (SACK'd)
+[2m2026-03-14T22:12:35.016351Z[0m [34mDEBUG[0m retransmitted data_seq 32 (while waiting for window)
+[2m2026-03-14T22:12:35.016386Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:12:35.016389Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.016397Z[0m [34mDEBUG[0m retransmitted data_seq 32 (while waiting for window)
+[2m2026-03-14T22:12:35.016429Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:12:35.016463Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.016515Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 66, packet_seq 76)
+[2m2026-03-14T22:12:35.016518Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 67, packet_seq 77)
+[2m2026-03-14T22:12:35.016521Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 68, packet_seq 78)
+[2m2026-03-14T22:12:35.016526Z[0m [34mDEBUG[0m [TX] batch=19 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=15µs encrypt=56.5ms send=56.5ms strategy=SendMmsg data_seq=69 cwnd=38 window=38 WINDOW_STALL
+[2m2026-03-14T22:12:35.016556Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.016650Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 69, packet_seq 79)
+[2m2026-03-14T22:12:35.016758Z[0m [34mDEBUG[0m received SACK: cumulative_ack=32, 1 ranges
+[2m2026-03-14T22:12:35.016765Z[0m [34mDEBUG[0m spurious retransmit detected for seq 32: ack arrived in 0.4ms, expected 21.8ms
+[2m2026-03-14T22:12:35.016769Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.0
+[2m2026-03-14T22:12:35.016773Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [33]
+[2m2026-03-14T22:12:35.016778Z[0m [34mDEBUG[0m [RX] batch=41 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=500µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.016784Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.0 → ssthresh=19.0, recovery_seq=Some(70))
+[2m2026-03-14T22:12:35.017001Z[0m [34mDEBUG[0m retransmitted data_seq 33 (while waiting for window)
+[2m2026-03-14T22:12:35.017638Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 70, packet_seq 80)
+[2m2026-03-14T22:12:35.017659Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 11, buffered 0
+[2m2026-03-14T22:12:35.017709Z[0m [34mDEBUG[0m [RX] batch=42 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=871µs pipeline=2µs decrypt=4µs reassembly=1µs tcp_write=44µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.017771Z[0m [34mDEBUG[0m sent ACK for delivered_seq 10 (packet seq 81)
+[2m2026-03-14T22:12:35.017782Z[0m [34mDEBUG[0m received ACK for data_seq 50
+[2m2026-03-14T22:12:35.017791Z[0m [34mDEBUG[0m [RX] batch=43 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.017799Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 12, buffered 0
+[2m2026-03-14T22:12:35.017809Z[0m [34mDEBUG[0m [RX] batch=44 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=7µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.017823Z[0m [34mDEBUG[0m sent ACK for delivered_seq 11 (packet seq 82)
+[2m2026-03-14T22:12:35.017829Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 13, buffered 0
+[2m2026-03-14T22:12:35.017834Z[0m [34mDEBUG[0m [RX] batch=45 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=1µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.017851Z[0m [34mDEBUG[0m sent ACK for delivered_seq 12 (packet seq 83)
+[2m2026-03-14T22:12:35.017895Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 71, packet_seq 84)
+[2m2026-03-14T22:12:35.017931Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 72, packet_seq 85)
+[2m2026-03-14T22:12:35.017967Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 73, packet_seq 86)
+[2m2026-03-14T22:12:35.018004Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 74, packet_seq 87)
+[2m2026-03-14T22:12:35.018041Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 75, packet_seq 88)
+[2m2026-03-14T22:12:35.018080Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 76, packet_seq 89)
+[2m2026-03-14T22:12:35.018090Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 77, packet_seq 90)
+[2m2026-03-14T22:12:35.018094Z[0m [34mDEBUG[0m [TX] batch=20 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=20µs encrypt=1.5ms send=1.5ms strategy=SendMmsg data_seq=78 cwnd=38 window=38 WINDOW_STALL
+[2m2026-03-14T22:12:35.018118Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.018153Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 78, packet_seq 91)
+[2m2026-03-14T22:12:35.018192Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 79, packet_seq 92)
+[2m2026-03-14T22:12:35.018228Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 80, packet_seq 93)
+[2m2026-03-14T22:12:35.018290Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 81, packet_seq 94)
+[2m2026-03-14T22:12:35.018328Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 82, packet_seq 95)
+[2m2026-03-14T22:12:35.018365Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 83, packet_seq 96)
+[2m2026-03-14T22:12:35.018402Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 84, packet_seq 97)
+[2m2026-03-14T22:12:35.018440Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 85, packet_seq 98)
+[2m2026-03-14T22:12:35.018449Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 86, packet_seq 99)
+[2m2026-03-14T22:12:35.018453Z[0m [34mDEBUG[0m [TX] batch=21 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=19µs encrypt=330µs send=330µs strategy=SendMmsg data_seq=87 cwnd=38 window=38 
+[2m2026-03-14T22:12:35.018471Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.018508Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 87, packet_seq 100)
+[2m2026-03-14T22:12:35.018543Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 88, packet_seq 101)
+[2m2026-03-14T22:12:35.068192Z[0m [34mDEBUG[0m received NACK for 15 missing seqs: [51, 52, 53, 54, 55]
+[2m2026-03-14T22:12:35.068219Z[0m [34mDEBUG[0m [RX] batch=46 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=185 tcp_bytes=0 recv=1.6ms pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.072299Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.072404Z[0m [34mDEBUG[0m retransmitted data_seq 51 (while waiting for window)
+[2m2026-03-14T22:12:35.072455Z[0m [34mDEBUG[0m retransmitted data_seq 52 (while waiting for window)
+[2m2026-03-14T22:12:35.072495Z[0m [34mDEBUG[0m retransmitted data_seq 53 (while waiting for window)
+[2m2026-03-14T22:12:35.072540Z[0m [34mDEBUG[0m retransmitted data_seq 54 (while waiting for window)
+[2m2026-03-14T22:12:35.072585Z[0m [34mDEBUG[0m retransmitted data_seq 55 (while waiting for window)
+[2m2026-03-14T22:12:35.072624Z[0m [34mDEBUG[0m retransmitted data_seq 56 (while waiting for window)
+[2m2026-03-14T22:12:35.072667Z[0m [34mDEBUG[0m retransmitted data_seq 57 (while waiting for window)
+[2m2026-03-14T22:12:35.072719Z[0m [34mDEBUG[0m retransmitted data_seq 58 (while waiting for window)
+[2m2026-03-14T22:12:35.072732Z[0m [34mDEBUG[0m retransmitted data_seq 59 (while waiting for window)
+[2m2026-03-14T22:12:35.072781Z[0m [34mDEBUG[0m retransmitted data_seq 60 (while waiting for window)
+[2m2026-03-14T22:12:35.072822Z[0m [34mDEBUG[0m retransmitted data_seq 61 (while waiting for window)
+[2m2026-03-14T22:12:35.072870Z[0m [34mDEBUG[0m retransmitted data_seq 62 (while waiting for window)
+[2m2026-03-14T22:12:35.072913Z[0m [34mDEBUG[0m retransmitted data_seq 63 (while waiting for window)
+[2m2026-03-14T22:12:35.072950Z[0m [34mDEBUG[0m retransmitted data_seq 64 (while waiting for window)
+[2m2026-03-14T22:12:35.072990Z[0m [34mDEBUG[0m retransmitted data_seq 65 (while waiting for window)
+[2m2026-03-14T22:12:35.073251Z[0m [34mDEBUG[0m received SACK: cumulative_ack=53, 1 ranges
+[2m2026-03-14T22:12:35.073266Z[0m [34mDEBUG[0m spurious retransmit detected for seq 53: ack arrived in 0.8ms, expected 30.5ms
+[2m2026-03-14T22:12:35.073272Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.0
+[2m2026-03-14T22:12:35.073281Z[0m [34mDEBUG[0m SACK gap: 12 missing seqs: [54, 55, 56, 57, 58]
+[2m2026-03-14T22:12:35.073288Z[0m [34mDEBUG[0m [RX] batch=47 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=5.0ms pipeline=3µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.073298Z[0m [34mDEBUG[0m received SACK: cumulative_ack=54, 1 ranges
+[2m2026-03-14T22:12:35.073303Z[0m [34mDEBUG[0m spurious retransmit detected for seq 54: ack arrived in 0.8ms, expected 30.5ms
+[2m2026-03-14T22:12:35.073307Z[0m [34mDEBUG[0m SACK gap: 11 missing seqs: [55, 56, 57, 58, 59]
+[2m2026-03-14T22:12:35.073317Z[0m [34mDEBUG[0m [RX] batch=48 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.073325Z[0m [34mDEBUG[0m received SACK: cumulative_ack=56, 1 ranges
+[2m2026-03-14T22:12:35.073329Z[0m [34mDEBUG[0m spurious retransmit detected for seq 56: ack arrived in 0.7ms, expected 30.5ms
+[2m2026-03-14T22:12:35.073335Z[0m [34mDEBUG[0m SACK gap: 9 missing seqs: [57, 58, 59, 60, 61]
+[2m2026-03-14T22:12:35.073338Z[0m [34mDEBUG[0m [RX] batch=49 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.073345Z[0m [34mDEBUG[0m received SACK: cumulative_ack=57, 1 ranges
+[2m2026-03-14T22:12:35.073347Z[0m [34mDEBUG[0m spurious retransmit detected for seq 57: ack arrived in 0.7ms, expected 30.5ms
+[2m2026-03-14T22:12:35.073350Z[0m [34mDEBUG[0m SACK gap: 8 missing seqs: [58, 59, 60, 61, 62]
+[2m2026-03-14T22:12:35.073353Z[0m [34mDEBUG[0m [RX] batch=50 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.073358Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.1 → ssthresh=19.1, recovery_seq=Some(89))
+[2m2026-03-14T22:12:35.073362Z[0m [34mDEBUG[0m skipping retransmit for data_seq 54 (SACK'd)
+[2m2026-03-14T22:12:35.073365Z[0m [34mDEBUG[0m skipping retransmit for data_seq 55 (SACK'd)
+[2m2026-03-14T22:12:35.073367Z[0m [34mDEBUG[0m skipping retransmit for data_seq 56 (SACK'd)
+[2m2026-03-14T22:12:35.073370Z[0m [34mDEBUG[0m skipping retransmit for data_seq 57 (SACK'd)
+[2m2026-03-14T22:12:35.073417Z[0m [34mDEBUG[0m retransmitted data_seq 58 (while waiting for window)
+[2m2026-03-14T22:12:35.073433Z[0m [34mDEBUG[0m retransmitted data_seq 59 (while waiting for window)
+[2m2026-03-14T22:12:35.073477Z[0m [34mDEBUG[0m retransmitted data_seq 60 (while waiting for window)
+[2m2026-03-14T22:12:35.073513Z[0m [34mDEBUG[0m retransmitted data_seq 61 (while waiting for window)
+[2m2026-03-14T22:12:35.073548Z[0m [34mDEBUG[0m retransmitted data_seq 62 (while waiting for window)
+[2m2026-03-14T22:12:35.073584Z[0m [34mDEBUG[0m retransmitted data_seq 63 (while waiting for window)
+[2m2026-03-14T22:12:35.073619Z[0m [34mDEBUG[0m retransmitted data_seq 64 (while waiting for window)
+[2m2026-03-14T22:12:35.073652Z[0m [34mDEBUG[0m retransmitted data_seq 65 (while waiting for window)
+[2m2026-03-14T22:12:35.073655Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.073658Z[0m [34mDEBUG[0m skipping retransmit for data_seq 55 (SACK'd)
+[2m2026-03-14T22:12:35.073660Z[0m [34mDEBUG[0m skipping retransmit for data_seq 56 (SACK'd)
+[2m2026-03-14T22:12:35.073662Z[0m [34mDEBUG[0m skipping retransmit for data_seq 57 (SACK'd)
+[2m2026-03-14T22:12:35.073696Z[0m [34mDEBUG[0m retransmitted data_seq 58 (while waiting for window)
+[2m2026-03-14T22:12:35.073705Z[0m [34mDEBUG[0m retransmitted data_seq 59 (while waiting for window)
+[2m2026-03-14T22:12:35.073741Z[0m [34mDEBUG[0m retransmitted data_seq 60 (while waiting for window)
+[2m2026-03-14T22:12:35.073776Z[0m [34mDEBUG[0m retransmitted data_seq 61 (while waiting for window)
+[2m2026-03-14T22:12:35.073812Z[0m [34mDEBUG[0m retransmitted data_seq 62 (while waiting for window)
+[2m2026-03-14T22:12:35.073856Z[0m [34mDEBUG[0m retransmitted data_seq 63 (while waiting for window)
+[2m2026-03-14T22:12:35.073901Z[0m [34mDEBUG[0m retransmitted data_seq 64 (while waiting for window)
+[2m2026-03-14T22:12:35.073938Z[0m [34mDEBUG[0m retransmitted data_seq 65 (while waiting for window)
+[2m2026-03-14T22:12:35.073941Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.073943Z[0m [34mDEBUG[0m skipping retransmit for data_seq 57 (SACK'd)
+[2m2026-03-14T22:12:35.073984Z[0m [34mDEBUG[0m retransmitted data_seq 58 (while waiting for window)
+[2m2026-03-14T22:12:35.073992Z[0m [34mDEBUG[0m retransmitted data_seq 59 (while waiting for window)
+[2m2026-03-14T22:12:35.074029Z[0m [34mDEBUG[0m retransmitted data_seq 60 (while waiting for window)
+[2m2026-03-14T22:12:35.074061Z[0m [34mDEBUG[0m retransmitted data_seq 61 (while waiting for window)
+[2m2026-03-14T22:12:35.074097Z[0m [34mDEBUG[0m retransmitted data_seq 62 (while waiting for window)
+[2m2026-03-14T22:12:35.074142Z[0m [34mDEBUG[0m retransmitted data_seq 63 (while waiting for window)
+[2m2026-03-14T22:12:35.074175Z[0m [34mDEBUG[0m retransmitted data_seq 64 (while waiting for window)
+[2m2026-03-14T22:12:35.074209Z[0m [34mDEBUG[0m retransmitted data_seq 65 (while waiting for window)
+[2m2026-03-14T22:12:35.074212Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.074248Z[0m [34mDEBUG[0m retransmitted data_seq 58 (while waiting for window)
+[2m2026-03-14T22:12:35.074280Z[0m [34mDEBUG[0m retransmitted data_seq 59 (while waiting for window)
+[2m2026-03-14T22:12:35.074318Z[0m [34mDEBUG[0m retransmitted data_seq 60 (while waiting for window)
+[2m2026-03-14T22:12:35.074355Z[0m [34mDEBUG[0m retransmitted data_seq 61 (while waiting for window)
+[2m2026-03-14T22:12:35.074395Z[0m [34mDEBUG[0m retransmitted data_seq 62 (while waiting for window)
+[2m2026-03-14T22:12:35.074434Z[0m [34mDEBUG[0m retransmitted data_seq 63 (while waiting for window)
+[2m2026-03-14T22:12:35.074469Z[0m [34mDEBUG[0m retransmitted data_seq 64 (while waiting for window)
+[2m2026-03-14T22:12:35.074509Z[0m [34mDEBUG[0m retransmitted data_seq 65 (while waiting for window)
+[2m2026-03-14T22:12:35.074614Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.074667Z[0m [34mDEBUG[0m received SACK: cumulative_ack=58, 1 ranges
+[2m2026-03-14T22:12:35.074678Z[0m [34mDEBUG[0m spurious retransmit detected for seq 58: ack arrived in 0.5ms, expected 65.0ms
+[2m2026-03-14T22:12:35.074683Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.1
+[2m2026-03-14T22:12:35.074687Z[0m [34mDEBUG[0m SACK gap: 7 missing seqs: [59, 60, 61, 62, 63]
+[2m2026-03-14T22:12:35.074697Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 89, packet_seq 102)
+[2m2026-03-14T22:12:35.074701Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 90, packet_seq 103)
+[2m2026-03-14T22:12:35.074703Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 91, packet_seq 104)
+[2m2026-03-14T22:12:35.074704Z[0m [34mDEBUG[0m [RX] batch=51 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1.3ms pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.074715Z[0m [34mDEBUG[0m received SACK: cumulative_ack=59, 1 ranges
+[2m2026-03-14T22:12:35.074745Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 92, packet_seq 105)
+[2m2026-03-14T22:12:35.074750Z[0m [34mDEBUG[0m spurious retransmit detected for seq 59: ack arrived in 0.5ms, expected 65.0ms
+[2m2026-03-14T22:12:35.074792Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 93, packet_seq 106)
+[2m2026-03-14T22:12:35.074798Z[0m [34mDEBUG[0m SACK gap: 6 missing seqs: [60, 61, 62, 63, 64]
+[2m2026-03-14T22:12:35.074802Z[0m [34mDEBUG[0m [RX] batch=52 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.074812Z[0m [34mDEBUG[0m received SACK: cumulative_ack=60, 1 ranges
+[2m2026-03-14T22:12:35.074862Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 94, packet_seq 107)
+[2m2026-03-14T22:12:35.074866Z[0m [34mDEBUG[0m spurious retransmit detected for seq 60: ack arrived in 0.6ms, expected 65.0ms
+[2m2026-03-14T22:12:35.074879Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 95, packet_seq 108)
+[2m2026-03-14T22:12:35.074885Z[0m [34mDEBUG[0m [TX] batch=22 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=14µs encrypt=56.4ms send=56.4ms strategy=SendMmsg data_seq=96 cwnd=38 window=38 WINDOW_STALL
+[2m2026-03-14T22:12:35.074896Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.2 → ssthresh=19.1, recovery_seq=Some(96))
+[2m2026-03-14T22:12:35.074901Z[0m [34mDEBUG[0m skipping retransmit for data_seq 59 (SACK'd)
+[2m2026-03-14T22:12:35.074904Z[0m [34mDEBUG[0m skipping retransmit for data_seq 60 (SACK'd)
+[2m2026-03-14T22:12:35.074907Z[0m [34mDEBUG[0m SACK gap: 5 missing seqs: [61, 62, 63, 64, 65]
+[2m2026-03-14T22:12:35.074911Z[0m [34mDEBUG[0m [RX] batch=53 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.074918Z[0m [34mDEBUG[0m received SACK: cumulative_ack=61, 1 ranges
+[2m2026-03-14T22:12:35.074961Z[0m [34mDEBUG[0m retransmitted data_seq 61 (packet_seq 71, 16446 bytes)
+[2m2026-03-14T22:12:35.074965Z[0m [34mDEBUG[0m spurious retransmit detected for seq 61: ack arrived in 0.1ms, expected 81.5ms
+[2m2026-03-14T22:12:35.074967Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.2
+[2m2026-03-14T22:12:35.075003Z[0m [34mDEBUG[0m retransmitted data_seq 62 (packet_seq 72, 16446 bytes)
+[2m2026-03-14T22:12:35.075006Z[0m [34mDEBUG[0m skipping retransmit for data_seq 63 (SACK'd)
+[2m2026-03-14T22:12:35.075008Z[0m [34mDEBUG[0m skipping retransmit for data_seq 64 (SACK'd)
+[2m2026-03-14T22:12:35.075010Z[0m [34mDEBUG[0m skipping retransmit for data_seq 65 (SACK'd)
+[2m2026-03-14T22:12:35.075013Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.2 → ssthresh=19.1, recovery_seq=Some(96))
+[2m2026-03-14T22:12:35.075015Z[0m [34mDEBUG[0m skipping retransmit for data_seq 60 (SACK'd)
+[2m2026-03-14T22:12:35.075018Z[0m [34mDEBUG[0m skipping retransmit for data_seq 61 (SACK'd)
+[2m2026-03-14T22:12:35.075021Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [62]
+[2m2026-03-14T22:12:35.075023Z[0m [34mDEBUG[0m [RX] batch=54 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.075030Z[0m [34mDEBUG[0m received ACK for data_seq 88
+[2m2026-03-14T22:12:35.075071Z[0m [34mDEBUG[0m retransmitted data_seq 62 (packet_seq 72, 16446 bytes)
+[2m2026-03-14T22:12:35.075074Z[0m [34mDEBUG[0m skipping retransmit for data_seq 63 (SACK'd)
+[2m2026-03-14T22:12:35.075076Z[0m [34mDEBUG[0m skipping retransmit for data_seq 64 (SACK'd)
+[2m2026-03-14T22:12:35.075078Z[0m [34mDEBUG[0m skipping retransmit for data_seq 65 (SACK'd)
+[2m2026-03-14T22:12:35.075081Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.075083Z[0m [34mDEBUG[0m skipping retransmit for data_seq 61 (SACK'd)
+[2m2026-03-14T22:12:35.075121Z[0m [34mDEBUG[0m retransmitted data_seq 62 (packet_seq 72, 16446 bytes)
+[2m2026-03-14T22:12:35.075123Z[0m [34mDEBUG[0m skipping retransmit for data_seq 63 (SACK'd)
+[2m2026-03-14T22:12:35.075125Z[0m [34mDEBUG[0m skipping retransmit for data_seq 64 (SACK'd)
+[2m2026-03-14T22:12:35.075128Z[0m [34mDEBUG[0m skipping retransmit for data_seq 65 (SACK'd)
+[2m2026-03-14T22:12:35.075130Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.075161Z[0m [34mDEBUG[0m [RX] batch=55 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.075178Z[0m [34mDEBUG[0m retransmit requested for data_seq 62 but not in buffer
+[2m2026-03-14T22:12:35.075227Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.075270Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 96, packet_seq 109)
+[2m2026-03-14T22:12:35.075306Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 97, packet_seq 110)
+[2m2026-03-14T22:12:35.075348Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 98, packet_seq 111)
+[2m2026-03-14T22:12:35.075394Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 99, packet_seq 112)
+[2m2026-03-14T22:12:35.075451Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 100, packet_seq 113)
+[2m2026-03-14T22:12:35.075497Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 101, packet_seq 114)
+[2m2026-03-14T22:12:35.075538Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 102, packet_seq 115)
+[2m2026-03-14T22:12:35.075579Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 103, packet_seq 116)
+[2m2026-03-14T22:12:35.075589Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 104, packet_seq 117)
+[2m2026-03-14T22:12:35.075593Z[0m [34mDEBUG[0m [TX] batch=23 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=46µs encrypt=361µs send=361µs strategy=SendMmsg data_seq=105 cwnd=38 window=38 
+[2m2026-03-14T22:12:35.075611Z[0m [34mDEBUG[0m reassembly: buffered seq 14 (expected 13, buffered 1)
+[2m2026-03-14T22:12:35.075617Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.075621Z[0m [34mDEBUG[0m [RX] batch=56 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=0 recv=431µs pipeline=5µs decrypt=15µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.075757Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 105, packet_seq 118)
+[2m2026-03-14T22:12:35.075771Z[0m [34mDEBUG[0m reassembly: buffered seq 15 (expected 13, buffered 2)
+[2m2026-03-14T22:12:35.075778Z[0m [34mDEBUG[0m [RX] batch=57 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=179 tcp_bytes=0 recv=139µs pipeline=3µs decrypt=7µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.075813Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 106, packet_seq 119)
+[2m2026-03-14T22:12:35.075926Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 107, packet_seq 120)
+[2m2026-03-14T22:12:35.075973Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 108, packet_seq 121)
+[2m2026-03-14T22:12:35.076018Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 109, packet_seq 122)
+[2m2026-03-14T22:12:35.076064Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 110, packet_seq 123)
+[2m2026-03-14T22:12:35.076109Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 111, packet_seq 124)
+[2m2026-03-14T22:12:35.076153Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 112, packet_seq 125)
+[2m2026-03-14T22:12:35.076166Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 113, packet_seq 126)
+[2m2026-03-14T22:12:35.076170Z[0m [34mDEBUG[0m [TX] batch=24 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=20µs encrypt=547µs send=547µs strategy=SendMmsg data_seq=114 cwnd=38 window=38 
+[2m2026-03-14T22:12:35.076194Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.076242Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 114, packet_seq 127)
+[2m2026-03-14T22:12:35.076288Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 115, packet_seq 128)
+[2m2026-03-14T22:12:35.076333Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 116, packet_seq 129)
+[2m2026-03-14T22:12:35.076376Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 117, packet_seq 130)
+[2m2026-03-14T22:12:35.076421Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 118, packet_seq 131)
+[2m2026-03-14T22:12:35.076473Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 119, packet_seq 132)
+[2m2026-03-14T22:12:35.076523Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 120, packet_seq 133)
+[2m2026-03-14T22:12:35.076576Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 121, packet_seq 134)
+[2m2026-03-14T22:12:35.076588Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 122, packet_seq 135)
+[2m2026-03-14T22:12:35.076592Z[0m [34mDEBUG[0m [TX] batch=25 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=19µs encrypt=395µs send=395µs strategy=SendMmsg data_seq=123 cwnd=38 window=38 
+[2m2026-03-14T22:12:35.076622Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.076674Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 123, packet_seq 136)
+[2m2026-03-14T22:12:35.076720Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 124, packet_seq 137)
+[2m2026-03-14T22:12:35.076771Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 125, packet_seq 138)
+[2m2026-03-14T22:12:35.076815Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 126, packet_seq 139)
+[2m2026-03-14T22:12:35.126535Z[0m [34mDEBUG[0m received NACK for 7 missing seqs: [89, 90, 91, 92, 93]
+[2m2026-03-14T22:12:35.126565Z[0m [34mDEBUG[0m [RX] batch=58 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=121 tcp_bytes=0 recv=2.0ms pipeline=9µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.130635Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.130734Z[0m [34mDEBUG[0m retransmitted data_seq 89 (while waiting for window)
+[2m2026-03-14T22:12:35.130783Z[0m [34mDEBUG[0m retransmitted data_seq 90 (while waiting for window)
+[2m2026-03-14T22:12:35.130828Z[0m [34mDEBUG[0m retransmitted data_seq 91 (while waiting for window)
+[2m2026-03-14T22:12:35.130876Z[0m [34mDEBUG[0m retransmitted data_seq 92 (while waiting for window)
+[2m2026-03-14T22:12:35.130912Z[0m [34mDEBUG[0m retransmitted data_seq 93 (while waiting for window)
+[2m2026-03-14T22:12:35.130946Z[0m [34mDEBUG[0m retransmitted data_seq 94 (while waiting for window)
+[2m2026-03-14T22:12:35.130955Z[0m [34mDEBUG[0m retransmitted data_seq 95 (while waiting for window)
+[2m2026-03-14T22:12:35.131498Z[0m [34mDEBUG[0m received SACK: cumulative_ack=89, 1 ranges
+[2m2026-03-14T22:12:35.131587Z[0m [34mDEBUG[0m spurious retransmit detected for seq 89: ack arrived in 0.9ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131595Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 38.2
+[2m2026-03-14T22:12:35.131601Z[0m [34mDEBUG[0m SACK gap: 6 missing seqs: [90, 91, 92, 93, 94]
+[2m2026-03-14T22:12:35.131611Z[0m [34mDEBUG[0m [RX] batch=59 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=4.9ms pipeline=8µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131624Z[0m [34mDEBUG[0m received SACK: cumulative_ack=90, 1 ranges
+[2m2026-03-14T22:12:35.131628Z[0m [34mDEBUG[0m spurious retransmit detected for seq 90: ack arrived in 0.9ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131632Z[0m [34mDEBUG[0m SACK gap: 5 missing seqs: [91, 92, 93, 94, 95]
+[2m2026-03-14T22:12:35.131635Z[0m [34mDEBUG[0m [RX] batch=60 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=3µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131642Z[0m [34mDEBUG[0m received SACK: cumulative_ack=91, 1 ranges
+[2m2026-03-14T22:12:35.131645Z[0m [34mDEBUG[0m spurious retransmit detected for seq 91: ack arrived in 0.9ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131649Z[0m [34mDEBUG[0m SACK gap: 4 missing seqs: [92, 93, 94, 95]
+[2m2026-03-14T22:12:35.131651Z[0m [34mDEBUG[0m [RX] batch=61 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131658Z[0m [34mDEBUG[0m received SACK: cumulative_ack=92, 1 ranges
+[2m2026-03-14T22:12:35.131661Z[0m [34mDEBUG[0m spurious retransmit detected for seq 92: ack arrived in 0.8ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131664Z[0m [34mDEBUG[0m SACK gap: 3 missing seqs: [93, 94, 95]
+[2m2026-03-14T22:12:35.131667Z[0m [34mDEBUG[0m [RX] batch=62 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131674Z[0m [34mDEBUG[0m received SACK: cumulative_ack=93, 1 ranges
+[2m2026-03-14T22:12:35.131678Z[0m [34mDEBUG[0m spurious retransmit detected for seq 93: ack arrived in 0.8ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131692Z[0m [34mDEBUG[0m SACK gap: 2 missing seqs: [94, 95]
+[2m2026-03-14T22:12:35.131695Z[0m [34mDEBUG[0m [RX] batch=63 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131702Z[0m [34mDEBUG[0m received SACK: cumulative_ack=94, 1 ranges
+[2m2026-03-14T22:12:35.131706Z[0m [34mDEBUG[0m spurious retransmit detected for seq 94: ack arrived in 0.8ms, expected 82.0ms
+[2m2026-03-14T22:12:35.131710Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [95]
+[2m2026-03-14T22:12:35.131713Z[0m [34mDEBUG[0m [RX] batch=64 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131720Z[0m [34mDEBUG[0m received ACK for data_seq 115
+[2m2026-03-14T22:12:35.131728Z[0m [34mDEBUG[0m [RX] batch=65 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.131738Z[0m [34mDEBUG[0m reassembly: buffered seq 16 (expected 13, buffered 3)
+[2m2026-03-14T22:12:35.131742Z[0m [34mDEBUG[0m [RX] batch=66 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=5µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.131751Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=38.9 → ssthresh=19.4, recovery_seq=Some(127))
+[2m2026-03-14T22:12:35.131757Z[0m [34mDEBUG[0m skipping retransmit for data_seq 90 (SACK'd)
+[2m2026-03-14T22:12:35.131760Z[0m [34mDEBUG[0m skipping retransmit for data_seq 91 (SACK'd)
+[2m2026-03-14T22:12:35.131762Z[0m [34mDEBUG[0m skipping retransmit for data_seq 92 (SACK'd)
+[2m2026-03-14T22:12:35.131765Z[0m [34mDEBUG[0m skipping retransmit for data_seq 93 (SACK'd)
+[2m2026-03-14T22:12:35.131768Z[0m [34mDEBUG[0m skipping retransmit for data_seq 94 (SACK'd)
+[2m2026-03-14T22:12:35.131772Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.131775Z[0m [34mDEBUG[0m skipping retransmit for data_seq 91 (SACK'd)
+[2m2026-03-14T22:12:35.131778Z[0m [34mDEBUG[0m skipping retransmit for data_seq 92 (SACK'd)
+[2m2026-03-14T22:12:35.131781Z[0m [34mDEBUG[0m skipping retransmit for data_seq 93 (SACK'd)
+[2m2026-03-14T22:12:35.131784Z[0m [34mDEBUG[0m skipping retransmit for data_seq 94 (SACK'd)
+[2m2026-03-14T22:12:35.131787Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.131790Z[0m [34mDEBUG[0m skipping retransmit for data_seq 92 (SACK'd)
+[2m2026-03-14T22:12:35.131792Z[0m [34mDEBUG[0m skipping retransmit for data_seq 93 (SACK'd)
+[2m2026-03-14T22:12:35.131795Z[0m [34mDEBUG[0m skipping retransmit for data_seq 94 (SACK'd)
+[2m2026-03-14T22:12:35.131798Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.131801Z[0m [34mDEBUG[0m skipping retransmit for data_seq 93 (SACK'd)
+[2m2026-03-14T22:12:35.131803Z[0m [34mDEBUG[0m skipping retransmit for data_seq 94 (SACK'd)
+[2m2026-03-14T22:12:35.131806Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.131809Z[0m [34mDEBUG[0m skipping retransmit for data_seq 94 (SACK'd)
+[2m2026-03-14T22:12:35.131812Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.131905Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 127, packet_seq 140)
+[2m2026-03-14T22:12:35.132045Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 128, packet_seq 141)
+[2m2026-03-14T22:12:35.132097Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 129, packet_seq 142)
+[2m2026-03-14T22:12:35.132145Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 130, packet_seq 143)
+[2m2026-03-14T22:12:35.132156Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 131, packet_seq 144)
+[2m2026-03-14T22:12:35.132167Z[0m [34mDEBUG[0m [TX] batch=26 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=26µs encrypt=55.5ms send=55.5ms strategy=SendMmsg data_seq=132 cwnd=39 window=38 WINDOW_STALL
+[2m2026-03-14T22:12:35.132192Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.132231Z[0m [34mDEBUG[0m reassembly: buffered seq 17 (expected 13, buffered 4)
+[2m2026-03-14T22:12:35.132241Z[0m [34mDEBUG[0m [RX] batch=67 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=0 recv=478µs pipeline=3µs decrypt=9µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=4
+[2m2026-03-14T22:12:35.132254Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 132, packet_seq 145)
+[2m2026-03-14T22:12:35.132294Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 133, packet_seq 146)
+[2m2026-03-14T22:12:35.132340Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 134, packet_seq 147)
+[2m2026-03-14T22:12:35.132388Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 135, packet_seq 148)
+[2m2026-03-14T22:12:35.132433Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 136, packet_seq 149)
+[2m2026-03-14T22:12:35.132475Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 137, packet_seq 150)
+[2m2026-03-14T22:12:35.132520Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 138, packet_seq 151)
+[2m2026-03-14T22:12:35.132561Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 139, packet_seq 152)
+[2m2026-03-14T22:12:35.132571Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 140, packet_seq 153)
+[2m2026-03-14T22:12:35.132575Z[0m [34mDEBUG[0m [TX] batch=27 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=20µs encrypt=378µs send=378µs strategy=SendMmsg data_seq=141 cwnd=39 window=38 
+[2m2026-03-14T22:12:35.132591Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.132635Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 141, packet_seq 154)
+[2m2026-03-14T22:12:35.132676Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 142, packet_seq 155)
+[2m2026-03-14T22:12:35.132714Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 143, packet_seq 156)
+[2m2026-03-14T22:12:35.132753Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 144, packet_seq 157)
+[2m2026-03-14T22:12:35.132792Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 145, packet_seq 158)
+[2m2026-03-14T22:12:35.132830Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 146, packet_seq 159)
+[2m2026-03-14T22:12:35.132881Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 147, packet_seq 160)
+[2m2026-03-14T22:12:35.132924Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 148, packet_seq 161)
+[2m2026-03-14T22:12:35.132934Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 149, packet_seq 162)
+[2m2026-03-14T22:12:35.132937Z[0m [34mDEBUG[0m [TX] batch=28 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=13µs encrypt=342µs send=342µs strategy=SendMmsg data_seq=150 cwnd=39 window=38 
+[2m2026-03-14T22:12:35.132962Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.133005Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 150, packet_seq 163)
+[2m2026-03-14T22:12:35.133046Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 151, packet_seq 164)
+[2m2026-03-14T22:12:35.133085Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 152, packet_seq 165)
+[2m2026-03-14T22:12:35.133138Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 153, packet_seq 166)
+[2m2026-03-14T22:12:35.211640Z[0m [34mDEBUG[0m sending NACK for 1 missing seqs (expected=13): [13]
+[2m2026-03-14T22:12:35.212111Z[0m [34mDEBUG[0m reassembly: delivered 5 packets, expected_seq now 18, buffered 0
+[2m2026-03-14T22:12:35.212163Z[0m [34mDEBUG[0m [RX] batch=68 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=324 recv=381µs pipeline=5µs decrypt=14µs reassembly=2µs tcp_write=35µs delivered=5 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.212189Z[0m [34mDEBUG[0m sent ACK for delivered_seq 17 (packet seq 168)
+[2m2026-03-14T22:12:35.243366Z[0m [34mDEBUG[0m received NACK for 12 missing seqs: [116, 117, 118, 119, 120]
+[2m2026-03-14T22:12:35.243391Z[0m [34mDEBUG[0m [RX] batch=69 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=161 tcp_bytes=0 recv=432µs pipeline=5µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.247468Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.247532Z[0m [34mDEBUG[0m retransmitted data_seq 116 (while waiting for window)
+[2m2026-03-14T22:12:35.247569Z[0m [34mDEBUG[0m retransmitted data_seq 117 (while waiting for window)
+[2m2026-03-14T22:12:35.247605Z[0m [34mDEBUG[0m retransmitted data_seq 118 (while waiting for window)
+[2m2026-03-14T22:12:35.247639Z[0m [34mDEBUG[0m retransmitted data_seq 119 (while waiting for window)
+[2m2026-03-14T22:12:35.247694Z[0m [34mDEBUG[0m retransmitted data_seq 120 (while waiting for window)
+[2m2026-03-14T22:12:35.247779Z[0m [34mDEBUG[0m retransmitted data_seq 121 (while waiting for window)
+[2m2026-03-14T22:12:35.247867Z[0m [34mDEBUG[0m retransmitted data_seq 122 (while waiting for window)
+[2m2026-03-14T22:12:35.247913Z[0m [34mDEBUG[0m retransmitted data_seq 123 (while waiting for window)
+[2m2026-03-14T22:12:35.247949Z[0m [34mDEBUG[0m retransmitted data_seq 124 (while waiting for window)
+[2m2026-03-14T22:12:35.247989Z[0m [34mDEBUG[0m retransmitted data_seq 125 (while waiting for window)
+[2m2026-03-14T22:12:35.248023Z[0m [34mDEBUG[0m retransmitted data_seq 126 (while waiting for window)
+[2m2026-03-14T22:12:35.248033Z[0m [34mDEBUG[0m retransmitted data_seq 149 (while waiting for window)
+[2m2026-03-14T22:12:35.338065Z[0m [34mDEBUG[0m RTO backoff #1: rto now 283.6ms
+[2m2026-03-14T22:12:35.338099Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=19.4)
+[2m2026-03-14T22:12:35.338105Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 200ms, cwnd 39 → 2
+[2m2026-03-14T22:12:35.338207Z[0m [34mDEBUG[0m RTO retransmit data_seq 116 (packet_seq 129)
+[2m2026-03-14T22:12:35.338245Z[0m [34mDEBUG[0m RTO retransmit data_seq 117 (packet_seq 130)
+[2m2026-03-14T22:12:35.338826Z[0m [34mDEBUG[0m received SACK: cumulative_ack=148, 1 ranges
+[2m2026-03-14T22:12:35.338855Z[0m [34mDEBUG[0m congestion: SlowStart → CongAvoid (cwnd=35.0, ssthresh=19.4)
+[2m2026-03-14T22:12:35.338925Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [149]
+[2m2026-03-14T22:12:35.338933Z[0m [34mDEBUG[0m [RX] batch=70 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=2.8ms pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.338944Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=35.0 → ssthresh=17.5, recovery_seq=Some(154))
+[2m2026-03-14T22:12:35.338968Z[0m [34mDEBUG[0m retransmitted data_seq 149 (while waiting for window)
+[2m2026-03-14T22:12:35.339040Z[0m [34mDEBUG[0m batch sending 5 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.339138Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 154, packet_seq 169)
+[2m2026-03-14T22:12:35.339141Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 155, packet_seq 170)
+[2m2026-03-14T22:12:35.339144Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 156, packet_seq 171)
+[2m2026-03-14T22:12:35.339146Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 157, packet_seq 172)
+[2m2026-03-14T22:12:35.339148Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 158, packet_seq 173)
+[2m2026-03-14T22:12:35.339153Z[0m [34mDEBUG[0m [TX] batch=29 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=20µs encrypt=206.2ms send=206.2ms strategy=SendMmsg data_seq=159 cwnd=35 window=35 WINDOW_STALL
+[2m2026-03-14T22:12:35.339175Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.339269Z[0m [34mDEBUG[0m batch sending 5 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.339372Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 159, packet_seq 174)
+[2m2026-03-14T22:12:35.339380Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 160, packet_seq 175)
+[2m2026-03-14T22:12:35.339383Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 161, packet_seq 176)
+[2m2026-03-14T22:12:35.339385Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 162, packet_seq 177)
+[2m2026-03-14T22:12:35.339387Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 163, packet_seq 178)
+[2m2026-03-14T22:12:35.339433Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 164, packet_seq 179)
+[2m2026-03-14T22:12:35.339475Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 165, packet_seq 180)
+[2m2026-03-14T22:12:35.339514Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 166, packet_seq 181)
+[2m2026-03-14T22:12:35.339524Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 167, packet_seq 182)
+[2m2026-03-14T22:12:35.339528Z[0m [34mDEBUG[0m [TX] batch=30 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=17µs encrypt=349µs send=349µs strategy=SendMmsg data_seq=168 cwnd=35 window=35 
+[2m2026-03-14T22:12:35.339542Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.339576Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 168, packet_seq 183)
+[2m2026-03-14T22:12:35.339618Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 169, packet_seq 184)
+[2m2026-03-14T22:12:35.339656Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 170, packet_seq 185)
+[2m2026-03-14T22:12:35.339698Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 171, packet_seq 186)
+[2m2026-03-14T22:12:35.339737Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 172, packet_seq 187)
+[2m2026-03-14T22:12:35.339775Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 173, packet_seq 188)
+[2m2026-03-14T22:12:35.339813Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 174, packet_seq 189)
+[2m2026-03-14T22:12:35.339860Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 175, packet_seq 190)
+[2m2026-03-14T22:12:35.339870Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 176, packet_seq 191)
+[2m2026-03-14T22:12:35.339873Z[0m [34mDEBUG[0m [TX] batch=31 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=9µs encrypt=327µs send=327µs strategy=SendMmsg data_seq=177 cwnd=35 window=35 
+[2m2026-03-14T22:12:35.339889Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.339927Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 177, packet_seq 192)
+[2m2026-03-14T22:12:35.339974Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 178, packet_seq 193)
+[2m2026-03-14T22:12:35.340020Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 179, packet_seq 194)
+[2m2026-03-14T22:12:35.340065Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 180, packet_seq 195)
+[2m2026-03-14T22:12:35.340110Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 181, packet_seq 196)
+[2m2026-03-14T22:12:35.340153Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 182, packet_seq 197)
+[2m2026-03-14T22:12:35.340197Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 183, packet_seq 198)
+[2m2026-03-14T22:12:35.340223Z[0m [34mDEBUG[0m received ACK for data_seq 153
+[2m2026-03-14T22:12:35.340252Z[0m [34mDEBUG[0m [RX] batch=71 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1.3ms pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340260Z[0m [34mDEBUG[0m received ACK for data_seq 154
+[2m2026-03-14T22:12:35.340263Z[0m [34mDEBUG[0m [RX] batch=72 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340269Z[0m [34mDEBUG[0m received ACK for data_seq 155
+[2m2026-03-14T22:12:35.340272Z[0m [34mDEBUG[0m [RX] batch=73 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340278Z[0m [34mDEBUG[0m received ACK for data_seq 156
+[2m2026-03-14T22:12:35.340280Z[0m [34mDEBUG[0m [RX] batch=74 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340290Z[0m [34mDEBUG[0m received ACK for data_seq 157
+[2m2026-03-14T22:12:35.340293Z[0m [34mDEBUG[0m [RX] batch=75 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340299Z[0m [34mDEBUG[0m received ACK for data_seq 158
+[2m2026-03-14T22:12:35.340302Z[0m [34mDEBUG[0m [RX] batch=76 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340308Z[0m [34mDEBUG[0m received ACK for data_seq 159
+[2m2026-03-14T22:12:35.340311Z[0m [34mDEBUG[0m [RX] batch=77 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340317Z[0m [34mDEBUG[0m received ACK for data_seq 160
+[2m2026-03-14T22:12:35.340319Z[0m [34mDEBUG[0m [RX] batch=78 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340325Z[0m [34mDEBUG[0m received ACK for data_seq 161
+[2m2026-03-14T22:12:35.340328Z[0m [34mDEBUG[0m [RX] batch=79 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340334Z[0m [34mDEBUG[0m received ACK for data_seq 162
+[2m2026-03-14T22:12:35.340337Z[0m [34mDEBUG[0m [RX] batch=80 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340343Z[0m [34mDEBUG[0m received ACK for data_seq 164
+[2m2026-03-14T22:12:35.340346Z[0m [34mDEBUG[0m [RX] batch=81 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=0µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340351Z[0m [34mDEBUG[0m received ACK for data_seq 165
+[2m2026-03-14T22:12:35.340354Z[0m [34mDEBUG[0m [RX] batch=82 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340360Z[0m [34mDEBUG[0m received ACK for data_seq 167
+[2m2026-03-14T22:12:35.340363Z[0m [34mDEBUG[0m [RX] batch=83 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.340403Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 184, packet_seq 199)
+[2m2026-03-14T22:12:35.340412Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 185, packet_seq 200)
+[2m2026-03-14T22:12:35.340415Z[0m [34mDEBUG[0m [TX] batch=32 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=12µs encrypt=523µs send=523µs strategy=SendMmsg data_seq=186 cwnd=35 window=35 WINDOW_STALL
+[2m2026-03-14T22:12:35.340429Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.340463Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 186, packet_seq 201)
+[2m2026-03-14T22:12:35.340497Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 187, packet_seq 202)
+[2m2026-03-14T22:12:35.340532Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 188, packet_seq 203)
+[2m2026-03-14T22:12:35.340576Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 189, packet_seq 204)
+[2m2026-03-14T22:12:35.340631Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 190, packet_seq 205)
+[2m2026-03-14T22:12:35.340671Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 191, packet_seq 206)
+[2m2026-03-14T22:12:35.340721Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 192, packet_seq 207)
+[2m2026-03-14T22:12:35.340762Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 193, packet_seq 208)
+[2m2026-03-14T22:12:35.340773Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 194, packet_seq 209)
+[2m2026-03-14T22:12:35.340777Z[0m [34mDEBUG[0m [TX] batch=33 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=10µs encrypt=344µs send=344µs strategy=SendMmsg data_seq=195 cwnd=35 window=35 
+[2m2026-03-14T22:12:35.340789Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.340844Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 195, packet_seq 210)
+[2m2026-03-14T22:12:35.340898Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 196, packet_seq 211)
+[2m2026-03-14T22:12:35.340933Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 197, packet_seq 212)
+[2m2026-03-14T22:12:35.340974Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 198, packet_seq 213)
+[2m2026-03-14T22:12:35.341021Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 199, packet_seq 214)
+[2m2026-03-14T22:12:35.341064Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 200, packet_seq 215)
+[2m2026-03-14T22:12:35.341114Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 201, packet_seq 216)
+[2m2026-03-14T22:12:35.341153Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 202, packet_seq 217)
+[2m2026-03-14T22:12:35.341725Z[0m [34mDEBUG[0m reassembly: buffered seq 20 (expected 18, buffered 1)
+[2m2026-03-14T22:12:35.341734Z[0m [34mDEBUG[0m [RX] batch=84 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1.4ms pipeline=2µs decrypt=9µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.341742Z[0m [34mDEBUG[0m reassembly: buffered seq 21 (expected 18, buffered 2)
+[2m2026-03-14T22:12:35.341745Z[0m [34mDEBUG[0m [RX] batch=85 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.341752Z[0m [34mDEBUG[0m reassembly: buffered seq 22 (expected 18, buffered 3)
+[2m2026-03-14T22:12:35.341754Z[0m [34mDEBUG[0m [RX] batch=86 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.341874Z[0m [34mDEBUG[0m reassembly: buffered seq 23 (expected 18, buffered 4)
+[2m2026-03-14T22:12:35.341880Z[0m [34mDEBUG[0m [RX] batch=87 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=112µs pipeline=1µs decrypt=5µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=4
+[2m2026-03-14T22:12:35.341887Z[0m [34mDEBUG[0m reassembly: buffered seq 24 (expected 18, buffered 5)
+[2m2026-03-14T22:12:35.341890Z[0m [34mDEBUG[0m [RX] batch=88 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=5
+[2m2026-03-14T22:12:35.342154Z[0m [34mDEBUG[0m reassembly: buffered seq 25 (expected 18, buffered 6)
+[2m2026-03-14T22:12:35.342159Z[0m [34mDEBUG[0m [RX] batch=89 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=0 recv=257µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=6
+[2m2026-03-14T22:12:35.342186Z[0m [34mDEBUG[0m reassembly: buffered seq 26 (expected 18, buffered 7)
+[2m2026-03-14T22:12:35.342189Z[0m [34mDEBUG[0m [RX] batch=90 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=20µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=7
+[2m2026-03-14T22:12:35.395478Z[0m [34mDEBUG[0m received NACK for 7 missing seqs: [168, 171, 172, 189, 190]
+[2m2026-03-14T22:12:35.395492Z[0m [34mDEBUG[0m [RX] batch=91 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=121 tcp_bytes=0 recv=5.3ms pipeline=2µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=7
+[2m2026-03-14T22:12:35.395503Z[0m [34mDEBUG[0m sending NACK for 2 missing seqs (expected=18): [18, 19]
+[2m2026-03-14T22:12:35.395749Z[0m [34mDEBUG[0m reassembly: buffered seq 19 (expected 18, buffered 8)
+[2m2026-03-14T22:12:35.395756Z[0m [34mDEBUG[0m [RX] batch=92 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=0 recv=218µs pipeline=1µs decrypt=6µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=8
+[2m2026-03-14T22:12:35.396821Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.396871Z[0m [34mDEBUG[0m retransmitted data_seq 168 (while waiting for window)
+[2m2026-03-14T22:12:35.396905Z[0m [34mDEBUG[0m retransmitted data_seq 171 (while waiting for window)
+[2m2026-03-14T22:12:35.396936Z[0m [34mDEBUG[0m retransmitted data_seq 172 (while waiting for window)
+[2m2026-03-14T22:12:35.396969Z[0m [34mDEBUG[0m retransmitted data_seq 189 (while waiting for window)
+[2m2026-03-14T22:12:35.397001Z[0m [34mDEBUG[0m retransmitted data_seq 190 (while waiting for window)
+[2m2026-03-14T22:12:35.397037Z[0m [34mDEBUG[0m retransmitted data_seq 200 (while waiting for window)
+[2m2026-03-14T22:12:35.397069Z[0m [34mDEBUG[0m retransmitted data_seq 201 (while waiting for window)
+[2m2026-03-14T22:12:35.397295Z[0m [34mDEBUG[0m received SACK: cumulative_ack=170, 3 ranges
+[2m2026-03-14T22:12:35.397301Z[0m [34mDEBUG[0m congestion: Recovery complete, cwnd=17.5
+[2m2026-03-14T22:12:35.397316Z[0m [34mDEBUG[0m SACK gap: 6 missing seqs: [171, 172, 189, 190, 200]
+[2m2026-03-14T22:12:35.397320Z[0m [34mDEBUG[0m [RX] batch=93 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=121 tcp_bytes=0 recv=1.5ms pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=8
+[2m2026-03-14T22:12:35.397336Z[0m [34mDEBUG[0m reassembly: buffered seq 27 (expected 18, buffered 9)
+[2m2026-03-14T22:12:35.397339Z[0m [34mDEBUG[0m [RX] batch=94 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=9
+[2m2026-03-14T22:12:35.397345Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=17.5 → ssthresh=8.8, recovery_seq=Some(203))
+[2m2026-03-14T22:12:35.397387Z[0m [34mDEBUG[0m retransmitted data_seq 171 (while waiting for window)
+[2m2026-03-14T22:12:35.397427Z[0m [34mDEBUG[0m retransmitted data_seq 172 (while waiting for window)
+[2m2026-03-14T22:12:35.397460Z[0m [34mDEBUG[0m retransmitted data_seq 189 (while waiting for window)
+[2m2026-03-14T22:12:35.397492Z[0m [34mDEBUG[0m retransmitted data_seq 190 (while waiting for window)
+[2m2026-03-14T22:12:35.397524Z[0m [34mDEBUG[0m retransmitted data_seq 200 (while waiting for window)
+[2m2026-03-14T22:12:35.397556Z[0m [34mDEBUG[0m retransmitted data_seq 201 (while waiting for window)
+[2m2026-03-14T22:12:35.397698Z[0m [34mDEBUG[0m received SACK: cumulative_ack=171, 2 ranges
+[2m2026-03-14T22:12:35.397704Z[0m [34mDEBUG[0m spurious retransmit detected for seq 171: ack arrived in 0.4ms, expected 25.5ms
+[2m2026-03-14T22:12:35.397707Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 17.5
+[2m2026-03-14T22:12:35.397711Z[0m [34mDEBUG[0m SACK gap: 2 missing seqs: [172, 201]
+[2m2026-03-14T22:12:35.397714Z[0m [34mDEBUG[0m [RX] batch=95 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=105 tcp_bytes=0 recv=351µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=9
+[2m2026-03-14T22:12:35.397719Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=17.5 → ssthresh=8.8, recovery_seq=Some(203))
+[2m2026-03-14T22:12:35.397759Z[0m [34mDEBUG[0m retransmitted data_seq 172 (while waiting for window)
+[2m2026-03-14T22:12:35.397794Z[0m [34mDEBUG[0m retransmitted data_seq 201 (while waiting for window)
+[2m2026-03-14T22:12:35.397802Z[0m [34mDEBUG[0m received SACK: cumulative_ack=200, 1 ranges
+[2m2026-03-14T22:12:35.397806Z[0m [34mDEBUG[0m spurious retransmit detected for seq 200: ack arrived in 0.3ms, expected 25.5ms
+[2m2026-03-14T22:12:35.397816Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 17.5
+[2m2026-03-14T22:12:35.397820Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [201]
+[2m2026-03-14T22:12:35.397823Z[0m [34mDEBUG[0m [RX] batch=96 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=82µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=9
+[2m2026-03-14T22:12:35.397827Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=17.5 → ssthresh=8.8, recovery_seq=Some(203))
+[2m2026-03-14T22:12:35.397865Z[0m [34mDEBUG[0m retransmitted data_seq 201 (while waiting for window)
+[2m2026-03-14T22:12:35.397875Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 203, packet_seq 219)
+[2m2026-03-14T22:12:35.397879Z[0m [34mDEBUG[0m [TX] batch=34 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=8µs encrypt=57.1ms send=57.1ms strategy=SendMmsg data_seq=204 cwnd=18 window=17 WINDOW_STALL
+[2m2026-03-14T22:12:35.397900Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.397980Z[0m [34mDEBUG[0m batch sending 6 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.398108Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 204, packet_seq 220)
+[2m2026-03-14T22:12:35.398111Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 205, packet_seq 221)
+[2m2026-03-14T22:12:35.398114Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 206, packet_seq 222)
+[2m2026-03-14T22:12:35.398116Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 207, packet_seq 223)
+[2m2026-03-14T22:12:35.398118Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 208, packet_seq 224)
+[2m2026-03-14T22:12:35.398120Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 209, packet_seq 225)
+[2m2026-03-14T22:12:35.398560Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 210, packet_seq 226)
+[2m2026-03-14T22:12:35.398599Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 211, packet_seq 227)
+[2m2026-03-14T22:12:35.398609Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 212, packet_seq 228)
+[2m2026-03-14T22:12:35.398613Z[0m [34mDEBUG[0m [TX] batch=35 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=17µs encrypt=709µs send=709µs strategy=SendMmsg data_seq=213 cwnd=18 window=17 
+[2m2026-03-14T22:12:35.398626Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.398659Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 213, packet_seq 229)
+[2m2026-03-14T22:12:35.398783Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 214, packet_seq 230)
+[2m2026-03-14T22:12:35.398818Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 215, packet_seq 231)
+[2m2026-03-14T22:12:35.398858Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 216, packet_seq 232)
+[2m2026-03-14T22:12:35.398891Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 217, packet_seq 233)
+[2m2026-03-14T22:12:35.398904Z[0m [34mDEBUG[0m reassembly: buffered seq 28 (expected 18, buffered 10)
+[2m2026-03-14T22:12:35.398907Z[0m [34mDEBUG[0m [RX] batch=97 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=215 tcp_bytes=0 recv=1.1ms pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=10
+[2m2026-03-14T22:12:35.398914Z[0m [34mDEBUG[0m reassembly: buffered seq 29 (expected 18, buffered 11)
+[2m2026-03-14T22:12:35.398917Z[0m [34mDEBUG[0m [RX] batch=98 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=11
+[2m2026-03-14T22:12:35.398925Z[0m [34mDEBUG[0m reassembly: buffered seq 30 (expected 18, buffered 12)
+[2m2026-03-14T22:12:35.398927Z[0m [34mDEBUG[0m [RX] batch=99 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=12
+[2m2026-03-14T22:12:35.454429Z[0m [34mDEBUG[0m received NACK for 2 missing seqs: [203, 204]
+[2m2026-03-14T22:12:35.454453Z[0m [34mDEBUG[0m [RX] batch=100 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=81 tcp_bytes=0 recv=760µs pipeline=4µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=12
+[2m2026-03-14T22:12:35.459525Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.459557Z[0m [34mDEBUG[0m retransmitted data_seq 203 (while waiting for window)
+[2m2026-03-14T22:12:35.459601Z[0m [34mDEBUG[0m retransmitted data_seq 204 (while waiting for window)
+[2m2026-03-14T22:12:35.460664Z[0m [34mDEBUG[0m sending NACK for 1 missing seqs (expected=18): [18]
+[2m2026-03-14T22:12:35.460987Z[0m [34mDEBUG[0m reassembly: delivered 13 packets, expected_seq now 31, buffered 0
+[2m2026-03-14T22:12:35.461061Z[0m [34mDEBUG[0m [RX] batch=101 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=648 recv=286µs pipeline=6µs decrypt=33µs reassembly=2µs tcp_write=40µs delivered=13 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.461097Z[0m [34mDEBUG[0m sent ACK for delivered_seq 30 (packet seq 235)
+[2m2026-03-14T22:12:35.509583Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [203]
+[2m2026-03-14T22:12:35.509602Z[0m [34mDEBUG[0m [RX] batch=102 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=6.1ms pipeline=4µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.513667Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.513695Z[0m [34mDEBUG[0m retransmitted data_seq 203 (while waiting for window)
+[2m2026-03-14T22:12:35.514163Z[0m [34mDEBUG[0m received ACK for data_seq 217
+[2m2026-03-14T22:12:35.514205Z[0m [34mDEBUG[0m [RX] batch=103 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=4.6ms pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.514274Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 218, packet_seq 236)
+[2m2026-03-14T22:12:35.514315Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 219, packet_seq 237)
+[2m2026-03-14T22:12:35.514351Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 220, packet_seq 238)
+[2m2026-03-14T22:12:35.514361Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 221, packet_seq 239)
+[2m2026-03-14T22:12:35.514365Z[0m [34mDEBUG[0m [TX] batch=36 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=8µs encrypt=115.7ms send=115.7ms strategy=SendMmsg data_seq=222 cwnd=18 window=17 WINDOW_STALL
+[2m2026-03-14T22:12:35.514407Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.514446Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 222, packet_seq 240)
+[2m2026-03-14T22:12:35.514481Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 223, packet_seq 241)
+[2m2026-03-14T22:12:35.514517Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 224, packet_seq 242)
+[2m2026-03-14T22:12:35.514553Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 225, packet_seq 243)
+[2m2026-03-14T22:12:35.514588Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 226, packet_seq 244)
+[2m2026-03-14T22:12:35.514625Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 227, packet_seq 245)
+[2m2026-03-14T22:12:35.514663Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 228, packet_seq 246)
+[2m2026-03-14T22:12:35.514698Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 229, packet_seq 247)
+[2m2026-03-14T22:12:35.514708Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 230, packet_seq 248)
+[2m2026-03-14T22:12:35.514711Z[0m [34mDEBUG[0m [TX] batch=37 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=36µs encrypt=299µs send=299µs strategy=SendMmsg data_seq=231 cwnd=18 window=17 
+[2m2026-03-14T22:12:35.514727Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.514763Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 231, packet_seq 249)
+[2m2026-03-14T22:12:35.514797Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 232, packet_seq 250)
+[2m2026-03-14T22:12:35.514830Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 233, packet_seq 251)
+[2m2026-03-14T22:12:35.514879Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 234, packet_seq 252)
+[2m2026-03-14T22:12:35.514891Z[0m [34mDEBUG[0m received ACK for data_seq 218
+[2m2026-03-14T22:12:35.514895Z[0m [34mDEBUG[0m [RX] batch=104 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=679µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.514903Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 32, buffered 0
+[2m2026-03-14T22:12:35.514918Z[0m [34mDEBUG[0m [RX] batch=105 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=1µs pipeline=0µs decrypt=4µs reassembly=1µs tcp_write=11µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.514929Z[0m [34mDEBUG[0m sent ACK for delivered_seq 31 (packet seq 253)
+[2m2026-03-14T22:12:35.514935Z[0m [34mDEBUG[0m received ACK for data_seq 219
+[2m2026-03-14T22:12:35.514938Z[0m [34mDEBUG[0m [RX] batch=106 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.514976Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 235, packet_seq 254)
+[2m2026-03-14T22:12:35.515010Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 236, packet_seq 255)
+[2m2026-03-14T22:12:35.515019Z[0m [34mDEBUG[0m received ACK for data_seq 220
+[2m2026-03-14T22:12:35.515022Z[0m [34mDEBUG[0m [RX] batch=107 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=75µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.515059Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 237, packet_seq 256)
+[2m2026-03-14T22:12:35.515067Z[0m [34mDEBUG[0m received ACK for data_seq 221
+[2m2026-03-14T22:12:35.515070Z[0m [34mDEBUG[0m [RX] batch=108 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=40µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.515106Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 238, packet_seq 257)
+[2m2026-03-14T22:12:35.515422Z[0m [34mDEBUG[0m received ACK for data_seq 222
+[2m2026-03-14T22:12:35.515428Z[0m [34mDEBUG[0m [RX] batch=109 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=344µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.515443Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 239, packet_seq 258)
+[2m2026-03-14T22:12:35.515447Z[0m [34mDEBUG[0m [TX] batch=38 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=12µs encrypt=715µs send=715µs strategy=SendMmsg data_seq=240 cwnd=18 window=17 WINDOW_STALL
+[2m2026-03-14T22:12:35.515471Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.515482Z[0m [34mDEBUG[0m received ACK for data_seq 224
+[2m2026-03-14T22:12:35.515486Z[0m [34mDEBUG[0m [RX] batch=110 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=48µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.515537Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 240, packet_seq 259)
+[2m2026-03-14T22:12:35.515577Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 241, packet_seq 260)
+[2m2026-03-14T22:12:35.515717Z[0m [34mDEBUG[0m received ACK for data_seq 226
+[2m2026-03-14T22:12:35.515741Z[0m [34mDEBUG[0m [RX] batch=111 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=208µs pipeline=9µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.515805Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 242, packet_seq 261)
+[2m2026-03-14T22:12:35.515855Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 243, packet_seq 262)
+[2m2026-03-14T22:12:35.515970Z[0m [34mDEBUG[0m received ACK for data_seq 227
+[2m2026-03-14T22:12:35.515986Z[0m [34mDEBUG[0m [RX] batch=112 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=216µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.516040Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 244, packet_seq 263)
+[2m2026-03-14T22:12:35.516252Z[0m [34mDEBUG[0m received ACK for data_seq 229
+[2m2026-03-14T22:12:35.516272Z[0m [34mDEBUG[0m [RX] batch=113 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=256µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.516323Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 245, packet_seq 264)
+[2m2026-03-14T22:12:35.516372Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 246, packet_seq 265)
+[2m2026-03-14T22:12:35.516496Z[0m [34mDEBUG[0m reassembly: buffered seq 33 (expected 32, buffered 1)
+[2m2026-03-14T22:12:35.516505Z[0m [34mDEBUG[0m [RX] batch=114 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=0 recv=212µs pipeline=3µs decrypt=9µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.571261Z[0m [34mDEBUG[0m sending NACK for 1 missing seqs (expected=32): [32]
+[2m2026-03-14T22:12:35.571867Z[0m [34mDEBUG[0m received NACK for 7 missing seqs: [230, 231, 232, 233, 234]
+[2m2026-03-14T22:12:35.571881Z[0m [34mDEBUG[0m [RX] batch=115 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=121 tcp_bytes=0 recv=506µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.571891Z[0m [34mDEBUG[0m reassembly: delivered 2 packets, expected_seq now 34, buffered 0
+[2m2026-03-14T22:12:35.571914Z[0m [34mDEBUG[0m [RX] batch=116 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=108 recv=1µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=18µs delivered=2 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.571930Z[0m [34mDEBUG[0m sent ACK for delivered_seq 33 (packet seq 267)
+[2m2026-03-14T22:12:35.577394Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.577451Z[0m [34mDEBUG[0m retransmitted data_seq 230 (while waiting for window)
+[2m2026-03-14T22:12:35.577510Z[0m [34mDEBUG[0m retransmitted data_seq 231 (while waiting for window)
+[2m2026-03-14T22:12:35.577561Z[0m [34mDEBUG[0m retransmitted data_seq 232 (while waiting for window)
+[2m2026-03-14T22:12:35.577600Z[0m [34mDEBUG[0m retransmitted data_seq 233 (while waiting for window)
+[2m2026-03-14T22:12:35.577645Z[0m [34mDEBUG[0m retransmitted data_seq 234 (while waiting for window)
+[2m2026-03-14T22:12:35.577703Z[0m [34mDEBUG[0m retransmitted data_seq 237 (while waiting for window)
+[2m2026-03-14T22:12:35.577717Z[0m [34mDEBUG[0m retransmitted data_seq 239 (while waiting for window)
+[2m2026-03-14T22:12:35.577924Z[0m [34mDEBUG[0m received SACK: cumulative_ack=231, 3 ranges
+[2m2026-03-14T22:12:35.577934Z[0m [34mDEBUG[0m congestion: Recovery complete, cwnd=8.8
+[2m2026-03-14T22:12:35.578129Z[0m [34mDEBUG[0m spurious retransmit detected for seq 231: ack arrived in 0.7ms, expected 13.8ms
+[2m2026-03-14T22:12:35.578134Z[0m [34mDEBUG[0m SACK gap: 5 missing seqs: [232, 233, 234, 237, 239]
+[2m2026-03-14T22:12:35.578140Z[0m [34mDEBUG[0m [RX] batch=117 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=121 tcp_bytes=0 recv=535µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.578148Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=8.8 → ssthresh=4.4, recovery_seq=Some(247))
+[2m2026-03-14T22:12:35.578202Z[0m [34mDEBUG[0m retransmitted data_seq 232 (while waiting for window)
+[2m2026-03-14T22:12:35.578238Z[0m [34mDEBUG[0m retransmitted data_seq 233 (while waiting for window)
+[2m2026-03-14T22:12:35.578286Z[0m [34mDEBUG[0m retransmitted data_seq 234 (while waiting for window)
+[2m2026-03-14T22:12:35.578321Z[0m [34mDEBUG[0m retransmitted data_seq 237 (while waiting for window)
+[2m2026-03-14T22:12:35.578336Z[0m [34mDEBUG[0m retransmitted data_seq 239 (while waiting for window)
+[2m2026-03-14T22:12:35.578889Z[0m [34mDEBUG[0m received ACK for data_seq 246
+[2m2026-03-14T22:12:35.578911Z[0m [34mDEBUG[0m [RX] batch=118 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=735µs pipeline=5µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.578948Z[0m [34mDEBUG[0m batch sending 2 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.578982Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 247, packet_seq 268)
+[2m2026-03-14T22:12:35.578986Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 248, packet_seq 269)
+[2m2026-03-14T22:12:35.578990Z[0m [34mDEBUG[0m [TX] batch=39 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=20µs encrypt=63.5ms send=63.5ms strategy=SendMmsg data_seq=249 cwnd=9 window=8 WINDOW_STALL
+[2m2026-03-14T22:12:35.579015Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.579105Z[0m [34mDEBUG[0m batch sending 4 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.579205Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 249, packet_seq 270)
+[2m2026-03-14T22:12:35.579211Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 250, packet_seq 271)
+[2m2026-03-14T22:12:35.579214Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 251, packet_seq 272)
+[2m2026-03-14T22:12:35.579216Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 252, packet_seq 273)
+[2m2026-03-14T22:12:35.579263Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 253, packet_seq 274)
+[2m2026-03-14T22:12:35.579303Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 254, packet_seq 275)
+[2m2026-03-14T22:12:35.579446Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 35, buffered 0
+[2m2026-03-14T22:12:35.579467Z[0m [34mDEBUG[0m [RX] batch=119 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=143 tcp_bytes=72 recv=513µs pipeline=2µs decrypt=7µs reassembly=10µs tcp_write=13µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.579489Z[0m [34mDEBUG[0m sent ACK for delivered_seq 34 (packet seq 276)
+[2m2026-03-14T22:12:35.579614Z[0m [34mDEBUG[0m received ACK for data_seq 247
+[2m2026-03-14T22:12:35.579626Z[0m [34mDEBUG[0m [RX] batch=120 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=114µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.579674Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 255, packet_seq 277)
+[2m2026-03-14T22:12:35.579925Z[0m [34mDEBUG[0m received ACK for data_seq 248
+[2m2026-03-14T22:12:35.579936Z[0m [34mDEBUG[0m [RX] batch=121 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=274µs pipeline=16µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.579946Z[0m [34mDEBUG[0m received ACK for data_seq 249
+[2m2026-03-14T22:12:35.579950Z[0m [34mDEBUG[0m [RX] batch=122 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.579958Z[0m [34mDEBUG[0m received ACK for data_seq 250
+[2m2026-03-14T22:12:35.579961Z[0m [34mDEBUG[0m [RX] batch=123 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580029Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 256, packet_seq 278)
+[2m2026-03-14T22:12:35.580044Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 257, packet_seq 279)
+[2m2026-03-14T22:12:35.580048Z[0m [34mDEBUG[0m [TX] batch=40 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=19µs encrypt=1.0ms send=1.0ms strategy=SendMmsg data_seq=258 cwnd=9 window=8 WINDOW_STALL
+[2m2026-03-14T22:12:35.580081Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.580136Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 258, packet_seq 280)
+[2m2026-03-14T22:12:35.580246Z[0m [34mDEBUG[0m received ACK for data_seq 253
+[2m2026-03-14T22:12:35.580263Z[0m [34mDEBUG[0m [RX] batch=124 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=275µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580313Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 259, packet_seq 281)
+[2m2026-03-14T22:12:35.580352Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 260, packet_seq 282)
+[2m2026-03-14T22:12:35.580390Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 261, packet_seq 283)
+[2m2026-03-14T22:12:35.580464Z[0m [34mDEBUG[0m received ACK for data_seq 254
+[2m2026-03-14T22:12:35.580472Z[0m [34mDEBUG[0m [RX] batch=125 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=190µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580531Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 262, packet_seq 284)
+[2m2026-03-14T22:12:35.580541Z[0m [34mDEBUG[0m received ACK for data_seq 255
+[2m2026-03-14T22:12:35.580544Z[0m [34mDEBUG[0m [RX] batch=126 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=62µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580552Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 36, buffered 0
+[2m2026-03-14T22:12:35.580573Z[0m [34mDEBUG[0m [RX] batch=127 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=12µs reassembly=1µs tcp_write=8µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580585Z[0m [34mDEBUG[0m sent ACK for delivered_seq 35 (packet seq 285)
+[2m2026-03-14T22:12:35.580625Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 263, packet_seq 286)
+[2m2026-03-14T22:12:35.580634Z[0m [34mDEBUG[0m received ACK for data_seq 256
+[2m2026-03-14T22:12:35.580638Z[0m [34mDEBUG[0m [RX] batch=128 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=44µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580675Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 264, packet_seq 287)
+[2m2026-03-14T22:12:35.580684Z[0m [34mDEBUG[0m received ACK for data_seq 257
+[2m2026-03-14T22:12:35.580687Z[0m [34mDEBUG[0m [RX] batch=129 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=41µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.580724Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 265, packet_seq 288)
+[2m2026-03-14T22:12:35.635298Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [258]
+[2m2026-03-14T22:12:35.635321Z[0m [34mDEBUG[0m [RX] batch=130 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=562µs pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.640392Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.640490Z[0m [34mDEBUG[0m retransmitted data_seq 258 (while waiting for window)
+[2m2026-03-14T22:12:35.641124Z[0m [34mDEBUG[0m received ACK for data_seq 263
+[2m2026-03-14T22:12:35.641142Z[0m [34mDEBUG[0m [RX] batch=131 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=5.8ms pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.641170Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 266, packet_seq 289)
+[2m2026-03-14T22:12:35.641176Z[0m [34mDEBUG[0m [TX] batch=41 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=27µs encrypt=61.1ms send=61.1ms strategy=SendMmsg data_seq=267 cwnd=9 window=8 WINDOW_STALL
+[2m2026-03-14T22:12:35.641204Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.641293Z[0m [34mDEBUG[0m batch sending 5 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.641411Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 267, packet_seq 290)
+[2m2026-03-14T22:12:35.641416Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 268, packet_seq 291)
+[2m2026-03-14T22:12:35.641419Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 269, packet_seq 292)
+[2m2026-03-14T22:12:35.641422Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 270, packet_seq 293)
+[2m2026-03-14T22:12:35.641425Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 271, packet_seq 294)
+[2m2026-03-14T22:12:35.697243Z[0m [34mDEBUG[0m received NACK for 4 missing seqs: [264, 265, 266, 267]
+[2m2026-03-14T22:12:35.697262Z[0m [34mDEBUG[0m [RX] batch=132 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=97 tcp_bytes=0 recv=962µs pipeline=6µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.702331Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.702394Z[0m [34mDEBUG[0m retransmitted data_seq 264 (while waiting for window)
+[2m2026-03-14T22:12:35.702430Z[0m [34mDEBUG[0m retransmitted data_seq 265 (while waiting for window)
+[2m2026-03-14T22:12:35.702440Z[0m [34mDEBUG[0m retransmitted data_seq 266 (while waiting for window)
+[2m2026-03-14T22:12:35.702474Z[0m [34mDEBUG[0m retransmitted data_seq 267 (while waiting for window)
+[2m2026-03-14T22:12:35.702873Z[0m [34mDEBUG[0m received SACK: cumulative_ack=264, 1 ranges
+[2m2026-03-14T22:12:35.702896Z[0m [34mDEBUG[0m congestion: Recovery complete, cwnd=4.4
+[2m2026-03-14T22:12:35.702905Z[0m [34mDEBUG[0m spurious retransmit detected for seq 264: ack arrived in 0.6ms, expected 14.8ms
+[2m2026-03-14T22:12:35.702911Z[0m [34mDEBUG[0m SACK gap: 3 missing seqs: [265, 266, 267]
+[2m2026-03-14T22:12:35.702921Z[0m [34mDEBUG[0m [RX] batch=133 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=5.6ms pipeline=9µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.702931Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=4.4 → ssthresh=2.2, recovery_seq=Some(272))
+[2m2026-03-14T22:12:35.703119Z[0m [34mDEBUG[0m retransmitted data_seq 265 (while waiting for window)
+[2m2026-03-14T22:12:35.703188Z[0m [34mDEBUG[0m retransmitted data_seq 266 (while waiting for window)
+[2m2026-03-14T22:12:35.703283Z[0m [34mDEBUG[0m retransmitted data_seq 267 (while waiting for window)
+[2m2026-03-14T22:12:35.703305Z[0m [34mDEBUG[0m received SACK: cumulative_ack=265, 1 ranges
+[2m2026-03-14T22:12:35.703311Z[0m [34mDEBUG[0m spurious retransmit detected for seq 265: ack arrived in 0.4ms, expected 28.2ms
+[2m2026-03-14T22:12:35.703315Z[0m [34mDEBUG[0m spurious recovery: restoring cwnd to 4.4
+[2m2026-03-14T22:12:35.703324Z[0m [34mDEBUG[0m SACK gap: 2 missing seqs: [266, 267]
+[2m2026-03-14T22:12:35.703330Z[0m [34mDEBUG[0m [RX] batch=134 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=373µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.703339Z[0m [34mDEBUG[0m received SACK: cumulative_ack=266, 1 ranges
+[2m2026-03-14T22:12:35.703343Z[0m [34mDEBUG[0m spurious retransmit detected for seq 266: ack arrived in 0.2ms, expected 28.2ms
+[2m2026-03-14T22:12:35.703346Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [267]
+[2m2026-03-14T22:12:35.703349Z[0m [34mDEBUG[0m [RX] batch=135 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.703357Z[0m [34mDEBUG[0m received ACK for data_seq 271
+[2m2026-03-14T22:12:35.703371Z[0m [34mDEBUG[0m [RX] batch=136 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.703385Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=5.7 → ssthresh=2.8, recovery_seq=Some(272))
+[2m2026-03-14T22:12:35.703389Z[0m [34mDEBUG[0m skipping retransmit for data_seq 266 (SACK'd)
+[2m2026-03-14T22:12:35.703392Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.703558Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 272, packet_seq 295)
+[2m2026-03-14T22:12:35.703662Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 273, packet_seq 296)
+[2m2026-03-14T22:12:35.703816Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 274, packet_seq 297)
+[2m2026-03-14T22:12:35.703867Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 275, packet_seq 298)
+[2m2026-03-14T22:12:35.703876Z[0m [34mDEBUG[0m [TX] batch=42 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=22µs encrypt=62.7ms send=62.7ms strategy=SendMmsg data_seq=276 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.703907Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.703951Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 276, packet_seq 299)
+[2m2026-03-14T22:12:35.703970Z[0m [34mDEBUG[0m reassembly: buffered seq 37 (expected 36, buffered 1)
+[2m2026-03-14T22:12:35.703974Z[0m [34mDEBUG[0m [RX] batch=137 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=581µs pipeline=1µs decrypt=5µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.703983Z[0m [34mDEBUG[0m received ACK for data_seq 272
+[2m2026-03-14T22:12:35.703988Z[0m [34mDEBUG[0m [RX] batch=138 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.703995Z[0m [34mDEBUG[0m received ACK for data_seq 273
+[2m2026-03-14T22:12:35.703999Z[0m [34mDEBUG[0m [RX] batch=139 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704007Z[0m [34mDEBUG[0m received ACK for data_seq 274
+[2m2026-03-14T22:12:35.704010Z[0m [34mDEBUG[0m [RX] batch=140 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704058Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 277, packet_seq 300)
+[2m2026-03-14T22:12:35.704101Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 278, packet_seq 301)
+[2m2026-03-14T22:12:35.704143Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 279, packet_seq 302)
+[2m2026-03-14T22:12:35.704153Z[0m [34mDEBUG[0m received ACK for data_seq 275
+[2m2026-03-14T22:12:35.704170Z[0m [34mDEBUG[0m [RX] batch=141 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=136µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704216Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 280, packet_seq 303)
+[2m2026-03-14T22:12:35.704227Z[0m [34mDEBUG[0m received ACK for data_seq 276
+[2m2026-03-14T22:12:35.704231Z[0m [34mDEBUG[0m [RX] batch=142 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=50µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704238Z[0m [34mDEBUG[0m received ACK for data_seq 277
+[2m2026-03-14T22:12:35.704242Z[0m [34mDEBUG[0m [RX] batch=143 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704285Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 281, packet_seq 304)
+[2m2026-03-14T22:12:35.704329Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 282, packet_seq 305)
+[2m2026-03-14T22:12:35.704339Z[0m [34mDEBUG[0m received ACK for data_seq 278
+[2m2026-03-14T22:12:35.704343Z[0m [34mDEBUG[0m [RX] batch=144 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=91µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704358Z[0m [34mDEBUG[0m received ACK for data_seq 279
+[2m2026-03-14T22:12:35.704361Z[0m [34mDEBUG[0m [RX] batch=145 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704409Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 283, packet_seq 306)
+[2m2026-03-14T22:12:35.704423Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 284, packet_seq 307)
+[2m2026-03-14T22:12:35.704428Z[0m [34mDEBUG[0m [TX] batch=43 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=25µs encrypt=516µs send=516µs strategy=SendMmsg data_seq=285 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.704450Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.704461Z[0m [34mDEBUG[0m received ACK for data_seq 280
+[2m2026-03-14T22:12:35.704465Z[0m [34mDEBUG[0m [RX] batch=146 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=93µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.704599Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 285, packet_seq 308)
+[2m2026-03-14T22:12:35.704992Z[0m [34mDEBUG[0m received ACK for data_seq 281
+[2m2026-03-14T22:12:35.705005Z[0m [34mDEBUG[0m [RX] batch=147 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=488µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705046Z[0m [34mDEBUG[0m received ACK for data_seq 282
+[2m2026-03-14T22:12:35.705056Z[0m [34mDEBUG[0m [RX] batch=148 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=17µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705131Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 286, packet_seq 309)
+[2m2026-03-14T22:12:35.705171Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 287, packet_seq 310)
+[2m2026-03-14T22:12:35.705303Z[0m [34mDEBUG[0m received ACK for data_seq 283
+[2m2026-03-14T22:12:35.705312Z[0m [34mDEBUG[0m [RX] batch=149 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=238µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705320Z[0m [34mDEBUG[0m received ACK for data_seq 284
+[2m2026-03-14T22:12:35.705323Z[0m [34mDEBUG[0m [RX] batch=150 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705329Z[0m [34mDEBUG[0m received ACK for data_seq 285
+[2m2026-03-14T22:12:35.705332Z[0m [34mDEBUG[0m [RX] batch=151 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705461Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 288, packet_seq 311)
+[2m2026-03-14T22:12:35.705564Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 289, packet_seq 312)
+[2m2026-03-14T22:12:35.705673Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 290, packet_seq 313)
+[2m2026-03-14T22:12:35.705711Z[0m [34mDEBUG[0m received ACK for data_seq 286
+[2m2026-03-14T22:12:35.705717Z[0m [34mDEBUG[0m [RX] batch=152 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=373µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705724Z[0m [34mDEBUG[0m received ACK for data_seq 287
+[2m2026-03-14T22:12:35.705727Z[0m [34mDEBUG[0m [RX] batch=153 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705738Z[0m [34mDEBUG[0m received ACK for data_seq 288
+[2m2026-03-14T22:12:35.705740Z[0m [34mDEBUG[0m [RX] batch=154 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=1
+[2m2026-03-14T22:12:35.705748Z[0m [34mDEBUG[0m reassembly: buffered seq 39 (expected 36, buffered 2)
+[2m2026-03-14T22:12:35.705751Z[0m [34mDEBUG[0m [RX] batch=155 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=3µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.705792Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 291, packet_seq 314)
+[2m2026-03-14T22:12:35.705827Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 292, packet_seq 315)
+[2m2026-03-14T22:12:35.705845Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 293, packet_seq 316)
+[2m2026-03-14T22:12:35.705849Z[0m [34mDEBUG[0m [TX] batch=44 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=17µs encrypt=1.4ms send=1.4ms strategy=SendMmsg data_seq=294 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.705882Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.705990Z[0m [34mDEBUG[0m received ACK for data_seq 289
+[2m2026-03-14T22:12:35.705993Z[0m [34mDEBUG[0m [RX] batch=156 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=232µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706033Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 294, packet_seq 317)
+[2m2026-03-14T22:12:35.706054Z[0m [34mDEBUG[0m received ACK for data_seq 290
+[2m2026-03-14T22:12:35.706058Z[0m [34mDEBUG[0m [RX] batch=157 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=55µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706096Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 295, packet_seq 318)
+[2m2026-03-14T22:12:35.706270Z[0m [34mDEBUG[0m received ACK for data_seq 291
+[2m2026-03-14T22:12:35.706278Z[0m [34mDEBUG[0m [RX] batch=158 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=205µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706406Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 296, packet_seq 319)
+[2m2026-03-14T22:12:35.706419Z[0m [34mDEBUG[0m received ACK for data_seq 292
+[2m2026-03-14T22:12:35.706424Z[0m [34mDEBUG[0m [RX] batch=159 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=135µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706430Z[0m [34mDEBUG[0m received ACK for data_seq 293
+[2m2026-03-14T22:12:35.706433Z[0m [34mDEBUG[0m [RX] batch=160 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706475Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 297, packet_seq 320)
+[2m2026-03-14T22:12:35.706509Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 298, packet_seq 321)
+[2m2026-03-14T22:12:35.706518Z[0m [34mDEBUG[0m received ACK for data_seq 294
+[2m2026-03-14T22:12:35.706521Z[0m [34mDEBUG[0m [RX] batch=161 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=79µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706556Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 299, packet_seq 322)
+[2m2026-03-14T22:12:35.706563Z[0m [34mDEBUG[0m received ACK for data_seq 295
+[2m2026-03-14T22:12:35.706566Z[0m [34mDEBUG[0m [RX] batch=162 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=37µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706606Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 300, packet_seq 323)
+[2m2026-03-14T22:12:35.706901Z[0m [34mDEBUG[0m received ACK for data_seq 296
+[2m2026-03-14T22:12:35.706908Z[0m [34mDEBUG[0m [RX] batch=163 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=323µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706915Z[0m [34mDEBUG[0m received ACK for data_seq 297
+[2m2026-03-14T22:12:35.706919Z[0m [34mDEBUG[0m [RX] batch=164 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706925Z[0m [34mDEBUG[0m received ACK for data_seq 298
+[2m2026-03-14T22:12:35.706928Z[0m [34mDEBUG[0m [RX] batch=165 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.706973Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 301, packet_seq 324)
+[2m2026-03-14T22:12:35.706984Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 302, packet_seq 325)
+[2m2026-03-14T22:12:35.706988Z[0m [34mDEBUG[0m [TX] batch=45 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=29µs encrypt=1.1ms send=1.1ms strategy=SendMmsg data_seq=303 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.707010Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.707045Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 303, packet_seq 326)
+[2m2026-03-14T22:12:35.707056Z[0m [34mDEBUG[0m reassembly: buffered seq 40 (expected 36, buffered 3)
+[2m2026-03-14T22:12:35.707059Z[0m [34mDEBUG[0m [RX] batch=166 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=0 recv=122µs pipeline=1µs decrypt=2µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.707066Z[0m [34mDEBUG[0m received ACK for data_seq 299
+[2m2026-03-14T22:12:35.707069Z[0m [34mDEBUG[0m [RX] batch=167 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.707075Z[0m [34mDEBUG[0m received ACK for data_seq 300
+[2m2026-03-14T22:12:35.707078Z[0m [34mDEBUG[0m [RX] batch=168 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.707116Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 304, packet_seq 327)
+[2m2026-03-14T22:12:35.707152Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 305, packet_seq 328)
+[2m2026-03-14T22:12:35.707387Z[0m [34mDEBUG[0m received ACK for data_seq 302
+[2m2026-03-14T22:12:35.707399Z[0m [34mDEBUG[0m [RX] batch=169 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=300µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.707455Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 306, packet_seq 329)
+[2m2026-03-14T22:12:35.707493Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 307, packet_seq 330)
+[2m2026-03-14T22:12:35.707606Z[0m [34mDEBUG[0m received ACK for data_seq 303
+[2m2026-03-14T22:12:35.707615Z[0m [34mDEBUG[0m [RX] batch=170 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=196µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=3
+[2m2026-03-14T22:12:35.707693Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 308, packet_seq 331)
+[2m2026-03-14T22:12:35.756404Z[0m [34mDEBUG[0m sending NACK for 2 missing seqs (expected=36): [36, 38]
+[2m2026-03-14T22:12:35.756920Z[0m [34mDEBUG[0m reassembly: delivered 2 packets, expected_seq now 38, buffered 2
+[2m2026-03-14T22:12:35.756957Z[0m [34mDEBUG[0m [RX] batch=171 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=72 recv=416µs pipeline=5µs decrypt=14µs reassembly=2µs tcp_write=21µs delivered=2 buffered=0 reasm_depth=2
+[2m2026-03-14T22:12:35.756976Z[0m [32m INFO[0m 
+[STATS] elapsed=1.0s tx_tcp=4.0MB rx_tcp=3.9KB tx_udp=4.1MB rx_udp=16.8KB tx_rate=4.0MB/s rx_rate=3.9KB/s
+[2m2026-03-14T22:12:35.756979Z[0m [32m INFO[0m         pkts_sent=303 pkts_recv=171 pkts_drop=0 retransmits=0 nacks_sent=0 nacks_recv=10 acks_sent=0 acks_recv=95
+[2m2026-03-14T22:12:35.756982Z[0m [32m INFO[0m         cwnd=6 ssthresh=3 srtt=1.2ms rto=200ms window_stalls=18 delivered=38 buffered=0 gro_segments=171
+[2m2026-03-14T22:12:35.756986Z[0m [32m INFO[0m         strategy=SendMmsg gro=enabled batches_tx=45 batches_rx=171
+[2m2026-03-14T22:12:35.756989Z[0m [32m INFO[0m         time: tcp_read=202.7ms(20.2%) encrypt=749.9ms(74.7%) send=749.9ms(74.7%) window_wait=749.9ms(74.7%)
+[2m2026-03-14T22:12:35.756992Z[0m [32m INFO[0m               recv=111.1ms(11.1%) pipeline=428µs(0.0%) decrypt=246µs(0.0%) reassembly=346µs(0.0%) tcp_write=385µs(0.0%)
+[2m2026-03-14T22:12:35.757012Z[0m [34mDEBUG[0m sent SACK (cumulative_ack=37, 1 ranges, packet_seq=333)
+[2m2026-03-14T22:12:35.757023Z[0m [34mDEBUG[0m reassembly: delivered 3 packets, expected_seq now 41, buffered 0
+[2m2026-03-14T22:12:35.757029Z[0m [34mDEBUG[0m [RX] batch=172 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=108 recv=2µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=2µs delivered=3 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.757042Z[0m [34mDEBUG[0m sent ACK for delivered_seq 40 (packet seq 334)
+[2m2026-03-14T22:12:35.763481Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [305]
+[2m2026-03-14T22:12:35.763497Z[0m [34mDEBUG[0m [RX] batch=173 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=519µs pipeline=4µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.768536Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.768610Z[0m [34mDEBUG[0m retransmitted data_seq 305 (while waiting for window)
+[2m2026-03-14T22:12:35.768983Z[0m [34mDEBUG[0m received ACK for data_seq 308
+[2m2026-03-14T22:12:35.768997Z[0m [34mDEBUG[0m [RX] batch=174 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=5.5ms pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769050Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.769120Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 309, packet_seq 335)
+[2m2026-03-14T22:12:35.769123Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 310, packet_seq 336)
+[2m2026-03-14T22:12:35.769126Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 311, packet_seq 337)
+[2m2026-03-14T22:12:35.769130Z[0m [34mDEBUG[0m [TX] batch=46 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=18µs encrypt=62.1ms send=62.1ms strategy=SendMmsg data_seq=312 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.769156Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.769185Z[0m [34mDEBUG[0m batch sending 2 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.769232Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 312, packet_seq 338)
+[2m2026-03-14T22:12:35.769235Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 313, packet_seq 339)
+[2m2026-03-14T22:12:35.769247Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 42, buffered 0
+[2m2026-03-14T22:12:35.769262Z[0m [34mDEBUG[0m [RX] batch=175 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=241µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=10µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769273Z[0m [34mDEBUG[0m sent ACK for delivered_seq 41 (packet seq 340)
+[2m2026-03-14T22:12:35.769528Z[0m [34mDEBUG[0m received ACK for data_seq 309
+[2m2026-03-14T22:12:35.769537Z[0m [34mDEBUG[0m [RX] batch=176 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=247µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769654Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 314, packet_seq 341)
+[2m2026-03-14T22:12:35.769734Z[0m [34mDEBUG[0m received ACK for data_seq 310
+[2m2026-03-14T22:12:35.769743Z[0m [34mDEBUG[0m [RX] batch=177 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=182µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769810Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 315, packet_seq 342)
+[2m2026-03-14T22:12:35.769948Z[0m [34mDEBUG[0m received ACK for data_seq 311
+[2m2026-03-14T22:12:35.769953Z[0m [34mDEBUG[0m [RX] batch=178 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=186µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769960Z[0m [34mDEBUG[0m received ACK for data_seq 312
+[2m2026-03-14T22:12:35.769964Z[0m [34mDEBUG[0m [RX] batch=179 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769972Z[0m [34mDEBUG[0m received ACK for data_seq 313
+[2m2026-03-14T22:12:35.769976Z[0m [34mDEBUG[0m [RX] batch=180 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.769983Z[0m [34mDEBUG[0m received ACK for data_seq 314
+[2m2026-03-14T22:12:35.769987Z[0m [34mDEBUG[0m [RX] batch=181 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770042Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 316, packet_seq 343)
+[2m2026-03-14T22:12:35.770089Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 317, packet_seq 344)
+[2m2026-03-14T22:12:35.770133Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 318, packet_seq 345)
+[2m2026-03-14T22:12:35.770179Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 319, packet_seq 346)
+[2m2026-03-14T22:12:35.770328Z[0m [34mDEBUG[0m received ACK for data_seq 315
+[2m2026-03-14T22:12:35.770338Z[0m [34mDEBUG[0m [RX] batch=182 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=332µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770355Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 320, packet_seq 347)
+[2m2026-03-14T22:12:35.770360Z[0m [34mDEBUG[0m [TX] batch=47 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=21µs encrypt=1.2ms send=1.2ms strategy=SendMmsg data_seq=321 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.770390Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.770423Z[0m [34mDEBUG[0m received ACK for data_seq 316
+[2m2026-03-14T22:12:35.770431Z[0m [34mDEBUG[0m [RX] batch=183 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=76µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770548Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 321, packet_seq 348)
+[2m2026-03-14T22:12:35.770606Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 43, buffered 0
+[2m2026-03-14T22:12:35.770638Z[0m [34mDEBUG[0m [RX] batch=184 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=167µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=26µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770656Z[0m [34mDEBUG[0m sent ACK for delivered_seq 42 (packet seq 349)
+[2m2026-03-14T22:12:35.770663Z[0m [34mDEBUG[0m received ACK for data_seq 317
+[2m2026-03-14T22:12:35.770667Z[0m [34mDEBUG[0m [RX] batch=185 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770710Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 322, packet_seq 350)
+[2m2026-03-14T22:12:35.770892Z[0m [34mDEBUG[0m received ACK for data_seq 318
+[2m2026-03-14T22:12:35.770897Z[0m [34mDEBUG[0m [RX] batch=186 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=214µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.770936Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 323, packet_seq 351)
+[2m2026-03-14T22:12:35.771265Z[0m [34mDEBUG[0m received ACK for data_seq 319
+[2m2026-03-14T22:12:35.771273Z[0m [34mDEBUG[0m [RX] batch=187 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=360µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771280Z[0m [34mDEBUG[0m received ACK for data_seq 320
+[2m2026-03-14T22:12:35.771283Z[0m [34mDEBUG[0m [RX] batch=188 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771327Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 324, packet_seq 352)
+[2m2026-03-14T22:12:35.771360Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 325, packet_seq 353)
+[2m2026-03-14T22:12:35.771369Z[0m [34mDEBUG[0m received ACK for data_seq 321
+[2m2026-03-14T22:12:35.771372Z[0m [34mDEBUG[0m [RX] batch=189 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=81µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771378Z[0m [34mDEBUG[0m received ACK for data_seq 322
+[2m2026-03-14T22:12:35.771381Z[0m [34mDEBUG[0m [RX] batch=190 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771418Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 326, packet_seq 354)
+[2m2026-03-14T22:12:35.771453Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 327, packet_seq 355)
+[2m2026-03-14T22:12:35.771707Z[0m [34mDEBUG[0m received ACK for data_seq 324
+[2m2026-03-14T22:12:35.771713Z[0m [34mDEBUG[0m [RX] batch=191 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=318µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771758Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 328, packet_seq 356)
+[2m2026-03-14T22:12:35.771769Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 329, packet_seq 357)
+[2m2026-03-14T22:12:35.771773Z[0m [34mDEBUG[0m [TX] batch=48 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=23µs encrypt=1.4ms send=1.4ms strategy=SendMmsg data_seq=330 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.771792Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.771905Z[0m [34mDEBUG[0m received ACK for data_seq 325
+[2m2026-03-14T22:12:35.771911Z[0m [34mDEBUG[0m [RX] batch=192 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=178µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.771918Z[0m [34mDEBUG[0m received ACK for data_seq 326
+[2m2026-03-14T22:12:35.771921Z[0m [34mDEBUG[0m [RX] batch=193 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772025Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 330, packet_seq 358)
+[2m2026-03-14T22:12:35.772162Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 331, packet_seq 359)
+[2m2026-03-14T22:12:35.772176Z[0m [34mDEBUG[0m received ACK for data_seq 327
+[2m2026-03-14T22:12:35.772181Z[0m [34mDEBUG[0m [RX] batch=194 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=250µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772219Z[0m [34mDEBUG[0m received ACK for data_seq 328
+[2m2026-03-14T22:12:35.772223Z[0m [34mDEBUG[0m [RX] batch=195 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772229Z[0m [34mDEBUG[0m received ACK for data_seq 329
+[2m2026-03-14T22:12:35.772232Z[0m [34mDEBUG[0m [RX] batch=196 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772238Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 44, buffered 0
+[2m2026-03-14T22:12:35.772249Z[0m [34mDEBUG[0m [RX] batch=197 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=1µs pipeline=0µs decrypt=3µs reassembly=1µs tcp_write=7µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772299Z[0m [34mDEBUG[0m sent ACK for delivered_seq 43 (packet seq 360)
+[2m2026-03-14T22:12:35.772307Z[0m [34mDEBUG[0m received ACK for data_seq 330
+[2m2026-03-14T22:12:35.772311Z[0m [34mDEBUG[0m [RX] batch=198 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772317Z[0m [34mDEBUG[0m received ACK for data_seq 331
+[2m2026-03-14T22:12:35.772319Z[0m [34mDEBUG[0m [RX] batch=199 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=0µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.772360Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 332, packet_seq 361)
+[2m2026-03-14T22:12:35.772554Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 333, packet_seq 362)
+[2m2026-03-14T22:12:35.772588Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 334, packet_seq 363)
+[2m2026-03-14T22:12:35.772621Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 335, packet_seq 364)
+[2m2026-03-14T22:12:35.772655Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 336, packet_seq 365)
+[2m2026-03-14T22:12:35.936810Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [332]
+[2m2026-03-14T22:12:35.936845Z[0m [34mDEBUG[0m [RX] batch=200 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=6.0ms pipeline=8µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.942872Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:35.942956Z[0m [34mDEBUG[0m retransmitted data_seq 332 (while waiting for window)
+[2m2026-03-14T22:12:35.943409Z[0m [34mDEBUG[0m received ACK for data_seq 336
+[2m2026-03-14T22:12:35.943420Z[0m [34mDEBUG[0m [RX] batch=201 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=538µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.943448Z[0m [34mDEBUG[0m batch sending 2 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.943488Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 337, packet_seq 366)
+[2m2026-03-14T22:12:35.943491Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 338, packet_seq 367)
+[2m2026-03-14T22:12:35.943496Z[0m [34mDEBUG[0m [TX] batch=49 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=15µs encrypt=171.7ms send=171.7ms strategy=SendMmsg data_seq=339 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:35.943523Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:35.943570Z[0m [34mDEBUG[0m batch sending 3 packets via sendmmsg to 172.30.1.100:23095
+[2m2026-03-14T22:12:35.943632Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 339, packet_seq 368)
+[2m2026-03-14T22:12:35.943635Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 340, packet_seq 369)
+[2m2026-03-14T22:12:35.943642Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 341, packet_seq 370)
+[2m2026-03-14T22:12:35.943654Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 45, buffered 0
+[2m2026-03-14T22:12:35.943671Z[0m [34mDEBUG[0m [RX] batch=202 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=225µs pipeline=1µs decrypt=4µs reassembly=1µs tcp_write=13µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.943683Z[0m [34mDEBUG[0m sent ACK for delivered_seq 44 (packet seq 371)
+[2m2026-03-14T22:12:35.943748Z[0m [34mDEBUG[0m received ACK for data_seq 337
+[2m2026-03-14T22:12:35.943753Z[0m [34mDEBUG[0m [RX] batch=203 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=59µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.943795Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 342, packet_seq 372)
+[2m2026-03-14T22:12:35.943812Z[0m [34mDEBUG[0m received ACK for data_seq 338
+[2m2026-03-14T22:12:35.943816Z[0m [34mDEBUG[0m [RX] batch=204 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=53µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:35.943856Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 343, packet_seq 373)
+[2m2026-03-14T22:12:35.999532Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [339]
+[2m2026-03-14T22:12:35.999564Z[0m [34mDEBUG[0m [RX] batch=205 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=750µs pipeline=9µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.004650Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:36.004739Z[0m [34mDEBUG[0m retransmitted data_seq 339 (while waiting for window)
+[2m2026-03-14T22:12:36.005204Z[0m [34mDEBUG[0m received ACK for data_seq 343
+[2m2026-03-14T22:12:36.005230Z[0m [34mDEBUG[0m [RX] batch=206 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=5.6ms pipeline=5µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.005298Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 344, packet_seq 374)
+[2m2026-03-14T22:12:36.005359Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 345, packet_seq 375)
+[2m2026-03-14T22:12:36.005465Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 346, packet_seq 376)
+[2m2026-03-14T22:12:36.005485Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 347, packet_seq 377)
+[2m2026-03-14T22:12:36.005492Z[0m [34mDEBUG[0m [TX] batch=50 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=23µs encrypt=62.0ms send=62.0ms strategy=SendMmsg data_seq=348 cwnd=6 window=5 WINDOW_STALL
+[2m2026-03-14T22:12:36.005515Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:36.005554Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 348, packet_seq 378)
+[2m2026-03-14T22:12:36.005569Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 46, buffered 0
+[2m2026-03-14T22:12:36.005588Z[0m [34mDEBUG[0m [RX] batch=207 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=327µs pipeline=2µs decrypt=4µs reassembly=1µs tcp_write=14µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.005602Z[0m [34mDEBUG[0m sent ACK for delivered_seq 45 (packet seq 379)
+[2m2026-03-14T22:12:36.061391Z[0m [34mDEBUG[0m received NACK for 2 missing seqs: [344, 345]
+[2m2026-03-14T22:12:36.061427Z[0m [34mDEBUG[0m [RX] batch=208 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=81 tcp_bytes=0 recv=788µs pipeline=8µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.066519Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:36.066613Z[0m [34mDEBUG[0m retransmitted data_seq 344 (while waiting for window)
+[2m2026-03-14T22:12:36.066660Z[0m [34mDEBUG[0m retransmitted data_seq 345 (while waiting for window)
+[2m2026-03-14T22:12:36.067165Z[0m [34mDEBUG[0m received SACK: cumulative_ack=344, 1 ranges
+[2m2026-03-14T22:12:36.067176Z[0m [34mDEBUG[0m congestion: Recovery complete, cwnd=2.8
+[2m2026-03-14T22:12:36.067182Z[0m [34mDEBUG[0m spurious retransmit detected for seq 344: ack arrived in 0.6ms, expected 22.6ms
+[2m2026-03-14T22:12:36.067186Z[0m [34mDEBUG[0m SACK gap: 1 missing seqs: [345]
+[2m2026-03-14T22:12:36.067193Z[0m [34mDEBUG[0m [RX] batch=209 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=89 tcp_bytes=0 recv=5.7ms pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.067201Z[0m [34mDEBUG[0m congestion: loss detected, entering Recovery (cwnd=2.8 → ssthresh=2.0, recovery_seq=Some(349))
+[2m2026-03-14T22:12:36.067247Z[0m [34mDEBUG[0m retransmitted data_seq 345 (while waiting for window)
+[2m2026-03-14T22:12:36.067348Z[0m [34mDEBUG[0m received ACK for data_seq 348
+[2m2026-03-14T22:12:36.067357Z[0m [34mDEBUG[0m [RX] batch=210 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=145µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.067409Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 349, packet_seq 380)
+[2m2026-03-14T22:12:36.067444Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 350, packet_seq 381)
+[2m2026-03-14T22:12:36.067740Z[0m [34mDEBUG[0m received ACK for data_seq 349
+[2m2026-03-14T22:12:36.067747Z[0m [34mDEBUG[0m [RX] batch=211 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=374µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.067808Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 351, packet_seq 382)
+[2m2026-03-14T22:12:36.067820Z[0m [34mDEBUG[0m received ACK for data_seq 350
+[2m2026-03-14T22:12:36.067824Z[0m [34mDEBUG[0m [RX] batch=212 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=66µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.067870Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 352, packet_seq 383)
+[2m2026-03-14T22:12:36.067888Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 47, buffered 0
+[2m2026-03-14T22:12:36.067906Z[0m [34mDEBUG[0m [RX] batch=213 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=56µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=13µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.067916Z[0m [34mDEBUG[0m sent ACK for delivered_seq 46 (packet seq 384)
+[2m2026-03-14T22:12:36.068147Z[0m [34mDEBUG[0m received ACK for data_seq 351
+[2m2026-03-14T22:12:36.068154Z[0m [34mDEBUG[0m [RX] batch=214 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=223µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.068161Z[0m [34mDEBUG[0m received ACK for data_seq 352
+[2m2026-03-14T22:12:36.068165Z[0m [34mDEBUG[0m [RX] batch=215 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.068210Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 353, packet_seq 385)
+[2m2026-03-14T22:12:36.068245Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 354, packet_seq 386)
+[2m2026-03-14T22:12:36.068536Z[0m [34mDEBUG[0m received ACK for data_seq 353
+[2m2026-03-14T22:12:36.068545Z[0m [34mDEBUG[0m [RX] batch=216 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=363µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.068553Z[0m [34mDEBUG[0m received ACK for data_seq 354
+[2m2026-03-14T22:12:36.068556Z[0m [34mDEBUG[0m [RX] batch=217 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.068621Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 355, packet_seq 387)
+[2m2026-03-14T22:12:36.068633Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 356, packet_seq 388)
+[2m2026-03-14T22:12:36.068637Z[0m [34mDEBUG[0m [TX] batch=51 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=18µs encrypt=63.1ms send=63.1ms strategy=SendMmsg data_seq=357 cwnd=3 window=2 WINDOW_STALL
+[2m2026-03-14T22:12:36.068654Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:36.069032Z[0m [34mDEBUG[0m received ACK for data_seq 355
+[2m2026-03-14T22:12:36.069041Z[0m [34mDEBUG[0m [RX] batch=218 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=452µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069048Z[0m [34mDEBUG[0m received ACK for data_seq 356
+[2m2026-03-14T22:12:36.069052Z[0m [34mDEBUG[0m [RX] batch=219 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069097Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 357, packet_seq 389)
+[2m2026-03-14T22:12:36.069132Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 358, packet_seq 390)
+[2m2026-03-14T22:12:36.069425Z[0m [34mDEBUG[0m received ACK for data_seq 357
+[2m2026-03-14T22:12:36.069445Z[0m [34mDEBUG[0m [RX] batch=220 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=357µs pipeline=6µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069510Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 359, packet_seq 391)
+[2m2026-03-14T22:12:36.069641Z[0m [34mDEBUG[0m received ACK for data_seq 358
+[2m2026-03-14T22:12:36.069650Z[0m [34mDEBUG[0m [RX] batch=221 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=186µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069702Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 360, packet_seq 392)
+[2m2026-03-14T22:12:36.069842Z[0m [34mDEBUG[0m received ACK for data_seq 359
+[2m2026-03-14T22:12:36.069849Z[0m [34mDEBUG[0m [RX] batch=222 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=178µs pipeline=7µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069901Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 361, packet_seq 393)
+[2m2026-03-14T22:12:36.069911Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 48, buffered 0
+[2m2026-03-14T22:12:36.069922Z[0m [34mDEBUG[0m [RX] batch=223 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=55µs pipeline=1µs decrypt=3µs reassembly=1µs tcp_write=8µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.069933Z[0m [34mDEBUG[0m sent ACK for delivered_seq 47 (packet seq 394)
+[2m2026-03-14T22:12:36.124064Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [360]
+[2m2026-03-14T22:12:36.124092Z[0m [34mDEBUG[0m [RX] batch=224 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=162µs pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.129185Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:36.129281Z[0m [34mDEBUG[0m retransmitted data_seq 360 (while waiting for window)
+[2m2026-03-14T22:12:36.129862Z[0m [34mDEBUG[0m received ACK for data_seq 361
+[2m2026-03-14T22:12:36.129880Z[0m [34mDEBUG[0m [RX] batch=225 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=5.8ms pipeline=5µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.129948Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 362, packet_seq 395)
+[2m2026-03-14T22:12:36.129990Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 363, packet_seq 396)
+[2m2026-03-14T22:12:36.130291Z[0m [34mDEBUG[0m received ACK for data_seq 362
+[2m2026-03-14T22:12:36.130304Z[0m [34mDEBUG[0m [RX] batch=226 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=398µs pipeline=3µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.130360Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 364, packet_seq 397)
+[2m2026-03-14T22:12:36.130655Z[0m [34mDEBUG[0m received ACK for data_seq 364
+[2m2026-03-14T22:12:36.130661Z[0m [34mDEBUG[0m [RX] batch=227 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=341µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.130681Z[0m [34mDEBUG[0m ZTLP sent: 143 bytes (data_seq 365, packet_seq 398)
+[2m2026-03-14T22:12:36.130695Z[0m [34mDEBUG[0m [TX] batch=52 pkts=9 tcp_bytes=131072 udp_bytes=131711 tcp_read=13µs encrypt=62.0ms send=62.0ms strategy=SendMmsg data_seq=366 cwnd=3 window=2 WINDOW_STALL
+[2m2026-03-14T22:12:36.130724Z[0m [34mDEBUG[0m TCP → ZTLP: 131072 bytes
+[2m2026-03-14T22:12:36.130858Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 366, packet_seq 399)
+[2m2026-03-14T22:12:36.130875Z[0m [34mDEBUG[0m received ACK for data_seq 365
+[2m2026-03-14T22:12:36.130879Z[0m [34mDEBUG[0m [RX] batch=228 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=206µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.130924Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 367, packet_seq 400)
+[2m2026-03-14T22:12:36.131037Z[0m [34mDEBUG[0m received ACK for data_seq 366
+[2m2026-03-14T22:12:36.131045Z[0m [34mDEBUG[0m [RX] batch=229 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=149µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.131160Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 368, packet_seq 401)
+[2m2026-03-14T22:12:36.131226Z[0m [34mDEBUG[0m received ACK for data_seq 367
+[2m2026-03-14T22:12:36.131236Z[0m [34mDEBUG[0m [RX] batch=230 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=172µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.131292Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 369, packet_seq 402)
+[2m2026-03-14T22:12:36.131435Z[0m [34mDEBUG[0m received ACK for data_seq 368
+[2m2026-03-14T22:12:36.131443Z[0m [34mDEBUG[0m [RX] batch=231 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=189µs pipeline=2µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.131505Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 370, packet_seq 403)
+[2m2026-03-14T22:12:36.131525Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 49, buffered 0
+[2m2026-03-14T22:12:36.131546Z[0m [34mDEBUG[0m [RX] batch=232 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=107 tcp_bytes=36 recv=71µs pipeline=1µs decrypt=5µs reassembly=1µs tcp_write=16µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.131562Z[0m [34mDEBUG[0m sent ACK for delivered_seq 48 (packet seq 404)
+[2m2026-03-14T22:12:36.131569Z[0m [34mDEBUG[0m received ACK for data_seq 369
+[2m2026-03-14T22:12:36.131573Z[0m [34mDEBUG[0m [RX] batch=233 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=1µs pipeline=1µs decrypt=0µs reassembly=1µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.131619Z[0m [34mDEBUG[0m ZTLP sent: 16446 bytes (data_seq 371, packet_seq 405)
+[2m2026-03-14T22:12:36.185562Z[0m [34mDEBUG[0m received NACK for 1 missing seqs: [370]
+[2m2026-03-14T22:12:36.185598Z[0m [34mDEBUG[0m [RX] batch=234 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=73 tcp_bytes=0 recv=5.0ms pipeline=10µs decrypt=0µs reassembly=3µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:12:36.186706Z[0m [34mDEBUG[0m congestion: additional loss during recovery, ignoring
+[2m2026-03-14T22:12:36.186826Z[0m [34mDEBUG[0m retransmitted data_seq 370 (while waiting for window)
+[2m2026-03-14T22:12:36.332074Z[0m [34mDEBUG[0m RTO backoff #1: rto now 200.0ms
+[2m2026-03-14T22:12:36.332114Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:36.332126Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 200ms, cwnd 3 → 2
+[2m2026-03-14T22:12:36.332247Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:36.332304Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:36.533118Z[0m [34mDEBUG[0m RTO backoff #2: rto now 200.0ms
+[2m2026-03-14T22:12:36.533156Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:36.533166Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 200ms, cwnd 2 → 2
+[2m2026-03-14T22:12:36.533285Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:36.533331Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:36.734288Z[0m [34mDEBUG[0m RTO backoff #3: rto now 374.6ms
+[2m2026-03-14T22:12:36.734339Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:36.734352Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 200ms, cwnd 2 → 2
+[2m2026-03-14T22:12:36.734514Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:36.734575Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:37.110784Z[0m [34mDEBUG[0m RTO backoff #4: rto now 749.2ms
+[2m2026-03-14T22:12:37.110811Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:37.110816Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 374ms, cwnd 2 → 2
+[2m2026-03-14T22:12:37.110915Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:37.110954Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:37.864247Z[0m [34mDEBUG[0m RTO backoff #5: rto now 1498.4ms
+[2m2026-03-14T22:12:37.864284Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:37.864294Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 749ms, cwnd 2 → 2
+[2m2026-03-14T22:12:37.864405Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:37.864446Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:39.366333Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:39.366382Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:39.366395Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 1.498s, cwnd 2 → 2
+[2m2026-03-14T22:12:39.366519Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:39.366560Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:42.367504Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:42.367535Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:42.367540Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:42.367654Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:42.367699Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:45.367528Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:45.367574Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:45.367585Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:45.367744Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:45.367816Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:48.369048Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:48.369083Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:48.369093Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:48.369210Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:48.369257Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:51.368478Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:51.368531Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:51.368537Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:51.368687Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:51.368734Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:54.369691Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:54.369730Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:54.369738Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:54.369892Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:54.369951Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:12:57.369341Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:12:57.369375Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:12:57.369385Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:12:57.369493Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:12:57.369535Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:13:00.366854Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:13:00.366892Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:13:00.366898Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:13:00.367018Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:13:00.367060Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:13:03.366827Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:13:03.366862Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:13:03.366868Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:13:03.366964Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:13:03.367003Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:13:06.364678Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:13:06.364710Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:13:06.364723Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:13:06.364837Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:13:06.364878Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:13:09.366375Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:13:09.366411Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:13:09.366417Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:13:09.366531Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:13:09.366576Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)
+[2m2026-03-14T22:13:12.363819Z[0m [34mDEBUG[0m RTO backoff #6: rto now 2996.7ms
+[2m2026-03-14T22:13:12.363852Z[0m [34mDEBUG[0m congestion: RTO timeout, back to SlowStart (cwnd=2.0, ssthresh=2.0)
+[2m2026-03-14T22:13:12.363862Z[0m [34mDEBUG[0m RTO loss detection: no ACK for 2.996s, cwnd 2 → 2
+[2m2026-03-14T22:13:12.363965Z[0m [34mDEBUG[0m RTO retransmit data_seq 370 (packet_seq 403)
+[2m2026-03-14T22:13:12.364005Z[0m [34mDEBUG[0m RTO retransmit data_seq 371 (packet_seq 405)

@@ -1,0 +1,15 @@
+scenario_id=5
+scenario_name=packet-loss-ladder
+scenario_description=Progressive packet loss: 1%, 5%, 10%, 25%, 50%
+loss_1_handshake_ms=64
+loss_1_ssh_echo=PASS
+loss_1_1mb_time_ms=10186
+loss_1_1mb_throughput_mbps=.78
+loss_1_1mb_checksum=PASS
+loss_5_handshake_ms=70
+loss_5_ssh_echo=PASS
+loss_5_1mb_time_ms=877
+loss_5_1mb_throughput_mbps=9.19
+loss_5_1mb_checksum=PASS
+loss_10_handshake_ms=68
+loss_10_ssh_echo=FAIL

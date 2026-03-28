@@ -1,0 +1,40 @@
+=== Handshake Events ===
+[32m✓ Handshake complete![0m
+  [36mHandshake latency:[0m 337.38ms
+
+=== Congestion Control ===
+[2m2026-03-14T22:16:03.466029Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=6µs encrypt=69µs send=69µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+[2m2026-03-14T22:16:04.028883Z[0m [34mDEBUG[0m [TX] batch=2 pkts=1 tcp_bytes=1288 udp_bytes=1359 tcp_read=562.8ms encrypt=30µs send=30µs strategy=SendMmsg data_seq=2 cwnd=11 window=11 
+[2m2026-03-14T22:16:04.029706Z[0m [34mDEBUG[0m [TX] batch=3 pkts=1 tcp_bytes=48 udp_bytes=119 tcp_read=775µs encrypt=36µs send=36µs strategy=SendMmsg data_seq=3 cwnd=11 window=11 
+[2m2026-03-14T22:16:04.487425Z[0m [32m INFO[0m         cwnd=12 ssthresh=65535 srtt=425.6ms rto=1095ms window_stalls=0 delivered=2 buffered=0 gro_segments=4
+[2m2026-03-14T22:16:04.487432Z[0m [32m INFO[0m         time: tcp_read=563.6ms(55.2%) encrypt=137µs(0.0%) send=137µs(0.0%) window_wait=137µs(0.0%)
+
+=== Retransmissions ===
+[2m2026-03-14T22:16:04.487422Z[0m [32m INFO[0m         pkts_sent=3 pkts_recv=4 pkts_drop=0 retransmits=0 nacks_sent=0 nacks_recv=0 acks_sent=0 acks_recv=2
+
+=== SACK ===
+
+=== Anti-Replay ===
+
+=== PMTU ===
+
+=== Rekey ===
+
+=== Errors/Warnings ===
+[2m2026-03-14T22:16:03.465932Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:16:03.886879Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=737µs pipeline=15µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.028645Z[0m [34mDEBUG[0m [RX] batch=2 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=111 tcp_bytes=40 recv=2.9ms pipeline=8µs decrypt=38µs reassembly=3µs tcp_write=37µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.028707Z[0m [34mDEBUG[0m [RX] batch=3 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=2µs pipeline=1µs decrypt=2µs reassembly=9µs tcp_write=10µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.487411Z[0m [34mDEBUG[0m [RX] batch=4 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=3.4ms pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.487422Z[0m [32m INFO[0m         pkts_sent=3 pkts_recv=4 pkts_drop=0 retransmits=0 nacks_sent=0 nacks_recv=0 acks_sent=0 acks_recv=2
+[2m2026-03-14T22:16:04.487446Z[0m [34mDEBUG[0m [RX] batch=5 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+
+=== Summary Stats ===
+Total log lines: 67
+Handshake events: 2
+Retransmissions: 1
+SACK events: 0
+0
+Anti-replay drops: 0
+0
+Errors: 1

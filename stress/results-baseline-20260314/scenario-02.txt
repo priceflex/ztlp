@@ -1,0 +1,16 @@
+scenario_id=2
+scenario_name=high-latency
+scenario_description=500ms RTT (250ms one-way delay)
+handshake_time_ms=605
+ssh_echo=PASS
+scp_1mb_time_ms=17165
+scp_1mb_throughput_mbps=.46
+scp_1mb_checksum=PASS
+scp_10mb_time_ms=57894
+scp_10mb_throughput_mbps=1.38
+scp_10mb_checksum=PASS
+scp_50mb_time_ms=230578
+scp_50mb_throughput_mbps=1.73
+scp_50mb_checksum=PASS
+retransmit_count=458
+scenario_duration_s=334

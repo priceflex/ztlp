@@ -1,0 +1,67 @@
+[2m2026-03-14T22:16:01.070923Z[0m [32m INFO[0m loading identity from /home/ztlp/.ztlp/client-identity.json
+[2m2026-03-14T22:16:01.070984Z[0m [32m INFO[0m loaded NodeID: b417df82be38c9f9c88296bfc84115e0
+[2m2026-03-14T22:16:01.071013Z[0m [32m INFO[0m ZTLP node bound to 0.0.0.0:51117
+[36mBound to:[0m 0.0.0.0:51117
+[36mConnecting to:[0m 172.30.1.100:23095
+
+[2m→ Sending HELLO (message 1/3)...[0m
+  [36mService:[0m ssh
+[2m2026-03-14T22:16:01.071187Z[0m [34mDEBUG[0m sent 128 bytes to 172.30.1.100:23095
+[2m← Waiting for HELLO_ACK (message 2/3)...[0m
+[2m2026-03-14T22:16:01.408258Z[0m [34mDEBUG[0m received 192 bytes from 172.30.1.100:23095
+[2m→ Sending final confirmation (message 3/3)...[0m
+[2m2026-03-14T22:16:01.408477Z[0m [34mDEBUG[0m sent 160 bytes to 172.30.1.100:23095
+
+[32m✓ Handshake complete![0m
+  [36mRemote NodeID:[0m 64e0858cf40b9a4dc0c7abf3bc72634e
+  [36mSession ID:[0m b6556bb7b95c6a451bcbeaba
+  [36mHandshake latency:[0m 337.38ms
+
+--- [1mZTLP tunnel active[0m ---
+  [36mLocal listener:[0m 127.0.0.1:2222
+  [36mUsage:[0m Connect your TCP client to 127.0.0.1:2222
+  [2mStop:[0m Ctrl+C
+
+[32m✓ Listening for TCP connections on[0m 127.0.0.1:2222
+[36mTCP connection from[0m 127.0.0.1:49104 → tunnel
+[2m2026-03-14T22:16:03.465763Z[0m [32m INFO[0m run_bridge: starting for session b6556bb7b95c6a451bcbeaba peer=172.30.1.100:23095 local_udp=Ok(0.0.0.0:51117)
+[2m2026-03-14T22:16:03.465785Z[0m [32m INFO[0m system profile: recv_buf=14336KB, send_buf=14336KB, loopback=false, pacing=none (buffer-based), sub_batch=128
+[2m2026-03-14T22:16:03.465791Z[0m [34mDEBUG[0m run_bridge: pre-extracted crypto keys for session b6556bb7b95c6a451bcbeaba
+[2m2026-03-14T22:16:03.465853Z[0m [32m INFO[0m tcp_to_ztlp: starting, peer_addr=172.30.1.100:23095
+[2m2026-03-14T22:16:03.465873Z[0m [32m INFO[0m ztlp_to_tcp: starting (prefetched_packets=0)
+[2m2026-03-14T22:16:03.465897Z[0m [34mDEBUG[0m GRO detected: available (enabled on socket)
+[2m2026-03-14T22:16:03.465901Z[0m [34mDEBUG[0m GroReceiver created: mode=auto, gro_enabled=true
+[2m2026-03-14T22:16:03.465932Z[0m [34mDEBUG[0m GSO not available: Invalid argument (os error 22)
+[2m2026-03-14T22:16:03.465941Z[0m [34mDEBUG[0m UdpSender created: mode=auto, capability=Unavailable
+[2m2026-03-14T22:16:03.465953Z[0m [34mDEBUG[0m TCP → ZTLP: 40 bytes
+[2m2026-03-14T22:16:03.466022Z[0m [34mDEBUG[0m ZTLP sent: 111 bytes (data_seq 0, packet_seq 0)
+[2m2026-03-14T22:16:03.466029Z[0m [34mDEBUG[0m [TX] batch=1 pkts=1 tcp_bytes=40 udp_bytes=111 tcp_read=6µs encrypt=69µs send=69µs strategy=SendMmsg data_seq=1 cwnd=10 window=10 
+[2m2026-03-14T22:16:03.886852Z[0m [34mDEBUG[0m received ACK for data_seq 0
+[2m2026-03-14T22:16:03.886879Z[0m [34mDEBUG[0m [RX] batch=1 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=737µs pipeline=15µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.028569Z[0m [34mDEBUG[0m reassembly: initialized with first data_seq 0
+[2m2026-03-14T22:16:04.028598Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 1, buffered 0
+[2m2026-03-14T22:16:04.028645Z[0m [34mDEBUG[0m [RX] batch=2 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=111 tcp_bytes=40 recv=2.9ms pipeline=8µs decrypt=38µs reassembly=3µs tcp_write=37µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.028676Z[0m [34mDEBUG[0m sent ACK for delivered_seq 0 (packet seq 1)
+[2m2026-03-14T22:16:04.028693Z[0m [34mDEBUG[0m reassembly: delivered 1 packets, expected_seq now 2, buffered 0
+[2m2026-03-14T22:16:04.028707Z[0m [34mDEBUG[0m [RX] batch=3 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=1207 tcp_bytes=1136 recv=2µs pipeline=1µs decrypt=2µs reassembly=9µs tcp_write=10µs delivered=1 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.028717Z[0m [34mDEBUG[0m sent ACK for delivered_seq 1 (packet seq 2)
+[2m2026-03-14T22:16:04.028846Z[0m [34mDEBUG[0m TCP → ZTLP: 1288 bytes
+[2m2026-03-14T22:16:04.028869Z[0m [34mDEBUG[0m ZTLP sent: 1359 bytes (data_seq 1, packet_seq 3)
+[2m2026-03-14T22:16:04.028883Z[0m [34mDEBUG[0m [TX] batch=2 pkts=1 tcp_bytes=1288 udp_bytes=1359 tcp_read=562.8ms encrypt=30µs send=30µs strategy=SendMmsg data_seq=2 cwnd=11 window=11 
+[2m2026-03-14T22:16:04.029664Z[0m [34mDEBUG[0m TCP → ZTLP: 48 bytes
+[2m2026-03-14T22:16:04.029695Z[0m [34mDEBUG[0m ZTLP sent: 119 bytes (data_seq 2, packet_seq 4)
+[2m2026-03-14T22:16:04.029706Z[0m [34mDEBUG[0m [TX] batch=3 pkts=1 tcp_bytes=48 udp_bytes=119 tcp_read=775µs encrypt=36µs send=36µs strategy=SendMmsg data_seq=3 cwnd=11 window=11 
+[2m2026-03-14T22:16:04.487373Z[0m [34mDEBUG[0m received ACK for data_seq 1
+[2m2026-03-14T22:16:04.487411Z[0m [34mDEBUG[0m [RX] batch=4 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=3.4ms pipeline=7µs decrypt=0µs reassembly=2µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:04.487419Z[0m [32m INFO[0m 
+[STATS] elapsed=1.0s tx_tcp=1.3KB rx_tcp=1.1KB tx_udp=1.6KB rx_udp=1.4KB tx_rate=1.3KB/s rx_rate=1.1KB/s
+[2m2026-03-14T22:16:04.487422Z[0m [32m INFO[0m         pkts_sent=3 pkts_recv=4 pkts_drop=0 retransmits=0 nacks_sent=0 nacks_recv=0 acks_sent=0 acks_recv=2
+[2m2026-03-14T22:16:04.487425Z[0m [32m INFO[0m         cwnd=12 ssthresh=65535 srtt=425.6ms rto=1095ms window_stalls=0 delivered=2 buffered=0 gro_segments=4
+[2m2026-03-14T22:16:04.487429Z[0m [32m INFO[0m         strategy=SendMmsg gro=enabled batches_tx=3 batches_rx=4
+[2m2026-03-14T22:16:04.487432Z[0m [32m INFO[0m         time: tcp_read=563.6ms(55.2%) encrypt=137µs(0.0%) send=137µs(0.0%) window_wait=137µs(0.0%)
+[2m2026-03-14T22:16:04.487435Z[0m [32m INFO[0m               recv=7.1ms(0.7%) pipeline=33µs(0.0%) decrypt=18µs(0.0%) reassembly=41µs(0.0%) tcp_write=48µs(0.0%)
+[2m2026-03-14T22:16:04.487443Z[0m [34mDEBUG[0m received ACK for data_seq 2
+[2m2026-03-14T22:16:04.487446Z[0m [34mDEBUG[0m [RX] batch=5 gro_segs=1 pkts_ok=1 pkts_drop=0 udp_bytes=71 tcp_bytes=0 recv=2µs pipeline=1µs decrypt=0µs reassembly=0µs tcp_write=0µs delivered=0 buffered=0 reasm_depth=0
+[2m2026-03-14T22:16:34.060146Z[0m [32m INFO[0m TCP connection closed (read EOF), sending FIN
+[2m2026-03-14T22:16:34.060221Z[0m [34mDEBUG[0m sent FIN frame (data_seq 3, packet_seq 5)
+[2m2026-03-14T22:16:34.060294Z[0m [32m INFO[0m tunnel: TCP side sent FIN, waiting for ZTLP side...

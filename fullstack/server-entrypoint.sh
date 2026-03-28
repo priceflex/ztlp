@@ -16,6 +16,21 @@ SERVER_NAME="${ZTLP_SERVER_NAME:-server.${ZONE}}"
 NS_SERVER="${ZTLP_NS_SERVER:-ns:23096}"
 BIND_ADDR="${ZTLP_BIND_ADDR:-0.0.0.0:23095}"
 BACKEND="${ZTLP_BACKEND:-backend:22}"
+HTTP_BACKEND="${ZTLP_HTTP_BACKEND:-backend:8080}"
+
+# Resolve hostname to IP for --forward args (ztlp needs IP:PORT)
+resolve_backend() {
+    local addr="$1"
+    local host="${addr%%:*}"
+    local port="${addr##*:}"
+    local ip
+    ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')
+    if [ -n "$ip" ]; then
+        echo "${ip}:${port}"
+    else
+        echo "$addr"
+    fi
+}
 KEY_DIR="/home/ztlp/.ztlp"
 KEY_FILE="${KEY_DIR}/server-identity.json"
 
@@ -27,7 +42,7 @@ log "  Zone:       ${ZONE}"
 log "  Name:       ${SERVER_NAME}"
 log "  NS Server:  ${NS_SERVER}"
 log "  Bind:       ${BIND_ADDR}"
-log "  Backend:    ssh://${BACKEND}"
+log "  Backend:    ssh://${BACKEND}, http://${HTTP_BACKEND}"
 log "  RUST_LOG:   ${RUST_LOG:-not set}"
 log "═══════════════════════════════════════════════════════"
 
@@ -88,7 +103,11 @@ dbg "  Lookup result: ${VERIFY}"
 
 # ── Step 4: Start listening ─────────────────────────────────
 log "→ Starting ZTLP listener with DEBUG output..."
-log "  Command: ztlp listen --bind ${BIND_ADDR} --key ${KEY_FILE} --forward ssh:${BACKEND} --ns-server ${NS_SERVER} --gateway -vv"
+# Resolve backends to IPs
+BACKEND_RESOLVED=$(resolve_backend "${BACKEND}")
+HTTP_BACKEND_RESOLVED=$(resolve_backend "${HTTP_BACKEND}")
+
+log "  Command: ztlp listen --bind ${BIND_ADDR} --key ${KEY_FILE} --forward ssh:${BACKEND_RESOLVED} --forward http:${HTTP_BACKEND_RESOLVED} --ns-server ${NS_SERVER} --gateway -vv"
 log ""
 log "═══════════════════════════════════════════════════════"
 log "  Server is LIVE — waiting for client connections"
@@ -98,7 +117,8 @@ log ""
 exec ztlp listen \
     --bind "${BIND_ADDR}" \
     --key "${KEY_FILE}" \
-    --forward "ssh:${BACKEND}" \
+    --forward "ssh:${BACKEND_RESOLVED}" \
+    --forward "http:${HTTP_BACKEND_RESOLVED}" \
     --ns-server "${NS_SERVER}" \
     --gateway \
     -vv

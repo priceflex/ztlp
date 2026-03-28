@@ -70,18 +70,19 @@ defmodule ZtlpGateway.Session do
   @linger_timeout_ms 15_000
 
   # Congestion control (TCP-like AIMD)
-  # Initial congestion window (RFC 6928 IW=10)
-  @initial_cwnd 10
-  # Maximum congestion window (packets). 512 × 1200 = 614KB.
-  @max_cwnd 512
+  # Initial congestion window — 32 covers up to ~38KB without slow start
+  @initial_cwnd 32
+  # Maximum congestion window (packets). 256 × 1200 = 307KB.
+  # Conservative max to avoid overwhelming cellular/relay paths.
+  @max_cwnd 256
   # Minimum cwnd (never go below this)
-  @min_cwnd 2
-  # Slow-start threshold — start unlimited, let actual loss set it
-  @initial_ssthresh 512
+  @min_cwnd 4
+  # Slow-start threshold — switch to linear growth at 128 packets (153KB)
+  @initial_ssthresh 128
   # Pacing interval: ms between burst sends
   @pacing_interval_ms 1
-  # Max packets sent per pacing tick (burst size to reduce timer overhead)
-  @burst_size 16
+  # Max packets sent per pacing tick — limits instantaneous burst
+  @burst_size 8
 
   # Maximum plaintext payload per ZTLP data packet.
   # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.

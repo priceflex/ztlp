@@ -55,6 +55,7 @@ pub mod nat;
 #[allow(unsafe_code)]
 pub mod pacing;
 pub mod packet;
+pub mod packet_router;
 pub mod pipeline;
 pub mod pmtu;
 pub mod policy;

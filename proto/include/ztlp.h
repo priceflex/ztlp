@@ -724,6 +724,87 @@ char *ztlp_ns_resolve(const char *service_name,
                        uint32_t timeout_ms);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Packet Router (iOS utun / TUN interface)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Create a new packet router for the iOS utun interface.
+ *
+ * Initializes a userspace TCP/IP handler that processes raw IPv4 packets
+ * from the tunnel interface. Maps destination IPs in 10.122.0.0/16 to
+ * ZTLP service names and creates mux streams to the gateway.
+ *
+ * @param client       Valid client handle.
+ * @param tunnel_addr  IPv4 address of the utun interface (e.g., "10.122.0.100").
+ *                     Null-terminated C string.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_new(ZtlpClient *client, const char *tunnel_addr);
+
+/**
+ * @brief Register a VIP service with the packet router.
+ *
+ * Maps a VIP address to a ZTLP service name. Traffic to this VIP on any
+ * port will be routed through a ZTLP mux stream to the named service.
+ *
+ * Example: ztlp_router_add_service(client, "10.122.0.1", "vault")
+ *
+ * @param client        Valid client handle.
+ * @param vip           VIP IPv4 address (e.g., "10.122.0.1"). Null-terminated.
+ * @param service_name  ZTLP service name (e.g., "vault"). Null-terminated.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_add_service(ZtlpClient *client,
+                                 const char *vip,
+                                 const char *service_name);
+
+/**
+ * @brief Write a raw IPv4 packet into the packet router.
+ *
+ * Called from Swift when NEPacketTunnelProvider.readPackets() delivers a
+ * packet from the utun interface. The router parses IP/TCP, manages
+ * connection state, and queues response packets.
+ *
+ * After calling this, call ztlp_router_read_packet() to retrieve any
+ * outbound response packets (SYN-ACK, ACK, data, FIN).
+ *
+ * @param client  Valid client handle.
+ * @param data    Raw IPv4 packet bytes.
+ * @param len     Length of the packet in bytes.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_write_packet(ZtlpClient *client,
+                                  const uint8_t *data,
+                                  size_t len);
+
+/**
+ * @brief Read the next outbound IPv4 packet from the router.
+ *
+ * Returns one complete IPv4 packet to inject back into the utun interface
+ * via NEPacketTunnelProvider.writePackets(). Call in a loop until 0 is
+ * returned to drain all queued packets.
+ *
+ * @param client   Valid client handle.
+ * @param buf      Output buffer for the IPv4 packet.
+ * @param buf_len  Size of the output buffer in bytes.
+ * @return Positive: bytes written to buf. 0: no packets available. Negative: error.
+ */
+int32_t ztlp_router_read_packet(ZtlpClient *client,
+                                 uint8_t *buf,
+                                 size_t buf_len);
+
+/**
+ * @brief Stop and destroy the packet router.
+ *
+ * Cleans up all TCP flows and releases resources. Call when tearing down
+ * the VPN tunnel.
+ *
+ * @param client  Valid client handle.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Statistics
  * ═══════════════════════════════════════════════════════════════════════════ */
 

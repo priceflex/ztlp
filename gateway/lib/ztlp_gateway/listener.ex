@@ -23,7 +23,7 @@ defmodule ZtlpGateway.Listener do
 
   require Logger
 
-  alias ZtlpGateway.{Packet, Pipeline, Session, Config}
+  alias ZtlpGateway.{Packet, Pipeline, Session, SessionRegistry, Config}
 
   # ---------------------------------------------------------------------------
   # Client API
@@ -137,10 +137,24 @@ defmodule ZtlpGateway.Listener do
 
   defp start_new_session(packet_data, client_addr, state) do
     # Check session limit
-    current = ZtlpGateway.SessionRegistry.count()
+    current = SessionRegistry.count()
     max = Config.get(:max_sessions)
 
     if current < max do
+      # Session deduplication: if an existing session is already registered
+      # from this client address, terminate it before creating a new one.
+      # This prevents session accumulation when VPN extensions reconnect
+      # frequently (new handshake from same {ip, port}).
+      case SessionRegistry.lookup_by_addr(client_addr) do
+        {:ok, {old_sid, old_pid}} ->
+          Logger.info("[Listener] Replacing session #{Base.encode16(old_sid)} from #{inspect(client_addr)} — new HELLO received")
+          # Use DynamicSupervisor.terminate_child for clean shutdown under supervision tree
+          DynamicSupervisor.terminate_child(ZtlpGateway.SessionSupervisor, old_pid)
+
+        :error ->
+          :ok
+      end
+
       # Use the client's SessionID from the HELLO packet (echoed in HELLO_ACK)
       session_id =
         case Packet.extract_session_id(packet_data) do

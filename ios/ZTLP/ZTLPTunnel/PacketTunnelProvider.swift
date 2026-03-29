@@ -6,12 +6,14 @@
 // this extension via NETunnelProviderSession.sendProviderMessage().
 //
 // Architecture:
-//   The extension uses ZTLPBridge to establish the ZTLP connection and run
-//   a VIP TCP proxy on 127.0.0.1:8080. Safari (or any app) connects to
-//   the proxy, which forwards traffic through the encrypted ZTLP tunnel.
+//   The extension uses ZTLPBridge to establish the ZTLP connection, then
+//   starts a packet router on the 10.122.0.0/16 VIP subnet. Each service
+//   gets a virtual IP (e.g., 10.122.0.2 = vault, 10.122.0.3 = http).
+//   The utun interface captures IPv4 packets destined for VIPs, and the
+//   Rust packet router handles TCP state + ZTLP mux stream routing.
 //
-//   We do NOT use TUN packet I/O — no readPackets/writePackets. The VIP
-//   proxy handles all traffic at the TCP level.
+//   A legacy VIP TCP proxy on 127.0.0.1:8080 is also started for backward
+//   compatibility with HTTP benchmarks and tools using port-based addressing.
 //
 // Lifecycle:
 //   1. iOS calls startTunnel() when the user toggles the VPN on.
@@ -201,12 +203,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
                 self.logger.info("Connected to \(target)", source: "Tunnel")
 
-                // Step 6: Start VIP proxy
+                // Step 6: Start packet router (VIP IP routing on 10.122.0.0/16)
+                // Register services: each gets its own virtual IP on the tunnel subnet.
+                // Apps connect to the VIP using standard ports (80, 443).
+                let services: [(vip: String, name: String)] = [
+                    ("10.122.0.2", svcName),           // Primary service (vault/default)
+                    ("10.122.0.3", "http"),             // HTTP echo/web service
+                ]
+                try self.startPacketRouter(services: services)
+
+                // Also start VIP proxy on 127.0.0.1 for backward compatibility
+                // (HTTP benchmarks and tools that use port-based addressing)
                 try self.startVipProxy(serviceName: svcName)
 
-                // Step 7: Apply tunnel network settings
+                // Step 7: Apply tunnel network settings (with packet router routes)
                 let remoteAddr = config.relayAddress ?? target
-                let tunSettings = self.createTunnelNetworkSettings(tunnelRemoteAddress: remoteAddr)
+                let tunSettings = self.createTunnelNetworkSettings(
+                    tunnelRemoteAddress: remoteAddr,
+                    usePacketRouter: true
+                )
 
                 let settingsSemaphore = DispatchSemaphore(value: 0)
                 var settingsError: Error?
@@ -239,7 +254,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 self.sharedDefaults?.set(target, forKey: SharedKey.peerAddress)
 
-                self.logger.info("Tunnel active — VIP proxy on 127.0.0.1:8080/8443", source: "Tunnel")
+                self.logger.info("Tunnel active — packet router on 10.122.0.0/16 + VIP proxy on 127.0.0.1:8080/8443", source: "Tunnel")
                 completionHandler(nil)
 
             } catch {
@@ -274,7 +289,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.keepaliveTimer?.cancel()
             self.keepaliveTimer = nil
 
-            // Stop VIP proxy and DNS
+            // Stop packet router, write timer, VIP proxy, and DNS
+            self.stopWritePacketTimer()
+            self.bridge.routerStop()
+            self.logger.info("Packet router stopped", source: "Tunnel")
+
             self.bridge.vipStop()
             self.logger.info("VIP proxy stopped", source: "Tunnel")
 
@@ -390,6 +409,104 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } catch {
             logger.warn("DNS resolver failed (expected on iOS): \(error.localizedDescription)", source: "Tunnel")
         }
+    }
+
+    // MARK: - Packet Router
+
+    /// Start the packet router for VIP IP routing on 10.122.0.0/16.
+    /// This replaces the VIP proxy for services that should be accessed
+    /// via virtual IP addresses instead of 127.0.0.1:port.
+    private func startPacketRouter(services: [(vip: String, name: String)]) throws {
+        // Initialize the router with the tunnel interface address
+        try bridge.routerNew(tunnelAddr: "10.122.0.1")
+        logger.info("Packet router initialized (tunnel=10.122.0.1)", source: "Tunnel")
+
+        // Register all services
+        for svc in services {
+            try bridge.routerAddService(vip: svc.vip, serviceName: svc.name)
+            logger.info("Router service: \(svc.vip) → \(svc.name)", source: "Tunnel")
+        }
+
+        // Start the packet read/write loop
+        startPacketLoop()
+    }
+
+    /// Start the utun packet I/O loop.
+    /// Reads IP packets from the tunnel interface, feeds them to the Rust
+    /// packet router, and writes response packets back to the interface.
+    private func startPacketLoop() {
+        logger.info("Starting packet I/O loop", source: "Tunnel")
+
+        // Read loop: utun → packet router → ZTLP
+        readPacketLoop()
+
+        // Write loop: poll outbound packets from router → utun
+        // Runs on a background timer to avoid busy-waiting
+        startWritePacketTimer()
+    }
+
+    /// Recursive readPackets loop. iOS calls the completion handler each
+    /// time packets are available, and we call readPackets again to keep
+    /// the loop going. This is the standard pattern for NEPacketTunnelProvider.
+    private func readPacketLoop() {
+        packetFlow.readPackets { [weak self] packets, protocols in
+            guard let self = self, self.isTunnelActive else { return }
+
+            for (i, packet) in packets.enumerated() {
+                // Only handle IPv4 (protocol family 2 = AF_INET)
+                let proto = protocols[i]
+                if proto.intValue == AF_INET {
+                    do {
+                        try self.bridge.routerWritePacket(packet)
+                    } catch {
+                        self.logger.warn("router write error: \(error)", source: "Tunnel")
+                    }
+                }
+            }
+
+            // Immediately flush any outbound response packets
+            self.flushOutboundPackets()
+
+            // Continue reading
+            self.readPacketLoop()
+        }
+    }
+
+    /// Write response packets from the router back to the utun interface.
+    private func flushOutboundPackets() {
+        var packets: [Data] = []
+        var protocols: [NSNumber] = []
+
+        // Drain all available outbound packets
+        while let pkt = bridge.routerReadPacket() {
+            packets.append(pkt)
+            protocols.append(NSNumber(value: AF_INET)) // IPv4
+        }
+
+        if !packets.isEmpty {
+            packetFlow.writePackets(packets, withProtocols: protocols)
+        }
+    }
+
+    /// Periodic timer to flush outbound packets from the router.
+    /// This catches response packets that arrive asynchronously from the
+    /// gateway (e.g., HTTP response data) outside of the readPackets cycle.
+    private var writePacketTimer: DispatchSourceTimer?
+
+    private func startWritePacketTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(5))
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.isTunnelActive else { return }
+            self.flushOutboundPackets()
+        }
+        timer.resume()
+        writePacketTimer = timer
+    }
+
+    private func stopWritePacketTimer() {
+        writePacketTimer?.cancel()
+        writePacketTimer = nil
     }
 
     // MARK: - NS Resolution
@@ -598,7 +715,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// These settings are required by iOS to consider the VPN "active",
     /// but we configure split-tunnel that captures nothing.
     private func createTunnelNetworkSettings(
-        tunnelRemoteAddress: String
+        tunnelRemoteAddress: String,
+        usePacketRouter: Bool = true
     ) -> NEPacketTunnelNetworkSettings {
         // NEPacketTunnelNetworkSettings requires a bare IP address (no port).
         // The address may contain a port (e.g., "34.219.64.205:23095"), so strip it.
@@ -606,11 +724,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
 
-        // IPv4: split tunnel that captures no real traffic
-        let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
-        ipv4.includedRoutes = []
-        ipv4.excludedRoutes = [NEIPv4Route.default()]
-        settings.ipv4Settings = ipv4
+        if usePacketRouter {
+            // Packet router mode: route 10.122.0.0/16 through the tunnel.
+            // Apps connect to service VIPs (e.g., 10.122.0.1:443) using
+            // standard ports. The utun interface captures these packets,
+            // and PacketTunnelProvider feeds them through the Rust packet
+            // router, which manages TCP state and ZTLP mux streams.
+            let ipv4 = NEIPv4Settings(
+                addresses: ["10.122.0.1"],           // Tunnel interface IP
+                subnetMasks: ["255.255.0.0"]          // /16 subnet
+            )
+            // Route the entire VIP subnet through the tunnel
+            let vipRoute = NEIPv4Route(
+                destinationAddress: "10.122.0.0",
+                subnetMask: "255.255.0.0"
+            )
+            ipv4.includedRoutes = [vipRoute]
+            // Don't route anything else through the tunnel
+            ipv4.excludedRoutes = [NEIPv4Route.default()]
+            settings.ipv4Settings = ipv4
+        } else {
+            // Legacy VIP proxy mode: no real traffic routes through the tunnel.
+            // Traffic goes to 127.0.0.1:port VIP proxy listeners.
+            let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
+            ipv4.includedRoutes = []
+            ipv4.excludedRoutes = [NEIPv4Route.default()]
+            settings.ipv4Settings = ipv4
+        }
 
         // DNS: only intercept .ztlp domain queries
         let dns = NEDNSSettings(servers: ["127.0.55.53"])

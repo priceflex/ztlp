@@ -112,6 +112,8 @@ struct ZtlpClientInner {
     dns_server: Option<ZtlpDns>,
     /// Shared VIP registry (service name → IP) used by both VIP proxy and DNS.
     vip_registry: VipRegistry,
+    /// Packet router for iOS utun interface (raw IPv4 → ZTLP mux streams).
+    packet_router: Option<crate::packet_router::PacketRouter>,
 }
 
 unsafe impl Send for ZtlpClientInner {}
@@ -135,6 +137,9 @@ struct ActiveSession {
     /// Channel to feed gateway upload ACKs to the SendController.
     /// Set when VIP proxy starts with congestion-controlled uploads.
     upload_ack_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+    /// Channel for packet router actions (OpenStream, SendData, CloseStream).
+    /// The async router_action_task processes these and sends ZTLP mux frames.
+    router_action_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::packet_router::RouterAction>>,
     // Cached C strings for accessors
     session_id_str: CString,
     peer_node_id_str: CString,
@@ -352,6 +357,7 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         vip_proxy: None,
         dns_server: None,
         vip_registry: Arc::new(TokioRwLock::new(std::collections::HashMap::new())),
+        packet_router: None,
     };
     let client = ZtlpClient {
         inner: Arc::new(std::sync::Mutex::new(inner)),
@@ -843,6 +849,7 @@ async fn do_connect(
         stop_flag,
         data_seq: Arc::new(AtomicU64::new(0)),
         upload_ack_tx: None,
+        router_action_tx: None,
         session_id_str: CString::new(hex::encode(session_id.as_bytes())).unwrap_or_default(),
         peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes())).unwrap_or_default(),
         peer_addr_str: CString::new(send_addr.to_string()).unwrap_or_default(),
@@ -1316,21 +1323,41 @@ async fn recv_loop(
                     }
 
                     // Flush contiguous packets
-                    if let Ok(guard) = inner.lock() {
-                        if let Some(ref proxy) = guard.vip_proxy {
-                            let disp = proxy.dispatcher();
-                            while let Some((sid, data)) =
-                                reassembly_buf.remove(&vip_next_deliver_seq)
-                            {
-                                if !disp.dispatch(sid, data) {
-                                    tracing::warn!(
-                                        "recv_loop: dispatch failed for stream={} data_seq={}",
-                                        sid,
-                                        vip_next_deliver_seq
-                                    );
+                    if let Ok(mut guard) = inner.lock() {
+                        // Flush contiguous packets to VIP proxy or packet router
+                        let has_vip = guard.vip_proxy.is_some();
+                        let has_router = guard.packet_router.is_some();
+
+                        while let Some((sid, data)) =
+                            reassembly_buf.remove(&vip_next_deliver_seq)
+                        {
+                            let mut dispatched = false;
+
+                            // Try VIP proxy dispatcher first
+                            if has_vip {
+                                if let Some(ref proxy) = guard.vip_proxy {
+                                    if proxy.dispatcher().dispatch(sid, data.clone()) {
+                                        dispatched = true;
+                                    }
                                 }
-                                vip_next_deliver_seq += 1;
                             }
+
+                            // Fall through to packet router if VIP proxy didn't handle it
+                            if !dispatched && has_router {
+                                if let Some(ref mut router) = guard.packet_router {
+                                    router.process_gateway_data(sid, &data);
+                                    dispatched = true;
+                                }
+                            }
+
+                            if !dispatched {
+                                tracing::warn!(
+                                    "recv_loop: dispatch failed for stream={} data_seq={}",
+                                    sid,
+                                    vip_next_deliver_seq
+                                );
+                            }
+                            vip_next_deliver_seq += 1;
                         }
                     }
 
@@ -1367,9 +1394,13 @@ async fn recv_loop(
                             log_level,
                             &log_path,
                         );
-                        if let Ok(guard) = inner.lock() {
+                        if let Ok(mut guard) = inner.lock() {
                             if let Some(ref proxy) = guard.vip_proxy {
                                 proxy.dispatcher().close_stream(fin_stream_id);
+                            }
+                            // Also notify packet router of stream close
+                            if let Some(ref mut router) = guard.packet_router {
+                                router.process_gateway_close(fin_stream_id);
                             }
                         }
                     } else {
@@ -1405,9 +1436,12 @@ async fn recv_loop(
                             log_level,
                             &log_path,
                         );
-                        if let Ok(guard) = inner.lock() {
+                        if let Ok(mut guard) = inner.lock() {
                             if let Some(ref proxy) = guard.vip_proxy {
                                 proxy.dispatcher().close_stream(close_stream_id);
+                            }
+                            if let Some(ref mut router) = guard.packet_router {
+                                router.process_gateway_close(close_stream_id);
                             }
                         }
                     }
@@ -2222,6 +2256,349 @@ pub extern "C" fn ztlp_ns_resolve(
             std::ptr::null_mut()
         }
     }
+}
+
+// ── Packet Router FFI (iOS utun) ────────────────────────────────────────
+
+/// Create a new packet router for the iOS utun interface.
+///
+/// The `tunnel_addr` is the IP address assigned to the utun interface
+/// (e.g., "10.122.0.100"). This should match the address configured in
+/// `NEPacketTunnelProvider`.
+///
+/// Returns 0 on success, or a negative error code.
+#[no_mangle]
+pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c_char) -> i32 {
+    if client.is_null() || tunnel_addr.is_null() {
+        set_last_error("client or tunnel_addr is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let addr_cstr = unsafe { CStr::from_ptr(tunnel_addr) };
+    let addr_str = match addr_cstr.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in tunnel_addr: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+    if addr_str.len() > MAX_FFI_ADDRESS_LEN {
+        set_last_error("tunnel_addr too long");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let addr: std::net::Ipv4Addr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            set_last_error(&format!("invalid tunnel_addr '{}': {}", addr_str, e));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.packet_router = Some(crate::packet_router::PacketRouter::new(addr));
+
+    // Set up the router action channel and processing task
+    // (requires an active session with transport access)
+    if let Some(ref mut session) = guard.active_session {
+        let (action_tx, mut action_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::packet_router::RouterAction>();
+        session.router_action_tx = Some(action_tx);
+
+        let transport = session.transport.clone();
+        let session_id = session.session_id;
+        let peer_addr = session.peer_addr;
+        let stop = session.stop_flag.clone();
+
+        // Spawn async task that reads router actions and sends ZTLP mux frames
+        guard.runtime.spawn(async move {
+            use crate::packet_router::RouterAction;
+            const FRAME_OPEN: u8 = 0x06;
+            const FRAME_DATA: u8 = 0x00;
+            const FRAME_CLOSE: u8 = 0x05;
+
+            while let Some(action) = action_rx.recv().await {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                match action {
+                    RouterAction::OpenStream {
+                        stream_id,
+                        service_name,
+                    } => {
+                        // FRAME_OPEN with service name:
+                        // [0x06 | stream_id(4 BE) | service_name_len(1) | service_name]
+                        let name_bytes = service_name.as_bytes();
+                        let mut frame =
+                            Vec::with_capacity(5 + 1 + name_bytes.len());
+                        frame.push(FRAME_OPEN);
+                        frame.extend_from_slice(&stream_id.to_be_bytes());
+                        frame.push(name_bytes.len() as u8);
+                        frame.extend_from_slice(name_bytes);
+                        if let Err(e) = transport
+                            .send_data(session_id, &frame, peer_addr)
+                            .await
+                        {
+                            tracing::warn!(
+                                "router: failed to send OPEN for stream {}: {}",
+                                stream_id,
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "router: sent OPEN for stream {} (service={})",
+                                stream_id,
+                                service_name
+                            );
+                        }
+                    }
+                    RouterAction::SendData { stream_id, data } => {
+                        // Chunk data into MAX_MUX_PAYLOAD-sized frames
+                        const MAX_MUX_PAYLOAD: usize = 1195;
+                        for chunk in data.chunks(MAX_MUX_PAYLOAD) {
+                            let mut frame = Vec::with_capacity(5 + chunk.len());
+                            frame.push(FRAME_DATA);
+                            frame.extend_from_slice(&stream_id.to_be_bytes());
+                            frame.extend_from_slice(chunk);
+                            if let Err(e) = transport
+                                .send_data(session_id, &frame, peer_addr)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "router: failed to send DATA for stream {}: {}",
+                                    stream_id,
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    RouterAction::CloseStream { stream_id } => {
+                        let mut frame = Vec::with_capacity(5);
+                        frame.push(FRAME_CLOSE);
+                        frame.extend_from_slice(&stream_id.to_be_bytes());
+                        let _ = transport
+                            .send_data(session_id, &frame, peer_addr)
+                            .await;
+                        tracing::info!("router: sent CLOSE for stream {}", stream_id);
+                    }
+                }
+            }
+            tracing::info!("router: action processing task exiting");
+        });
+
+        tracing::info!("router: initialized with tunnel_addr={}, action task spawned", addr);
+    } else {
+        tracing::warn!("router: initialized but no active session — actions won't be sent until connect");
+    }
+
+    ZtlpResult::Ok as i32
+}
+
+/// Register a VIP service with the packet router.
+///
+/// Maps a VIP address (e.g., "10.122.0.1") to a ZTLP service name
+/// (e.g., "vault"). Traffic destined for the VIP will be routed through
+/// a ZTLP mux stream to the named service on the gateway.
+///
+/// Returns 0 on success, or a negative error code.
+#[no_mangle]
+pub extern "C" fn ztlp_router_add_service(
+    client: *mut ZtlpClient,
+    vip: *const c_char,
+    service_name: *const c_char,
+) -> i32 {
+    if client.is_null() || vip.is_null() || service_name.is_null() {
+        set_last_error("client, vip, or service_name is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let vip_str = match unsafe { CStr::from_ptr(vip) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in vip: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+    let name_str = match unsafe { CStr::from_ptr(service_name) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in service_name: {e}"));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+    if vip_str.len() > MAX_FFI_ADDRESS_LEN {
+        set_last_error("vip address too long");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let addr: std::net::Ipv4Addr = match vip_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            set_last_error(&format!("invalid vip '{}': {}", vip_str, e));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    match guard.packet_router.as_mut() {
+        Some(router) => {
+            router.add_service(addr, name_str.to_string());
+            ZtlpResult::Ok as i32
+        }
+        None => {
+            set_last_error("packet router not initialized (call ztlp_router_new first)");
+            ZtlpResult::NotConnected as i32
+        }
+    }
+}
+
+/// Write a raw IPv4 packet into the packet router (from utun → ZTLP).
+///
+/// Called by Swift when `NEPacketTunnelProvider.readPackets()` delivers a
+/// packet from the utun interface. The router parses the IP/TCP headers,
+/// manages TCP state, and queues ZTLP actions.
+///
+/// **Note:** In the current implementation, ZTLP mux actions (OpenStream,
+/// SendData, CloseStream) are processed internally. The caller should call
+/// `ztlp_router_read_packet()` after this to retrieve outbound response
+/// packets (SYN-ACK, ACK, data responses).
+///
+/// Returns 0 on success, or a negative error code.
+#[no_mangle]
+pub extern "C" fn ztlp_router_write_packet(
+    client: *mut ZtlpClient,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    if client.is_null() || data.is_null() {
+        set_last_error("client or data is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let packet = unsafe { std::slice::from_raw_parts(data, len) };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    match guard.packet_router.as_mut() {
+        Some(router) => {
+            let actions = router.process_inbound(packet);
+            // Forward router actions to the async transport via channel
+            if !actions.is_empty() {
+                if let Some(ref session) = guard.active_session {
+                    if let Some(ref tx) = session.router_action_tx {
+                        for action in actions {
+                            let _ = tx.send(action);
+                        }
+                    } else {
+                        tracing::warn!("router: actions generated but no router_action_tx channel");
+                    }
+                } else {
+                    tracing::warn!("router: actions generated but no active session");
+                }
+            }
+            ZtlpResult::Ok as i32
+        }
+        None => {
+            set_last_error("packet router not initialized");
+            ZtlpResult::NotConnected as i32
+        }
+    }
+}
+
+/// Read the next outbound IPv4 packet from the router (ZTLP → utun).
+///
+/// Called by Swift to get response packets to inject back into the utun
+/// interface via `writePackets()`. The packet router generates these in
+/// response to:
+/// - TCP handshakes (SYN-ACK)
+/// - Data acknowledgments (ACK)
+/// - Gateway response data (TCP data packets)
+/// - Connection teardown (FIN, RST)
+///
+/// Returns:
+/// - Positive value: number of bytes written to `buf` (one complete IPv4 packet)
+/// - 0: no packets available
+/// - Negative: error
+#[no_mangle]
+pub extern "C" fn ztlp_router_read_packet(
+    client: *mut ZtlpClient,
+    buf: *mut u8,
+    buf_len: usize,
+) -> i32 {
+    if client.is_null() || buf.is_null() {
+        set_last_error("client or buf is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    match guard.packet_router.as_mut() {
+        Some(router) => {
+            // Pop one packet at a time (caller loops until 0 is returned)
+            if let Some(pkt) = router.pop_outbound() {
+                if pkt.len() > buf_len {
+                    set_last_error(&format!(
+                        "packet too large for buffer ({} > {})",
+                        pkt.len(),
+                        buf_len
+                    ));
+                    return -1;
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(pkt.as_ptr(), buf, pkt.len());
+                }
+                pkt.len() as i32
+            } else {
+                0
+            }
+        }
+        None => {
+            set_last_error("packet router not initialized");
+            -1
+        }
+    }
+}
+
+/// Stop and destroy the packet router.
+///
+/// Cleans up all TCP flows and releases resources. Call this when the
+/// VPN tunnel is being torn down.
+///
+/// Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn ztlp_router_stop(client: *mut ZtlpClient) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.packet_router = None;
+    ZtlpResult::Ok as i32
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -3280,6 +3657,7 @@ mod tests {
             vip_proxy: None,
             dns_server: None,
             vip_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            packet_router: None,
         }
     }
 }

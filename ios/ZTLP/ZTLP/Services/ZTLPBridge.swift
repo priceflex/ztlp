@@ -429,6 +429,66 @@ final class ZTLPBridge {
         ztlp_vip_stop(c)
     }
 
+    // MARK: - Packet Router (10.122.0.0/16 VIP Routing)
+
+    /// Initialize the packet router with the tunnel interface address.
+    /// Call after `connect()` succeeds. The router handles raw IPv4 packets
+    /// from the utun interface and maps destination IPs to ZTLP services.
+    func routerNew(tunnelAddr: String) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = tunnelAddr.withCString { cAddr in
+            ztlp_router_new(c, cAddr)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Register a VIP service with the packet router.
+    /// Maps a VIP address (e.g., "10.122.0.1") to a ZTLP service name.
+    func routerAddService(vip: String, serviceName: String) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = vip.withCString { cVip in
+            serviceName.withCString { cName in
+                ztlp_router_add_service(c, cVip, cName)
+            }
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Write a raw IPv4 packet into the packet router (from utun → ZTLP).
+    /// Call this from the readPackets loop.
+    func routerWritePacket(_ data: Data) throws {
+        guard let c = clientLock.sync(execute: { self.client }) else {
+            throw ZTLPError.notConnected
+        }
+        let result = data.withUnsafeBytes { ptr in
+            ztlp_router_write_packet(c, ptr.baseAddress?.assumingMemoryBound(to: UInt8.self), data.count)
+        }
+        if let error = ZTLPError.from(code: result) { throw error }
+    }
+
+    /// Read the next outbound IPv4 packet from the router (ZTLP → utun).
+    /// Returns nil when no packets are available.
+    func routerReadPacket() -> Data? {
+        guard let c = clientLock.sync(execute: { self.client }) else { return nil }
+        // Max IPv4 packet size with 1400 MTU
+        var buf = [UInt8](repeating: 0, count: 1500)
+        let result = ztlp_router_read_packet(c, &buf, buf.count)
+        if result > 0 {
+            return Data(buf[..<Int(result)])
+        }
+        return nil
+    }
+
+    /// Stop the packet router.
+    func routerStop() {
+        guard let c = clientLock.sync(execute: { self.client }) else { return }
+        ztlp_router_stop(c)
+    }
+
     /// Start local DNS resolver for *.ztlp domains.
     func dnsStart(listenAddr: String = "127.0.55.53:5354") throws {
         guard let c = clientLock.sync(execute: { self.client }) else {

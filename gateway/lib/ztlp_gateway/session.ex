@@ -144,8 +144,8 @@ defmodule ZtlpGateway.Session do
     static_priv = Map.fetch!(opts, :static_priv)
     service = Map.get(opts, :service, "default")
 
-    # Register in the session registry
-    :ok = SessionRegistry.register(session_id, self())
+    # Register in the session registry (with client_addr for dedup lookup)
+    :ok = SessionRegistry.register(session_id, self(), client_addr)
     Stats.session_opened()
 
     # Initialize the Noise handshake as responder
@@ -660,6 +660,17 @@ defmodule ZtlpGateway.Session do
       state = send_ack(state.recv_seq, state)
       {:noreply, state}
     end
+  end
+
+  # Keepalive: exactly 1-byte 0x01 frame from iOS VPN extension.
+  # This matches BEFORE the ACK handler because @frame_ack == 0x01 and a
+  # proper ACK frame is 9+ bytes (1 type + 8 data_seq). A single-byte 0x01
+  # is a keepalive — just reset the idle timer, never forward to the backend.
+  # This prevents the keepalive → backend reconnect → immediate close cycle
+  # that occurs when vaultwarden closes idle TCP connections.
+  defp handle_tunnel_frame(<<0x01>>, state) do
+    Logger.debug("[Session] Keepalive received, resetting idle timer")
+    {:noreply, reset_timeout(state)}
   end
 
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, _rest::binary>>, state) do

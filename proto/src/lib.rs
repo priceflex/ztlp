@@ -65,6 +65,7 @@ pub mod relay;
 pub mod relay_pool;
 pub mod roaming;
 pub mod security;
+pub mod send_controller;
 pub mod session;
 pub mod session_manager;
 pub mod stats;

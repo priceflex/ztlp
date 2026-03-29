@@ -132,6 +132,9 @@ struct ActiveSession {
     stop_flag: Arc<AtomicBool>,
     /// Tunnel data sequence counter (for FRAME_DATA framing).
     data_seq: Arc<AtomicU64>,
+    /// Channel to feed gateway upload ACKs to the SendController.
+    /// Set when VIP proxy starts with congestion-controlled uploads.
+    upload_ack_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
     // Cached C strings for accessors
     session_id_str: CString,
     peer_node_id_str: CString,
@@ -839,6 +842,7 @@ async fn do_connect(
         bytes_received,
         stop_flag,
         data_seq: Arc::new(AtomicU64::new(0)),
+        upload_ack_tx: None,
         session_id_str: CString::new(hex::encode(session_id.as_bytes())).unwrap_or_default(),
         peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes())).unwrap_or_default(),
         peer_addr_str: CString::new(send_addr.to_string()).unwrap_or_default(),
@@ -1163,6 +1167,40 @@ async fn recv_loop(
                 }
 
                 bytes_received.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
+
+                // ── Upload ACK: gateway acknowledging our upload packets ──
+                //
+                // When the gateway receives our upload data, it sends back:
+                //   [FRAME_ACK(0x01) | acked_packet_seq(8 BE)]
+                // This is a cumulative ACK — all packets ≤ acked_packet_seq
+                // are confirmed received. We feed this to the SendController
+                // so it can open the congestion window and stop retransmitting.
+                //
+                // This check MUST come before the FRAME_DATA check because
+                // FRAME_ACK (0x01) with 9 bytes should not fall through to
+                // process_recv_packet (which would treat 1-byte 0x01 as keepalive).
+                if plaintext.len() == 9 && plaintext[0] == FRAME_ACK {
+                    let acked_seq =
+                        u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
+                    log_write(
+                        &mut debug_log,
+                        &mut log_bytes_written,
+                        log_start,
+                        LogLevel::Debug,
+                        &format!("FRAME_ACK (upload) acked_seq={}", acked_seq),
+                        log_level,
+                        &log_path,
+                    );
+                    // Forward to SendController via the upload ACK channel
+                    if let Ok(guard) = inner.lock() {
+                        if let Some(ref session) = guard.active_session {
+                            if let Some(ref tx) = session.upload_ack_tx {
+                                let _ = tx.send(acked_seq);
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 // ── ACK logic: track received data_seqs and send cumulative ACKs ──
                 //
@@ -1933,7 +1971,14 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
     guard.vip_proxy = Some(proxy);
 
     match result {
-        Ok(()) => ZtlpResult::Ok as i32,
+        Ok(ack_tx) => {
+            // Store the ACK channel sender so the recv_loop can feed
+            // gateway upload ACKs to the SendController.
+            if let Some(ref mut session) = guard.active_session {
+                session.upload_ack_tx = Some(ack_tx);
+            }
+            ZtlpResult::Ok as i32
+        }
         Err(e) => {
             set_last_error(&format!("VIP proxy start failed: {e}"));
             ZtlpResult::ConnectionError as i32

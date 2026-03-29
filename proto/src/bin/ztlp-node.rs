@@ -319,7 +319,7 @@ async fn data_loop(
                             continue;
                         }
                         match node.send_data(session_id, text.as_bytes(), send_dest).await {
-                            Ok(()) => {
+                            Ok(_seq) => {
                                 info!("sent: \"{}\" ({} bytes)", text, text.len());
                             }
                             Err(e) => {

@@ -3971,7 +3971,7 @@ async fn interactive_data_loop(
                     Ok(Some(text)) => {
                         if text.is_empty() { continue; }
                         match node.send_data(session_id, text.as_bytes(), send_dest).await {
-                            Ok(()) => {
+                            Ok(_seq) => {
                                 eprintln!("{} \"{}\" ({} bytes)",
                                     c_dim("→ sent:"), text, text.len());
                             }

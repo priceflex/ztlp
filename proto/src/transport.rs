@@ -91,12 +91,17 @@ impl TransportNode {
     ///
     /// Builds a compact data header, computes the HeaderAuthTag,
     /// encrypts the payload, and sends.
+    /// Send an encrypted data packet and return the assigned packet sequence number.
+    ///
+    /// The returned `u64` is the transport-level sequence number assigned to this
+    /// packet by the session. Callers that need ACK tracking (e.g., `SendController`)
+    /// use this to correlate gateway ACK frames back to in-flight packets.
     pub async fn send_data(
         &self,
         session_id: SessionId,
         plaintext: &[u8],
         dest: SocketAddr,
-    ) -> Result<(), TransportError> {
+    ) -> Result<u64, TransportError> {
         let mut pipeline = self.pipeline.lock().await;
         let session = pipeline.get_session_mut(&session_id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
@@ -132,7 +137,7 @@ impl TransportNode {
 
         drop(pipeline);
         self.send_raw(&data, dest).await?;
-        Ok(())
+        Ok(seq)
     }
 
     /// Send multiple raw packets to a destination using batched I/O.
@@ -164,7 +169,7 @@ impl TransportNode {
         session_id: SessionId,
         plaintext: &[u8],
         relay_addr: SocketAddr,
-    ) -> Result<(), TransportError> {
+    ) -> Result<u64, TransportError> {
         // The relay is transparent — same packet format, different destination.
         self.send_data(session_id, plaintext, relay_addr).await
     }

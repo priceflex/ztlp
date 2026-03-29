@@ -36,6 +36,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::packet::SessionId;
+use crate::send_controller::SendController;
 use crate::transport::TransportNode;
 
 /// Swappable tunnel session state.
@@ -48,6 +49,9 @@ pub struct TunnelSession {
     pub peer_addr: SocketAddr,
     pub data_seq: Arc<AtomicU64>,
     pub bytes_sent: Arc<AtomicU64>,
+    /// Congestion-controlled sender for uploads. Shared across all connections
+    /// so the entire upload path shares one congestion window.
+    pub send_controller: Arc<tokio::sync::Mutex<SendController>>,
 }
 
 impl TunnelSession {
@@ -57,6 +61,7 @@ impl TunnelSession {
         peer_addr: SocketAddr,
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
+        send_controller: Arc<tokio::sync::Mutex<SendController>>,
     ) -> Self {
         Self {
             transport,
@@ -64,6 +69,7 @@ impl TunnelSession {
             peer_addr,
             data_seq,
             bytes_sent,
+            send_controller,
         }
     }
 }
@@ -98,16 +104,6 @@ const FRAME_DATA: u8 = 0x00;
 /// header(46) + encrypted(plaintext + 16) = 46 + 1200 + 16 = 1262 bytes
 /// Well under 1280 IPv6 minimum MTU and 1464 cellular MTU.
 const MAX_MUX_PAYLOAD: usize = 1195;
-
-/// Upload pacing: max packets to send before yielding.
-/// Prevents overwhelming the cellular/relay path with bursts.
-/// At 8 packets × 1195 bytes = ~9.6KB per burst — gentle enough for cellular.
-/// For 1MB upload: 878 packets / 8 = 110 bursts × 2ms = 220ms pacing overhead.
-const UPLOAD_BURST_SIZE: usize = 8;
-/// Microseconds to sleep between upload bursts.
-/// 2ms between 8-packet bursts = ~4.8 MB/s theoretical max.
-/// Tested: 32-packet/1ms bursts caused 18% packet loss on cellular.
-const UPLOAD_BURST_PAUSE_US: u64 = 2000;
 
 /// Frame type for closing a multiplexed stream.
 const FRAME_CLOSE: u8 = 0x05;
@@ -280,6 +276,10 @@ impl VipProxy {
     /// The tunnel session (transport, session_id, peer_addr) is stored in a
     /// shared `Arc<RwLock<>>` so it can be swapped on reconnect via
     /// `update_session()` without restarting the TCP listeners.
+    ///
+    /// Returns an `mpsc::UnboundedSender<u64>` — the caller must store this
+    /// in the FFI `ActiveSession::upload_ack_tx` so the recv_loop can feed
+    /// gateway ACKs to the `SendController`.
     pub async fn start(
         &mut self,
         transport: Arc<TransportNode>,
@@ -287,7 +287,23 @@ impl VipProxy {
         peer_addr: SocketAddr,
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
-    ) -> Result<(), String> {
+    ) -> Result<mpsc::UnboundedSender<u64>, String> {
+        // Create a SendController with an ACK channel for congestion control
+        let (ack_tx, ack_rx) = mpsc::unbounded_channel();
+        let send_controller = Arc::new(tokio::sync::Mutex::new(SendController::new(
+            transport.clone(),
+            session_id,
+            peer_addr,
+            ack_rx,
+        )));
+
+        // Spawn background task for periodic flush + retransmit
+        let sc_bg = send_controller.clone();
+        let stop_bg = self.stop_flag.clone();
+        tokio::spawn(async move {
+            send_controller_background_task(sc_bg, stop_bg).await;
+        });
+
         // Store the tunnel session
         {
             let mut sess = self.session.write().await;
@@ -297,6 +313,7 @@ impl VipProxy {
                 peer_addr,
                 data_seq.clone(),
                 bytes_sent.clone(),
+                send_controller,
             ));
         }
 
@@ -306,7 +323,7 @@ impl VipProxy {
             // Fresh dispatcher for new session
             self.dispatcher = Arc::new(StreamDispatcher::new());
             self.next_stream_id.store(1, Ordering::SeqCst);
-            return Ok(());
+            return Ok(ack_tx);
         }
 
         // First start — create listeners
@@ -373,7 +390,7 @@ impl VipProxy {
             }
         }
 
-        Ok(())
+        Ok(ack_tx)
     }
 
     /// Hot-swap the tunnel session without restarting listeners.
@@ -387,13 +404,30 @@ impl VipProxy {
         peer_addr: SocketAddr,
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
-    ) {
+    ) -> mpsc::UnboundedSender<u64> {
+        // Create fresh SendController for the new session
+        let (ack_tx, ack_rx) = mpsc::unbounded_channel();
+        let send_controller = Arc::new(tokio::sync::Mutex::new(SendController::new(
+            transport.clone(),
+            session_id,
+            peer_addr,
+            ack_rx,
+        )));
+
+        // Spawn background task for the new controller
+        let sc_bg = send_controller.clone();
+        let stop_bg = self.stop_flag.clone();
+        tokio::spawn(async move {
+            send_controller_background_task(sc_bg, stop_bg).await;
+        });
+
         let mut sess = self.session.write().await;
         *sess = Some(TunnelSession::new(
-            transport, session_id, peer_addr, data_seq, bytes_sent,
+            transport, session_id, peer_addr, data_seq, bytes_sent, send_controller,
         ));
         // Fresh dispatcher for new session
         tracing::info!("VIP proxy: tunnel session updated (hot-swap)");
+        ack_tx
     }
 
     /// Get the shared session reference (for FFI to check if session exists).
@@ -482,6 +516,40 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
 
 // ─── Listener + Connection Handling ─────────────────────────────────────────
 
+/// Background task that periodically processes ACKs, flushes pending data,
+/// and retransmits timed-out packets for the SendController.
+///
+/// Runs every 10ms (or RTO/4, whichever is smaller) to keep the upload path
+/// responsive. Exits when the stop flag is set.
+async fn send_controller_background_task(
+    controller: Arc<tokio::sync::Mutex<SendController>>,
+    stop: Arc<AtomicBool>,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Short sleep — upload responsiveness matters
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut sc = controller.lock().await;
+
+        // Process any pending ACKs from the recv_loop
+        sc.process_acks();
+
+        // Flush pending packets (up to cwnd)
+        if let Err(e) = sc.flush().await {
+            tracing::warn!("send_controller: flush error: {}", e);
+        }
+
+        // Check for retransmits
+        if let Err(e) = sc.check_retransmit().await {
+            tracing::warn!("send_controller: retransmit error: {}", e);
+        }
+    }
+}
+
 /// TCP listener task for a single VIP:port.
 ///
 /// Accepts concurrent TCP connections. Each gets a unique stream_id and
@@ -520,7 +588,7 @@ async fn vip_listener_task(
         };
 
         // Read the current tunnel session — reject if no active session
-        let (transport, session_id, peer_addr, data_seq, bytes_sent) = {
+        let (transport, session_id, peer_addr, data_seq, bytes_sent, send_controller) = {
             let sess_guard = session.read().await;
             match sess_guard.as_ref() {
                 Some(s) => (
@@ -529,6 +597,7 @@ async fn vip_listener_task(
                     s.peer_addr,
                     s.data_seq.clone(),
                     s.bytes_sent.clone(),
+                    s.send_controller.clone(),
                 ),
                 None => {
                     tracing::warn!(
@@ -593,6 +662,7 @@ async fn vip_listener_task(
                             &data_seq,
                             &bytes_sent,
                             &dispatcher,
+                            &send_controller,
                         )
                         .await;
                     }
@@ -621,6 +691,7 @@ async fn vip_listener_task(
                     &data_seq,
                     &bytes_sent,
                     &dispatcher,
+                    &send_controller,
                 )
                 .await;
             }
@@ -648,6 +719,7 @@ async fn handle_mux_connection<R, W>(
     data_seq: &Arc<AtomicU64>,
     bytes_sent: &Arc<AtomicU64>,
     dispatcher: &Arc<StreamDispatcher>,
+    send_controller: &Arc<tokio::sync::Mutex<SendController>>,
 ) where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
@@ -748,10 +820,16 @@ async fn handle_mux_connection<R, W>(
     });
 
     // Main loop: TCP → tunnel (read from TCP, send through tunnel with stream_id)
+    //
+    // Uses the shared SendController for congestion-controlled sending.
+    // Frames are enqueued and then flushed up to the current cwnd. The
+    // background task handles periodic flushing and retransmits, but we
+    // also flush eagerly here to minimize latency for small transfers.
     let transport = transport.clone();
     let data_seq = data_seq.clone();
     let bytes_sent = bytes_sent.clone();
     let stop = stop.clone();
+    let send_controller = send_controller.clone();
     let mut buf = vec![0u8; TCP_READ_BUF_SIZE];
 
     loop {
@@ -769,8 +847,6 @@ async fn handle_mux_connection<R, W>(
                 // Max plaintext per ZTLP packet = 1200 bytes, so max payload = 1195.
                 let data = &buf[..n];
                 let mut offset = 0;
-                let mut send_ok = true;
-                let mut burst_count = 0usize;
                 while offset < n {
                     let chunk_end = std::cmp::min(offset + MAX_MUX_PAYLOAD, n);
                     let chunk = &data[offset..chunk_end];
@@ -779,26 +855,26 @@ async fn handle_mux_connection<R, W>(
                     framed.extend_from_slice(&stream_id.to_be_bytes());
                     framed.extend_from_slice(chunk);
 
-                    if let Err(e) = transport.send_data(session_id, &framed, peer_addr).await {
-                        tracing::warn!("VIP tunnel send error stream {}: {}", stream_id, e);
-                        send_ok = false;
-                        break;
+                    // Enqueue via SendController (congestion-controlled)
+                    {
+                        let mut sc = send_controller.lock().await;
+                        sc.enqueue(framed);
                     }
                     data_seq.fetch_add(1, Ordering::Relaxed);
                     offset = chunk_end;
+                }
 
-                    // Pace uploads to avoid overwhelming the network path.
-                    // Without pacing, 878 packets (1MB) would burst in <10ms,
-                    // causing massive packet loss on cellular/relay paths.
-                    burst_count += 1;
-                    if burst_count >= UPLOAD_BURST_SIZE {
-                        tokio::time::sleep(std::time::Duration::from_micros(UPLOAD_BURST_PAUSE_US)).await;
-                        burst_count = 0;
+                // Eagerly flush what the cwnd allows — the background task
+                // handles the rest (pending queue, retransmits, ACK processing).
+                {
+                    let mut sc = send_controller.lock().await;
+                    sc.process_acks();
+                    if let Err(e) = sc.flush().await {
+                        tracing::warn!("VIP tunnel send error stream {}: {}", stream_id, e);
+                        break;
                     }
                 }
-                if !send_ok {
-                    break;
-                }
+
                 bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
             }
             Ok(Err(e)) => {

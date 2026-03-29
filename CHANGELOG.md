@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.20.0 — 2026-03-29
+
+### UDP Transport — Phase 3
+- **Selective ACK (SACK)**: Up to 3 SACK block ranges in ACK frames. Gateway builds SACK from RecvWindow, skips SACK'd sequences on retransmit. Client SackScoreboard wired into AdvancedCongestionController. Backward compatible (sack_count=0 = legacy). 27 gateway + 12 Rust tests.
+- **Path MTU Discovery (PLPMTUD, RFC 8899)**: Probe state machine with binary search ladder (1200 → 1500). FRAME_PMTU_PROBE (0x0C) and FRAME_PMTU_PROBE_ACK (0x0D). TransportNode.max_payload_size() returns discovered MTU. 19 tests.
+
+### Operational Excellence — Phase 7
+- **Admin Dashboard**: Single-page HTML on localhost:9105 with dark theme, auto-refresh (5s). Session table, pool stats, audit events, system metrics. JSON API at /api/stats. Zero external deps. 8 tests.
+- **Config Hot-Reload**: ConfigWatcher GenServer polls YAML config every 30s + SIGHUP support. Diff-based change detection with audit events. Reuses existing YamlParser/YamlConfig validation pipeline. 18 tests.
+
+### Bug Fix
+- FRAME_STREAM_RESET constant 0x0A → 0x0B (resolved collision with FRAME_REKEY)
+
+### Test Counts
+- 1,083 Rust tests, 0 failures
+- 715 gateway tests, 0 failures (1 pre-existing TLS timing flake)
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **3,089 total**
+
 ## v0.19.0 — 2026-03-29
 
 ### Gateway — Stream Performance & Reliability

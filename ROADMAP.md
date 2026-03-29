@@ -1,6 +1,6 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.19.0
+> Last updated: 2026-03-29 | Current release: v0.20.0
 
 ## Current State
 
@@ -130,21 +130,21 @@ VIP proxy graceful stream recovery, HTTP request boundary detection.
 
 ---
 
-## Phase 3 — UDP Transport Improvements (High Impact, High Effort)
+## Phase 3 — UDP Transport Improvements (Partially Done)
 
 **Goal:** Reliable 50+ MB/s throughput, robust packet loss recovery.
 
-### 3.1 Selective ACK (SACK)
-SACK blocks in ACK frames for selective retransmission. ~400 lines.
+### 3.1 ✅ Selective ACK (SACK)
+SACK blocks in ACK frames — up to 3 ranges. Gateway builds from RecvWindow, skips SACK'd on retransmit. Backward compatible. 39 tests.
 
-### 3.2 BBR-Style Congestion Control
+### 3.2 BBR-Style Congestion Control — NOT STARTED
 Replace AIMD with BBR or COPA for better throughput through packet loss.
 
-### 3.3 FEC (Forward Error Correction)
+### 3.3 FEC (Forward Error Correction) — NOT STARTED
 Reed-Solomon or XOR-based FEC for lossy links. Configurable redundancy.
 
-### 3.4 Path MTU Discovery
-PLPMTUD (RFC 8899) to discover and use optimal packet sizes.
+### 3.4 ✅ Path MTU Discovery (PLPMTUD, RFC 8899)
+Probe state machine with binary search ladder (1200 → 1500). FRAME_PMTU_PROBE/ACK. 19 tests.
 
 ---
 
@@ -189,12 +189,14 @@ Gateway static key pinning with multi-key rotation support, auto-pin on enrollme
 
 ---
 
-## Phase 7 — Operational Excellence
+## Phase 7 — Operational Excellence (Partially Done)
 
-### 7.1 Prometheus/Grafana Metrics (Client)
-### 7.2 Auto-Update (macOS)
-### 7.3 Admin Dashboard (Phoenix LiveView)
-### 7.4 Config Hot-Reload
+### 7.1 Prometheus/Grafana Metrics (Client) — NOT STARTED
+### 7.2 Auto-Update (macOS) — NOT STARTED
+### 7.3 ✅ Admin Dashboard
+Single-page HTML on localhost:9105 with dark theme, auto-refresh, JSON API. Zero deps. 8 tests.
+### 7.4 ✅ Config Hot-Reload
+ConfigWatcher polls YAML every 30s + SIGHUP. Diff-based with audit events. 18 tests.
 
 ---
 
@@ -207,7 +209,7 @@ Gateway static key pinning with multi-key rotation support, auto-pin on enrollme
 | **2: Connection Pooling** | Medium | Low | 🟡 Mostly Done (1/3, 2 in progress) |
 | **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done (3/7) |
 | **6: Security Hardening** | Critical | Medium | 🟡 Mostly Done (4/7, rotation in progress) |
-| **3: UDP Transport** | High | High | 🔵 Not Started |
-| **7: Ops Excellence** | Medium | Low-Medium | 🔵 Not Started |
+| **3: UDP Transport** | High | High | 🟡 Partially Done (2/4) |
+| **7: Ops Excellence** | Medium | Low-Medium | 🟡 Partially Done (2/4) |
 | **4: Multi-Service** | Medium | High | 🔵 Later |
 | **5: Mobile (Android)** | High | High | 🔵 Later |

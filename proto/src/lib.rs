@@ -61,6 +61,7 @@ pub mod packet_router;
 pub mod pipeline;
 pub mod pmtu;
 pub mod policy;
+pub mod pqkem;
 pub mod punch;
 pub mod reject;
 pub mod rekey;

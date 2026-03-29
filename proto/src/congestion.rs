@@ -19,11 +19,11 @@ use tracing::debug;
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Initial congestion window (in packets). RFC 6928 IW10.
-pub const INITIAL_CWND: f64 = 10.0;
+pub const INITIAL_CWND: f64 = 64.0;
 
 /// Initial slow-start threshold. Start unlimited — let actual loss set the
 /// threshold. This avoids artificially capping throughput on high-bandwidth links.
-pub const INITIAL_SSTHRESH: f64 = 65535.0;
+pub const INITIAL_SSTHRESH: f64 = 128.0;
 
 /// Minimum retransmission timeout in milliseconds.
 pub const MIN_RTO_MS: f64 = 200.0;

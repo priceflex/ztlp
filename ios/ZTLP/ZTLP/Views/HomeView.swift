@@ -11,6 +11,8 @@ import SwiftUI
 
 struct HomeView: View {
     @ObservedObject var viewModel: TunnelViewModel
+    @ObservedObject var configuration: ZTLPConfiguration
+    @StateObject private var certService = CertificateService.shared
     @EnvironmentObject var networkMonitor: NetworkMonitor
 
     /// Animation state for the pulsing status ring.
@@ -49,6 +51,12 @@ struct HomeView: View {
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(viewModel.status.color)
                         .animation(.easeInOut, value: viewModel.status)
+
+                    // CA Trust card (shown after enrollment, before cert is installed)
+                    if configuration.isEnrolled && !certService.isInstalled {
+                        caTrustCard
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
 
                     // Connection duration
                     if viewModel.status == .connected {
@@ -146,6 +154,101 @@ struct HomeView: View {
         .accessibilityLabel(viewModel.status.canConnect ? "Connect" : "Disconnect")
         .accessibilityHint(viewModel.status.label)
         .onAppear { isPulsing = true }
+    }
+
+    /// CA trust card — prompts user to install the ZTLP CA certificate.
+    private var caTrustCard: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.ztlpOrange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Install ZTLP Certificate")
+                        .font(.callout.weight(.semibold))
+                    Text("Required for HTTPS access to ZTLP services")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if certService.caRootDER != nil {
+                // Cert is fetched, ready to install
+                Button {
+                    certService.installCACert()
+                } label: {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down.fill")
+                        Text("Install Certificate")
+                            .font(.callout.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.ztlpBlue, in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(.white)
+                }
+
+                // After Safari opens, show confirm button
+                if UserDefaults.standard.bool(forKey: "ztlp_ca_install_attempted") {
+                    Button {
+                        certService.markAsInstalled()
+                    } label: {
+                        HStack {
+                            Image(systemName: "checkmark.circle")
+                            Text("Done — I've installed it")
+                                .font(.caption)
+                        }
+                        .foregroundStyle(Color.ztlpGreen)
+                    }
+                    .padding(.top, 4)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("After downloading in Safari:")
+                            .font(.caption2.weight(.medium))
+                        Text("Settings → General → VPN & Device Mgmt → Install")
+                            .font(.caption2)
+                        Text("Settings → General → About → Certificate Trust → Enable")
+                            .font(.caption2)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                // Need to fetch first
+                Button {
+                    Task {
+                        let ns = configuration.nsServer.isEmpty ? "34.217.62.46:23096" : configuration.nsServer
+                        await certService.fetchCARootCert(nsServer: ns)
+                    }
+                } label: {
+                    HStack {
+                        if certService.isFetching {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "arrow.down.circle.fill")
+                        }
+                        Text(certService.isFetching ? "Fetching..." : "Download Certificate")
+                            .font(.callout.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.ztlpOrange, in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(.white)
+                }
+                .disabled(certService.isFetching)
+            }
+
+            if let error = certService.errorMessage {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     /// VIP proxy access card — shows URL and tap-to-open button.
@@ -296,6 +399,7 @@ struct HomeView: View {
 }
 
 #Preview("Disconnected") {
-    HomeView(viewModel: TunnelViewModel(configuration: ZTLPConfiguration()))
+    let config = ZTLPConfiguration()
+    HomeView(viewModel: TunnelViewModel(configuration: config), configuration: config)
         .environmentObject(NetworkMonitor.shared)
 }

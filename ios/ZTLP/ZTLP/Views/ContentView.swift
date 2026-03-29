@@ -30,7 +30,7 @@ struct ContentView: View {
         Group {
             if let tunnelVM, let servicesVM, let settingsVM, let enrollmentVM {
                 TabView(selection: $selectedTab) {
-                    HomeView(viewModel: tunnelVM)
+                    HomeView(viewModel: tunnelVM, configuration: configuration)
                         .tabItem {
                             Label("Home", systemImage: "shield.checkered")
                         }

@@ -168,14 +168,14 @@ const FRAME_CORRUPTION_NACK: u8 = 0x09;
 /// reuse the same stream for a new HTTP request. The gateway can then reuse
 /// the same backend TCP connection, avoiding a full TCP teardown/setup cycle.
 ///
-/// Wire format: `[0x0A | stream_id(4 BE)]`
+/// Wire format: `[0x0B | stream_id(4 BE)]`
 ///
 /// This is a mux-layer frame (like FRAME_OPEN/FRAME_CLOSE in `vip.rs`),
 /// not a tunnel reliability frame. It travels inside the encrypted tunnel
 /// payload alongside mux DATA/OPEN/CLOSE frames.
 ///
 /// Gateway-side handling is added separately.
-pub const FRAME_STREAM_RESET: u8 = 0x0A;
+pub const FRAME_STREAM_RESET: u8 = 0x0B;
 
 /// Outcome of a bridge run, distinguishing normal close from a stream reset.
 #[derive(Debug, Clone, PartialEq, Eq)]

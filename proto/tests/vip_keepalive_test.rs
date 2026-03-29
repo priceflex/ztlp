@@ -234,7 +234,7 @@ fn test_stream_state_equality() {
 
 #[test]
 fn test_frame_stream_reset_value() {
-    assert_eq!(FRAME_STREAM_RESET, 0x0A);
+    assert_eq!(FRAME_STREAM_RESET, 0x0B);
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn test_frame_stream_reset_wire_format() {
     frame.extend_from_slice(&stream_id.to_be_bytes());
 
     assert_eq!(frame.len(), 5);
-    assert_eq!(frame[0], 0x0A);
+    assert_eq!(frame[0], 0x0B);
     assert_eq!(
         u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]),
         42

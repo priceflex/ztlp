@@ -285,7 +285,7 @@ final class CertificateService: ObservableObject {
 private class CertHTTPServer {
     
     private let profileData: Data
-    private var listener: CFSocketRef?
+    private var listener: CFSocket?
     private var serverSocket: Int32 = -1
     private var port: UInt16 = 0
     private var isRunning = false

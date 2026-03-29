@@ -51,6 +51,7 @@
 		BB11CC22DD33EE44FF550006 /* BenchmarkResultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */; };
 		DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */; };
 		DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */; };
+		DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660003 /* CertificateService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -133,6 +134,7 @@
 		AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkResultTests.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBenchmark.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPBenchmark.swift; sourceTree = "<group>"; };
+		CC22DD33EE44FF55AA660003 /* CertificateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -239,6 +241,7 @@
 				AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */,
 				CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */,
 				CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */,
+				CC22DD33EE44FF55AA660003 /* CertificateService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -448,6 +451,7 @@
 				BB11CC22DD33EE44FF550001 /* BenchmarkRunner.swift in Sources */,
 				DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */,
 				DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */,
+				DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */,
 				BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -43,6 +43,7 @@ pub mod congestion;
 pub mod dns;
 pub mod enrollment;
 pub mod error;
+pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod gro_batch;
@@ -50,6 +51,7 @@ pub mod gro_batch;
 pub mod gso;
 pub mod handshake;
 pub mod identity;
+pub mod metrics;
 pub mod mobile;
 pub mod nat;
 #[allow(unsafe_code)]

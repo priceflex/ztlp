@@ -46,6 +46,7 @@ defmodule ZtlpGateway.Application do
         ZtlpGateway.HeaderSigner.NonceCache,
         ZtlpGateway.PolicyEngine,
         ZtlpGateway.NsClient,
+        ZtlpGateway.BackendPool,
         {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
         ZtlpGateway.Listener,
         ZtlpGateway.RelayRegistrar,

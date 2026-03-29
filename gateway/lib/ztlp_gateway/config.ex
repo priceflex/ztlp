@@ -13,6 +13,8 @@ defmodule ZtlpGateway.Config do
   - `:policies` — list of access policy maps
   - `:session_timeout_ms` — idle timeout per session (default: 300,000ms)
   - `:max_sessions` — maximum concurrent sessions (default: 10,000)
+  - `:pool_size` — max idle connections per backend (default: 8)
+  - `:pool_idle_timeout` — idle pool connection timeout in ms (default: 60,000)
   - `:ns_server_host` — ZTLP-NS server address tuple (default: `{127, 0, 0, 1}`)
   - `:ns_server_port` — ZTLP-NS server UDP port (default: 23096)
   - `:ns_query_timeout_ms` — timeout for NS queries in ms (default: 2000)
@@ -27,6 +29,8 @@ defmodule ZtlpGateway.Config do
     Example: `*:metrics,admin.zone:api`
   - `ZTLP_GATEWAY_SESSION_TIMEOUT_MS` — idle timeout per session
   - `ZTLP_GATEWAY_MAX_SESSIONS` — max concurrent sessions
+  - `ZTLP_GATEWAY_POOL_SIZE` — max idle connections per backend pool (default 8)
+  - `ZTLP_GATEWAY_POOL_IDLE_TIMEOUT` — idle connection timeout in ms (default 60000)
   """
 
   @doc """
@@ -193,6 +197,26 @@ defmodule ZtlpGateway.Config do
 
   def get(:header_signing_timestamp_window) do
     Application.get_env(:ztlp_gateway, :header_signing_timestamp_window, 60)
+  end
+
+  # ── Backend Connection Pool ────────────────────────────────────
+
+  @doc "Max idle connections per backend in the pool. Default: 8."
+  @spec pool_size() :: non_neg_integer()
+  def pool_size do
+    case System.get_env("ZTLP_GATEWAY_POOL_SIZE") do
+      nil -> Application.get_env(:ztlp_gateway, :pool_size, 8)
+      s -> String.to_integer(s)
+    end
+  end
+
+  @doc "Idle connection timeout in ms before pool sweep closes it. Default: 60000."
+  @spec pool_idle_timeout() :: non_neg_integer()
+  def pool_idle_timeout do
+    case System.get_env("ZTLP_GATEWAY_POOL_IDLE_TIMEOUT") do
+      nil -> Application.get_env(:ztlp_gateway, :pool_idle_timeout, 60_000)
+      s -> String.to_integer(s)
+    end
   end
 
   # ── Relay Registration ─────────────────────────────────────────

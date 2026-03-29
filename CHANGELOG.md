@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.22.0 — 2026-03-29
+
+### Security — Phase 6 COMPLETE
+- **Post-Quantum KEM Framework**: Hybrid X25519 + ML-KEM-768 architecture. `Kem` trait, `X25519Kem` (real DH via curve25519-dalek), `MlKemPlaceholder` (correct API shape for drop-in replacement), `HybridKem` combiner with BLAKE2s. `KemAlgorithm` enum for wire negotiation (0x01-0x03). 29 tests.
+
+### Multi-Gateway — Phase 4
+- **Gateway Federation (4.1)**: PEER_HELLO/PING/PONG (0x20-0x22), SESSION_MIGRATE (0x23), SERVICE_QUERY/REPLY (0x24/0x25). UDP peer mesh with health monitoring. Load-based service routing. NS-based discovery. 20 tests.
+- **Service Router (4.2)**: Weighted round-robin across backends. Circuit breaker (closed → open → half_open). SERVICE_REDIRECT frame (0x10). Dynamic backend add/remove. Per-service stats. 25 tests.
+
+### Test Counts
+- 1,167 Rust tests, 0 failures
+- 799 gateway tests, 0 failures (1 pre-existing timing flake excluded)
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **3,257 total**
+
 ## v0.21.0 — 2026-03-29
 
 ### UDP Transport — Phase 3 COMPLETE

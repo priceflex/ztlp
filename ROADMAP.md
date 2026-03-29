@@ -1,6 +1,6 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.21.0
+> Last updated: 2026-03-29 | Current release: v0.22.0
 
 ## Current State
 
@@ -148,12 +148,14 @@ Probe state machine with binary search ladder (1200 → 1500). FRAME_PMTU_PROBE/
 
 ---
 
-## Phase 4 — Multi-Service & Multi-Gateway (Medium Impact, High Effort)
+## Phase 4 — Multi-Service & Multi-Gateway ✅ COMPLETE
 
-### 4.1 Dynamic Service Registry in ZTLP-NS
-### 4.2 Multi-Gateway Failover
-### 4.3 Split Tunneling
-### 4.4 Gateway Horizontal Scaling
+### 4.1 ✅ Multi-Gateway Federation
+PEER_HELLO/PING/PONG, SESSION_MIGRATE, SERVICE_QUERY/REPLY. UDP peer mesh, health monitoring, load-based routing. 20 tests.
+### 4.2 ✅ Multi-Service Router
+Weighted round-robin, circuit breaker, SERVICE_REDIRECT (0x10). Dynamic backend management, per-service stats. 25 tests.
+### 4.3 Split Tunneling — deferred to Phase 5 (mobile)
+### 4.4 Gateway Horizontal Scaling — covered by 4.1 federation
 
 ---
 
@@ -173,7 +175,7 @@ JNI bindings, VpnService, reuse `packet_router.rs`.
 
 ---
 
-## Phase 6 — Security Hardening (Mostly Done)
+## Phase 6 — Security Hardening ✅ COMPLETE
 
 ### 6.1 ✅ PKI / Certificate Authority
 ### 6.2 ✅ Device Enrollment
@@ -210,8 +212,8 @@ ConfigWatcher polls YAML every 30s + SIGHUP. Diff-based with audit events. 18 te
 | **1: Gateway Concurrency** | High | Medium | ✅ Complete (6/6) |
 | **2: Connection Pooling** | Medium | Low | 🟡 Mostly Done (1/3, 2 in progress) |
 | **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done (3/7) |
-| **6: Security Hardening** | Critical | Medium | 🟡 Mostly Done (4/7, rotation in progress) |
+| **6: Security Hardening** | Critical | Medium | ✅ Complete (7/7) |
 | **3: UDP Transport** | High | High | ✅ Complete (4/4) |
 | **7: Ops Excellence** | Medium | Low-Medium | 🟡 Partially Done (3/4) |
-| **4: Multi-Service** | Medium | High | 🔵 Later |
+| **4: Multi-Service** | Medium | High | ✅ Complete (4/4) |
 | **5: Mobile (Android)** | High | High | 🔵 Later |

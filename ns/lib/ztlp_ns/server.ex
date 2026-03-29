@@ -363,7 +363,7 @@ defmodule ZtlpNs.Server do
   defp process_query(<<0x14, 0x01>>, _source) do
     case ZtlpNs.CertAuthority.get_root_cert_der() do
       {:ok, cert_der} ->
-        StructuredLog.info("ca_root_exported", %{size: byte_size(cert_der)})
+        Logger.info("[Server] CA root cert exported (#{byte_size(cert_der)} bytes)")
         <<0x14, 0x01, 0x00, byte_size(cert_der)::unsigned-big-32, cert_der::binary>>
 
       {:error, _} ->
@@ -393,12 +393,12 @@ defmodule ZtlpNs.Server do
   #           <<0x14, 0x03, 0x01>>  (CA not initialized)
   #           <<0x14, 0x03, 0x02>>  (issuance failed)
   defp process_query(<<0x14, 0x03, hostname_len::unsigned-big-16, hostname::binary-size(hostname_len)>>, _source) do
-    StructuredLog.info("cert_issue_request", %{hostname: hostname})
+    Logger.info("[Server] Cert issuance request for #{hostname}")
 
     # Use RSA-2048 for service certs to keep response under 8KB UDP limit
     case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname], key_type: :rsa2048) do
       {:ok, %{cert_pem: cert_pem, key_pem: key_pem, chain_pem: chain_pem}} ->
-        StructuredLog.info("cert_issued", %{hostname: hostname})
+        Logger.info("[Server] Cert issued for #{hostname}")
         <<0x14, 0x03, 0x00,
           byte_size(cert_pem)::unsigned-big-32, cert_pem::binary,
           byte_size(key_pem)::unsigned-big-32, key_pem::binary,

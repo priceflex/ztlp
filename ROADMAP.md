@@ -1,12 +1,12 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.17.0
+> Last updated: 2026-03-29 | Current release: v0.18.0
 
 ## Current State
 
-ZTLP v0.17.0 is a working zero-trust tunnel with macOS and iOS clients, Elixir gateway/relay/NS infrastructure, eBPF packet filter, and a full PKI system. The iOS app connects to a gateway via relay over encrypted UDP, multiplexes TCP streams, and routes traffic through a VIP subnet (`10.122.0.0/16`) via a userspace TCP/IP stack.
+ZTLP v0.18.0 is a working zero-trust tunnel with macOS and iOS clients, Elixir gateway/relay/NS infrastructure, eBPF packet filter, and a full PKI system. The iOS app connects to a gateway via relay over encrypted UDP, multiplexes TCP streams, and routes traffic through a VIP subnet (`10.122.0.0/16`) via a userspace TCP/IP stack.
 
-### What's Working (v0.17.0)
+### What's Working (v0.18.0)
 - **iOS app** with NetworkExtension packet tunnel, VIP routing, enrollment, CA cert install flow
 - **macOS app** with loopback VIP proxy, pf port redirection, menu bar UI
 - **Elixir gateway** with AIMD congestion control, TLS termination, session dedup, keepalive handling

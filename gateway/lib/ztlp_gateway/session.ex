@@ -32,11 +32,13 @@ defmodule ZtlpGateway.Session do
   require Logger
 
   alias ZtlpGateway.{
+    Config,
     Crypto,
     Handshake,
     Packet,
     SessionRegistry,
     Backend,
+    BackendPool,
     PolicyEngine,
     Identity,
     AuditLog,
@@ -153,7 +155,7 @@ defmodule ZtlpGateway.Session do
     # Initialize the Noise handshake as responder
     hs = Handshake.init_responder(static_pub, static_priv)
 
-    timeout_ms = ZtlpGateway.Config.get(:session_timeout_ms)
+    timeout_ms = Config.get(:session_timeout_ms)
 
     state = %{
       session_id: session_id,
@@ -569,7 +571,7 @@ defmodule ZtlpGateway.Session do
             # Policy check — is this identity allowed to access the service?
             if PolicyEngine.authorize?(identity, state.service) do
               # Try to connect to the backend
-              backends = ZtlpGateway.Config.get(:backends)
+              backends = Config.get(:backends)
 
               case find_backend(backends, state.service) do
                 {:ok, %{host: host, port: port}} ->
@@ -905,7 +907,7 @@ defmodule ZtlpGateway.Session do
     # Cancel any pending retransmit/pacing timers
     state = cancel_timers(state)
 
-    backends = ZtlpGateway.Config.get(:backends)
+    backends = Config.get(:backends)
 
     case find_backend(backends, state.service) do
       {:ok, %{host: host, port: port}} ->
@@ -967,7 +969,7 @@ defmodule ZtlpGateway.Session do
     # This prevents a race where all streams close temporarily and the next
     # FRAME_DATA gets misinterpreted as legacy format.
     state = %{state | mux_mode: true}
-    backends = ZtlpGateway.Config.get(:backends)
+    backends = Config.get(:backends)
 
     case find_backend(backends, service_name) do
       {:ok, %{host: host, port: port}} ->

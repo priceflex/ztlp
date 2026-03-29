@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.18.0 — 2026-03-29
+
+### Production Hardening
+- Zone delegation re-bootstrap: gateway verifies NS zone KEY each registration cycle
+- NS data persistence: Mnesia disc_copies default, configurable CA data directory
+- TLS cert lifecycle: exponential backoff retry, expiry tracking, status reporting
+- Echo server systemd service for production deployment
+- Gateway log levels: data-path logging moved to debug
+- Firewall rules documentation and deployment scripts
+
+### Gateway
+- AIMD congestion control (IW=64, max_cwnd=256, ssthresh=128)
+- Session deduplication via secondary ETS index
+- Keepalive frame handling (1-byte 0x01, not forwarded to backends)
+- Legacy backend reconnection on idle TCP close
+- TLS termination per-stream with Erlang :ssl
+- CertProvisioner with NS CA integration
+- FRAME_OPEN extended with per-stream service name
+
+### Client (Rust)
+- SendController: cwnd-gated uploads with ACK processing
+- Packet router: userspace TCP/IP stack for VIP routing (2,030 lines, 35 tests)
+- VIP proxy upload chunking (MAX_MUX_PAYLOAD=1195)
+- NS CA cert fetch FFI functions
+
+### ZTLP-NS
+- Certificate Authority with auto-init, cert issuance via 0x14 wire protocol
+- Security hardening: registration auth, name validation, amplification prevention
+- Mnesia disc_copies for production persistence
+- Configurable CA data directory (ZTLP_CA_DATA_DIR)
+
+### iOS App
+- NetworkExtension packet tunnel with VIP routing
+- Enrollment flow with QR scan and zone registration
+- CA certificate installation via .mobileconfig profile
+- In-app benchmark suite (14 local + 11 HTTP benchmarks)
+- Services view, connection status, traffic stats
+
+### Infrastructure
+- Unified audit/logging dashboard spec (docs/UNIFIED-AUDIT.md)
+- Production deployment scripts (deploy/)
+- Updated ROADMAP.md with Phase 0 production hardening
+
+### Test Counts
+- 844 Rust tests, 0 failures
+- 573 gateway tests, 0 failures
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **2,708 total, 0 failures**
+
+---
+
+## v0.17.0 — 2026-03-28
+- iOS VIP packet routing
+- Gateway keepalive + session dedup
+- FFI header sync
+
+---
+
 ## v0.14.0 — 2026-03-26
 
 ### macOS Client — Production Hardening

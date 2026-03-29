@@ -95,17 +95,25 @@ defmodule ZtlpNs.Application do
     # Set Mnesia directory if configured
     case ZtlpNs.Config.mnesia_dir() do
       nil -> :ok
-      dir -> Application.put_env(:mnesia, :dir, dir)
+      dir -> Application.put_env(:mnesia, :dir, dir |> to_charlist_if_needed())
     end
 
     storage_mode = ZtlpNs.Config.storage_mode()
 
-    # Only create disk schema for disc_copies mode
+    # For disc_copies mode, Mnesia schema must be created ON DISK before
+    # Mnesia starts. But OTP auto-starts Mnesia (it's in extra_applications),
+    # so we must stop it first, create the disk schema, then restart.
     if storage_mode == :disc_copies do
+      # Stop Mnesia if auto-started by OTP
+      :mnesia.stop()
+
       case :mnesia.create_schema([node()]) do
-        :ok -> :ok
-        {:error, {_, {:already_exists, _}}} -> :ok
-        {:error, reason} -> raise "Mnesia schema creation failed: #{inspect(reason)}"
+        :ok ->
+          Logger.info("[NS] Created Mnesia disk schema for #{node()}")
+        {:error, {_, {:already_exists, _}}} ->
+          :ok
+        {:error, reason} ->
+          raise "Mnesia schema creation failed: #{inspect(reason)}"
       end
     end
 
@@ -117,4 +125,7 @@ defmodule ZtlpNs.Application do
 
     :ok
   end
+
+  defp to_charlist_if_needed(dir) when is_list(dir), do: dir
+  defp to_charlist_if_needed(dir) when is_binary(dir), do: String.to_charlist(dir)
 end

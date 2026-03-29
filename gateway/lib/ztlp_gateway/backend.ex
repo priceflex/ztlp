@@ -51,6 +51,36 @@ defmodule ZtlpGateway.Backend do
   end
 
   @doc """
+  Start a backend connection using an existing (pooled) TCP socket.
+
+  The socket should have `{:active, false}`. This process takes ownership,
+  sets it to `{:active, true}`, and begins forwarding data.
+
+  ## Parameters
+  - `socket` — an existing `:gen_tcp` socket
+  - `owner` — pid of the Session process that will receive responses
+  - `stream_id` — optional stream ID for multiplexed mode
+  """
+  @spec start_link_with_socket(:gen_tcp.socket(), pid(), non_neg_integer() | nil) :: GenServer.on_start()
+  def start_link_with_socket(socket, owner, stream_id \\ nil) do
+    GenServer.start_link(__MODULE__, {:adopt, socket, owner, stream_id})
+  end
+
+  @doc """
+  Extract the raw TCP socket from a Backend process and stop it without
+  closing the socket. Used to return connections to the pool.
+
+  Returns `{:ok, socket}` on success, `{:error, reason}` if the backend
+  is already dead or the socket is closed.
+  """
+  @spec detach_socket(pid()) :: {:ok, :gen_tcp.socket()} | {:error, term()}
+  def detach_socket(pid) do
+    GenServer.call(pid, :detach_socket)
+  catch
+    :exit, _ -> {:error, :noproc}
+  end
+
+  @doc """
   Send data to the backend service over TCP.
 
   Returns `:ok` on success, `{:error, reason}` if the socket is closed.

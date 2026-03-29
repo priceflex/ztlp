@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.19.0 — 2026-03-29
+
+### Gateway — Stream Performance & Reliability
+- **Sliding receive window** (256 entries): out-of-order packets buffered and delivered in sequence, replacing strict seq > recv_seq check that dropped reordered cellular packets
+- **Async FRAME_OPEN**: backend TCP connections established asynchronously via spawn, with stream states (connecting → connected) and 10s timeout
+- **Backend connection pool**: ETS-backed per-backend pool with checkout/checkin, idle sweep (30s), configurable pool size and timeout
+- **Unified audit collector**: AuditCollector GenServer with ETS storage, retention sweep, HTTP query API on localhost:9104 (/audit/events, /audit/stats), wire protocol 0x15 for remote event submission
+- **Session key rotation** (FRAME_REKEY 0x0A): rotate keys every 2^32 packets or 24 hours via BLAKE2s key derivation, gateway-initiated with client ACK flow
+
+### Client (Rust) — HTTP Keep-Alive & Stream Reuse
+- **HttpTracker**: lightweight HTTP response boundary detection (Content-Length, chunked transfer-encoding, Connection: close)
+- **StreamState machine**: Active → Reopening → Active for graceful stream recovery on gateway FRAME_CLOSE
+- **FRAME_STREAM_RESET (0x0A)**: wire constant for stream reuse without close/reopen overhead
+
+### Security
+- **CA key security**: strong passphrase via ZTLP_CA_PASSPHRASE env var, persistent volume storage
+- **Certificate pinning**: gateway static key pinning with multi-key rotation support (v0.18.0)
+
+### Production Operations
+- NS redeployed with disc_copies + persistent volume + strong CA passphrase
+- Gateway restarted with zone re-bootstrap verification
+- Firewall hardened (metrics + echo locked to localhost/Docker bridge)
+
+### Test Counts
+- 1,032 Rust tests, 0 failures
+- 658 gateway tests, 0 failures
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **2,981 total**, 0 failures
+
 ## v0.18.0 — 2026-03-29
 
 ### Production Hardening

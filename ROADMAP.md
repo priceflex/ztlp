@@ -1,6 +1,6 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.18.0
+> Last updated: 2026-03-29 | Current release: v0.19.0
 
 ## Current State
 

@@ -349,7 +349,14 @@ pub fn build_ipv4_tcp(
 ) -> Vec<u8> {
     // Build TCP segment first (need its length for IP header)
     let mut tcp_segment = build_tcp_segment(
-        src_port, dst_port, seq, ack, flags, window, payload, include_mss,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        window,
+        payload,
+        include_mss,
     );
 
     // Compute TCP checksum and fill it in
@@ -671,9 +678,7 @@ impl PacketRouter {
 
                         // If there's data piggybacked on the ACK
                         if !tcp_payload.is_empty() {
-                            flow.client_seq = tcp_hdr
-                                .seq
-                                .wrapping_add(tcp_payload.len() as u32);
+                            flow.client_seq = tcp_hdr.seq.wrapping_add(tcp_payload.len() as u32);
                             actions.push(RouterAction::SendData {
                                 stream_id: flow.stream_id,
                                 data: tcp_payload.to_vec(),
@@ -687,9 +692,7 @@ impl PacketRouter {
                 TcpState::Established => {
                     // Handle data
                     if !tcp_payload.is_empty() {
-                        flow.client_seq = tcp_hdr
-                            .seq
-                            .wrapping_add(tcp_payload.len() as u32);
+                        flow.client_seq = tcp_hdr.seq.wrapping_add(tcp_payload.len() as u32);
                         actions.push(RouterAction::SendData {
                             stream_id: flow.stream_id,
                             data: tcp_payload.to_vec(),
@@ -813,7 +816,7 @@ impl PacketRouter {
         let flow = TcpFlow {
             state: TcpState::SynReceived,
             client_seq: tcp_hdr.seq.wrapping_add(1), // SYN consumes 1 seq
-            server_seq: server_isn.wrapping_add(1),   // After SYN-ACK
+            server_seq: server_isn.wrapping_add(1),  // After SYN-ACK
             client_ack: 0,
             service_name: service_name.clone(),
             stream_id,
@@ -825,16 +828,16 @@ impl PacketRouter {
 
         // Send SYN-ACK
         let syn_ack = build_ipv4_tcp(
-            ip_hdr.dst_ip,      // src = service VIP
-            ip_hdr.src_ip,      // dst = client
-            tcp_hdr.dst_port,   // src port = service port
-            tcp_hdr.src_port,   // dst port = client port
-            server_isn,         // seq = our ISN
-            flow.client_seq,    // ack = client_seq (syn+1)
-            TCP_SYN | TCP_ACK,  // flags
-            TCP_WINDOW_SIZE,    // window
-            &[],                // no payload
-            true,               // include MSS option
+            ip_hdr.dst_ip,     // src = service VIP
+            ip_hdr.src_ip,     // dst = client
+            tcp_hdr.dst_port,  // src port = service port
+            tcp_hdr.src_port,  // dst port = client port
+            server_isn,        // seq = our ISN
+            flow.client_seq,   // ack = client_seq (syn+1)
+            TCP_SYN | TCP_ACK, // flags
+            TCP_WINDOW_SIZE,   // window
+            &[],               // no payload
+            true,              // include MSS option
         );
         self.outbound.push_back(syn_ack);
 
@@ -1046,15 +1049,18 @@ fn queue_rst(
     ack: u32,
     outbound: &mut VecDeque<Vec<u8>>,
 ) {
-    let flags = if ack != 0 {
-        TCP_RST | TCP_ACK
-    } else {
-        TCP_RST
-    };
+    let flags = if ack != 0 { TCP_RST | TCP_ACK } else { TCP_RST };
     let pkt = build_ipv4_tcp(
-        src_ip, dst_ip, src_port, dst_port, seq, ack, flags,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
         0, // window = 0 for RST
-        &[], false,
+        &[],
+        false,
     );
     outbound.push_back(pkt);
 }
@@ -1215,7 +1221,7 @@ mod tests {
         header[7] = 0x00; // flags=DF
         header[8] = 0x40; // ttl=64
         header[9] = 0x06; // protocol=TCP
-        // checksum bytes 10-11 will be skipped
+                          // checksum bytes 10-11 will be skipped
         header[12] = 0x0A;
         header[13] = 0x00;
         header[14] = 0x00;
@@ -1247,9 +1253,7 @@ mod tests {
         let dst_ip = Ipv4Addr::new(10, 122, 0, 2);
 
         // Build a TCP SYN packet
-        let pkt = build_ipv4_tcp(
-            src_ip, dst_ip, 8080, 80, 1000, 0, TCP_SYN, 65535, &[], true,
-        );
+        let pkt = build_ipv4_tcp(src_ip, dst_ip, 8080, 80, 1000, 0, TCP_SYN, 65535, &[], true);
 
         // Parse it back
         let ip_hdr = parse_ipv4(&pkt).unwrap();
@@ -1257,7 +1261,10 @@ mod tests {
 
         // Verify TCP checksum by including checksum field in sum
         let cksum = verify_tcp_checksum(src_ip, dst_ip, tcp_data);
-        assert_eq!(cksum, 0, "TCP checksum should verify to 0 for correct packet");
+        assert_eq!(
+            cksum, 0,
+            "TCP checksum should verify to 0 for correct packet"
+        );
     }
 
     #[test]
@@ -1406,14 +1413,8 @@ mod tests {
         smap.add(Ipv4Addr::new(10, 122, 0, 2), "http".to_string());
 
         assert_eq!(smap.len(), 2);
-        assert_eq!(
-            smap.lookup(&Ipv4Addr::new(10, 122, 0, 1)),
-            Some("vault")
-        );
-        assert_eq!(
-            smap.lookup(&Ipv4Addr::new(10, 122, 0, 2)),
-            Some("http")
-        );
+        assert_eq!(smap.lookup(&Ipv4Addr::new(10, 122, 0, 1)), Some("vault"));
+        assert_eq!(smap.lookup(&Ipv4Addr::new(10, 122, 0, 2)), Some("http"));
         assert_eq!(smap.lookup(&Ipv4Addr::new(10, 122, 0, 3)), None);
     }
 
@@ -1443,7 +1444,18 @@ mod tests {
         dst_port: u16,
         seq: u32,
     ) -> Vec<u8> {
-        build_ipv4_tcp(src_ip, dst_ip, src_port, dst_port, seq, 0, TCP_SYN, 65535, &[], true)
+        build_ipv4_tcp(
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            0,
+            TCP_SYN,
+            65535,
+            &[],
+            true,
+        )
     }
 
     /// Build a raw IPv4/TCP ACK packet.
@@ -1456,7 +1468,16 @@ mod tests {
         ack: u32,
     ) -> Vec<u8> {
         build_ipv4_tcp(
-            src_ip, dst_ip, src_port, dst_port, seq, ack, TCP_ACK, 65535, &[], false,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            TCP_ACK,
+            65535,
+            &[],
+            false,
         )
     }
 
@@ -1516,7 +1537,16 @@ mod tests {
         seq: u32,
     ) -> Vec<u8> {
         build_ipv4_tcp(
-            src_ip, dst_ip, src_port, dst_port, seq, 0, TCP_RST, 0, &[], false,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            0,
+            TCP_RST,
+            0,
+            &[],
+            false,
         )
     }
 
@@ -1532,9 +1562,7 @@ mod tests {
         let router = make_router();
         assert_eq!(router.service_map().len(), 2);
         assert_eq!(
-            router
-                .service_map()
-                .lookup(&Ipv4Addr::new(10, 122, 0, 1)),
+            router.service_map().lookup(&Ipv4Addr::new(10, 122, 0, 1)),
             Some("vault")
         );
     }
@@ -1659,15 +1687,8 @@ mod tests {
 
         // Send data
         let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        let data_pkt = make_data_packet(
-            client_ip,
-            service_ip,
-            54321,
-            80,
-            1001,
-            server_isn + 1,
-            data,
-        );
+        let data_pkt =
+            make_data_packet(client_ip, service_ip, 54321, 80, 1001, server_isn + 1, data);
         let actions = router.process_inbound(&data_pkt);
 
         assert_eq!(actions.len(), 1);
@@ -1844,7 +1865,8 @@ mod tests {
             dst_port: 80,
         };
         if let Some(flow) = router.flows.get_mut(&flow_key) {
-            flow.last_activity = Instant::now() - std::time::Duration::from_secs(FLOW_TIMEOUT_SECS + 10);
+            flow.last_activity =
+                Instant::now() - std::time::Duration::from_secs(FLOW_TIMEOUT_SECS + 10);
         }
 
         let stale = router.cleanup_stale_flows();

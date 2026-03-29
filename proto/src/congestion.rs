@@ -641,6 +641,19 @@ impl SackScoreboard {
     pub fn ranges(&self) -> &[SackRange] {
         &self.received_ranges
     }
+
+    /// Process incoming SACK blocks from an ACK frame.
+    ///
+    /// Each block `(start, end)` is an inclusive range of sequences the
+    /// receiver has confirmed. Adds them to the scoreboard and merges
+    /// overlapping/adjacent ranges.
+    pub fn process_sack_blocks(&mut self, blocks: &[(u64, u64)]) {
+        for &(start, end) in blocks {
+            if end >= start {
+                self.add_range(SackRange::new(start, end));
+            }
+        }
+    }
 }
 
 impl Default for SackScoreboard {
@@ -695,6 +708,12 @@ impl RetransmitTracker {
     /// Prune entries for sequences that have been fully acknowledged.
     pub fn prune_up_to(&mut self, acked_seq: u64) {
         self.last_retransmit.retain(|&seq, _| seq > acked_seq);
+    }
+
+    /// Check if a data_seq should be skipped for retransmit because the
+    /// receiver already has it (confirmed via SACK).
+    pub fn should_skip_sacked(&self, data_seq: u64, scoreboard: &SackScoreboard) -> bool {
+        scoreboard.is_acked(data_seq)
     }
 }
 
@@ -1056,6 +1075,18 @@ impl ReceiverSackState {
     /// Get current SACK ranges.
     pub fn ranges(&self) -> &[SackRange] {
         &self.sack_ranges
+    }
+
+    /// Generate SACK blocks as `(start, end)` tuples for the ACK frame.
+    ///
+    /// Returns up to `max_blocks` contiguous received ranges above the
+    /// cumulative ACK. These are the ranges the sender should NOT retransmit.
+    pub fn get_sack_blocks(&self, max_blocks: usize) -> Vec<(u64, u64)> {
+        self.sack_ranges
+            .iter()
+            .take(max_blocks)
+            .map(|r| (r.start, r.end))
+            .collect()
     }
 }
 
@@ -1767,5 +1798,160 @@ mod tests {
 
         // Should have recovered significantly
         assert!(cc.cwnd > post_loss_ssthresh + 5.0);
+    }
+
+    // ── ReceiverSackState get_sack_blocks tests ─────────────────────
+
+    #[test]
+    fn test_receiver_sack_get_sack_blocks_empty() {
+        let state = ReceiverSackState::new();
+        assert!(state.get_sack_blocks(3).is_empty());
+    }
+
+    #[test]
+    fn test_receiver_sack_get_sack_blocks_contiguous() {
+        let mut state = ReceiverSackState::new();
+        state.update_from_reassembly(10, &[]); // no out-of-order packets
+        assert!(state.get_sack_blocks(3).is_empty());
+    }
+
+    #[test]
+    fn test_receiver_sack_get_sack_blocks_with_gaps() {
+        let mut state = ReceiverSackState::new();
+        // expected_seq = 5 (cumulative_ack = 4), buffered = [8, 9, 10, 15, 16]
+        state.update_from_reassembly(5, &[8, 9, 10, 15, 16]);
+
+        let blocks = state.get_sack_blocks(3);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], (8, 10));
+        assert_eq!(blocks[1], (15, 16));
+    }
+
+    #[test]
+    fn test_receiver_sack_get_sack_blocks_max_capped() {
+        let mut state = ReceiverSackState::new();
+        // Create 4 separate ranges: [3], [6], [9], [12]
+        state.update_from_reassembly(1, &[3, 6, 9, 12]);
+
+        // Request max 2 blocks
+        let blocks = state.get_sack_blocks(2);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], (3, 3));
+        assert_eq!(blocks[1], (6, 6));
+
+        // Request max 10 — should get all 4
+        let all_blocks = state.get_sack_blocks(10);
+        assert_eq!(all_blocks.len(), 4);
+    }
+
+    // ── SackScoreboard process_sack_blocks tests ────────────────────
+
+    #[test]
+    fn test_scoreboard_process_sack_blocks_empty() {
+        let mut sb = SackScoreboard::new();
+        sb.process_sack_blocks(&[]);
+        assert!(sb.ranges().is_empty());
+    }
+
+    #[test]
+    fn test_scoreboard_process_sack_blocks_single() {
+        let mut sb = SackScoreboard::new();
+        sb.cumulative_ack = Some(4);
+        sb.process_sack_blocks(&[(6, 8)]);
+
+        assert!(sb.is_acked(6));
+        assert!(sb.is_acked(7));
+        assert!(sb.is_acked(8));
+        assert!(!sb.is_acked(5));
+        assert!(!sb.is_acked(9));
+    }
+
+    #[test]
+    fn test_scoreboard_process_sack_blocks_multiple() {
+        let mut sb = SackScoreboard::new();
+        sb.cumulative_ack = Some(4);
+        sb.process_sack_blocks(&[(6, 8), (11, 15)]);
+
+        // Gaps at 5, 9, 10 should not be acked
+        assert!(!sb.is_acked(5));
+        assert!(sb.is_acked(6));
+        assert!(sb.is_acked(8));
+        assert!(!sb.is_acked(9));
+        assert!(!sb.is_acked(10));
+        assert!(sb.is_acked(11));
+        assert!(sb.is_acked(15));
+
+        let missing = sb.get_missing_seqs(100);
+        assert_eq!(missing, vec![5, 9, 10]);
+    }
+
+    #[test]
+    fn test_scoreboard_process_sack_blocks_merges_with_existing() {
+        let mut sb = SackScoreboard::new();
+        sb.cumulative_ack = Some(0);
+        sb.process_sack_blocks(&[(5, 7)]);
+        sb.process_sack_blocks(&[(8, 10)]); // adjacent to [5,7]
+
+        // Should merge into [5, 10]
+        assert!(sb.is_acked(5));
+        assert!(sb.is_acked(7));
+        assert!(sb.is_acked(8));
+        assert!(sb.is_acked(10));
+        assert_eq!(sb.ranges().len(), 1);
+        assert_eq!(sb.ranges()[0].start, 5);
+        assert_eq!(sb.ranges()[0].end, 10);
+    }
+
+    // ── RetransmitTracker should_skip_sacked tests ──────────────────
+
+    #[test]
+    fn test_retransmit_tracker_skip_sacked_empty_scoreboard() {
+        let tracker = RetransmitTracker::new(100);
+        let sb = SackScoreboard::new();
+        // Nothing is acked, so nothing should be skipped
+        assert!(!tracker.should_skip_sacked(5, &sb));
+    }
+
+    #[test]
+    fn test_retransmit_tracker_skip_sacked_below_cumulative() {
+        let tracker = RetransmitTracker::new(100);
+        let mut sb = SackScoreboard::new();
+        sb.update_from_sack(10, &[]);
+        // seq 5 is below cumulative ACK 10 → should be skipped
+        assert!(tracker.should_skip_sacked(5, &sb));
+        // seq 11 is above → should NOT be skipped
+        assert!(!tracker.should_skip_sacked(11, &sb));
+    }
+
+    #[test]
+    fn test_retransmit_tracker_skip_sacked_in_sack_range() {
+        let tracker = RetransmitTracker::new(100);
+        let mut sb = SackScoreboard::new();
+        sb.update_from_sack(4, &[SackRange::new(6, 8)]);
+        // seq 7 is in SACK range [6,8] → should be skipped
+        assert!(tracker.should_skip_sacked(7, &sb));
+        // seq 5 is NOT in any range → should NOT be skipped
+        assert!(!tracker.should_skip_sacked(5, &sb));
+        // seq 9 is NOT in any range → should NOT be skipped
+        assert!(!tracker.should_skip_sacked(9, &sb));
+    }
+
+    #[test]
+    fn test_retransmit_tracker_skip_sacked_integration() {
+        // Simulate: send_buffer has data_seqs 5-15
+        // cumulative_ack = 4, SACK ranges [6,8] and [11,15]
+        // Only 5, 9, 10 should NOT be skipped (they're the gaps)
+        let tracker = RetransmitTracker::new(100);
+        let mut sb = SackScoreboard::new();
+        sb.update_from_sack(4, &[SackRange::new(6, 8), SackRange::new(11, 15)]);
+
+        let data_seqs: Vec<u64> = (5..=15).collect();
+        let to_retransmit: Vec<u64> = data_seqs
+            .iter()
+            .filter(|&&ds| !tracker.should_skip_sacked(ds, &sb))
+            .copied()
+            .collect();
+
+        assert_eq!(to_retransmit, vec![5, 9, 10]);
     }
 }

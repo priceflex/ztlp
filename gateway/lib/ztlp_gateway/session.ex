@@ -1,3 +1,133 @@
+defmodule ZtlpGateway.Sack do
+  @moduledoc """
+  Pure-function helpers for Selective Acknowledgment (SACK) in ZTLP.
+
+  Provides SACK block generation, serialization, and parsing used by
+  `ZtlpGateway.Session` for selective retransmission. Extracted as a
+  separate module for direct testability (like `ZtlpGateway.RecvWindow`
+  and `ZtlpGateway.Rekey`).
+
+  ## SACK ACK Format
+
+  Extends the cumulative ACK frame with optional SACK blocks:
+
+      [0x01 | cumulative_ack(8 BE) | sack_count(1) | sack_block_1_start(8 BE) | sack_block_1_end(8 BE) | ...]
+
+  - `cumulative_ack`: highest contiguous delivered sequence (unchanged)
+  - `sack_count`: number of SACK blocks (0 = legacy cumulative ACK, max 3)
+  - Each SACK block: `[start_seq, end_seq]` — inclusive range of received-but-not-contiguous sequences
+
+  When `sack_count` is 0, the frame is backward-compatible with legacy ACK.
+  """
+
+  @max_sack_blocks 3
+
+  @doc "Maximum number of SACK blocks per ACK frame."
+  def max_sack_blocks, do: @max_sack_blocks
+
+  @doc """
+  Build SACK blocks from the receive window state.
+
+  Given the current `recv_window` MapSet and `recv_window_base`, finds
+  contiguous ranges of received sequences above the base (which represent
+  out-of-order packets). Returns up to 3 blocks as `[{start, end}, ...]`.
+
+  Returns an empty list when there are no gaps (all received packets are
+  contiguous from the base).
+  """
+  def build_sack_blocks(recv_window, recv_window_base) do
+    recv_window
+    |> MapSet.to_list()
+    |> Enum.filter(&(&1 > recv_window_base))
+    |> Enum.sort()
+    |> chunk_contiguous()
+    |> Enum.take(@max_sack_blocks)
+  end
+
+  @doc """
+  Group a sorted list of integers into contiguous ranges.
+
+  ## Examples
+
+      iex> ZtlpGateway.Sack.chunk_contiguous([6, 7, 8, 11, 12, 13, 14, 15])
+      [{6, 8}, {11, 15}]
+
+      iex> ZtlpGateway.Sack.chunk_contiguous([])
+      []
+  """
+  def chunk_contiguous([]), do: []
+  def chunk_contiguous([first | rest]) do
+    chunk_contiguous(rest, first, first, [])
+  end
+
+  defp chunk_contiguous([], start, stop, acc) do
+    Enum.reverse([{start, stop} | acc])
+  end
+  defp chunk_contiguous([n | rest], start, stop, acc) when n == stop + 1 do
+    chunk_contiguous(rest, start, n, acc)
+  end
+  defp chunk_contiguous([n | rest], start, stop, acc) do
+    chunk_contiguous(rest, n, n, [{start, stop} | acc])
+  end
+
+  @doc """
+  Encode a SACK ACK frame (without the FRAME_ACK type byte prefix — caller adds it).
+
+  Returns the binary: `<<cumulative_ack::64, sack_count::8, sack_data::binary>>`
+
+  The caller prepends `<<@frame_ack>>` before encrypting.
+  """
+  def encode_sack_ack(cumulative_ack, sack_blocks) do
+    sack_data = Enum.reduce(sack_blocks, <<>>, fn {start, stop}, acc ->
+      acc <> <<start::big-64, stop::big-64>>
+    end)
+    <<cumulative_ack::big-64, length(sack_blocks)::8, sack_data::binary>>
+  end
+
+  @doc """
+  Parse SACK blocks from the trailing data after the cumulative ACK.
+
+  Given `sack_count` and `sack_data` binary, returns a list of `{start, end}` tuples.
+  Returns an empty list for count 0 or malformed data.
+  """
+  def parse_sack_blocks(0, _sack_data), do: []
+  def parse_sack_blocks(count, sack_data) when is_integer(count) and count > 0 do
+    parse_sack_blocks_loop(count, sack_data, [])
+  end
+  def parse_sack_blocks(_count, _sack_data), do: []
+
+  defp parse_sack_blocks_loop(0, _data, acc), do: Enum.reverse(acc)
+  defp parse_sack_blocks_loop(remaining, <<start::big-64, stop::big-64, rest::binary>>, acc) when remaining > 0 do
+    parse_sack_blocks_loop(remaining - 1, rest, [{start, stop} | acc])
+  end
+  defp parse_sack_blocks_loop(_remaining, _data, acc), do: Enum.reverse(acc)
+
+  @doc """
+  Process incoming SACK blocks into a sacked_set MapSet.
+
+  Takes existing sacked_set and a list of `{start, end}` SACK blocks,
+  returns updated sacked_set with all sequences in the SACK ranges added.
+  """
+  def add_to_sacked_set(sacked_set, sack_blocks) do
+    Enum.reduce(sack_blocks, sacked_set, fn {start, stop}, acc ->
+      Enum.reduce(start..stop, acc, fn seq, inner_acc ->
+        MapSet.put(inner_acc, seq)
+      end)
+    end)
+  end
+
+  @doc """
+  Prune the sacked_set by removing sequences at or below the cumulative ACK.
+
+  These sequences are fully acknowledged and no longer need tracking.
+  """
+  def prune_sacked_set(sacked_set, cumulative_ack) do
+    sacked_set
+    |> Enum.filter(fn seq -> seq > cumulative_ack end)
+    |> MapSet.new()
+  end
+end
+
 defmodule ZtlpGateway.Rekey do
   @moduledoc """
   Pure-function helpers for FRAME_REKEY session key rotation.
@@ -259,6 +389,7 @@ defmodule ZtlpGateway.Session do
     Handshake,
     Packet,
     Rekey,
+    Sack,
     SessionRegistry,
     Backend,
     BackendPool,
@@ -447,7 +578,10 @@ defmodule ZtlpGateway.Session do
         cwnd: @initial_cwnd,
         ssthresh: @initial_ssthresh,
         # Track data_seq of last ACK for duplicate detection
-        last_acked_data_seq: -1
+        last_acked_data_seq: -1,
+        # SACK: set of data_seqs that have been selectively acknowledged
+        # by the client. Retransmit logic skips these sequences.
+        sacked_set: MapSet.new()
       }
       |> Map.merge(rekey_state)
 
@@ -670,6 +804,11 @@ defmodule ZtlpGateway.Session do
         elapsed = now - sent_at
 
         cond do
+          # Skip SACK'd sequences — the client already has them
+          is_integer(ds) and MapSet.member?(acc.sacked_set, ds) ->
+            Logger.debug("[Session] Skipping retransmit for SACK'd data_seq=#{ds}")
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count}
+
           retransmit_count >= @max_retransmits ->
             Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
@@ -1225,53 +1364,34 @@ defmodule ZtlpGateway.Session do
     {:noreply, reset_timeout(state)}
   end
 
-  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, _rest::binary>>, state) do
-    # Cumulative ACK from client: "I've received everything up to and including data_seq N"
-    now = System.monotonic_time(:millisecond)
+  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
+    # Cumulative ACK with SACK blocks from client
+    state = process_cumulative_ack(acked_data_seq, state)
 
-    {acked_entries, remaining} =
-      Enum.split_with(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
-        is_integer(ds) and ds <= acked_data_seq
-      end)
-
-    newly_acked = length(acked_entries)
-
-    # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
-    state =
-      Enum.reduce(acked_entries, state, fn {_seq, {_pkt, sent_at, retransmit_count, _ds}}, acc ->
-        if retransmit_count == 0 do
-          update_rtt(acc, now - sent_at)
-        else
-          acc
-        end
-      end)
-
-    send_buffer = Map.new(remaining)
-
-    # Congestion control: grow window on new ACKs
-    state = if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
-      cwnd = state.cwnd
-      ssthresh = state.ssthresh
-      new_cwnd = if cwnd < ssthresh do
-        # Slow start: grow by newly_acked (exponential)
-        min(cwnd + newly_acked, @max_cwnd)
-      else
-        # Congestion avoidance: grow by ~1 per RTT (linear)
-        min(cwnd + newly_acked / cwnd, @max_cwnd)
-      end
-      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
-    else
-      state
-    end
-
-    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")
-
-    state = %{state | send_buffer: send_buffer}
+    # Process SACK blocks — mark those data_seqs as selectively acknowledged
+    sack_blocks = Sack.parse_sack_blocks(sack_count, sack_data)
+    sacked_set = Sack.add_to_sacked_set(state.sacked_set, sack_blocks)
+    sacked_set = Sack.prune_sacked_set(sacked_set, acked_data_seq)
+    state = %{state | sacked_set: sacked_set}
 
     # ACK freed window space — try to flush more from the queue
     state = flush_send_queue(state)
 
     # If draining with empty queue and empty send_buffer, all data delivered
+    if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
+      Logger.info("[Session] All data ACKed during drain, terminating cleanly")
+      terminate_session(state, :drain_complete)
+    else
+      {:noreply, state}
+    end
+  end
+
+  # Legacy ACK without SACK blocks (backward compatible)
+  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64>>, state) do
+    state = process_cumulative_ack(acked_data_seq, state)
+
+    state = flush_send_queue(state)
+
     if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
       Logger.info("[Session] All data ACKed during drain, terminating cleanly")
       terminate_session(state, :drain_complete)
@@ -1296,6 +1416,9 @@ defmodule ZtlpGateway.Session do
     new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
     new_cwnd = max(new_ssthresh, @min_cwnd)
     state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh}
+
+    # Filter out data_seqs that were already SACK'd — the client has them
+    nacked_data_seqs = Enum.reject(nacked_data_seqs, &MapSet.member?(state.sacked_set, &1))
 
     state =
       Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->
@@ -1498,13 +1621,17 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # Send an ACK frame back to the client (returns updated state)
+  # Send an ACK frame back to the client with SACK blocks (returns updated state)
   defp send_ack(packet_seq, state) do
     seq = state.send_seq + 1
     nonce = <<0::32, seq::little-64>>
 
-    # ACK frame: [FRAME_ACK(1) | acked_packet_seq(8 BE)]
-    ack_frame = <<@frame_ack, packet_seq::big-64>>
+    # Build SACK blocks from the receive window (out-of-order packets above base)
+    sack_blocks = Sack.build_sack_blocks(state.recv_window, state.recv_window_base)
+    sack_payload = Sack.encode_sack_ack(packet_seq, sack_blocks)
+
+    # ACK frame: [FRAME_ACK(1) | cumulative_ack(8 BE) | sack_count(1) | sack_blocks...]
+    ack_frame = <<@frame_ack, sack_payload::binary>>
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, ack_frame, <<>>)
     encrypted = ct <> tag
 
@@ -1849,6 +1976,53 @@ defmodule ZtlpGateway.Session do
     })
 
     {:stop, :normal, state}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Cumulative ACK processing (shared between SACK and legacy ACK handlers)
+  # ---------------------------------------------------------------------------
+
+  defp process_cumulative_ack(acked_data_seq, state) do
+    now = System.monotonic_time(:millisecond)
+
+    {acked_entries, remaining} =
+      Enum.split_with(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
+        is_integer(ds) and ds <= acked_data_seq
+      end)
+
+    newly_acked = length(acked_entries)
+
+    # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
+    state =
+      Enum.reduce(acked_entries, state, fn {_seq, {_pkt, sent_at, retransmit_count, _ds}}, acc ->
+        if retransmit_count == 0 do
+          update_rtt(acc, now - sent_at)
+        else
+          acc
+        end
+      end)
+
+    send_buffer = Map.new(remaining)
+
+    # Congestion control: grow window on new ACKs
+    state = if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
+      cwnd = state.cwnd
+      ssthresh = state.ssthresh
+      new_cwnd = if cwnd < ssthresh do
+        # Slow start: grow by newly_acked (exponential)
+        min(cwnd + newly_acked, @max_cwnd)
+      else
+        # Congestion avoidance: grow by ~1 per RTT (linear)
+        min(cwnd + newly_acked / cwnd, @max_cwnd)
+      end
+      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
+    else
+      state
+    end
+
+    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")
+
+    %{state | send_buffer: send_buffer}
   end
 
   # ---------------------------------------------------------------------------

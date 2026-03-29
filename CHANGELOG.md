@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.23.0 — 2026-03-29
+
+### Mobile Clients — Phase 5
+- **Android JNI Bindings (5.2)**: AndroidTunnelConfig, TunnelState FSM, AtomicTunnelStats, VipTable, PerAppConfig, JNI name generator, Kotlin class spec. 30 tests.
+- **iOS On-Demand Rules (5.4)**: OnDemandRule model, NEOnDemandRule conversion, trusted WiFi template, SSID/interface matching, SwiftUI rule editor.
+- **iOS Battery Optimization (5.5)**: BatteryConfig with adaptive keepalive, BatteryMonitor (UIDevice), low battery disconnect, cellular optimization, background suspension.
+
+### Operational Excellence — Phase 7 COMPLETE
+- **Auto-Update (7.2)**: SemVer parse/compare, UpdateChannel (stable/beta/nightly), GitHub releases API parser, real Ed25519 signature verification, checksum verification. 30 tests.
+
+### Test Counts
+- 1,229 Rust tests, 0 failures
+- 799 gateway tests, 0 failures (1 pre-existing timing flake)
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **3,319 total**
+
 ## v0.22.0 — 2026-03-29
 
 ### Security — Phase 6 COMPLETE

@@ -1,6 +1,6 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.22.0
+> Last updated: 2026-03-29 | Current release: v0.23.0
 
 ## Current State
 
@@ -214,6 +214,6 @@ ConfigWatcher polls YAML every 30s + SIGHUP. Diff-based with audit events. 18 te
 | **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done (3/7) |
 | **6: Security Hardening** | Critical | Medium | ✅ Complete (7/7) |
 | **3: UDP Transport** | High | High | ✅ Complete (4/4) |
-| **7: Ops Excellence** | Medium | Low-Medium | 🟡 Partially Done (3/4) |
+| **7: Ops Excellence** | Medium | Low-Medium | ✅ Complete (4/4) |
 | **4: Multi-Service** | Medium | High | ✅ Complete (4/4) |
 | **5: Mobile (Android)** | High | High | 🔵 Later |

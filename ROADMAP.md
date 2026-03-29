@@ -1,6 +1,6 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-29 | Current release: v0.20.0
+> Last updated: 2026-03-29 | Current release: v0.21.0
 
 ## Current State
 
@@ -130,18 +130,18 @@ VIP proxy graceful stream recovery, HTTP request boundary detection.
 
 ---
 
-## Phase 3 — UDP Transport Improvements (Partially Done)
+## Phase 3 — UDP Transport Improvements ✅ COMPLETE
 
 **Goal:** Reliable 50+ MB/s throughput, robust packet loss recovery.
 
 ### 3.1 ✅ Selective ACK (SACK)
 SACK blocks in ACK frames — up to 3 ranges. Gateway builds from RecvWindow, skips SACK'd on retransmit. Backward compatible. 39 tests.
 
-### 3.2 BBR-Style Congestion Control — NOT STARTED
-Replace AIMD with BBR or COPA for better throughput through packet loss.
+### 3.2 ✅ BBR Congestion Control
+4-state model (Startup → Drain → ProbeBW → ProbeRTT). BtlBw windowed max filter, min RTT tracking. Replaces AIMD. 21 tests.
 
-### 3.3 FEC (Forward Error Correction) — NOT STARTED
-Reed-Solomon or XOR-based FEC for lossy links. Configurable redundancy.
+### 3.3 ✅ FEC (Forward Error Correction)
+XOR-based FEC. FecEncoder/FecDecoder, configurable group size 1-10. FRAME_FEC_DATA (0x0E), FRAME_FEC_PARITY (0x0F). 26 tests.
 
 ### 3.4 ✅ Path MTU Discovery (PLPMTUD, RFC 8899)
 Probe state machine with binary search ladder (1200 → 1500). FRAME_PMTU_PROBE/ACK. 19 tests.
@@ -184,14 +184,16 @@ Gateway static key pinning with multi-key rotation support, auto-pin on enrollme
 ### 6.5 Key Rotation — IN PROGRESS
 `FRAME_REKEY (0x0A)` — rotate session keys every 2^32 packets or 24 hours.
 
-### 6.6 Mutual Device Attestation — NOT STARTED
+### 6.6 ✅ Device Attestation Framework
+Apple App Attest, Android Key Attestation, YubiKey (stubs). Software attestation (Ed25519) fully functional. Trust levels + ZTLP_MIN_ATTESTATION_LEVEL. 18 tests.
 ### 6.7 Post-Quantum Readiness — NOT STARTED
 
 ---
 
 ## Phase 7 — Operational Excellence (Partially Done)
 
-### 7.1 Prometheus/Grafana Metrics (Client) — NOT STARTED
+### 7.1 ✅ Client Prometheus Metrics
+Counter/Gauge/Histogram types, MetricsRegistry, ZtlpMetrics (14 pre-defined). Zero deps. 28 tests.
 ### 7.2 Auto-Update (macOS) — NOT STARTED
 ### 7.3 ✅ Admin Dashboard
 Single-page HTML on localhost:9105 with dark theme, auto-refresh, JSON API. Zero deps. 8 tests.
@@ -209,7 +211,7 @@ ConfigWatcher polls YAML every 30s + SIGHUP. Diff-based with audit events. 18 te
 | **2: Connection Pooling** | Medium | Low | 🟡 Mostly Done (1/3, 2 in progress) |
 | **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done (3/7) |
 | **6: Security Hardening** | Critical | Medium | 🟡 Mostly Done (4/7, rotation in progress) |
-| **3: UDP Transport** | High | High | 🟡 Partially Done (2/4) |
-| **7: Ops Excellence** | Medium | Low-Medium | 🟡 Partially Done (2/4) |
+| **3: UDP Transport** | High | High | ✅ Complete (4/4) |
+| **7: Ops Excellence** | Medium | Low-Medium | 🟡 Partially Done (3/4) |
 | **4: Multi-Service** | Medium | High | 🔵 Later |
 | **5: Mobile (Android)** | High | High | 🔵 Later |

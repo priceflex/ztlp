@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.21.0 — 2026-03-29
+
+### UDP Transport — Phase 3 COMPLETE
+- **BBR Congestion Control**: 4-state model (Startup → Drain → ProbeBW → ProbeRTT), bottleneck bandwidth estimation with windowed max filter, min RTT tracking. Replaces AIMD as default (toggle via @use_bbr). 21 tests.
+- **XOR Forward Error Correction (FEC)**: FecEncoder/FecDecoder, groups N data packets → 1 XOR parity, recovers single lost packet per group. FRAME_FEC_DATA (0x0E), FRAME_FEC_PARITY (0x0F). Configurable group size 1-10. 26 tests.
+
+### Security — Phase 6.6
+- **Device Attestation Framework**: Apple App Attest, Android Key Attestation, YubiKey (structured stubs). Software attestation fully functional (Ed25519). Trust levels: hardware > tee > software > none. ZTLP_MIN_ATTESTATION_LEVEL env var. 18 tests.
+
+### Operational Excellence — Phase 7.1
+- **Client Prometheus Metrics**: Counter, Gauge, Histogram types with atomic operations. MetricsRegistry with text exposition export. 14 pre-defined ZtlpMetrics. Zero external deps. 28 tests.
+
+### Test Counts
+- 1,138 Rust tests, 0 failures
+- 754 gateway tests, 0 failures
+- 726 NS tests, 0 failures
+- 565 relay tests, 0 failures
+- **3,183 total**
+
 ## v0.20.0 — 2026-03-29
 
 ### UDP Transport — Phase 3

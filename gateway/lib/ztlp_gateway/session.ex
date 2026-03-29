@@ -384,6 +384,7 @@ defmodule ZtlpGateway.Session do
   require Logger
 
   alias ZtlpGateway.{
+    Bbr,
     Config,
     Crypto,
     Handshake,
@@ -445,6 +446,10 @@ defmodule ZtlpGateway.Session do
   @min_cwnd 4
   # Slow-start threshold — switch to linear growth at 128 packets (153KB)
   @initial_ssthresh 128
+
+  # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
+  @use_bbr true
+
   # Pacing interval: ms between burst sends
   @pacing_interval_ms 1
   # Max packets sent per pacing tick — limits instantaneous burst
@@ -574,7 +579,8 @@ defmodule ZtlpGateway.Session do
         streams: %{},
         mux_mode: false,
         pacing_timer_ref: nil,
-        # Congestion control (AIMD)
+        # Congestion control — BBR (default) or AIMD (fallback)
+        bbr: if(@use_bbr, do: Bbr.new(), else: nil),
         cwnd: @initial_cwnd,
         ssthresh: @initial_ssthresh,
         # Track data_seq of last ACK for duplicate detection
@@ -830,7 +836,8 @@ defmodule ZtlpGateway.Session do
             send_udp(acc, new_packet)
 
             # Multiplicative decrease on loss (only once per loss event)
-            acc = if retransmit_count == 0 do
+            # BBR does not reduce cwnd on loss — it's model-based, not loss-based
+            acc = if not @use_bbr and retransmit_count == 0 do
               new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
               new_cwnd = max(new_ssthresh, @min_cwnd)
               Logger.debug("[Session] Loss detected: cwnd #{Float.round(acc.cwnd, 1)} → #{new_cwnd}, ssthresh → #{new_ssthresh}")
@@ -1412,10 +1419,14 @@ defmodule ZtlpGateway.Session do
 
     now = System.monotonic_time(:millisecond)
 
-    # Fast retransmit loss event — reduce cwnd once
-    new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
-    new_cwnd = max(new_ssthresh, @min_cwnd)
-    state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh}
+    # Fast retransmit loss event — reduce cwnd once (AIMD only; BBR is model-based)
+    state = if not @use_bbr do
+      new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
+      new_cwnd = max(new_ssthresh, @min_cwnd)
+      %{state | cwnd: new_cwnd, ssthresh: new_ssthresh}
+    else
+      state
+    end
 
     # Filter out data_seqs that were already SACK'd — the client has them
     nacked_data_seqs = Enum.reject(nacked_data_seqs, &MapSet.member?(state.sacked_set, &1))
@@ -1667,7 +1678,12 @@ defmodule ZtlpGateway.Session do
 
   defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
-    effective_window = min(trunc(state.cwnd), @max_cwnd)
+    window_full = if @use_bbr do
+      not Bbr.can_send?(state.bbr)
+    else
+      effective_window = min(trunc(state.cwnd), @max_cwnd)
+      inflight >= effective_window
+    end
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.
@@ -1678,7 +1694,7 @@ defmodule ZtlpGateway.Session do
           state
         end
 
-      inflight >= effective_window ->
+      window_full ->
         # Window full — schedule pacing timer to retry
         schedule_pacing_timer(state)
 
@@ -1769,6 +1785,13 @@ defmodule ZtlpGateway.Session do
       rekey_packet_count: state.rekey_packet_count + 1
     }
 
+    # Track inflight in BBR
+    new_state = if @use_bbr do
+      %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
+    else
+      new_state
+    end
+
     new_state = maybe_initiate_rekey(new_state)
     {:ok, new_state}
   end
@@ -1808,6 +1831,13 @@ defmodule ZtlpGateway.Session do
       retransmit_timer_ref: retransmit_timer_ref,
       rekey_packet_count: state.rekey_packet_count + 1
     }
+
+    # Track inflight in BBR
+    new_state = if @use_bbr do
+      %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
+    else
+      new_state
+    end
 
     new_state = maybe_initiate_rekey(new_state)
     {:ok, new_state}
@@ -2004,20 +2034,31 @@ defmodule ZtlpGateway.Session do
 
     send_buffer = Map.new(remaining)
 
-    # Congestion control: grow window on new ACKs
-    state = if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
-      cwnd = state.cwnd
-      ssthresh = state.ssthresh
-      new_cwnd = if cwnd < ssthresh do
-        # Slow start: grow by newly_acked (exponential)
-        min(cwnd + newly_acked, @max_cwnd)
+    # Congestion control: BBR or AIMD
+    state = if @use_bbr do
+      if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
+        # Calculate acked_bytes and RTT for BBR
+        acked_bytes = newly_acked * @max_payload_bytes
+        rtt_ms = state.srtt_ms || @initial_rto_ms
+        bbr = Bbr.on_ack(state.bbr, acked_bytes, rtt_ms, now)
+        %{state | bbr: bbr, last_acked_data_seq: acked_data_seq}
       else
-        # Congestion avoidance: grow by ~1 per RTT (linear)
-        min(cwnd + newly_acked / cwnd, @max_cwnd)
+        state
       end
-      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
     else
-      state
+      # Legacy AIMD: grow window on new ACKs
+      if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
+        cwnd = state.cwnd
+        ssthresh = state.ssthresh
+        new_cwnd = if cwnd < ssthresh do
+          min(cwnd + newly_acked, @max_cwnd)
+        else
+          min(cwnd + newly_acked / cwnd, @max_cwnd)
+        end
+        %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
+      else
+        state
+      end
     end
 
     Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")

@@ -143,6 +143,28 @@ defmodule ZtlpNs.CertAuthority do
     # Try to load existing CA from disk
     state = try_load_ca(state)
 
+    # Auto-initialize if not loaded from disk and auto_init is explicitly enabled
+    state =
+      if not state.initialized and System.get_env("ZTLP_CA_AUTO_INIT") == "true" do
+        Logger.info("[CertAuthority] No existing CA found, auto-initializing...")
+        zone = System.get_env("ZTLP_GATEWAY_SERVICE_ZONE") || "techrockstars.ztlp"
+        subject = %{
+          cn: "ZTLP Root CA - #{zone}",
+          o: "ZTLP",
+          ou: "Certificate Authority"
+        }
+        case do_init_ca(state, subject: subject) do
+          {:ok, new_state, _result} ->
+            Logger.info("[CertAuthority] CA auto-initialized for zone: #{zone}")
+            new_state
+          {:error, reason} ->
+            Logger.warning("[CertAuthority] CA auto-init failed: #{inspect(reason)}")
+            state
+        end
+      else
+        state
+      end
+
     {:ok, state}
   end
 

@@ -395,7 +395,8 @@ defmodule ZtlpNs.Server do
   defp process_query(<<0x14, 0x03, hostname_len::unsigned-big-16, hostname::binary-size(hostname_len)>>, _source) do
     StructuredLog.info("cert_issue_request", %{hostname: hostname})
 
-    case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname]) do
+    # Use RSA-2048 for service certs to keep response under 8KB UDP limit
+    case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname], key_type: :rsa2048) do
       {:ok, %{cert_pem: cert_pem, key_pem: key_pem, chain_pem: chain_pem}} ->
         StructuredLog.info("cert_issued", %{hostname: hostname})
         <<0x14, 0x03, 0x00,

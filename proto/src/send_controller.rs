@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::congestion::AdvancedCongestionController;
 use crate::error::TransportError;
@@ -139,7 +139,7 @@ impl SendController {
         }
 
         if sent_count > 0 {
-            info!(
+            debug!(
                 "send_controller: flushed {} packets (in_flight={}, cwnd={}, pending={})",
                 sent_count,
                 self.in_flight(),
@@ -196,7 +196,7 @@ impl SendController {
                 // Open the congestion window
                 self.cc.on_ack(newly_acked);
 
-                info!(
+                debug!(
                     "send_controller: ACK seq={}, newly_acked={}, cwnd={:.1}, in_flight={}, pending={}, rtt={:?}",
                     acked_seq,
                     newly_acked,

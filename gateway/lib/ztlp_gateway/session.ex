@@ -216,7 +216,7 @@ defmodule ZtlpGateway.Session do
   @impl true
   def handle_cast({:packet, packet_data, from_addr}, state) do
     Stats.bytes_received(byte_size(packet_data))
-    Logger.info("[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}")
+    Logger.debug("[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}")
 
     # Reset idle timeout on every packet
     state = reset_timeout(state)
@@ -640,7 +640,7 @@ defmodule ZtlpGateway.Session do
   defp handle_data_packet(packet_data, _from_addr, state) do
     case Packet.parse(packet_data) do
       {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}} when type in [:data, :data_compact] ->
-        Logger.info("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} recv_seq=#{state.recv_seq}")
+        Logger.debug("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} recv_seq=#{state.recv_seq}")
         # Replay protection: only accept packets with sequence > last seen
         if seq > state.recv_seq do
           # Decrypt the payload using the initiator→responder key
@@ -659,7 +659,7 @@ defmodule ZtlpGateway.Session do
                 {:noreply, state}
 
               plaintext ->
-                Logger.info("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
+                Logger.debug("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
                 state = %{state | recv_seq: seq, bytes_in: state.bytes_in + byte_size(packet_data)}
                 handle_tunnel_frame(plaintext, state)
             end
@@ -668,12 +668,12 @@ defmodule ZtlpGateway.Session do
             {:noreply, state}
           end
         else
-          Logger.info("[Session] Replayed/out-of-order: seq=#{seq} <= recv_seq=#{state.recv_seq}")
+          Logger.debug("[Session] Replayed/out-of-order: seq=#{seq} <= recv_seq=#{state.recv_seq}")
           {:noreply, state}
         end
 
       {:ok, other} ->
-        Logger.info("[Session] Non-data packet in established phase: type=#{Map.get(other, :type, :unknown)}")
+        Logger.debug("[Session] Non-data packet in established phase: type=#{Map.get(other, :type, :unknown)}")
         {:noreply, state}
 
       {:error, reason} ->
@@ -725,7 +725,7 @@ defmodule ZtlpGateway.Session do
           %{backend_pid: pid} when pid != nil ->
             # Plain stream: forward directly to backend
             if byte_size(payload) > 0 do
-              Logger.info("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+              Logger.debug("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
               Backend.send_data(pid, payload)
             end
             state
@@ -739,15 +739,15 @@ defmodule ZtlpGateway.Session do
     else
       # Legacy single-stream mode: [data_seq(8) | payload]
       <<data_seq::big-64, payload::binary>> = rest
-      Logger.info("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
+      Logger.debug("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
 
       # Reconnect backend if it was closed (e.g. idle timeout from vaultwarden)
       state =
         if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
-          Logger.info("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
+          Logger.debug("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
           case Backend.start_link(state.backend_addr) do
             {:ok, pid} ->
-              Logger.info("[Session] Legacy backend reconnected: #{inspect(pid)}")
+              Logger.debug("[Session] Legacy backend reconnected: #{inspect(pid)}")
               %{state | backend_pid: pid}
             {:error, reason} ->
               Logger.warning("[Session] Legacy backend reconnect failed: #{inspect(reason)}")
@@ -758,7 +758,7 @@ defmodule ZtlpGateway.Session do
         end
 
       if state.backend_pid && byte_size(payload) > 0 do
-        Logger.info("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+        Logger.debug("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
         Backend.send_data(state.backend_pid, payload)
       end
       state = send_ack(state.recv_seq, state)
@@ -840,7 +840,7 @@ defmodule ZtlpGateway.Session do
   defp handle_tunnel_frame(<<@frame_nack, count::big-16, rest::binary>>, state) do
     # NACK from client: list of missing data_seqs to retransmit immediately
     nacked_data_seqs = parse_nack_seqs(rest, count, [])
-    Logger.info("[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}")
+    Logger.debug("[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}")
 
     now = System.monotonic_time(:millisecond)
 
@@ -866,7 +866,7 @@ defmodule ZtlpGateway.Session do
               )
               new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-              Logger.info("[Session] NACK retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} attempt=#{retransmit_count + 1}")
+              Logger.debug("[Session] NACK retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} attempt=#{retransmit_count + 1}")
               send_udp(acc, new_packet)
               updated_buffer = acc.send_buffer
                 |> Map.delete(seq)
@@ -1253,7 +1253,7 @@ defmodule ZtlpGateway.Session do
 
   defp process_pending_packets([], state), do: state
   defp process_pending_packets([{packet_data, from_addr} | rest], state) do
-    Logger.info("[Session] Processing buffered #{byte_size(packet_data)} byte packet")
+    Logger.debug("[Session] Processing buffered #{byte_size(packet_data)} byte packet")
     case handle_data_packet(packet_data, from_addr, state) do
       {:noreply, new_state} ->
         process_pending_packets(rest, new_state)

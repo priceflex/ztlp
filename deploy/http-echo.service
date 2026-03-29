@@ -1,0 +1,14 @@
+[Unit]
+Description=ZTLP HTTP Echo Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/ztlp/http-echo.py
+Restart=always
+RestartSec=5
+User=ubuntu
+WorkingDirectory=/opt/ztlp
+
+[Install]
+WantedBy=multi-user.target

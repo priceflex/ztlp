@@ -1,3 +1,112 @@
+defmodule ZtlpGateway.RecvWindow do
+  @moduledoc """
+  Pure-function sliding receive window for out-of-order packet acceptance.
+
+  Tracks received packet sequence numbers within a fixed-size window and
+  buffers payloads for in-order delivery. This module is used by
+  `ZtlpGateway.Session` for its receive path and is also directly testable.
+  """
+
+  @recv_window_size 256
+
+  @doc "Returns the window size constant."
+  def window_size, do: @recv_window_size
+
+  @doc """
+  Create a new receive window state.
+
+  With no arguments, creates an unanchored window — the base will be set
+  to the first accepted packet's sequence number. Pass an integer base
+  to create a window anchored at that sequence.
+  """
+  def new(base \\ :unset) do
+    %{
+      recv_window: MapSet.new(),
+      recv_window_base: base,
+      recv_buffer: %{}
+    }
+  end
+
+  @doc """
+  Attempt to accept a packet with the given sequence number and data.
+
+  If the window base is `:unset`, the first accepted packet anchors the window.
+
+  Returns:
+  - `{:ok, window_state}` — packet accepted and added to buffer
+  - `{:duplicate, :below_window}` — seq is below the window base (already delivered)
+  - `{:duplicate, :already_received}` — seq is within window but already received
+  - `{:rejected, :beyond_window}` — seq is beyond the window (too far ahead)
+  """
+  def accept(window, seq, data) do
+    # Anchor the window on first packet if unset
+    window =
+      if window.recv_window_base == :unset do
+        %{window | recv_window_base: seq}
+      else
+        window
+      end
+
+    cond do
+      seq < window.recv_window_base ->
+        {:duplicate, :below_window}
+
+      seq >= window.recv_window_base + @recv_window_size ->
+        {:rejected, :beyond_window}
+
+      MapSet.member?(window.recv_window, seq) ->
+        {:duplicate, :already_received}
+
+      true ->
+        {:ok, %{window |
+          recv_window: MapSet.put(window.recv_window, seq),
+          recv_buffer: Map.put(window.recv_buffer, seq, data)
+        }}
+    end
+  end
+
+  @doc """
+  Deliver as many contiguous packets as possible starting from the window base.
+
+  Returns `{delivered_packets, new_window_state}` where `delivered_packets`
+  is an ordered list of `{seq, data}` tuples.
+  """
+  def deliver(window) do
+    deliver_loop(window, [])
+  end
+
+  defp deliver_loop(window, acc) do
+    base = window.recv_window_base
+    if MapSet.member?(window.recv_window, base) do
+      data = window.recv_buffer[base]
+      window = %{window |
+        recv_window: MapSet.delete(window.recv_window, base),
+        recv_buffer: Map.delete(window.recv_buffer, base),
+        recv_window_base: base + 1
+      }
+      deliver_loop(window, [{base, data} | acc])
+    else
+      {Enum.reverse(acc), window}
+    end
+  end
+
+  @doc """
+  Returns the cumulative ACK value: the highest contiguously delivered sequence.
+  This is `recv_window_base - 1`. Returns `nil` if no packets have been delivered
+  (base is still at the initial value or `:unset`).
+  """
+  def cumulative_ack(window, initial_base \\ :unset) do
+    cond do
+      window.recv_window_base == :unset -> nil
+      window.recv_window_base == initial_base -> nil
+      true -> window.recv_window_base - 1
+    end
+  end
+
+  @doc "Returns the number of buffered (out-of-order) packets."
+  def buffered_count(window), do: map_size(window.recv_buffer)
+end
+
 defmodule ZtlpGateway.Session do
   @moduledoc """
   Per-session GenServer for the ZTLP Gateway.
@@ -50,6 +159,11 @@ defmodule ZtlpGateway.Session do
   # ---------------------------------------------------------------------------
   # Constants
   # ---------------------------------------------------------------------------
+
+  # Sliding receive window size for out-of-order packet acceptance.
+  # Packets within [recv_window_base, recv_window_base + window_size) are
+  # accepted and buffered; delivered to the backend in sequence order.
+  @recv_window_size 256
 
   # Tunnel frame types (must match Rust tunnel.rs constants)
   @frame_data 0x00
@@ -169,9 +283,14 @@ defmodule ZtlpGateway.Session do
       i2r_key: nil,
       # gateway→client encrypt key
       r2i_key: nil,
-      # Sequence numbers for replay protection
-      # recv_seq starts at -1 so that seq=0 (first data packet) passes the > check
-      recv_seq: -1,
+      # Sliding receive window for out-of-order packet acceptance.
+      # Replaces strict recv_seq > check with a window that buffers and
+      # reorders packets — critical for cellular where reordering is common.
+      # recv_window_base starts as :unset; the first accepted data packet
+      # anchors the window at that sequence number.
+      recv_window: MapSet.new(),
+      recv_window_base: :unset,
+      recv_buffer: %{},
       send_seq: 0,
       # Tunnel framing: data_seq for ordered reassembly
       send_data_seq: 0,
@@ -489,6 +608,83 @@ defmodule ZtlpGateway.Session do
     {:noreply, %{state | retransmit_timer_ref: retransmit_timer_ref}}
   end
 
+  # ── Async backend connect results (mux streams) ──
+
+  # Backend connection succeeded — transition stream to :connected, flush buffer
+  def handle_info({:backend_connect_result, stream_id, {:ok, pid}}, state) do
+    case Map.get(state.streams, stream_id) do
+      %{state: :connecting, connect_timeout_ref: tref} = stream ->
+        # Cancel the connect timeout
+        if tref, do: Process.cancel_timer(tref)
+
+        # Link the backend to this session (it was unlinked from the spawner)
+        Process.link(pid)
+
+        Logger.info("[Session] Stream #{stream_id} connected, flushing #{length(stream.buffer)} buffered chunks")
+
+        # Flush buffered data to the backend (buffer is prepend-order, reverse for FIFO)
+        flush_stream_buffer(stream, pid)
+
+        updated = %{stream |
+          state: :connected,
+          backend_pid: pid,
+          buffer: [],
+          connect_timeout_ref: nil
+        }
+        streams = Map.put(state.streams, stream_id, updated)
+
+        if updated.tls_creds do
+          Logger.info("[Session] Stream #{stream_id} opened with TLS termination (service=#{updated.service}), total_streams=#{map_size(streams)}")
+        else
+          Logger.info("[Session] Stream #{stream_id} opened (service=#{updated.service}), total_streams=#{map_size(streams)}")
+        end
+
+        {:noreply, %{state | streams: streams}}
+
+      _ ->
+        # Stream was already closed/removed (e.g. client sent FRAME_CLOSE during connect).
+        # Close the backend we just connected since nobody needs it.
+        if Process.alive?(pid), do: BackendPool.close(pid)
+        Logger.info("[Session] Stream #{stream_id} connect result arrived but stream already gone, closing backend")
+        {:noreply, state}
+    end
+  end
+
+  # Backend connection failed — send FRAME_CLOSE to client, remove stream
+  def handle_info({:backend_connect_result, stream_id, {:error, reason}}, state) do
+    case Map.get(state.streams, stream_id) do
+      %{state: :connecting, connect_timeout_ref: tref} ->
+        if tref, do: Process.cancel_timer(tref)
+        Logger.warning("[Session] Stream #{stream_id} backend connect failed: #{inspect(reason)}")
+        send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+        streams = Map.delete(state.streams, stream_id)
+        state = %{state | send_queue: send_queue, streams: streams}
+        state = flush_send_queue(state)
+        {:noreply, state}
+
+      _ ->
+        # Stream already gone — nothing to do
+        {:noreply, state}
+    end
+  end
+
+  # Connect timeout expired — close the stream if still connecting
+  def handle_info({:connect_timeout, stream_id}, state) do
+    case Map.get(state.streams, stream_id) do
+      %{state: :connecting} ->
+        Logger.warning("[Session] Stream #{stream_id} connect timeout (10s), sending FRAME_CLOSE")
+        send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+        streams = Map.delete(state.streams, stream_id)
+        state = %{state | send_queue: send_queue, streams: streams}
+        state = flush_send_queue(state)
+        {:noreply, state}
+
+      _ ->
+        # Stream already connected or gone — ignore stale timeout
+        {:noreply, state}
+    end
+  end
+
   # Ignore stale timers
   def handle_info(_msg, state) do
     {:noreply, state}
@@ -642,36 +838,37 @@ defmodule ZtlpGateway.Session do
   defp handle_data_packet(packet_data, _from_addr, state) do
     case Packet.parse(packet_data) do
       {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}} when type in [:data, :data_compact] ->
-        Logger.debug("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} recv_seq=#{state.recv_seq}")
-        # Replay protection: only accept packets with sequence > last seen
-        if seq > state.recv_seq do
-          # Decrypt the payload using the initiator→responder key
-          # The nonce is derived from the sequence number
-          nonce = <<0::32, seq::little-64>>
+        Logger.debug("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} window_base=#{state.recv_window_base}")
 
-          # The encrypted payload is ciphertext + 16-byte tag appended
-          if byte_size(encrypted_payload) >= 16 do
-            ct_len = byte_size(encrypted_payload) - 16
-            ct = binary_part(encrypted_payload, 0, ct_len)
-            tag = binary_part(encrypted_payload, ct_len, 16)
-
-            case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
-              :error ->
-                Logger.warning("[Session] Decrypt FAILED for seq #{seq}, key_len=#{byte_size(state.i2r_key)}, ct_len=#{ct_len}, tag_len=#{byte_size(tag)}")
-                {:noreply, state}
-
-              plaintext ->
-                Logger.debug("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
-                state = %{state | recv_seq: seq, bytes_in: state.bytes_in + byte_size(packet_data)}
-                handle_tunnel_frame(plaintext, state)
-            end
+        # Sliding receive window: accept packets within
+        # [recv_window_base, recv_window_base + @recv_window_size).
+        # On the first data packet, the window base is anchored to that seq.
+        state =
+          if state.recv_window_base == :unset do
+            %{state | recv_window_base: seq}
           else
-            Logger.warning("[Session] Payload too short: #{byte_size(encrypted_payload)} bytes")
-            {:noreply, state}
+            state
           end
-        else
-          Logger.debug("[Session] Replayed/out-of-order: seq=#{seq} <= recv_seq=#{state.recv_seq}")
-          {:noreply, state}
+
+        cond do
+          # Already delivered (below window base)
+          seq < state.recv_window_base ->
+            Logger.debug("[Session] Duplicate seq=#{seq} below base=#{state.recv_window_base}")
+            {:noreply, state}
+
+          # Beyond window (too far ahead)
+          seq >= state.recv_window_base + @recv_window_size ->
+            Logger.debug("[Session] Seq=#{seq} beyond window max=#{state.recv_window_base + @recv_window_size - 1}")
+            {:noreply, state}
+
+          # Already received (within window but duplicate)
+          MapSet.member?(state.recv_window, seq) ->
+            Logger.debug("[Session] Duplicate seq=#{seq} already in window")
+            {:noreply, state}
+
+          # Within window, not yet received — decrypt and accept
+          true ->
+            decrypt_and_accept(packet_data, seq, encrypted_payload, state)
         end
 
       {:ok, other} ->
@@ -681,6 +878,82 @@ defmodule ZtlpGateway.Session do
       {:error, reason} ->
         Logger.warning("[Session] Packet parse failed: #{inspect(reason)}")
         {:noreply, state}
+    end
+  end
+
+  # Decrypt a packet and, on success, add it to the receive window buffer.
+  # Then deliver as many in-order packets as possible.
+  defp decrypt_and_accept(packet_data, seq, encrypted_payload, state) do
+    # Decrypt the payload using the initiator→responder key
+    # The nonce is derived from the packet sequence number
+    nonce = <<0::32, seq::little-64>>
+
+    # The encrypted payload is ciphertext + 16-byte tag appended
+    if byte_size(encrypted_payload) >= 16 do
+      ct_len = byte_size(encrypted_payload) - 16
+      ct = binary_part(encrypted_payload, 0, ct_len)
+      tag = binary_part(encrypted_payload, ct_len, 16)
+
+      case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
+        :error ->
+          Logger.warning("[Session] Decrypt FAILED for seq #{seq}, key_len=#{byte_size(state.i2r_key)}, ct_len=#{ct_len}, tag_len=#{byte_size(tag)}")
+          {:noreply, state}
+
+        plaintext ->
+          Logger.debug("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
+          # Accept: add to window and buffer
+          state = %{state |
+            recv_window: MapSet.put(state.recv_window, seq),
+            recv_buffer: Map.put(state.recv_buffer, seq, plaintext),
+            bytes_in: state.bytes_in + byte_size(packet_data)
+          }
+          # Deliver as many contiguous packets as possible
+          deliver_recv_window(state)
+      end
+    else
+      Logger.warning("[Session] Payload too short: #{byte_size(encrypted_payload)} bytes")
+      {:noreply, state}
+    end
+  end
+
+  # Deliver buffered packets in sequence order starting from recv_window_base.
+  # Each delivered packet is passed to handle_tunnel_frame/2.
+  # After delivery, sends a cumulative ACK for the highest contiguous seq.
+  defp deliver_recv_window(state) do
+    case deliver_recv_window_loop(state, false) do
+      {:stop, reason, stop_state} ->
+        {:stop, reason, stop_state}
+
+      {:ok, new_state, true} ->
+        # Delivered at least one packet — send cumulative ACK
+        new_state = send_ack(new_state.recv_window_base - 1, new_state)
+        {:noreply, new_state}
+
+      {:ok, new_state, false} ->
+        # No contiguous delivery possible (gap at base), packet is buffered
+        {:noreply, new_state}
+    end
+  end
+
+  defp deliver_recv_window_loop(state, delivered_any) do
+    base = state.recv_window_base
+    if MapSet.member?(state.recv_window, base) do
+      plaintext = state.recv_buffer[base]
+      # Advance window BEFORE delivering, so handle_tunnel_frame sees updated state
+      state = %{state |
+        recv_window: MapSet.delete(state.recv_window, base),
+        recv_buffer: Map.delete(state.recv_buffer, base),
+        recv_window_base: base + 1
+      }
+      case handle_tunnel_frame(plaintext, state) do
+        {:noreply, new_state} ->
+          deliver_recv_window_loop(new_state, true)
+
+        {:stop, reason, stop_state} ->
+          {:stop, reason, stop_state}
+      end
+    else
+      {:ok, state, delivered_any}
     end
   end
 
@@ -724,6 +997,16 @@ defmodule ZtlpGateway.Session do
                 state
             end
 
+          %{state: :connecting, buffer: buffer} = stream ->
+            # Stream is still connecting — buffer data for flush on connect
+            if byte_size(payload) > 0 do
+              Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect")
+              updated = %{stream | buffer: [payload | buffer]}
+              %{state | streams: Map.put(state.streams, stream_id, updated)}
+            else
+              state
+            end
+
           %{backend_pid: pid} when pid != nil ->
             # Plain stream: forward directly to backend
             if byte_size(payload) > 0 do
@@ -736,7 +1019,7 @@ defmodule ZtlpGateway.Session do
             Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
             state
         end
-      state = send_ack(state.recv_seq, state)
+      # ACK is sent by deliver_recv_window after in-order delivery
       {:noreply, state}
     else
       # Legacy single-stream mode: [data_seq(8) | payload]
@@ -763,7 +1046,7 @@ defmodule ZtlpGateway.Session do
         Logger.debug("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
         Backend.send_data(state.backend_pid, payload)
       end
-      state = send_ack(state.recv_seq, state)
+      # ACK is sent by deliver_recv_window after in-order delivery
       {:noreply, state}
     end
   end
@@ -948,8 +1231,14 @@ defmodule ZtlpGateway.Session do
   defp handle_tunnel_frame(<<@frame_close, stream_id::big-32>>, state) do
     Logger.info("[Session] FRAME_CLOSE stream_id=#{stream_id}")
     case Map.get(state.streams, stream_id) do
+      %{state: :connecting, connect_timeout_ref: tref} ->
+        # Cancel connect timeout; the spawned connect will send a result
+        # message that we'll ignore since the stream is already removed.
+        if tref, do: Process.cancel_timer(tref)
+
       %{backend_pid: pid} when pid != nil ->
         if Process.alive?(pid), do: Backend.close(pid)
+
       _ ->
         :ok
     end
@@ -981,31 +1270,39 @@ defmodule ZtlpGateway.Session do
           :error -> nil
         end
 
-        case Backend.start_link({host, port, self(), stream_id}) do
-          {:ok, pid} ->
-            stream_state = %{
-              backend_pid: pid,
-              tls_state: if(tls_creds, do: :pending_handshake, else: nil),
-              tls_creds: tls_creds,
-              tls_socket: nil,
-              service: service_name
-            }
-            streams = Map.put(state.streams, stream_id, stream_state)
-            if tls_creds do
-              Logger.info("[Session] Stream #{stream_id} opened with TLS termination (service=#{service_name}), total_streams=#{map_size(streams)}")
-            else
-              Logger.info("[Session] Stream #{stream_id} opened (service=#{service_name}), total_streams=#{map_size(streams)}")
-            end
-            {:noreply, %{state | streams: streams}}
+        # Async backend connection: spawn a process to connect without
+        # blocking the session GenServer. Data arriving for this stream
+        # during connection is buffered and flushed on success.
+        #
+        # Backend.start_link links to the calling process, so we unlink
+        # the backend from the short-lived spawned process before it exits.
+        # The session will re-link when handling the connect result.
+        session_pid = self()
+        spawn(fn ->
+          result = Backend.start_link({host, port, session_pid, stream_id})
+          case result do
+            {:ok, pid} -> Process.unlink(pid)
+            _ -> :ok
+          end
+          send(session_pid, {:backend_connect_result, stream_id, result})
+        end)
 
-          {:error, reason} ->
-            Logger.warning("[Session] Stream #{stream_id} backend connect failed: #{inspect(reason)}")
-            # Send FRAME_CLOSE back to client for this stream
-            send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
-            state = %{state | send_queue: send_queue}
-            state = flush_send_queue(state)
-            {:noreply, state}
-        end
+        # 10-second connect timeout prevents hanging streams
+        timeout_ref = Process.send_after(self(), {:connect_timeout, stream_id}, 10_000)
+
+        stream_state = %{
+          state: :connecting,
+          backend_pid: nil,
+          buffer: [],
+          connect_timeout_ref: timeout_ref,
+          tls_state: if(tls_creds, do: :pending_handshake, else: nil),
+          tls_creds: tls_creds,
+          tls_socket: nil,
+          service: service_name
+        }
+        streams = Map.put(state.streams, stream_id, stream_state)
+        Logger.info("[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}")
+        {:noreply, %{state | streams: streams}}
 
       :error ->
         Logger.warning("[Session] No backend for service #{service_name}")
@@ -1230,6 +1527,15 @@ defmodule ZtlpGateway.Session do
     end)
   end
 
+  # Flush buffered data accumulated during :connecting state to the backend.
+  # Buffer is a list with most recent data prepended (O(1) append), so we
+  # reverse to restore original order before sending.
+  defp flush_stream_buffer(stream, pid) do
+    stream.buffer
+    |> Enum.reverse()
+    |> Enum.each(fn data -> Backend.send_data(pid, data) end)
+  end
+
   defp find_backend(backends, service) do
     case Enum.find(backends, fn b -> b.name == service end) do
       nil ->
@@ -1266,9 +1572,13 @@ defmodule ZtlpGateway.Session do
   end
 
   defp terminate_session(state, reason) do
-    # Close all multiplexed stream backends
-    Enum.each(state.streams, fn {_sid, %{backend_pid: pid}} ->
+    # Close all multiplexed stream backends (including :connecting streams with nil backend_pid)
+    Enum.each(state.streams, fn {_sid, stream} ->
+      pid = Map.get(stream, :backend_pid)
       if pid && Process.alive?(pid), do: Backend.close(pid)
+      # Cancel any pending connect timeout
+      tref = Map.get(stream, :connect_timeout_ref)
+      if tref, do: Process.cancel_timer(tref)
     end)
 
     # Send FIN to client if we have transport keys and not already draining

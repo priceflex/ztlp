@@ -101,6 +101,17 @@ pub enum TransportError {
 
     #[error("address parse error: {0}")]
     AddrParse(#[from] std::net::AddrParseError),
+
+    #[error("gateway pin mismatch: expected [{expected_hex}], got {got_hex}", expected_hex = display_pin_list(.expected), got_hex = hex::encode(.got))]
+    PinMismatch {
+        expected: Vec<[u8; 32]>,
+        got: Vec<u8>,
+    },
+}
+
+/// Format a list of pinned keys as comma-separated hex strings.
+fn display_pin_list(keys: &[[u8; 32]]) -> String {
+    keys.iter().map(hex::encode).collect::<Vec<_>>().join(", ")
 }
 
 /// Identity management errors.

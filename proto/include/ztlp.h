@@ -897,6 +897,37 @@ char *ztlp_ns_fetch_ca_chain_pem(
     uint32_t timeout_ms
 );
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Gateway Key Pinning (Certificate Pinning)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Pin a gateway's static Noise public key.
+ *
+ * Stores the key in ~/.ztlp/config.toml so that subsequent connections
+ * will reject gateways whose static key doesn't match any pinned key.
+ * Multiple keys can be pinned for key rotation support.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return ZTLP_OK on success, ZTLP_INVALID_ARGUMENT on bad input,
+ *         ZTLP_INTERNAL_ERROR on I/O failure.
+ */
+int32_t ztlp_pin_gateway_key(const char *key_hex);
+
+/**
+ * @brief Verify a gateway's static key against pinned keys.
+ *
+ * Checks if the given key matches any key in the pinned_gateway_keys
+ * configuration list.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return 1 if key matches (or no keys pinned), 0 if no match,
+ *         negative on error.
+ */
+int32_t ztlp_verify_gateway_pin(const char *key_hex);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

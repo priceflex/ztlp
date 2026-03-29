@@ -81,6 +81,9 @@ struct Config {
     bind: Option<String>,
     #[serde(default)]
     transport: Option<TransportConfig>,
+    /// Pinned gateway static public keys (base64-encoded).
+    #[serde(default)]
+    pinned_gateway_keys: Vec<String>,
 }
 
 /// Transport-layer configuration.

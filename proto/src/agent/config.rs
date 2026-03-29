@@ -3,7 +3,7 @@
 //! The agent config extends the existing `~/.ztlp/config.toml` CLI config
 //! with agent-specific settings (DNS, tunnels, renewal, health).
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -33,6 +33,9 @@ pub struct AgentConfig {
 
     /// Local TLS termination settings.
     pub tls: TlsConfig,
+
+    /// Gateway pinning settings.
+    pub gateway: GatewayPinConfig,
 }
 
 /// Identity file location.
@@ -191,6 +194,66 @@ pub struct LogConfig {
 
     /// Structured JSON logging.
     pub json: bool,
+}
+
+/// Gateway certificate/key pinning configuration.
+///
+/// When `pinned_keys` is non-empty, connections are only allowed to gateways
+/// whose static Noise public key matches one of these pins. This prevents
+/// MITM attacks even if the Noise_XX handshake succeeds with an unknown gateway.
+///
+/// Keys are stored as base64-encoded 32-byte X25519 public keys.
+///
+/// ```toml
+/// [gateway]
+/// pinned_keys = [
+///   "base64_encoded_key_1",
+///   "base64_encoded_key_2"   # for key rotation
+/// ]
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct GatewayPinConfig {
+    /// Pinned gateway static public keys (base64-encoded).
+    /// If non-empty, connections are only allowed to gateways whose
+    /// static Noise key matches one of these pins.
+    #[serde(default, deserialize_with = "deserialize_pinned_keys")]
+    pub pinned_keys: Vec<[u8; 32]>,
+}
+
+/// Deserialize pinned keys from a list of base64-encoded strings.
+fn deserialize_pinned_keys<'de, D>(deserializer: D) -> Result<Vec<[u8; 32]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use base64::Engine;
+    use serde::de::Error;
+
+    let strings: Vec<String> = Vec::deserialize(deserializer)?;
+    let mut keys = Vec::with_capacity(strings.len());
+
+    for s in &strings {
+        // Try base64 standard, then URL-safe, then hex
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(s)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s))
+            .or_else(|_| hex::decode(s).map_err(|_| base64::DecodeError::InvalidLength(0)))
+            .map_err(|e| Error::custom(format!("invalid pinned key encoding '{}': {}", s, e)))?;
+
+        if bytes.len() != 32 {
+            return Err(Error::custom(format!(
+                "pinned key must be 32 bytes, got {} bytes from '{}'",
+                bytes.len(),
+                s,
+            )));
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        keys.push(key);
+    }
+
+    Ok(keys)
 }
 
 // ── Default implementations ─────────────────────────────────────────────────

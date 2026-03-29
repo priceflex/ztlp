@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::error::HandshakeError;
+use crate::error::{HandshakeError, TransportError};
 use crate::identity::{NodeId, NodeIdentity};
 use crate::packet::{HandshakeHeader, MsgType, SessionId};
 use crate::pipeline::compute_header_auth_tag;
@@ -264,6 +264,51 @@ impl HandshakeContext {
     /// Returns `None` if the remote static key is not yet available.
     pub fn remote_static_hex(&self) -> Option<String> {
         self.noise.get_remote_static().map(hex::encode)
+    }
+
+    /// Get the remote peer's static X25519 public key as raw bytes.
+    /// Returns `None` if the remote static key is not yet available.
+    pub fn remote_static_bytes(&self) -> Option<&[u8]> {
+        self.noise.get_remote_static()
+    }
+
+    /// Verify the remote gateway's static key against a set of pinned keys.
+    ///
+    /// If `pinned_keys` is empty, all connections are accepted (backward compatible).
+    /// If `pinned_keys` is non-empty, the remote static key must match at least one
+    /// of the pinned keys. This supports key rotation by allowing multiple pins.
+    ///
+    /// Call this after the handshake completes (i.e., after reading message 2 for the
+    /// initiator) but before finalizing the session.
+    ///
+    /// Returns `Ok(())` if the pin check passes, or `Err(TransportError::PinMismatch)`
+    /// if the remote key doesn't match any pinned key.
+    pub fn verify_gateway_pin(&self, pinned_keys: &[[u8; 32]]) -> Result<(), TransportError> {
+        if pinned_keys.is_empty() {
+            return Ok(());
+        }
+
+        let remote_static = match self.noise.get_remote_static() {
+            Some(key) => key,
+            None => {
+                return Err(TransportError::PinMismatch {
+                    expected: pinned_keys.to_vec(),
+                    got: Vec::new(),
+                });
+            }
+        };
+
+        if pinned_keys
+            .iter()
+            .any(|pin| pin.as_slice() == remote_static)
+        {
+            Ok(())
+        } else {
+            Err(TransportError::PinMismatch {
+                expected: pinned_keys.to_vec(),
+                got: remote_static.to_vec(),
+            })
+        }
     }
 
     /// Finalize the handshake — derive transport keys and create session state.

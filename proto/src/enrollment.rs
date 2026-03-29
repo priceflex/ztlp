@@ -30,6 +30,7 @@
 use blake2::digest::Mac;
 use blake2::Blake2sMac256;
 use rand::RngCore;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current enrollment token version.
@@ -496,6 +497,93 @@ pub fn generate_enrollment_secret() -> [u8; 32] {
     let mut secret = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut secret);
     secret
+}
+
+/// Pin a gateway's static Noise public key to the config file.
+///
+/// Reads the existing config, adds the key (base64-encoded) to the
+/// `pinned_gateway_keys` list if not already present, and writes it back.
+///
+/// This is called after a successful first enrollment to bind the client
+/// to the specific gateway it enrolled with. Subsequent connections will
+/// reject gateways with different static keys.
+pub fn pin_gateway_key(
+    config_path: &Path,
+    key: &[u8; 32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+
+    // Read existing config content (or start fresh)
+    let contents = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+
+    // Check if this key is already pinned
+    if contents.contains(&encoded) {
+        return Ok(());
+    }
+
+    // Parse existing pinned_gateway_keys if present
+    let mut existing_keys: Vec<String> = Vec::new();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("pinned_gateway_keys") {
+            // Parse the array value — handle simple cases
+            if let Some(arr_start) = trimmed.find('[') {
+                let arr_str = &trimmed[arr_start..];
+                if let Some(arr_end) = arr_str.find(']') {
+                    let inner = &arr_str[1..arr_end];
+                    for item in inner.split(',') {
+                        let key_str = item.trim().trim_matches('"').trim();
+                        if !key_str.is_empty() {
+                            existing_keys.push(key_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    existing_keys.push(encoded);
+
+    // Build the new pinned_gateway_keys line
+    let keys_toml = format!(
+        "pinned_gateway_keys = [{}]",
+        existing_keys
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // Replace or append
+    let new_contents = if contents.contains("pinned_gateway_keys") {
+        let mut result = String::new();
+        for line in contents.lines() {
+            if line.trim().starts_with("pinned_gateway_keys") {
+                result.push_str(&keys_toml);
+            } else {
+                result.push_str(line);
+            }
+            result.push('\n');
+        }
+        result
+    } else {
+        let mut result = contents;
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&keys_toml);
+        result.push('\n');
+        result
+    };
+
+    std::fs::write(config_path, new_contents)?;
+    Ok(())
 }
 
 /// Parse a duration string like "24h", "7d", "30m", "3600s" into seconds.

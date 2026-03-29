@@ -139,7 +139,8 @@ struct ActiveSession {
     upload_ack_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
     /// Channel for packet router actions (OpenStream, SendData, CloseStream).
     /// The async router_action_task processes these and sends ZTLP mux frames.
-    router_action_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::packet_router::RouterAction>>,
+    router_action_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::packet_router::RouterAction>>,
     // Cached C strings for accessors
     session_id_str: CString,
     peer_node_id_str: CString,
@@ -1328,9 +1329,7 @@ async fn recv_loop(
                         let has_vip = guard.vip_proxy.is_some();
                         let has_router = guard.packet_router.is_some();
 
-                        while let Some((sid, data)) =
-                            reassembly_buf.remove(&vip_next_deliver_seq)
-                        {
+                        while let Some((sid, data)) = reassembly_buf.remove(&vip_next_deliver_seq) {
                             let mut dispatched = false;
 
                             // Try VIP proxy dispatcher first
@@ -2293,7 +2292,11 @@ pub extern "C" fn ztlp_ns_fetch_ca_root(
         }
     };
 
-    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+    let timeout = if timeout_ms == 0 {
+        5000
+    } else {
+        timeout_ms as u64
+    };
 
     // Use a dedicated thread to avoid nesting tokio runtimes
     let (tx, rx) = std::sync::mpsc::channel();
@@ -2329,7 +2332,10 @@ pub extern "C" fn ztlp_ns_fetch_ca_root(
                 return Err("response too short".to_string());
             }
             if buf[0] != 0x14 || buf[1] != 0x01 {
-                return Err(format!("unexpected response type: 0x{:02x}{:02x}", buf[0], buf[1]));
+                return Err(format!(
+                    "unexpected response type: 0x{:02x}{:02x}",
+                    buf[0], buf[1]
+                ));
             }
             if buf[2] == 0x01 {
                 return Err("CA not initialized on NS server".to_string());
@@ -2422,7 +2428,11 @@ pub extern "C" fn ztlp_ns_fetch_ca_chain_pem(
         }
     };
 
-    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+    let timeout = if timeout_ms == 0 {
+        5000
+    } else {
+        timeout_ms as u64
+    };
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2456,7 +2466,10 @@ pub extern "C" fn ztlp_ns_fetch_ca_chain_pem(
                 return Err("response too short".to_string());
             }
             if buf[0] != 0x14 || buf[1] != 0x02 {
-                return Err(format!("unexpected response type: 0x{:02x}{:02x}", buf[0], buf[1]));
+                return Err(format!(
+                    "unexpected response type: 0x{:02x}{:02x}",
+                    buf[0], buf[1]
+                ));
             }
             if buf[2] == 0x01 {
                 return Err("CA not initialized on NS server".to_string());
@@ -2576,16 +2589,12 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
                         // FRAME_OPEN with service name:
                         // [0x06 | stream_id(4 BE) | service_name_len(1) | service_name]
                         let name_bytes = service_name.as_bytes();
-                        let mut frame =
-                            Vec::with_capacity(5 + 1 + name_bytes.len());
+                        let mut frame = Vec::with_capacity(5 + 1 + name_bytes.len());
                         frame.push(FRAME_OPEN);
                         frame.extend_from_slice(&stream_id.to_be_bytes());
                         frame.push(name_bytes.len() as u8);
                         frame.extend_from_slice(name_bytes);
-                        if let Err(e) = transport
-                            .send_data(session_id, &frame, peer_addr)
-                            .await
-                        {
+                        if let Err(e) = transport.send_data(session_id, &frame, peer_addr).await {
                             tracing::warn!(
                                 "router: failed to send OPEN for stream {}: {}",
                                 stream_id,
@@ -2607,9 +2616,7 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
                             frame.push(FRAME_DATA);
                             frame.extend_from_slice(&stream_id.to_be_bytes());
                             frame.extend_from_slice(chunk);
-                            if let Err(e) = transport
-                                .send_data(session_id, &frame, peer_addr)
-                                .await
+                            if let Err(e) = transport.send_data(session_id, &frame, peer_addr).await
                             {
                                 tracing::warn!(
                                     "router: failed to send DATA for stream {}: {}",
@@ -2624,9 +2631,7 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
                         let mut frame = Vec::with_capacity(5);
                         frame.push(FRAME_CLOSE);
                         frame.extend_from_slice(&stream_id.to_be_bytes());
-                        let _ = transport
-                            .send_data(session_id, &frame, peer_addr)
-                            .await;
+                        let _ = transport.send_data(session_id, &frame, peer_addr).await;
                         tracing::info!("router: sent CLOSE for stream {}", stream_id);
                     }
                 }
@@ -2634,9 +2639,14 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
             tracing::info!("router: action processing task exiting");
         });
 
-        tracing::info!("router: initialized with tunnel_addr={}, action task spawned", addr);
+        tracing::info!(
+            "router: initialized with tunnel_addr={}, action task spawned",
+            addr
+        );
     } else {
-        tracing::warn!("router: initialized but no active session — actions won't be sent until connect");
+        tracing::warn!(
+            "router: initialized but no active session — actions won't be sent until connect"
+        );
     }
 
     ZtlpResult::Ok as i32
@@ -2842,6 +2852,158 @@ pub extern "C" fn ztlp_router_stop(client: *mut ZtlpClient) -> i32 {
     };
     guard.packet_router = None;
     ZtlpResult::Ok as i32
+}
+
+// ── Gateway Key Pinning ─────────────────────────────────────────────────
+
+/// Pin a gateway's static Noise public key for certificate pinning.
+///
+/// The key is stored in the default config file (`~/.ztlp/config.toml`).
+/// After pinning, subsequent connections will reject gateways whose
+/// static key doesn't match any pinned key.
+///
+/// # Parameters
+/// - `key_hex`: Hex-encoded 32-byte X25519 public key (64 hex chars).
+///
+/// # Returns
+/// - `ZTLP_OK` on success
+/// - `ZTLP_INVALID_ARGUMENT` if `key_hex` is null, not valid hex, or wrong length
+/// - `ZTLP_INTERNAL_ERROR` on file I/O failure
+#[no_mangle]
+pub extern "C" fn ztlp_pin_gateway_key(key_hex: *const c_char) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if key_hex.is_null() {
+            set_last_error("key_hex is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        let key_str = match unsafe { CStr::from_ptr(key_hex) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("key_hex is not valid UTF-8");
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+
+        if key_str.len() > MAX_FFI_ADDRESS_LEN {
+            set_last_error("key_hex too long");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        let key_bytes = match hex::decode(key_str) {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(&format!("invalid hex: {}", e));
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+
+        if key_bytes.len() != 32 {
+            set_last_error(&format!(
+                "key must be 32 bytes, got {} bytes",
+                key_bytes.len()
+            ));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+
+        let config_path = match dirs::home_dir() {
+            Some(h) => h.join(".ztlp").join("config.toml"),
+            None => {
+                set_last_error("could not determine home directory");
+                return ZtlpResult::InternalError as i32;
+            }
+        };
+
+        match crate::enrollment::pin_gateway_key(&config_path, &key) {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!("failed to pin key: {}", e));
+                ZtlpResult::InternalError as i32
+            }
+        }
+    }));
+
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_pin_gateway_key");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+/// Verify a gateway's static key against pinned keys.
+///
+/// Checks if the given hex-encoded key matches any key in the config file's
+/// `pinned_gateway_keys` list.
+///
+/// # Parameters
+/// - `key_hex`: Hex-encoded 32-byte X25519 public key (64 hex chars).
+///
+/// # Returns
+/// - `1` if the key matches a pinned key (or no keys are pinned)
+/// - `0` if the key does NOT match any pinned key
+/// - Negative error code on invalid input
+#[no_mangle]
+pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if key_hex.is_null() {
+            set_last_error("key_hex is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        let key_str = match unsafe { CStr::from_ptr(key_hex) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("key_hex is not valid UTF-8");
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+
+        if key_str.len() > MAX_FFI_ADDRESS_LEN {
+            set_last_error("key_hex too long");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        let key_bytes = match hex::decode(key_str) {
+            Ok(b) => b,
+            Err(e) => {
+                set_last_error(&format!("invalid hex: {}", e));
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+
+        if key_bytes.len() != 32 {
+            set_last_error(&format!(
+                "key must be 32 bytes, got {} bytes",
+                key_bytes.len()
+            ));
+            return ZtlpResult::InvalidArgument as i32;
+        }
+
+        // Load pinned keys from agent config
+        let agent_config = crate::agent::config::AgentConfig::load();
+        let pinned_keys = &agent_config.gateway.pinned_keys;
+
+        if pinned_keys.is_empty() {
+            // No pins configured — accept all
+            return 1;
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+
+        if pinned_keys.contains(&key) {
+            1 // Match found
+        } else {
+            0 // No match
+        }
+    }));
+
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_verify_gateway_pin");
+        ZtlpResult::InternalError as i32
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

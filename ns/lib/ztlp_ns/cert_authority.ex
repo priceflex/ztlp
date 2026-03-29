@@ -30,7 +30,7 @@ defmodule ZtlpNs.CertAuthority do
   use GenServer
   require Logger
 
-  @ca_dir_name "ca"
+  alias ZtlpNs.Config
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -480,10 +480,10 @@ defmodule ZtlpNs.CertAuthority do
   defp generate_keypair(_), do: ZtlpNs.X509.generate_rsa_keypair()
 
   defp default_ca_dir do
+    # Check legacy ZTLP_CA_DIR env var first for backward compatibility,
+    # then delegate to Config.ca_data_dir/0 which reads ZTLP_CA_DATA_DIR.
     case System.get_env("ZTLP_CA_DIR") do
-      nil ->
-        home = System.user_home!()
-        Path.join([home, ".ztlp", @ca_dir_name])
+      nil -> Config.ca_data_dir()
       dir -> dir
     end
   end

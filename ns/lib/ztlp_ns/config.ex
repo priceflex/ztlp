@@ -72,6 +72,27 @@ defmodule ZtlpNs.Config do
     end
   end
 
+  @doc """
+  Directory for CA key/cert storage.
+
+  Defaults to `~/.ztlp/ca`. Override with `ZTLP_CA_DATA_DIR` env var.
+  For production Docker deployments, set to a path on a persistent volume
+  (e.g., `/app/data/ca`) and mount with `-v ztlp-ns-data:/app/data`.
+  """
+  @spec ca_data_dir() :: String.t()
+  def ca_data_dir do
+    case System.get_env("ZTLP_CA_DATA_DIR") do
+      nil ->
+        case Application.get_env(:ztlp_ns, :ca_data_dir) do
+          nil ->
+            home = System.user_home!()
+            Path.join([home, ".ztlp", "ca"])
+          dir -> dir
+        end
+      dir -> dir
+    end
+  end
+
   @doc "Per-IP query rate limit (queries per second)."
   @spec rate_limit_queries_per_second() :: non_neg_integer()
   def rate_limit_queries_per_second do

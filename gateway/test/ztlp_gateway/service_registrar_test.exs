@@ -176,12 +176,16 @@ defmodule ZtlpGateway.ServiceRegistrarTest do
 
       {:ok, pid} = ServiceRegistrar.start_link(name: name)
 
-      # Accept all incoming packets (zone bootstrap + SVC registrations)
+      # Accept all incoming packets (zone KEY lookup + bootstrap + SVC registrations)
       # and respond with success
       accept_all = fn accept_all ->
         case :gen_udp.recv(ns_socket, 0, 500) do
-          {:ok, {_, port, packet}} ->
-            # Verify it's a REGISTER packet
+          {:ok, {_, port, <<0x01, _::binary>>}} ->
+            # Zone KEY lookup — respond with "not found" to trigger bootstrap
+            :gen_udp.send(ns_socket, {127, 0, 0, 1}, port, <<0xFF>>)
+            accept_all.(accept_all)
+          {:ok, {_, port, <<0x09, _::binary>> = packet}} ->
+            # REGISTER packet (zone bootstrap or SVC registration)
             assert <<0x09, _::binary>> = packet
             :gen_udp.send(ns_socket, {127, 0, 0, 1}, port, <<0x06>>)
             accept_all.(accept_all)

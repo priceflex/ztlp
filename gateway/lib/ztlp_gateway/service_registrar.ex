@@ -140,19 +140,47 @@ defmodule ZtlpGateway.ServiceRegistrar do
   def handle_info(:register, state) do
     case :gen_udp.open(0, [:binary, {:active, false}]) do
       {:ok, socket} ->
-        # Ensure zone delegation key exists (self-healing bootstrap)
+        # Verify zone KEY record exists before each registration cycle.
+        # If NS restarted and lost RAM records, re-bootstrap the zone delegation.
         state =
-          if not Map.get(state, :zone_bootstrapped, false) do
-            case bootstrap_zone_delegation(socket, state) do
-              :ok ->
-                Logger.info("[ServiceRegistrar] Zone delegation key bootstrapped for #{state.zone}")
+          case verify_zone_key(socket, state) do
+            :found ->
+              # Zone KEY exists — ensure bootstrapped flag is set
+              if not Map.get(state, :zone_bootstrapped, false) do
+                Logger.info("[ServiceRegistrar] Zone KEY record verified for #{state.zone}")
                 Map.put(state, :zone_bootstrapped, true)
-              {:error, reason} ->
-                Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(reason)}")
+              else
                 state
-            end
-          else
-            state
+              end
+
+            :not_found ->
+              Logger.warning("[ServiceRegistrar] Zone KEY record missing for #{state.zone}, re-bootstrapping")
+              state = Map.put(state, :zone_bootstrapped, false)
+              case bootstrap_zone_delegation(socket, state) do
+                :ok ->
+                  Logger.info("[ServiceRegistrar] Zone delegation key re-bootstrapped for #{state.zone}")
+                  Map.put(state, :zone_bootstrapped, true)
+                {:error, reason} ->
+                  Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(reason)}")
+                  state
+              end
+
+            {:error, reason} ->
+              # Could not verify (timeout, socket error) — try bootstrap if never done
+              if not Map.get(state, :zone_bootstrapped, false) do
+                Logger.warning("[ServiceRegistrar] Zone KEY verification failed (#{inspect(reason)}), attempting bootstrap")
+                case bootstrap_zone_delegation(socket, state) do
+                  :ok ->
+                    Logger.info("[ServiceRegistrar] Zone delegation key bootstrapped for #{state.zone}")
+                    Map.put(state, :zone_bootstrapped, true)
+                  {:error, boot_reason} ->
+                    Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(boot_reason)}")
+                    state
+                end
+              else
+                Logger.warning("[ServiceRegistrar] Zone KEY verification failed (#{inspect(reason)}), proceeding with existing bootstrap")
+                state
+              end
           end
 
         results =
@@ -341,6 +369,36 @@ defmodule ZtlpGateway.ServiceRegistrar do
 
       {:error, reason} ->
         {:error, {:dns_error, reason}}
+    end
+  end
+
+  # ── Private: Zone KEY Verification ──────────────────────────────
+
+  @doc false
+  defp verify_zone_key(socket, state) do
+    # Send a lookup query to NS for the zone KEY record (type 0x01).
+    # Packet format: <<0x01, name_len::16, name::binary, type_byte::8>>
+    # Response: <<0x02, ...>> = found, <<0xFF>> = not found
+    name = state.zone
+    name_len = byte_size(name)
+    type_byte = 0x01  # KEY record
+
+    lookup_packet = <<0x01, name_len::16, name::binary, type_byte::8>>
+    {ns_host, ns_port} = state.ns_server
+
+    case resolve_host(ns_host) do
+      {:ok, ip} ->
+        :gen_udp.send(socket, ip, ns_port, lookup_packet)
+
+        case :gen_udp.recv(socket, 0, 5_000) do
+          {:ok, {_, _, <<0x02, _::binary>>}} -> :found
+          {:ok, {_, _, <<0xFF>>}} -> :not_found
+          {:ok, {_, _, _other}} -> :not_found
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, {:dns, reason}}
     end
   end
 

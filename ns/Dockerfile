@@ -49,25 +49,32 @@ COPY --from=builder /build/_build/prod/rel/ztlp_ns/ /app/
 RUN printf '#!/bin/sh\n/app/bin/ztlp_ns rpc "IO.puts(:ok)" 2>/dev/null | grep -q "ok"\n' > /app/healthcheck.sh \
     && chmod +x /app/healthcheck.sh
 
-# Mnesia data directory (for disc_copies mode)
-RUN mkdir -p /app/data && chown -R ztlp:ztlp /app
+# Mnesia and CA data directories (persistent volume mount point)
+RUN mkdir -p /app/data/mnesia /app/data/ca && chown -R ztlp:ztlp /app
 USER ztlp
 WORKDIR /app
 
 # Default environment
 ENV ZTLP_NS_PORT=23096
 ENV ZTLP_NS_MAX_RECORDS=100000
-ENV ZTLP_NS_STORAGE_MODE=ram_copies
+# Production default: disc_copies for persistence across restarts.
+# Override with ZTLP_NS_STORAGE_MODE=ram_copies for volatile/test deployments.
+ENV ZTLP_NS_STORAGE_MODE=disc_copies
 ENV ZTLP_LOG_FORMAT=json
 ENV ZTLP_LOG_LEVEL=info
 ENV ZTLP_NS_METRICS_ENABLED=true
 ENV ZTLP_NS_METRICS_PORT=9103
-ENV ZTLP_NS_MNESIA_DIR=/app/data
+ENV ZTLP_NS_MNESIA_DIR=/app/data/mnesia
+# CA key/cert storage — on the same persistent volume as Mnesia
+ENV ZTLP_CA_DATA_DIR=/app/data/ca
 ENV RELEASE_COOKIE=ztlp_ns_docker
 
 EXPOSE 23096/udp
 EXPOSE 9103
 
+# Production deployment: mount a persistent volume for BOTH Mnesia AND CA data.
+#   docker run -v ztlp-ns-data:/app/data ...
+# This ensures zone records, CA keys, and certificates survive container restarts.
 VOLUME /app/data
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -37,6 +37,7 @@
 
 pub mod admission;
 pub mod agent;
+pub mod android;
 pub mod anti_replay;
 pub mod batch;
 pub mod congestion;
@@ -75,4 +76,5 @@ pub mod session_manager;
 pub mod stats;
 pub mod transport;
 pub mod tunnel;
+pub mod updater;
 pub mod vip;

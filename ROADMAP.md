@@ -93,6 +93,20 @@ Current codebase has ~15 commits since v0.14.0 with major features (SendControll
 
 **Fix:** Bump to v0.18.0, update CHANGELOG.md, tag, push, CI build.
 
+### 0.9 Unified Audit & Logging Dashboard
+All ZTLP components (gateway, relay, NS, agents/clients) ship structured audit events to a central collector. Searchable by date/time, hostname, username, service, event type, and free-text details. Single-page HTML dashboard served from the gateway.
+
+**Full spec:** [`docs/UNIFIED-AUDIT.md`](docs/UNIFIED-AUDIT.md)
+
+**Summary:**
+- Audit Collector GenServer on gateway with Mnesia persistence
+- Wire protocol `0x15` for event submission from remote components
+- HTTP query API (`/audit/events`, `/audit/stats`, `/audit/dashboard`)
+- Standard event envelope (ts, component, hostname, username, event, level, details)
+- 50+ event types across gateway, NS, relay, and client
+- Configurable retention (default 30 days), rate limiting, auth
+- 5 implementation phases: collector → reporters → client reporting → dashboard UI → retention
+
 ---
 
 ## Phase 1 — Gateway Stream Concurrency ✅ DONE
@@ -278,7 +292,7 @@ Gateway config changes without restart. Watch config file, apply changes to rout
 
 | Phase | Impact | Effort | Priority | Status |
 |---|---|---|---|---|
-| **0: Production Hardening** | Critical | Low-Medium | 🔴 BLOCKING | 0/8 done |
+| **0: Production Hardening** | Critical | Low-Medium | 🔴 BLOCKING | 0/9 done |
 | **1: Gateway Concurrency** | High | Medium | ✅ Mostly Done | 4/6 done |
 | **2: Connection Pooling** | Medium | Low | 🟡 Do Soon | 0/3 done |
 | **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done | 3/7 done |
@@ -298,5 +312,6 @@ Gateway config changes without restart. Watch config file, apply changes to rout
 4. **Zone re-bootstrap** (Phase 0.2) — check zone key each registration cycle, ~30 lines
 5. **Echo server systemd** (Phase 0.3) — systemd unit file, 5 minutes
 6. **Version bump** (Phase 0.8) — tag v0.18.0, update changelog
-7. **Certificate pinning** (Phase 6.4) — ~50 lines, significant security improvement
-8. **Backend connection pool** (Phase 2.1) — cuts repeat latency in half
+7. **Unified audit spec** (Phase 0.9) — spec written ([`docs/UNIFIED-AUDIT.md`](docs/UNIFIED-AUDIT.md)), build when ready
+8. **Certificate pinning** (Phase 6.4) — ~50 lines, significant security improvement
+9. **Backend connection pool** (Phase 2.1) — cuts repeat latency in half

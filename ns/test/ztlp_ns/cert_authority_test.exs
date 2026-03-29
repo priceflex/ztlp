@@ -11,12 +11,26 @@ defmodule ZtlpNs.CertAuthorityTest do
     test_dir = Path.join(System.tmp_dir!(), "ztlp_ca_test_#{:rand.uniform(1_000_000)}")
     File.mkdir_p!(test_dir)
 
-    # Stop existing CertAuthority if running
+    # Stop existing CertAuthority (supervisor-started) cleanly
+    # Use Supervisor.terminate_child to prevent auto-restart
+    case Process.whereis(ZtlpNs.Supervisor) do
+      nil -> :ok
+      _sup ->
+        # Find and terminate the child
+        children = Supervisor.which_children(ZtlpNs.Supervisor)
+        case Enum.find(children, fn {id, _, _, _} -> id == CertAuthority end) do
+          nil -> :ok
+          _ ->
+            Supervisor.terminate_child(ZtlpNs.Supervisor, CertAuthority)
+            Supervisor.delete_child(ZtlpNs.Supervisor, CertAuthority)
+        end
+    end
+
+    # Also stop any lingering process
     case GenServer.whereis(CertAuthority) do
       nil -> :ok
       pid ->
         GenServer.stop(pid, :normal, 5000)
-        # Wait for process to terminate
         Process.sleep(50)
     end
 

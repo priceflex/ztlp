@@ -49,7 +49,8 @@ defmodule ZtlpGateway.Application do
         {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
         ZtlpGateway.Listener,
         ZtlpGateway.RelayRegistrar,
-        ZtlpGateway.ServiceRegistrar
+        ZtlpGateway.ServiceRegistrar,
+        ZtlpGateway.CertProvisioner
       ] ++ tls_children()
 
     opts = [strategy: :one_for_one, name: ZtlpGateway.Supervisor]

@@ -65,6 +65,7 @@ defmodule ZtlpNs.Application do
       {Task.Supervisor, name: ZtlpNs.QuerySupervisor, max_children: ZtlpNs.Config.worker_pool_size()},
       ZtlpNs.EndpointStore,
       ZtlpNs.Audit,
+      ZtlpNs.CertAuthority,
       ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
       ZtlpNs.Server

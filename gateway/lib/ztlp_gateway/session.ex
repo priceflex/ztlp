@@ -40,7 +40,9 @@ defmodule ZtlpGateway.Session do
     PolicyEngine,
     Identity,
     AuditLog,
-    Stats
+    Stats,
+    CertProvisioner,
+    TlsTerminator
   }
 
   # ---------------------------------------------------------------------------
@@ -299,17 +301,89 @@ defmodule ZtlpGateway.Session do
     terminate_session(state, :backend_error)
   end
 
+  # ── TLS terminator messages ──
+
+  # Decrypted data from TLS bridge — forward to the backend
+  def handle_info({:tls_decrypted, stream_id, data}, state) do
+    case Map.get(state.streams, stream_id) do
+      %{backend_pid: pid} when pid != nil ->
+        Backend.send_data(pid, data)
+      _ ->
+        Logger.warning("[Session] TLS decrypted data for unknown stream #{stream_id}")
+    end
+    {:noreply, state}
+  end
+
+  # TLS bridge closed — close the mux stream
+  def handle_info({:tls_closed, stream_id}, state) do
+    Logger.info("[Session] TLS bridge closed for stream #{stream_id}")
+    case Map.get(state.streams, stream_id) do
+      %{backend_pid: pid, tls_socket: sock} ->
+        if pid && Process.alive?(pid), do: Backend.close(pid)
+        if sock, do: :gen_tcp.close(sock)
+      _ -> :ok
+    end
+    send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+    streams = Map.delete(state.streams, stream_id)
+    state = %{state | send_queue: send_queue, streams: streams}
+    state = flush_send_queue(state)
+    {:noreply, state}
+  end
+
+  # Encrypted TLS response data from the local socket pair.
+  # When the TLS bridge encrypts backend response data, it comes out
+  # the client_socket side as raw bytes. We send these to the phone
+  # via the ZTLP mux stream.
+  def handle_info({:tcp, socket, data}, state) do
+    # Find which stream owns this socket
+    case find_stream_by_tls_socket(state.streams, socket) do
+      {stream_id, _stream} ->
+        chunks = chunk_data(data, @max_payload_bytes - 4)
+        send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
+          :queue.in({:stream, stream_id, chunk}, q)
+        end)
+        state = %{state | send_queue: send_queue}
+        state = flush_send_queue(state)
+        {:noreply, state}
+
+      nil ->
+        # Not a TLS socket — might be a stale connection
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:tcp_closed, socket}, state) do
+    case find_stream_by_tls_socket(state.streams, socket) do
+      {stream_id, _} ->
+        Logger.info("[Session] TLS client socket closed for stream #{stream_id}")
+        send(self(), {:tls_closed, stream_id})
+      _ -> :ok
+    end
+    {:noreply, state}
+  end
+
   # ── Multiplexed stream backend messages ──
 
   # Backend sent data on a specific stream — enqueue with stream_id tag
+  # For TLS-terminated streams, route through TLS bridge for re-encryption
   def handle_info({:backend_data, stream_id, data}, state) when is_integer(stream_id) do
-    chunks = chunk_data(data, @max_payload_bytes - 4)  # 4 bytes for stream_id header
-    send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
-      :queue.in({:stream, stream_id, chunk}, q)
-    end)
-    state = %{state | send_queue: send_queue}
-    state = flush_send_queue(state)
-    {:noreply, state}
+    case Map.get(state.streams, stream_id) do
+      %{tls_state: :active, tls_bridge_pid: bridge_pid} when bridge_pid != nil ->
+        # TLS stream: send to bridge for encryption, encrypted data comes
+        # back via {:tcp, client_socket, encrypted_data} in handle_info
+        send(bridge_pid, {:backend_response, data})
+        {:noreply, state}
+
+      _ ->
+        # Plain stream: send directly
+        chunks = chunk_data(data, @max_payload_bytes - 4)
+        send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
+          :queue.in({:stream, stream_id, chunk}, q)
+        end)
+        state = %{state | send_queue: send_queue}
+        state = flush_send_queue(state)
+        {:noreply, state}
+    end
   end
 
   # Backend closed on a specific stream — send stream FIN, clean up stream
@@ -621,15 +695,45 @@ defmodule ZtlpGateway.Session do
     if state.mux_mode do
       # Multiplexed mode: [stream_id(4) | payload]
       <<stream_id::big-32, payload::binary>> = rest
-      case Map.get(state.streams, stream_id) do
-        %{backend_pid: pid} when pid != nil ->
-          if byte_size(payload) > 0 do
-            Logger.info("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
-            Backend.send_data(pid, payload)
-          end
-        _ ->
-          Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
-      end
+      state =
+        case Map.get(state.streams, stream_id) do
+          %{tls_state: :active, tls_socket: tls_sock} when tls_sock != nil ->
+            # TLS-terminated stream: write encrypted data to local TLS bridge socket
+            if byte_size(payload) > 0 do
+              :gen_tcp.send(tls_sock, payload)
+            end
+            state
+
+          %{tls_state: :pending_handshake, tls_creds: creds} = stream ->
+            # First data on a TLS stream — start the TLS bridge and write the ClientHello
+            case TlsTerminator.start_bridge(
+              creds.cert_pem, creds.key_pem, creds.chain_pem,
+              self(), stream_id
+            ) do
+              {:ok, client_socket, bridge_pid} ->
+                if byte_size(payload) > 0 do
+                  :gen_tcp.send(client_socket, payload)
+                end
+                updated = %{stream | tls_state: :active, tls_socket: client_socket, tls_bridge_pid: bridge_pid}
+                %{state | streams: Map.put(state.streams, stream_id, updated)}
+
+              {:error, reason} ->
+                Logger.warning("[Session] TLS bridge failed for stream #{stream_id}: #{inspect(reason)}")
+                state
+            end
+
+          %{backend_pid: pid} when pid != nil ->
+            # Plain stream: forward directly to backend
+            if byte_size(payload) > 0 do
+              Logger.info("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+              Backend.send_data(pid, payload)
+            end
+            state
+
+          _ ->
+            Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
+            state
+        end
       state = send_ack(state.recv_seq, state)
       {:noreply, state}
     else
@@ -824,36 +928,18 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  # FRAME_OPEN: client wants to open a new multiplexed stream
+  # FRAME_OPEN with service name: [0x06 | stream_id(4) | svc_len(1) | svc_name]
+  # The packet router sends per-stream service names for VIP routing.
+  defp handle_tunnel_frame(<<@frame_open, stream_id::big-32, svc_len::8, svc_name::binary-size(svc_len)>>, state) do
+    Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id} service=#{svc_name}")
+    open_mux_stream(stream_id, svc_name, state)
+  end
+
+  # FRAME_OPEN without service name: [0x06 | stream_id(4)]
+  # Legacy VIP proxy sends bare FRAME_OPEN; use session-level service.
   defp handle_tunnel_frame(<<@frame_open, stream_id::big-32>>, state) do
-    Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id}")
-    # Once we see a FRAME_OPEN, this session is permanently in mux mode.
-    # This prevents a race where all streams close temporarily and the next
-    # FRAME_DATA gets misinterpreted as legacy format.
-    state = %{state | mux_mode: true}
-    backends = ZtlpGateway.Config.get(:backends)
-
-    case find_backend(backends, state.service) do
-      {:ok, %{host: host, port: port}} ->
-        case Backend.start_link({host, port, self(), stream_id}) do
-          {:ok, pid} ->
-            streams = Map.put(state.streams, stream_id, %{backend_pid: pid})
-            Logger.info("[Session] Stream #{stream_id} opened, backend=#{inspect(pid)}, total_streams=#{map_size(streams)}")
-            {:noreply, %{state | streams: streams}}
-
-          {:error, reason} ->
-            Logger.warning("[Session] Stream #{stream_id} backend connect failed: #{inspect(reason)}")
-            # Send FRAME_CLOSE back to client for this stream
-            send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
-            state = %{state | send_queue: send_queue}
-            state = flush_send_queue(state)
-            {:noreply, state}
-        end
-
-      :error ->
-        Logger.warning("[Session] No backend for service #{state.service}")
-        {:noreply, state}
-    end
+    Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id} (session service=#{state.service})")
+    open_mux_stream(stream_id, state.service, state)
   end
 
   # FRAME_CLOSE: client is closing a stream
@@ -872,6 +958,57 @@ defmodule ZtlpGateway.Session do
   defp handle_tunnel_frame(_other, state) do
     # Unknown frame type — ignore
     {:noreply, state}
+  end
+
+  # ── Mux stream opener (extracted to avoid splitting handle_tunnel_frame clauses) ──
+
+  defp open_mux_stream(stream_id, service_name, state) do
+    # Once we see a FRAME_OPEN, this session is permanently in mux mode.
+    # This prevents a race where all streams close temporarily and the next
+    # FRAME_DATA gets misinterpreted as legacy format.
+    state = %{state | mux_mode: true}
+    backends = ZtlpGateway.Config.get(:backends)
+
+    case find_backend(backends, service_name) do
+      {:ok, %{host: host, port: port}} ->
+        # Check if we should do TLS termination for this stream.
+        # When a cert is provisioned for this service, gateway terminates
+        # TLS and forwards plain HTTP to the backend.
+        tls_creds = case CertProvisioner.lookup(service_name) do
+          {:ok, creds} -> creds
+          :error -> nil
+        end
+
+        case Backend.start_link({host, port, self(), stream_id}) do
+          {:ok, pid} ->
+            stream_state = %{
+              backend_pid: pid,
+              tls_state: if(tls_creds, do: :pending_handshake, else: nil),
+              tls_creds: tls_creds,
+              tls_socket: nil,
+              service: service_name
+            }
+            streams = Map.put(state.streams, stream_id, stream_state)
+            if tls_creds do
+              Logger.info("[Session] Stream #{stream_id} opened with TLS termination (service=#{service_name}), total_streams=#{map_size(streams)}")
+            else
+              Logger.info("[Session] Stream #{stream_id} opened (service=#{service_name}), total_streams=#{map_size(streams)}")
+            end
+            {:noreply, %{state | streams: streams}}
+
+          {:error, reason} ->
+            Logger.warning("[Session] Stream #{stream_id} backend connect failed: #{inspect(reason)}")
+            # Send FRAME_CLOSE back to client for this stream
+            send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+            state = %{state | send_queue: send_queue}
+            state = flush_send_queue(state)
+            {:noreply, state}
+        end
+
+      :error ->
+        Logger.warning("[Session] No backend for service #{service_name}")
+        {:noreply, state}
+    end
   end
 
   # Send an ACK frame back to the client (returns updated state)
@@ -1082,6 +1219,13 @@ defmodule ZtlpGateway.Session do
 
   defp send_udp(%{udp_socket: socket, client_addr: {ip, port}}, data) do
     :gen_udp.send(socket, ip, port, data)
+  end
+
+  # Find which stream owns a given TLS client socket
+  defp find_stream_by_tls_socket(streams, socket) do
+    Enum.find(streams, fn {_id, s} ->
+      Map.get(s, :tls_socket) == socket
+    end)
   end
 
   defp find_backend(backends, service) do

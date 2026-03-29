@@ -57,6 +57,7 @@ defmodule ZtlpNs.Server do
   """
 
   use GenServer
+  require Logger
 
   alias ZtlpNs.{Audit, Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
 
@@ -351,6 +352,61 @@ defmodule ZtlpNs.Server do
   # Enrollment (0x07) — device enrollment with token
   defp process_query(<<0x07, rest::binary>>, _source) do
     Enrollment.process_enroll(rest)
+  end
+
+  # ── Certificate Authority Queries (0x14) ───────────────────────────
+
+  # 0x14 0x01 — Get CA root certificate (DER)
+  # Request:  <<0x14, 0x01>>
+  # Response: <<0x14, 0x01, 0x00, cert_len::32, cert_der::binary>>  (success)
+  #           <<0x14, 0x01, 0x01>>                                   (CA not initialized)
+  defp process_query(<<0x14, 0x01>>, _source) do
+    case ZtlpNs.CertAuthority.get_root_cert_der() do
+      {:ok, cert_der} ->
+        StructuredLog.info("ca_root_exported", %{size: byte_size(cert_der)})
+        <<0x14, 0x01, 0x00, byte_size(cert_der)::unsigned-big-32, cert_der::binary>>
+
+      {:error, _} ->
+        <<0x14, 0x01, 0x01>>
+    end
+  end
+
+  # 0x14 0x02 — Get CA chain (intermediate + root) in PEM
+  # Request:  <<0x14, 0x02>>
+  # Response: <<0x14, 0x02, 0x00, chain_len::32, chain_pem::binary>>
+  #           <<0x14, 0x02, 0x01>>
+  defp process_query(<<0x14, 0x02>>, _source) do
+    case ZtlpNs.CertAuthority.get_chain_pem() do
+      {:ok, chain_pem} ->
+        <<0x14, 0x02, 0x00, byte_size(chain_pem)::unsigned-big-32, chain_pem::binary>>
+
+      {:error, _} ->
+        <<0x14, 0x02, 0x01>>
+    end
+  end
+
+  # 0x14 0x03 — Issue server certificate for a service hostname
+  # Request:  <<0x14, 0x03, hostname_len::16, hostname::binary>>
+  # Response: <<0x14, 0x03, 0x00, cert_len::32, cert_pem::binary,
+  #                                key_len::32, key_pem::binary,
+  #                                chain_len::32, chain_pem::binary>>
+  #           <<0x14, 0x03, 0x01>>  (CA not initialized)
+  #           <<0x14, 0x03, 0x02>>  (issuance failed)
+  defp process_query(<<0x14, 0x03, hostname_len::unsigned-big-16, hostname::binary-size(hostname_len)>>, _source) do
+    StructuredLog.info("cert_issue_request", %{hostname: hostname})
+
+    case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname]) do
+      {:ok, %{cert_pem: cert_pem, key_pem: key_pem, chain_pem: chain_pem}} ->
+        StructuredLog.info("cert_issued", %{hostname: hostname})
+        <<0x14, 0x03, 0x00,
+          byte_size(cert_pem)::unsigned-big-32, cert_pem::binary,
+          byte_size(key_pem)::unsigned-big-32, key_pem::binary,
+          byte_size(chain_pem)::unsigned-big-32, chain_pem::binary>>
+
+      {:error, reason} ->
+        Logger.warning("[Server] Cert issuance failed for #{hostname}: #{inspect(reason)}")
+        <<0x14, 0x03, 0x02>>
+    end
   end
 
   # Malformed query → invalid response

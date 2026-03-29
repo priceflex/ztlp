@@ -231,6 +231,24 @@ defmodule ZtlpGateway.Config do
     end
   end
 
+  # ── Admin Dashboard ────────────────────────────────────────────
+
+  def get(:dashboard_enabled) do
+    case System.get_env("ZTLP_GATEWAY_DASHBOARD_ENABLED") do
+      nil -> Application.get_env(:ztlp_gateway, :dashboard_enabled, true)
+      "false" -> false
+      "0" -> false
+      _ -> true
+    end
+  end
+
+  def get(:dashboard_port) do
+    case System.get_env("ZTLP_GATEWAY_DASHBOARD_PORT") do
+      nil -> Application.get_env(:ztlp_gateway, :dashboard_port, 9105)
+      port -> String.to_integer(port)
+    end
+  end
+
   # ── Backend Connection Pool ────────────────────────────────────
 
   @doc "Max idle connections per backend in the pool. Default: 8."

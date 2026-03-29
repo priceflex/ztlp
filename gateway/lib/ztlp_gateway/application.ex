@@ -53,7 +53,8 @@ defmodule ZtlpGateway.Application do
         ZtlpGateway.Listener,
         ZtlpGateway.RelayRegistrar,
         ZtlpGateway.ServiceRegistrar,
-        ZtlpGateway.CertProvisioner
+        ZtlpGateway.CertProvisioner,
+        ZtlpGateway.AdminDashboard
       ] ++ tls_children()
 
     opts = [strategy: :one_for_one, name: ZtlpGateway.Supervisor]

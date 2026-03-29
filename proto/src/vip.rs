@@ -111,6 +111,275 @@ const FRAME_CLOSE: u8 = 0x05;
 /// Frame type for opening a new multiplexed stream.
 const FRAME_OPEN: u8 = 0x06;
 
+/// Frame type for FIN from gateway (stream finished / backend closed).
+/// Used in stream recovery logic when the gateway signals stream completion.
+#[allow(dead_code)]
+const FRAME_FIN: u8 = 0x02;
+
+// Re-export the mux-layer STREAM_RESET constant from tunnel.rs.
+pub use crate::tunnel::FRAME_STREAM_RESET;
+
+// ─── Stream State Machine ───────────────────────────────────────────────────
+
+/// State of a multiplexed stream within a VIP proxy connection.
+///
+/// When the gateway sends FRAME_CLOSE or FRAME_FIN for a stream, the VIP
+/// proxy doesn't immediately tear down the TCP connection. Instead, if the
+/// TCP connection is still alive (browser keep-alive), it transitions to
+/// `Reopening` and opens a new ZTLP stream, allowing the next HTTP request
+/// to flow on the same TCP connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamState {
+    /// Stream is active with the given stream_id.
+    Active { stream_id: u32 },
+    /// Stream was closed by gateway; waiting to open a new one.
+    Reopening,
+    /// Stream and TCP connection are both closed.
+    Closed,
+}
+
+impl StreamState {
+    /// Returns the stream_id if the stream is active.
+    pub fn stream_id(&self) -> Option<u32> {
+        match self {
+            StreamState::Active { stream_id } => Some(*stream_id),
+            _ => None,
+        }
+    }
+
+    /// Returns true if the stream is in the Active state.
+    pub fn is_active(&self) -> bool {
+        matches!(self, StreamState::Active { .. })
+    }
+
+    /// Returns true if the stream is closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(self, StreamState::Closed)
+    }
+}
+
+// ─── HTTP Request Boundary Detection ────────────────────────────────────────
+
+/// Tracks HTTP response boundaries to detect when a request-response cycle
+/// is complete. This is NOT a full HTTP parser — just enough to know when
+/// one response ends so we can track metrics and potentially trigger stream
+/// reuse.
+///
+/// Supports:
+/// - `Content-Length` header → count body bytes
+/// - `Transfer-Encoding: chunked` → detect `0\r\n\r\n` terminator
+/// - `Connection: close` → signal stream should close after response
+#[derive(Debug)]
+pub struct HttpTracker {
+    /// Current parsing state.
+    state: HttpState,
+    /// Content-Length value from headers (if present).
+    content_length: Option<usize>,
+    /// Bytes remaining in the current body (for Content-Length mode).
+    bytes_remaining: usize,
+    /// Whether the response uses chunked transfer encoding.
+    chunked: bool,
+    /// Whether the server sent `Connection: close`.
+    connection_close: bool,
+    /// Number of completed request-response cycles.
+    requests_completed: u64,
+}
+
+/// HTTP response parsing state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpState {
+    /// Waiting for the start of a response (status line).
+    WaitingForResponse,
+    /// Accumulating header bytes until `\r\n\r\n`.
+    ReadingHeaders(Vec<u8>),
+    /// Reading body bytes (Content-Length or chunked).
+    ReadingBody,
+    /// Response is complete; ready for the next one.
+    Complete,
+}
+
+impl Default for HttpTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HttpTracker {
+    /// Create a new HTTP tracker in the initial state.
+    pub fn new() -> Self {
+        Self {
+            state: HttpState::WaitingForResponse,
+            content_length: None,
+            bytes_remaining: 0,
+            chunked: false,
+            connection_close: false,
+            requests_completed: 0,
+        }
+    }
+
+    /// Number of completed request-response cycles.
+    pub fn requests_completed(&self) -> u64 {
+        self.requests_completed
+    }
+
+    /// Whether the server indicated `Connection: close`.
+    pub fn is_connection_close(&self) -> bool {
+        self.connection_close
+    }
+
+    /// Current parsing state.
+    pub fn state(&self) -> &HttpState {
+        &self.state
+    }
+
+    /// Feed response data from the server into the tracker.
+    ///
+    /// Call this with each chunk of data received from the tunnel.
+    /// After calling, check `state()` for `Complete` or
+    /// `is_connection_close()` to decide what to do.
+    pub fn feed(&mut self, data: &[u8]) {
+        let mut remaining = data;
+
+        while !remaining.is_empty() {
+            match &mut self.state {
+                HttpState::WaitingForResponse => {
+                    // Start accumulating headers
+                    self.state = HttpState::ReadingHeaders(Vec::new());
+                    // Don't consume — fall through to ReadingHeaders
+                }
+                HttpState::ReadingHeaders(ref mut buf) => {
+                    // Look for end-of-headers marker: \r\n\r\n
+                    buf.extend_from_slice(remaining);
+
+                    if let Some(pos) = find_header_end(buf) {
+                        // Parse headers up to the double CRLF
+                        let header_bytes = buf[..pos].to_vec();
+                        let body_start = pos + 4; // skip \r\n\r\n
+                        let leftover = if body_start < buf.len() {
+                            buf[body_start..].to_vec()
+                        } else {
+                            Vec::new()
+                        };
+
+                        self.parse_headers(&header_bytes);
+
+                        if self.content_length == Some(0) {
+                            // No body — response complete
+                            self.complete_response();
+                            remaining = &[]; // leftover handled on next feed
+                            if !leftover.is_empty() {
+                                // Recurse with leftover (next response)
+                                self.feed(&leftover);
+                            }
+                        } else if self.content_length.is_some() || self.chunked {
+                            self.state = HttpState::ReadingBody;
+                            remaining = &[];
+                            if !leftover.is_empty() {
+                                self.feed(&leftover);
+                            }
+                        } else {
+                            // No Content-Length, not chunked — could be
+                            // connection-close delimited. Mark as reading body.
+                            self.state = HttpState::ReadingBody;
+                            remaining = &[];
+                            if !leftover.is_empty() {
+                                self.feed(&leftover);
+                            }
+                        }
+                    } else {
+                        // Haven't found end of headers yet; need more data
+                        remaining = &[];
+                    }
+                }
+                HttpState::ReadingBody => {
+                    if self.chunked {
+                        // For chunked encoding, look for the terminator
+                        // `0\r\n\r\n` anywhere in the data stream.
+                        if contains_chunked_terminator(remaining) {
+                            self.complete_response();
+                        }
+                        remaining = &[];
+                    } else if self.content_length.is_some() {
+                        // Count down body bytes
+                        let consume = remaining.len().min(self.bytes_remaining);
+                        self.bytes_remaining -= consume;
+                        remaining = &remaining[consume..];
+                        if self.bytes_remaining == 0 {
+                            self.complete_response();
+                            // Any leftover belongs to the next response
+                            if !remaining.is_empty() {
+                                let leftover = remaining.to_vec();
+                                remaining = &[];
+                                self.feed(&leftover);
+                            }
+                        }
+                    } else {
+                        // No Content-Length, not chunked — read until close
+                        remaining = &[];
+                    }
+                }
+                HttpState::Complete => {
+                    // Reset for next request-response cycle
+                    self.state = HttpState::WaitingForResponse;
+                    // Don't consume — loop will pick up WaitingForResponse
+                }
+            }
+        }
+    }
+
+    /// Parse HTTP headers to extract Content-Length, Transfer-Encoding, Connection.
+    fn parse_headers(&mut self, header_bytes: &[u8]) {
+        let header_str = String::from_utf8_lossy(header_bytes);
+
+        self.content_length = None;
+        self.bytes_remaining = 0;
+        self.chunked = false;
+        self.connection_close = false;
+
+        for line in header_str.split("\r\n") {
+            let lower = line.to_ascii_lowercase();
+            if let Some(val) = lower.strip_prefix("content-length:") {
+                if let Ok(len) = val.trim().parse::<usize>() {
+                    self.content_length = Some(len);
+                    self.bytes_remaining = len;
+                }
+            } else if let Some(val) = lower.strip_prefix("transfer-encoding:") {
+                if val.trim().contains("chunked") {
+                    self.chunked = true;
+                }
+            } else if let Some(val) = lower.strip_prefix("connection:") {
+                if val.trim() == "close" {
+                    self.connection_close = true;
+                }
+            }
+        }
+    }
+
+    /// Mark the current response as complete and reset for the next one.
+    fn complete_response(&mut self) {
+        self.requests_completed += 1;
+        self.state = HttpState::Complete;
+        self.content_length = None;
+        self.bytes_remaining = 0;
+        self.chunked = false;
+        // Note: connection_close persists — once set, the connection should close
+    }
+}
+
+/// Find the position of `\r\n\r\n` in a byte slice.
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    data.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Check if data contains the chunked transfer-encoding terminator.
+///
+/// The terminator is `0\r\n\r\n` — the last chunk has size 0.
+/// We also accept `0\r\n\r\n` preceded by `\r\n` (the CRLF ending
+/// the previous chunk).
+fn contains_chunked_terminator(data: &[u8]) -> bool {
+    data.windows(5).any(|w| w == b"0\r\n\r\n")
+}
+
 /// A registered VIP service.
 #[derive(Debug, Clone)]
 pub struct VipService {
@@ -423,7 +692,12 @@ impl VipProxy {
 
         let mut sess = self.session.write().await;
         *sess = Some(TunnelSession::new(
-            transport, session_id, peer_addr, data_seq, bytes_sent, send_controller,
+            transport,
+            session_id,
+            peer_addr,
+            data_seq,
+            bytes_sent,
+            send_controller,
         ));
         // Fresh dispatcher for new session
         tracing::info!("VIP proxy: tunnel session updated (hot-swap)");

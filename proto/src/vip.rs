@@ -100,15 +100,14 @@ const FRAME_DATA: u8 = 0x00;
 const MAX_MUX_PAYLOAD: usize = 1195;
 
 /// Upload pacing: max packets to send before yielding.
-/// Prevents overwhelming the cellular/relay path with a burst of hundreds of
-/// packets. After sending this many packets, we yield briefly to let the
-/// network drain and ACKs arrive.
-const UPLOAD_BURST_SIZE: usize = 32;
+/// Prevents overwhelming the cellular/relay path with bursts.
+/// At 8 packets × 1195 bytes = ~9.6KB per burst — gentle enough for cellular.
+/// For 1MB upload: 878 packets / 8 = 110 bursts × 2ms = 220ms pacing overhead.
+const UPLOAD_BURST_SIZE: usize = 8;
 /// Microseconds to sleep between upload bursts.
-/// 1ms allows ~32 × 1195 = ~38KB per burst, ~38 MB/s theoretical max.
-/// In practice, cellular RTT (~60ms) limits effective throughput, but pacing
-/// prevents buffer bloat and packet drops.
-const UPLOAD_BURST_PAUSE_US: u64 = 1000;
+/// 2ms between 8-packet bursts = ~4.8 MB/s theoretical max.
+/// Tested: 32-packet/1ms bursts caused 18% packet loss on cellular.
+const UPLOAD_BURST_PAUSE_US: u64 = 2000;
 
 /// Frame type for closing a multiplexed stream.
 const FRAME_CLOSE: u8 = 0x05;

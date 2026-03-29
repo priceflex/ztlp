@@ -1168,6 +1168,15 @@ async fn recv_loop(
 
                 bytes_received.fetch_add(plaintext.len() as u64, Ordering::Relaxed);
 
+                // Log first byte for debugging ACK reception
+                if plaintext.len() <= 9 {
+                    tracing::info!(
+                        "recv_loop: short packet len={} first_byte=0x{:02x}",
+                        plaintext.len(),
+                        plaintext.first().copied().unwrap_or(0)
+                    );
+                }
+
                 // ── Upload ACK: gateway acknowledging our upload packets ──
                 //
                 // When the gateway receives our upload data, it sends back:
@@ -1182,11 +1191,12 @@ async fn recv_loop(
                 if plaintext.len() == 9 && plaintext[0] == FRAME_ACK {
                     let acked_seq =
                         u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
+                    tracing::info!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);
                     log_write(
                         &mut debug_log,
                         &mut log_bytes_written,
                         log_start,
-                        LogLevel::Debug,
+                        LogLevel::Info,
                         &format!("FRAME_ACK (upload) acked_seq={}", acked_seq),
                         log_level,
                         &log_path,

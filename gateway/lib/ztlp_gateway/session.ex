@@ -1237,7 +1237,8 @@ defmodule ZtlpGateway.Session do
         if tref, do: Process.cancel_timer(tref)
 
       %{backend_pid: pid} when pid != nil ->
-        if Process.alive?(pid), do: Backend.close(pid)
+        # Return pooled connection for reuse instead of closing it
+        if Process.alive?(pid), do: BackendPool.checkin(pid)
 
       _ ->
         :ok
@@ -1273,17 +1274,10 @@ defmodule ZtlpGateway.Session do
         # Async backend connection: spawn a process to connect without
         # blocking the session GenServer. Data arriving for this stream
         # during connection is buffered and flushed on success.
-        #
-        # Backend.start_link links to the calling process, so we unlink
-        # the backend from the short-lived spawned process before it exits.
-        # The session will re-link when handling the connect result.
+        # Uses the BackendPool for connection reuse across mux streams.
         session_pid = self()
         spawn(fn ->
-          result = Backend.start_link({host, port, session_pid, stream_id})
-          case result do
-            {:ok, pid} -> Process.unlink(pid)
-            _ -> :ok
-          end
+          result = BackendPool.checkout(host, port, session_pid, stream_id)
           send(session_pid, {:backend_connect_result, stream_id, result})
         end)
 

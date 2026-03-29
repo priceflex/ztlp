@@ -198,6 +198,19 @@ final class EnrollmentViewModel: ObservableObject {
                 //   4. NS returns our zone assignment + peer addresses
                 logger.warn("Enrollment stub: NS registration not yet implemented. Config saved locally only.", source: "Enrollment")
 
+                // Step 6: Fetch and store the ZTLP CA root certificate
+                logger.info("Fetching ZTLP CA root certificate from NS...", source: "Enrollment")
+                let certService = CertificateService.shared
+                let certFetched = await certService.fetchCARootCert(
+                    nsServer: tokenInfo.nsAddress,
+                    timeoutMs: 15000
+                )
+                if certFetched {
+                    logger.info("CA root certificate fetched and stored", source: "Enrollment")
+                } else {
+                    logger.warn("Could not fetch CA cert during enrollment — can be done later from Settings", source: "Enrollment")
+                }
+
                 // Success!
                 logger.info("Enrollment complete for zone: \(tokenInfo.zone)", source: "Enrollment")
                 state = .success(zoneName: tokenInfo.zone)

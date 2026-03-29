@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
+    @StateObject private var certService = CertificateService.shared
 
     @State private var showAdvanced = false
     @State private var showRegenConfirm = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
                 generalSection
                 identitySection
                 enrollmentSection
+                certificateTrustSection
 
                 if showAdvanced {
                     connectionSection
@@ -187,6 +189,101 @@ struct SettingsView: View {
                     systemImage: "ticket"
                 )
                 .font(.callout)
+            }
+        }
+    }
+
+    // MARK: - Certificate Trust
+
+    private var certificateTrustSection: some View {
+        Section("Certificate Trust") {
+            // CA cert status
+            HStack {
+                Label("ZTLP CA", systemImage: "lock.shield")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if certService.isInstalled {
+                    Label("Trusted", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Color.ztlpGreen)
+                        .font(.callout)
+                } else if certService.caRootDER != nil {
+                    Label("Downloaded", systemImage: "arrow.down.circle.fill")
+                        .foregroundStyle(Color.ztlpOrange)
+                        .font(.callout)
+                } else {
+                    Label("Not Available", systemImage: "xmark.circle")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+            }
+
+            if certService.caRootDER == nil {
+                // Fetch button
+                Button {
+                    Task {
+                        let ns = configuration.nsServer.isEmpty ? "34.217.62.46:23096" : configuration.nsServer
+                        await certService.fetchCARootCert(nsServer: ns)
+                    }
+                } label: {
+                    HStack {
+                        Label("Fetch CA Certificate", systemImage: "arrow.down.doc")
+                            .font(.callout)
+                        if certService.isFetching {
+                            Spacer()
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                .disabled(certService.isFetching)
+            } else if !certService.isInstalled {
+                // Install button
+                Button {
+                    certService.installCACert()
+                } label: {
+                    Label("Install CA Certificate", systemImage: "square.and.arrow.down")
+                        .font(.callout)
+                }
+
+                // Instructions
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("After downloading:")
+                        .font(.caption.weight(.medium))
+                    Text("1. Go to Settings → General → VPN & Device Management")
+                        .font(.caption2)
+                    Text("2. Tap the 'ZTLP Network Trust' profile")
+                        .font(.caption2)
+                    Text("3. Tap Install and enter your passcode")
+                        .font(.caption2)
+                    Text("4. Go to Settings → General → About → Certificate Trust Settings")
+                        .font(.caption2)
+                    Text("5. Enable full trust for 'ZTLP Root CA'")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+
+                // Mark as installed button
+                Button {
+                    certService.markAsInstalled()
+                } label: {
+                    Label("I've Installed the Certificate", systemImage: "checkmark")
+                        .font(.callout)
+                        .foregroundStyle(Color.ztlpGreen)
+                }
+            } else {
+                // Already installed
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ZTLP services using .ztlp domains are trusted for HTTPS.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let error = certService.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         }
     }

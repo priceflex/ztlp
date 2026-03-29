@@ -2258,6 +2258,249 @@ pub extern "C" fn ztlp_ns_resolve(
     }
 }
 
+// ── NS Certificate Authority FFI ────────────────────────────────────────
+
+/// Fetch the CA root certificate (DER-encoded) from the ZTLP-NS server.
+///
+/// Sends a `0x14 0x01` query to the NS and returns the raw DER bytes.
+/// The caller receives a pointer and length via `out_data` and `out_len`.
+/// The returned buffer must be freed with `ztlp_bytes_free()`.
+///
+/// Returns 0 on success, negative on error.
+///
+/// # Parameters
+/// - `ns_server`: NS server address as "host:port" C string
+/// - `timeout_ms`: Query timeout in milliseconds (0 = default 5000ms)
+/// - `out_data`: Pointer to receive the DER data pointer
+/// - `out_len`: Pointer to receive the data length
+#[no_mangle]
+pub extern "C" fn ztlp_ns_fetch_ca_root(
+    ns_server: *const c_char,
+    timeout_ms: u32,
+    out_data: *mut *mut u8,
+    out_len: *mut u32,
+) -> i32 {
+    if ns_server.is_null() || out_data.is_null() || out_len.is_null() {
+        set_last_error("ns_server, out_data, or out_len is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let server = match unsafe { CStr::from_ptr(ns_server) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in ns_server");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+    };
+
+    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+
+    // Use a dedicated thread to avoid nesting tokio runtimes
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::net::UdpSocket;
+
+        let result = (|| -> Result<Vec<u8>, String> {
+            let addr: SocketAddr = server
+                .parse()
+                .map_err(|e| format!("invalid ns_server address: {e}"))?;
+
+            let socket = UdpSocket::bind("0.0.0.0:0")
+                .map_err(|e| format!("failed to bind UDP socket: {e}"))?;
+            socket
+                .set_read_timeout(Some(Duration::from_millis(timeout)))
+                .map_err(|e| format!("failed to set timeout: {e}"))?;
+
+            // Send query: 0x14 0x01 (get CA root DER)
+            let query = [0x14u8, 0x01];
+            socket
+                .send_to(&query, addr)
+                .map_err(|e| format!("failed to send query: {e}"))?;
+
+            // Receive response
+            let mut buf = vec![0u8; 8192];
+            let len = socket
+                .recv(&mut buf)
+                .map_err(|e| format!("failed to receive response: {e}"))?;
+            buf.truncate(len);
+
+            // Parse: <<0x14, 0x01, 0x00, cert_len(4 BE), cert_der>>
+            if buf.len() < 3 {
+                return Err("response too short".to_string());
+            }
+            if buf[0] != 0x14 || buf[1] != 0x01 {
+                return Err(format!("unexpected response type: 0x{:02x}{:02x}", buf[0], buf[1]));
+            }
+            if buf[2] == 0x01 {
+                return Err("CA not initialized on NS server".to_string());
+            }
+            if buf[2] != 0x00 || buf.len() < 7 {
+                return Err(format!("unexpected status byte: 0x{:02x}", buf[2]));
+            }
+
+            let cert_len = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]) as usize;
+            if buf.len() < 7 + cert_len {
+                return Err(format!(
+                    "truncated response: expected {} cert bytes, got {}",
+                    cert_len,
+                    buf.len() - 7
+                ));
+            }
+
+            Ok(buf[7..7 + cert_len].to_vec())
+        })();
+
+        let _ = tx.send(result);
+    });
+
+    let wait_time = Duration::from_millis(timeout + 2000);
+    match rx.recv_timeout(wait_time) {
+        Ok(Ok(der_bytes)) => {
+            let len = der_bytes.len();
+            let ptr = unsafe {
+                let layout = std::alloc::Layout::from_size_align(len, 1).unwrap();
+                let p = std::alloc::alloc(layout);
+                if p.is_null() {
+                    set_last_error("allocation failed");
+                    return ZtlpResult::InternalError as i32;
+                }
+                std::ptr::copy_nonoverlapping(der_bytes.as_ptr(), p, len);
+                p
+            };
+            unsafe {
+                *out_data = ptr;
+                *out_len = len as u32;
+            }
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(&e);
+            ZtlpResult::ConnectionError as i32
+        }
+        Err(_) => {
+            set_last_error("NS CA root query timed out");
+            ZtlpResult::ConnectionError as i32
+        }
+    }
+}
+
+/// Free a byte buffer returned by `ztlp_ns_fetch_ca_root()`.
+///
+/// # Safety
+/// `data` must have been returned by a `ztlp_ns_fetch_ca_*` function,
+/// and `len` must match the returned length.
+#[no_mangle]
+pub extern "C" fn ztlp_bytes_free(data: *mut u8, len: u32) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
+        std::alloc::dealloc(data, layout);
+    }
+}
+
+/// Fetch the CA chain (PEM-encoded intermediate + root) from the ZTLP-NS server.
+///
+/// Returns a C string (null-terminated PEM). Caller must free with `ztlp_string_free()`.
+/// Returns null on error (check `ztlp_last_error()`).
+#[no_mangle]
+pub extern "C" fn ztlp_ns_fetch_ca_chain_pem(
+    ns_server: *const c_char,
+    timeout_ms: u32,
+) -> *mut c_char {
+    if ns_server.is_null() {
+        set_last_error("ns_server is null");
+        return std::ptr::null_mut();
+    }
+
+    let server = match unsafe { CStr::from_ptr(ns_server) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in ns_server");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let timeout = if timeout_ms == 0 { 5000 } else { timeout_ms as u64 };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::net::UdpSocket;
+
+        let result = (|| -> Result<String, String> {
+            let addr: SocketAddr = server
+                .parse()
+                .map_err(|e| format!("invalid ns_server address: {e}"))?;
+
+            let socket = UdpSocket::bind("0.0.0.0:0")
+                .map_err(|e| format!("failed to bind UDP socket: {e}"))?;
+            socket
+                .set_read_timeout(Some(Duration::from_millis(timeout)))
+                .map_err(|e| format!("failed to set timeout: {e}"))?;
+
+            // Send query: 0x14 0x02 (get CA chain PEM)
+            let query = [0x14u8, 0x02];
+            socket
+                .send_to(&query, addr)
+                .map_err(|e| format!("failed to send query: {e}"))?;
+
+            let mut buf = vec![0u8; 16384]; // chain PEM can be larger
+            let len = socket
+                .recv(&mut buf)
+                .map_err(|e| format!("failed to receive response: {e}"))?;
+            buf.truncate(len);
+
+            // Parse: <<0x14, 0x02, 0x00, chain_len(4 BE), chain_pem>>
+            if buf.len() < 3 {
+                return Err("response too short".to_string());
+            }
+            if buf[0] != 0x14 || buf[1] != 0x02 {
+                return Err(format!("unexpected response type: 0x{:02x}{:02x}", buf[0], buf[1]));
+            }
+            if buf[2] == 0x01 {
+                return Err("CA not initialized on NS server".to_string());
+            }
+            if buf[2] != 0x00 || buf.len() < 7 {
+                return Err(format!("unexpected status byte: 0x{:02x}", buf[2]));
+            }
+
+            let chain_len = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]) as usize;
+            if buf.len() < 7 + chain_len {
+                return Err(format!(
+                    "truncated response: expected {} chain bytes, got {}",
+                    chain_len,
+                    buf.len() - 7
+                ));
+            }
+
+            String::from_utf8(buf[7..7 + chain_len].to_vec())
+                .map_err(|e| format!("invalid UTF-8 in chain PEM: {e}"))
+        })();
+
+        let _ = tx.send(result);
+    });
+
+    let wait_time = Duration::from_millis(timeout + 2000);
+    match rx.recv_timeout(wait_time) {
+        Ok(Ok(pem)) => match CString::new(pem) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => {
+                set_last_error("chain PEM contains null byte");
+                std::ptr::null_mut()
+            }
+        },
+        Ok(Err(e)) => {
+            set_last_error(&e);
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            set_last_error("NS CA chain query timed out");
+            std::ptr::null_mut()
+        }
+    }
+}
+
 // ── Packet Router FFI (iOS utun) ────────────────────────────────────────
 
 /// Create a new packet router for the iOS utun interface.

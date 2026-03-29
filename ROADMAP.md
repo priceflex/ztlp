@@ -1,61 +1,119 @@
 # ZTLP Feature Roadmap
 
-> Last updated: 2026-03-26 | Current release: v0.14.0
+> Last updated: 2026-03-29 | Current release: v0.17.0
 
 ## Current State
 
-ZTLP v0.14.0 is a working zero-trust tunnel with a macOS client, Elixir gateway/relay/NS infrastructure, and eBPF packet filter. The macOS app connects to a gateway over encrypted UDP, multiplexes TCP streams, and exposes services on loopback VIPs with pf port redirection.
+ZTLP v0.17.0 is a working zero-trust tunnel with macOS and iOS clients, Elixir gateway/relay/NS infrastructure, eBPF packet filter, and a full PKI system. The iOS app connects to a gateway via relay over encrypted UDP, multiplexes TCP streams, and routes traffic through a VIP subnet (`10.122.0.0/16`) via a userspace TCP/IP stack.
 
-### Stress Test Baseline (v0.14.0)
+### What's Working (v0.17.0)
+- **iOS app** with NetworkExtension packet tunnel, VIP routing, enrollment, CA cert install flow
+- **macOS app** with loopback VIP proxy, pf port redirection, menu bar UI
+- **Elixir gateway** with AIMD congestion control, TLS termination, session dedup, keepalive handling
+- **Elixir relay** with mesh routing, admission tokens, multi-hop forwarding
+- **ZTLP-NS** with CA auto-init, cert issuance, zone delegation, federation stubs
+- **Rust client** with SendController (cwnd-gated uploads), Noise_XX handshake, mux streams
+- **eBPF/XDP** packet filter with dual-port support
 
-| Concurrency | Success Rate | Latency (p50) |
+### iOS Benchmark Results (cellular, via relay)
+
+| Benchmark | Result | Status |
 |---|---|---|
-| 1 (sequential) | 100% | 141ms |
-| 2 | 98% | ~140ms |
-| 5 | 90% | ~240ms |
-| 10 | 86% | ~330ms |
-| 20 | 80% | — |
+| HTTP Ping | 94-97ms | ✅ |
+| GET 1KB | 95-97ms | ✅ |
+| GET 10KB | 100-101ms | ✅ |
+| GET 100KB | 133-207ms | ✅ |
+| GET 1MB | 701ms, 1.3 MB/s | ✅ |
+| Download 5MB | 3.5s, 1.4 MB/s | ✅ |
+| POST 1KB | 95-96ms | ✅ |
+| POST 100KB | 192-262ms | ✅ |
+| Upload 1MB | 5.5s, 0.2 MB/s | ✅ (conservative) |
+| Concurrent 5x GET | 108ms | ✅ |
+| TTFB | 96ms | ✅ |
 
-**Root cause of concurrency drops:** The gateway processes FRAME_OPEN serially in a single GenServer, each opening a synchronous TCP connection to the backend (5s timeout). At 10+ concurrent streams, the GenServer mailbox backs up and some stream opens time out on the client side before the gateway processes them.
+### Test Counts
+- **844 Rust tests**, 0 failures
+- **573 gateway tests**, 0 failures
+- **726 NS tests**, 0 failures
+- **284 relay tests**, 0 failures
+- **2,427 total**, 0 failures
 
 ---
 
-## Phase 1 — Gateway Stream Concurrency (High Impact, Medium Effort)
+## 🔴 Phase 0 — Production Hardening (BLOCKING — Do Before Users)
 
-**Goal:** 95%+ success rate at concurrency 20.
+Must fix before real users touch this. These are operational/data-safety issues, not features.
 
-### 1.1 Async Backend Connection in FRAME_OPEN
-The gateway `Session` GenServer currently calls `Backend.start_link()` synchronously inside `handle_tunnel_frame/2`. This blocks the GenServer from processing other frames (including FRAME_DATA for already-open streams) while the TCP connect to Vaultwarden completes.
+### 0.1 NS Data Persistence ⚠️ CRITICAL
+Mnesia is `ram_copies` — all NS records (service registrations, zone delegations) are lost on container restart. CA keys live at `/home/ztlp/.ztlp/ca/` inside the container filesystem — lost on container recreation (`docker pull` + `docker run`).
 
-**Fix:** Spawn the backend connection asynchronously. Send FRAME_OPEN_ACK back to the client when ready, or FRAME_CLOSE on failure.
+**Impact:** Container recreation = new CA key = every enrolled device must re-install CA cert.
 
-```elixir
-# Before (blocking):
-case Backend.start_link({host, port, self(), stream_id}) do
-  {:ok, pid} -> ...
+**Fix:**
+- Mount `/home/ztlp/.ztlp` to a host volume (`-v ztlp-ns-data:/home/ztlp/.ztlp`)
+- Switch Mnesia to `disc_copies` (`ZTLP_NS_STORAGE_MODE=disc_copies`)
+- Backup CA keys to encrypted offsite storage
 
-# After (async):
-Task.start(fn ->
-  case Backend.start_link({host, port, owner, stream_id}) do
-    {:ok, pid} -> send(owner, {:backend_ready, stream_id, pid})
-    {:error, _} -> send(owner, {:backend_failed, stream_id})
-  end
-end)
-```
+### 0.2 Zone Delegation Re-Bootstrap ⚠️ CRITICAL
+Gateway bootstraps zone delegation key on first startup, sets `zone_bootstrapped: true`, never re-checks. If NS restarts after the gateway, zone key is lost → all service registrations rejected as "unauthorized" → NS lookups fail → clients can't discover services.
 
-Buffer incoming FRAME_DATA for a stream until `{:backend_ready, ...}` arrives. Estimated: ~200 lines.
+**Impact:** NS restart silently breaks all service discovery. No error on the phone — just timeouts.
 
-### 1.2 Client-Side Stream Open Queuing
-The VIP proxy currently fires FRAME_OPEN and immediately starts forwarding TCP data. If the gateway hasn't opened the backend yet, the data frames hit a closed stream.
+**Fix:** Gateway ServiceRegistrar should verify zone key exists before each registration cycle (query NS for zone KEY record, re-bootstrap if missing). Alternatively, NS persists records to disk (see 0.1).
 
-**Fix:** Add a per-stream state machine: `opening → open → closing → closed`. Buffer TCP reads during `opening`. Timeout after 10s if no FRAME_DATA arrives from gateway.
+### 0.3 Echo Server Persistence
+HTTP echo server is a bare `python3 /tmp/http-echo.py` process. Dies on reboot, no restart policy.
 
-### 1.3 Gateway Send Window Tuning
-Current: `@send_window_size 64`, `@pacing_interval_ms 1`. The pacing sends 1 packet per ms = 1000 pkt/sec. With 1200-byte payloads, that's ~1.2 MB/s throughput ceiling.
+**Fix:** Containerize with Docker (add to gateway host's compose) or create a systemd service with `Restart=always`.
 
-**Fix:** Increase to `@send_window_size 256` and dynamically adjust pacing based on RTT. Target: 10+ MB/s sustained throughput for concurrent streams.
+### 0.4 Gateway Log Verbosity
+18K+ log lines in 11 hours. Every FRAME_DATA, decrypted byte count, and forwarded payload logged at `info` level. In production with real traffic, this will fill disk in days.
 
-**Expected result:** 95%+ at concurrency 20, latency under 500ms.
+**Fix:** Change data-path logging (`FRAME_DATA`, `Decrypted`, `Forwarding`) to `debug` level. Keep handshake, session lifecycle, errors, and policy decisions at `info`.
+
+### 0.5 Firewall Exposed Ports
+- Prometheus metrics on `0.0.0.0:9102` — publicly scrapable
+- Echo server on `0.0.0.0:8180` — publicly accessible (meant for tunnel-only access)
+
+**Fix:** Bind metrics to `127.0.0.1:9102`. Bind echo server to `172.18.0.1:8180` (Docker bridge only) or firewall with iptables.
+
+### 0.6 CA Key Security
+Root CA private key encrypted with default passphrase, stored on container filesystem. No HSM, no KMS.
+
+**Fix (short-term):** Strong passphrase via `ZTLP_CA_KEY_PASSPHRASE` env var. Volume-mount CA directory (see 0.1).
+**Fix (long-term):** AWS KMS, HashiCorp Vault, or hardware HSM for CA signing operations.
+
+### 0.7 TLS Cert Renewal Resilience
+Cert renewal timer hardcoded to 3.5 days. If NS is unreachable when renewal fires, no retry — certs expire, all HTTPS connections fail.
+
+**Fix:** Exponential backoff retry on renewal failure. Grace period: continue serving with existing cert until expiry. Alert on failed renewal.
+
+### 0.8 Version Bump & Release
+Current codebase has ~15 commits since v0.14.0 with major features (SendController, packet router, PKI, iOS integration, gateway hardening). Need a proper release.
+
+**Fix:** Bump to v0.18.0, update CHANGELOG.md, tag, push, CI build.
+
+---
+
+## Phase 1 — Gateway Stream Concurrency ✅ DONE
+
+**Goal:** 95%+ success rate at concurrency 20. **Achieved: 100% at concurrency 5 on cellular.**
+
+### 1.1 ✅ AIMD Congestion Control (replaced fixed window)
+Gateway `session.ex` now has TCP-like AIMD: IW=64, max_cwnd=256, ssthresh=128, burst=8, pacing=1ms. Slow start → congestion avoidance. RTT estimation with Karn's algorithm. Retransmit with exponential backoff.
+
+### 1.2 ✅ Client-Side SendController
+`send_controller.rs` (453 lines, 10 tests) wraps `AdvancedCongestionController` with send buffer, cwnd-gated flushing, ACK processing, retransmission. Integrated into VIP proxy upload path.
+
+### 1.3 ✅ Session Deduplication
+Secondary ETS table prevents zombie session accumulation from phone reconnects. Old session killed on new HELLO from same `{ip, port}`.
+
+### 1.4 ✅ Keepalive Handling
+1-byte `0x01` frames reset idle timer without forwarding to backends. Prevents Vaultwarden close → drain → session death cycle.
+
+### Remaining
+- **1.5 Async FRAME_OPEN** — Still synchronous backend connect in `handle_tunnel_frame/2`. Not yet a bottleneck at current concurrency levels but will be at 10+.
+- **1.6 Out-of-order packet acceptance** — Gateway uses strictly-greater seq check, drops reordered packets. Needs sliding window for cellular reliability.
 
 ---
 
@@ -136,47 +194,66 @@ Single gateway process = single-machine limit (~10K concurrent sessions estimate
 
 ---
 
-## Phase 5 — Mobile Clients (High Impact, Very High Effort)
+## Phase 5 — Mobile Clients (Mostly Done)
 
 **Goal:** iOS and Android apps with the same VIP proxy architecture.
 
-### 5.1 iOS App (SwiftUI + NetworkExtension)
-The macOS FFI layer (`libztlp_proto.a`) is already cross-compiled for arm64. The iOS project skeleton exists.
+### 5.1 ✅ iOS App (SwiftUI + NetworkExtension)
+Full iOS app with:
+- `NEPacketTunnelProvider` with VIP routing via `packet_router.rs` (2,030 lines, 35 tests)
+- VIP subnet `10.122.0.0/16` — each service gets a unique IP (e.g., `10.122.0.2` = vault, `10.122.0.3` = http)
+- Enrollment flow with QR scan + NS zone registration
+- CA certificate installation via `.mobileconfig` profile (Home screen card + Settings section)
+- In-app benchmark suite (14 local + 11 HTTP benchmarks)
+- 112 unit tests (100 passing, 12 pre-existing Keychain simulator failures)
+- Services view, connection status, traffic stats, tunnel logs
 
-**Work:** NetworkExtension packet tunnel provider, iOS-appropriate UI (no menu bar), on-demand VPN rules, background keepalive, battery-efficient reconnect.
+### 5.2 Android App (Kotlin + VpnService) — NOT STARTED
+JNI bindings to `libztlp_proto.so`. Android VpnService for tun interface. Can reuse `packet_router.rs` directly.
 
-### 5.2 Android App (Kotlin + VpnService)
-JNI bindings to `libztlp_proto.so`. Android VpnService for tun interface.
+### 5.3 ✅ Shared Tunnel Core
+`packet_router.rs` is platform-agnostic (only iOS wired up). Desktop agent uses separate `127.100.0.x` VIP pool. Android would use same router via `VpnService.Builder`.
 
-**Work:** JNI FFI wrapper, VpnService implementation, split tunnel routing, battery optimization (Doze-aware keepalive).
-
-### 5.3 Shared Tunnel Core Refactor
-Extract tunnel management (connect/disconnect/reconnect/keepalive/VIP) into a platform-agnostic Rust library. Platform-specific code (NetworkExtension, VpnService, pf redirect) stays in Swift/Kotlin.
-
-**Expected result:** ZTLP accessible from any device.
+### Remaining iOS Work
+- **5.4 On-demand VPN rules** — auto-connect when accessing `.ztlp` domains
+- **5.5 Battery optimization** — keepalive interval tuning, background task scheduling
+- **5.6 Split tunneling** — only route `.ztlp` traffic through tunnel, direct for everything else
+- **5.7 App Store preparation** — proper code signing, TestFlight distribution, privacy manifest
 
 ---
 
-## Phase 6 — Security Hardening for Production (Critical, Medium Effort)
+## Phase 6 — Security Hardening for Production (Partially Done)
 
 **Goal:** Defense-in-depth beyond the current Noise_XX + ChaCha20 baseline.
 
-### 6.1 Certificate Pinning
-Pin the gateway's static public key in the client config. Reject connections to unknown gateways even if Noise handshake succeeds.
+### 6.1 ✅ PKI / Certificate Authority
+- NS acts as CA (RSA-4096 root + intermediate, auto-init on startup)
+- Gateway auto-provisions TLS certs from NS via UDP `0x14` protocol
+- TLS termination at gateway for HTTPS services (per-stream, using Erlang `:ssl`)
+- iOS CA cert enrollment via `.mobileconfig` profile
 
-### 6.2 Key Rotation
+### 6.2 ✅ Device Enrollment
+- `ztlp setup` CLI wizard with QR code support
+- ENROLL wire protocol (0x07/0x08) with HMAC-BLAKE2s tokens
+- iOS enrollment flow with zone registration
+
+### 6.3 ✅ Structured Audit Logging
+- JSON structured logging across all components (NS, gateway, relay)
+- Audit trail for registrations, policy decisions, session lifecycle
+
+### 6.4 Certificate Pinning — NOT STARTED
+Pin the gateway's static public key in the client config. Reject connections to unknown gateways even if Noise handshake succeeds. ~50 lines.
+
+### 6.5 Key Rotation — NOT STARTED
 Rotate session keys every 2^32 packets or 24 hours (whichever first). New frame type: `FRAME_REKEY (0x0A)`. Both sides derive new keys from the current ones via HKDF. Zero-downtime — no reconnect needed.
 
-### 6.3 Mutual Device Attestation
-Extend the enrollment system to verify device identity on every connection:
+### 6.6 Mutual Device Attestation — NOT STARTED
+Extend enrollment to verify device identity on every connection:
 - macOS: Secure Enclave attestation
 - iOS: DeviceCheck / App Attest
 - Android: Play Integrity / Key Attestation
 
-### 6.4 Audit Trail
-Structured audit log of all connections, stream opens, policy decisions, and authentication events. Ship to SIEM (Splunk, Elastic, etc.) via syslog or webhook.
-
-### 6.5 Post-Quantum Readiness
+### 6.7 Post-Quantum Readiness — NOT STARTED
 Current Noise_XX uses X25519 for key exchange. Add hybrid PQ mode: X25519 + ML-KEM-768 (Kyber). Key sizes increase but tunnel overhead stays the same after handshake.
 
 ---
@@ -199,22 +276,27 @@ Gateway config changes without restart. Watch config file, apply changes to rout
 
 ## Priority Matrix
 
-| Phase | Impact | Effort | Priority |
-|---|---|---|---|
-| **1: Gateway Concurrency** | High | Medium | 🔴 Do First |
-| **2: Connection Pooling** | Medium | Low | 🔴 Do First |
-| **6: Security Hardening** | Critical | Medium | 🟡 Do Soon |
-| **3: UDP Transport** | High | High | 🟡 Do Soon |
-| **7: Ops Excellence** | Medium | Low-Medium | 🟢 Steady |
-| **4: Multi-Service** | Medium | High | 🟢 Steady |
-| **5: Mobile Clients** | High | Very High | 🔵 Later |
+| Phase | Impact | Effort | Priority | Status |
+|---|---|---|---|---|
+| **0: Production Hardening** | Critical | Low-Medium | 🔴 BLOCKING | 0/8 done |
+| **1: Gateway Concurrency** | High | Medium | ✅ Mostly Done | 4/6 done |
+| **2: Connection Pooling** | Medium | Low | 🟡 Do Soon | 0/3 done |
+| **5: Mobile (iOS)** | High | Very High | ✅ Mostly Done | 3/7 done |
+| **6: Security Hardening** | Critical | Medium | 🟡 Partially Done | 3/7 done |
+| **3: UDP Transport** | High | High | 🟢 Steady | 0/4 done |
+| **7: Ops Excellence** | Medium | Low-Medium | 🟢 Steady | 0/4 done |
+| **4: Multi-Service** | Medium | High | 🔵 Later | 0/4 done |
+| **5: Mobile (Android)** | High | High | 🔵 Later | 0/1 done |
 
 ---
 
 ## Quick Wins (can ship in a day each)
 
-1. **Async FRAME_OPEN** (Phase 1.1) — biggest bang for buck, fixes the concurrency drop
-2. **Backend connection pool** (Phase 2.1) — cuts repeat latency in half
-3. **Send window tuning** (Phase 1.3) — pure config change, immediate throughput improvement
-4. **Certificate pinning** (Phase 6.1) — ~50 lines, significant security improvement
-5. **Client metrics export** (Phase 7.1) — visibility into tunnel health
+1. **NS data persistence** (Phase 0.1) — volume mount + disc_copies, prevents CA key loss
+2. **Gateway log levels** (Phase 0.4) — change data-path to debug, immediate disk savings
+3. **Firewall exposed ports** (Phase 0.5) — iptables rules, 10 minutes
+4. **Zone re-bootstrap** (Phase 0.2) — check zone key each registration cycle, ~30 lines
+5. **Echo server systemd** (Phase 0.3) — systemd unit file, 5 minutes
+6. **Version bump** (Phase 0.8) — tag v0.18.0, update changelog
+7. **Certificate pinning** (Phase 6.4) — ~50 lines, significant security improvement
+8. **Backend connection pool** (Phase 2.1) — cuts repeat latency in half

@@ -177,6 +177,14 @@ const FRAME_CORRUPTION_NACK: u8 = 0x09;
 /// Gateway-side handling is added separately.
 pub const FRAME_STREAM_RESET: u8 = 0x0B;
 
+/// PLPMTUD probe request — sent with padding to test larger MTU sizes.
+/// Wire format: `[0x0C | probe_size(2 BE) | probe_seq(2 BE) | padding...]`
+pub const FRAME_PMTU_PROBE: u8 = 0x0C;
+
+/// PLPMTUD probe acknowledgment.
+/// Wire format: `[0x0D | probe_size(2 BE) | probe_seq(2 BE)]`
+pub const FRAME_PMTU_PROBE_ACK: u8 = 0x0D;
+
 /// Outcome of a bridge run, distinguishing normal close from a stream reset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeOutcome {

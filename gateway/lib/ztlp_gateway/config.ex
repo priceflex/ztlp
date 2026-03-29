@@ -199,6 +199,38 @@ defmodule ZtlpGateway.Config do
     Application.get_env(:ztlp_gateway, :header_signing_timestamp_window, 60)
   end
 
+  # ── Audit Collector ────────────────────────────────────────────
+
+  def get(:audit_enabled) do
+    case System.get_env("ZTLP_GATEWAY_AUDIT_ENABLED") do
+      nil -> Application.get_env(:ztlp_gateway, :audit_enabled, true)
+      "false" -> false
+      "0" -> false
+      _ -> true
+    end
+  end
+
+  def get(:audit_port) do
+    case System.get_env("ZTLP_GATEWAY_AUDIT_PORT") do
+      nil -> Application.get_env(:ztlp_gateway, :audit_port, 9104)
+      port -> String.to_integer(port)
+    end
+  end
+
+  def get(:audit_max_events) do
+    case System.get_env("ZTLP_GATEWAY_AUDIT_MAX_EVENTS") do
+      nil -> Application.get_env(:ztlp_gateway, :audit_max_events, 10_000)
+      n -> String.to_integer(n)
+    end
+  end
+
+  def get(:audit_retention_days) do
+    case System.get_env("ZTLP_GATEWAY_AUDIT_RETENTION_DAYS") do
+      nil -> Application.get_env(:ztlp_gateway, :audit_retention_days, 30)
+      n -> String.to_integer(n)
+    end
+  end
+
   # ── Backend Connection Pool ────────────────────────────────────
 
   @doc "Max idle connections per backend in the pool. Default: 8."
@@ -339,4 +371,5 @@ defmodule ZtlpGateway.Config do
       port -> String.to_integer(port)
     end
   end
+
 end

@@ -42,6 +42,8 @@ defmodule ZtlpGateway.Application do
         ZtlpGateway.StatsReporter,
         ZtlpGateway.MetricsServer,
         ZtlpGateway.AuditLog,
+        ZtlpGateway.AuditCollector,
+        ZtlpGateway.AuditCollectorServer,
         ZtlpGateway.SessionRegistry,
         ZtlpGateway.HeaderSigner.NonceCache,
         ZtlpGateway.PolicyEngine,

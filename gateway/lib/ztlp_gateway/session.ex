@@ -1,3 +1,116 @@
+defmodule ZtlpGateway.Rekey do
+  @moduledoc """
+  Pure-function helpers for FRAME_REKEY session key rotation.
+
+  Provides key derivation and rekey state management used by
+  `ZtlpGateway.Session` for periodic key rotation. Extracted as a
+  separate module for direct testability (like `ZtlpGateway.RecvWindow`).
+
+  ## Protocol
+
+  FRAME_REKEY (0x0A) rotates encryption keys every 2^32 packets or 24 hours
+  (whichever comes first) without disconnecting.
+
+  1. Gateway sends `<<0x0A, key_material::32-bytes>>` encrypted with current r2i_key
+  2. Client ACKs with `<<0x0A, client_key_material::32-bytes>>` encrypted with current i2r_key
+  3. Both sides derive new keys: `BLAKE2s(current_key || key_material)`
+  4. Keys switch atomically after ACK
+  """
+
+  @default_rekey_interval_ms 86_400_000
+  @default_rekey_packet_limit 4_294_967_296
+
+  @doc "Returns the default rekey interval in milliseconds (24 hours)."
+  def default_interval_ms, do: @default_rekey_interval_ms
+
+  @doc "Returns the default rekey packet limit (2^32)."
+  def default_packet_limit, do: @default_rekey_packet_limit
+
+  @doc """
+  Create initial rekey state fields.
+
+  Returns a map of rekey-related fields to merge into the session state.
+  """
+  def initial_state(opts \\ %{}) do
+    %{
+      rekey_packet_count: 0,
+      rekey_interval_ms: Map.get(opts, :rekey_interval_ms, @default_rekey_interval_ms),
+      rekey_packet_limit: Map.get(opts, :rekey_packet_limit, @default_rekey_packet_limit),
+      rekey_pending: false,
+      rekey_timer_ref: nil,
+      pending_r2i_key: nil,
+      pending_i2r_key: nil,
+      rekey_count: 0
+    }
+  end
+
+  @doc """
+  Derive a new key from the current key and fresh key material using BLAKE2s.
+
+  Returns a 32-byte binary.
+  """
+  def derive_new_key(current_key, key_material) do
+    :crypto.hash(:blake2s, current_key <> key_material)
+  end
+
+  @doc """
+  Check whether a rekey should be initiated based on the current state.
+
+  Returns `:initiate` if a rekey should start, or `:skip` with a reason.
+  """
+  def should_rekey?(state) do
+    cond do
+      state.rekey_pending ->
+        {:skip, :already_pending}
+
+      state.rekey_packet_count >= state.rekey_packet_limit ->
+        :initiate
+
+      true ->
+        {:skip, :below_threshold}
+    end
+  end
+
+  @doc """
+  Apply rekey initiation to state: set pending flag and compute pending r2i key.
+
+  Takes the current state and key_material (32 random bytes).
+  Returns updated state fields as a map (caller merges into full state).
+  """
+  def initiate(state, key_material) do
+    pending_r2i = derive_new_key(state.r2i_key, key_material)
+
+    %{
+      rekey_pending: true,
+      pending_r2i_key: pending_r2i
+    }
+  end
+
+  @doc """
+  Complete a rekey after receiving the client's ACK with their key material.
+
+  Returns updated state fields as a map, or `:not_pending` if no rekey was in progress.
+  """
+  def complete(state, client_key_material) do
+    if state.rekey_pending do
+      new_i2r = derive_new_key(state.i2r_key, client_key_material)
+
+      {:ok,
+        %{
+          r2i_key: state.pending_r2i_key,
+          i2r_key: new_i2r,
+          rekey_pending: false,
+          pending_r2i_key: nil,
+          pending_i2r_key: nil,
+          rekey_packet_count: 0,
+          rekey_count: state.rekey_count + 1
+        }}
+    else
+      :not_pending
+    end
+  end
+end
+
 defmodule ZtlpGateway.RecvWindow do
   @moduledoc """
   Pure-function sliding receive window for out-of-order packet acceptance.
@@ -145,12 +258,14 @@ defmodule ZtlpGateway.Session do
     Crypto,
     Handshake,
     Packet,
+    Rekey,
     SessionRegistry,
     Backend,
     BackendPool,
     PolicyEngine,
     Identity,
     AuditLog,
+    AuditCollector,
     Stats,
     CertProvisioner,
     TlsTerminator
@@ -173,6 +288,7 @@ defmodule ZtlpGateway.Session do
   @frame_reset 0x04
   @frame_close 0x05
   @frame_open 0x06
+  @frame_rekey 0x0A
 
   # ARQ constants (KCP-inspired, tuned for relay paths)
   # Default initial RTO accommodates full relay round-trip:
@@ -271,65 +387,69 @@ defmodule ZtlpGateway.Session do
 
     timeout_ms = Config.get(:session_timeout_ms)
 
-    state = %{
-      session_id: session_id,
-      client_addr: client_addr,
-      udp_socket: udp_socket,
-      service: service,
-      handshake: hs,
-      phase: :awaiting_msg1,
-      # Transport keys (set after handshake)
-      # client→gateway decrypt key
-      i2r_key: nil,
-      # gateway→client encrypt key
-      r2i_key: nil,
-      # Sliding receive window for out-of-order packet acceptance.
-      # Replaces strict recv_seq > check with a window that buffers and
-      # reorders packets — critical for cellular where reordering is common.
-      # recv_window_base starts as :unset; the first accepted data packet
-      # anchors the window at that sequence number.
-      recv_window: MapSet.new(),
-      recv_window_base: :unset,
-      recv_buffer: %{},
-      send_seq: 0,
-      # Tunnel framing: data_seq for ordered reassembly
-      send_data_seq: 0,
-      # Backend connection
-      backend_pid: nil,
-      # Stats
-      bytes_in: 0,
-      bytes_out: 0,
-      started_at: System.monotonic_time(:millisecond),
-      # Timeout
-      timeout_ms: timeout_ms,
-      timer_ref: schedule_timeout(timeout_ms),
-      # Buffer for packets that arrive before handshake completes
-      pending_packets: [],
-      # Send buffer for retransmission (KCP-inspired ARQ)
-      # %{packet_seq => {plaintext_frame, sent_at_mono, retransmit_count, data_seq}}
-      send_buffer: %{},
-      rto_ms: @initial_rto_ms,
-      srtt_ms: nil,
-      rttvar_ms: nil,
-      retransmit_timer_ref: nil,
-      # Draining: backend closed, but we keep the session alive to retransmit
-      draining: false,
-      # Paced send queue: list of plaintext chunks waiting to be sent
-      # Each entry is a raw plaintext (not yet framed/encrypted)
-      send_queue: :queue.new(),
-      # Backend address for legacy reconnection on idle-close
-      backend_addr: nil,
-      # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
-      # When populated, the session is in multiplexed mode.
-      streams: %{},
-      mux_mode: false,
-      pacing_timer_ref: nil,
-      # Congestion control (AIMD)
-      cwnd: @initial_cwnd,
-      ssthresh: @initial_ssthresh,
-      # Track data_seq of last ACK for duplicate detection
-      last_acked_data_seq: -1
-    }
+    rekey_state = Rekey.initial_state()
+
+    state =
+      %{
+        session_id: session_id,
+        client_addr: client_addr,
+        udp_socket: udp_socket,
+        service: service,
+        handshake: hs,
+        phase: :awaiting_msg1,
+        # Transport keys (set after handshake)
+        # client→gateway decrypt key
+        i2r_key: nil,
+        # gateway→client encrypt key
+        r2i_key: nil,
+        # Sliding receive window for out-of-order packet acceptance.
+        # Replaces strict recv_seq > check with a window that buffers and
+        # reorders packets — critical for cellular where reordering is common.
+        # recv_window_base starts as :unset; the first accepted data packet
+        # anchors the window at that sequence number.
+        recv_window: MapSet.new(),
+        recv_window_base: :unset,
+        recv_buffer: %{},
+        send_seq: 0,
+        # Tunnel framing: data_seq for ordered reassembly
+        send_data_seq: 0,
+        # Backend connection
+        backend_pid: nil,
+        # Stats
+        bytes_in: 0,
+        bytes_out: 0,
+        started_at: System.monotonic_time(:millisecond),
+        # Timeout
+        timeout_ms: timeout_ms,
+        timer_ref: schedule_timeout(timeout_ms),
+        # Buffer for packets that arrive before handshake completes
+        pending_packets: [],
+        # Send buffer for retransmission (KCP-inspired ARQ)
+        # %{packet_seq => {plaintext_frame, sent_at_mono, retransmit_count, data_seq}}
+        send_buffer: %{},
+        rto_ms: @initial_rto_ms,
+        srtt_ms: nil,
+        rttvar_ms: nil,
+        retransmit_timer_ref: nil,
+        # Draining: backend closed, but we keep the session alive to retransmit
+        draining: false,
+        # Paced send queue: list of plaintext chunks waiting to be sent
+        # Each entry is a raw plaintext (not yet framed/encrypted)
+        send_queue: :queue.new(),
+        # Backend address for legacy reconnection on idle-close
+        backend_addr: nil,
+        # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
+        # When populated, the session is in multiplexed mode.
+        streams: %{},
+        mux_mode: false,
+        pacing_timer_ref: nil,
+        # Congestion control (AIMD)
+        cwnd: @initial_cwnd,
+        ssthresh: @initial_ssthresh,
+        # Track data_seq of last ACK for duplicate detection
+        last_acked_data_seq: -1
+      }
+      |> Map.merge(rekey_state)
 
     {:ok, state}
   end
@@ -639,6 +759,19 @@ defmodule ZtlpGateway.Session do
           Logger.info("[Session] Stream #{stream_id} opened (service=#{updated.service}), total_streams=#{map_size(streams)}")
         end
 
+        # Audit: stream opened
+        AuditCollector.log_event(%{
+          event: "stream.opened",
+          component: "gateway",
+          level: "info",
+          service: updated.service,
+          details: %{
+            session_id: Base.encode16(state.session_id),
+            stream_id: stream_id,
+            total_streams: map_size(streams)
+          }
+        })
+
         {:noreply, %{state | streams: streams}}
 
       _ ->
@@ -685,6 +818,18 @@ defmodule ZtlpGateway.Session do
     end
   end
 
+  # Rekey timer — initiate key rotation if not already pending
+  def handle_info(:rekey_timer, state) do
+    if state.phase == :established and not state.rekey_pending do
+      Logger.info("[Session] Rekey timer fired, initiating key rotation")
+      state = do_initiate_rekey(state)
+      {:noreply, state}
+    else
+      # Reschedule if pending (will be rescheduled after completion)
+      {:noreply, state}
+    end
+  end
+
   # Ignore stale timers
   def handle_info(_msg, state) do
     {:noreply, state}
@@ -709,6 +854,20 @@ defmodule ZtlpGateway.Session do
       state.bytes_in,
       state.bytes_out
     )
+
+    # Audit: session terminated
+    AuditCollector.log_event(%{
+      event: "session.terminated",
+      component: "gateway",
+      level: "info",
+      details: %{
+        session_id: Base.encode16(state.session_id),
+        reason: "normal",
+        duration_ms: duration,
+        bytes_in: state.bytes_in,
+        bytes_out: state.bytes_out
+      }
+    })
 
     :ok
   end
@@ -782,6 +941,9 @@ defmodule ZtlpGateway.Session do
                         state.service
                       )
 
+                      # Start rekey timer for periodic key rotation
+                      rekey_timer_ref = Process.send_after(self(), :rekey_timer, state.rekey_interval_ms)
+
                       new_state =
                         %{
                           state
@@ -791,7 +953,8 @@ defmodule ZtlpGateway.Session do
                             r2i_key: keys.r2i_key,
                             backend_pid: backend_pid,
                             backend_addr: {host, port, self()},
-                            pending_packets: []
+                            pending_packets: [],
+                            rekey_timer_ref: rekey_timer_ref
                         }
 
                       # Process any packets that arrived during handshake
@@ -1243,8 +1406,39 @@ defmodule ZtlpGateway.Session do
       _ ->
         :ok
     end
+    # Audit: stream closed
+    AuditCollector.log_event(%{
+      event: "stream.closed",
+      component: "gateway",
+      level: "info",
+      details: %{
+        session_id: Base.encode16(state.session_id),
+        stream_id: stream_id
+      }
+    })
+
     streams = Map.delete(state.streams, stream_id)
     {:noreply, %{state | streams: streams}}
+  end
+
+  # FRAME_REKEY: client's ACK with their key material for key rotation
+  defp handle_tunnel_frame(<<@frame_rekey, client_key_material::binary-32>>, state) do
+    case Rekey.complete(state, client_key_material) do
+      {:ok, rekey_updates} ->
+        Logger.info("[Session] Rekey ##{rekey_updates.rekey_count} complete, keys rotated")
+        # Schedule next rekey timer
+        rekey_timer_ref = Process.send_after(self(), :rekey_timer, state.rekey_interval_ms)
+        state =
+          state
+          |> Map.merge(rekey_updates)
+          |> Map.put(:rekey_timer_ref, rekey_timer_ref)
+        {:noreply, state}
+
+      :not_pending ->
+        # Client-initiated rekey or stale — ignore for now
+        Logger.debug("[Session] Received FRAME_REKEY but no rekey pending, ignoring")
+        {:noreply, state}
+    end
   end
 
   defp handle_tunnel_frame(_other, state) do
@@ -1400,11 +1594,12 @@ defmodule ZtlpGateway.Session do
   end
   defp schedule_pacing_timer(state), do: state
 
-  # Cancel any pending retransmit and pacing timers (used on RESET/cleanup).
+  # Cancel any pending retransmit, pacing, and rekey timers (used on RESET/cleanup).
   defp cancel_timers(state) do
     if state.retransmit_timer_ref, do: Process.cancel_timer(state.retransmit_timer_ref)
     if state.pacing_timer_ref, do: Process.cancel_timer(state.pacing_timer_ref)
-    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil}
+    if state.rekey_timer_ref, do: Process.cancel_timer(state.rekey_timer_ref)
+    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil, rekey_timer_ref: nil}
   end
 
   defp encrypt_and_send(plaintext, state) do
@@ -1438,13 +1633,17 @@ defmodule ZtlpGateway.Session do
     # Schedule retransmit timer if not already scheduled
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
 
-    {:ok, %{state |
+    new_state = %{state |
       send_seq: seq,
       send_data_seq: data_seq + 1,
       bytes_out: state.bytes_out + byte_size(packet),
       send_buffer: send_buffer,
-      retransmit_timer_ref: retransmit_timer_ref
-    }}
+      retransmit_timer_ref: retransmit_timer_ref,
+      rekey_packet_count: state.rekey_packet_count + 1
+    }
+
+    new_state = maybe_initiate_rekey(new_state)
+    {:ok, new_state}
   end
 
   # Encrypt and send a multiplexed stream data frame.
@@ -1474,13 +1673,17 @@ defmodule ZtlpGateway.Session do
     send_buffer = Map.put(state.send_buffer, seq, {framed, now, 0, data_seq})
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
 
-    {:ok, %{state |
+    new_state = %{state |
       send_seq: seq,
       send_data_seq: data_seq + 1,
       bytes_out: state.bytes_out + byte_size(packet),
       send_buffer: send_buffer,
-      retransmit_timer_ref: retransmit_timer_ref
-    }}
+      retransmit_timer_ref: retransmit_timer_ref,
+      rekey_packet_count: state.rekey_packet_count + 1
+    }
+
+    new_state = maybe_initiate_rekey(new_state)
+    {:ok, new_state}
   end
 
   # Encrypt and send a control frame (FIN/CLOSE per stream — no retransmit needed).
@@ -1509,6 +1712,43 @@ defmodule ZtlpGateway.Session do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # Check if a rekey should be initiated based on packet count threshold.
+  # Called after each data packet send.
+  defp maybe_initiate_rekey(state) do
+    case Rekey.should_rekey?(state) do
+      :initiate -> do_initiate_rekey(state)
+      {:skip, _reason} -> state
+    end
+  end
+
+  # Initiate a rekey: generate key material, send FRAME_REKEY, update state.
+  defp do_initiate_rekey(state) do
+    key_material = :crypto.strong_rand_bytes(32)
+
+    # Send FRAME_REKEY with key_material (encrypted with current r2i_key)
+    frame = <<@frame_rekey, key_material::binary>>
+    seq = state.send_seq + 1
+    nonce = <<0::32, seq::little-64>>
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, frame, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+    send_udp(state, packet)
+
+    # Compute pending key and update state
+    rekey_updates = Rekey.initiate(state, key_material)
+
+    Logger.info("[Session] Rekey initiated (packet_count=#{state.rekey_packet_count}), waiting for client ACK")
+
+    state
+    |> Map.put(:send_seq, seq)
+    |> Map.merge(rekey_updates)
+  end
 
   defp send_udp(%{udp_socket: socket, client_addr: {ip, port}}, data) do
     :gen_udp.send(socket, ip, port, data)
@@ -1593,6 +1833,20 @@ defmodule ZtlpGateway.Session do
       state.bytes_in,
       state.bytes_out
     )
+
+    # Audit: session terminated (with reason)
+    AuditCollector.log_event(%{
+      event: "session.terminated",
+      component: "gateway",
+      level: "info",
+      details: %{
+        session_id: Base.encode16(state.session_id),
+        reason: to_string(reason),
+        duration_ms: duration,
+        bytes_in: state.bytes_in,
+        bytes_out: state.bytes_out
+      }
+    })
 
     {:stop, :normal, state}
   end

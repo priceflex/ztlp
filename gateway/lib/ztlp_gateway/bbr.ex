@@ -67,14 +67,26 @@ defmodule ZtlpGateway.Bbr do
 
   @doc "Called on each ACK. Returns updated state."
   def on_ack(state, acked_bytes, rtt_ms, now_ms) do
-    state
-    |> update_round(acked_bytes)
-    |> update_btl_bw(acked_bytes, rtt_ms, now_ms)
-    |> update_rt_prop(rtt_ms, now_ms)
-    |> update_inflight(-acked_bytes)
-    |> check_state_transitions(now_ms)
-    |> set_pacing_rate()
-    |> set_cwnd()
+    new_state =
+      state
+      |> update_round(acked_bytes)
+      |> update_btl_bw(acked_bytes, rtt_ms, now_ms)
+      |> update_rt_prop(rtt_ms, now_ms)
+      |> update_inflight(-acked_bytes)
+      |> check_state_transitions(now_ms)
+      |> set_pacing_rate()
+      |> set_cwnd()
+
+    if new_state.round_start or new_state.state != state.state or new_state.cwnd != state.cwnd do
+      require Logger
+      Logger.debug("[BBR] state=#{new_state.state} cwnd=#{Float.round(new_state.cwnd, 1)} " <>
+        "btl_bw=#{trunc(new_state.btl_bw)} rt_prop=#{inspect(new_state.rt_prop)} " <>
+        "inflight=#{new_state.inflight} delivered=#{new_state.delivered} " <>
+        "round=#{new_state.round_count} filled=#{new_state.filled_pipe} " <>
+        "bdp=#{trunc(bdp(new_state))} pacing=#{trunc(new_state.pacing_rate)}")
+    end
+
+    new_state
   end
 
   @doc "Called on each send. Returns updated state."

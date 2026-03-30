@@ -28,7 +28,7 @@ defmodule ZtlpGateway.Bbr do
             rt_prop: :infinity,
             rt_prop_stamp: 0,
             pacing_rate: 0.0,
-            cwnd: 64,
+            cwnd: 64.0,
             filled_pipe: false,
             full_bw: 0.0,
             full_bw_count: 0,
@@ -267,8 +267,8 @@ defmodule ZtlpGateway.Bbr do
 
     cwnd =
       case state.state do
-        :probe_rtt -> @min_cwnd
-        _ -> min(max(target_cwnd, @min_cwnd), @max_cwnd)
+        :probe_rtt -> @min_cwnd * 1.0
+        _ -> min(max(target_cwnd, @min_cwnd), @max_cwnd) * 1.0
       end
 
     %{state | cwnd: cwnd}

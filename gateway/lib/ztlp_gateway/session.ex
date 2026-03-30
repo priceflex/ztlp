@@ -438,7 +438,7 @@ defmodule ZtlpGateway.Session do
   # Initial congestion window — 64 covers up to ~77KB without slow start.
   # This handles concurrent 5x GET 10KB (45 packets) in a single burst,
   # plus small requests without needing slow start at all.
-  @initial_cwnd 64
+  @initial_cwnd 64.0
   # Maximum congestion window (packets). 256 × 1200 = 307KB.
   # Conservative max to avoid overwhelming cellular/relay paths.
   @max_cwnd 256
@@ -873,7 +873,7 @@ defmodule ZtlpGateway.Session do
             acc = if not @use_bbr and retransmit_count == 0 do
               new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
               new_cwnd = max(new_ssthresh, @min_cwnd)
-              Logger.debug("[Session] Loss detected: cwnd #{Float.round(acc.cwnd, 1)} → #{new_cwnd}, ssthresh → #{new_ssthresh}")
+              Logger.debug("[Session] Loss detected: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{new_cwnd}, ssthresh → #{new_ssthresh}")
               %{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}
             else
               acc
@@ -2163,7 +2163,7 @@ defmodule ZtlpGateway.Session do
       end
     end
 
-    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")
+    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}")
 
     %{state | send_buffer: send_buffer}
   end

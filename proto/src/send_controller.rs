@@ -52,8 +52,13 @@ struct SendEntry {
 pub struct SendController {
     /// AIMD congestion controller (cwnd, RTT, loss detection).
     cc: AdvancedCongestionController,
-    /// In-flight packets keyed by transport sequence number.
+    /// In-flight DATA packets keyed by transport sequence number.
+    /// Only contains packets that count toward cwnd (regular data).
     send_buffer: BTreeMap<u64, SendEntry>,
+    /// In-flight PRIORITY packets keyed by transport sequence number.
+    /// Tracked for retransmission but NOT counted in cwnd gating.
+    /// Download ACKs and keepalives go here.
+    priority_buffer: BTreeMap<u64, SendEntry>,
     /// Framed payloads waiting to be sent (enqueued but not yet transmitted).
     pending_queue: VecDeque<Vec<u8>>,
     /// Priority queue for ACK frames — flushed unconditionally, not subject
@@ -90,6 +95,7 @@ impl SendController {
         Self {
             cc: AdvancedCongestionController::new(),
             send_buffer: BTreeMap::new(),
+            priority_buffer: BTreeMap::new(),
             pending_queue: VecDeque::new(),
             priority_queue: VecDeque::new(),
             ack_rx,
@@ -130,17 +136,25 @@ impl SendController {
     pub async fn flush(&mut self) -> Result<usize, TransportError> {
         let mut sent_count = 0usize;
 
-        // First: flush all priority frames (ACKs) — fire-and-forget.
-        // NOT tracked in send_buffer — download ACKs are idempotent
-        // (each new ACK supersedes the previous) so retransmission is
-        // unnecessary. Critically, tracking them in send_buffer would
-        // inflate in_flight() and block all cwnd-gated data sends
-        // (870 ACKs for a 1MB download → in_flight=870 >> cwnd=64).
+        // First: flush all priority frames (ACKs) — bypass cwnd but
+        // tracked in priority_buffer for retransmission.
+        // NOT in send_buffer so they don't inflate in_flight() which
+        // gates cwnd for regular data.
         while let Some(framed) = self.priority_queue.pop_front() {
-            let _seq = self
+            let seq = self
                 .transport
                 .send_data(self.session_id, &framed, self.peer_addr)
                 .await?;
+
+            self.priority_buffer.insert(
+                seq,
+                SendEntry {
+                    data: framed,
+                    sent_at: Instant::now(),
+                    send_seq: seq,
+                    retransmits: 0,
+                },
+            );
 
             sent_count += 1;
         }
@@ -205,11 +219,22 @@ impl SendController {
             let mut rtt_sample: Option<Duration> = None;
 
             // Remove all entries with seq ≤ acked_seq (cumulative ACK)
+            // Check both send_buffer (data) and priority_buffer (ACKs)
             let acked_keys: Vec<u64> = self
                 .send_buffer
                 .range(..=acked_seq)
                 .map(|(&k, _)| k)
                 .collect();
+
+            // Also clear acked priority entries
+            let priority_acked: Vec<u64> = self
+                .priority_buffer
+                .range(..=acked_seq)
+                .map(|(&k, _)| k)
+                .collect();
+            for key in priority_acked {
+                self.priority_buffer.remove(&key);
+            }
 
             for key in acked_keys {
                 if let Some(entry) = self.send_buffer.remove(&key) {
@@ -306,6 +331,38 @@ impl SendController {
             }
         }
 
+        // Also retransmit timed-out priority entries (download ACKs).
+        // These don't affect the congestion controller (no on_loss/on_rto)
+        // since they're control traffic, but they must be retransmitted
+        // to fill recv_window gaps on the gateway.
+        let priority_timed_out: Vec<u64> = self
+            .priority_buffer
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.sent_at) > rto)
+            .map(|(&seq, _)| seq)
+            .collect();
+
+        for old_seq in priority_timed_out {
+            if let Some(mut entry) = self.priority_buffer.remove(&old_seq) {
+                entry.retransmits += 1;
+                if entry.retransmits > 10 {
+                    debug!(
+                        "send_controller: dropping priority packet seq={} after {} retransmits",
+                        old_seq, entry.retransmits
+                    );
+                    continue;
+                }
+
+                self.transport
+                    .send_data_with_seq(self.session_id, old_seq, &entry.data, self.peer_addr)
+                    .await?;
+
+                entry.sent_at = Instant::now();
+                self.priority_buffer.insert(old_seq, entry);
+                retransmit_count += 1;
+            }
+        }
+
         Ok(retransmit_count)
     }
 
@@ -313,7 +370,8 @@ impl SendController {
     ///
     /// All queues and the send buffer must be empty.
     pub fn is_complete(&self) -> bool {
-        self.pending_queue.is_empty() && self.priority_queue.is_empty() && self.send_buffer.is_empty()
+        self.pending_queue.is_empty() && self.priority_queue.is_empty()
+            && self.send_buffer.is_empty() && self.priority_buffer.is_empty()
     }
 
     /// Number of packets waiting in the pending queue (not yet sent).

@@ -1369,41 +1369,56 @@ async fn recv_loop(
                         }
                     }
 
-                    // Send cumulative ACK for highest contiguous seq received.
-                    // Route through SendController so the ACK consumes a tracked
-                    // seq — if lost, it gets retransmitted instead of creating a
-                    // permanent gap in the gateway's recv_window.
-                    let ack_seq = next_expected_seq.saturating_sub(1);
-                    let mut ack_frame = Vec::with_capacity(9);
-                    ack_frame.push(FRAME_ACK);
-                    ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+                    // Delayed ACK: only send every ACK_COALESCE_COUNT packets,
+                    // or immediately when there's an out-of-order gap (to trigger
+                    // fast retransmit on the gateway), or during startup (first
+                    // 64 packets ACK every 2 to help BBR ramp up).
+                    // This reduces ACK count from ~870 (for 1MB) to ~70.
+                    const ACK_COALESCE_COUNT: u64 = 16;
+                    const ACK_STARTUP_EVERY: u64 = 2;
+                    const ACK_STARTUP_THRESHOLD: u64 = 64;
+                    let has_gap = !received_ahead.is_empty();
+                    let in_startup = next_expected_seq < ACK_STARTUP_THRESHOLD;
+                    let is_coalesce_point = if in_startup {
+                        next_expected_seq % ACK_STARTUP_EVERY == 0
+                    } else {
+                        next_expected_seq % ACK_COALESCE_COUNT == 0
+                    };
+                    let is_first = next_expected_seq <= 1;
 
-                    let ack_sent = if let Ok(guard) = inner.lock() {
-                        if let Some(ref session) = guard.active_session {
-                            if let Some(ref tx) = session.send_enqueue_tx {
-                                let _ = tx.send(ack_frame.clone());
-                                true
+                    if is_coalesce_point || has_gap || is_first {
+                        let ack_seq = next_expected_seq.saturating_sub(1);
+                        let mut ack_frame = Vec::with_capacity(9);
+                        ack_frame.push(FRAME_ACK);
+                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+
+                        let ack_sent = if let Ok(guard) = inner.lock() {
+                            if let Some(ref session) = guard.active_session {
+                                if let Some(ref tx) = session.send_enqueue_tx {
+                                    let _ = tx.send(ack_frame.clone());
+                                    true
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
                         } else {
                             false
-                        }
-                    } else {
-                        false
-                    };
+                        };
 
-                    // Fallback: send directly if SendController not available
-                    if !ack_sent {
-                        if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
-                            tracing::warn!(
-                                "recv_loop: failed to send ACK for data_seq={}: {}",
-                                ack_seq,
-                                e
-                            );
+                        if !ack_sent {
+                            if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                                tracing::warn!(
+                                    "recv_loop: failed to send ACK for data_seq={}: {}",
+                                    ack_seq,
+                                    e
+                                );
+                            }
                         }
+                        tracing::debug!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={})",
+                            ack_seq, ack_sent, has_gap, is_coalesce_point);
                     }
-                    tracing::debug!("recv_loop: ACK data_seq={} via_sc={}", ack_seq, ack_sent);
                 } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
                     // Per-stream FIN or legacy FIN
                     let fin_stream_id = if plaintext.len() >= 5 {

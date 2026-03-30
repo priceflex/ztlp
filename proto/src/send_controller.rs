@@ -130,24 +130,17 @@ impl SendController {
     pub async fn flush(&mut self) -> Result<usize, TransportError> {
         let mut sent_count = 0usize;
 
-        // First: flush all priority frames (ACKs) — not subject to cwnd.
-        // These are tracked in send_buffer for retransmission but don't
-        // count against the congestion window for gating purposes.
+        // First: flush all priority frames (ACKs) — fire-and-forget.
+        // NOT tracked in send_buffer — download ACKs are idempotent
+        // (each new ACK supersedes the previous) so retransmission is
+        // unnecessary. Critically, tracking them in send_buffer would
+        // inflate in_flight() and block all cwnd-gated data sends
+        // (870 ACKs for a 1MB download → in_flight=870 >> cwnd=64).
         while let Some(framed) = self.priority_queue.pop_front() {
-            let seq = self
+            let _seq = self
                 .transport
                 .send_data(self.session_id, &framed, self.peer_addr)
                 .await?;
-
-            self.send_buffer.insert(
-                seq,
-                SendEntry {
-                    data: framed,
-                    sent_at: Instant::now(),
-                    send_seq: seq,
-                    retransmits: 0,
-                },
-            );
 
             sent_count += 1;
         }

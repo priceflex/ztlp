@@ -143,6 +143,54 @@ impl TransportNode {
         Ok(seq)
     }
 
+    /// Send data using a specific (pre-assigned) sequence number.
+    ///
+    /// Used for retransmissions: the receiver's recv_window expects the
+    /// original seq, so retransmits must reuse it. The nonce is derived
+    /// from seq, so re-encrypting with the same seq and same plaintext
+    /// produces the same ciphertext (deterministic AEAD).
+    ///
+    /// IMPORTANT: The caller must ensure `seq` was previously allocated
+    /// via `send_data()` and is not reused for new data.
+    pub async fn send_data_with_seq(
+        &self,
+        session_id: SessionId,
+        seq: u64,
+        plaintext: &[u8],
+        dest: SocketAddr,
+    ) -> Result<(), TransportError> {
+        let pipeline = self.pipeline.lock().await;
+        let session = pipeline.get_session(&session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+        })?;
+
+        let send_key = session.send_key;
+
+        // Encrypt with the original seq as nonce
+        let cipher = ChaCha20Poly1305::new((&send_key).into());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let encrypted = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        let mut header = DataHeader::new(session_id, seq);
+        let aad = header.aad_bytes();
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+        let packet = ZtlpPacket::Data {
+            header,
+            payload: encrypted,
+        };
+
+        let data = packet.serialize();
+        drop(pipeline);
+        self.send_raw(&data, dest).await?;
+        Ok(())
+    }
+
     /// Send multiple raw packets to a destination using batched I/O.
     ///
     /// Uses GSO/sendmmsg when available for better throughput on bulk sends.

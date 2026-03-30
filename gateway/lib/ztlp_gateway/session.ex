@@ -1193,9 +1193,11 @@ defmodule ZtlpGateway.Session do
           end
 
         cond do
-          # Already delivered (below window base)
+          # Already delivered (below window base) — re-ACK so the sender
+          # can clear its send_buffer (the original ACK may have been lost)
           seq < state.recv_window_base ->
-            Logger.debug("[Session] Duplicate seq=#{seq} below base=#{state.recv_window_base}")
+            Logger.debug("[Session] Duplicate seq=#{seq} below base=#{state.recv_window_base}, re-ACKing")
+            state = send_ack(state.recv_window_base - 1, state)
             {:noreply, state}
 
           # Beyond window (too far ahead)
@@ -1203,9 +1205,10 @@ defmodule ZtlpGateway.Session do
             Logger.debug("[Session] Seq=#{seq} beyond window max=#{state.recv_window_base + @recv_window_size - 1}")
             {:noreply, state}
 
-          # Already received (within window but duplicate)
+          # Already received (within window but duplicate) — re-ACK
           MapSet.member?(state.recv_window, seq) ->
-            Logger.debug("[Session] Duplicate seq=#{seq} already in window")
+            Logger.debug("[Session] Duplicate seq=#{seq} already in window, re-ACKing")
+            state = send_ack(state.recv_window_base - 1, state)
             {:noreply, state}
 
           # Within window, not yet received — decrypt and accept

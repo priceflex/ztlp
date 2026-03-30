@@ -251,20 +251,22 @@ impl SendController {
                     continue;
                 }
 
-                // Retransmit — gets a new transport seq
-                let new_seq = self
-                    .transport
-                    .send_data(self.session_id, &entry.data, self.peer_addr)
+                // Retransmit — reuse the ORIGINAL transport seq so the
+                // receiver's recv_window can fill the gap. Sending with a
+                // new seq would place the retransmit beyond the receiver's
+                // window (base + 256) after many packets, causing permanent
+                // gaps and download stalls.
+                self.transport
+                    .send_data_with_seq(self.session_id, old_seq, &entry.data, self.peer_addr)
                     .await?;
 
                 debug!(
-                    "send_controller: retransmit old_seq={} → new_seq={} (attempt {})",
-                    old_seq, new_seq, entry.retransmits
+                    "send_controller: retransmit seq={} (attempt {})",
+                    old_seq, entry.retransmits
                 );
 
-                entry.send_seq = new_seq;
                 entry.sent_at = Instant::now();
-                self.send_buffer.insert(new_seq, entry);
+                self.send_buffer.insert(old_seq, entry);
 
                 retransmit_count += 1;
             }

@@ -556,9 +556,13 @@ impl VipProxy {
         peer_addr: SocketAddr,
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
-    ) -> Result<mpsc::UnboundedSender<u64>, String> {
+    ) -> Result<(mpsc::UnboundedSender<u64>, mpsc::UnboundedSender<Vec<u8>>), String> {
         // Create a SendController with an ACK channel for congestion control
         let (ack_tx, ack_rx) = mpsc::unbounded_channel();
+        // Channel for recv_loop to enqueue frames (download ACKs) through SendController.
+        // Without this, download ACKs bypass SendController and create unrecoverable
+        // gaps in the gateway's recv_window when lost.
+        let (send_enqueue_tx, send_enqueue_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let send_controller = Arc::new(tokio::sync::Mutex::new(SendController::new(
             transport.clone(),
             session_id,
@@ -570,7 +574,7 @@ impl VipProxy {
         let sc_bg = send_controller.clone();
         let stop_bg = self.stop_flag.clone();
         tokio::spawn(async move {
-            send_controller_background_task(sc_bg, stop_bg).await;
+            send_controller_background_task(sc_bg, stop_bg, send_enqueue_rx).await;
         });
 
         // Store the tunnel session
@@ -592,7 +596,7 @@ impl VipProxy {
             // Fresh dispatcher for new session
             self.dispatcher = Arc::new(StreamDispatcher::new());
             self.next_stream_id.store(1, Ordering::SeqCst);
-            return Ok(ack_tx);
+            return Ok((ack_tx, send_enqueue_tx));
         }
 
         // First start — create listeners
@@ -659,7 +663,7 @@ impl VipProxy {
             }
         }
 
-        Ok(ack_tx)
+        Ok((ack_tx, send_enqueue_tx))
     }
 
     /// Hot-swap the tunnel session without restarting listeners.
@@ -673,9 +677,10 @@ impl VipProxy {
         peer_addr: SocketAddr,
         data_seq: Arc<AtomicU64>,
         bytes_sent: Arc<AtomicU64>,
-    ) -> mpsc::UnboundedSender<u64> {
+    ) -> (mpsc::UnboundedSender<u64>, mpsc::UnboundedSender<Vec<u8>>) {
         // Create fresh SendController for the new session
         let (ack_tx, ack_rx) = mpsc::unbounded_channel();
+        let (send_enqueue_tx, send_enqueue_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let send_controller = Arc::new(tokio::sync::Mutex::new(SendController::new(
             transport.clone(),
             session_id,
@@ -687,7 +692,7 @@ impl VipProxy {
         let sc_bg = send_controller.clone();
         let stop_bg = self.stop_flag.clone();
         tokio::spawn(async move {
-            send_controller_background_task(sc_bg, stop_bg).await;
+            send_controller_background_task(sc_bg, stop_bg, send_enqueue_rx).await;
         });
 
         let mut sess = self.session.write().await;
@@ -701,7 +706,7 @@ impl VipProxy {
         ));
         // Fresh dispatcher for new session
         tracing::info!("VIP proxy: tunnel session updated (hot-swap)");
-        ack_tx
+        (ack_tx, send_enqueue_tx)
     }
 
     /// Get the shared session reference (for FFI to check if session exists).
@@ -798,6 +803,7 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
 async fn send_controller_background_task(
     controller: Arc<tokio::sync::Mutex<SendController>>,
     stop: Arc<AtomicBool>,
+    mut send_enqueue_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -808,6 +814,11 @@ async fn send_controller_background_task(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let mut sc = controller.lock().await;
+
+        // Drain any frames enqueued by the recv_loop (download ACKs, etc.)
+        while let Ok(frame) = send_enqueue_rx.try_recv() {
+            sc.enqueue(frame);
+        }
 
         // Process any pending ACKs from the recv_loop
         sc.process_acks();

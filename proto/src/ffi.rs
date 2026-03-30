@@ -137,6 +137,12 @@ struct ActiveSession {
     /// Channel to feed gateway upload ACKs to the SendController.
     /// Set when VIP proxy starts with congestion-controlled uploads.
     upload_ack_tx: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+    /// Channel for the recv_loop to enqueue frames (e.g., download ACKs)
+    /// into the SendController for sequenced, retransmittable sending.
+    /// Without this, download ACKs sent directly via transport.send_data()
+    /// consume transport seq numbers but aren't retransmitted if lost,
+    /// creating permanent gaps in the gateway's recv_window.
+    send_enqueue_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     /// Channel for packet router actions (OpenStream, SendData, CloseStream).
     /// The async router_action_task processes these and sends ZTLP mux frames.
     router_action_tx:
@@ -850,6 +856,7 @@ async fn do_connect(
         stop_flag,
         data_seq: Arc::new(AtomicU64::new(0)),
         upload_ack_tx: None,
+        send_enqueue_tx: None,
         router_action_tx: None,
         session_id_str: CString::new(hex::encode(session_id.as_bytes())).unwrap_or_default(),
         peer_node_id_str: CString::new(hex::encode(peer_node_id.as_bytes())).unwrap_or_default(),
@@ -1362,21 +1369,41 @@ async fn recv_loop(
                         }
                     }
 
-                    // Send cumulative ACK for highest contiguous seq received
+                    // Send cumulative ACK for highest contiguous seq received.
+                    // Route through SendController so the ACK consumes a tracked
+                    // seq — if lost, it gets retransmitted instead of creating a
+                    // permanent gap in the gateway's recv_window.
                     let ack_seq = next_expected_seq.saturating_sub(1);
                     let mut ack_frame = Vec::with_capacity(9);
                     ack_frame.push(FRAME_ACK);
                     ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                    if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
-                        tracing::warn!(
-                            "recv_loop: failed to send ACK for data_seq={}: {}",
-                            ack_seq,
-                            e
-                        );
+                    let ack_sent = if let Ok(guard) = inner.lock() {
+                        if let Some(ref session) = guard.active_session {
+                            if let Some(ref tx) = session.send_enqueue_tx {
+                                let _ = tx.send(ack_frame.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     } else {
-                        tracing::debug!("recv_loop: sent ACK data_seq={}", ack_seq);
+                        false
+                    };
+
+                    // Fallback: send directly if SendController not available
+                    if !ack_sent {
+                        if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                            tracing::warn!(
+                                "recv_loop: failed to send ACK for data_seq={}: {}",
+                                ack_seq,
+                                e
+                            );
+                        }
                     }
+                    tracing::debug!("recv_loop: ACK data_seq={} via_sc={}", ack_seq, ack_sent);
                 } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
                     // Per-stream FIN or legacy FIN
                     let fin_stream_id = if plaintext.len() >= 5 {
@@ -1420,7 +1447,18 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
+                            // Route through SendController if available
+                            let sent = if let Ok(guard) = inner.lock() {
+                                if let Some(ref session) = guard.active_session {
+                                    if let Some(ref tx) = session.send_enqueue_tx {
+                                        let _ = tx.send(ack_frame.clone());
+                                        true
+                                    } else { false }
+                                } else { false }
+                            } else { false };
+                            if !sent {
+                                let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
+                            }
                         }
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
@@ -2016,11 +2054,14 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
     guard.vip_proxy = Some(proxy);
 
     match result {
-        Ok(ack_tx) => {
+        Ok((ack_tx, send_enqueue_tx)) => {
             // Store the ACK channel sender so the recv_loop can feed
             // gateway upload ACKs to the SendController.
+            // Store the send_enqueue_tx so the recv_loop can route download
+            // ACKs through the SendController (for reliable delivery).
             if let Some(ref mut session) = guard.active_session {
                 session.upload_ack_tx = Some(ack_tx);
+                session.send_enqueue_tx = Some(send_enqueue_tx);
             }
             ZtlpResult::Ok as i32
         }

@@ -105,6 +105,11 @@ defmodule ZtlpRelay.UdpListener do
   def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
 
+    # Debug: log all packets from known gateway IPs
+    if src_ip == {54, 149, 48, 6} do
+      Logger.info("[UdpListener] Packet from gateway #{inspect(sender)} len=#{byte_size(data)} first=#{if byte_size(data) > 0, do: :binary.at(data, 0), else: :empty}")
+    end
+
     # Check for GATEWAY_REGISTER packet before the pipeline
     case data do
       <<0x5A, 0x37, 0x0A, rest::binary>> ->

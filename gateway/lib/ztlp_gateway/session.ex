@@ -1075,7 +1075,8 @@ defmodule ZtlpGateway.Session do
 
             # Wrap msg2 in a HELLO_ACK packet
             response = Packet.build_hello_ack(state.session_id, msg2_bytes)
-            send_udp(state, response)
+            result = send_udp(state, response)
+            Logger.info("[Session] Sent msg2 (#{byte_size(response)} bytes) to #{inspect(state.client_addr)}, result=#{inspect(result)}")
 
             {:noreply, %{state | handshake: hs, phase: :awaiting_msg3}}
         end

@@ -388,6 +388,45 @@ impl SendController {
     pub fn rto_ms(&self) -> f64 {
         self.cc.rto_ms()
     }
+
+    /// Purge all send_buffer and pending_queue entries for a given stream_id.
+    ///
+    /// Called when a stream closes so stale retransmits don't consume cwnd
+    /// or cause "Data for unknown stream" warnings on the gateway.
+    /// Frame format: [frame_type(1) | stream_id(4 BE) | payload...]
+    pub fn purge_stream(&mut self, stream_id: u32) {
+        let sid_bytes = stream_id.to_be_bytes();
+
+        // Remove from send_buffer (in-flight packets)
+        let to_remove: Vec<u64> = self
+            .send_buffer
+            .iter()
+            .filter(|(_, entry)| {
+                entry.data.len() >= 5 && entry.data[1..5] == sid_bytes
+            })
+            .map(|(seq, _)| *seq)
+            .collect();
+
+        let removed = to_remove.len();
+        for seq in to_remove {
+            self.send_buffer.remove(&seq);
+        }
+
+        // Remove from pending_queue (not yet sent)
+        let before = self.pending_queue.len();
+        self.pending_queue
+            .retain(|frame| !(frame.len() >= 5 && frame[1..5] == sid_bytes));
+        let pending_removed = before - self.pending_queue.len();
+
+        if removed > 0 || pending_removed > 0 {
+            tracing::debug!(
+                "purge_stream {}: removed {} in-flight + {} pending",
+                stream_id,
+                removed,
+                pending_removed
+            );
+        }
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

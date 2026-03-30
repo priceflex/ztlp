@@ -1211,6 +1211,12 @@ async fn handle_mux_connection<R, W>(
         .await
         {
             Ok(mut sc) => {
+                // Purge stale retransmit entries for this stream BEFORE enqueuing CLOSE.
+                // Without this, old DATA frames for the stream stay in send_buffer,
+                // consuming cwnd and causing "Data for unknown stream" warnings on the
+                // gateway (which has already deleted the stream from its map).
+                sc.purge_stream(stream_id);
+
                 sc.enqueue(close_frame);
                 sc.process_acks();
                 let _ = sc.flush().await;

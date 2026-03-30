@@ -1072,6 +1072,21 @@ async fn handle_mux_connection<R, W>(
                             .as_secs(),
                         Ordering::Relaxed,
                     );
+
+                    // Check for in-band control sentinels (FIN/CLOSE wrapped in
+                    // data frames for reliable delivery). These are single-byte
+                    // payloads matching the control frame type.
+                    const FRAME_FIN_SENTINEL: u8 = 0x02;
+                    const FRAME_CLOSE_SENTINEL: u8 = 0x05;
+                    if data.len() == 1 && (data[0] == FRAME_FIN_SENTINEL || data[0] == FRAME_CLOSE_SENTINEL) {
+                        tracing::info!(
+                            "VIP: stream {} received in-band {} sentinel",
+                            stream_id,
+                            if data[0] == FRAME_FIN_SENTINEL { "FIN" } else { "CLOSE" }
+                        );
+                        break;
+                    }
+
                     if let Err(e) = write_half.write_all(&data).await {
                         tracing::debug!("VIP: TCP write error stream {}: {}", stream_id, e);
                         break;

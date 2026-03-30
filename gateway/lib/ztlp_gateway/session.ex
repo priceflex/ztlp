@@ -1766,12 +1766,15 @@ defmodule ZtlpGateway.Session do
             encrypt_and_send_stream(stream_id, plaintext, state)
 
           {:stream_fin, stream_id} ->
-            # Stream FIN: [FRAME_FIN | stream_id(4 BE)]
-            encrypt_and_send_control(<<@frame_fin, stream_id::big-32>>, state)
+            # Stream FIN: send as a data frame with a sentinel payload so it
+            # participates in the reliable data_seq stream (retransmitted if
+            # lost). The payload is <<@frame_fin>> which the client detects
+            # after mux dispatch.
+            encrypt_and_send_stream(stream_id, <<@frame_fin>>, state)
 
           {:stream_close, stream_id} ->
-            # Stream close: [FRAME_CLOSE | stream_id(4 BE)]
-            encrypt_and_send_control(<<@frame_close, stream_id::big-32>>, state)
+            # Stream close: same approach — wrapped in data frame for reliability
+            encrypt_and_send_stream(stream_id, <<@frame_close>>, state)
 
           :legacy_fin ->
             # Legacy FIN: sent after backend closes and all data is flushed.
@@ -1911,6 +1914,37 @@ defmodule ZtlpGateway.Session do
 
   # Encrypt and send a control frame (FIN/CLOSE per stream — no retransmit needed).
   defp encrypt_and_send_control(control_frame, state) do
+    # Wrap control frames (FIN, CLOSE) inside a FRAME_DATA envelope with a
+    # data_seq so they participate in the reliable delivery stream.
+    #
+    # The client's recv_loop processes FRAME_DATA by data_seq ordering and
+    # sends cumulative ACKs. By wrapping FIN/CLOSE as data payloads, they
+    # get the same retransmission protection as response data.
+    #
+    # Format: [FRAME_DATA(0x00) | stream_id=0(4 BE) | data_seq(8 BE) | control_frame]
+    # The client dispatches stream_id=0 data to the legacy handler, but we
+    # use a special prefix byte (the original control frame type) so the
+    # client can distinguish control-in-data from actual data.
+    #
+    # Actually, simpler: just send the control frame through the same
+    # encrypt_and_send_stream path with stream_id=0. The client already
+    # handles stream_id=0 and the payload starts with the control frame
+    # type byte (FRAME_FIN=0x02, FRAME_CLOSE=0x05) which the client can
+    # detect.
+    #
+    # Wait — encrypt_and_send_stream wraps the control_frame in a mux header
+    # [FRAME_DATA | stream_id | data_seq | payload], so the client will
+    # receive it as a mux data packet and try to deliver it to stream 0.
+    # This won't trigger the FIN/CLOSE handler on the client side.
+    #
+    # The correct approach: send the control frame as a separate, tracked
+    # packet. Use send_seq for the send_buffer key and assign it a data_seq
+    # so the client's cumulative ACK covers it. The client processes FIN/CLOSE
+    # from the decrypted plaintext (before mux dispatch), so it doesn't need
+    # to be in a FRAME_DATA envelope — it just needs to advance next_expected_seq.
+
+    # For now, keep the original fire-and-forget approach but also re-send
+    # control frames on a timer until we get an ACK past their data_seq.
     seq = state.send_seq + 1
     nonce = <<0::32, seq::little-64>>
 

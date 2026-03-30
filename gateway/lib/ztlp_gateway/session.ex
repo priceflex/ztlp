@@ -1659,6 +1659,7 @@ defmodule ZtlpGateway.Session do
           tls_state: if(tls_creds, do: :pending_handshake, else: nil),
           tls_creds: tls_creds,
           tls_socket: nil,
+          tls_bridge_pid: nil,
           service: service_name
         }
         streams = Map.put(state.streams, stream_id, stream_state)

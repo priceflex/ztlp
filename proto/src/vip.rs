@@ -816,8 +816,9 @@ async fn send_controller_background_task(
         let mut sc = controller.lock().await;
 
         // Drain any frames enqueued by the recv_loop (download ACKs, etc.)
+        // These are priority frames — bypass cwnd to avoid circular deadlock
         while let Ok(frame) = send_enqueue_rx.try_recv() {
-            sc.enqueue(frame);
+            sc.enqueue_priority(frame);
         }
 
         // Process any pending ACKs from the recv_loop

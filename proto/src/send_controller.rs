@@ -56,6 +56,11 @@ pub struct SendController {
     send_buffer: BTreeMap<u64, SendEntry>,
     /// Framed payloads waiting to be sent (enqueued but not yet transmitted).
     pending_queue: VecDeque<Vec<u8>>,
+    /// Priority queue for ACK frames — flushed unconditionally, not subject
+    /// to cwnd. Download ACKs must flow freely to avoid circular deadlock:
+    /// gateway waits for download ACKs, phone waits for upload ACKs to free
+    /// cwnd to send download ACKs.
+    priority_queue: VecDeque<Vec<u8>>,
     /// Receives ACK sequence numbers from the recv_loop.
     ack_rx: mpsc::UnboundedReceiver<u64>,
     /// Transport for sending packets.
@@ -86,6 +91,7 @@ impl SendController {
             cc: AdvancedCongestionController::new(),
             send_buffer: BTreeMap::new(),
             pending_queue: VecDeque::new(),
+            priority_queue: VecDeque::new(),
             ack_rx,
             transport,
             session_id,
@@ -102,16 +108,51 @@ impl SendController {
         self.pending_queue.push_back(framed_data);
     }
 
+    /// Add a priority frame (ACK) that bypasses cwnd gating.
+    ///
+    /// These are flushed first in `flush()` without checking the congestion
+    /// window. Download ACKs must not be blocked by upload congestion —
+    /// otherwise the gateway can't advance its send window, creating a
+    /// circular deadlock.
+    pub fn enqueue_priority(&mut self, framed_data: Vec<u8>) {
+        self.priority_queue.push_back(framed_data);
+    }
+
     /// Number of packets currently in-flight (sent but not yet ACKed).
     pub fn in_flight(&self) -> usize {
         self.send_buffer.len()
     }
 
-    /// Send up to `cwnd - in_flight` packets from the pending queue.
+    /// Send priority frames unconditionally, then up to `cwnd - in_flight`
+    /// packets from the pending queue.
     ///
     /// Returns Ok(number_sent) on success, or the first send error encountered.
     pub async fn flush(&mut self) -> Result<usize, TransportError> {
         let mut sent_count = 0usize;
+
+        // First: flush all priority frames (ACKs) — not subject to cwnd.
+        // These are tracked in send_buffer for retransmission but don't
+        // count against the congestion window for gating purposes.
+        while let Some(framed) = self.priority_queue.pop_front() {
+            let seq = self
+                .transport
+                .send_data(self.session_id, &framed, self.peer_addr)
+                .await?;
+
+            self.send_buffer.insert(
+                seq,
+                SendEntry {
+                    data: framed,
+                    sent_at: Instant::now(),
+                    send_seq: seq,
+                    retransmits: 0,
+                },
+            );
+
+            sent_count += 1;
+        }
+
+        // Then: flush data frames subject to cwnd
         let cwnd = self.cc.effective_window() as usize;
 
         while self.in_flight() < cwnd {
@@ -277,14 +318,14 @@ impl SendController {
 
     /// Returns true when all data has been sent and acknowledged.
     ///
-    /// Both the pending queue and the send buffer must be empty.
+    /// All queues and the send buffer must be empty.
     pub fn is_complete(&self) -> bool {
-        self.pending_queue.is_empty() && self.send_buffer.is_empty()
+        self.pending_queue.is_empty() && self.priority_queue.is_empty() && self.send_buffer.is_empty()
     }
 
     /// Number of packets waiting in the pending queue (not yet sent).
     pub fn pending_count(&self) -> usize {
-        self.pending_queue.len()
+        self.pending_queue.len() + self.priority_queue.len()
     }
 
     /// Current congestion window size.

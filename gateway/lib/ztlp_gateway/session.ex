@@ -587,6 +587,8 @@ defmodule ZtlpGateway.Session do
         last_acked_data_seq: -1,
         # Duplicate ACK counter for fast retransmit
         dup_ack_count: 0,
+        # Whether fast retransmit already fired for this loss event
+        fast_retransmit_sent: false,
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
         sacked_set: MapSet.new()
@@ -1546,6 +1548,7 @@ defmodule ZtlpGateway.Session do
               ssthresh: @initial_ssthresh,
               last_acked_data_seq: -1,
               dup_ack_count: 0,
+              fast_retransmit_sent: false,
               retransmit_timer_ref: retransmit_ref,
               bbr: if(@use_bbr, do: Bbr.new(), else: nil)
             }}
@@ -2169,45 +2172,46 @@ defmodule ZtlpGateway.Session do
       end
     end
 
-    # Duplicate ACK detection + fast retransmit
-    # If we get the same data_seq ACK with acked=0, the client is telling us
-    # it's missing the NEXT packets. After 3 duplicate ACKs, immediately
-    # retransmit the lowest unacked data_seq without waiting for RTO.
-    {dup_count, send_buffer} = if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and map_size(send_buffer) > 0 do
-      new_count = state.dup_ack_count + 1
-      send_buffer = if new_count >= 3 and rem(new_count, 3) == 0 do
-        # Fast retransmit: resend all unacked packets immediately
-        now_ms = System.monotonic_time(:millisecond)
-        retransmit_count = Enum.reduce(send_buffer, 0, fn {seq, {packet, _sent_at, _rc, _ds}}, count ->
-          nonce = <<0::32, seq::little-64>>
-          {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
-          encrypted = ct <> tag
-          new_pkt = Packet.build_data(state.session_id, seq,
-            payload: encrypted,
-            payload_len: byte_size(encrypted)
-          )
-          new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
-          send_udp(state, new_packet)
-          count + 1
-        end)
-        # Reset sent_at for all fast-retransmitted packets
-        updated_buffer = Map.new(send_buffer, fn {seq, {packet, _sent_at, rc, ds}} ->
-          {seq, {packet, now_ms, rc, ds}}
-        end)
-        Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq})")
-        updated_buffer
+    # Duplicate ACK detection + fast retransmit (TCP-style: once per loss event)
+    # After 3 duplicate ACKs, retransmit once. Don't retransmit again until
+    # new data is ACK'd (newly_acked > 0). This prevents retransmit storms
+    # when the client sends hundreds of duplicate ACKs for the same gap.
+    {dup_count, send_buffer, fast_retransmit_sent} =
+      if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and map_size(send_buffer) > 0 do
+        new_count = state.dup_ack_count + 1
+        send_buffer = if new_count == 3 and not state.fast_retransmit_sent do
+          # Fast retransmit: resend all unacked packets ONCE
+          now_ms = System.monotonic_time(:millisecond)
+          retransmit_count = Enum.reduce(send_buffer, 0, fn {seq, {packet, _sent_at, _rc, _ds}}, count ->
+            nonce = <<0::32, seq::little-64>>
+            {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
+            encrypted = ct <> tag
+            new_pkt = Packet.build_data(state.session_id, seq,
+              payload: encrypted,
+              payload_len: byte_size(encrypted)
+            )
+            new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
+            send_udp(state, new_packet)
+            count + 1
+          end)
+          # Reset sent_at for all fast-retransmitted packets
+          updated_buffer = Map.new(send_buffer, fn {seq, {packet, _sent_at, rc, ds}} ->
+            {seq, {packet, now_ms, rc, ds}}
+          end)
+          Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq})")
+          updated_buffer
+        else
+          send_buffer
+        end
+        {new_count, send_buffer, new_count >= 3}
       else
-        send_buffer
+        # New data acked — reset dup counter and allow next fast retransmit
+        {0, send_buffer, false}
       end
-      {new_count, send_buffer}
-    else
-      # New data acked — reset dup counter
-      {0, send_buffer}
-    end
 
     Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}, dup_ack=#{dup_count}")
 
-    %{state | send_buffer: send_buffer, dup_ack_count: dup_count}
+    %{state | send_buffer: send_buffer, dup_ack_count: dup_count, fast_retransmit_sent: fast_retransmit_sent}
   end
 
   # ---------------------------------------------------------------------------

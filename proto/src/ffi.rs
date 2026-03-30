@@ -1003,6 +1003,12 @@ async fn recv_loop(
     const NACK_MIN_INTERVAL_MS: u128 = 100; // rate-limit: one NACK per 100ms
     const MAX_NACK_SEQS: usize = 64; // max missing seqs per NACK frame
 
+    // Rate-limit duplicate re-ACKs to prevent retransmit storms.
+    // When gateway fast-retransmits N packets, client receives N duplicates.
+    // Without rate limiting, N re-ACKs trigger another fast retransmit → loop.
+    let mut last_reack_time: Option<std::time::Instant> = None;
+    const REACK_MIN_INTERVAL_MS: u128 = 100; // one re-ACK per 100ms max
+
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -1342,24 +1348,30 @@ async fn recv_loop(
                     }
                     _last_data_seq = data_seq;
 
-                    // Immediately ACK duplicates — the gateway is retransmitting
-                    // because it didn't get our previous ACK. Re-ACK so it can
-                    // clear its send_buffer.
+                    // Re-ACK duplicates so gateway can clear its send_buffer,
+                    // but rate-limit to prevent retransmit storms: gateway fast-retransmits
+                    // N packets → N duplicates → N re-ACKs → another fast retransmit → loop.
                     if is_duplicate && next_expected_seq > 0 {
-                        let ack_seq = next_expected_seq.saturating_sub(1);
-                        let mut ack_frame = Vec::with_capacity(9);
-                        ack_frame.push(FRAME_ACK);
-                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                        if let Ok(guard) = inner.lock() {
-                            if let Some(ref session) = guard.active_session {
-                                if let Some(ref tx) = session.send_enqueue_tx {
-                                    let _ = tx.send(ack_frame);
+                        let should_reack = last_reack_time
+                            .map(|t| t.elapsed().as_millis() >= REACK_MIN_INTERVAL_MS)
+                            .unwrap_or(true);
+                        if should_reack {
+                            let ack_seq = next_expected_seq.saturating_sub(1);
+                            let mut ack_frame = Vec::with_capacity(9);
+                            ack_frame.push(FRAME_ACK);
+                            ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+                            if let Ok(guard) = inner.lock() {
+                                if let Some(ref session) = guard.active_session {
+                                    if let Some(ref tx) = session.send_enqueue_tx {
+                                        let _ = tx.send(ack_frame);
+                                    }
                                 }
                             }
+                            tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
+                            last_acked_data_seq = next_expected_seq;
+                            last_data_recv_time = None;
+                            last_reack_time = Some(std::time::Instant::now());
                         }
-                        tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
-                        last_acked_data_seq = next_expected_seq;
-                        last_data_recv_time = None;
                         continue; // Don't re-deliver duplicate to VIP proxy
                     }
 

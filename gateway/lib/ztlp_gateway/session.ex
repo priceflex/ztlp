@@ -2178,25 +2178,35 @@ defmodule ZtlpGateway.Session do
       if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and map_size(send_buffer) > 0 do
         new_count = state.dup_ack_count + 1
         send_buffer = if new_count == 3 and not state.fast_retransmit_sent do
-          # Fast retransmit: resend all unacked packets ONCE
+          # Fast retransmit: resend only the OLDEST unacked packets (up to 4).
+          # TCP-style: retransmit the lost packet, not the entire window.
+          # Sending 4 covers the likely gap without flooding the link.
           now_ms = System.monotonic_time(:millisecond)
-          retransmit_count = Enum.reduce(send_buffer, 0, fn {seq, {packet, _sent_at, _rc, _ds}}, count ->
-            nonce = <<0::32, seq::little-64>>
-            {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
-            encrypted = ct <> tag
-            new_pkt = Packet.build_data(state.session_id, seq,
-              payload: encrypted,
-              payload_len: byte_size(encrypted)
-            )
-            new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
-            send_udp(state, new_packet)
-            count + 1
+          oldest_seqs = send_buffer |> Map.keys() |> Enum.sort() |> Enum.take(4)
+          retransmit_count = Enum.reduce(oldest_seqs, 0, fn seq, count ->
+            case Map.get(send_buffer, seq) do
+              {packet, _sent_at, _rc, _ds} ->
+                nonce = <<0::32, seq::little-64>>
+                {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
+                encrypted = ct <> tag
+                new_pkt = Packet.build_data(state.session_id, seq,
+                  payload: encrypted,
+                  payload_len: byte_size(encrypted)
+                )
+                new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
+                send_udp(state, new_packet)
+                count + 1
+              _ -> count
+            end
           end)
-          # Reset sent_at for all fast-retransmitted packets
-          updated_buffer = Map.new(send_buffer, fn {seq, {packet, _sent_at, rc, ds}} ->
-            {seq, {packet, now_ms, rc, ds}}
+          # Reset sent_at only for retransmitted packets
+          updated_buffer = Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
+            case Map.get(buf, seq) do
+              {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
+              _ -> buf
+            end
           end)
-          Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq})")
+          Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)})")
           updated_buffer
         else
           send_buffer

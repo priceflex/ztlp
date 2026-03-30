@@ -1312,6 +1312,7 @@ async fn recv_loop(
 
                     // Update cumulative ACK tracking (global across all streams)
                     last_data_recv_time = Some(std::time::Instant::now());
+                    let is_duplicate = data_seq < next_expected_seq;
                     if data_seq == next_expected_seq {
                         next_expected_seq = data_seq + 1;
                         while received_ahead.remove(&next_expected_seq) {
@@ -1321,6 +1322,27 @@ async fn recv_loop(
                         received_ahead.insert(data_seq);
                     }
                     _last_data_seq = data_seq;
+
+                    // Immediately ACK duplicates — the gateway is retransmitting
+                    // because it didn't get our previous ACK. Re-ACK so it can
+                    // clear its send_buffer.
+                    if is_duplicate && next_expected_seq > 0 {
+                        let ack_seq = next_expected_seq.saturating_sub(1);
+                        let mut ack_frame = Vec::with_capacity(9);
+                        ack_frame.push(FRAME_ACK);
+                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+                        if let Ok(guard) = inner.lock() {
+                            if let Some(ref session) = guard.active_session {
+                                if let Some(ref tx) = session.send_enqueue_tx {
+                                    let _ = tx.send(ack_frame);
+                                }
+                            }
+                        }
+                        tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
+                        last_acked_data_seq = next_expected_seq;
+                        last_data_recv_time = None;
+                        continue; // Don't re-deliver duplicate to VIP proxy
+                    }
 
                     // ── Delivery to VIP proxy ──
                     // Buffer for ordered delivery, then flush contiguous.

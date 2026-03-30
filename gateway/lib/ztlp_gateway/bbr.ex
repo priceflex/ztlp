@@ -18,8 +18,8 @@ defmodule ZtlpGateway.Bbr do
   @probe_rtt_interval_ms 10_000
   @probe_rtt_duration_ms 200
   @min_cwnd 4
-  @max_cwnd 256
-  @max_payload_bytes 1200
+  @max_cwnd 512
+  @max_payload_bytes 1140
 
   defstruct state: :startup,
             btl_bw: 0.0,
@@ -28,7 +28,7 @@ defmodule ZtlpGateway.Bbr do
             rt_prop: :infinity,
             rt_prop_stamp: 0,
             pacing_rate: 0.0,
-            cwnd: 64.0,
+            cwnd: 256.0,
             filled_pipe: false,
             full_bw: 0.0,
             full_bw_count: 0,

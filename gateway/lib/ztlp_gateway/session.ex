@@ -438,14 +438,13 @@ defmodule ZtlpGateway.Session do
   # Initial congestion window — 64 covers up to ~77KB without slow start.
   # This handles concurrent 5x GET 10KB (45 packets) in a single burst,
   # plus small requests without needing slow start at all.
-  @initial_cwnd 64.0
-  # Maximum congestion window (packets). 256 × 1200 = 307KB.
-  # Conservative max to avoid overwhelming cellular/relay paths.
-  @max_cwnd 256
+  @initial_cwnd 256.0
+  # Maximum congestion window (packets). 512 × 1140 = 570KB.
+  @max_cwnd 512
   # Minimum cwnd (never go below this)
   @min_cwnd 4
-  # Slow-start threshold — switch to linear growth at 128 packets (153KB)
-  @initial_ssthresh 128
+  # Slow-start threshold — switch to linear growth at 512 packets
+  @initial_ssthresh 512
 
   # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
   @use_bbr true
@@ -453,16 +452,14 @@ defmodule ZtlpGateway.Session do
   # Pacing interval: ms between burst sends
   @pacing_interval_ms 1
   # Max packets sent per pacing tick — limits instantaneous burst
-  @burst_size 8
+  @burst_size 16
 
   # Maximum plaintext payload per ZTLP data packet.
-  # Wire overhead: 46 (ZTLP header) + 9 (frame type + data_seq) + 16 (AEAD tag) = 71 bytes.
-  # To keep the UDP datagram under 1280 bytes (IPv6 minimum MTU, safe for
-  # any internet path including PPPoE, tunnels, and VPN encapsulation):
-  #   1280 - 8 (UDP) - 20 (IP) = 1252 max UDP payload
-  #   1252 - 71 (ZTLP overhead) = 1181 max plaintext
-  # We round down to 1200 for a comfortable margin (wire = ~1271 bytes).
-  @max_payload_bytes 1200
+  # Max plaintext payload per ZTLP packet.
+  # Wire size = header(46) + payload + AEAD(16) + UDP(8) + IP(20) = payload + 90
+  # At 1140: wire = 1230 bytes, fits in 1280 (IPv6 min) with room for
+  # SD-WAN/VPN tunnel overhead. Previous 1200 → wire 1290, broke SD-WAN paths.
+  @max_payload_bytes 1140
 
   # ---------------------------------------------------------------------------
   # Types

@@ -98,12 +98,13 @@ const FRAME_DATA: u8 = 0x00;
 ///
 /// Calculation: gateway uses `@max_payload_bytes = 1200` as the max plaintext
 /// frame size (including mux header). The mux header is 5 bytes:
-/// `[FRAME_DATA(1) | stream_id(4)]`. So max TCP data = 1200 - 5 = 1195.
+/// `[FRAME_DATA(1) | stream_id(4)]`. So max TCP data = 1140 - 5 = 1135.
 ///
 /// The resulting ZTLP packet on the wire:
-/// header(46) + encrypted(plaintext + 16) = 46 + 1200 + 16 = 1262 bytes
-/// Well under 1280 IPv6 minimum MTU and 1464 cellular MTU.
-const MAX_MUX_PAYLOAD: usize = 1195;
+/// header(46) + encrypted(plaintext + 16) = 46 + 1140 + 16 = 1202 bytes
+/// Plus UDP(8) + IP(20) = 1230 bytes total — fits in 1280 IPv6 minimum MTU
+/// and any SD-WAN/VPN tunnel with overhead up to 270 bytes.
+const MAX_MUX_PAYLOAD: usize = 1135;
 
 /// Frame type for closing a multiplexed stream.
 const FRAME_CLOSE: u8 = 0x05;

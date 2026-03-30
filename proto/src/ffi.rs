@@ -2831,7 +2831,8 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
                     }
                     RouterAction::SendData { stream_id, data } => {
                         // Chunk data into MAX_MUX_PAYLOAD-sized frames
-                        const MAX_MUX_PAYLOAD: usize = 1195;
+                        // max_payload(1140) - mux_header(5) = 1135
+                        const MAX_MUX_PAYLOAD: usize = 1135;
                         for chunk in data.chunks(MAX_MUX_PAYLOAD) {
                             let mut frame = Vec::with_capacity(5 + chunk.len());
                             frame.push(FRAME_DATA);

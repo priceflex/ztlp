@@ -853,19 +853,21 @@ defmodule ZtlpGateway.Session do
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
 
           elapsed > per_packet_rto(acc.rto_ms, retransmit_count) ->
-            # Re-encrypt with a NEW packet_seq to avoid anti-replay rejection
-            # and nonce reuse. The stored `packet` is actually the plaintext frame.
-            new_seq = acc.send_seq + 1
-            new_nonce = <<0::32, new_seq::little-64>>
-            {ct, tag} = Crypto.encrypt(acc.r2i_key, new_nonce, packet, <<>>)
+            # Retransmit with the ORIGINAL packet_seq. Same plaintext + same
+            # nonce = identical ciphertext (deterministic AEAD). This is safe
+            # because we're re-sending the exact same data. Using new seqs would
+            # eventually exceed the client's recv_window (base + 256) after many
+            # retransmits, creating unrecoverable gaps.
+            nonce = <<0::32, seq::little-64>>
+            {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, packet, <<>>)
             encrypted = ct <> tag
-            new_pkt = Packet.build_data(acc.session_id, new_seq,
+            new_pkt = Packet.build_data(acc.session_id, seq,
               payload: encrypted,
               payload_len: byte_size(encrypted)
             )
             new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-            Logger.debug("[Session] RTO retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
+            Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
             send_udp(acc, new_packet)
 
             # Multiplicative decrease on loss (only once per loss event)
@@ -879,11 +881,9 @@ defmodule ZtlpGateway.Session do
               acc
             end
 
-            # Remove old entry, add new one with new seq
-            updated_buffer = acc.send_buffer
-              |> Map.delete(seq)
-              |> Map.put(new_seq, {packet, now, retransmit_count + 1, ds})
-            {%{acc | send_buffer: updated_buffer, send_seq: new_seq}, exp_count}
+            # Update in-place (same seq key, reset sent_at, increment retransmit count)
+            updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
+            {%{acc | send_buffer: updated_buffer}, exp_count}
 
           true ->
             {acc, exp_count}
@@ -1473,23 +1473,21 @@ defmodule ZtlpGateway.Session do
         case Enum.find(acc.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == nacked_ds end) do
           {seq, {plaintext_frame, _sent_at, retransmit_count, ds}} ->
             if retransmit_count < @max_retransmits do
-              # Re-encrypt with new packet_seq (same reason as RTO retransmit)
-              new_seq = acc.send_seq + 1
-              new_nonce = <<0::32, new_seq::little-64>>
-              {ct, tag} = Crypto.encrypt(acc.r2i_key, new_nonce, plaintext_frame, <<>>)
+              # Retransmit with ORIGINAL packet_seq (same nonce = deterministic
+              # ciphertext). Using new seqs exhausts the client's recv_window.
+              nonce = <<0::32, seq::little-64>>
+              {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, plaintext_frame, <<>>)
               encrypted = ct <> tag
-              new_pkt = Packet.build_data(acc.session_id, new_seq,
+              new_pkt = Packet.build_data(acc.session_id, seq,
                 payload: encrypted,
                 payload_len: byte_size(encrypted)
               )
               new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-              Logger.debug("[Session] NACK retransmit data_seq=#{ds} old_seq=#{seq} new_seq=#{new_seq} attempt=#{retransmit_count + 1}")
+              Logger.debug("[Session] NACK retransmit data_seq=#{ds} seq=#{seq} attempt=#{retransmit_count + 1}")
               send_udp(acc, new_packet)
-              updated_buffer = acc.send_buffer
-                |> Map.delete(seq)
-                |> Map.put(new_seq, {plaintext_frame, now, retransmit_count + 1, ds})
-              %{acc | send_buffer: updated_buffer, send_seq: new_seq}
+              updated_buffer = Map.put(acc.send_buffer, seq, {plaintext_frame, now, retransmit_count + 1, ds})
+              %{acc | send_buffer: updated_buffer}
             else
               Logger.warning("[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping")
               %{acc | send_buffer: Map.delete(acc.send_buffer, seq)}

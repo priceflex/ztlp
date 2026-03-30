@@ -89,7 +89,7 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
 /// TCP connection idle timeout in seconds (no data in either direction).
-const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
+const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 35;
 
 /// Frame type for tunnel data frames.
 const FRAME_DATA: u8 = 0x00;
@@ -1193,6 +1193,9 @@ async fn handle_mux_connection<R, W>(
     write_task.abort();
 
     // 4. Send FRAME_CLOSE to gateway via SendController (retransmittable)
+    //    Timeout the lock acquisition — if SendController is backlogged, don't
+    //    block cleanup. The stream will be cleaned up on the gateway side via
+    //    keepalive/idle timeout even without an explicit CLOSE.
     {
         let close_frame = vec![
             FRAME_CLOSE,
@@ -1201,11 +1204,25 @@ async fn handle_mux_connection<R, W>(
             (stream_id >> 8) as u8,
             stream_id as u8,
         ];
-        let mut sc = send_controller.lock().await;
-        sc.enqueue(close_frame);
-        sc.process_acks();
-        let _ = sc.flush().await;
-        tracing::info!("VIP: stream {} closed from {}", stream_id, client_addr);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send_controller.lock(),
+        )
+        .await
+        {
+            Ok(mut sc) => {
+                sc.enqueue(close_frame);
+                sc.process_acks();
+                let _ = sc.flush().await;
+                tracing::info!("VIP: stream {} closed from {}", stream_id, client_addr);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "VIP: stream {} close timeout (SendController busy), skipping CLOSE frame",
+                    stream_id
+                );
+            }
+        }
     }
 
     // 5. Unregister from dispatcher

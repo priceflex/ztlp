@@ -661,8 +661,22 @@ defmodule ZtlpGateway.Session do
       # For legacy sessions, keep alive for backend reconnect instead of draining.
       # Even if there are a few unacked packets in send_buffer, those will be
       # retransmitted by the existing retransmit timer. No need to kill the session.
-      Logger.info("[Session] Legacy backend closed (#{queue_len} queued, #{buf_len} in send_buffer), keeping session alive for reconnect")
-      {:noreply, %{state | backend_pid: nil}}
+      Logger.info("[Session] Legacy backend closed (#{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{Float.round(state.cwnd + 0.0, 1)}), flushing + FIN")
+      state = %{state | backend_pid: nil}
+      # Flush remaining queued data to the client — the backend sent its response
+      # and closed, but we still need to deliver the queued packets.
+      # Then queue a FIN so the client knows the response is complete.
+      state = if queue_len > 0 or buf_len > 0 do
+        # Queue FIN after remaining data
+        send_queue = :queue.in(:legacy_fin, state.send_queue)
+        state = %{state | send_queue: send_queue}
+        state = flush_send_queue(state)
+        Logger.info("[Session] After flush: #{:queue.len(state.send_queue)} queued, #{map_size(state.send_buffer)} in send_buffer, pacing_timer=#{inspect(state.pacing_timer_ref != nil)}")
+        state
+      else
+        state
+      end
+      {:noreply, state}
     end
   end
 
@@ -796,6 +810,11 @@ defmodule ZtlpGateway.Session do
 
   # Pacing timer — send next packet from queue if window allows
   def handle_info(:pacing_tick, state) do
+    queue_len = :queue.len(state.send_queue)
+    buf_len = map_size(state.send_buffer)
+    if queue_len > 0 do
+      Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{Float.round(state.cwnd + 0.0, 1)}")
+    end
     state = %{state | pacing_timer_ref: nil}
     state = flush_send_queue(state)
     {:noreply, state}
@@ -1493,12 +1512,19 @@ defmodule ZtlpGateway.Session do
       {:ok, %{host: host, port: port}} ->
         case Backend.start_link({host, port, self()}) do
           {:ok, new_pid} ->
+            # Reset all send state for new stream, including congestion control
+            retransmit_ref = Process.send_after(self(), :retransmit_check, @retransmit_check_interval_ms)
             {:noreply, %{state |
               backend_pid: new_pid,
               send_data_seq: 0,
               send_queue: :queue.new(),
               send_buffer: %{},
-              draining: false
+              draining: false,
+              cwnd: @initial_cwnd,
+              ssthresh: @initial_ssthresh,
+              last_acked_data_seq: -1,
+              retransmit_timer_ref: retransmit_ref,
+              bbr: if(@use_bbr, do: Bbr.new(), else: nil)
             }}
 
           {:error, _reason} ->
@@ -1715,6 +1741,15 @@ defmodule ZtlpGateway.Session do
           {:stream_close, stream_id} ->
             # Stream close: [FRAME_CLOSE | stream_id(4 BE)]
             encrypt_and_send_control(<<@frame_close, stream_id::big-32>>, state)
+
+          :legacy_fin ->
+            # Legacy FIN: sent after backend closes and all data is flushed.
+            # Include data_seq so client waits for all preceding data before closing.
+            # send_data_seq is already the NEXT seq (one past last sent), which is
+            # exactly what the client expects as the FIN boundary.
+            fin_seq = state.send_data_seq
+            Logger.info("[Session] Sending legacy FIN to client (data_seq=#{fin_seq}, backend response complete)")
+            encrypt_and_send_control(<<@frame_fin, fin_seq::big-64>>, state)
 
           plaintext when is_binary(plaintext) ->
             # Legacy single-stream data

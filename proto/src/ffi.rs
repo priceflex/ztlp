@@ -1196,7 +1196,9 @@ async fn recv_loop(
                 // This check MUST come before the FRAME_DATA check because
                 // FRAME_ACK (0x01) with 9 bytes should not fall through to
                 // process_recv_packet (which would treat 1-byte 0x01 as keepalive).
-                if plaintext.len() == 9 && plaintext[0] == FRAME_ACK {
+                // Gateway ACK format: [FRAME_ACK(1) | cumulative_ack(8) | sack_count(1) | sack_blocks...]
+                // Minimum 10 bytes (with sack_count=0), but also accept legacy 9-byte format.
+                if plaintext.len() >= 9 && plaintext[0] == FRAME_ACK {
                     let acked_seq =
                         u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
                     tracing::debug!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);

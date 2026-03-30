@@ -985,6 +985,12 @@ async fn recv_loop(
         std::collections::BTreeMap::new(); // data_seq → (stream_id, payload)
     let mut vip_next_deliver_seq: u64 = 0;
     let mut _last_data_seq: u64 = 0;
+    // Delayed ACK flush: track the last ACK we sent and when we last received data.
+    // If we have unacked data older than ACK_FLUSH_TIMEOUT, send an ACK immediately
+    // instead of waiting for the coalesce threshold.
+    let mut last_acked_data_seq: u64 = 0; // last data_seq we ACK'd (next_expected at ACK time)
+    let mut last_data_recv_time: Option<std::time::Instant> = None;
+    const ACK_FLUSH_TIMEOUT_MS: u128 = 50; // flush unacked data after 50ms
 
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
@@ -1152,7 +1158,7 @@ async fn recv_loop(
             break;
         }
 
-        match tokio::time::timeout(Duration::from_secs(1), transport.recv_data()).await {
+        match tokio::time::timeout(Duration::from_millis(50), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
                 last_recv_time = std::time::Instant::now();
                 log_write(
@@ -1305,6 +1311,7 @@ async fn recv_loop(
                     }
 
                     // Update cumulative ACK tracking (global across all streams)
+                    last_data_recv_time = Some(std::time::Instant::now());
                     if data_seq == next_expected_seq {
                         next_expected_seq = data_seq + 1;
                         while received_ahead.remove(&next_expected_seq) {
@@ -1418,6 +1425,8 @@ async fn recv_loop(
                         }
                         tracing::info!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={}, first={})",
                             ack_seq, ack_sent, has_gap, is_coalesce_point, is_first);
+                        last_acked_data_seq = next_expected_seq;
+                        last_data_recv_time = None; // ACK sent, reset timer
                     }
                 } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
                     // Per-stream FIN or legacy FIN
@@ -1557,7 +1566,44 @@ async fn recv_loop(
                 break;
             }
             Err(_) => {
-                // Timeout — check keepalive watchdog
+                // Timeout — flush delayed ACKs if needed
+                if let Some(recv_time) = last_data_recv_time {
+                    if recv_time.elapsed().as_millis() >= ACK_FLUSH_TIMEOUT_MS
+                        && next_expected_seq > last_acked_data_seq
+                    {
+                        // Unacked data has been sitting for >50ms — flush ACK now
+                        let ack_seq = next_expected_seq.saturating_sub(1);
+                        let mut ack_frame = Vec::with_capacity(9);
+                        ack_frame.push(FRAME_ACK);
+                        ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
+
+                        let ack_sent = if let Ok(guard) = inner.lock() {
+                            if let Some(ref session) = guard.active_session {
+                                if let Some(ref tx) = session.send_enqueue_tx {
+                                    let _ = tx.send(ack_frame.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if !ack_sent {
+                            if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                                tracing::warn!("recv_loop: failed to send delayed ACK: {}", e);
+                            }
+                        }
+                        tracing::info!("recv_loop: delayed ACK flush data_seq={} via_sc={}", ack_seq, ack_sent);
+                        last_acked_data_seq = next_expected_seq;
+                        last_data_recv_time = None;
+                    }
+                }
+
+                // Check keepalive watchdog
                 if last_recv_time.elapsed() > KEEPALIVE_TIMEOUT {
                     tracing::warn!(
                         "recv_loop: keepalive timeout ({}s without data)",

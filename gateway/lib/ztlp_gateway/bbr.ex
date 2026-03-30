@@ -82,6 +82,11 @@ defmodule ZtlpGateway.Bbr do
     update_inflight(state, sent_bytes)
   end
 
+  @doc "Release bytes from inflight without triggering bandwidth estimation (for dropped/SACK'd packets)."
+  def release_bytes(state, bytes) do
+    update_inflight(state, -bytes)
+  end
+
   @doc "Get current pacing rate in bytes/sec."
   def pacing_rate(%__MODULE__{pacing_rate: rate}), do: rate
 
@@ -114,14 +119,23 @@ defmodule ZtlpGateway.Bbr do
     delivered = state.delivered + acked_bytes
     round_start = delivered >= state.next_round_delivered
 
-    round_count =
-      if round_start, do: state.round_count + 1, else: state.round_count
-
-    %{state |
-      delivered: delivered,
-      round_start: round_start,
-      round_count: round_count
-    }
+    if round_start do
+      # New round detected: set the next round target to the current
+      # delivery count plus estimated bytes in flight. This ensures the
+      # next round lasts approximately one RTT.
+      next_target = delivered + max(state.inflight, acked_bytes)
+      %{state |
+        delivered: delivered,
+        round_start: true,
+        round_count: state.round_count + 1,
+        next_round_delivered: next_target
+      }
+    else
+      %{state |
+        delivered: delivered,
+        round_start: false
+      }
+    end
   end
 
   defp update_btl_bw(state, acked_bytes, rtt_ms, now_ms) when rtt_ms > 0 do

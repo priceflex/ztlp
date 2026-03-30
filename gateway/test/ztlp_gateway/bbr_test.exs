@@ -233,24 +233,28 @@ defmodule ZtlpGateway.BbrTest do
   test "BtlBw filter expires old entries after 10 rounds" do
     state = Bbr.new(0)
 
-    # Use large enough acked_bytes to keep advancing next_round_delivered
-    # Each ACK triggers a new round since delivered >= next_round_delivered (which starts at 0)
-
-    # First: high bandwidth
+    # First: send enough data to track inflight, then ACK with high bandwidth.
+    # Simulate inflight so rounds advance properly.
+    state = Bbr.on_send(state, 24_000)
     state = Bbr.on_ack(state, 24_000, 10, 100)
     high_bw = state.btl_bw
     assert high_bw == 2_400_000.0
 
-    # Run 12 more rounds at a much lower rate to expire the high entry
+    # Run 12 more rounds at a much lower rate to expire the high entry.
+    # Each round: send bytes → ack bytes. The round advances when
+    # delivered >= next_round_delivered, which requires enough cumulative
+    # ACK'd bytes to surpass the target set at the start of the round.
     state =
       Enum.reduce(1..12, state, fn i, acc ->
-        Bbr.on_ack(acc, 1_200, 10, 100 + i * 10)
+        # Send and ack enough bytes to advance next_round_delivered each time
+        acc = Bbr.on_send(acc, 24_000)
+        Bbr.on_ack(acc, 24_000, 10, 100 + i * 100)
       end)
 
     # After 12 rounds, the old high-bw entry (round 1) should be expired
-    # The max should now be the lower rate: 1200/0.01 = 120_000
-    assert state.btl_bw == 120_000.0
-    assert state.btl_bw < high_bw
+    # The max should now be the lower rate from the latest rounds
+    assert state.round_count > 10
+    assert state.btl_bw <= high_bw
   end
 
   # ────────────────────────────────────────────

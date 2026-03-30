@@ -733,7 +733,8 @@ defmodule ZtlpGateway.Session do
     # Find which stream owns this socket
     case find_stream_by_tls_socket(state.streams, socket) do
       {stream_id, _stream} ->
-        chunks = chunk_data(data, @max_payload_bytes - 4)
+        # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
+        chunks = chunk_data(data, @max_payload_bytes - 13)
         send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
           :queue.in({:stream, stream_id, chunk}, q)
         end)
@@ -771,7 +772,8 @@ defmodule ZtlpGateway.Session do
 
       _ ->
         # Plain stream: send directly
-        chunks = chunk_data(data, @max_payload_bytes - 4)
+        # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
+        chunks = chunk_data(data, @max_payload_bytes - 13)
         send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
           :queue.in({:stream, stream_id, chunk}, q)
         end)
@@ -832,10 +834,22 @@ defmodule ZtlpGateway.Session do
           # Skip SACK'd sequences — the client already has them
           is_integer(ds) and MapSet.member?(acc.sacked_set, ds) ->
             Logger.debug("[Session] Skipping retransmit for SACK'd data_seq=#{ds}")
+            # Release BBR inflight for removed entry (no BW estimation update)
+            acc = if @use_bbr do
+              %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
+            else
+              acc
+            end
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count}
 
           retransmit_count >= @max_retransmits ->
             Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
+            # Release BBR inflight for dropped entry (no BW estimation update)
+            acc = if @use_bbr do
+              %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
+            else
+              acc
+            end
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
 
           elapsed > per_packet_rto(acc.rto_ms, retransmit_count) ->
@@ -2086,8 +2100,10 @@ defmodule ZtlpGateway.Session do
     # Congestion control: BBR or AIMD
     state = if @use_bbr do
       if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
-        # Calculate acked_bytes and RTT for BBR
-        acked_bytes = newly_acked * @max_payload_bytes
+        # Calculate actual acked_bytes from send_buffer entries (matches on_send tracking)
+        acked_bytes = Enum.reduce(acked_entries, 0, fn {_seq, {pkt, _sent_at, _rc, _ds}}, acc ->
+          acc + byte_size(pkt)
+        end)
         rtt_ms = state.srtt_ms || @initial_rto_ms
         bbr = Bbr.on_ack(state.bbr, acked_bytes, rtt_ms, now)
         %{state | bbr: bbr, last_acked_data_seq: acked_data_seq}

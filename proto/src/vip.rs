@@ -987,9 +987,9 @@ async fn handle_mux_connection<R, W>(
     stream_id: u32,
     client_addr: SocketAddr,
     stop: &Arc<AtomicBool>,
-    transport: &Arc<TransportNode>,
-    session_id: SessionId,
-    peer_addr: SocketAddr,
+    _transport: &Arc<TransportNode>,
+    _session_id: SessionId,
+    _peer_addr: SocketAddr,
     data_seq: &Arc<AtomicU64>,
     bytes_sent: &Arc<AtomicU64>,
     dispatcher: &Arc<StreamDispatcher>,
@@ -1001,7 +1001,10 @@ async fn handle_mux_connection<R, W>(
     // 1. Register stream with dispatcher to receive tunnel data
     let mut stream_rx = dispatcher.register(stream_id);
 
-    // 2. Send FRAME_OPEN to gateway to create backend connection
+    // 2. Send FRAME_OPEN to gateway via SendController (congestion-controlled +
+    //    retransmittable). Previously sent directly via transport.send_data() which
+    //    bypassed retransmission — if the OPEN was lost, the gateway's recv_window
+    //    had a permanent gap and all subsequent packets were buffered without ACKs.
     {
         let open_frame = vec![
             FRAME_OPEN,
@@ -1010,16 +1013,18 @@ async fn handle_mux_connection<R, W>(
             (stream_id >> 8) as u8,
             stream_id as u8,
         ];
-        if let Err(e) = transport
-            .send_data(session_id, &open_frame, peer_addr)
-            .await
         {
-            tracing::warn!("VIP: failed to send OPEN for stream {}: {}", stream_id, e);
-            dispatcher.unregister(stream_id);
-            return;
+            let mut sc = send_controller.lock().await;
+            sc.enqueue(open_frame);
+            sc.process_acks();
+            if let Err(e) = sc.flush().await {
+                tracing::warn!("VIP: failed to send OPEN for stream {}: {}", stream_id, e);
+                dispatcher.unregister(stream_id);
+                return;
+            }
         }
         tracing::info!(
-            "VIP: sent OPEN for stream {} from {}",
+            "VIP: sent OPEN for stream {} from {} (via SendController)",
             stream_id,
             client_addr
         );
@@ -1099,7 +1104,6 @@ async fn handle_mux_connection<R, W>(
     // Frames are enqueued and then flushed up to the current cwnd. The
     // background task handles periodic flushing and retransmits, but we
     // also flush eagerly here to minimize latency for small transfers.
-    let transport = transport.clone();
     let data_seq = data_seq.clone();
     let bytes_sent = bytes_sent.clone();
     let stop = stop.clone();
@@ -1161,7 +1165,7 @@ async fn handle_mux_connection<R, W>(
 
     write_task.abort();
 
-    // 4. Send FRAME_CLOSE to gateway
+    // 4. Send FRAME_CLOSE to gateway via SendController (retransmittable)
     {
         let close_frame = vec![
             FRAME_CLOSE,
@@ -1170,9 +1174,10 @@ async fn handle_mux_connection<R, W>(
             (stream_id >> 8) as u8,
             stream_id as u8,
         ];
-        let _ = transport
-            .send_data(session_id, &close_frame, peer_addr)
-            .await;
+        let mut sc = send_controller.lock().await;
+        sc.enqueue(close_frame);
+        sc.process_acks();
+        let _ = sc.flush().await;
         tracing::info!("VIP: stream {} closed from {}", stream_id, client_addr);
     }
 

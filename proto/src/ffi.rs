@@ -963,6 +963,7 @@ async fn recv_loop(
     const FRAME_DATA: u8 = 0x00;
     const FRAME_ACK: u8 = 0x01;
     const FRAME_FIN: u8 = 0x02;
+    const FRAME_NACK: u8 = 0x03;
     const FRAME_CLOSE: u8 = 0x05;
 
     // Keepalive watchdog: if no data arrives for this long, treat connection as dead
@@ -991,6 +992,16 @@ async fn recv_loop(
     let mut last_acked_data_seq: u64 = 0; // last data_seq we ACK'd (next_expected at ACK time)
     let mut last_data_recv_time: Option<std::time::Instant> = None;
     const ACK_FLUSH_TIMEOUT_MS: u128 = 50; // flush unacked data after 50ms
+
+    // NACK (Negative ACK): when we detect a gap (received_ahead non-empty),
+    // wait NACK_GAP_THRESHOLD_MS then send FRAME_NACK listing missing seqs.
+    // This tells the gateway exactly which data_seqs to retransmit immediately
+    // instead of waiting for exponential RTO backoff.
+    let mut gap_detected_at: Option<std::time::Instant> = None;
+    let mut last_nack_time: Option<std::time::Instant> = None;
+    const NACK_GAP_THRESHOLD_MS: u128 = 50; // wait this long before sending NACK
+    const NACK_MIN_INTERVAL_MS: u128 = 100; // rate-limit: one NACK per 100ms
+    const MAX_NACK_SEQS: usize = 64; // max missing seqs per NACK frame
 
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
@@ -1318,8 +1329,16 @@ async fn recv_loop(
                         while received_ahead.remove(&next_expected_seq) {
                             next_expected_seq += 1;
                         }
+                        // Gap cleared if all out-of-order packets consumed
+                        if received_ahead.is_empty() {
+                            gap_detected_at = None;
+                        }
                     } else if data_seq > next_expected_seq {
                         received_ahead.insert(data_seq);
+                        // Start gap timer if this is first out-of-order packet
+                        if gap_detected_at.is_none() {
+                            gap_detected_at = Some(std::time::Instant::now());
+                        }
                     }
                     _last_data_seq = data_seq;
 
@@ -1622,6 +1641,70 @@ async fn recv_loop(
                         tracing::info!("recv_loop: delayed ACK flush data_seq={} via_sc={}", ack_seq, ack_sent);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;
+                    }
+                }
+
+                // NACK: if we have a persistent gap (out-of-order packets received
+                // but expected_seq hasn't arrived), tell the gateway exactly which
+                // data_seqs are missing so it can retransmit immediately.
+                if !received_ahead.is_empty() {
+                    let gap_old_enough = gap_detected_at
+                        .map(|t| t.elapsed().as_millis() >= NACK_GAP_THRESHOLD_MS)
+                        .unwrap_or(false);
+                    let nack_allowed = last_nack_time
+                        .map(|t| t.elapsed().as_millis() >= NACK_MIN_INTERVAL_MS)
+                        .unwrap_or(true);
+
+                    if gap_old_enough && nack_allowed {
+                        // Build list of missing data_seqs between next_expected and
+                        // the highest buffered seq
+                        let max_buffered = received_ahead.iter().next_back().copied().unwrap_or(next_expected_seq);
+                        let mut missing: Vec<u64> = Vec::new();
+                        let mut seq = next_expected_seq;
+                        while seq <= max_buffered && missing.len() < MAX_NACK_SEQS {
+                            if !received_ahead.contains(&seq) {
+                                missing.push(seq);
+                            }
+                            seq += 1;
+                        }
+
+                        if !missing.is_empty() {
+                            // Encode NACK: [FRAME_NACK(1) | count(2 BE) | seq1(8 BE) | seq2(8 BE) | ...]
+                            let count = missing.len() as u16;
+                            let mut nack_frame = Vec::with_capacity(1 + 2 + (count as usize) * 8);
+                            nack_frame.push(FRAME_NACK);
+                            nack_frame.extend_from_slice(&count.to_be_bytes());
+                            for &ms in &missing {
+                                nack_frame.extend_from_slice(&ms.to_be_bytes());
+                            }
+
+                            let nack_sent = if let Ok(guard) = inner.lock() {
+                                if let Some(ref session) = guard.active_session {
+                                    if let Some(ref tx) = session.send_enqueue_tx {
+                                        let _ = tx.send(nack_frame.clone());
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                            if !nack_sent {
+                                if let Err(e) = transport.send_data(session_id, &nack_frame, peer_addr).await {
+                                    tracing::warn!("recv_loop: failed to send NACK: {}", e);
+                                }
+                            }
+
+                            tracing::info!(
+                                "recv_loop: NACK sent for {} missing seqs (expected={}, max_buffered={}, first_missing={})",
+                                missing.len(), next_expected_seq, max_buffered, missing[0]
+                            );
+                            last_nack_time = Some(std::time::Instant::now());
+                        }
                     }
                 }
 

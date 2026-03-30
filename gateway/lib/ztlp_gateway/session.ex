@@ -1492,6 +1492,11 @@ defmodule ZtlpGateway.Session do
               %{acc | send_buffer: updated_buffer}
             else
               Logger.warning("[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping")
+              acc = if @use_bbr do
+                %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(plaintext_frame))}
+              else
+                acc
+              end
               %{acc | send_buffer: Map.delete(acc.send_buffer, seq)}
             end
 

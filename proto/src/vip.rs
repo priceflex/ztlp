@@ -817,8 +817,13 @@ async fn send_controller_background_task(
 
         // Drain any frames enqueued by the recv_loop (download ACKs, etc.)
         // These are priority frames — bypass cwnd to avoid circular deadlock
+        let mut drained = 0u32;
         while let Ok(frame) = send_enqueue_rx.try_recv() {
             sc.enqueue_priority(frame);
+            drained += 1;
+        }
+        if drained > 0 {
+            tracing::info!("send_controller_bg: drained {} frames from recv_loop", drained);
         }
 
         // Process any pending ACKs from the recv_loop

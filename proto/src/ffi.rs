@@ -1416,8 +1416,8 @@ async fn recv_loop(
                                 );
                             }
                         }
-                        tracing::debug!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={})",
-                            ack_seq, ack_sent, has_gap, is_coalesce_point);
+                        tracing::info!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={}, first={})",
+                            ack_seq, ack_sent, has_gap, is_coalesce_point, is_first);
                     }
                 } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
                     // Per-stream FIN or legacy FIN

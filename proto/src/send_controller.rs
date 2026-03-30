@@ -146,6 +146,11 @@ impl SendController {
                 .send_data(self.session_id, &framed, self.peer_addr)
                 .await?;
 
+            tracing::info!(
+                "send_controller: priority frame sent seq={} len={} peer={}",
+                seq, framed.len(), self.peer_addr
+            );
+
             self.priority_buffer.insert(
                 seq,
                 SendEntry {

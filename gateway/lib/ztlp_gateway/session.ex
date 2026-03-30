@@ -1601,6 +1601,19 @@ defmodule ZtlpGateway.Session do
     end
   end
 
+  # Client FIN: the client's TCP side closed (e.g. POST body fully sent).
+  # Close the write half of the backend TCP connection so the backend knows
+  # no more data is coming and can finalize its response.
+  defp handle_tunnel_frame(<<@frame_fin, fin_data_seq::big-64>>, state) do
+    Logger.info("[Session] Received client FIN (data_seq=#{fin_data_seq})")
+    if state.backend_pid && Process.alive?(state.backend_pid) do
+      # Shutdown the write side of the backend socket so the backend sees EOF
+      # and sends its response. The read side stays open for the response.
+      Backend.shutdown_write(state.backend_pid)
+    end
+    {:noreply, state}
+  end
+
   defp handle_tunnel_frame(_other, state) do
     # Unknown frame type — ignore
     {:noreply, state}

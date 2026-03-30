@@ -90,6 +90,12 @@ defmodule ZtlpGateway.Backend do
     GenServer.call(pid, {:send, data})
   end
 
+  @doc "Shutdown the write half of the backend TCP connection (half-close)."
+  @spec shutdown_write(pid()) :: :ok
+  def shutdown_write(pid) do
+    GenServer.cast(pid, :shutdown_write)
+  end
+
   @doc "Close the backend connection."
   @spec close(pid()) :: :ok
   def close(pid) do
@@ -123,6 +129,12 @@ defmodule ZtlpGateway.Backend do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  @impl true
+  def handle_cast(:shutdown_write, %{socket: socket} = state) do
+    :gen_tcp.shutdown(socket, :write)
+    {:noreply, state}
   end
 
   @impl true

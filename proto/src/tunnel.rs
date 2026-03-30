@@ -103,7 +103,10 @@ const TCP_READ_BUF: usize = 131072;
 ///
 /// At ~16KB per packet, 64 packets ≈ 1MB per burst.
 #[allow(dead_code)]
-const MAX_SUB_BATCH: usize = 64;
+/// Maximum packets per sendmmsg batch. Relay-friendly default — relays
+/// process packets sequentially so large bursts overflow their UDP buffers.
+/// 16 packets × 1271 bytes ≈ 20 KB per batch, well within UDP socket buffers.
+const MAX_SUB_BATCH: usize = 16;
 
 /// Maximum UDP payload (minus ZTLP header + AEAD overhead).
 /// ZTLP data header is 46 bytes, Poly1305 tag is 16 bytes, so
@@ -113,7 +116,14 @@ const MAX_SUB_BATCH: usize = 64;
 /// which is manageable. Larger payloads suffer exponentially worse
 /// fragment loss rates under any packet loss.
 /// Subtract 9 bytes for the frame type prefix (1) + data_seq (8).
-const MAX_PLAINTEXT_PER_PACKET: usize = 16384 - 9;
+/// Maximum plaintext payload per ZTLP packet (TCP data only, before framing).
+/// Must fit in a single UDP datagram after adding:
+///   - 9 bytes frame overhead (1 type + 8 data_seq)
+///   - 16 bytes ChaCha20-Poly1305 tag
+///   - 46 bytes ZTLP data header
+/// Total overhead = 71 bytes. Target max UDP = 1280 (IPv6 min MTU).
+/// 1280 - 71 = 1209, rounded down to 1200 for safety margin.
+const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
 
 // ─── Frame types ────────────────────────────────────────────────────────────
 

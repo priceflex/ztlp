@@ -541,12 +541,44 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       :error ->
-        # Session not found locally — try mesh routing if enabled
-        if state.mesh_enabled do
-          mesh_route_packet(session_id, data, sender, state)
-        else
-          Logger.debug("No session found for #{Base.encode16(session_id)} from #{inspect(sender)}")
-          :ok
+        # Session not in SessionRegistry — try GatewayForwarder (dynamic gateway sessions)
+        case GatewayForwarder.lookup(session_id) do
+          {:ok, %{client: client_addr, gateway: gateway_addr}} ->
+            cond do
+              sender == client_addr ->
+                {dest_ip, dest_port} = gateway_addr
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+
+              sender == gateway_addr ->
+                {dest_ip, dest_port} = client_addr
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+
+              true ->
+                # Sender IP might differ from registered gateway (VPC vs EIP).
+                # Check if sender is a known gateway IP with matching port.
+                {sender_ip, sender_port} = sender
+                {_gw_ip, gw_port} = gateway_addr
+
+                if sender_ip in GatewayForwarder.known_gateway_ips() and sender_port == gw_port do
+                  {dest_ip, dest_port} = client_addr
+                  :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                  Stats.increment(:forwarded)
+                else
+                  Logger.debug(
+                    "Unknown sender #{inspect(sender)} for GW-forwarded session #{Base.encode16(session_id)}"
+                  )
+                end
+            end
+
+          :error ->
+            if state.mesh_enabled do
+              mesh_route_packet(session_id, data, sender, state)
+            else
+              Logger.debug("No session found for #{Base.encode16(session_id)} from #{inspect(sender)}")
+              :ok
+            end
         end
     end
   end

@@ -22,18 +22,39 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-// ── iOS console logging via os_log ──────────────────────────────────────
+// ── iOS console logging via NSLog ────────────────────────────────────────
 // println!/eprintln! don't show in Xcode's device console on iOS.
-// We call through to Apple's os_log via the C bridge.
+// NSLog is always available from Foundation framework (linked by the app).
+// We call it directly via extern "C" — no Swift bridge needed.
 #[cfg(target_os = "ios")]
 extern "C" {
-    fn ztlp_os_log(msg: *const c_char);
+    // Foundation's NSLog — format string is an NSString (CFStringRef).
+    // We use CFStringCreateWithCString to create one from a C string.
+    fn CFStringCreateWithCString(
+        alloc: *const c_void,
+        c_str: *const c_char,
+        encoding: u32,
+    ) -> *const c_void;
+    fn CFRelease(cf: *const c_void);
+    fn NSLog(format: *const c_void, ...);
 }
 
 #[cfg(target_os = "ios")]
 fn ios_log(msg: &str) {
     if let Ok(c) = CString::new(msg) {
-        unsafe { ztlp_os_log(c.as_ptr()); }
+        unsafe {
+            // kCFStringEncodingUTF8 = 0x08000100
+            let cfstr = CFStringCreateWithCString(
+                std::ptr::null(),
+                c.as_ptr(),
+                0x08000100,
+            );
+            if !cfstr.is_null() {
+                // NSLog(@"%@", cfstr) — but simpler: NSLog(cfstr) since it's the format
+                NSLog(cfstr);
+                CFRelease(cfstr);
+            }
+        }
     }
 }
 
@@ -42,7 +63,7 @@ fn ios_log(msg: &str) {
     eprintln!("{}", msg);
 }
 
-/// Log to both iOS console (os_log) and Rust println for simulator/debug
+/// Log to iOS console (NSLog) or stderr on other platforms
 macro_rules! diag_log {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);

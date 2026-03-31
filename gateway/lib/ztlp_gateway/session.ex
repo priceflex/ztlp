@@ -816,7 +816,9 @@ defmodule ZtlpGateway.Session do
     queue_len = :queue.len(state.send_queue)
     buf_len = map_size(state.send_buffer)
     if queue_len > 0 do
-      Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{Float.round(state.cwnd + 0.0, 1)}")
+      effective_window = min(trunc(state.cwnd), @max_cwnd)
+      window_open = buf_len < effective_window
+      Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{effective_window} window_open=#{window_open}")
     end
     state = %{state | pacing_timer_ref: nil}
     state = flush_send_queue(state)
@@ -1742,12 +1744,11 @@ defmodule ZtlpGateway.Session do
 
   defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
-    window_full = if @use_bbr do
-      not Bbr.can_send?(state.bbr)
-    else
-      effective_window = min(trunc(state.cwnd), @max_cwnd)
-      inflight >= effective_window
-    end
+    # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
+    # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
+    # BBR is used for pacing rate only; session cwnd gates the send window.
+    effective_window = min(trunc(state.cwnd), @max_cwnd)
+    window_full = inflight >= effective_window
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.

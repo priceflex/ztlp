@@ -387,7 +387,12 @@ pub extern "C" fn ztlp_identity_free(identity: *mut ZtlpIdentity) {
 
 #[no_mangle]
 pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClient {
+    // Diagnostic: confirm this library version is actually running
+    ios_log("[ZTLP] ======= ztlp_client_new called =======");
+    ios_log("[ZTLP] Library version: 0.24.1-diag (build b29f324+nslog)");
+    ios_log("[ZTLP] NSLog bridge: CFStringCreateWithCString direct");
     if identity.is_null() {
+        ios_log("[ZTLP] ERROR: identity handle is null");
         set_last_error("identity handle is null");
         return std::ptr::null_mut();
     }
@@ -571,7 +576,9 @@ pub extern "C" fn ztlp_connect(
     callback: ZtlpConnectCallback,
     user_data: *mut c_void,
 ) -> i32 {
+    ios_log("[ZTLP] ztlp_connect called");
     if client.is_null() || target.is_null() {
+        ios_log("[ZTLP] ERROR: client or target is null");
         set_last_error("client or target is null");
         return ZtlpResult::InvalidArgument as i32;
     }
@@ -2247,6 +2254,7 @@ pub extern "C" fn ztlp_vip_add_service(
 /// a TCP listener on its VIP:port that pipes data through the tunnel.
 #[no_mangle]
 pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
+    ios_log("[ZTLP] ztlp_vip_start called");
     if client.is_null() {
         set_last_error("client is null");
         return ZtlpResult::InvalidArgument as i32;

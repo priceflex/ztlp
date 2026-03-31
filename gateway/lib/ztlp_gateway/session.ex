@@ -441,10 +441,13 @@ defmodule ZtlpGateway.Session do
   @initial_cwnd 10.0
   # Maximum congestion window (packets). 512 × 1140 = 570KB.
   @max_cwnd 512
-  # Minimum cwnd (never go below this)
-  @min_cwnd 4
+  # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
+  @min_cwnd 10
   # Slow-start threshold — starts high, reduced on first loss event
   @initial_ssthresh 512
+  # Maximum packets to retransmit per RTO firing (prevents flooding phone
+  # with duplicates which trigger dup ACK storms that collapse cwnd)
+  @max_rto_retransmit_per_tick 8
 
   # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
   @use_bbr true
@@ -586,6 +589,11 @@ defmodule ZtlpGateway.Session do
         dup_ack_count: 0,
         # Whether fast retransmit already fired for this loss event
         fast_retransmit_sent: false,
+        # TCP NewReno-style recovery: when in recovery, don't halve cwnd on
+        # duplicate ACKs (they're caused by our own retransmits). Recovery
+        # ends when ACK advances past recovery_data_seq.
+        in_recovery: false,
+        recovery_data_seq: 0,
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
         sacked_set: MapSet.new()
@@ -825,81 +833,98 @@ defmodule ZtlpGateway.Session do
     {:noreply, state}
   end
 
-  # Retransmit timer — check send_buffer for timed-out packets
+  # Retransmit timer — check send_buffer for timed-out packets.
+  # Key design: only retransmit the OLDEST @max_rto_retransmit_per_tick packets
+  # per firing. Retransmitting the entire buffer floods the phone with dups,
+  # which triggers dup ACK storms that collapse cwnd (double-punishment).
+  # Also enters "recovery mode" to prevent cwnd reduction on dup ACKs caused
+  # by our own retransmits (TCP NewReno-style).
   def handle_info(:retransmit_check, state) do
     now = System.monotonic_time(:millisecond)
 
-    # Track whether we've already reduced cwnd in this retransmit round.
-    # TCP reduces cwnd ONCE per loss event (= per retransmit timer firing),
-    # not once per lost packet. Multiple packets timing out simultaneously
-    # is ONE loss event.
-    {state, expired_count, _loss_reduced} =
-      Enum.reduce(state.send_buffer, {state, 0, false}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, exp_count, loss_reduced} ->
-        elapsed = now - sent_at
-
+    # First pass: clean up SACK'd and max-retransmit entries
+    {state, expired_count} =
+      Enum.reduce(state.send_buffer, {state, 0}, fn {seq, {packet, _sent_at, retransmit_count, ds}}, {acc, exp_count} ->
         cond do
-          # Skip SACK'd sequences — the client already has them
           is_integer(ds) and MapSet.member?(acc.sacked_set, ds) ->
-            Logger.debug("[Session] Skipping retransmit for SACK'd data_seq=#{ds}")
-            # Release BBR inflight for removed entry (no BW estimation update)
             acc = if @use_bbr do
               %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
             else
               acc
             end
-            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count, loss_reduced}
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count}
 
           retransmit_count >= @max_retransmits ->
             Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
-            # Release BBR inflight for dropped entry (no BW estimation update)
             acc = if @use_bbr do
               %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
             else
               acc
             end
-            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1, loss_reduced}
-
-          elapsed > per_packet_rto(acc.rto_ms, retransmit_count) ->
-            # Retransmit with the ORIGINAL packet_seq. Same plaintext + same
-            # nonce = identical ciphertext (deterministic AEAD). This is safe
-            # because we're re-sending the exact same data. Using new seqs would
-            # eventually exceed the client's recv_window (base + 256) after many
-            # retransmits, creating unrecoverable gaps.
-            nonce = <<0::32, seq::little-64>>
-            {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, packet, <<>>)
-            encrypted = ct <> tag
-            new_pkt = Packet.build_data(acc.session_id, seq,
-              payload: encrypted,
-              payload_len: byte_size(encrypted)
-            )
-            new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
-
-            Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
-            send_udp(acc, new_packet)
-
-            # Multiplicative decrease ONCE per loss event (not per packet).
-            # First retransmit in this round triggers cwnd halving; subsequent
-            # retransmits in the same timer firing are part of the same event.
-            {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced do
-              new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
-              new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-              Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-              {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}, true}
-            else
-              {acc, loss_reduced}
-            end
-
-            # Update in-place (same seq key, reset sent_at, increment retransmit count)
-            updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
-            {%{acc | send_buffer: updated_buffer}, exp_count, loss_reduced}
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
 
           true ->
-            {acc, exp_count, loss_reduced}
+            {acc, exp_count}
         end
       end)
 
     if expired_count > 0 do
       Logger.debug("[Session] RTO: dropped #{expired_count} packets exceeding max retransmits")
+    end
+
+    # Second pass: find expired packets, sort by seq, retransmit only the oldest N.
+    # This prevents flooding the phone with retransmits that cause dup ACK storms.
+    expired_entries =
+      state.send_buffer
+      |> Enum.filter(fn {_seq, {_pkt, sent_at, rc, _ds}} ->
+        elapsed = now - sent_at
+        elapsed > per_packet_rto(state.rto_ms, rc)
+      end)
+      |> Enum.sort_by(fn {seq, _} -> seq end)
+      |> Enum.take(@max_rto_retransmit_per_tick)
+
+    # Retransmit selected packets; halve cwnd ONCE for the entire batch
+    {state, retransmit_count, _loss_reduced} =
+      Enum.reduce(expired_entries, {state, 0, false}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, rt_count, loss_reduced} ->
+        nonce = <<0::32, seq::little-64>>
+        {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, packet, <<>>)
+        encrypted = ct <> tag
+        new_pkt = Packet.build_data(acc.session_id, seq,
+          payload: encrypted,
+          payload_len: byte_size(encrypted)
+        )
+        new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
+
+        Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
+        send_udp(acc, new_packet)
+
+        # Multiplicative decrease ONCE per loss event, and NEVER during recovery.
+        # When in recovery, new packets timing out for the first time are part
+        # of the same loss event that triggered recovery — don't double-punish.
+        {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
+          new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
+          new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+          Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
+          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}, true}
+        else
+          {acc, loss_reduced}
+        end
+
+        updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
+        {%{acc | send_buffer: updated_buffer}, rt_count + 1, loss_reduced}
+      end)
+
+    # Enter recovery mode after RTO retransmit. While in recovery, dup ACKs
+    # caused by our retransmits won't halve cwnd again. Recovery ends when
+    # a new ACK advances past the highest data_seq at time of loss.
+    state = if retransmit_count > 0 and not state.in_recovery do
+      highest_ds = state.send_buffer
+        |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
+        |> Enum.max(fn -> 0 end)
+      Logger.info("[Session] Entering recovery mode (recovery_data_seq=#{highest_ds}, retransmitted=#{retransmit_count})")
+      %{state | in_recovery: true, recovery_data_seq: highest_ds}
+    else
+      state
     end
 
     # Reschedule if buffer is non-empty
@@ -1464,11 +1489,16 @@ defmodule ZtlpGateway.Session do
 
     now = System.monotonic_time(:millisecond)
 
-    # Fast retransmit loss event — halve cwnd (AIMD multiplicative decrease)
-    new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
-    new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-    Logger.info("[Session] Fast retransmit loss: cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-    state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh}
+    # Fast retransmit loss event — halve cwnd (AIMD) unless already in recovery
+    state = if not state.in_recovery do
+      new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
+      new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+      Logger.info("[Session] NACK loss: cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
+      %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: state.send_data_seq}
+    else
+      Logger.debug("[Session] NACK during recovery — skipping cwnd reduction")
+      state
+    end
 
     # Filter out data_seqs that were already SACK'd — the client has them
     nacked_data_seqs = Enum.reject(nacked_data_seqs, &MapSet.member?(state.sacked_set, &1))
@@ -1551,6 +1581,8 @@ defmodule ZtlpGateway.Session do
               last_acked_data_seq: -1,
               dup_ack_count: 0,
               fast_retransmit_sent: false,
+              in_recovery: false,
+              recovery_data_seq: 0,
               retransmit_timer_ref: retransmit_ref,
               bbr: if(@use_bbr, do: Bbr.new(), else: nil)
             }}
@@ -2174,54 +2206,76 @@ defmodule ZtlpGateway.Session do
       state
     end
 
-    # Duplicate ACK detection + fast retransmit (TCP-style: once per loss event)
-    # After 3 duplicate ACKs, retransmit once. Don't retransmit again until
-    # new data is ACK'd (newly_acked > 0). This prevents retransmit storms
-    # when the client sends hundreds of duplicate ACKs for the same gap.
-    {dup_count, send_buffer, fast_retransmit_sent} =
+    # Exit recovery mode when ACK advances past recovery_data_seq
+    state = if state.in_recovery and newly_acked > 0 and acked_data_seq > state.recovery_data_seq do
+      Logger.info("[Session] Exiting recovery mode (acked=#{acked_data_seq} > recovery=#{state.recovery_data_seq})")
+      %{state | in_recovery: false, recovery_data_seq: 0}
+    else
+      state
+    end
+
+    # Duplicate ACK detection + fast retransmit (TCP NewReno-style).
+    # In recovery mode, dup ACKs don't trigger fast retransmit or cwnd reduction
+    # because they're caused by our own retransmits. Each dup ACK in recovery
+    # inflates cwnd by 1 to allow new data (TCP NewReno "inflation").
+    {dup_count, send_buffer, fast_retransmit_sent, state} =
       if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and map_size(send_buffer) > 0 do
         new_count = state.dup_ack_count + 1
-        send_buffer = if new_count == 3 and not state.fast_retransmit_sent do
-          # Fast retransmit: resend only the OLDEST unacked packets (up to 4).
-          # TCP-style: retransmit the lost packet, not the entire window.
-          # Sending 4 covers the likely gap without flooding the link.
-          now_ms = System.monotonic_time(:millisecond)
-          oldest_seqs = send_buffer |> Map.keys() |> Enum.sort() |> Enum.take(4)
-          retransmit_count = Enum.reduce(oldest_seqs, 0, fn seq, count ->
-            case Map.get(send_buffer, seq) do
-              {packet, _sent_at, _rc, _ds} ->
-                nonce = <<0::32, seq::little-64>>
-                {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
-                encrypted = ct <> tag
-                new_pkt = Packet.build_data(state.session_id, seq,
-                  payload: encrypted,
-                  payload_len: byte_size(encrypted)
-                )
-                new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
-                send_udp(state, new_packet)
-                count + 1
-              _ -> count
-            end
-          end)
-          # Reset sent_at only for retransmitted packets
-          updated_buffer = Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
-            case Map.get(buf, seq) do
-              {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
-              _ -> buf
-            end
-          end)
-          Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)})")
-          updated_buffer
+
+        if state.in_recovery do
+          # In recovery: inflate cwnd by 1 per dup ACK (NewReno) to allow
+          # new data to flow. Don't retransmit — the RTO handler covers that.
+          new_cwnd = min(state.cwnd + 1.0, @max_cwnd * 1.0)
+          state = %{state | cwnd: new_cwnd}
+          {new_count, send_buffer, state.fast_retransmit_sent, state}
         else
-          send_buffer
+          # Not in recovery: normal fast retransmit at 3 dup ACKs
+          {send_buffer, state} = if new_count == 3 and not state.fast_retransmit_sent do
+            now_ms = System.monotonic_time(:millisecond)
+            oldest_seqs = send_buffer |> Map.keys() |> Enum.sort() |> Enum.take(4)
+            retransmit_count = Enum.reduce(oldest_seqs, 0, fn seq, count ->
+              case Map.get(send_buffer, seq) do
+                {packet, _sent_at, _rc, _ds} ->
+                  nonce = <<0::32, seq::little-64>>
+                  {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
+                  encrypted = ct <> tag
+                  new_pkt = Packet.build_data(state.session_id, seq,
+                    payload: encrypted,
+                    payload_len: byte_size(encrypted)
+                  )
+                  new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
+                  send_udp(state, new_packet)
+                  count + 1
+                _ -> count
+              end
+            end)
+            updated_buffer = Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
+              case Map.get(buf, seq) do
+                {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
+                _ -> buf
+              end
+            end)
+
+            # Halve cwnd and enter recovery
+            new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
+            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+            highest_ds = send_buffer
+              |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
+              |> Enum.max(fn -> 0 end)
+            Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)})")
+            state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: highest_ds}
+            {updated_buffer, state}
+          else
+            {send_buffer, state}
+          end
+          {new_count, send_buffer, new_count >= 3, state}
         end
-        {new_count, send_buffer, new_count >= 3}
       else
         # New data acked — reset dup counter and allow next fast retransmit
-        {0, send_buffer, false}
+        {0, send_buffer, false, state}
       end
 
-    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{state.ssthresh}, buffer=#{map_size(send_buffer)}, dup_ack=#{dup_count}")
+    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{trunc(state.ssthresh)}, buffer=#{map_size(send_buffer)}, dup_ack=#{dup_count}#{if state.in_recovery, do: " [RECOVERY]", else: ""}")
 
     %{state | send_buffer: send_buffer, dup_ack_count: dup_count, fast_retransmit_sent: fast_retransmit_sent}
   end

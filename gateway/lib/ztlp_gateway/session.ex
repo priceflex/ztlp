@@ -829,8 +829,12 @@ defmodule ZtlpGateway.Session do
   def handle_info(:retransmit_check, state) do
     now = System.monotonic_time(:millisecond)
 
-    {state, expired_count} =
-      Enum.reduce(state.send_buffer, {state, 0}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, exp_count} ->
+    # Track whether we've already reduced cwnd in this retransmit round.
+    # TCP reduces cwnd ONCE per loss event (= per retransmit timer firing),
+    # not once per lost packet. Multiple packets timing out simultaneously
+    # is ONE loss event.
+    {state, expired_count, _loss_reduced} =
+      Enum.reduce(state.send_buffer, {state, 0, false}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, exp_count, loss_reduced} ->
         elapsed = now - sent_at
 
         cond do
@@ -843,7 +847,7 @@ defmodule ZtlpGateway.Session do
             else
               acc
             end
-            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count}
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count, loss_reduced}
 
           retransmit_count >= @max_retransmits ->
             Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
@@ -853,7 +857,7 @@ defmodule ZtlpGateway.Session do
             else
               acc
             end
-            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
+            {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1, loss_reduced}
 
           elapsed > per_packet_rto(acc.rto_ms, retransmit_count) ->
             # Retransmit with the ORIGINAL packet_seq. Same plaintext + same
@@ -873,22 +877,24 @@ defmodule ZtlpGateway.Session do
             Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{elapsed}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
             send_udp(acc, new_packet)
 
-            # Multiplicative decrease on first retransmit (AIMD loss response)
-            acc = if retransmit_count == 0 do
+            # Multiplicative decrease ONCE per loss event (not per packet).
+            # First retransmit in this round triggers cwnd halving; subsequent
+            # retransmits in the same timer firing are part of the same event.
+            {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced do
               new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
               new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
               Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-              %{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}
+              {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}, true}
             else
-              acc
+              {acc, loss_reduced}
             end
 
             # Update in-place (same seq key, reset sent_at, increment retransmit count)
             updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
-            {%{acc | send_buffer: updated_buffer}, exp_count}
+            {%{acc | send_buffer: updated_buffer}, exp_count, loss_reduced}
 
           true ->
-            {acc, exp_count}
+            {acc, exp_count, loss_reduced}
         end
       end)
 

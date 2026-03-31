@@ -258,16 +258,20 @@ impl TransportNode {
                                 return Ok(Some((plaintext, addr)));
                             }
                             Err(e) => {
+                                println!("[ZTLP-DECRYPT] FAILED seq={} session={} err={}", header.packet_seq, header.session_id, e);
                                 warn!("payload decryption failed: {}", e);
                                 return Ok(None);
                             }
                         }
+                    } else {
+                        println!("[ZTLP-PIPELINE] session not found for sid={} (data packet passed pipeline but no session)", header.session_id);
                     }
                 }
                 // Pass but not a data packet — could be handshake
                 Ok(Some((data, addr)))
             }
             AdmissionResult::Drop | AdmissionResult::RateLimit => {
+                println!("[ZTLP-PIPELINE] DROPPED {} bytes from {} (pipeline reject)", data.len(), addr);
                 debug!("packet from {} dropped by pipeline", addr);
                 Ok(None)
             }

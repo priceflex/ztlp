@@ -1178,6 +1178,9 @@ async fn recv_loop(
         match tokio::time::timeout(Duration::from_millis(50), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
                 last_recv_time = std::time::Instant::now();
+                println!("[ZTLP-RX] {} bytes, first_byte=0x{:02x}",
+                    plaintext.len(),
+                    plaintext.first().copied().unwrap_or(0));
                 log_write(
                     &mut debug_log,
                     &mut log_bytes_written,
@@ -1231,6 +1234,7 @@ async fn recv_loop(
                 if plaintext.len() >= 9 && plaintext[0] == FRAME_ACK {
                     let acked_seq =
                         u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
+                    println!("[ZTLP-RX] FRAME_ACK (upload) acked_seq={} len={}", acked_seq, plaintext.len());
                     tracing::debug!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);
                     log_write(
                         &mut debug_log,
@@ -1288,6 +1292,8 @@ async fn recv_loop(
                         (0u32, ds, plaintext[9..].to_vec())
                     };
 
+                    println!("[ZTLP-RX] FRAME_DATA stream={} data_seq={} payload={} expected={}",
+                        stream_id, data_seq, payload.len(), next_expected_seq);
                     // Per-frame trace logging (very verbose)
                     log_write(
                         &mut debug_log,
@@ -1352,6 +1358,7 @@ async fn recv_loop(
                     // but rate-limit to prevent retransmit storms: gateway fast-retransmits
                     // N packets → N duplicates → N re-ACKs → another fast retransmit → loop.
                     if is_duplicate && next_expected_seq > 0 {
+                        println!("[ZTLP-RX] DUPLICATE data_seq={} (expected={})", data_seq, next_expected_seq);
                         let should_reack = last_reack_time
                             .map(|t| t.elapsed().as_millis() >= REACK_MIN_INTERVAL_MS)
                             .unwrap_or(true);
@@ -1367,6 +1374,7 @@ async fn recv_loop(
                                     }
                                 }
                             }
+                            println!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
                             last_acked_data_seq = next_expected_seq;
                             last_data_recv_time = None;
@@ -1458,23 +1466,31 @@ async fn recv_loop(
                                     let _ = tx.send(ack_frame.clone());
                                     true
                                 } else {
+                                    println!("[ZTLP-TX] ACK ack_seq={} send_enqueue_tx=NONE, using direct", ack_seq);
                                     false
                                 }
                             } else {
+                                println!("[ZTLP-TX] ACK ack_seq={} active_session=NONE, using direct", ack_seq);
                                 false
                             }
                         } else {
+                            println!("[ZTLP-TX] ACK ack_seq={} lock failed, using direct", ack_seq);
                             false
                         };
 
                         if !ack_sent {
                             if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                                println!("[ZTLP-TX] ACK FAILED ack_seq={} err={}", ack_seq, e);
                                 tracing::warn!(
                                     "recv_loop: failed to send ACK for data_seq={}: {}",
                                     ack_seq,
                                     e
                                 );
+                            } else {
+                                println!("[ZTLP-TX] ACK ack_seq={} via direct transport", ack_seq);
                             }
+                        } else {
+                            println!("[ZTLP-TX] ACK ack_seq={} via SendController", ack_seq);
                         }
                         tracing::info!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={}, first={})",
                             ack_seq, ack_sent, has_gap, is_coalesce_point, is_first);
@@ -1594,7 +1610,8 @@ async fn recv_loop(
                 }
             }
             Ok(Ok(None)) => {
-                // Packet dropped by pipeline — continue
+                // Packet dropped by pipeline or decrypt failure — continue
+                println!("[ZTLP-RX] packet dropped (pipeline/decrypt)");
                 log_write(
                     &mut debug_log,
                     &mut log_bytes_written,

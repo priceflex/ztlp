@@ -2261,6 +2261,7 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
     }
 
     let client = unsafe { &*client };
+    ios_log("[ZTLP] vip_start: acquiring lock...");
     let mut guard = match client.inner.lock() {
         Ok(g) => g,
         Err(e) => {
@@ -2268,9 +2269,11 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
             return ZtlpResult::InternalError as i32;
         }
     };
+    ios_log("[ZTLP] vip_start: lock acquired");
 
     if guard.state != ConnectionState::Connected {
         set_last_error("not connected — connect first, then start VIP proxy");
+        ios_log("[ZTLP] vip_start: not connected");
         return ZtlpResult::NotConnected as i32;
     }
 
@@ -2278,6 +2281,7 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
         Some(s) => s,
         None => {
             set_last_error("no active session");
+            ios_log("[ZTLP] vip_start: no active session");
             return ZtlpResult::SessionNotFound as i32;
         }
     };
@@ -2287,21 +2291,40 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
     let peer_addr = session.peer_addr;
     let data_seq = session.data_seq.clone();
     let bytes_sent = session.bytes_sent.clone();
+    let runtime_handle = guard.runtime.handle().clone();
 
     let mut proxy = match guard.vip_proxy.take() {
         Some(p) => p,
         None => {
             set_last_error("no services registered — call ztlp_vip_add_service first");
+            ios_log("[ZTLP] vip_start: no services registered");
             return ZtlpResult::InvalidArgument as i32;
         }
     };
 
-    // Start proxy listeners on the runtime
-    let result = guard.runtime.block_on(async {
+    // Drop the lock BEFORE block_on to avoid deadlock with recv_loop.
+    // recv_loop constantly locks inner to process packets — holding the lock
+    // during block_on can deadlock if recv_loop is waiting for the lock.
+    ios_log("[ZTLP] vip_start: dropping lock before proxy.start()");
+    drop(guard);
+
+    // Start proxy listeners on the runtime (lock is NOT held)
+    ios_log("[ZTLP] vip_start: calling proxy.start()...");
+    let result = runtime_handle.block_on(async {
         proxy
             .start(transport, session_id, peer_addr, data_seq, bytes_sent)
             .await
     });
+    ios_log("[ZTLP] vip_start: proxy.start() returned");
+
+    // Re-acquire lock to store results
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned after vip_start: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
 
     guard.vip_proxy = Some(proxy);
 
@@ -2315,9 +2338,11 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
                 session.upload_ack_tx = Some(ack_tx);
                 session.send_enqueue_tx = Some(send_enqueue_tx);
             }
+            ios_log("[ZTLP] vip_start: OK, channels stored");
             ZtlpResult::Ok as i32
         }
         Err(e) => {
+            ios_log(&format!("[ZTLP] vip_start: FAILED: {}", e));
             set_last_error(&format!("VIP proxy start failed: {e}"));
             ZtlpResult::ConnectionError as i32
         }

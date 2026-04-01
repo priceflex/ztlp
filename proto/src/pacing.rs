@@ -287,11 +287,31 @@ pub fn detect_system(
                 recv / 1024,
                 target_kb,
             );
+            // On iOS, the kernel caps SO_RCVBUF at ~192KB-1MB.
+            // At 1140-byte packets and 55Mbps, the buffer holds ~170 packets
+            // and fills in ~28ms. Log this prominently for iOS diagnostics.
+            if recv <= 1_048_576 {
+                warn!(
+                    "iOS-DIAG: UDP recv buffer capped at {}KB by kernel (requested {}KB). \
+                     This limits in-flight packets to ~{} before kernel drops begin. \
+                     This is a known iOS limitation.",
+                    recv / 1024, target_kb, recv / 1200
+                );
+            } else {
+                warn!(
+                    "To fix: sudo sysctl -w net.core.rmem_max={} net.core.wmem_max={}",
+                    TARGET_BUFFER_SIZE, TARGET_BUFFER_SIZE,
+                );
+                warn!("Or run: ztlp tune (applies optimal kernel settings)");
+            }
+        }
+    }
+    if let Some(send) = send_buffer_size {
+        if send < TARGET_BUFFER_SIZE / 2 {
             warn!(
-                "To fix: sudo sysctl -w net.core.rmem_max={} net.core.wmem_max={}",
-                TARGET_BUFFER_SIZE, TARGET_BUFFER_SIZE,
+                "iOS-DIAG: UDP send buffer is {}KB (target: {}KB). ACK sending may be delayed.",
+                send / 1024, target_kb
             );
-            warn!("Or run: ztlp tune (applies optimal kernel settings)");
         }
     }
 

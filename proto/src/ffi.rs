@@ -1065,6 +1065,24 @@ async fn recv_loop(
     let mut last_reack_time: Option<std::time::Instant> = None;
     const REACK_MIN_INTERVAL_MS: u128 = 100; // one re-ACK per 100ms max
 
+    // ── iOS diagnostic counters ──
+    // Track packet flow metrics for diagnosing iOS performance issues.
+    // Logged periodically (every 100 packets or 5 seconds) to TunnelLogger.
+    let mut diag_packets_received: u64 = 0;
+    let mut diag_packets_decrypted: u64 = 0;
+    let mut diag_acks_sent: u64 = 0;
+    let mut diag_reassembly_buf_peak: usize = 0;
+    let mut diag_ooo_peak: usize = 0;
+    let mut diag_last_report: std::time::Instant = std::time::Instant::now();
+    let mut diag_lock_contention_us: u64 = 0;
+    const DIAG_REPORT_INTERVAL_MS: u128 = 5000; // report every 5 seconds
+    const DIAG_REPORT_PACKET_INTERVAL: u64 = 200; // or every 200 packets
+
+    // Reassembly buffer cap — prevent unbounded memory growth in iOS
+    // Network Extension (15MB process limit). 512 entries × ~1200 bytes
+    // = ~600KB max reassembly memory.
+    const REASSEMBLY_MAX_ENTRIES: usize = 512;
+
     // NAT keepalive: send an encrypted empty frame every 15s to keep
     // UDP NAT mappings alive (typical timeout 30-60s).
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -1453,7 +1471,24 @@ async fn recv_loop(
                     }
 
                     if data_seq >= vip_next_deliver_seq {
-                        reassembly_buf.insert(data_seq, (stream_id, payload));
+                        // Cap reassembly buffer to prevent OOM in iOS NE
+                        if reassembly_buf.len() >= REASSEMBLY_MAX_ENTRIES {
+                            tracing::warn!(
+                                "recv_loop: reassembly buffer full ({} entries), dropping data_seq={}",
+                                reassembly_buf.len(), data_seq
+                            );
+                            diag_log!("[ZTLP-DIAG] reassembly_buf FULL len={} dropping seq={}", reassembly_buf.len(), data_seq);
+                        } else {
+                            reassembly_buf.insert(data_seq, (stream_id, payload));
+                        }
+                    }
+
+                    // Track diagnostic peaks
+                    if reassembly_buf.len() > diag_reassembly_buf_peak {
+                        diag_reassembly_buf_peak = reassembly_buf.len();
+                    }
+                    if received_ahead.len() > diag_ooo_peak {
+                        diag_ooo_peak = received_ahead.len();
                     }
 
                     // Flush contiguous packets
@@ -1552,6 +1587,33 @@ async fn recv_loop(
                             ack_seq, ack_sent, has_gap, is_coalesce_point, is_first);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None; // ACK sent, reset timer
+                        diag_acks_sent += 1;
+                    }
+
+                    // ── Periodic diagnostic report ──
+                    diag_packets_received += 1;
+                    diag_packets_decrypted += 1;
+                    let now_diag = std::time::Instant::now();
+                    if diag_packets_received % DIAG_REPORT_PACKET_INTERVAL == 0
+                        || now_diag.duration_since(diag_last_report).as_millis() > DIAG_REPORT_INTERVAL_MS
+                    {
+                        let elapsed_ms = now_diag.duration_since(diag_last_report).as_millis();
+                        let pps = if elapsed_ms > 0 { diag_packets_received as u128 * 1000 / elapsed_ms } else { 0 };
+                        diag_log!(
+                            "[ZTLP-DIAG] pkts={} decrypted={} acks_sent={} next_expected={} reassembly_buf={}/{} ooo_peak={} lock_us={} pps={}",
+                            diag_packets_received, diag_packets_decrypted, diag_acks_sent,
+                            next_expected_seq, reassembly_buf.len(), REASSEMBLY_MAX_ENTRIES,
+                            diag_ooo_peak, diag_lock_contention_us, pps
+                        );
+                        tracing::info!(
+                            "recv_diag: pkts={} acks={} next_seq={} reasm_buf={} ooo_peak={} pps={}",
+                            diag_packets_received, diag_acks_sent, next_expected_seq,
+                            reassembly_buf.len(), diag_ooo_peak, pps
+                        );
+                        // Reset periodic counters
+                        diag_last_report = now_diag;
+                        diag_lock_contention_us = 0;
+                        diag_ooo_peak = 0;
                     }
                 } else if plaintext.len() >= 5 && plaintext[0] == FRAME_FIN {
                     // Per-stream FIN or legacy FIN

@@ -232,50 +232,64 @@ impl TransportNode {
     pub async fn recv_data(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, TransportError> {
         let (data, addr) = self.recv_raw().await?;
 
-        let pipeline = self.pipeline.lock().await;
-        let result = pipeline.process(&data);
+        // Extract what we need under the pipeline lock, then release it
+        // BEFORE decryption. This unblocks send_data() (which needs the
+        // pipeline lock for encryption) so ACKs can be sent concurrently
+        // with receive processing. This is critical on iOS where the
+        // ~192KB socket buffer fills in ~28ms at full rate.
+        let crypto_info = {
+            let pipeline = self.pipeline.lock().await;
+            let result = pipeline.process(&data);
 
-        match result {
-            AdmissionResult::Pass => {
-                // Try to decrypt as a data packet
-                if let Ok(header) = DataHeader::deserialize(&data) {
-                    if let Some(session) = pipeline.get_session(&header.session_id) {
-                        let encrypted_payload = &data[crate::packet::DATA_HEADER_SIZE..];
-                        let recv_key = session.recv_key;
-
-                        let cipher = ChaCha20Poly1305::new((&recv_key).into());
-                        let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
-                        let nonce = Nonce::from_slice(&nonce_bytes);
-
-                        match cipher.decrypt(nonce, encrypted_payload) {
-                            Ok(plaintext) => {
-                                info!(
-                                    "decrypted {} bytes from session {}",
-                                    plaintext.len(),
-                                    header.session_id
-                                );
-                                return Ok(Some((plaintext, addr)));
-                            }
-                            Err(e) => {
-                                println!("[ZTLP-DECRYPT] FAILED seq={} session={} err={}", header.packet_seq, header.session_id, e);
-                                warn!("payload decryption failed: {}", e);
-                                return Ok(None);
-                            }
+            match result {
+                AdmissionResult::Pass => {
+                    if let Ok(header) = DataHeader::deserialize(&data) {
+                        if let Some(session) = pipeline.get_session(&header.session_id) {
+                            let recv_key = session.recv_key;
+                            let encrypted_payload = data[crate::packet::DATA_HEADER_SIZE..].to_vec();
+                            Some((header, recv_key, encrypted_payload))
+                        } else {
+                            println!("[ZTLP-PIPELINE] session not found for sid={} (data packet passed pipeline but no session)", header.session_id);
+                            None
                         }
                     } else {
-                        println!("[ZTLP-PIPELINE] session not found for sid={} (data packet passed pipeline but no session)", header.session_id);
+                        None
                     }
                 }
-                // Pass but not a data packet — could be handshake
-                Ok(Some((data, addr)))
+                AdmissionResult::Drop | AdmissionResult::RateLimit => {
+                    println!("[ZTLP-PIPELINE] DROPPED {} bytes from {} (pipeline reject)", data.len(), addr);
+                    debug!("packet from {} dropped by pipeline", addr);
+                    return Ok(None);
+                }
             }
-            AdmissionResult::Drop | AdmissionResult::RateLimit => {
-                println!("[ZTLP-PIPELINE] DROPPED {} bytes from {} (pipeline reject)", data.len(), addr);
-                debug!("packet from {} dropped by pipeline", addr);
-                Ok(None)
+        }; // pipeline lock released HERE — before crypto
+
+        // Decrypt OUTSIDE the pipeline lock
+        if let Some((header, recv_key, encrypted_payload)) = crypto_info {
+            let cipher = ChaCha20Poly1305::new((&recv_key).into());
+            let mut nonce_bytes = [0u8; 12];
+            nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+            let nonce = Nonce::from_slice(&nonce_bytes);
+
+            match cipher.decrypt(nonce, encrypted_payload.as_slice()) {
+                Ok(plaintext) => {
+                    info!(
+                        "decrypted {} bytes from session {}",
+                        plaintext.len(),
+                        header.session_id
+                    );
+                    return Ok(Some((plaintext, addr)));
+                }
+                Err(e) => {
+                    println!("[ZTLP-DECRYPT] FAILED seq={} session={} err={}", header.packet_seq, header.session_id, e);
+                    warn!("payload decryption failed: {}", e);
+                    return Ok(None);
+                }
             }
         }
+
+        // Pass but not a data packet — could be handshake
+        Ok(Some((data, addr)))
     }
 
     /// Get the current effective MTU for sending data.

@@ -669,6 +669,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         timer.schedule(deadline: .now() + 25, repeating: 25)
         timer.setEventHandler { [weak self] in
             guard let self = self, self.bridge.hasClient else { return }
+            // Log memory diagnostics every keepalive cycle
+            self.logMemoryDiagnostics()
             // Send a 1-byte keepalive
             let keepaliveData = Data([0])
             do {
@@ -769,6 +771,48 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func updateConnectionState(_ state: TunnelConnectionState) {
         sharedDefaults?.set(state.rawValue, forKey: SharedKey.connectionState)
         sharedDefaults?.synchronize()
+    }
+
+    // MARK: - Memory Diagnostics
+
+    /// Log memory usage periodically. iOS Network Extensions have a ~15MB limit.
+    /// Call this from the keepalive timer to track memory during transfers.
+    private func logMemoryDiagnostics() {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        if result == KERN_SUCCESS {
+            let residentMB = Double(info.resident_size) / 1_048_576.0
+            let virtualMB = Double(info.virtual_size) / 1_048_576.0
+            // Warn if approaching the ~15MB NE limit
+            if residentMB > 10.0 {
+                logger.warn(
+                    "iOS-DIAG: Memory HIGH — resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB (NE limit ~15MB)",
+                    source: "Tunnel"
+                )
+            } else {
+                logger.debug(
+                    "iOS-DIAG: Memory resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB",
+                    source: "Tunnel"
+                )
+            }
+        }
+
+        // Also log available memory (iOS 13+)
+        if #available(iOS 13.0, *) {
+            let available = os_proc_available_memory()
+            let availableMB = Double(available) / 1_048_576.0
+            if availableMB < 50.0 {
+                logger.warn(
+                    "iOS-DIAG: Low available memory: \(String(format: "%.1f", availableMB))MB",
+                    source: "Tunnel"
+                )
+            }
+        }
     }
 
     // MARK: - Helpers

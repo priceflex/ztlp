@@ -176,7 +176,7 @@ final class NetworkBenchmark: ObservableObject {
 
                 let config = ZTLPConfigHandle()
                 try config.setRelay(relayAddress)
-                try config.setTimeoutMs(10000)
+                try config.setTimeoutMs(30000)
 
                 let start = CFAbsoluteTimeGetCurrent()
                 try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
@@ -354,7 +354,7 @@ final class NetworkBenchmark: ObservableObject {
 
             let config = ZTLPConfigHandle()
             try config.setRelay(relayAddress)
-            try config.setTimeoutMs(15000)
+            try config.setTimeoutMs(60000)
 
             try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
             let connected = CFAbsoluteTimeGetCurrent()
@@ -396,7 +396,7 @@ final class NetworkBenchmark: ObservableObject {
 
             let config = ZTLPConfigHandle()
             try config.setRelay(relayAddress)
-            try config.setTimeoutMs(10000)
+            try config.setTimeoutMs(30000)
 
             try await ZTLPBridge.shared.connect(target: gatewayTarget, config: config)
             connectionStatus = "Connected"

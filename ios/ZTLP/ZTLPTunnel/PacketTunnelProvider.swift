@@ -161,7 +161,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
 
                 try configHandle.setNatAssist(true)
-                try configHandle.setTimeoutMs(15000)
+                try configHandle.setTimeoutMs(60000)
 
                 let svcName = config.serviceName ?? "vault"
                 if !svcName.isEmpty {

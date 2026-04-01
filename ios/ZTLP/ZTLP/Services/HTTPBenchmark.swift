@@ -54,8 +54,8 @@ final class HTTPBenchmark: ObservableObject {
     /// URLSession configured to not cache and use short timeouts.
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 120
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 300
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         return URLSession(configuration: config)
@@ -188,7 +188,7 @@ final class HTTPBenchmark: ObservableObject {
 
             let config = ZTLPConfigHandle()
             try config.setRelay(relayAddress)
-            try config.setTimeoutMs(15000)
+            try config.setTimeoutMs(60000)
             try config.setService("http")
 
             connectionStatus = "Handshaking with relay..."

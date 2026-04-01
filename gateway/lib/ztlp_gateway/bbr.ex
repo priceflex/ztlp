@@ -28,7 +28,7 @@ defmodule ZtlpGateway.Bbr do
             rt_prop: :infinity,
             rt_prop_stamp: 0,
             pacing_rate: 0.0,
-            cwnd: 256.0,
+            cwnd: 16.0,
             filled_pipe: false,
             full_bw: 0.0,
             full_bw_count: 0,

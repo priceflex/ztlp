@@ -431,6 +431,7 @@ defmodule ZtlpGateway.Session do
   @max_rto_ms 30_000
   @max_retransmits 20
   @retransmit_check_interval_ms 50
+  # NOTE: pacing/cwnd tuned 2026-04-01 for mobile (iOS over relay) paths
   # Linger timeout removed — legacy sessions no longer drain on backend close.
   # The :linger_timeout handler remains as a safety no-op.
 
@@ -438,12 +439,12 @@ defmodule ZtlpGateway.Session do
   # Start at 10 packets (standard TCP IW=10, RFC 6928) and grow via slow start.
   # cwnd doubles per RTT until ssthresh, then grows linearly (congestion avoidance).
   # On loss: cwnd halved (multiplicative decrease).
-  @initial_cwnd 64.0
+  @initial_cwnd 32.0
   # Maximum congestion window (packets). 128 × 1140 = 146KB.
   # 256 was too aggressive for lossy WiFi→phone path — caused receiver stalls
   # with 199 inflight packets and 50+ dup ACKs without progress. 128 balances
   # throughput with path capacity.
-  @max_cwnd 128
+  @max_cwnd 512
   # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
   @min_cwnd 10
   # Minimum ssthresh floor. Without this, ssthresh collapses to @min_cwnd on
@@ -463,7 +464,7 @@ defmodule ZtlpGateway.Session do
   # Session stall detection. If ACK sequence hasn't advanced for this long
   # while data is in flight, the session is a zombie (phone dropped off,
   # path died, etc). Tear it down so the phone reconnects with a fresh session.
-  @stall_timeout_ms 60_000
+  @stall_timeout_ms 15_000
   # Slow-start threshold — starts high, reduced on first loss event
   @initial_ssthresh 512
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
@@ -474,9 +475,9 @@ defmodule ZtlpGateway.Session do
   @use_bbr true
 
   # Pacing interval: ms between burst sends
-  @pacing_interval_ms 1
+  @pacing_interval_ms 2
   # Max packets sent per pacing tick — limits instantaneous burst
-  @burst_size 16
+  @burst_size 4
 
   # Maximum plaintext payload per ZTLP data packet.
   # Max plaintext payload per ZTLP packet.
@@ -616,7 +617,7 @@ defmodule ZtlpGateway.Session do
         in_recovery: false,
         recovery_data_seq: 0,
         # cwnd value at recovery entry — restored on exit (inflation is temporary)
-        recovery_cwnd: @initial_cwnd,
+        recovery_cwnd: @initial_cwnd,  # 16.0 after mobile tuning
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
         sacked_set: MapSet.new(),

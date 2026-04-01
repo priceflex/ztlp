@@ -438,11 +438,32 @@ defmodule ZtlpGateway.Session do
   # Start at 10 packets (standard TCP IW=10, RFC 6928) and grow via slow start.
   # cwnd doubles per RTT until ssthresh, then grows linearly (congestion avoidance).
   # On loss: cwnd halved (multiplicative decrease).
-  @initial_cwnd 10.0
-  # Maximum congestion window (packets). 512 × 1140 = 570KB.
-  @max_cwnd 512
+  @initial_cwnd 64.0
+  # Maximum congestion window (packets). 128 × 1140 = 146KB.
+  # 256 was too aggressive for lossy WiFi→phone path — caused receiver stalls
+  # with 199 inflight packets and 50+ dup ACKs without progress. 128 balances
+  # throughput with path capacity.
+  @max_cwnd 128
   # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
   @min_cwnd 10
+  # Minimum ssthresh floor. Without this, ssthresh collapses to @min_cwnd on
+  # lossy paths, and recovery deflation resets cwnd to 10 every time. A floor
+  # of 48 ensures ~55KB always in flight (48 × 1140) as a throughput baseline.
+  @min_ssthresh 48
+  # Loss reduction factor (β). TCP uses 0.5 (halve on loss). CUBIC uses 0.7.
+  # On lossy WiFi paths, most loss is random noise, not congestion. A gentler
+  # β=0.75 (reduce by 25%) keeps throughput up while still responding to loss.
+  @loss_beta 0.75
+  # Backpressure thresholds for the send queue. When the queue exceeds @queue_high,
+  # we stop reading from the backend (don't call resume_read). When it drops below
+  # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
+  # when the backend dumps a large response faster than the tunnel can deliver.
+  @queue_high 256
+  @queue_low 64
+  # Session stall detection. If ACK sequence hasn't advanced for this long
+  # while data is in flight, the session is a zombie (phone dropped off,
+  # path died, etc). Tear it down so the phone reconnects with a fresh session.
+  @stall_timeout_ms 60_000
   # Slow-start threshold — starts high, reduced on first loss event
   @initial_ssthresh 512
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
@@ -594,9 +615,18 @@ defmodule ZtlpGateway.Session do
         # ends when ACK advances past recovery_data_seq.
         in_recovery: false,
         recovery_data_seq: 0,
+        # cwnd value at recovery entry — restored on exit (inflation is temporary)
+        recovery_cwnd: @initial_cwnd,
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
-        sacked_set: MapSet.new()
+        sacked_set: MapSet.new(),
+        # Backpressure: when send_queue exceeds @queue_high, we stop
+        # reading from backends. Tracks which backend pids are paused.
+        backends_paused: false,
+        # Stall detection: track when ACK last advanced (monotonic ms).
+        # If no ACK progress for @stall_timeout_ms while data is in flight,
+        # the session is a zombie — tear it down so the phone reconnects.
+        last_ack_advance_at: System.monotonic_time(:millisecond)
       }
       |> Map.merge(rekey_state)
 
@@ -637,11 +667,6 @@ defmodule ZtlpGateway.Session do
   # Backend sent data — enqueue for paced sending
   @impl true
   def handle_info({:backend_data, data}, state) do
-    # Chunk the plaintext data to keep each ZTLP packet under the path MTU.
-    # Without chunking, a single TCP read can produce a 1460-byte payload
-    # that becomes a 1531-byte ZTLP packet (1559 bytes on wire), requiring
-    # IP fragmentation. Fragmented retransmits are unreliable on paths with
-    # broken PMTUD or low MTU (PPPoE, tunnels).
     chunks = chunk_data(data, @max_payload_bytes)
     send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
       :queue.in(chunk, q)
@@ -650,6 +675,9 @@ defmodule ZtlpGateway.Session do
 
     # Try to send immediately if window allows
     state = flush_send_queue(state)
+
+    # Backpressure: if queue is small enough, tell backend to send more
+    state = maybe_resume_backends(state)
     {:noreply, state}
   end
 
@@ -749,6 +777,7 @@ defmodule ZtlpGateway.Session do
         end)
         state = %{state | send_queue: send_queue}
         state = flush_send_queue(state)
+        state = maybe_resume_backends(state)
         {:noreply, state}
 
       nil ->
@@ -788,6 +817,7 @@ defmodule ZtlpGateway.Session do
         end)
         state = %{state | send_queue: send_queue}
         state = flush_send_queue(state)
+        state = maybe_resume_backends(state)
         {:noreply, state}
     end
   end
@@ -830,6 +860,7 @@ defmodule ZtlpGateway.Session do
     end
     state = %{state | pacing_timer_ref: nil}
     state = flush_send_queue(state)
+    state = maybe_resume_backends(state)
     {:noreply, state}
   end
 
@@ -902,10 +933,10 @@ defmodule ZtlpGateway.Session do
         # When in recovery, new packets timing out for the first time are part
         # of the same loss event that triggered recovery — don't double-punish.
         {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
-          new_ssthresh = max(trunc(acc.cwnd / 2), @min_cwnd)
+          new_ssthresh = max(trunc(acc.cwnd * @loss_beta), @min_ssthresh)
           new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
           Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh}, true}
+          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: acc.send_data_seq, recovery_cwnd: new_cwnd}, true}
         else
           {acc, loss_reduced}
         end
@@ -927,17 +958,25 @@ defmodule ZtlpGateway.Session do
       state
     end
 
-    # Reschedule if buffer is non-empty
-    retransmit_timer_ref =
-      if map_size(state.send_buffer) > 0 do
-        interval = min(div(state.rto_ms, 2), @retransmit_check_interval_ms)
-        interval = max(interval, 10)
-        Process.send_after(self(), :retransmit_check, interval)
-      else
-        nil
-      end
+    # Stall detection: if data is in flight but ACK hasn't advanced for
+    # @stall_timeout_ms, the session is a zombie. Log and tear it down.
+    stall_age = now - state.last_ack_advance_at
+    if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
+      Logger.warning("[Session] Stall detected: no ACK advance for #{div(stall_age, 1000)}s with #{map_size(state.send_buffer)} inflight — tearing down session")
+      {:stop, {:shutdown, :stall_timeout}, state}
+    else
+      # Reschedule if buffer is non-empty
+      retransmit_timer_ref =
+        if map_size(state.send_buffer) > 0 do
+          interval = min(div(state.rto_ms, 2), @retransmit_check_interval_ms)
+          interval = max(interval, 10)
+          Process.send_after(self(), :retransmit_check, interval)
+        else
+          nil
+        end
 
-    {:noreply, %{state | retransmit_timer_ref: retransmit_timer_ref}}
+      {:noreply, %{state | retransmit_timer_ref: retransmit_timer_ref}}
+    end
   end
 
   # ── Async backend connect results (mux streams) ──
@@ -1453,6 +1492,8 @@ defmodule ZtlpGateway.Session do
 
     # ACK freed window space — try to flush more from the queue
     state = flush_send_queue(state)
+    # Resume backends if queue drained below low-water mark
+    state = maybe_resume_backends(state)
 
     # If draining with empty queue and empty send_buffer, all data delivered
     if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
@@ -1468,6 +1509,7 @@ defmodule ZtlpGateway.Session do
     state = process_cumulative_ack(acked_data_seq, state)
 
     state = flush_send_queue(state)
+    state = maybe_resume_backends(state)
 
     if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
       Logger.info("[Session] All data ACKed during drain, terminating cleanly")
@@ -1489,14 +1531,13 @@ defmodule ZtlpGateway.Session do
 
     now = System.monotonic_time(:millisecond)
 
-    # Fast retransmit loss event — halve cwnd (AIMD) unless already in recovery
+    # Enter recovery mode (no cwnd reduction). On lossy WiFi, NACKs indicate
+    # random packet drops, not congestion. Only RTO should reduce cwnd.
     state = if not state.in_recovery do
-      new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
-      new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-      Logger.info("[Session] NACK loss: cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-      %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: state.send_data_seq}
+      Logger.info("[Session] NACK loss: entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)")
+      %{state | in_recovery: true, recovery_data_seq: state.send_data_seq, recovery_cwnd: state.cwnd}
     else
-      Logger.debug("[Session] NACK during recovery — skipping cwnd reduction")
+      Logger.debug("[Session] NACK during recovery — skipping")
       state
     end
 
@@ -1583,8 +1624,10 @@ defmodule ZtlpGateway.Session do
               fast_retransmit_sent: false,
               in_recovery: false,
               recovery_data_seq: 0,
+              recovery_cwnd: 0,
               retransmit_timer_ref: retransmit_ref,
-              bbr: if(@use_bbr, do: Bbr.new(), else: nil)
+              bbr: if(@use_bbr, do: Bbr.new(), else: nil),
+              last_ack_advance_at: System.monotonic_time(:millisecond)
             }}
 
           {:error, _reason} ->
@@ -1759,6 +1802,36 @@ defmodule ZtlpGateway.Session do
   # ---------------------------------------------------------------------------
   # Encrypt and send response to client
   # ---------------------------------------------------------------------------
+
+  # Backpressure: resume backend reads when queue is below low-water mark.
+  # When the queue was above @queue_high, backends were paused (active: :once
+  # not re-armed). Once queue drops below @queue_low, re-arm all backends.
+  defp maybe_resume_backends(state) do
+    queue_len = :queue.len(state.send_queue)
+    cond do
+      queue_len >= @queue_high and not state.backends_paused ->
+        # Queue is full — pause all backends
+        Logger.debug("[Session] Backpressure ON: pausing backend reads (queue=#{queue_len})")
+        for {_stream_id, stream_info} <- state.streams do
+          if pid = stream_info[:backend_pid], do: Backend.pause_read(pid)
+        end
+        if state.backend_pid, do: Backend.pause_read(state.backend_pid)
+        %{state | backends_paused: true}
+
+      queue_len <= @queue_low and state.backends_paused ->
+        # Queue drained — resume all stream backends
+        Logger.debug("[Session] Backpressure OFF: resuming backend reads (queue=#{queue_len})")
+        for {_stream_id, stream_info} <- state.streams do
+          if pid = stream_info[:backend_pid], do: Backend.resume_read(pid)
+        end
+        if state.backend_pid, do: Backend.resume_read(state.backend_pid)
+        %{state | backends_paused: false}
+
+      true ->
+        # Between high and low, or already in correct state — no change (hysteresis)
+        state
+    end
+  end
 
   # Flush the send queue: send packets as long as the send window allows.
   # Paces sends by scheduling a timer for the next packet if the queue
@@ -2201,15 +2274,18 @@ defmodule ZtlpGateway.Session do
         # Congestion avoidance: grow by ~1 packet per RTT
         min(cwnd + newly_acked / cwnd, @max_cwnd * 1.0)
       end
-      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq}
+      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq, last_ack_advance_at: now}
     else
       state
     end
 
-    # Exit recovery mode when ACK advances past recovery_data_seq
+    # Exit recovery mode when ACK advances past recovery_data_seq.
+    # Restore cwnd to recovery_cwnd (the value at entry), stripping any
+    # dup-ACK inflation that accumulated during recovery.
     state = if state.in_recovery and newly_acked > 0 and acked_data_seq > state.recovery_data_seq do
-      Logger.info("[Session] Exiting recovery mode (acked=#{acked_data_seq} > recovery=#{state.recovery_data_seq})")
-      %{state | in_recovery: false, recovery_data_seq: 0}
+      restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), @max_cwnd * 1.0)
+      Logger.info("[Session] Exiting recovery (acked=#{acked_data_seq} > recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}")
+      %{state | in_recovery: false, recovery_data_seq: 0, recovery_cwnd: 0, cwnd: restored_cwnd}
     else
       state
     end
@@ -2224,9 +2300,25 @@ defmodule ZtlpGateway.Session do
 
         if state.in_recovery do
           # In recovery: inflate cwnd by 1 per dup ACK (NewReno) to allow
-          # new data to flow. Don't retransmit — the RTO handler covers that.
-          new_cwnd = min(state.cwnd + 1.0, @max_cwnd * 1.0)
-          state = %{state | cwnd: new_cwnd}
+          # new data to flow. Cap at ssthresh + inflight to prevent runaway
+          # inflation (hundreds of dup ACKs would balloon cwnd to 400+,
+          # causing a massive burst on recovery exit).
+          #
+          # Plateau detection: if 20+ dup ACKs without ANY new data being
+          # acked, the path is overwhelmed. Halve cwnd and ssthresh to drain.
+          # This catches the case where cwnd is too large for the path —
+          # receiver has a hole it can't fill because we're flooding it.
+          state = if new_count >= 20 and rem(new_count, 20) == 0 do
+            new_ssthresh = max(trunc(state.cwnd * @loss_beta), @min_ssthresh)
+            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+            Logger.info("[Session] Dup ACK plateau (#{new_count}): path overwhelmed, cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}")
+            %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, recovery_cwnd: new_cwnd}
+          else
+            inflight = map_size(send_buffer)
+            max_recovery_cwnd = min(state.ssthresh + inflight, @max_cwnd) * 1.0
+            new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
+            %{state | cwnd: new_cwnd}
+          end
           {new_count, send_buffer, state.fast_retransmit_sent, state}
         else
           # Not in recovery: normal fast retransmit at 3 dup ACKs
@@ -2256,14 +2348,15 @@ defmodule ZtlpGateway.Session do
               end
             end)
 
-            # Halve cwnd and enter recovery
-            new_ssthresh = max(trunc(state.cwnd / 2), @min_cwnd)
-            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+            # Enter recovery WITHOUT reducing cwnd. On lossy WiFi, fast retransmits
+            # are almost always random drops, not congestion. Reducing cwnd on every
+            # 3-dup-ACK event pins throughput to min_ssthresh. Only RTO (true timeout)
+            # should reduce cwnd — that's the real congestion signal.
             highest_ds = send_buffer
               |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
               |> Enum.max(fn -> 0 end)
-            Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)})")
-            state = %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: highest_ds}
+            Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)")
+            state = %{state | in_recovery: true, recovery_data_seq: highest_ds, recovery_cwnd: state.cwnd}
             {updated_buffer, state}
           else
             {send_buffer, state}

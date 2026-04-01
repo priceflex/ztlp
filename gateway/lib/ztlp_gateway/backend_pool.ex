@@ -451,13 +451,27 @@ defmodule ZtlpGateway.BackendPool.Conn do
   @impl true
   def init({owner, stream_id, backend_key}) do
     Process.monitor(owner)
-    {:ok, %{socket: nil, owner: owner, stream_id: stream_id, backend_key: backend_key}}
+    {:ok, %{socket: nil, owner: owner, stream_id: stream_id, backend_key: backend_key, paused: false}}
   end
 
   @impl true
   def handle_cast({:activate, socket}, state) do
-    :inet.setopts(socket, [{:active, true}])
-    {:noreply, %{state | socket: socket}}
+    :inet.setopts(socket, [{:active, :once}])
+    {:noreply, %{state | socket: socket, paused: false}}
+  end
+
+  # Backpressure: Session tells us to pause/resume reading
+  def handle_cast(:pause_read, state) do
+    {:noreply, %{state | paused: true}}
+  end
+
+  def handle_cast(:resume_read, %{socket: socket, paused: _} = state) when socket != nil do
+    :inet.setopts(socket, [{:active, :once}])
+    {:noreply, %{state | paused: false}}
+  end
+
+  def handle_cast(:resume_read, state) do
+    {:noreply, %{state | paused: false}}
   end
 
   def handle_cast(:close, %{socket: socket} = state) when socket != nil do
@@ -498,14 +512,17 @@ defmodule ZtlpGateway.BackendPool.Conn do
   end
 
   # TCP data from the backend → forward to the session owner
+  # Uses active: :once for backpressure. Re-arms immediately unless paused.
   @impl true
-  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: nil} = state) do
+  def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: nil, paused: paused} = state) do
     send(owner, {:backend_data, data})
+    unless paused, do: :inet.setopts(socket, [{:active, :once}])
     {:noreply, state}
   end
 
-  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: stream_id} = state) do
+  def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: stream_id, paused: paused} = state) do
     send(owner, {:backend_data, stream_id, data})
+    unless paused, do: :inet.setopts(socket, [{:active, :once}])
     {:noreply, state}
   end
 

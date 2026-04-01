@@ -102,6 +102,18 @@ defmodule ZtlpGateway.Backend do
     GenServer.cast(pid, :close)
   end
 
+  @doc "Pause reading from the backend socket (backpressure)."
+  @spec pause_read(pid()) :: :ok
+  def pause_read(pid) do
+    GenServer.cast(pid, :pause_read)
+  end
+
+  @doc "Resume reading from the backend socket (re-arm active: :once)."
+  @spec resume_read(pid()) :: :ok
+  def resume_read(pid) do
+    GenServer.cast(pid, :resume_read)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -109,11 +121,11 @@ defmodule ZtlpGateway.Backend do
   @impl true
   def init({host, port, owner, stream_id}) do
     # Connect to the backend. 5-second timeout for the TCP handshake.
-    case :gen_tcp.connect(host, port, [:binary, active: true, packet: :raw], 5_000) do
+    case :gen_tcp.connect(host, port, [:binary, active: :once, packet: :raw], 5_000) do
       {:ok, socket} ->
         # Monitor the owner (Session process) — if it dies, we clean up
         Process.monitor(owner)
-        {:ok, %{socket: socket, owner: owner, stream_id: stream_id}}
+        {:ok, %{socket: socket, owner: owner, stream_id: stream_id, paused: false}}
 
       {:error, reason} ->
         {:stop, {:connect_failed, reason}}
@@ -143,16 +155,33 @@ defmodule ZtlpGateway.Backend do
     {:stop, :normal, state}
   end
 
+  # Session tells us to pause reading (backpressure — send queue is full)
+  @impl true
+  def handle_cast(:pause_read, state) do
+    {:noreply, %{state | paused: true}}
+  end
+
+  # Session tells us to resume reading (send queue drained)
+  @impl true
+  def handle_cast(:resume_read, %{socket: socket} = state) do
+    :inet.setopts(socket, active: :once)
+    {:noreply, %{state | paused: false}}
+  end
+
   # TCP data from the backend → forward to the Session process
   # Include stream_id when available (multiplexed mode)
+  # Uses active: :once for flow control. Re-arms immediately unless paused
+  # by the Session (backpressure when send queue is too deep).
   @impl true
-  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: nil} = state) do
+  def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: nil, paused: paused} = state) do
     send(owner, {:backend_data, data})
+    unless paused, do: :inet.setopts(socket, active: :once)
     {:noreply, state}
   end
 
-  def handle_info({:tcp, _socket, data}, %{owner: owner, stream_id: stream_id} = state) do
+  def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: stream_id, paused: paused} = state) do
     send(owner, {:backend_data, stream_id, data})
+    unless paused, do: :inet.setopts(socket, active: :once)
     {:noreply, state}
   end
 

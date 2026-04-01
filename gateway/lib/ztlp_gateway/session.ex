@@ -777,6 +777,10 @@ defmodule ZtlpGateway.Session do
         end)
         state = %{state | send_queue: send_queue}
         state = flush_send_queue(state)
+        # Backpressure on TLS bridge sockets: pause reading from this socket
+        # when queue is high. Without this, the TLS bridge keeps delivering
+        # data even when backend TCP is paused, ballooning queue to 40K+.
+        state = maybe_pause_tls_socket(state, socket)
         state = maybe_resume_backends(state)
         {:noreply, state}
 
@@ -1810,19 +1814,27 @@ defmodule ZtlpGateway.Session do
     queue_len = :queue.len(state.send_queue)
     cond do
       queue_len >= @queue_high and not state.backends_paused ->
-        # Queue is full — pause all backends
+        # Queue is full — pause all backends AND TLS bridge sockets
         Logger.debug("[Session] Backpressure ON: pausing backend reads (queue=#{queue_len})")
         for {_stream_id, stream_info} <- state.streams do
           if pid = stream_info[:backend_pid], do: Backend.pause_read(pid)
+          # Also pause TLS bridge client sockets to stop encrypted data delivery
+          if socket = stream_info[:tls_socket] do
+            :inet.setopts(socket, active: false)
+          end
         end
         if state.backend_pid, do: Backend.pause_read(state.backend_pid)
         %{state | backends_paused: true}
 
       queue_len <= @queue_low and state.backends_paused ->
-        # Queue drained — resume all stream backends
+        # Queue drained — resume all stream backends AND TLS bridge sockets
         Logger.debug("[Session] Backpressure OFF: resuming backend reads (queue=#{queue_len})")
         for {_stream_id, stream_info} <- state.streams do
           if pid = stream_info[:backend_pid], do: Backend.resume_read(pid)
+          # Resume TLS bridge client sockets
+          if socket = stream_info[:tls_socket] do
+            :inet.setopts(socket, active: true)
+          end
         end
         if state.backend_pid, do: Backend.resume_read(state.backend_pid)
         %{state | backends_paused: false}
@@ -1831,6 +1843,19 @@ defmodule ZtlpGateway.Session do
         # Between high and low, or already in correct state — no change (hysteresis)
         state
     end
+  end
+
+  # Pause a TLS bridge client socket when queue exceeds high-water mark.
+  # This prevents the TLS bridge from delivering encrypted data when the
+  # send queue is already overloaded — without this, pausing the backend
+  # TCP socket alone is insufficient because the TLS bridge has its own
+  # internal buffer that keeps draining into our send_queue.
+  defp maybe_pause_tls_socket(state, socket) do
+    queue_len = :queue.len(state.send_queue)
+    if queue_len >= @queue_high do
+      :inet.setopts(socket, active: false)
+    end
+    state
   end
 
   # Flush the send queue: send packets as long as the send window allows.

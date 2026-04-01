@@ -11,7 +11,7 @@ require "timeout"
 # This replaces raw TCP/SSH for metrics collection — eating our own dogfood.
 #
 # Usage:
-#   tunnel = ZtlpTunnel.new(gateway_addr: "52.39.59.34:23098", service: "metrics")
+#   tunnel = ZtlpTunnel.new(gateway_addr: "52.39.59.34:23097", service: "metrics")
 #   result = tunnel.fetch_metrics
 #   # => { available: true, data: { sessions_active: 42, ... } }
 #

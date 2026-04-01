@@ -16,7 +16,8 @@ class HealthChecker
   HEALTH_CHECKS = {
     "ns"      => { port: 23096, protocol: :udp, metrics_port: 9103 },
     "relay"   => { port: 23095, protocol: :udp, metrics_port: 9101 },
-    "gateway" => { port: 23098, protocol: :tcp, metrics_port: 9102 }
+    # Gateway listens on 23097 in current production deployment.
+    "gateway" => { port: 23097, protocol: :udp, metrics_port: 9102 }
   }.freeze
 
   CONTAINER_NAMES = {

@@ -28,13 +28,14 @@ class SshProvisioner
   ZTLP_PORTS = {
     "ns"      => { udp: 23096, metrics: 9103 },
     "relay"   => { udp: 23095, mesh: 23096, metrics: 9101 },
-    "gateway" => { tcp: 23098, metrics: 9102 }
+    # Main gateway listener (prod): UDP 23097
+    "gateway" => { udp: 23097, metrics: 9102 }
   }.freeze
 
   # Gateway sidecar ports — each machine gets a gateway for ZTLP-native metrics access.
   # Different roles use different ports so the relay can distinguish between
   # its own local gateway and remote gateways when forwarding HELLO packets.
-  GATEWAY_SIDECAR_PORT = 23098          # Default (NS machines)
+  GATEWAY_SIDECAR_PORT = 23097          # Default (NS and dedicated gateway machines)
   GATEWAY_SIDECAR_RELAY_PORT = 23099    # Relay machines use a separate port
 
   # Returns the gateway sidecar port for a given machine based on its roles.

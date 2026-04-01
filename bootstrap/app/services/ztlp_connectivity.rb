@@ -21,16 +21,16 @@ class ZtlpConnectivity
 
   # Test connectivity to a machine's gateway sidecar via ZTLP tunnel.
   # Automatically routes through the relay if available (for UDP-hostile NATs).
-  # Uses role-specific gateway ports (NS=23098, relay=23099).
+  # Uses role-specific gateway ports (NS/gateway=23097, relay=23099).
   # For standalone gateway machines (role=gateway only), connects directly to
-  # the main gateway port (23098) instead of using sidecar port logic.
+  # the main gateway port (23097) instead of using sidecar port logic.
   # Returns a Result struct.
   def self.check(machine, gateway_port: nil)
     return Result.new(reachable: false, error: "ZTLP not available") unless available?
 
     gateway_port ||= if machine.role_list == ["gateway"]
       # Standalone gateway — connect directly to its main gateway port
-      SshProvisioner::ZTLP_PORTS["gateway"][:tcp]
+      SshProvisioner::ZTLP_PORTS["gateway"][:udp]
     else
       SshProvisioner.gateway_port_for(machine)
     end

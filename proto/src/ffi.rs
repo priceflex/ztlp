@@ -1130,12 +1130,31 @@ async fn recv_loop(
     let ack_session_id = session_id;
     let ack_peer = peer_addr;
     tokio::spawn(async move {
+        let mut sent_count: u64 = 0;
+        let mut err_count: u64 = 0;
         while let Some(frame) = ack_send_rx.recv().await {
             if ack_stop.load(Ordering::Relaxed) {
+                tracing::info!("ack_sender: stopped (sent={}, errors={})", sent_count, err_count);
                 break;
             }
-            let _ = ack_transport.send_data(ack_session_id, &frame, ack_peer).await;
+            match ack_transport.send_data(ack_session_id, &frame, ack_peer).await {
+                Ok(_) => {
+                    sent_count += 1;
+                    if sent_count <= 5 || sent_count % 100 == 0 {
+                        tracing::info!("ack_sender: sent #{} (frame_len={})", sent_count, frame.len());
+                    }
+                }
+                Err(e) => {
+                    err_count += 1;
+                    tracing::warn!("ack_sender: send_data FAILED #{}: {} (frame_len={})", err_count, e, frame.len());
+                    if err_count > 10 {
+                        tracing::error!("ack_sender: too many errors, stopping");
+                        break;
+                    }
+                }
+            }
         }
+        tracing::info!("ack_sender: task exiting (sent={}, errors={})", sent_count, err_count);
     });
 
     // ── Leveled file logging for diagnosing tunnel issues ──

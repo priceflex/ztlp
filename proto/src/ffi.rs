@@ -1134,27 +1134,37 @@ async fn recv_loop(
         let mut err_count: u64 = 0;
         while let Some(frame) = ack_send_rx.recv().await {
             if ack_stop.load(Ordering::Relaxed) {
-                tracing::info!("ack_sender: stopped (sent={}, errors={})", sent_count, err_count);
                 break;
             }
-            match ack_transport.send_data(ack_session_id, &frame, ack_peer).await {
-                Ok(_) => {
-                    sent_count += 1;
-                    if sent_count <= 5 || sent_count % 100 == 0 {
-                        tracing::info!("ack_sender: sent #{} (frame_len={})", sent_count, frame.len());
-                    }
-                }
-                Err(e) => {
-                    err_count += 1;
-                    tracing::warn!("ack_sender: send_data FAILED #{}: {} (frame_len={})", err_count, e, frame.len());
-                    if err_count > 10 {
-                        tracing::error!("ack_sender: too many errors, stopping");
-                        break;
-                    }
+            // Drain any queued frames to coalesce — only send the LATEST ACK.
+            // Multiple ACKs in the queue are redundant since ACKs are cumulative.
+            // This prevents flooding the iOS UDP send buffer which causes all
+            // outbound packets (including ACKs) to be silently dropped by the kernel.
+            let mut latest_frame = frame;
+            while let Ok(f) = ack_send_rx.try_recv() {
+                // Keep NACK frames (type 0x03) — they're not redundant
+                if f.len() > 0 && f[0] == 0x03 {
+                    // Send the NACK immediately
+                    let _ = ack_transport.send_data(ack_session_id, &f, ack_peer).await;
+                } else {
+                    latest_frame = f; // newer ACK supersedes older
                 }
             }
+
+            match ack_transport.send_data(ack_session_id, &latest_frame, ack_peer).await {
+                Ok(_) => { sent_count += 1; }
+                Err(e) => {
+                    err_count += 1;
+                    tracing::warn!("ack_sender: FAILED #{}: {}", err_count, e);
+                }
+            }
+
+            // Small yield to let the recv socket drain before sending more.
+            // iOS silently drops outbound UDP when the send buffer is contended
+            // with high-rate inbound traffic on the same socket.
+            tokio::task::yield_now().await;
         }
-        tracing::info!("ack_sender: task exiting (sent={}, errors={})", sent_count, err_count);
+        tracing::info!("ack_sender: exiting (sent={}, errors={})", sent_count, err_count);
     });
 
     // ── Leveled file logging for diagnosing tunnel issues ──
@@ -1570,7 +1580,7 @@ async fn recv_loop(
                     // fast retransmit on the gateway), or during startup (first
                     // 64 packets ACK every 2 to help BBR ramp up).
                     // This reduces ACK count from ~870 (for 1MB) to ~70.
-                    const ACK_COALESCE_COUNT: u64 = 1; // ACK every packet — redundancy beats coalescing on lossy paths
+                    const ACK_COALESCE_COUNT: u64 = 4; // ACK every 4 packets — iOS kernel drops bursts of outbound UDP
                     const ACK_STARTUP_EVERY: u64 = 2;
                     const ACK_STARTUP_THRESHOLD: u64 = 64;
                     let has_gap = !received_ahead.is_empty();

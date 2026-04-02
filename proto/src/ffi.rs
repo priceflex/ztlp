@@ -1118,6 +1118,44 @@ async fn recv_loop(
         }
     });
 
+    // ── Tokio ACK pump — reliable ACK sender via tokio I/O path ──
+    // iOS kernel reliably sends packets via tokio's async I/O (keepalive proves this).
+    // The OS thread sendto() gets silently dropped under heavy inbound load.
+    // This pump fires every 5ms, reads the latest ack_seq from a shared atomic,
+    // and sends it via transport.send_data() — the proven reliable path.
+    let latest_ack_seq = Arc::new(std::sync::atomic::AtomicI64::new(-1));
+    let pump_ack_seq = latest_ack_seq.clone();
+    let pump_transport = transport.clone();
+    let pump_stop = stop_flag.clone();
+    let pump_session_id = session_id;
+    let pump_peer = peer_addr;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(5));
+        interval.tick().await; // skip first immediate tick
+        let mut last_sent_seq: i64 = -1;
+        loop {
+            interval.tick().await;
+            if pump_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let current = pump_ack_seq.load(Ordering::Relaxed);
+            if current > last_sent_seq && current >= 0 {
+                // Build and send ACK frame
+                let ack_seq = current as u64;
+                let mut frame = Vec::with_capacity(9);
+                frame.push(0x01); // FRAME_ACK
+                frame.extend_from_slice(&ack_seq.to_be_bytes());
+                if pump_transport
+                    .send_data(pump_session_id, &frame, pump_peer)
+                    .await
+                    .is_ok()
+                {
+                    last_sent_seq = current;
+                }
+            }
+        }
+    });
+
     // ── Dedicated ACK sender on OS thread ──
     // Solves tokio cooperative scheduling starvation: when recv_loop is busy
     // processing high-rate inbound data, tokio tasks never get CPU time.
@@ -1488,6 +1526,7 @@ async fn recv_loop(
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
                             // Fire-and-forget to OS thread ACK sender (nanoseconds)
                             let _ = ack_send_tx.send(ack_frame);
+                            latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
                             last_acked_data_seq = next_expected_seq;
@@ -1593,6 +1632,7 @@ async fn recv_loop(
 
                         // Fire-and-forget to OS thread ACK sender (nanoseconds)
                         let _ = ack_send_tx.send(ack_frame);
+                        latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
                         diag_log!("[ZTLP-TX] ACK ack_seq={} via ack_sender", ack_seq);
                         tracing::info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
                             ack_seq, has_gap, is_coalesce_point, is_first);
@@ -1671,6 +1711,7 @@ async fn recv_loop(
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
                             // Fire-and-forget to OS thread ACK sender
                             let _ = ack_send_tx.send(ack_frame);
+                            latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
                         }
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
@@ -1768,6 +1809,7 @@ async fn recv_loop(
 
                         // Fire-and-forget to OS thread ACK sender
                         let _ = ack_send_tx.send(ack_frame);
+                        latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
                         tracing::info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;

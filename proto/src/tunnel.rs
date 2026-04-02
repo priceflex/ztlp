@@ -1105,8 +1105,7 @@ where
             let session = pl
                 .get_session_mut(&session_id)
                 .ok_or("session not found for RESET")?;
-            let seq = session.send_seq;
-            session.send_seq += 1;
+            let seq = session.send_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             (seq, session.send_key)
         };
 
@@ -1788,9 +1787,7 @@ where
                 let first_packet_seq = {
                     let mut pl = pipeline_send.lock().await;
                     let session = pl.get_session_mut(&sid_send).ok_or("session not found")?;
-                    let first = session.send_seq;
-                    session.send_seq += send_count as u64;
-                    first
+                    session.send_seq.fetch_add(send_count as u64, std::sync::atomic::Ordering::Relaxed)
                 };
 
                 // Encrypt and build packets

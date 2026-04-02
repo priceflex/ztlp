@@ -13,6 +13,9 @@
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use crate::identity::NodeId;
 use crate::packet::SessionId;
 
@@ -105,8 +108,8 @@ pub struct SessionState {
     pub send_key: [u8; 32],
     /// Key for decrypting/verifying inbound packets (receive direction).
     pub recv_key: [u8; 32],
-    /// Next outbound packet sequence number.
-    pub send_seq: u64,
+    /// Next outbound packet sequence number (atomic for sharing with ACK sender thread).
+    pub send_seq: Arc<AtomicU64>,
     /// Anti-replay window for inbound packets.
     pub replay_window: ReplayWindow,
     /// Whether this session uses multipath.
@@ -133,17 +136,23 @@ impl SessionState {
             peer_node_id,
             send_key,
             recv_key,
-            send_seq: 0,
+            send_seq: Arc::new(AtomicU64::new(0)),
             replay_window: ReplayWindow::new(window_size),
             multipath,
         }
     }
 
-    /// Get and increment the send sequence number.
+    /// Get and atomically increment the send sequence number.
+    /// Thread-safe: can be called from both the async transport and the
+    /// OS-thread ACK sender (via the shared Arc<AtomicU64>).
     pub fn next_send_seq(&mut self) -> u64 {
-        let seq = self.send_seq;
-        self.send_seq += 1;
-        seq
+        self.send_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Get a clone of the atomic send_seq counter for sharing with the
+    /// ACK sender OS thread.
+    pub fn send_seq_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.send_seq)
     }
 
     /// Check a received packet's sequence number against the replay window.

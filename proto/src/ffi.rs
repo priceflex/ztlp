@@ -1118,19 +1118,32 @@ async fn recv_loop(
         }
     });
 
-    // ── Dedicated ACK sender on OS thread (I/O only) ──
+    // ── Dedicated ACK sender on OS thread ──
     // Solves tokio cooperative scheduling starvation: when recv_loop is busy
     // processing high-rate inbound data, tokio tasks never get CPU time.
     // This OS thread is scheduled by the kernel independently of tokio.
     //
-    // Architecture: the recv_loop pre-encrypts ACK packets using the normal
-    // transport pipeline (proper seq allocation + crypto), then hands off
-    // the raw encrypted bytes to this thread for blocking send_to() only.
-    // No crypto, no seq allocation, no pipeline lock on the OS thread.
+    // Architecture: the recv_loop fires plaintext ACK frames into a channel
+    // (nanoseconds, never blocks). The OS thread does its own crypto +
+    // ZTLP packet serialization + blocking send_to(). Sequence numbers
+    // come from a shared AtomicU64 (same counter as the main transport),
+    // so they stay interleaved within the gateway's anti-replay window.
     //
     // Uses a dup'd socket fd (same source port as main socket) so the relay
     // sees ACKs from the same address.
     let ack_send_tx = {
+        // Get send_key and shared seq counter from pipeline
+        let (send_key, seq_counter) = {
+            let pipeline = transport.pipeline.lock().await;
+            match pipeline.get_session(&session_id) {
+                Some(session) => (session.send_key, session.send_seq_counter()),
+                None => {
+                    tracing::error!("ack_sender: session not found at setup");
+                    ([0u8; 32], std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
+                }
+            }
+        };
+
         // Dup the main socket fd for the OS thread
         let ack_socket = match crate::ack_socket::dup_udp_socket(&transport.socket) {
             Ok(s) => {
@@ -1146,29 +1159,13 @@ async fn recv_loop(
 
         crate::ack_socket::spawn_ack_sender(crate::ack_socket::AckSenderConfig {
             socket: ack_socket,
+            session_id,
+            send_key,
             peer_addr,
             stop_flag: stop_flag.clone(),
+            seq_counter,
         })
     };
-    // Helper macro: encrypt an ACK/NACK frame via the transport pipeline
-    // (proper seq allocation), then hand the raw encrypted bytes to the
-    // OS thread for blocking send_to(). No send via tokio socket — ONLY
-    // the OS thread sends ACKs, avoiding tokio scheduling starvation.
-    macro_rules! send_ack_via_os_thread {
-        ($frame:expr, $is_nack:expr) => {
-            match transport.encrypt_data(session_id, &$frame).await {
-                Ok(wire_bytes) => {
-                    let _ = ack_send_tx.send(crate::ack_socket::WirePacket {
-                        data: wire_bytes,
-                        is_nack: $is_nack,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("ack encrypt failed: {}", e);
-                }
-            }
-        };
-    }
 
     // ── Leveled file logging for diagnosing tunnel issues ──
     //
@@ -1496,8 +1493,8 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            // Pre-encrypt + send ACK via OS thread (avoids tokio starvation)
-                            send_ack_via_os_thread!(ack_frame, false);
+                            // Fire-and-forget to OS thread ACK sender (nanoseconds)
+                            let _ = ack_send_tx.send(ack_frame);
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
                             last_acked_data_seq = next_expected_seq;
@@ -1601,8 +1598,8 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        // Pre-encrypt + send ACK via OS thread (avoids tokio starvation)
-                        send_ack_via_os_thread!(ack_frame, false);
+                        // Fire-and-forget to OS thread ACK sender (nanoseconds)
+                        let _ = ack_send_tx.send(ack_frame);
                         diag_log!("[ZTLP-TX] ACK ack_seq={} via ack_sender", ack_seq);
                         tracing::info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
                             ack_seq, has_gap, is_coalesce_point, is_first);
@@ -1679,8 +1676,8 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            // Pre-encrypt + send ACK via OS thread
-                            send_ack_via_os_thread!(ack_frame, false);
+                            // Fire-and-forget to OS thread ACK sender
+                            let _ = ack_send_tx.send(ack_frame);
                         }
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
@@ -1776,8 +1773,8 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        // Pre-encrypt + send delayed ACK via OS thread
-                        send_ack_via_os_thread!(ack_frame, false);
+                        // Fire-and-forget to OS thread ACK sender
+                        let _ = ack_send_tx.send(ack_frame);
                         tracing::info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;
@@ -1818,8 +1815,8 @@ async fn recv_loop(
                                 nack_frame.extend_from_slice(&ms.to_be_bytes());
                             }
 
-                            // Pre-encrypt + send NACK via OS thread
-                            send_ack_via_os_thread!(nack_frame, true);
+                            // Fire-and-forget NACK to OS thread ACK sender
+                            let _ = ack_send_tx.send(nack_frame);
 
                             tracing::info!(
                                 "recv_loop: NACK sent for {} missing seqs (expected={}, max_buffered={}, first_missing={})",

@@ -149,6 +149,48 @@ impl TransportNode {
         Ok(seq)
     }
 
+    /// Encrypt a data packet without sending it.
+    ///
+    /// Performs the same seq allocation, encryption, header construction,
+    /// and serialization as `send_data()`, but returns the raw wire bytes
+    /// instead of sending them. Used by the OS-thread ACK sender: the
+    /// recv_loop calls this to build the encrypted packet (proper seq
+    /// from the pipeline), then hands it to the OS thread for I/O only.
+    pub async fn encrypt_data(
+        &self,
+        session_id: SessionId,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, TransportError> {
+        let (seq, send_key) = {
+            let mut pipeline = self.pipeline.lock().await;
+            let session = pipeline.get_session_mut(&session_id).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+            })?;
+            let seq = session.next_send_seq();
+            let key = session.send_key;
+            (seq, key)
+        };
+
+        let cipher = ChaCha20Poly1305::new((&send_key).into());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let encrypted = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        let mut header = DataHeader::new(session_id, seq);
+        let aad = header.aad_bytes();
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+
+        let packet = ZtlpPacket::Data {
+            header,
+            payload: encrypted,
+        };
+        Ok(packet.serialize())
+    }
+
     /// Send data using a specific (pre-assigned) sequence number.
     ///
     /// Used for retransmissions: the receiver's recv_window expects the

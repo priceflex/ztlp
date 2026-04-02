@@ -6,9 +6,9 @@
 //! thread that the kernel schedules independently of the tokio runtime.
 //!
 //! The thread owns a dup'd copy of the main UDP socket (same source port)
-//! and performs its own ChaCha20-Poly1305 encryption + ZTLP packet
-//! serialization. No pipeline lock contention — the thread has its own
-//! cipher instance and atomic sequence counter.
+//! and performs blocking send_to() calls. The recv_loop pre-encrypts
+//! ACK packets using the normal transport pipeline (proper seq allocation),
+//! then sends the raw encrypted bytes to this thread for I/O only.
 //!
 //! # Safety
 //! Uses `libc::dup()` and `std::net::UdpSocket::from_raw_fd()` to create
@@ -18,25 +18,18 @@
 //! - Each fd maintains its own file offset (irrelevant for UDP)
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
-};
-
-use crate::packet::{DataHeader, SessionId, ZtlpPacket};
-use crate::pipeline::compute_header_auth_tag;
-
-/// Starting sequence number for the ACK sender thread.
-/// Main transport uses seqs starting at 0. By starting ACK seqs at 1<<48,
-/// we guarantee no collision within any realistic session lifetime.
-/// The gateway anti-replay window accepts any unique seq.
-const ACK_SEQ_OFFSET: u64 = 1u64 << 48;
-
-/// Frame type byte for NACK frames.
-const FRAME_NACK: u8 = 0x03;
+/// A pre-encrypted packet ready to send on the wire.
+/// The recv_loop builds these using the normal transport pipeline
+/// (proper seq allocation + encryption), then hands them off for I/O.
+pub struct WirePacket {
+    /// The fully serialized, encrypted ZTLP packet bytes.
+    pub data: Vec<u8>,
+    /// Whether this is a NACK (should not be coalesced).
+    pub is_nack: bool,
+}
 
 /// Duplicate a tokio UDP socket's file descriptor into a blocking std::net::UdpSocket.
 ///
@@ -80,72 +73,33 @@ pub fn dup_udp_socket(
     Ok(sock)
 }
 
-/// Serializes and encrypts a ZTLP data packet synchronously.
-///
-/// Replicates the exact wire format of `TransportNode::send_data()` but
-/// without any async or pipeline lock dependencies.
-fn build_encrypted_packet(
-    session_id: SessionId,
-    send_key: &[u8; 32],
-    seq: u64,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, String> {
-    // Step 1: Encrypt the payload
-    let cipher = ChaCha20Poly1305::new(send_key.into());
-    let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let encrypted = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| format!("encryption failed: {}", e))?;
-
-    // Step 2: Build the data header
-    let mut header = DataHeader::new(session_id, seq);
-
-    // Step 3: Compute header auth tag
-    let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
-
-    // Step 4: Assemble and serialize
-    let packet = ZtlpPacket::Data {
-        header,
-        payload: encrypted,
-    };
-    Ok(packet.serialize())
-}
-
 /// Configuration for spawning the ACK sender OS thread.
 pub struct AckSenderConfig {
     pub socket: std::net::UdpSocket,
-    pub session_id: SessionId,
-    pub send_key: [u8; 32],
     pub peer_addr: SocketAddr,
     pub stop_flag: Arc<AtomicBool>,
 }
 
 /// Spawn the dedicated ACK sender OS thread.
 ///
-/// Returns a `std::sync::mpsc::Sender<Vec<u8>>` for sending ACK/NACK frames.
-/// The thread handles:
+/// Returns a `std::sync::mpsc::Sender<WirePacket>` for sending pre-encrypted
+/// ZTLP packets. The thread handles:
 /// - Coalescing: drains queued ACKs, sends only the latest (cumulative)
-/// - NACK passthrough: NACKs (0x03) are sent immediately without coalescing
-/// - Full ZTLP packet serialization + ChaCha20 encryption
+/// - NACK passthrough: NACKs are sent immediately without coalescing
 /// - Blocking send_to() on the dup'd socket (OS-scheduled, not tokio)
+///
+/// NO crypto or seq allocation happens on this thread — the recv_loop
+/// pre-encrypts packets using the normal transport pipeline.
 pub fn spawn_ack_sender(
     config: AckSenderConfig,
-) -> std::sync::mpsc::Sender<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-
-    let seq_counter = AtomicU64::new(ACK_SEQ_OFFSET);
+) -> std::sync::mpsc::Sender<WirePacket> {
+    let (tx, rx) = std::sync::mpsc::channel::<WirePacket>();
 
     std::thread::Builder::new()
         .name("ztlp-ack-sender".into())
         .spawn(move || {
             let AckSenderConfig {
                 socket,
-                session_id,
-                send_key,
                 peer_addr,
                 stop_flag,
             } = config;
@@ -154,77 +108,50 @@ pub fn spawn_ack_sender(
             let mut error_count: u64 = 0;
 
             tracing::info!(
-                "ack_sender: started on OS thread, peer={}, session={}",
-                peer_addr,
-                session_id
+                "ack_sender: started on OS thread (I/O only), peer={}",
+                peer_addr
             );
 
-            while let Ok(frame) = rx.recv() {
+            while let Ok(pkt) = rx.recv() {
                 if stop_flag.load(Ordering::Relaxed) {
                     break;
                 }
 
-                // Coalesce: drain queued ACKs, keep only latest (cumulative).
+                // Coalesce: drain queued packets, keep only latest ACK.
                 // NACKs are sent immediately since they carry specific gap info.
-                let mut latest_frame = frame;
-                while let Ok(f) = rx.try_recv() {
-                    if !f.is_empty() && f[0] == FRAME_NACK {
+                let mut latest_data = pkt.data;
+                while let Ok(queued) = rx.try_recv() {
+                    if queued.is_nack {
                         // NACK — send immediately, not redundant
-                        let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
-                        match build_encrypted_packet(session_id, &send_key, seq, &f) {
-                            Ok(pkt) => {
-                                if let Err(e) = socket.send_to(&pkt, peer_addr) {
-                                    error_count += 1;
-                                    if error_count <= 5 {
-                                        tracing::warn!(
-                                            "ack_sender: NACK send failed: {}",
-                                            e
-                                        );
-                                    }
-                                } else {
-                                    sent_count += 1;
-                                }
-                            }
-                            Err(e) => {
-                                error_count += 1;
-                                if error_count <= 5 {
-                                    tracing::warn!("ack_sender: NACK encrypt failed: {}", e);
-                                }
-                            }
-                        }
-                    } else {
-                        latest_frame = f; // newer ACK supersedes older
-                    }
-                }
-
-                // Send the latest (coalesced) ACK
-                let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
-                match build_encrypted_packet(session_id, &send_key, seq, &latest_frame) {
-                    Ok(pkt) => {
-                        if let Err(e) = socket.send_to(&pkt, peer_addr) {
+                        if let Err(e) = socket.send_to(&queued.data, peer_addr) {
                             error_count += 1;
                             if error_count <= 5 {
-                                tracing::warn!("ack_sender: ACK send failed: {}", e);
+                                tracing::warn!("ack_sender: NACK send failed: {}", e);
                             }
                         } else {
                             sent_count += 1;
                         }
+                    } else {
+                        latest_data = queued.data; // newer ACK supersedes older
                     }
-                    Err(e) => {
-                        error_count += 1;
-                        if error_count <= 5 {
-                            tracing::warn!("ack_sender: ACK encrypt failed: {}", e);
-                        }
+                }
+
+                // Send the latest (coalesced) ACK
+                if let Err(e) = socket.send_to(&latest_data, peer_addr) {
+                    error_count += 1;
+                    if error_count <= 5 {
+                        tracing::warn!("ack_sender: ACK send failed: {}", e);
                     }
+                } else {
+                    sent_count += 1;
                 }
 
                 // Periodic status log
                 if sent_count > 0 && sent_count % 500 == 0 {
                     tracing::info!(
-                        "ack_sender: sent={} errors={} seq={}",
+                        "ack_sender: sent={} errors={}",
                         sent_count,
-                        error_count,
-                        seq_counter.load(Ordering::Relaxed)
+                        error_count
                     );
                 }
             }

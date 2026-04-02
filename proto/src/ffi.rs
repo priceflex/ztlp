@@ -1144,21 +1144,14 @@ async fn recv_loop(
             }
         };
 
-        // Dup the main socket fd for the OS thread
-        let ack_socket = match crate::ack_socket::dup_udp_socket(&transport.socket) {
-            Ok(s) => {
-                tracing::info!("ack_sender: dup'd socket, local_addr={:?}", s.local_addr());
-                s
-            }
-            Err(e) => {
-                tracing::warn!("ack_sender: dup failed ({}), binding fresh socket", e);
-                std::net::UdpSocket::bind("0.0.0.0:0")
-                    .expect("failed to bind fallback ACK socket")
-            }
-        };
+        // Get the raw fd of the original socket for direct sendto() from OS thread.
+        // No dup() — iOS NE sockets lose interface binding when dup'd.
+        // UDP sendto() is thread-safe: concurrent recv (tokio) and send (OS thread) are safe.
+        let socket_fd = crate::ack_socket::get_socket_fd(&transport.socket);
+        tracing::info!("ack_sender: using original socket fd={}", socket_fd);
 
         crate::ack_socket::spawn_ack_sender(crate::ack_socket::AckSenderConfig {
-            socket: ack_socket,
+            socket_fd,
             session_id,
             send_key,
             peer_addr,

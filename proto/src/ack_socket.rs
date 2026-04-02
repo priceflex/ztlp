@@ -30,46 +30,90 @@ use chacha20poly1305::{
 use crate::packet::{DataHeader, SessionId, ZtlpPacket};
 use crate::pipeline::compute_header_auth_tag;
 
-/// Duplicate a tokio UDP socket's file descriptor into a blocking std::net::UdpSocket.
+/// Get the raw file descriptor from a tokio UDP socket for direct sendto().
 ///
-/// The returned socket shares the same local address (IP + port) as the original,
-/// but is an independent fd suitable for use from a blocking OS thread.
+/// On iOS Network Extension, dup() + set_nonblocking can break the socket's
+/// interface binding. Instead, we use the ORIGINAL fd directly with libc::sendto()
+/// from the OS thread. UDP sendto() is thread-safe at the kernel level —
+/// concurrent calls from tokio (recv) and the OS thread (send) are safe.
 #[cfg(unix)]
-pub fn dup_udp_socket(
-    tokio_socket: &tokio::net::UdpSocket,
-) -> Result<std::net::UdpSocket, std::io::Error> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
-
-    let original_fd = tokio_socket.as_raw_fd();
-
-    // SAFETY: libc::dup() creates a new file descriptor that refers to the same
-    // open file description. The new fd is independent — closing it does not
-    // affect the original. UDP socket send_to() is safe to call concurrently
-    // from multiple fds/threads at the kernel level.
-    let new_fd = unsafe { libc::dup(original_fd) };
-    if new_fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    // SAFETY: new_fd is a valid, open file descriptor from dup(). We transfer
-    // ownership to std::net::UdpSocket which will close it on drop.
-    let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(new_fd) };
-
-    // Set to blocking mode (std::net::UdpSocket expects blocking)
-    std_socket.set_nonblocking(false)?;
-
-    Ok(std_socket)
+pub fn get_socket_fd(tokio_socket: &tokio::net::UdpSocket) -> i32 {
+    use std::os::unix::io::AsRawFd;
+    tokio_socket.as_raw_fd()
 }
 
-/// Non-unix fallback: bind a new socket on 0.0.0.0:0 (different port).
-/// The relay handles this via session_id matching + NAT rebind detection.
 #[cfg(not(unix))]
-pub fn dup_udp_socket(
-    _tokio_socket: &tokio::net::UdpSocket,
-) -> Result<std::net::UdpSocket, std::io::Error> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    sock.set_nonblocking(false)?;
-    Ok(sock)
+pub fn get_socket_fd(_tokio_socket: &tokio::net::UdpSocket) -> i32 {
+    -1 // fallback, will fail gracefully
+}
+
+/// Send raw bytes to a destination using libc::sendto() on a raw fd.
+/// This bypasses tokio's async I/O and works from any thread.
+#[cfg(unix)]
+fn raw_sendto(fd: i32, data: &[u8], dest: &SocketAddr) -> Result<usize, std::io::Error> {
+    match dest {
+        SocketAddr::V4(v4) => {
+            let sin = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                },
+                sin_zero: [0; 8],
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+            };
+            // SAFETY: sin is a valid sockaddr_in on the stack. We pass it to
+            // sendto which only reads it during the syscall. The cast to
+            // *const libc::sockaddr is the standard BSD sockets pattern.
+            let sent = unsafe {
+                libc::sendto(
+                    fd,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                    0,
+                    &sin as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            if sent < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(sent as usize);
+        }
+        SocketAddr::V6(v6) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
+                sin6_scope_id: v6.scope_id(),
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+            };
+            let sent = unsafe {
+                libc::sendto(
+                    fd,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                    0,
+                    &sin6 as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            };
+            if sent < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(sent as usize);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raw_sendto(_fd: i32, _data: &[u8], _dest: &SocketAddr) -> Result<usize, std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "raw_sendto not available on this platform"))
 }
 
 /// Serializes and encrypts a ZTLP data packet synchronously.
@@ -104,7 +148,10 @@ fn build_encrypted_packet(
 
 /// Configuration for spawning the ACK sender OS thread.
 pub struct AckSenderConfig {
-    pub socket: std::net::UdpSocket,
+    /// Raw fd of the ORIGINAL tokio socket (not dup'd).
+    /// We call libc::sendto() directly on this fd from the OS thread.
+    /// UDP sendto() is thread-safe — concurrent recv (tokio) and send (OS thread) are safe.
+    pub socket_fd: i32,
     pub session_id: SessionId,
     pub send_key: [u8; 32],
     pub peer_addr: SocketAddr,
@@ -134,7 +181,7 @@ pub fn spawn_ack_sender(
         .name("ztlp-ack-sender".into())
         .spawn(move || {
             let AckSenderConfig {
-                socket,
+                socket_fd,
                 session_id,
                 send_key,
                 peer_addr,
@@ -147,7 +194,8 @@ pub fn spawn_ack_sender(
             const FRAME_NACK: u8 = 0x03;
 
             tracing::info!(
-                "ack_sender: started on OS thread, peer={}, session={}",
+                "ack_sender: started on OS thread (raw sendto fd={}), peer={}, session={}",
+                socket_fd,
                 peer_addr,
                 session_id
             );
@@ -166,7 +214,7 @@ pub fn spawn_ack_sender(
                         let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
                         match build_encrypted_packet(session_id, &send_key, seq, &f) {
                             Ok(pkt) => {
-                                if let Err(e) = socket.send_to(&pkt, peer_addr) {
+                                if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
                                     error_count += 1;
                                     if error_count <= 5 {
                                         tracing::warn!("ack_sender: NACK send failed: {}", e);
@@ -191,7 +239,7 @@ pub fn spawn_ack_sender(
                 let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
                 match build_encrypted_packet(session_id, &send_key, seq, &latest_frame) {
                     Ok(pkt) => {
-                        if let Err(e) = socket.send_to(&pkt, peer_addr) {
+                        if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
                             error_count += 1;
                             if error_count <= 5 {
                                 tracing::warn!("ack_sender: ACK send failed: {}", e);

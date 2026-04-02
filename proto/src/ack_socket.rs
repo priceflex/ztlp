@@ -244,22 +244,32 @@ pub fn spawn_ack_sender(
                     }
                 }
 
-                // Send the latest (coalesced) ACK
+                // Send the latest (coalesced) ACK — send REDUNDANT_SENDS times
+                // to overcome iOS kernel silently dropping outbound UDP under
+                // heavy inbound load on the same socket fd. The gateway
+                // deduplicates by packet seq, so redundant sends are harmless.
+                const REDUNDANT_SENDS: usize = 3;
+                const REDUNDANT_DELAY_US: u64 = 200;
                 let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
                 match build_encrypted_packet(session_id, &send_key, seq, &latest_frame) {
                     Ok(pkt) => {
-                        if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
-                            error_count += 1;
-                            if error_count <= 50 {
-                                tracing::warn!("ack_sender: ACK send failed (fd={}, pkt_len={}, errno={}): {}", socket_fd, pkt.len(), e.raw_os_error().unwrap_or(-1), e);
+                        for attempt in 0..REDUNDANT_SENDS {
+                            if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
+                                error_count += 1;
+                                if error_count <= 50 {
+                                    tracing::warn!("ack_sender: ACK send failed (fd={}, attempt={}, errno={}): {}", socket_fd, attempt, e.raw_os_error().unwrap_or(-1), e);
+                                }
+                            } else {
+                                sent_count += 1;
                             }
-                        } else {
-                            sent_count += 1;
+                            if attempt < REDUNDANT_SENDS - 1 {
+                                std::thread::sleep(std::time::Duration::from_micros(REDUNDANT_DELAY_US));
+                            }
                         }
                     }
                     Err(e) => {
                         error_count += 1;
-                        if error_count <= 5 {
+                        if error_count <= 50 {
                             tracing::warn!("ack_sender: ACK encrypt failed: {}", e);
                         }
                     }

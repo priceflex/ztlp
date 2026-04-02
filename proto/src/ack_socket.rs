@@ -66,20 +66,29 @@ fn raw_sendto(fd: i32, data: &[u8], dest: &SocketAddr) -> Result<usize, std::io:
             // SAFETY: sin is a valid sockaddr_in on the stack. We pass it to
             // sendto which only reads it during the syscall. The cast to
             // *const libc::sockaddr is the standard BSD sockets pattern.
-            let sent = unsafe {
-                libc::sendto(
-                    fd,
-                    data.as_ptr() as *const libc::c_void,
-                    data.len(),
-                    0,
-                    &sin as *const libc::sockaddr_in as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                )
-            };
-            if sent < 0 {
-                return Err(std::io::Error::last_os_error());
+            // Retry loop for EAGAIN/EWOULDBLOCK on non-blocking socket
+            loop {
+                let sent = unsafe {
+                    libc::sendto(
+                        fd,
+                        data.as_ptr() as *const libc::c_void,
+                        data.len(),
+                        0,
+                        &sin as *const libc::sockaddr_in as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                };
+                if sent >= 0 {
+                    return Ok(sent as usize);
+                }
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Non-blocking socket, send buffer momentarily full — yield and retry
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    continue;
+                }
+                return Err(err);
             }
-            return Ok(sent as usize);
         }
         SocketAddr::V6(v6) => {
             let sin6 = libc::sockaddr_in6 {
@@ -216,8 +225,8 @@ pub fn spawn_ack_sender(
                             Ok(pkt) => {
                                 if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
                                     error_count += 1;
-                                    if error_count <= 5 {
-                                        tracing::warn!("ack_sender: NACK send failed: {}", e);
+                                    if error_count <= 50 {
+                                        tracing::warn!("ack_sender: NACK send failed (fd={}): {}", socket_fd, e);
                                     }
                                 } else {
                                     sent_count += 1;
@@ -241,8 +250,8 @@ pub fn spawn_ack_sender(
                     Ok(pkt) => {
                         if let Err(e) = raw_sendto(socket_fd, &pkt, &peer_addr) {
                             error_count += 1;
-                            if error_count <= 5 {
-                                tracing::warn!("ack_sender: ACK send failed: {}", e);
+                            if error_count <= 50 {
+                                tracing::warn!("ack_sender: ACK send failed (fd={}, pkt_len={}, errno={}): {}", socket_fd, pkt.len(), e.raw_os_error().unwrap_or(-1), e);
                             }
                         } else {
                             sent_count += 1;

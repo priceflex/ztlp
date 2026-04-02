@@ -91,6 +91,15 @@ defmodule ZtlpRelay.GatewayForwarder do
   end
 
   @doc """
+  Update the client address for a forwarded session (NAT rebinding).
+  Called when a client's UDP source port changes mid-session.
+  """
+  @spec update_client_addr(binary(), {:inet.ip_address(), non_neg_integer()}) :: :ok
+  def update_client_addr(session_id, new_client_addr) do
+    GenServer.cast(__MODULE__, {:update_client, session_id, new_client_addr})
+  end
+
+  @doc """
   Pick a gateway address to forward to (round-robin).
   Returns {:ok, {ip, port}} or :error if no gateways configured.
   """
@@ -221,6 +230,17 @@ defmodule ZtlpRelay.GatewayForwarder do
     )
 
     {:noreply, %{state | sessions: sessions}}
+  end
+
+  def handle_cast({:update_client, session_id, new_client_addr}, state) do
+    case Map.get(state.sessions, session_id) do
+      nil ->
+        {:noreply, state}
+
+      session ->
+        updated = %{session | client: new_client_addr}
+        {:noreply, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
+    end
   end
 
   @impl true

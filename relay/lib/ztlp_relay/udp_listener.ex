@@ -515,30 +515,51 @@ defmodule ZtlpRelay.UdpListener do
             # 2. The port matches peer_b's original port (IP-only change, e.g. VPC→EIP)
             same_port = sender_port == peer_b_port
 
-            if sender_ip in gateway_ips and same_port do
-              # Sender is a registered gateway with matching port — safe to migrate
-              Logger.info(
-                "Gateway address migration: session #{Base.encode16(session_id)} " <>
-                  "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP, same port)"
-              )
-
-              # Update session registry so future packets match on first check
-              if is_pid(pid), do: Session.update_peer_b(pid, sender)
-              SessionRegistry.update_peer_b(session_id, sender)
-
-              # Forward to client
-              {dest_ip, dest_port} = peer_a
-              :gen_udp.send(state.socket, dest_ip, dest_port, data)
-              Stats.increment(:forwarded)
-              if is_pid(pid), do: Session.forward(pid)
-            else
-              if state.mesh_enabled do
-                mesh_route_packet(session_id, data, sender, state)
-              else
-                Logger.debug(
-                  "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)} " <>
-                    "(peer_a=#{inspect(peer_a)} peer_b=#{inspect(peer_b)})"
+            cond do
+              sender_ip in gateway_ips and same_port ->
+                # Sender is a registered gateway with matching port — safe to migrate
+                Logger.info(
+                  "Gateway address migration: session #{Base.encode16(session_id)} " <>
+                    "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP, same port)"
                 )
+
+                # Update session registry so future packets match on first check
+                if is_pid(pid), do: Session.update_peer_b(pid, sender)
+                SessionRegistry.update_peer_b(session_id, sender)
+
+                # Forward to client
+                {dest_ip, dest_port} = peer_a
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+                if is_pid(pid), do: Session.forward(pid)
+
+              # Client NAT rebinding: same IP as peer_a but different port.
+              # Cellular carriers frequently rebind UDP source ports during
+              # active flows. If we don't update peer_a, all ACKs from the
+              # phone get dropped after the rebind, causing session stalls.
+              sender_ip == elem(peer_a, 0) and sender_port != elem(peer_a, 1) ->
+                Logger.info(
+                  "Client NAT rebind: session #{Base.encode16(session_id)} " <>
+                    "peer_a #{inspect(peer_a)} → #{inspect(sender)} (same IP, port changed)"
+                )
+
+                # Update peer_a address so future packets match
+                SessionRegistry.update_peer_a(session_id, sender)
+
+                # Forward to gateway
+                {dest_ip, dest_port} = peer_b
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+                if is_pid(pid), do: Session.forward(pid)
+
+              true ->
+                if state.mesh_enabled do
+                  mesh_route_packet(session_id, data, sender, state)
+                else
+                  Logger.debug(
+                    "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)} " <>
+                      "(peer_a=#{inspect(peer_a)} peer_b=#{inspect(peer_b)})"
+                  )
 
                 :ok
               end
@@ -561,19 +582,33 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
 
               true ->
-                # Sender IP might differ from registered gateway (VPC vs EIP).
-                # Check if sender is a known gateway IP with matching port.
+                # Sender IP might differ from registered addresses.
                 {sender_ip, sender_port} = sender
                 {_gw_ip, gw_port} = gateway_addr
+                {client_ip, _client_port} = client_addr
 
-                if sender_ip in GatewayForwarder.known_gateway_ips() and sender_port == gw_port do
-                  {dest_ip, dest_port} = client_addr
-                  :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                  Stats.increment(:forwarded)
-                else
-                  Logger.debug(
-                    "Unknown sender #{inspect(sender)} for GW-forwarded session #{Base.encode16(session_id)}"
-                  )
+                cond do
+                  # Gateway IP migration (VPC vs EIP)
+                  sender_ip in GatewayForwarder.known_gateway_ips() and sender_port == gw_port ->
+                    {dest_ip, dest_port} = client_addr
+                    :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                    Stats.increment(:forwarded)
+
+                  # Client NAT rebinding — same IP, different port
+                  sender_ip == client_ip ->
+                    Logger.info(
+                      "Client NAT rebind (GW-fwd): session #{Base.encode16(session_id)} " <>
+                        "client #{inspect(client_addr)} → #{inspect(sender)}"
+                    )
+                    GatewayForwarder.update_client_addr(session_id, sender)
+                    {dest_ip, dest_port} = gateway_addr
+                    :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                    Stats.increment(:forwarded)
+
+                  true ->
+                    Logger.debug(
+                      "Unknown sender #{inspect(sender)} for GW-forwarded session #{Base.encode16(session_id)}"
+                    )
                 end
             end
 

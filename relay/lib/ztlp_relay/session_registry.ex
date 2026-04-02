@@ -128,6 +128,25 @@ defmodule ZtlpRelay.SessionRegistry do
   end
 
   @doc """
+  Update peer_a address for an existing session.
+
+  Used when a client's NAT rebinds its source port during an active
+  session (common on cellular networks). Without this, all packets
+  from the client's new port are dropped as "unknown sender".
+  """
+  @spec update_peer_a(binary(), {tuple(), non_neg_integer()}) :: :ok | :error
+  def update_peer_a(session_id, peer_a) when byte_size(session_id) == 12 do
+    case lookup_session(session_id) do
+      {:ok, {_old_peer_a, peer_b, pid}} ->
+        :ets.insert(@table_name, {session_id, peer_a, peer_b, pid})
+        :ok
+
+      :error ->
+        :error
+    end
+  end
+
+  @doc """
   Count the number of registered sessions.
   """
   @spec count() :: non_neg_integer()

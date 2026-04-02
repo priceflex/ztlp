@@ -1047,7 +1047,7 @@ async fn recv_loop(
     // instead of waiting for the coalesce threshold.
     let mut last_acked_data_seq: u64 = 0; // last data_seq we ACK'd (next_expected at ACK time)
     let mut last_data_recv_time: Option<std::time::Instant> = None;
-    const ACK_FLUSH_TIMEOUT_MS: u128 = 20; // flush unacked data after 20ms (was 50ms)
+    const ACK_FLUSH_TIMEOUT_MS: u128 = 10; // flush unacked data after 10ms
 
     // NACK (Negative ACK): when we detect a gap (received_ahead non-empty),
     // wait NACK_GAP_THRESHOLD_MS then send FRAME_NACK listing missing seqs.
@@ -1063,7 +1063,7 @@ async fn recv_loop(
     // When gateway fast-retransmits N packets, client receives N duplicates.
     // Without rate limiting, N re-ACKs trigger another fast retransmit → loop.
     let mut last_reack_time: Option<std::time::Instant> = None;
-    const REACK_MIN_INTERVAL_MS: u128 = 100; // one re-ACK per 100ms max
+    const REACK_MIN_INTERVAL_MS: u128 = 20; // re-ACK every 20ms during dup storms (was 100ms)
 
     // ── iOS diagnostic counters ──
     // Track packet flow metrics for diagnosing iOS performance issues.
@@ -1535,7 +1535,7 @@ async fn recv_loop(
                     // fast retransmit on the gateway), or during startup (first
                     // 64 packets ACK every 2 to help BBR ramp up).
                     // This reduces ACK count from ~870 (for 1MB) to ~70.
-                    const ACK_COALESCE_COUNT: u64 = 4;
+                    const ACK_COALESCE_COUNT: u64 = 1; // ACK every packet — redundancy beats coalescing on lossy paths
                     const ACK_STARTUP_EVERY: u64 = 2;
                     const ACK_STARTUP_THRESHOLD: u64 = 64;
                     let has_gap = !received_ahead.is_empty();

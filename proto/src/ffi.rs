@@ -1083,9 +1083,12 @@ async fn recv_loop(
     // = ~600KB max reassembly memory.
     const REASSEMBLY_MAX_ENTRIES: usize = 512;
 
-    // NAT keepalive: send an encrypted empty frame every 15s to keep
-    // UDP NAT mappings alive (typical timeout 30-60s).
-    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+    // NAT keepalive: send an encrypted empty frame every 5s to keep
+    // UDP NAT mappings alive. Nebula uses 5s which handles aggressive
+    // cellular NATs (some have timeouts as low as 20-30s). The previous
+    // 15s interval was too close to the timeout threshold, causing
+    // NAT rebinding during active data transfers.
+    const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
     // Single-byte 0x01 — gateway sees <<@frame_ack, rest::binary>> with
     // empty rest, which it silently ignores (malformed ACK). This is fine
     // for keepalive purposes; it just needs to be an encrypted packet that
@@ -1441,12 +1444,11 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            if let Ok(guard) = inner.lock() {
-                                if let Some(ref session) = guard.active_session {
-                                    if let Some(ref tx) = session.send_enqueue_tx {
-                                        let _ = tx.send(ack_frame);
-                                    }
-                                }
+                            // Send ACK directly via transport — bypass VIP SendController.
+                            // The SendController's 10ms polling + upload cwnd can delay or
+                            // drop ACKs, breaking the gateway's congestion feedback loop.
+                            if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                                diag_log!("[ZTLP-TX] re-ACK FAILED ack_seq={} err={}", ack_seq, e);
                             }
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
@@ -1551,40 +1553,23 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        let ack_sent = if let Ok(guard) = inner.lock() {
-                            if let Some(ref session) = guard.active_session {
-                                if let Some(ref tx) = session.send_enqueue_tx {
-                                    let _ = tx.send(ack_frame.clone());
-                                    true
-                                } else {
-                                    diag_log!("[ZTLP-TX] ACK ack_seq={} send_enqueue_tx=NONE, using direct", ack_seq);
-                                    false
-                                }
-                            } else {
-                                diag_log!("[ZTLP-TX] ACK ack_seq={} active_session=NONE, using direct", ack_seq);
-                                false
-                            }
+                        // Always send ACKs directly via transport — never through
+                        // VIP SendController. ACKs are time-critical control frames;
+                        // routing them through the upload cwnd + 10ms polling loop
+                        // causes them to be delayed or lost, starving the gateway
+                        // of congestion feedback and causing retransmit storms.
+                        if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                            diag_log!("[ZTLP-TX] ACK FAILED ack_seq={} err={}", ack_seq, e);
+                            tracing::warn!(
+                                "recv_loop: failed to send ACK for data_seq={}: {}",
+                                ack_seq,
+                                e
+                            );
                         } else {
-                            diag_log!("[ZTLP-TX] ACK ack_seq={} lock failed, using direct", ack_seq);
-                            false
-                        };
-
-                        if !ack_sent {
-                            if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
-                                diag_log!("[ZTLP-TX] ACK FAILED ack_seq={} err={}", ack_seq, e);
-                                tracing::warn!(
-                                    "recv_loop: failed to send ACK for data_seq={}: {}",
-                                    ack_seq,
-                                    e
-                                );
-                            } else {
-                                diag_log!("[ZTLP-TX] ACK ack_seq={} via direct transport", ack_seq);
-                            }
-                        } else {
-                            diag_log!("[ZTLP-TX] ACK ack_seq={} via SendController", ack_seq);
+                            diag_log!("[ZTLP-TX] ACK ack_seq={} via direct transport", ack_seq);
                         }
-                        tracing::info!("recv_loop: ACK data_seq={} via_sc={} (gap={}, coalesce={}, first={})",
-                            ack_seq, ack_sent, has_gap, is_coalesce_point, is_first);
+                        tracing::info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
+                            ack_seq, has_gap, is_coalesce_point, is_first);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None; // ACK sent, reset timer
                         diag_acks_sent += 1;
@@ -1658,18 +1643,8 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            // Route through SendController if available
-                            let sent = if let Ok(guard) = inner.lock() {
-                                if let Some(ref session) = guard.active_session {
-                                    if let Some(ref tx) = session.send_enqueue_tx {
-                                        let _ = tx.send(ack_frame.clone());
-                                        true
-                                    } else { false }
-                                } else { false }
-                            } else { false };
-                            if !sent {
-                                let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
-                            }
+                            // Send ACK directly — bypass VIP SendController
+                            let _ = transport.send_data(session_id, &ack_frame, peer_addr).await;
                         }
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
@@ -1765,27 +1740,11 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        let ack_sent = if let Ok(guard) = inner.lock() {
-                            if let Some(ref session) = guard.active_session {
-                                if let Some(ref tx) = session.send_enqueue_tx {
-                                    let _ = tx.send(ack_frame.clone());
-                                    true
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                        if !ack_sent {
-                            if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
-                                tracing::warn!("recv_loop: failed to send delayed ACK: {}", e);
-                            }
+                        // Send delayed ACK directly — bypass VIP SendController
+                        if let Err(e) = transport.send_data(session_id, &ack_frame, peer_addr).await {
+                            tracing::warn!("recv_loop: failed to send delayed ACK: {}", e);
                         }
-                        tracing::info!("recv_loop: delayed ACK flush data_seq={} via_sc={}", ack_seq, ack_sent);
+                        tracing::info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;
                     }
@@ -1825,25 +1784,9 @@ async fn recv_loop(
                                 nack_frame.extend_from_slice(&ms.to_be_bytes());
                             }
 
-                            let nack_sent = if let Ok(guard) = inner.lock() {
-                                if let Some(ref session) = guard.active_session {
-                                    if let Some(ref tx) = session.send_enqueue_tx {
-                                        let _ = tx.send(nack_frame.clone());
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            };
-
-                            if !nack_sent {
-                                if let Err(e) = transport.send_data(session_id, &nack_frame, peer_addr).await {
-                                    tracing::warn!("recv_loop: failed to send NACK: {}", e);
-                                }
+                            // Send NACK directly — bypass VIP SendController
+                            if let Err(e) = transport.send_data(session_id, &nack_frame, peer_addr).await {
+                                tracing::warn!("recv_loop: failed to send NACK: {}", e);
                             }
 
                             tracing::info!(

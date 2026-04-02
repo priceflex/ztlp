@@ -286,14 +286,30 @@ defmodule ZtlpRelay.GatewayForwarder do
 
     case service_gateways do
       [] ->
-        # No dynamic gateway for this service — fall back to static gateways
-        case state.gateways do
+        # No dynamic gateway for this specific service — fall back to ANY available gateway.
+        # First try static gateways, then try ALL dynamic gateways regardless of service name.
+        # This prevents phone sessions from falling into half-open mode when the service name
+        # doesn't exactly match a registered gateway service.
+        all_fallback =
+          case state.gateways do
+            [] ->
+              # No static gateways — try all dynamic gateways regardless of service
+              state.dynamic_gateways
+              |> Enum.filter(fn gw -> gw.expires_at > now end)
+              |> Enum.map(fn gw -> gw.address end)
+              |> Enum.uniq()
+
+            static ->
+              static
+          end
+
+        case all_fallback do
           [] ->
             {:reply, :error, state}
 
           _ ->
-            index = rem(state.gateway_index, length(state.gateways))
-            gateway = Enum.at(state.gateways, index)
+            index = rem(state.gateway_index, length(all_fallback))
+            gateway = Enum.at(all_fallback, index)
             {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
         end
 

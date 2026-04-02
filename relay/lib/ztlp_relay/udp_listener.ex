@@ -351,6 +351,22 @@ defmodule ZtlpRelay.UdpListener do
     case SessionRegistry.lookup_session(session_id) do
       {:ok, {peer_a, peer_b, pid}} ->
         cond do
+          # Known peer retransmit on a half-open session with no gateway yet —
+          # try to upgrade to gateway-forwarded session now (the gateway may have
+          # registered since the first HELLO was received).
+          sender == peer_a and peer_b == nil and GatewayForwarder.enabled?() ->
+            Logger.info(
+              "Upgrading half-open session #{Base.encode16(session_id)} to gateway-forwarded " <>
+                "(HELLO retransmit from #{inspect(sender)})"
+            )
+
+            # Clean up the old half-open session
+            if is_pid(pid), do: Session.close(pid)
+            SessionRegistry.unregister_session(session_id)
+
+            # Re-create as gateway-forwarded
+            forward_hello_to_gateway(session_id, data, sender, parsed, state)
+
           # Known peer — forward normally
           sender == peer_a or sender == peer_b ->
             Logger.debug("Received HELLO from known peer #{inspect(sender)}")

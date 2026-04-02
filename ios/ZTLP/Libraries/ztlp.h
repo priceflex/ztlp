@@ -295,6 +295,24 @@ typedef void (*ZtlpRecvCallback)(void *user_data, const uint8_t *data,
 typedef void (*ZtlpDisconnectCallback)(void *user_data, ZtlpSession *session,
                                         int32_t reason);
 
+/**
+ * Callback for sending pre-encrypted ACK packets via a platform-native socket.
+ *
+ * The library encrypts ACK frames into full ZTLP wire packets and invokes
+ * this callback with the raw bytes and destination address. The platform
+ * should send via a separate UDP socket/NWConnection to avoid kernel
+ * contention with the library's internal recv socket.
+ *
+ * @param user_data  Opaque context passed during registration.
+ * @param data       Pre-encrypted ZTLP packet bytes (ready to send as-is).
+ * @param len        Length of the data in bytes.
+ * @param dest_addr  Destination address as "IP:port" string (e.g., "34.219.64.205:23095").
+ *
+ * @warning Invoked on the library's background thread. Do NOT block.
+ */
+typedef void (*ZtlpAckSendCallback)(void *user_data, const uint8_t *data,
+                                     size_t len, const char *dest_addr);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -550,6 +568,22 @@ int32_t ztlp_set_recv_callback(ZtlpClient *client, ZtlpRecvCallback callback,
 int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
                                       ZtlpDisconnectCallback callback,
                                       void *user_data);
+
+/**
+ * Register a callback for ACK packet sending via platform-native I/O.
+ *
+ * When registered, the library will invoke this callback with pre-encrypted
+ * ACK packets. The platform should send these bytes via a separate UDP
+ * socket (e.g., NWConnection on iOS) to avoid kernel contention.
+ *
+ * @param client     The ZTLP client handle.
+ * @param callback   Function pointer for ACK sending.
+ * @param user_data  Opaque context passed to the callback.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_set_ack_send_callback(ZtlpClient *client,
+                                    ZtlpAckSendCallback callback,
+                                    void *user_data);
 
 /**
  * @brief Disconnect from the current session.

@@ -140,6 +140,18 @@ pub type ZtlpConnectCallback = extern "C" fn(*mut c_void, i32, *const c_char);
 pub type ZtlpRecvCallback = extern "C" fn(*mut c_void, *const u8, usize, *mut ZtlpSession);
 pub type ZtlpDisconnectCallback = extern "C" fn(*mut c_void, *mut ZtlpSession, i32);
 
+/// Callback for sending pre-encrypted ACK packets via Swift's NWConnection.
+/// Rust encrypts the ACK into a full ZTLP wire packet, then calls this callback
+/// with the raw bytes + destination address. Swift sends via a separate NWConnection
+/// on its own dispatch queue, bypassing iOS kernel contention on the main socket.
+pub type ZtlpAckSendCallback = extern "C" fn(*mut c_void, *const u8, usize, *const c_char);
+
+/// Send-safe wrapper for raw pointers passed across thread boundaries.
+/// Safety: The caller guarantees the pointer remains valid for the task's lifetime.
+#[derive(Clone, Copy)]
+struct SendPtr(*mut c_void);
+unsafe impl Send for SendPtr {}
+
 // ── Opaque handle types ─────────────────────────────────────────────────
 
 pub struct ZtlpClient {
@@ -155,6 +167,7 @@ struct ZtlpClientInner {
     active_session: Option<ActiveSession>,
     recv_callback: Option<(ZtlpRecvCallback, *mut c_void)>,
     disconnect_callback: Option<(ZtlpDisconnectCallback, *mut c_void)>,
+    ack_send_callback: Option<(ZtlpAckSendCallback, *mut c_void)>,
     /// VIP proxy manager (local TCP → tunnel).
     vip_proxy: Option<VipProxy>,
     /// DNS resolver for *.ztlp domains.
@@ -415,6 +428,7 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         active_session: None,
         recv_callback: None,
         disconnect_callback: None,
+        ack_send_callback: None,
         vip_proxy: None,
         dns_server: None,
         vip_registry: Arc::new(TokioRwLock::new(std::collections::HashMap::new())),
@@ -1129,6 +1143,13 @@ async fn recv_loop(
     let pump_stop = stop_flag.clone();
     let pump_session_id = session_id;
     let pump_peer = peer_addr;
+    let pump_ack_cb: Option<(ZtlpAckSendCallback, SendPtr)> = {
+        if let Ok(guard) = inner.lock() {
+            guard.ack_send_callback.map(|(cb, ud)| (cb, SendPtr(ud)))
+        } else {
+            None
+        }
+    };
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(5));
         interval.tick().await; // skip first immediate tick
@@ -1140,18 +1161,27 @@ async fn recv_loop(
             }
             let current = pump_ack_seq.load(Ordering::Relaxed);
             if current > last_sent_seq && current >= 0 {
-                // Build and send ACK frame
                 let ack_seq = current as u64;
                 let mut frame = Vec::with_capacity(9);
                 frame.push(0x01); // FRAME_ACK
                 frame.extend_from_slice(&ack_seq.to_be_bytes());
-                if pump_transport
+                // Send via tokio (primary reliable path)
+                let _ = pump_transport
                     .send_data(pump_session_id, &frame, pump_peer)
-                    .await
-                    .is_ok()
-                {
-                    last_sent_seq = current;
+                    .await;
+                // ALSO send via Swift NWConnection callback if registered
+                if pump_ack_cb.is_some() {
+                    if let Ok(wire_bytes) = pump_transport
+                        .encrypt_data(pump_session_id, &frame)
+                        .await
+                    {
+                        let (cb, ref ud) = pump_ack_cb.as_ref().unwrap();
+                        let addr_str = std::ffi::CString::new(format!("{}", pump_peer))
+                            .unwrap_or_default();
+                        cb(ud.0, wire_bytes.as_ptr(), wire_bytes.len(), addr_str.as_ptr());
+                    }
                 }
+                last_sent_seq = current;
             }
         }
     });
@@ -2099,6 +2129,28 @@ pub extern "C" fn ztlp_set_disconnect_callback(
         }
     };
     guard.disconnect_callback = Some((callback, user_data));
+    ZtlpResult::Ok as i32
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_set_ack_send_callback(
+    client: *mut ZtlpClient,
+    callback: ZtlpAckSendCallback,
+    user_data: *mut c_void,
+) -> i32 {
+    if client.is_null() {
+        set_last_error("client is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let client = unsafe { &*client };
+    let mut guard = match client.inner.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            set_last_error(&format!("mutex poisoned: {e}"));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.ack_send_callback = Some((callback, user_data));
     ZtlpResult::Ok as i32
 }
 
@@ -4449,6 +4501,7 @@ mod tests {
             active_session: None,
             recv_callback: None,
             disconnect_callback: None,
+            ack_send_callback: None,
             vip_proxy: None,
             dns_server: None,
             vip_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

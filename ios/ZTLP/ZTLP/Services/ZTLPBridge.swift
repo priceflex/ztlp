@@ -21,6 +21,7 @@
 
 import Foundation
 import Combine
+import Network
 
 // MARK: - Error Types
 
@@ -235,6 +236,10 @@ final class ZTLPBridge {
     private(set) var bytesSent: UInt64 = 0
     private(set) var bytesReceived: UInt64 = 0
 
+    /// Dedicated NWConnection for ACK sending, bypassing the Rust-owned socket.
+    private var ackConnection: NWConnection?
+    private let ackQueue = DispatchQueue(label: "com.ztlp.ack-sender", qos: .userInteractive)
+
     // MARK: Init
 
     private init() {}
@@ -346,6 +351,8 @@ final class ZTLPBridge {
                 ztlp_client_free(c)
                 self.client = nil
             }
+            self.ackConnection?.cancel()
+            self.ackConnection = nil
             self.bytesSent = 0
             self.bytesReceived = 0
         }
@@ -607,6 +614,9 @@ final class ZTLPBridge {
 
         let disconnectResult = ztlp_set_disconnect_callback(c, disconnectCallbackFn, selfPtr)
         if let error = ZTLPError.from(code: disconnectResult) { throw error }
+
+        let ackResult = ztlp_set_ack_send_callback(c, ackSendCallback, selfPtr)
+        if let error = ZTLPError.from(code: ackResult) { throw error }
     }
 
     // MARK: - Helpers
@@ -688,4 +698,43 @@ private func disconnectCallbackFn(userData: UnsafeMutableRawPointer?,
                                    session: OpaquePointer?,
                                    reason: Int32) {
     ZTLPBridge.shared.eventSubject.send(.disconnected(reason: reason))
+}
+
+/// ACK send callback — invoked from Rust with pre-encrypted ZTLP packet bytes.
+///
+/// Creates or reuses an NWConnection (UDP) to send the bytes on a dedicated
+/// dispatch queue, completely separate from Rust's tokio socket.
+private func ackSendCallback(userData: UnsafeMutableRawPointer?,
+                              dataPtr: UnsafePointer<UInt8>?,
+                              dataLen: Int,
+                              destAddr: UnsafePointer<CChar>?) {
+    guard let dataPtr = dataPtr, dataLen > 0, let destAddr = destAddr else { return }
+    let data = Data(bytes: dataPtr, count: dataLen)
+    let addrStr = String(cString: destAddr)
+    
+    let bridge = ZTLPBridge.shared
+    bridge.ackQueue.async {
+        // Parse address
+        let parts = addrStr.split(separator: ":")
+        guard parts.count == 2,
+              let port = NWEndpoint.Port(rawValue: UInt16(parts[1]) ?? 0) else { return }
+        let host = NWEndpoint.Host(String(parts[0]))
+        
+        // Create connection on first use
+        if bridge.ackConnection == nil || bridge.ackConnection?.state == .cancelled {
+            let params = NWParameters.udp
+            let conn = NWConnection(host: host, port: port, using: params)
+            conn.stateUpdateHandler = { state in
+                if case .failed(let err) = state {
+                    print("[ZTLP-ACK] NWConnection failed: \(err)")
+                    bridge.ackConnection = nil
+                }
+            }
+            conn.start(queue: bridge.ackQueue)
+            bridge.ackConnection = conn
+        }
+        
+        // Send the pre-encrypted bytes — fire and forget
+        bridge.ackConnection?.send(content: data, completion: .idempotent)
+    }
 }

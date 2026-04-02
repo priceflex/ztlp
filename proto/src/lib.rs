@@ -35,6 +35,8 @@
 // unsafe for C FFI interop. The ffi module uses #![allow(unsafe_code)] locally.
 #![deny(unsafe_code)]
 
+#[allow(unsafe_code)]
+pub mod ack_socket;
 pub mod admission;
 pub mod agent;
 pub mod android;

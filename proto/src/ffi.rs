@@ -1118,36 +1118,48 @@ async fn recv_loop(
         }
     });
 
-    // ── Dedicated ACK sender task ──
-    // ACKs are sent from a separate tokio task via the SAME transport/socket.
-    // The recv_loop fires ACK frames into this channel (non-blocking), and
-    // the sender task handles encryption + socket I/O independently.
-    // Queued ACKs are coalesced (only latest sent — ACKs are cumulative).
-    let (ack_send_tx, mut ack_send_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let ack_transport = transport.clone();
-    let ack_stop = stop_flag.clone();
-    let ack_session_id = session_id;
-    let ack_peer = peer_addr;
-    tokio::spawn(async move {
-        while let Some(frame) = ack_send_rx.recv().await {
-            if ack_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            // Coalesce: drain queued ACKs, keep only latest (cumulative).
-            // Prevents flooding the iOS send buffer under heavy recv load.
-            let mut latest_frame = frame;
-            while let Ok(f) = ack_send_rx.try_recv() {
-                if f.len() > 0 && f[0] == 0x03 { // FRAME_NACK — not redundant
-                    let _ = ack_transport.send_data(ack_session_id, &f, ack_peer).await;
-                } else {
-                    latest_frame = f; // newer ACK supersedes older
+    // ── Dedicated ACK sender on OS thread ──
+    // Solves tokio cooperative scheduling starvation: when recv_loop is busy
+    // processing high-rate inbound data, tokio tasks never get CPU time.
+    // This OS thread is scheduled by the kernel independently of tokio.
+    //
+    // Uses a dup'd socket fd (same source port as main socket) so the relay
+    // sees ACKs from the same address. Own ChaCha20 cipher + ZTLP packet
+    // serialization — no pipeline lock contention.
+    let ack_send_tx = {
+        // Get send_key from pipeline (static for session lifetime)
+        let send_key = {
+            let pipeline = transport.pipeline.lock().await;
+            match pipeline.get_session(&session_id) {
+                Some(session) => session.send_key,
+                None => {
+                    tracing::error!("ack_sender: session not found, falling back to tokio task");
+                    [0u8; 32] // will fail to decrypt but won't crash
                 }
             }
-            let _ = ack_transport.send_data(ack_session_id, &latest_frame, ack_peer).await;
-            // Yield to let recv task process incoming packets
-            tokio::task::yield_now().await;
-        }
-    });
+        };
+
+        // Dup the main socket fd for the OS thread
+        let ack_socket = match crate::ack_socket::dup_udp_socket(&transport.socket) {
+            Ok(s) => {
+                tracing::info!("ack_sender: dup'd socket, local_addr={:?}", s.local_addr());
+                s
+            }
+            Err(e) => {
+                tracing::warn!("ack_sender: dup failed ({}), binding fresh socket", e);
+                std::net::UdpSocket::bind("0.0.0.0:0")
+                    .expect("failed to bind fallback ACK socket")
+            }
+        };
+
+        crate::ack_socket::spawn_ack_sender(crate::ack_socket::AckSenderConfig {
+            socket: ack_socket,
+            session_id,
+            send_key,
+            peer_addr,
+            stop_flag: stop_flag.clone(),
+        })
+    };
 
     // ── Leveled file logging for diagnosing tunnel issues ──
     //

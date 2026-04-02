@@ -105,15 +105,22 @@ impl TransportNode {
         plaintext: &[u8],
         dest: SocketAddr,
     ) -> Result<u64, TransportError> {
-        let mut pipeline = self.pipeline.lock().await;
-        let session = pipeline.get_session_mut(&session_id).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
-        })?;
+        // Extract seq + send_key under the lock, then release immediately.
+        // Encryption and socket I/O happen OUTSIDE the lock so the recv_loop
+        // can process incoming packets while ACKs/keepalives are being sent.
+        // Without this, a flood of re-ACKs during duplicate storms holds the
+        // pipeline lock continuously, blocking recv_data() and stalling the session.
+        let (seq, send_key) = {
+            let mut pipeline = self.pipeline.lock().await;
+            let session = pipeline.get_session_mut(&session_id).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+            })?;
+            let seq = session.next_send_seq();
+            let key = session.send_key;
+            (seq, key)
+        }; // pipeline lock released here
 
-        let seq = session.next_send_seq();
-        let send_key = session.send_key;
-
-        // Encrypt the payload
+        // Encrypt the payload (outside lock)
         let cipher = ChaCha20Poly1305::new((&send_key).into());
         // Use packet sequence as nonce (padded to 12 bytes)
         let mut nonce_bytes = [0u8; 12];
@@ -138,7 +145,6 @@ impl TransportNode {
         };
         let data = packet.serialize();
 
-        drop(pipeline);
         self.send_raw(&data, dest).await?;
         Ok(seq)
     }

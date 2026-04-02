@@ -52,6 +52,16 @@ impl TransportNode {
         })
     }
 
+    /// Create a new blocking UDP socket bound to the same local address.
+    /// Used for dedicated ACK sender thread which must not be subject to tokio scheduling.
+    pub fn new_std_socket_same_addr(&self) -> Result<std::net::UdpSocket, TransportError> {
+        // Bind a new socket on 0.0.0.0:0 — we don't need the same source port
+        // because the relay matches on session_id, not source port.
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_nonblocking(false)?;
+        Ok(sock)
+    }
+
     /// Send raw bytes to a destination.
     pub async fn send_raw(&self, data: &[u8], dest: SocketAddr) -> Result<usize, TransportError> {
         let sent = self.socket.send_to(data, dest).await?;

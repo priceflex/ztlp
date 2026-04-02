@@ -1118,54 +1118,116 @@ async fn recv_loop(
         }
     });
 
-    // ── Dedicated ACK sender task ──
-    // The recv_loop must NOT await send_data() for ACKs — that blocks packet
-    // processing while the socket send buffer drains, causing recv buffer
-    // overflow and kernel drops after ~600 packets. Instead, the recv_loop
-    // fires ACK frames into this channel and the ACK sender task handles
-    // encryption + socket I/O on its own task, never blocking the recv path.
-    let (ack_send_tx, mut ack_send_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let ack_transport = transport.clone();
+    // ── Dedicated ACK sender on OS thread ──
+    // tokio task scheduling starves ACK sends when the recv_loop is busy
+    // processing high-rate inbound data. Keepalives work because they fire
+    // during quiet intervals, but ACKs fire during recv bursts and never
+    // get CPU time under tokio's cooperative scheduling.
+    //
+    // Fix: dup() the UDP socket fd and send ACKs from a real OS thread.
+    // Same source port (same underlying socket), but the OS thread scheduler
+    // guarantees it gets CPU time independent of tokio. The thread does its
+    // own encryption so it never touches the pipeline lock.
+    let (ack_send_tx, ack_send_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let ack_stop = stop_flag.clone();
+    let ack_pipeline = transport.pipeline.clone();
     let ack_session_id = session_id;
     let ack_peer = peer_addr;
-    tokio::spawn(async move {
-        let mut sent_count: u64 = 0;
-        let mut err_count: u64 = 0;
-        while let Some(frame) = ack_send_rx.recv().await {
-            if ack_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            // Drain any queued frames to coalesce — only send the LATEST ACK.
-            // Multiple ACKs in the queue are redundant since ACKs are cumulative.
-            // This prevents flooding the iOS UDP send buffer which causes all
-            // outbound packets (including ACKs) to be silently dropped by the kernel.
-            let mut latest_frame = frame;
-            while let Ok(f) = ack_send_rx.try_recv() {
-                // Keep NACK frames (type 0x03) — they're not redundant
-                if f.len() > 0 && f[0] == 0x03 {
-                    // Send the NACK immediately
-                    let _ = ack_transport.send_data(ack_session_id, &f, ack_peer).await;
-                } else {
-                    latest_frame = f; // newer ACK supersedes older
-                }
-            }
 
-            match ack_transport.send_data(ack_session_id, &latest_frame, ack_peer).await {
-                Ok(_) => { sent_count += 1; }
-                Err(e) => {
-                    err_count += 1;
-                    tracing::warn!("ack_sender: FAILED #{}: {}", err_count, e);
-                }
-            }
+    // Get the send key and a dup'd blocking socket BEFORE spawning the thread
+    let ack_send_key = {
+        let pipeline = transport.pipeline.lock().await;
+        pipeline.get_session(&ack_session_id)
+            .map(|s| s.send_key)
+    };
 
-            // Small yield to let the recv socket drain before sending more.
-            // iOS silently drops outbound UDP when the send buffer is contended
-            // with high-rate inbound traffic on the same socket.
-            tokio::task::yield_now().await;
-        }
-        tracing::info!("ack_sender: exiting (sent={}, errors={})", sent_count, err_count);
-    });
+    let ack_std_socket = transport.new_std_socket_same_addr();
+
+    if let (Some(send_key), Ok(std_socket)) = (ack_send_key, ack_std_socket) {
+        std::thread::Builder::new()
+            .name("ztlp-ack-sender".into())
+            .spawn(move || {
+                use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadInPlace};
+                use chacha20poly1305::aead::Aead;
+                use chacha20poly1305::aead::generic_array::GenericArray;
+
+                let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&send_key));
+                let dest: std::net::SocketAddr = ack_peer;
+                let mut seq_counter: u64 = 1_000_000_000; // high offset to avoid collision with main send path
+
+                while let Ok(plaintext) = ack_send_rx.recv() {
+                    if ack_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    // Coalesce: drain any queued ACKs, keep only latest (cumulative)
+                    let mut latest = plaintext;
+                    let mut nacks: Vec<Vec<u8>> = Vec::new();
+                    while let Ok(f) = ack_send_rx.try_recv() {
+                        if f.len() > 0 && f[0] == 0x03 { // FRAME_NACK
+                            nacks.push(f);
+                        } else {
+                            latest = f;
+                        }
+                    }
+
+                    // Get a fresh seq from the pipeline for each send
+                    let seq = {
+                        // Try to get seq from pipeline; if locked, use our counter
+                        match ack_pipeline.try_lock() {
+                            Ok(mut p) => {
+                                match p.get_session_mut(&ack_session_id) {
+                                    Some(s) => s.next_send_seq(),
+                                    None => { seq_counter += 1; seq_counter }
+                                }
+                            }
+                            Err(_) => { seq_counter += 1; seq_counter }
+                        }
+                    };
+
+                    // Encrypt
+                    let mut nonce_bytes = [0u8; 12];
+                    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+                    let nonce = GenericArray::from_slice(&nonce_bytes);
+
+                    if let Ok(encrypted) = cipher.encrypt(nonce, latest.as_ref()) {
+                        // Build minimal data packet: header + encrypted payload
+                        let mut pkt = Vec::with_capacity(28 + encrypted.len());
+                        // ZTLP magic (2) + type DATA (1) + reserved (1) + session_id (12) + seq (8) + auth_tag placeholder (4)
+                        pkt.extend_from_slice(&[0x5A, 0x37]); // magic
+                        pkt.push(0x01); // type = DATA
+                        pkt.push(0x00); // reserved
+                        pkt.extend_from_slice(&ack_session_id.0); // 12-byte session ID
+                        pkt.extend_from_slice(&seq.to_le_bytes()); // 8-byte seq
+                        pkt.extend_from_slice(&[0x00; 4]); // auth tag placeholder
+                        pkt.extend_from_slice(&encrypted);
+
+                        let _ = std_socket.send_to(&pkt, dest);
+                    }
+
+                    // Send any NACK frames too
+                    for nack in nacks {
+                        seq_counter += 1;
+                        let mut nn = [0u8; 12];
+                        nn[4..12].copy_from_slice(&seq_counter.to_le_bytes());
+                        let nonce2 = GenericArray::from_slice(&nn);
+                        if let Ok(enc) = cipher.encrypt(nonce2, nack.as_ref()) {
+                            let mut pkt = Vec::with_capacity(28 + enc.len());
+                            pkt.extend_from_slice(&[0x5A, 0x37, 0x01, 0x00]);
+                            pkt.extend_from_slice(&ack_session_id.0);
+                            pkt.extend_from_slice(&seq_counter.to_le_bytes());
+                            pkt.extend_from_slice(&[0x00; 4]);
+                            pkt.extend_from_slice(&enc);
+                            let _ = std_socket.send_to(&pkt, dest);
+                        }
+                    }
+                }
+                tracing::info!("ack_sender thread exiting");
+            })
+            .ok();
+    } else {
+        tracing::warn!("ack_sender: failed to init (no session key or socket dup failed), ACKs will use fallback");
+    }
 
     // ── Leveled file logging for diagnosing tunnel issues ──
     //

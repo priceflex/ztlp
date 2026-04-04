@@ -204,46 +204,6 @@
     </div>
   </div>
 </section>
-
-<!-- ── IDENTITY HEADERS EXPLAINER ─────────────────────── -->
-<section style="background:var(--bg2);padding:3rem 1.5rem;">
-  <div style="max-width:900px;margin:0 auto;">
-    <h2 style="font-family:var(--font);font-size:1.6rem;font-weight:700;color:var(--text);margin-bottom:.5rem;">HMAC-Signed Identity Headers</h2>
-    <p style="font-family:var(--font);color:var(--text2);line-height:1.7;margin-bottom:1.2rem;">
-      The ZTLP gateway injects cryptographically signed HTTP headers into every request forwarded to backend services. Backends receive rich identity context &mdash; node ID, zone, assurance level, key attestation &mdash; without needing to understand ZTLP directly.
-    </p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:1.2rem;">
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1rem;">
-        <div style="font-weight:600;color:var(--text);margin-bottom:.3rem;">🔒 Strip &amp; Replace</div>
-        <div style="font-size:.9rem;color:var(--text2);">All incoming <code style="font-family:var(--mono);font-size:.8rem;background:var(--surface);padding:1px 4px;border-radius:3px;">X-ZTLP-*</code> headers are stripped. Only gateway-injected values pass through.</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1rem;">
-        <div style="font-weight:600;color:var(--text);margin-bottom:.3rem;">🔑 HMAC-SHA256 Signed</div>
-        <div style="font-size:.9rem;color:var(--text2);">A signature covers all injected headers with a timestamp and nonce &mdash; backends verify authenticity in one hash check.</div>
-      </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1rem;">
-        <div style="font-weight:600;color:var(--text);margin-bottom:.3rem;">🛡️ Hardware Attestation</div>
-        <div style="font-size:.9rem;color:var(--text2);">Headers include key source (YubiKey, TPM, Secure Enclave), assurance level, and attestation status for zero-trust policy enforcement.</div>
-      </div>
-    </div>
-    <details style="margin-top:.5rem;">
-      <summary style="font-family:var(--font);font-weight:600;color:var(--accent);cursor:pointer;font-size:.95rem;">Example Headers &darr;</summary>
-      <pre style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:.5rem;overflow-x:auto;font-family:var(--mono);font-size:.82rem;line-height:1.6;color:var(--text);">X-ZTLP-Node-ID: a1b2c3d4e5f67890a1b2c3d4e5f67890
-X-ZTLP-Node-Name: laptop.office.ztlp
-X-ZTLP-Zone: office.ztlp
-X-ZTLP-Authenticated: true
-X-ZTLP-Assurance: hardware
-X-ZTLP-Key-Source: yubikey
-X-ZTLP-Key-Attestation: verified
-X-ZTLP-Cert-Fingerprint: b94d27b9...e3b0c442
-X-ZTLP-Timestamp: 2026-03-23T21:15:00Z
-X-ZTLP-Nonce: 3a7f9c2e1d4b8a6f...
-X-ZTLP-Signature: 8f14e45f...</pre>
-    </details>
-    <a href="docs/index.html#comp-identity-headers" style="display:inline-block;margin-top:1rem;font-family:var(--font);font-size:.9rem;color:var(--accent);text-decoration:none;font-weight:500;">Full documentation &rarr;</a>
-  </div>
-</section>
-
 <!-- ── MAIN LAYOUT ────────────────────────────────────── -->
 <div class="layout" id="content-section">
 

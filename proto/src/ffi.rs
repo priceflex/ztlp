@@ -1132,101 +1132,60 @@ async fn recv_loop(
         }
     });
 
-    // ── Tokio ACK pump — reliable ACK sender via tokio I/O path ──
-    // iOS kernel reliably sends packets via tokio's async I/O (keepalive proves this).
-    // The OS thread sendto() gets silently dropped under heavy inbound load.
-    // This pump fires every 5ms, reads the latest ack_seq from a shared atomic,
-    // and sends it via transport.send_data() — the proven reliable path.
-    let latest_ack_seq = Arc::new(std::sync::atomic::AtomicI64::new(-1));
-    let pump_ack_seq = latest_ack_seq.clone();
-    let pump_transport = transport.clone();
-    let pump_stop = stop_flag.clone();
-    let pump_session_id = session_id;
-    let pump_peer = peer_addr;
-    let pump_ack_cb: Option<(ZtlpAckSendCallback, SendPtr)> = {
+    // ── ACK sender via Swift NWConnection callback (separate socket) ──
+    //
+    // Architecture: recv_loop builds ACK/NACK frames → encrypt locally →
+    // fire via FFI callback to Swift, which sends on a dedicated NWConnection.
+    //
+    // This solves the root cause: ACKs go out on a SEPARATE UDP socket from
+    // the one receiving data. No kernel-level sendto/recv contention.
+    //
+    // Previous approaches (OS thread sendto on same fd, tokio pump, 5x redundant
+    // sends) all suffered from single-socket contention under 55Mbps inbound.
+    // See SPEED-FIX-PLAN.md for the full analysis.
+    //
+    // The relay accepts ACKs from any source port because it routes by
+    // session_id (Nebula-style), not by (IP, port) tuple.
+    let ack_cb: Option<(ZtlpAckSendCallback, SendPtr)> = {
         if let Ok(guard) = inner.lock() {
             guard.ack_send_callback.map(|(cb, ud)| (cb, SendPtr(ud)))
         } else {
             None
         }
     };
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(5));
-        interval.tick().await; // skip first immediate tick
-        let mut last_sent_seq: i64 = -1;
-        loop {
-            interval.tick().await;
-            if pump_stop.load(Ordering::Relaxed) {
-                break;
-            }
-            let current = pump_ack_seq.load(Ordering::Relaxed);
-            if current > last_sent_seq && current >= 0 {
-                let ack_seq = current as u64;
-                let mut frame = Vec::with_capacity(9);
-                frame.push(0x01); // FRAME_ACK
-                frame.extend_from_slice(&ack_seq.to_be_bytes());
-                // Send via tokio (primary reliable path)
-                let _ = pump_transport
-                    .send_data(pump_session_id, &frame, pump_peer)
-                    .await;
-                // ALSO send via Swift NWConnection callback if registered
-                if pump_ack_cb.is_some() {
-                    if let Ok(wire_bytes) = pump_transport
-                        .encrypt_data(pump_session_id, &frame)
-                        .await
-                    {
-                        let (cb, ref ud) = pump_ack_cb.as_ref().unwrap();
-                        let addr_str = std::ffi::CString::new(format!("{}", pump_peer))
-                            .unwrap_or_default();
-                        cb(ud.0, wire_bytes.as_ptr(), wire_bytes.len(), addr_str.as_ptr());
+    let ack_transport = transport.clone();
+    let ack_session_id = session_id;
+    let ack_peer_addr = peer_addr;
+    let ack_peer_str = std::ffi::CString::new(format!("{}", peer_addr)).unwrap_or_default();
+
+    // Extract raw pointer from ack_cb so the macro doesn't hold a non-Send reference
+    // across await points. The raw fn ptr + raw void ptr are both Send-safe in practice
+    // (the Swift side guarantees the user_data pointer lives for the session's lifetime).
+    let ack_cb_fn: Option<ZtlpAckSendCallback> = ack_cb.map(|(cb, _)| cb);
+    let ack_cb_ud: SendPtr = ack_cb.map(|(_, ud)| ud).unwrap_or(SendPtr(std::ptr::null_mut()));
+
+    // Helper: encrypt an ACK/NACK frame and send via the Swift NWConnection callback.
+    // Falls back to tokio transport.send_data() if no callback is registered.
+    // This is a macro because it needs to .await (transport.encrypt_data / send_data).
+    macro_rules! send_ack_frame {
+        ($frame:expr) => {{
+            let frame_ref: &[u8] = &$frame;
+            if let Some(cb) = ack_cb_fn {
+                // Encrypt and send via Swift NWConnection (separate socket — no contention)
+                match ack_transport.encrypt_data(ack_session_id, frame_ref).await {
+                    Ok(wire_bytes) => {
+                        cb(ack_cb_ud.0, wire_bytes.as_ptr(), wire_bytes.len(), ack_peer_str.as_ptr());
+                    }
+                    Err(e) => {
+                        tracing::warn!("send_ack_frame: encrypt failed: {}", e);
                     }
                 }
-                last_sent_seq = current;
+            } else {
+                // Fallback: send via tokio transport (same socket — for non-iOS platforms)
+                let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
             }
-        }
-    });
-
-    // ── Dedicated ACK sender on OS thread ──
-    // Solves tokio cooperative scheduling starvation: when recv_loop is busy
-    // processing high-rate inbound data, tokio tasks never get CPU time.
-    // This OS thread is scheduled by the kernel independently of tokio.
-    //
-    // Architecture: the recv_loop fires plaintext ACK frames into a channel
-    // (nanoseconds, never blocks). The OS thread does its own crypto +
-    // ZTLP packet serialization + blocking send_to(). Sequence numbers
-    // come from a shared AtomicU64 (same counter as the main transport),
-    // so they stay interleaved within the gateway's anti-replay window.
-    //
-    // Uses a dup'd socket fd (same source port as main socket) so the relay
-    // sees ACKs from the same address.
-    let ack_send_tx = {
-        // Get send_key and shared seq counter from pipeline
-        let (send_key, seq_counter) = {
-            let pipeline = transport.pipeline.lock().await;
-            match pipeline.get_session(&session_id) {
-                Some(session) => (session.send_key, session.send_seq_counter()),
-                None => {
-                    tracing::error!("ack_sender: session not found at setup");
-                    ([0u8; 32], std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
-                }
-            }
-        };
-
-        // Get the raw fd of the original socket for direct sendto() from OS thread.
-        // No dup() — iOS NE sockets lose interface binding when dup'd.
-        // UDP sendto() is thread-safe: concurrent recv (tokio) and send (OS thread) are safe.
-        let socket_fd = crate::ack_socket::get_socket_fd(&transport.socket);
-        tracing::info!("ack_sender: using original socket fd={}", socket_fd);
-
-        crate::ack_socket::spawn_ack_sender(crate::ack_socket::AckSenderConfig {
-            socket_fd,
-            session_id,
-            send_key,
-            peer_addr,
-            stop_flag: stop_flag.clone(),
-            seq_counter,
-        })
-    };
+        }};
+    }
 
     // ── Leveled file logging for diagnosing tunnel issues ──
     //
@@ -1554,9 +1513,7 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            // Fire-and-forget to OS thread ACK sender (nanoseconds)
-                            let _ = ack_send_tx.send(ack_frame);
-                            latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
+                            send_ack_frame!(ack_frame);
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
                             last_acked_data_seq = next_expected_seq;
@@ -1660,10 +1617,8 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        // Fire-and-forget to OS thread ACK sender (nanoseconds)
-                        let _ = ack_send_tx.send(ack_frame);
-                        latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
-                        diag_log!("[ZTLP-TX] ACK ack_seq={} via ack_sender", ack_seq);
+                        send_ack_frame!(ack_frame);
+                        diag_log!("[ZTLP-TX] ACK ack_seq={} via callback", ack_seq);
                         tracing::info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
                             ack_seq, has_gap, is_coalesce_point, is_first);
                         last_acked_data_seq = next_expected_seq;
@@ -1739,9 +1694,7 @@ async fn recv_loop(
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
-                            // Fire-and-forget to OS thread ACK sender
-                            let _ = ack_send_tx.send(ack_frame);
-                            latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
+                            send_ack_frame!(ack_frame);
                         }
                     }
                 } else if !plaintext.is_empty() && plaintext[0] == FRAME_CLOSE {
@@ -1837,9 +1790,7 @@ async fn recv_loop(
                         ack_frame.push(FRAME_ACK);
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
-                        // Fire-and-forget to OS thread ACK sender
-                        let _ = ack_send_tx.send(ack_frame);
-                        latest_ack_seq.store(ack_seq as i64, Ordering::Relaxed);
+                        send_ack_frame!(ack_frame);
                         tracing::info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;
@@ -1880,8 +1831,7 @@ async fn recv_loop(
                                 nack_frame.extend_from_slice(&ms.to_be_bytes());
                             }
 
-                            // Fire-and-forget NACK to OS thread ACK sender
-                            let _ = ack_send_tx.send(nack_frame);
+                            send_ack_frame!(nack_frame);
 
                             tracing::info!(
                                 "recv_loop: NACK sent for {} missing seqs (expected={}, max_buffered={}, first_missing={})",

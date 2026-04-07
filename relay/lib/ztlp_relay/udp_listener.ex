@@ -568,6 +568,25 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
                 if is_pid(pid), do: Session.forward(pid)
 
+              # Session-ID routing (Nebula-style): the sender has a valid session
+              # but doesn't match peer_a or peer_b's recorded address. This happens
+              # when the iOS client sends ACKs from a SEPARATE NWConnection socket
+              # (different source port) to avoid kernel sendto/recv contention on
+              # the main data socket. The session_id in the packet header is the
+              # routing key — the gateway's AEAD verification provides real security.
+              # We forward to gateway without updating peer_a (the main data socket
+              # address stays canonical for return traffic).
+              sender_ip not in gateway_ips ->
+                Logger.debug(
+                  "Session-ID routed: session #{Base.encode16(session_id)} " <>
+                    "from #{inspect(sender)} (not peer_a=#{inspect(peer_a)}) → forwarding to gateway"
+                )
+
+                {dest_ip, dest_port} = peer_b
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+                if is_pid(pid), do: Session.forward(pid)
+
               true ->
                 if state.mesh_enabled do
                   mesh_route_packet(session_id, data, sender, state)
@@ -617,6 +636,17 @@ defmodule ZtlpRelay.UdpListener do
                         "client #{inspect(client_addr)} → #{inspect(sender)}"
                     )
                     GatewayForwarder.update_client_addr(session_id, sender)
+                    {dest_ip, dest_port} = gateway_addr
+                    :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                    Stats.increment(:forwarded)
+
+                  # Session-ID routing (Nebula-style): sender has valid session_id
+                  # but from a different port/IP. Forward to gateway — AEAD verifies.
+                  sender_ip not in GatewayForwarder.known_gateway_ips() ->
+                    Logger.debug(
+                      "Session-ID routed (GW-fwd): #{Base.encode16(session_id)} " <>
+                        "from #{inspect(sender)} → forwarding to gateway"
+                    )
                     {dest_ip, dest_port} = gateway_addr
                     :gen_udp.send(state.socket, dest_ip, dest_port, data)
                     Stats.increment(:forwarded)

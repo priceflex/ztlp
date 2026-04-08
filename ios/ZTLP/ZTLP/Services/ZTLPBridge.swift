@@ -237,8 +237,8 @@ final class ZTLPBridge {
     private(set) var bytesReceived: UInt64 = 0
 
     /// Dedicated NWConnection for ACK sending, bypassing the Rust-owned socket.
-    private var ackConnection: NWConnection?
-    private let ackQueue = DispatchQueue(label: "com.ztlp.ack-sender", qos: .userInteractive)
+    fileprivate var ackConnection: NWConnection?
+    fileprivate let ackQueue = DispatchQueue(label: "com.ztlp.ack-sender", qos: .userInteractive)
 
     // MARK: Init
 

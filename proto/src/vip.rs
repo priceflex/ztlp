@@ -401,6 +401,15 @@ pub struct TunnelData {
     pub payload: Vec<u8>,
 }
 
+/// Error type for stream dispatch.
+#[derive(Debug)]
+pub enum DispatchError {
+    /// Stream exists but channel buffer is full (backpressure).
+    ChannelFull,
+    /// Stream not registered (closed or never opened).
+    NoStream,
+}
+
 /// Stream dispatcher: routes incoming tunnel data to per-connection channels.
 ///
 /// Each TCP connection registers with a stream_id and gets a dedicated
@@ -438,14 +447,19 @@ impl StreamDispatcher {
         }
     }
 
-    /// Dispatch data to the appropriate stream. Returns false if stream not found.
-    pub fn dispatch(&self, stream_id: u32, data: Vec<u8>) -> bool {
+    /// Dispatch data to the appropriate stream.
+    /// Returns: Ok(()) on success, Err(DispatchError::ChannelFull) if backpressure,
+    /// Err(DispatchError::NoStream) if stream not registered.
+    pub fn dispatch(&self, stream_id: u32, data: Vec<u8>) -> Result<(), DispatchError> {
         if let Ok(streams) = self.streams.lock() {
             if let Some(tx) = streams.get(&stream_id) {
-                return tx.try_send(data).is_ok();
+                return match tx.try_send(data) {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(DispatchError::ChannelFull),
+                };
             }
         }
-        false
+        Err(DispatchError::NoStream)
     }
 
     /// Signal that a stream has been closed by the remote side (drop the sender).

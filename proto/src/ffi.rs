@@ -410,7 +410,13 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         return std::ptr::null_mut();
     }
     let identity = unsafe { Box::from_raw(identity) };
+    // Limit tokio to 4 worker threads to reduce memory while avoiding task starvation.
+    // Default spawns N=num_cpus (6 on iPhone) × 2MB stack = ~12MB.
+    // 4 threads × 512KB stacks = ~2MB — recv_loop, VIP proxy writes, send, and listener
+    // all need concurrent scheduling. 2 threads caused VIP proxy write starvation.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(512 * 1024)
         .enable_all()
         .build()
     {
@@ -1577,39 +1583,49 @@ async fn recv_loop(
                         diag_ooo_peak = received_ahead.len();
                     }
 
-                    // Flush contiguous packets
+                    // Flush contiguous packets to VIP proxy or packet router.
+                    // CRITICAL: distinguish channel-full (backpressure → retry) from
+                    // stream-not-found (closed → skip). Dropping data on channel-full
+                    // causes permanent TCP gaps; blocking on stream-closed causes deadlock.
                     if let Ok(mut guard) = inner.lock() {
-                        // Flush contiguous packets to VIP proxy or packet router
                         let has_vip = guard.vip_proxy.is_some();
                         let has_router = guard.packet_router.is_some();
 
                         while let Some((sid, data)) = reassembly_buf.remove(&vip_next_deliver_seq) {
                             let mut dispatched = false;
+                            let mut backpressure = false;
 
-                            // Try VIP proxy dispatcher first
                             if has_vip {
                                 if let Some(ref proxy) = guard.vip_proxy {
-                                    if proxy.dispatcher().dispatch(sid, data.clone()) {
-                                        dispatched = true;
+                                    match proxy.dispatcher().dispatch(sid, data.clone()) {
+                                        Ok(()) => dispatched = true,
+                                        Err(crate::vip::DispatchError::ChannelFull) => backpressure = true,
+                                        Err(crate::vip::DispatchError::NoStream) => {
+                                            // Stream closed/unregistered — skip, don't block
+                                        }
                                     }
                                 }
                             }
 
-                            // Fall through to packet router if VIP proxy didn't handle it
-                            if !dispatched && has_router {
+                            if !dispatched && !backpressure && has_router {
                                 if let Some(ref mut router) = guard.packet_router {
                                     router.process_gateway_data(sid, &data);
                                     dispatched = true;
                                 }
                             }
 
-                            if !dispatched {
-                                tracing::warn!(
-                                    "recv_loop: dispatch failed for stream={} data_seq={}",
-                                    sid,
+                            if backpressure {
+                                // Channel full — put it back and stop flushing.
+                                // Next recv iteration retries after consumer drains.
+                                reassembly_buf.insert(vip_next_deliver_seq, (sid, data));
+                                tracing::debug!(
+                                    "recv_loop: dispatch backpressure at data_seq={}, will retry",
                                     vip_next_deliver_seq
                                 );
+                                break;
                             }
+
+                            // Either dispatched or stream gone — advance either way
                             vip_next_deliver_seq += 1;
                         }
                     }

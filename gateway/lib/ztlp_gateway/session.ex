@@ -442,9 +442,9 @@ defmodule ZtlpGateway.Session do
   # 2026-04-07: Conservative mobile tuning. See TUNING-LOG.md for rationale.
   # Previous: cwnd=32, max=512, ssthresh=512, beta=0.75 → dup ACK spirals at cwnd~60
   @initial_cwnd 10.0
-  # Maximum congestion window. 64 × 1140 = 73KB inflight max.
-  # Keeps send rate within relay→cellular path capacity (~5-10 Mbps).
-  @max_cwnd 64
+  # Maximum congestion window. 24 × 1140 = 27.4KB inflight max.
+  # Path loses at cwnd=32; recovery exits at 19-27. Cap below loss threshold.
+  @max_cwnd 24
   # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
   @min_cwnd 10
   # Minimum ssthresh floor. Lower floor allows deeper backoff on very lossy paths.

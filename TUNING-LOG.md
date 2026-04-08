@@ -114,3 +114,57 @@ recovery exits (acked advances when cwnd is around 25-31).
 The path can sustain ~25-35 × 1140 = 28-40KB inflight.
 
 Next step: lower max_cwnd to 32, keep everything else the same.
+
+---
+
+## Change 2: Lower max_cwnd to 32 (2026-04-08 01:50 UTC)
+
+### What changed
+```
+@max_cwnd:  64  → 32     # cap at 32 × 1140 = 36.5KB inflight
+```
+
+### Why
+- Change 1 showed the stable operating point is cwnd 25-35
+- At max_cwnd=64, gateway ramps to ceiling → dup ACK plateaus at 55-64
+- Recovery exits healthily around cwnd 25-31
+- Sawtooth 64→32→64→32 causes repeated loss events before stalling
+- Setting max_cwnd=32 keeps the gateway within the path's observed capacity
+- Everything else stays the same — only this one knob
+
+### Expected behavior
+- Slow start exits at ssthresh=32, but max_cwnd=32 also caps it
+- Congestion avoidance operates in the 16-32 range (after any loss halving)
+- Should eliminate the "ramp to 64 → massive loss → crash" pattern
+- Throughput target: ~2-4 Mbps sustained (32 × 1140 × 1000/RTT)
+
+### Results: 6/11 passing (up from 5/11)
+
+No stalls (0 "Stall detected" events — first time!). But sawtooth pattern:
+- cwnd ramps to 32 → dup ACK plateau (20) or RTO every time
+- Slashed to 16, recovers to 32, hits loss again: 32→16→32→16→32→16
+- Recovery exits consistently at cwnd 19-27
+- Loss consistently at cwnd=32 — that's the congestion threshold, not sustainable rate
+- Healthy zone appears to be 16-24
+
+---
+
+## Change 3: Lower max_cwnd to 24 (2026-04-08 01:55 UTC)
+
+### What changed
+```
+@max_cwnd:  32  → 24     # cap at 24 × 1140 = 27.4KB inflight
+```
+
+### Why
+- Change 2 showed cwnd=32 is the loss threshold — hits plateau/RTO every time at 32
+- Recovery exits at 19-27, meaning the path sustains 16-24 packets
+- Capping at 24 keeps gateway below loss point, should reduce sawtooth oscillations
+- Should spend more time in steady state, less time in recovery
+
+### Expected behavior
+- Slow start exits at ssthresh=32 but capped at max_cwnd=24
+- After first loss: ssthresh→12, cwnd halved to 12, climbs back to 24 in CA
+- Fewer loss events = fewer retransmits = more consistent throughput
+
+### Results: TBD (deploy and benchmark next)

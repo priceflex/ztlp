@@ -415,8 +415,8 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
     // 4 threads × 512KB stacks = ~2MB — recv_loop, VIP proxy writes, send, and listener
     // all need concurrent scheduling. 2 threads caused VIP proxy write starvation.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .thread_stack_size(512 * 1024)
+        .worker_threads(2)
+        .thread_stack_size(256 * 1024)
         .enable_all()
         .build()
     {
@@ -1101,7 +1101,7 @@ async fn recv_loop(
     // Reassembly buffer cap — prevent unbounded memory growth in iOS
     // Network Extension (15MB process limit). 512 entries × ~1200 bytes
     // = ~600KB max reassembly memory.
-    const REASSEMBLY_MAX_ENTRIES: usize = 512;
+    const REASSEMBLY_MAX_ENTRIES: usize = 256;
 
     // Cap for received_ahead BTreeSet (out-of-order tracking).
     // 1024 entries × ~56 bytes per BTreeSet node = ~56KB max.

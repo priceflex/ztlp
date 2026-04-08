@@ -47,7 +47,7 @@ const FLOW_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum packets in outbound queue. Bounds memory for iOS NE (15MB limit).
 /// 256 packets × ~1400 bytes = ~350KB.
-const OUTBOUND_MAX_PACKETS: usize = 256;
+const OUTBOUND_MAX_PACKETS: usize = 128;
 
 /// Default tunnel subnet: 10.122.0.0/16.
 const DEFAULT_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 122, 0, 0);

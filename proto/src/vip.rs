@@ -80,10 +80,10 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 /// Maximum read buffer size for TCP proxy connections.
-const TCP_READ_BUF_SIZE: usize = 8192;
+const TCP_READ_BUF_SIZE: usize = 4096;
 
 /// Maximum concurrent TCP connections per listener.
-const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+const MAX_CONCURRENT_CONNECTIONS: usize = 8;
 
 /// TLS handshake timeout in seconds.
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;

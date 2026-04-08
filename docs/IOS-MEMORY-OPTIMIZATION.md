@@ -212,62 +212,337 @@ the entire tokio crate is dead code and LTO strips it. Potential 3-5MB saving.
 
 ### Phase 3 — Swift Event Loop (Swift)
 
-Only needed if Phase 1+2 don't get us under 15MB. Replace the Rust recv_loop
-with Swift GCD-driven receive:
+**Status:** Not started. Needs testing on Steve's Mac first.
+Only needed if Phase 1+2 don't get us under 15MB.
 
-**PacketTunnelProvider changes:**
+The main change is replacing the Rust tokio recv_loop with a Swift
+GCD-driven NWConnection receive loop. Two sub-paths:
+
+#### Path 3A: Minimal — just replace recv_loop
+- Keep `ztlp_connect_sync()` + `ztlp_crypto_context_extract()` as-is
+- Add Swift-side NWConnection for the main tunnel UDP (not just ACKs)
+- Replace `bridge.connect()` + recv_callback with sync path
+- VIP proxy + packet router stay on the Rust tokio runtime
+- Memory saving: modest (~500KB-1MB from removing recv_loop)
+
+#### Path 3B: Full tokio strip — replace recv_loop + VIP/tunnel
+- Use `ztlp_connect_sync()` directly from PacketTunnelProvider
+- NWConnection for main tunnel UDP (receive loop in Swift)
+- Swift NWListener for VIP proxy listeners (replace tokio TcpListener)
+- Packet router already sync for read/write paths → works as-is
+- Memory saving: ~2-4MB (tokio entirely dead, LTO strips it)
+
+**Path 3B is the one that actually matters — it's the ~3-5MB saving.**
+
+#### Concrete Phase 3B changes needed:
+
+**1. New main tunnel NWConnection (NWConnection for data, not just ACKs)**
 ```swift
-// Instead of Rust recv_loop, Swift does:
-func startReceiveLoop() {
-    connection.receiveMessage { [weak self] data, _, _, error in
-        guard let self, let data else { return }
+class PacketTunnelProvider: NEPacketTunnelProvider {
+    // Add these:
+    private var cryptoCtx: UnsafeMutableRawPointer?  // ZtlpCryptoContext*
+    private var mainConnection: NWConnection?         // Main tunnel UDP
+    private var dataSeq: UInt64 = 0                    // Tunnel data sequence
+    private var highestAckedSeq: UInt64 = 0            // For ACK tracking
+    private var receivedSeqs: Set<UInt64> = []         // For NACK tracking
+```
+
+**2. Replace ztlp_connect() -> ztlp_connect_sync() in startTunnel()**
+```swift
+// Step 5 replacement:
+let target = try self.resolveGateway(config: config, svcName: svcName)
+let identityHandle = try self.loadOrCreateIdentity(config: config)
+
+// Get raw identity pointer (need to add accessor to ZTLPIdentityHandle)
+let rawIdentity = identityHandle.getPointer()  // OpaquePointer -> UnsafeMutableRawPointer
+let rawConfig = configHandle.pointer           // OpaquePointer -> UnsafeMutableRawPointer
+
+target.withCString { cTarget in
+    self.cryptoCtx = ztlp_connect_sync(
+        OpaquePointer(rawIdentity),
+        OpaquePointer(rawConfig),
+        cTarget,
+        60000  // 60s timeout
+    )
+}
+guard let ctx = self.cryptoCtx else {
+    throw self.makeNSError("sync connect failed: \(String(cString: ztlp_last_error()))")
+}
+self.logger.info("Connected via sync: session=\(String(cString: ztlp_crypto_context_session_id(ctx)))")
+```
+
+**3. Swift receive loop (replaces Rust recv_loop)**
+```swift
+private func startReceiveLoop() {
+    // Use the same NWConnection parameters as the existing ackConnection
+    let parts = self.targetAddress.split(separator: ":")  // from resolved target
+    guard parts.count == 2,
+          let port = NWEndpoint.Port(UInt16(parts[1]) ?? 0) else { return }
+    
+    let params = NWParameters.udp
+    let conn = NWConnection(host: NWEndpoint.Host(String(parts[0])),
+                           port: port, using: params)
+    
+    // Also set up the ACK NWConnection for redundancy (existing ack_socket pattern)
+    self.ackConnection = conn  // reuse existing ackConnection for main data
+    
+    conn.stateUpdateHandler = { [weak self] state in
+        guard let self = self else { return }
+        switch state {
+        case .ready:
+            self.logger.info("Main tunnel UDP connection ready", source: "Receive")
+            self.receiveNext()
+        case .failed(let err):
+            self.logger.error("Main tunnel UDP failed: \(err)", source: "Receive")
+            self.connFailed(err)
+        default:
+            break
+        }
+    }
+    conn.start(queue: tunnelQueue)
+    self.mainConnection = conn
+}
+
+private func receiveNext() {
+    guard let conn = self.mainConnection else { return }
+    conn.receiveMessage { [weak self] data, context, isComplete, error in
+        guard let self = self else { return }
         
+        if let error = error {
+            self.logger.warn("receiveMessage error: \(error)", source: "Receive")
+            self.scheduleRereceive(delayMs: 100)
+            return
+        }
+        
+        guard let data = data else {
+            self.scheduleRereceive(delayMs: 10)
+            return
+        }
+        
+        // Decrypt via sync FFI
         var outBuf = [UInt8](repeating: 0, count: 65536)
         var written: Int = 0
-        let rc = ztlp_decrypt_packet(self.cryptoCtx, data, data.count,
-                                      &outBuf, outBuf.count, &written)
-        guard rc == 0 else { return }
+        let rc = data.withUnsafeBytes { ptr in
+            ztlp_decrypt_packet(self.cryptoCtx,
+                               ptr.baseAddress, data.count,
+                               &outBuf, outBuf.count, &written)
+        }
+        guard rc == 0 else {
+            self.logger.warn("decrypt failed: rc=\(rc)", source: "Receive")
+            self.scheduleRereceive(delayMs: 10)
+            return
+        }
         
+        // Parse frame
         var frameType: UInt8 = 0
         var seq: UInt64 = 0
         var payloadPtr: UnsafePointer<UInt8>?
         var payloadLen: Int = 0
-        ztlp_parse_frame(outBuf, written, &frameType, &seq,
-                         &payloadPtr, &payloadLen)
-        
-        switch frameType {
-        case 0x00: self.handleDataFrame(seq, payloadPtr, payloadLen)
-        case 0x01: self.handleAckFrame(payloadPtr, payloadLen)
-        case 0x02: self.handleFinFrame()
-        default: break
+        outBuf.withUnsafeBufferPointer { buf in
+            _ = ztlp_parse_frame(buf.baseAddress, written,
+                                &frameType, &seq, &payloadPtr, &payloadLen)
         }
         
-        self.startReceiveLoop() // continue receiving
+        // Process frame
+        self.processFrame(type: frameType, seq: seq,
+                         payload: payloadPtr, payloadLen: payloadLen)
+        
+        // Continue receiving (tail-recursive via async)
+        self.receiveNext()
     }
 }
 ```
 
-**Timers via GCD:**
+**4. Frame processing in Swift (replaces Rust recv_loop logic)**
 ```swift
-let keepaliveTimer = DispatchSource.makeTimerSource(queue: tunnelQueue)
-keepaliveTimer.schedule(deadline: .now(), repeating: .seconds(5))
-keepaliveTimer.setEventHandler { [weak self] in
-    self?.sendKeepalive()
+private func processFrame(type: UInt8, seq: UInt64,
+                         payload: UnsafePointer<UInt8>?, payloadLen: Int) {
+    switch type {
+    case 0x00: // FRAME_DATA
+        guard let payload = payload, payloadLen > 8 else { return }
+        // Extract stream_id (first 4 BE bytes) and data_seq
+        let streamId = payload.withMemoryRebound(to: UInt32.self, capacity: 1) {
+            $0.pointee.bigEndian
+        }
+        let dataSeq = payload.advanced(by: 4).withMemoryRebound(to: UInt64.self, capacity: 1) {
+            $0.pointee.bigEndian
+        }
+        let actualData = Data(bytes: payload.advanced(by: 12), count: payloadLen - 12)
+        
+        // Track for ACK
+        self.trackReceivedSeq(dataSeq)
+        
+        // Route to packet router
+        self.bridge.routerWritePacket(actualData)
+        self.flushOutboundPackets()
+        self.advanceDataSeq()
+        
+    case 0x01: // FRAME_ACK (download acknowledgment)
+        if payloadLen >= 8 {
+            let ackedSeq = payload!.withMemoryRebound(to: UInt64.self, capacity: 1) {
+                $0.pointee.bigEndian
+            }
+            self.handleDownloadAck(ackedSeq)
+        }
+        
+    case 0x02: // FRAME_FIN
+        self.logger.info("Received FIN frame", source: "Receive")
+        
+    case 0x03: // NACK
+        if payloadLen >= 8 {
+            let nackSeq = payload!.withMemoryRebound(to: UInt64.self, capacity: 1) {
+                $0.pointee.bigEndian
+            }
+            self.handleNack(nackSeq)
+        }
+        
+    case 0x01 where payloadLen == 0: // keepalive
+        break  // NAT ping, ignore
+        
+    default:
+        break
+    }
+}
+
+private func trackReceivedSeq(_ seq: UInt64) {
+    self.receivedSeqs.insert(seq)
+    self.highestAckedSeq = max(self.highestAckedSeq, seq)
+    
+    // Cap the set to prevent unbounded growth
+    if self.receivedSeqs.count > 2048 {
+        let threshold = self.highestAckedSeq - 1024
+        self.receivedSeqs = self.receivedSeqs.filter { $0 >= threshold }
+    }
+}
+
+private func advanceDataSeq() {
+    self.dataSeq += 1
+    self.flushOutboundPackets()
 }
 ```
 
-### Phase 4 (IF NEEDED) — Feature Gate
+**5. Send path: ztlp_frame_data + ztlp_encrypt_packet (replaces Rust send)**
+```swift
+private func sendTunnelData(_ data: Data) {
+    guard let ctx = self.cryptoCtx else { return }
+    
+    // Frame the data
+    var frameBuf = [UInt8](repeating: 0, count: 9 + data.count)
+    var frameLen: Int = 0
+    data.withUnsafeBytes { ptr in
+        _ = ztlp_frame_data(ptr.baseAddress, data.count,
+                           &frameBuf, frameBuf.count, &frameLen,
+                           self.dataSeq)
+    }
+    self.dataSeq += 1
+    
+    // Encrypt into ZTLP wire packet
+    var pktBuf = [UInt8](repeating: 0, count: 65536)
+    var pktLen: Int = 0
+    frameBuf.withUnsafeBufferPointer { buf in
+        _ = ztlp_encrypt_packet(ctx, buf.baseAddress, frameLen,
+                               &pktBuf, pktBuf.count, &pktLen)
+    }
+    
+    // Send via main NWConnection
+    let pktData = Data(pktBuf[..<pktLen])
+    self.mainConnection?.send(content: pktData, completion: .idempotent)
+}
+```
 
-If we go full sync, add `ios-sync` cargo feature to eliminate tokio from the
-iOS binary entirely:
+**6. ACK sending (leverages existing ack_socket pattern + new path)**
+```swift
+private func sendAck(for dataSeq: UInt64) {
+    guard let ctx = self.cryptoCtx else { return }
+    
+    // Build ACK frame
+    var ackBuf = [UInt8](repeating: 0, count: 9)
+    var ackLen: Int = 0
+    _ = ztlp_build_ack(dataSeq, &ackBuf, ackBuf.count, &ackLen)
+    
+    // Encrypt
+    var pktBuf = [UInt8](repeating: 0, count: 65536)
+    var pktLen: Int = 0
+    _ = ztlp_encrypt_packet(ctx, ackBuf.withUnsafeBufferPointer { $0.baseAddress },
+                           ackLen, &pktBuf, pktBuf.count, &pktLen)
+    
+    // Send via main NWConnection
+    self.mainConnection?.send(content: Data(pktBuf[..<pktLen]),
+                             completion: .idempotent)
+}
+```
+
+**7. Keepalive timer (GCD, replaces tokio::time::interval)**
+```swift
+private func startKeepaliveTimer() {
+    let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
+    timer.schedule(deadline: .now(), repeating: .seconds(5))
+    timer.setEventHandler { [weak self] in
+        guard let self = self, self.isTunnelActive, let ctx = self.cryptoCtx else { return }
+        
+        // Send keepalive via sync encrypt
+        let keepalivePayload: [UInt8] = [0x01]  // Simple keepalive frame
+        var pktBuf = [UInt8](repeating: 0, count: 65536)
+        var pktLen: Int = 0
+        _ = ztlp_encrypt_packet(ctx, keepalivePayload, keepalivePayload.count,
+                               &pktBuf, pktBuf.count, &pktLen)
+        
+        self.mainConnection?.send(content: Data(pktBuf[..<pktLen]),
+                                 completion: .idempotent)
+    }
+    timer.resume()
+    self.keepaliveTimer = timer  // Reuse existing timer property
+}
+```
+
+**Key insight:** `ztlp_crypto_context_extract()` already exists (Phase 1).
+`ztlp_connect_sync()` directly returns a context without needing extract.
+So the Swift code calls `ztlp_connect_sync()` then uses the context for
+all send/recv — no tokio runtime needed for the data plane.
+
+The existing ACK sender (ack_socket.rs) uses a dedicated NWConnection on a
+separate queue — this pattern proved to work. Phase 3B just extends it to
+the main data path too.
+
+### Phase 4 (IF NEEDED) — Feature Gate Tokio Out
+
+**Status:** Not started. Only relevant if Phase 3B removes all tokio usage.
+
+If Phase 3B eliminates every tokio reference from the iOS path,
+add `ios-sync` cargo feature to strip it from the binary:
 
 ```toml
 [features]
 ios-sync = []
 
 [dependencies]
-tokio = { version = "1", features = [...], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "signal", "macros"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# Conditional deps
+[dependencies.serde_json]
+version = "1"
+features = ["std"]
 ```
+
+Then conditional compilation in ffi.rs:
+```rust
+#[cfg(not(feature = "ios-sync"))]
+use tokio::runtime::Runtime;
+
+#[cfg(feature = "ios-sync")]
+mod sync_impl {
+    // Only sync FFI functions compile
+}
+```
+
+**Expected impact:** LTO would drop tokio entirely, saving 3-5MB TEXT.
+The entire async code path (ztlp_connect, recv_loop, VIP proxy start,
+tunnel_start, dns_start) becomes compile-time disabled.
+
+**Note:** If we keep the VIP proxy on Swift NWListeners (no tokio
+TcpListener), this feature gate becomes trivial — just conditional
+compilation on the async-only functions.
 
 ---
 

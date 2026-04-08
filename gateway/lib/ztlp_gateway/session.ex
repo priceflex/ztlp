@@ -428,7 +428,11 @@ defmodule ZtlpGateway.Session do
   # The adaptive EWMA (RFC 6298) converges to actual RTT within 3-4 packets.
   @initial_rto_ms 300
   @min_rto_ms 100
-  @max_rto_ms 30_000
+  # Max per-packet RTO after exponential backoff. MUST be well below
+  # @stall_timeout_ms — if max_rto >= stall_timeout, high-retransmit-count
+  # packets never get re-sent before the stall detector kills the session.
+  # At 5s, even the most backed-off packet retransmits 6x within 30s stall window.
+  @max_rto_ms 5_000
   @max_retransmits 20
   @retransmit_check_interval_ms 50
   # NOTE: pacing/cwnd tuned 2026-04-01 for mobile (iOS over relay) paths
@@ -441,17 +445,20 @@ defmodule ZtlpGateway.Session do
   # On loss: cwnd halved (multiplicative decrease).
   # 2026-04-07: Conservative mobile tuning. See TUNING-LOG.md for rationale.
   # Previous: cwnd=32, max=512, ssthresh=512, beta=0.75 → dup ACK spirals at cwnd~60
+  # 2026-04-08: Phase 1 — Cubic-style beta for cellular. loss_beta 0.5→0.7, max_cwnd 24→32.
+  # See TUNING-LOG.md Change 4 for full rationale.
   @initial_cwnd 10.0
-  # Maximum congestion window. 24 × 1140 = 27.4KB inflight max.
-  # Path loses at cwnd=32; recovery exits at 19-27. Cap below loss threshold.
-  @max_cwnd 24
-  # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
-  @min_cwnd 10
-  # Minimum ssthresh floor. Lower floor allows deeper backoff on very lossy paths.
-  @min_ssthresh 16
-  # Loss reduction factor (β). Standard TCP halving.
-  # Previous 0.75 was too gentle — cwnd stayed near congestion point, hit loss again.
-  @loss_beta 0.5
+  # Maximum congestion window. 32 × 1140 = 36.5KB inflight max.
+  # Gives headroom above sustainable 16-24 range so sawtooth stays in range.
+  @max_cwnd 32
+  # Minimum cwnd — low floor allows meaningful recovery (cwnd 22→4 vs old 12→10)
+  @min_cwnd 4
+  # Minimum ssthresh floor. Low floor for deep lossy-path backoff.
+  @min_ssthresh 8
+  # Loss reduction factor (β). Cubic-style 0.7 for cellular.
+  # After loss: 32×0.7=22 (sustainable range) vs old 32×0.5=16 (below sustainable).
+  # Random cellular drops shouldn't halve the window.
+  @loss_beta 0.7
   # Backpressure thresholds for the send queue. When the queue exceeds @queue_high,
   # we stop reading from the backend (don't call resume_read). When it drops below
   # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
@@ -461,10 +468,11 @@ defmodule ZtlpGateway.Session do
   # Session stall detection. If ACK sequence hasn't advanced for this long
   # while data is in flight, the session is a zombie (phone dropped off,
   # path died, etc). Tear it down so the phone reconnects with a fresh session.
-  @stall_timeout_ms 15_000
-  # Slow-start threshold — exit slow start at 32 packets, enter congestion avoidance.
-  # Previous 512 let slow start run until cwnd~60-80 where loss always occurred.
-  @initial_ssthresh 32
+  # 30s gives headroom for 5MB at 3 Mbps (~13s baseline + recovery delays).
+  @stall_timeout_ms 30_000
+  # Slow-start threshold — set above max_cwnd so slow start hits cwnd cap naturally.
+  # Previous 32=max_cwnd meant immediate CA entry at ceiling.
+  @initial_ssthresh 64
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
   @max_rto_retransmit_per_tick 8
@@ -473,11 +481,12 @@ defmodule ZtlpGateway.Session do
   @use_bbr true
 
   # Pacing interval: ms between burst sends.
-  # 5ms × 2 packets = 456 bytes/ms = ~3.6 Mbps pacing rate.
-  # Previous 2ms × 4 = 18 Mbps bursts overwhelmed cellular buffers.
-  @pacing_interval_ms 5
-  # Max packets sent per pacing tick — limits instantaneous burst
-  @burst_size 2
+  # 4ms × 3 packets = 855 bytes/ms = ~6.8 Mbps pacing rate.
+  # Aligns with LTE TTI scheduling (1ms). Previous 5ms×2 = 3.6 Mbps was too slow.
+  @pacing_interval_ms 4
+  # Max packets sent per pacing tick — 3×1140=3420 bytes per burst.
+  # LTE handles 3-packet bursts well. Previous 2 was too conservative.
+  @burst_size 3
 
   # Maximum plaintext payload per ZTLP data packet.
   # Max plaintext payload per ZTLP packet.

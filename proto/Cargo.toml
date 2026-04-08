@@ -14,7 +14,7 @@ crate-type = ["lib", "staticlib"]
 #   cbindgen --config cbindgen.toml --output include/ztlp.h
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "signal", "macros"] }
 snow = "0.9"
 chacha20poly1305 = "0.10"
 rand = "0.8"
@@ -40,6 +40,15 @@ hostname = "0.4"
 qr2term = "0.3"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+
+[profile.release]
+# iOS Network Extension has 15MB memory limit. LTO + strip removes dead
+# code from aws-lc-sys/rustls/tokio, cutting binary from ~9MB to ~5-6MB.
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"    # optimize for size over speed
+panic = "abort"    # smaller than unwinding
 
 [[bin]]
 name = "ztlp-node"

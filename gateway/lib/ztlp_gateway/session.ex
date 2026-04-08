@@ -646,6 +646,13 @@ defmodule ZtlpGateway.Session do
   @impl true
   def handle_cast({:packet, packet_data, from_addr}, state) do
     Stats.bytes_received(byte_size(packet_data))
+    if state.phase == :established and state.in_recovery do
+      pkt_seq = case Packet.parse(packet_data) do
+        {:ok, %{packet_seq: s}} -> s
+        _ -> -1
+      end
+      Logger.warning("[Session] PKT_IN_RECOVERY len=#{byte_size(packet_data)} pkt_seq=#{pkt_seq} recv_base=#{state.recv_window_base} window_max=#{state.recv_window_base + 256} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} dup_ack=#{state.dup_ack_count}")
+    end
     Logger.debug("[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}")
 
     # Reset idle timeout on every packet
@@ -917,19 +924,37 @@ defmodule ZtlpGateway.Session do
       Logger.debug("[Session] RTO: dropped #{expired_count} packets exceeding max retransmits")
     end
 
-    # Second pass: find expired packets, sort by seq, retransmit only the oldest N.
-    # This prevents flooding the phone with retransmits that cause dup ACK storms.
-    # Sort by data_seq (not packet_seq) so RTO retransmits the packets the
-    # client actually needs first. Sorting by packet_seq caused retransmitting
-    # data_seqs the client already has, leading to 30s stall timeouts.
-    expired_entries =
+    # Second pass: find expired packets for retransmission.
+    #
+    # CRITICAL: prioritize the FIRST packet the client is missing (last_acked + 1)
+    # rather than blindly retransmitting the N lowest data_seqs. The phone uses
+    # cumulative ACKs — it can only advance its ACK when it receives the next
+    # in-order data_seq. If we retransmit data_seqs the phone already has (but
+    # hasn't ACK'd because of a hole), we waste the entire per-tick budget on
+    # duplicates the phone discards, never reaching the actually-missing packet.
+    #
+    # Strategy: split into "head" (the first few after last_acked — most likely
+    # to contain the hole) and "tail" (the rest). Send head first, then fill
+    # remaining budget from tail. This ensures the missing packet gets
+    # retransmitted within 1-2 ticks instead of N ticks.
+    last_acked = state.last_acked_data_seq
+    all_expired =
       state.send_buffer
       |> Enum.filter(fn {_seq, {_pkt, sent_at, rc, _ds}} ->
         elapsed = now - sent_at
         elapsed > per_packet_rto(state.rto_ms, rc)
       end)
       |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
-      |> Enum.take(@max_rto_retransmit_per_tick)
+
+    # Prioritize: the packet at last_acked+1 is the one the client is
+    # most likely stuck on (cumulative ACK means it has everything up to
+    # last_acked). Put it at the front of the retransmit list.
+    # Then add the remaining expired in data_seq order.
+    first_missing_ds = last_acked + 1
+    {priority, rest} = Enum.split_with(all_expired, fn {_seq, {_pkt, _ts, _rc, ds}} ->
+      is_integer(ds) and ds == first_missing_ds
+    end)
+    expired_entries = (priority ++ rest) |> Enum.take(@max_rto_retransmit_per_tick)
 
     # Retransmit selected packets; halve cwnd ONCE for the entire batch
     {state, retransmit_count, _loss_reduced} =
@@ -979,7 +1004,7 @@ defmodule ZtlpGateway.Session do
     # @stall_timeout_ms, the session is a zombie. Log and tear it down.
     stall_age = now - state.last_ack_advance_at
     if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
-      Logger.warning("[Session] Stall detected: no ACK advance for #{div(stall_age, 1000)}s with #{map_size(state.send_buffer)} inflight — tearing down session")
+      Logger.warning("[Session] STALL: no ACK advance for #{div(stall_age, 1000)}s inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} recv_base=#{state.recv_window_base} dup_ack=#{state.dup_ack_count} recovery=#{state.in_recovery} — tearing down")
       {:stop, {:shutdown, :stall_timeout}, state}
     else
       # Reschedule if buffer is non-empty
@@ -1286,13 +1311,13 @@ defmodule ZtlpGateway.Session do
           # Already delivered (below window base) — re-ACK so the sender
           # can clear its send_buffer (the original ACK may have been lost)
           seq < state.recv_window_base ->
-            Logger.debug("[Session] Duplicate seq=#{seq} below base=#{state.recv_window_base}, re-ACKing")
+            Logger.info("[Session] BELOW_BASE seq=#{seq} base=#{state.recv_window_base} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}")
             state = send_ack(state.recv_window_base - 1, state)
             {:noreply, state}
 
           # Beyond window (too far ahead)
           seq >= state.recv_window_base + @recv_window_size ->
-            Logger.debug("[Session] Seq=#{seq} beyond window max=#{state.recv_window_base + @recv_window_size - 1}")
+            Logger.warning("[Session] WINDOW_REJECT seq=#{seq} beyond window [#{state.recv_window_base}..#{state.recv_window_base + @recv_window_size - 1}] last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}")
             {:noreply, state}
 
           # Already received (within window but duplicate) — re-ACK
@@ -1307,11 +1332,11 @@ defmodule ZtlpGateway.Session do
         end
 
       {:ok, other} ->
-        Logger.debug("[Session] Non-data packet in established phase: type=#{Map.get(other, :type, :unknown)}")
+        Logger.warning("[Session] NON_DATA_PKT in established phase: type=#{Map.get(other, :type, :unknown)} len=#{byte_size(packet_data)}")
         {:noreply, state}
 
       {:error, reason} ->
-        Logger.warning("[Session] Packet parse failed: #{inspect(reason)}")
+        Logger.warning("[Session] PARSE_FAIL: #{inspect(reason)} len=#{byte_size(packet_data)} first_bytes=#{Base.encode16(binary_part(packet_data, 0, min(16, byte_size(packet_data))))}")
         {:noreply, state}
     end
   end
@@ -1331,23 +1356,66 @@ defmodule ZtlpGateway.Session do
 
       case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
         :error ->
-          Logger.warning("[Session] Decrypt FAILED for seq #{seq}, key_len=#{byte_size(state.i2r_key)}, ct_len=#{ct_len}, tag_len=#{byte_size(tag)}")
+          Logger.warning("[Session] Decrypt FAILED seq=#{seq} window_base=#{state.recv_window_base} key_len=#{byte_size(state.i2r_key)} ct_len=#{ct_len} tag_len=#{byte_size(tag)} last_acked=#{state.last_acked_data_seq}")
           {:noreply, state}
 
         plaintext ->
           Logger.debug("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
-          # Accept: add to window and buffer
-          state = %{state |
-            recv_window: MapSet.put(state.recv_window, seq),
-            recv_buffer: Map.put(state.recv_buffer, seq, plaintext),
-            bytes_in: state.bytes_in + byte_size(packet_data)
-          }
-          # Deliver as many contiguous packets as possible
-          deliver_recv_window(state)
+
+          # FAST-PATH for ACK frames: process immediately without waiting for
+          # in-order delivery. ACK frames (0x01 + 8-byte data_seq, optionally
+          # + SACK blocks) carry no data payload — they only advance the send
+          # window. Blocking ACKs behind missing upload data packets causes
+          # 30-second stalls: the phone re-ACKs duplicates but the re-ACK
+          # shares the upload seq space and gets head-of-line blocked behind
+          # a gap in the recv_window.
+          first_byte = if byte_size(plaintext) > 0, do: :binary.at(plaintext, 0), else: nil
+          is_ack_frame = first_byte == @frame_ack and byte_size(plaintext) >= 9
+
+          if is_ack_frame do
+            # Process ACK immediately — don't buffer it.
+            # Mark the seq as received (so it's not accepted again) but
+            # don't add to recv_buffer (no data to deliver in order).
+            state = %{state |
+              recv_window: MapSet.put(state.recv_window, seq),
+              bytes_in: state.bytes_in + byte_size(packet_data)
+            }
+            # Also try to advance the recv_window base if this was the head
+            state = advance_recv_window_base(state)
+            # Now handle the ACK frame directly — bypasses in-order delivery
+            handle_tunnel_frame(plaintext, state)
+          else
+            # Normal path: buffer for in-order delivery
+            state = %{state |
+              recv_window: MapSet.put(state.recv_window, seq),
+              recv_buffer: Map.put(state.recv_buffer, seq, plaintext),
+              bytes_in: state.bytes_in + byte_size(packet_data)
+            }
+            # Deliver as many contiguous packets as possible
+            deliver_recv_window(state)
+          end
       end
     else
       Logger.warning("[Session] Payload too short: #{byte_size(encrypted_payload)} bytes")
       {:noreply, state}
+    end
+  end
+
+  # Advance recv_window_base past any seq slots that are marked as received
+  # but have no buffered data (e.g., ACK frames that were fast-tracked).
+  # This prevents ACK-only seqs from permanently blocking the recv window.
+  defp advance_recv_window_base(state) do
+    base = state.recv_window_base
+    if MapSet.member?(state.recv_window, base) and not Map.has_key?(state.recv_buffer, base) do
+      # This seq was received (ACK fast-path) but has no buffered data —
+      # advance past it so in-order delivery isn't blocked.
+      state = %{state |
+        recv_window: MapSet.delete(state.recv_window, base),
+        recv_window_base: base + 1
+      }
+      advance_recv_window_base(state)
+    else
+      state
     end
   end
 
@@ -1498,6 +1566,7 @@ defmodule ZtlpGateway.Session do
   end
 
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
+    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     # Cumulative ACK with SACK blocks from client
     state = process_cumulative_ack(acked_data_seq, state)
 
@@ -1523,6 +1592,7 @@ defmodule ZtlpGateway.Session do
 
   # Legacy ACK without SACK blocks (backward compatible)
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64>>, state) do
+    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} (no sack) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     state = process_cumulative_ack(acked_data_seq, state)
 
     state = flush_send_queue(state)

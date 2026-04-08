@@ -439,22 +439,19 @@ defmodule ZtlpGateway.Session do
   # Start at 10 packets (standard TCP IW=10, RFC 6928) and grow via slow start.
   # cwnd doubles per RTT until ssthresh, then grows linearly (congestion avoidance).
   # On loss: cwnd halved (multiplicative decrease).
-  @initial_cwnd 32.0
-  # Maximum congestion window (packets). 128 × 1140 = 146KB.
-  # 256 was too aggressive for lossy WiFi→phone path — caused receiver stalls
-  # with 199 inflight packets and 50+ dup ACKs without progress. 128 balances
-  # throughput with path capacity.
-  @max_cwnd 512
+  # 2026-04-07: Conservative mobile tuning. See TUNING-LOG.md for rationale.
+  # Previous: cwnd=32, max=512, ssthresh=512, beta=0.75 → dup ACK spirals at cwnd~60
+  @initial_cwnd 10.0
+  # Maximum congestion window. 64 × 1140 = 73KB inflight max.
+  # Keeps send rate within relay→cellular path capacity (~5-10 Mbps).
+  @max_cwnd 64
   # Minimum cwnd (never go below this) — 10 matches IW for minimum throughput
   @min_cwnd 10
-  # Minimum ssthresh floor. Without this, ssthresh collapses to @min_cwnd on
-  # lossy paths, and recovery deflation resets cwnd to 10 every time. A floor
-  # of 48 ensures ~55KB always in flight (48 × 1140) as a throughput baseline.
-  @min_ssthresh 48
-  # Loss reduction factor (β). TCP uses 0.5 (halve on loss). CUBIC uses 0.7.
-  # On lossy WiFi paths, most loss is random noise, not congestion. A gentler
-  # β=0.75 (reduce by 25%) keeps throughput up while still responding to loss.
-  @loss_beta 0.75
+  # Minimum ssthresh floor. Lower floor allows deeper backoff on very lossy paths.
+  @min_ssthresh 16
+  # Loss reduction factor (β). Standard TCP halving.
+  # Previous 0.75 was too gentle — cwnd stayed near congestion point, hit loss again.
+  @loss_beta 0.5
   # Backpressure thresholds for the send queue. When the queue exceeds @queue_high,
   # we stop reading from the backend (don't call resume_read). When it drops below
   # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
@@ -465,8 +462,9 @@ defmodule ZtlpGateway.Session do
   # while data is in flight, the session is a zombie (phone dropped off,
   # path died, etc). Tear it down so the phone reconnects with a fresh session.
   @stall_timeout_ms 15_000
-  # Slow-start threshold — starts high, reduced on first loss event
-  @initial_ssthresh 512
+  # Slow-start threshold — exit slow start at 32 packets, enter congestion avoidance.
+  # Previous 512 let slow start run until cwnd~60-80 where loss always occurred.
+  @initial_ssthresh 32
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
   @max_rto_retransmit_per_tick 8
@@ -474,10 +472,12 @@ defmodule ZtlpGateway.Session do
   # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
   @use_bbr true
 
-  # Pacing interval: ms between burst sends
-  @pacing_interval_ms 2
+  # Pacing interval: ms between burst sends.
+  # 5ms × 2 packets = 456 bytes/ms = ~3.6 Mbps pacing rate.
+  # Previous 2ms × 4 = 18 Mbps bursts overwhelmed cellular buffers.
+  @pacing_interval_ms 5
   # Max packets sent per pacing tick — limits instantaneous burst
-  @burst_size 4
+  @burst_size 2
 
   # Maximum plaintext payload per ZTLP data packet.
   # Max plaintext payload per ZTLP packet.

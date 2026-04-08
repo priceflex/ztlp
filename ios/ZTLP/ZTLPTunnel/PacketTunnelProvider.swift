@@ -107,6 +107,39 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Maximum reconnect delay cap.
     private static let maxReconnectDelay: TimeInterval = 60.0
 
+    // MARK: - Activity Tracking (keepalive suppression)
+
+    /// Last time we saw real data activity (packet read/write/flush).
+    /// If data flowed recently, the connection is alive — don't trigger
+    /// reconnect on a keepalive send failure.
+    private var lastDataActivity: Date = Date()
+
+    /// How recently data must have flowed to consider the connection "active".
+    /// If data flowed within this window, keepalive failures are ignored.
+    private static let activityGracePeriod: TimeInterval = 60.0
+
+    /// Consecutive keepalive failures. We require multiple failures
+    /// before triggering a reconnect to avoid tearing down a working
+    /// connection on a single transient send error.
+    private var consecutiveKeepaliveFailures = 0
+
+    /// Number of consecutive keepalive failures required before reconnect.
+    /// With 25s keepalive interval, 3 failures = 75s of no keepalive ACK.
+    private static let keepaliveFailureThreshold = 3
+
+    /// Track data activity (called from packet I/O paths).
+    private func markDataActivity() {
+        lastDataActivity = Date()
+        // Any real data flowing means the connection is alive — reset failures
+        consecutiveKeepaliveFailures = 0
+    }
+
+    /// Whether real data has flowed recently enough to consider the
+    /// connection alive regardless of keepalive send success.
+    private var isDataActive: Bool {
+        return Date().timeIntervalSince(lastDataActivity) < Self.activityGracePeriod
+    }
+
     // MARK: - NEPacketTunnelProvider Overrides
 
     /// Called by iOS when the VPN should start.
@@ -244,6 +277,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.isTunnelActive = true
                 self.connectedSince = Date()
                 self.reconnectAttempt = 0
+                self.consecutiveKeepaliveFailures = 0
+                self.lastDataActivity = Date()
                 self.startKeepaliveTimer()
 
                 // Step 9: Update shared state
@@ -464,6 +499,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
 
+            // Track that real data is flowing (upload direction)
+            if !packets.isEmpty {
+                self.markDataActivity()
+            }
+
             // Immediately flush any outbound response packets
             self.flushOutboundPackets()
 
@@ -484,6 +524,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         if !packets.isEmpty {
+            // Track that real data is flowing (download direction)
+            markDataActivity()
             packetFlow.writePackets(packets, withProtocols: protocols)
         }
     }
@@ -649,8 +691,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // Success — reset counter and update state
+        // Success — reset counters and update state
         reconnectAttempt = 0
+        consecutiveKeepaliveFailures = 0
+        lastDataActivity = Date()
         logger.info("Reconnected successfully to \(target)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
@@ -662,6 +706,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Keepalive
 
     /// Start a 25-second keepalive timer to maintain the connection.
+    ///
+    /// The keepalive serves two purposes:
+    /// 1. Keep NAT mappings alive when idle
+    /// 2. Detect dead connections when no data is flowing
+    ///
+    /// During active data transfer, keepalive failures are expected
+    /// (tokio send path may be saturated) and MUST NOT trigger reconnect.
+    /// We use activity tracking + consecutive failure counting to avoid
+    /// tearing down a working connection.
     private func startKeepaliveTimer() {
         keepaliveTimer?.cancel()
 
@@ -669,16 +722,41 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         timer.schedule(deadline: .now() + 25, repeating: 25)
         timer.setEventHandler { [weak self] in
             guard let self = self, self.bridge.hasClient else { return }
+
             // Log memory diagnostics every keepalive cycle
             self.logMemoryDiagnostics()
-            // Send a 1-byte keepalive
+
+            // If data flowed recently, the connection is alive.
+            // Skip keepalive send entirely — it would just contend
+            // with the data path and might fail spuriously.
+            if self.isDataActive {
+                self.consecutiveKeepaliveFailures = 0
+                self.logger.debug("Keepalive skipped — data active (\(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s ago)", source: "Tunnel")
+                return
+            }
+
+            // No recent data — send keepalive to check the connection
             let keepaliveData = Data([0])
             do {
                 try self.bridge.send(data: keepaliveData)
+                // Success — reset failure counter
+                self.consecutiveKeepaliveFailures = 0
             } catch {
-                self.logger.debug("Keepalive send failed: \(error.localizedDescription)", source: "Tunnel")
-                // Keepalive failure might mean disconnection — schedule reconnect
-                if self.isTunnelActive {
+                self.consecutiveKeepaliveFailures += 1
+                self.logger.debug(
+                    "Keepalive send failed (\(self.consecutiveKeepaliveFailures)/\(Self.keepaliveFailureThreshold)): \(error.localizedDescription)",
+                    source: "Tunnel"
+                )
+
+                // Only trigger reconnect after multiple consecutive failures
+                // AND no recent data activity
+                if self.consecutiveKeepaliveFailures >= Self.keepaliveFailureThreshold
+                    && !self.isDataActive
+                    && self.isTunnelActive {
+                    self.logger.warn(
+                        "Connection appears dead — \(self.consecutiveKeepaliveFailures) keepalive failures, no data for \(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s",
+                        source: "Tunnel"
+                    )
                     self.scheduleReconnect()
                 }
             }

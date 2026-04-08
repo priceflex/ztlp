@@ -1529,18 +1529,12 @@ async fn recv_loop(
                     // Re-ACK duplicates so gateway can clear its send_buffer,
                     // but rate-limit to prevent retransmit storms: gateway fast-retransmits
                     // N packets → N duplicates → N re-ACKs → another fast retransmit → loop.
-                    //
-                    // Also send NACK for the specific missing data_seq(s) when we keep getting
-                    // duplicates. The gateway's RTO retransmit picks the oldest packet_seqs,
-                    // which may correspond to data_seqs we already have. Without an explicit
-                    // NACK, the gateway never knows to retransmit the specific data_seq we need.
                     if is_duplicate && next_expected_seq > 0 {
                         diag_log!("[ZTLP-RX] DUPLICATE data_seq={} (expected={})", data_seq, next_expected_seq);
                         let should_reack = last_reack_time
                             .map(|t| t.elapsed().as_millis() >= REACK_MIN_INTERVAL_MS)
                             .unwrap_or(true);
                         if should_reack {
-                            // Send cumulative ACK up to what we have
                             let ack_seq = next_expected_seq.saturating_sub(1);
                             let mut ack_frame = Vec::with_capacity(9);
                             ack_frame.push(FRAME_ACK);
@@ -1548,39 +1542,6 @@ async fn recv_loop(
                             send_ack_frame!(ack_frame);
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
                             tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
-
-                            // Also NACK the specific missing seq(s) we need.
-                            // The gateway retransmits by oldest packet_seq, which may not be
-                            // what we need. NACK tells it exactly which data_seqs to send.
-                            let nack_allowed = last_nack_time
-                                .map(|t| t.elapsed().as_millis() >= NACK_MIN_INTERVAL_MS)
-                                .unwrap_or(true);
-                            if nack_allowed {
-                                // We need next_expected_seq and possibly a few after it
-                                let mut missing: Vec<u64> = Vec::new();
-                                let mut seq = next_expected_seq;
-                                // Request up to 8 seqs starting from the gap
-                                while seq < next_expected_seq + 8 && missing.len() < MAX_NACK_SEQS {
-                                    if !received_ahead.contains(&seq) {
-                                        missing.push(seq);
-                                    }
-                                    seq += 1;
-                                }
-                                if !missing.is_empty() {
-                                    let count = missing.len() as u16;
-                                    let mut nack_frame = Vec::with_capacity(1 + 2 + (count as usize) * 8);
-                                    nack_frame.push(FRAME_NACK);
-                                    nack_frame.extend_from_slice(&count.to_be_bytes());
-                                    for &ms in &missing {
-                                        nack_frame.extend_from_slice(&ms.to_be_bytes());
-                                    }
-                                    send_ack_frame!(nack_frame);
-                                    diag_log!("[ZTLP-TX] NACK for {} missing seqs starting at {}", missing.len(), missing[0]);
-                                    tracing::info!("recv_loop: NACK-on-dup for {} missing seqs (first={})", missing.len(), missing[0]);
-                                    last_nack_time = Some(std::time::Instant::now());
-                                }
-                            }
-
                             last_acked_data_seq = next_expected_seq;
                             last_data_recv_time = None;
                             last_reack_time = Some(std::time::Instant::now());

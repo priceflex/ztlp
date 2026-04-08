@@ -20,7 +20,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ── iOS console logging via NSLog ────────────────────────────────────────
 // println!/eprintln! don't show in Xcode's device console on iOS.
@@ -3724,9 +3724,13 @@ pub extern "C" fn ztlp_decrypt_packet(
 
 // Frame type constants (matching recv_loop in ffi.rs)
 const FRAME_DATA: u8 = 0x00;
+#[allow(dead_code)]
 const FRAME_ACK: u8 = 0x01;
+#[allow(dead_code)]
 const FRAME_FIN: u8 = 0x02;
+#[allow(dead_code)]
 const FRAME_NACK: u8 = 0x03;
+#[allow(dead_code)]
 const FRAME_CLOSE: u8 = 0x05;
 
 /// Build a FRAME_DATA envelope: [0x00 | data_seq(8 bytes BE) | payload].
@@ -3830,6 +3834,298 @@ pub extern "C" fn ztlp_parse_frame(
         *out_payload_len = payload_len;
     }
     0
+}
+
+// ── Sync connect (Phase 2: Sync Handshake) ──────────────────────────────
+//
+// Blocking connect using std::net::UdpSocket — no tokio runtime needed.
+// The Noise_XX state machine (snow) is already fully sync.
+
+use std::net::UdpSocket;
+
+/// Blocking synchronous connect using std::net::UdpSocket.
+///
+/// Performs the full Noise_XX 3-message handshake over plain UDP,
+/// extracts session keys, and returns a ZtlpCryptoContext ready for
+/// sync encrypt/decrypt. Does NOT create a tokio runtime or spawn any
+/// background threads. The caller (Swift) handles recv via NWConnection.
+///
+/// Args:
+///   identity    — ZTLP identity (software or hardware).
+///   config      — Connection config (relay, timeout, service_name).
+///   target      — Gateway/peer address as "host:port".
+///   timeout_ms  — Overall handshake timeout in milliseconds.
+///
+/// Returns a ZtlpCryptoContext* on success (caller must free),
+/// or NULL on failure (check ztlp_last_error()).
+#[no_mangle]
+pub extern "C" fn ztlp_connect_sync(
+    identity: *mut ZtlpIdentity,
+    config: *mut ZtlpConfig,
+    target: *const c_char,
+    timeout_ms: u32,
+) -> *mut ZtlpCryptoContext {
+    if identity.is_null() || target.is_null() {
+        set_last_error("identity or target is null");
+        return std::ptr::null_mut();
+    }
+
+    let identity = unsafe { &*identity };
+    let target_str = unsafe { CStr::from_ptr(target) };
+    let target_str = match target_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in target: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Extract config options
+    let timeout_ms = if timeout_ms == 0 {
+        15000 // default
+    } else {
+        timeout_ms as u64
+    };
+    let service_name: Option<&str> = if let Some(cfg) = unsafe { config.as_ref() } {
+        cfg.service_name.as_deref()
+    } else {
+        None
+    };
+    let relay_address: Option<&str> = if let Some(cfg) = unsafe { config.as_ref() } {
+        cfg.relay_address.as_deref()
+    } else {
+        None
+    };
+
+    let node_identity = match identity.provider.as_node_identity() {
+        Some(id) => id,
+        None => {
+            set_last_error("identity provider has no node identity");
+            return std::ptr::null_mut();
+        }
+    };
+
+    match do_connect_sync(node_identity, target_str, service_name, timeout_ms, relay_address) {
+        Ok(ctx) => Box::into_raw(Box::new(ctx)),
+        Err(e) => {
+            set_last_error(&e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Sync version of do_connect — performs the full Noise_XX handshake
+/// using std::net::UdpSocket.
+fn do_connect_sync(
+    identity: &NodeIdentity,
+    target: &str,
+    service_name: Option<&str>,
+    timeout_ms: u64,
+    relay_address: Option<&str>,
+) -> Result<ZtlpCryptoContext, String> {
+    // Parse target address
+    let target_addr: SocketAddr = target
+        .parse()
+        .map_err(|e| format!("invalid target address '{}': {}", target, e))?;
+
+    let send_addr: SocketAddr = if let Some(relay) = relay_address {
+        relay
+            .parse()
+            .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
+    } else {
+        target_addr
+    };
+
+    // Bind a standard UDP socket (non-blocking for timeout control)
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("failed to bind UDP socket: {}", e))?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| format!("set_read_timeout: {}", e))?;
+    let local_addr = socket
+        .local_addr()
+        .map_err(|e| format!("local_addr: {}", e))?;
+    diag_log!(
+        "[ZTLP] sync: bound to {} for handshake to {}",
+        local_addr,
+        send_addr
+    );
+
+    // Create Noise_XX initiator
+    let mut ctx = HandshakeContext::new_initiator(identity)
+        .map_err(|e| format!("handshake init: {}", e))?;
+    let session_id = SessionId::generate();
+
+    // ── Message 1: HELLO ──
+    let msg1 = ctx
+        .write_message(&[])
+        .map_err(|e| format!("handshake msg1: {}", e))?;
+
+    let mut hello_hdr = crate::packet::HandshakeHeader::new(crate::packet::MsgType::Hello);
+    hello_hdr.session_id = session_id;
+    hello_hdr.src_node_id = *identity.node_id.as_bytes();
+    hello_hdr.payload_len = msg1.len() as u16;
+
+    if let Some(svc) = service_name {
+        hello_hdr.dst_svc_id =
+            encode_service_name(svc).map_err(|e| format!("bad service name: {}", e))?;
+    }
+
+    let mut pkt1 = hello_hdr.serialize();
+    pkt1.extend_from_slice(&msg1);
+
+    // Send using sync socket
+    socket
+        .send_to(&pkt1, send_addr)
+        .map_err(|e| format!("send HELLO: {}", e))?;
+    diag_log!("[ZTLP] sync: sent HELLO to {}", send_addr);
+
+    // ── Message 2: HELLO_ACK (with retransmit) ──
+    let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+    let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+    let overall_timeout = Duration::from_millis(timeout_ms);
+    let start = Instant::now();
+    let mut retries: u8 = 0;
+
+    let (recv2, recv2_header) = loop {
+        if start.elapsed() > overall_timeout {
+            return Err("handshake timed out waiting for HELLO_ACK".to_string());
+        }
+
+        // Try to receive (socket has 100ms read timeout)
+        let mut buf = [0u8; 8192];
+        match socket.recv_from(&mut buf) {
+            Ok((len, _addr)) => {
+                let data = &buf[..len];
+                if data.len() >= crate::packet::HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = crate::packet::HandshakeHeader::deserialize(data) {
+                        if hdr.msg_type == crate::packet::MsgType::HelloAck
+                            && hdr.session_id == session_id
+                        {
+                            break (data.to_vec(), hdr);
+                        }
+                    }
+                }
+                // Not our HELLO_ACK — keep waiting
+                continue;
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    // Timeout — retransmit HELLO
+                    retries += 1;
+                    if retries > MAX_HANDSHAKE_RETRIES {
+                        return Err(
+                            "handshake failed: no HELLO_ACK after retransmits".to_string()
+                        );
+                    }
+                    socket
+                        .send_to(&pkt1, send_addr)
+                        .map_err(|e| format!("retransmit HELLO: {}", e))?;
+                    diag_log!("[ZTLP] sync: HELLO retransmit #{}", retries);
+                    std::thread::sleep(retry_delay);
+                    retry_delay = (retry_delay * 2).min(max_retry_delay);
+                } else {
+                    return Err(format!("recv error: {}", e));
+                }
+            }
+        }
+    };
+
+    // Process HELLO_ACK noise payload
+    let noise_payload2 = &recv2[crate::packet::HANDSHAKE_HEADER_SIZE..];
+    ctx.read_message(noise_payload2)
+        .map_err(|e| format!("handshake msg2: {}", e))?;
+
+    // ── Message 3: final confirmation ──
+    let msg3 = ctx
+        .write_message(&[])
+        .map_err(|e| format!("handshake msg3: {}", e))?;
+
+    let mut final_hdr =
+        crate::packet::HandshakeHeader::new(crate::packet::MsgType::Data);
+    final_hdr.session_id = session_id;
+    final_hdr.src_node_id = *identity.node_id.as_bytes();
+    final_hdr.payload_len = msg3.len() as u16;
+
+    let mut pkt3 = final_hdr.serialize();
+    pkt3.extend_from_slice(&msg3);
+
+    socket
+        .send_to(&pkt3, send_addr)
+        .map_err(|e| format!("send msg3: {}", e))?;
+    diag_log!("[ZTLP] sync: sent msg3 (final confirmation)");
+
+    if !ctx.is_finished() {
+        return Err("handshake did not complete after 3 messages".to_string());
+    }
+
+    let peer_node_id =
+        crate::identity::NodeId::from_bytes(recv2_header.src_node_id);
+    let (_transport_state, session_state) = ctx
+        .finalize(peer_node_id, session_id)
+        .map_err(|e| format!("handshake finalize: {}", e))?;
+
+    // Check for REJECT frame (server sends after handshake if policy denies)
+    // Non-blocking check with a short deadline
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        socket.set_read_timeout(Some(Duration::from_millis(50))).ok();
+        let mut buf = [0u8; 8192];
+        match socket.recv_from(&mut buf) {
+            Ok((len, _)) => {
+                if crate::reject::RejectFrame::is_reject(&buf[..len]) {
+                    if let Some(reject) =
+                        crate::reject::RejectFrame::decode(&buf[..len])
+                    {
+                        return Err(format!(
+                            "access denied: {} ({})",
+                            reject.message, reject.reason
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::WouldBlock
+                    && e.kind() != std::io::ErrorKind::TimedOut
+                {
+                    // Real socket error — proceed anyway
+                    break;
+                }
+                // Timeout, keep waiting
+            }
+        }
+    }
+
+    diag_log!(
+        "[ZTLP] sync: handshake complete session={} peer={} addr={}",
+        session_id,
+        peer_node_id,
+        send_addr
+    );
+
+    // Build the crypto context
+    let send_seq = Arc::new(AtomicU64::new(0));
+    let recv_window = crate::session::ReplayWindow::new(
+        crate::session::DEFAULT_REPLAY_WINDOW,
+    );
+    let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
+    let peer_addr_str = CString::new(send_addr.to_string()).unwrap_or_default();
+
+    Ok(ZtlpCryptoContext {
+        send_key: session_state.send_key,
+        recv_key: session_state.recv_key,
+        send_seq,
+        recv_window,
+        session_id,
+        peer_addr: send_addr,
+        session_id_str,
+        peer_addr_str,
+    })
 }
 
 /// Build an ACK frame: [FRAME_ACK(0x01) | ack_seq(8 bytes BE)].

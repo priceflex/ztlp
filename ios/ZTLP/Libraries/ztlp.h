@@ -975,6 +975,32 @@ int32_t ztlp_verify_gateway_pin(const char *key_hex);
 typedef struct ZtlpCryptoContext ZtlpCryptoContext;
 
 /**
+ * @brief Blocking synchronous connect using plain UDP (no tokio runtime).
+ *
+ * Performs the full Noise_XX 3-message handshake via std::net::UdpSocket
+ * and returns a ZtlpCryptoContext directly — no runtime, no callbacks,
+ * no background threads. The caller (Swift) handles recv via NWConnection.
+ *
+ * This is the iOS sync-connect entry point. Call it on a background
+ * queue so it doesn't block the main thread. After success, use
+ * ztlp_encrypt_packet/ztlp_decrypt_packet for all tunnel I/O.
+ *
+ * @param identity    ZTLP identity (from ztlp_identity_generate or ztlp_identity_from_file).
+ *                    Ownership is NOT transferred (identity must outlive the call).
+ * @param config      Optional connection config (relay, timeout, service_name), or NULL.
+ * @param target      Gateway/peer address as "host:port" (e.g. "relay.ztlp.net:4433").
+ * @param timeout_ms  Overall handshake timeout in milliseconds (0 = default 15000).
+ * @return ZtlpCryptoContext* on success (caller must free with ztlp_crypto_context_free).
+ *         NULL on failure (check ztlp_last_error).
+ */
+ZtlpCryptoContext *ztlp_connect_sync(
+    ZtlpIdentity *identity,
+    ZtlpConfig *config,
+    const char *target,
+    uint32_t timeout_ms
+);
+
+/**
  * @brief Extract a sync crypto context from a connected client.
  *
  * Call this AFTER ztlp_connect succeeds. The context holds the session

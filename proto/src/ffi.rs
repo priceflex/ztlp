@@ -1197,8 +1197,13 @@ async fn recv_loop(
     macro_rules! send_ack_frame {
         ($frame:expr) => {{
             let frame_ref: &[u8] = &$frame;
+            // Always send ACK via the main transport (same socket as data).
+            // This ensures ACKs reach the gateway even if the separate ACK
+            // socket (NWConnection) is dead or its packets get lost.
+            let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
+
+            // Also send via Swift NWConnection callback if registered (belt + suspenders).
             if let Some(cb) = ack_cb_fn {
-                // Lock-free encrypt + send via Swift NWConnection (separate socket)
                 let seq = ack_seq_counter.fetch_add(1, Ordering::Relaxed);
                 match crate::ack_socket::build_encrypted_packet(
                     ack_session_id, &ack_send_key, seq, frame_ref,
@@ -1210,9 +1215,6 @@ async fn recv_loop(
                         tracing::warn!("send_ack_frame: encrypt failed: {}", e);
                     }
                 }
-            } else {
-                // Fallback: send via tokio transport (same socket — for non-iOS platforms)
-                let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
             }
         }};
     }

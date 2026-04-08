@@ -129,7 +129,7 @@ fn raw_sendto(_fd: i32, _data: &[u8], _dest: &SocketAddr) -> Result<usize, std::
 ///
 /// Replicates the exact wire format of `TransportNode::send_data()` but
 /// without any async or pipeline lock dependencies.
-fn build_encrypted_packet(
+pub fn build_encrypted_packet(
     session_id: SessionId,
     send_key: &[u8; 32],
     seq: u64,

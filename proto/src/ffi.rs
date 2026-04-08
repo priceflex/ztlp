@@ -1164,15 +1164,35 @@ async fn recv_loop(
     let ack_cb_fn: Option<ZtlpAckSendCallback> = ack_cb.map(|(cb, _)| cb);
     let ack_cb_ud: SendPtr = ack_cb.map(|(_, ud)| ud).unwrap_or(SendPtr(std::ptr::null_mut()));
 
+    // Pre-extract send_key and shared seq counter for LOCK-FREE ACK encryption.
+    // This is critical: encrypt_data() takes the pipeline lock, which blocks recv_data().
+    // By extracting the key and using a shared atomic seq counter, we encrypt ACKs
+    // without any lock contention with the recv path.
+    let (ack_send_key, ack_seq_counter) = {
+        let pipeline = transport.pipeline.lock().await;
+        match pipeline.get_session(&session_id) {
+            Some(session) => (session.send_key, session.send_seq_counter()),
+            None => {
+                tracing::error!("ack setup: session not found");
+                ([0u8; 32], Arc::new(std::sync::atomic::AtomicU64::new(0)))
+            }
+        }
+    };
+
     // Helper: encrypt an ACK/NACK frame and send via the Swift NWConnection callback.
     // Falls back to tokio transport.send_data() if no callback is registered.
-    // This is a macro because it needs to .await (transport.encrypt_data / send_data).
+    //
+    // LOCK-FREE: uses pre-extracted send_key + atomic seq counter.
+    // Does NOT touch the pipeline lock — recv_data() runs unblocked.
     macro_rules! send_ack_frame {
         ($frame:expr) => {{
             let frame_ref: &[u8] = &$frame;
             if let Some(cb) = ack_cb_fn {
-                // Encrypt and send via Swift NWConnection (separate socket — no contention)
-                match ack_transport.encrypt_data(ack_session_id, frame_ref).await {
+                // Lock-free encrypt + send via Swift NWConnection (separate socket)
+                let seq = ack_seq_counter.fetch_add(1, Ordering::Relaxed);
+                match crate::ack_socket::build_encrypted_packet(
+                    ack_session_id, &ack_send_key, seq, frame_ref,
+                ) {
                     Ok(wire_bytes) => {
                         cb(ack_cb_ud.0, wire_bytes.as_ptr(), wire_bytes.len(), ack_peer_str.as_ptr());
                     }

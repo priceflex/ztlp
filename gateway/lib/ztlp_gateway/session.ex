@@ -919,13 +919,16 @@ defmodule ZtlpGateway.Session do
 
     # Second pass: find expired packets, sort by seq, retransmit only the oldest N.
     # This prevents flooding the phone with retransmits that cause dup ACK storms.
+    # Sort by data_seq (not packet_seq) so RTO retransmits the packets the
+    # client actually needs first. Sorting by packet_seq caused retransmitting
+    # data_seqs the client already has, leading to 30s stall timeouts.
     expired_entries =
       state.send_buffer
       |> Enum.filter(fn {_seq, {_pkt, sent_at, rc, _ds}} ->
         elapsed = now - sent_at
         elapsed > per_packet_rto(state.rto_ms, rc)
       end)
-      |> Enum.sort_by(fn {seq, _} -> seq end)
+      |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
       |> Enum.take(@max_rto_retransmit_per_tick)
 
     # Retransmit selected packets; halve cwnd ONCE for the entire batch
@@ -2359,7 +2362,13 @@ defmodule ZtlpGateway.Session do
           # Not in recovery: normal fast retransmit at 3 dup ACKs
           {send_buffer, state} = if new_count == 3 and not state.fast_retransmit_sent do
             now_ms = System.monotonic_time(:millisecond)
-            oldest_seqs = send_buffer |> Map.keys() |> Enum.sort() |> Enum.take(4)
+            # Sort by data_seq (not packet_seq) so we retransmit the packets the
+            # client actually needs. The old code sorted by Map.keys() (packet_seq),
+            # which would retransmit already-ACK'd data_seqs, causing a 30s stall.
+            oldest_seqs = send_buffer
+              |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
+              |> Enum.take(4)
+              |> Enum.map(fn {seq, _} -> seq end)
             retransmit_count = Enum.reduce(oldest_seqs, 0, fn seq, count ->
               case Map.get(send_buffer, seq) do
                 {packet, _sent_at, _rc, _ds} ->

@@ -1345,14 +1345,14 @@ mod tests {
     fn test_stream_dispatcher_register_dispatch() {
         let disp = StreamDispatcher::new();
         let mut rx = disp.register(1);
-        assert!(disp.dispatch(1, vec![1, 2, 3]));
+        assert!(disp.dispatch(1, vec![1, 2, 3]).is_ok());
         assert_eq!(rx.try_recv().unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
     fn test_stream_dispatcher_unknown_stream() {
         let disp = StreamDispatcher::new();
-        assert!(!disp.dispatch(99, vec![1, 2, 3]));
+        assert!(disp.dispatch(99, vec![1, 2, 3]).is_err());
     }
 
     #[test]
@@ -1362,7 +1362,7 @@ mod tests {
         assert_eq!(disp.stream_count(), 1);
         disp.unregister(1);
         assert_eq!(disp.stream_count(), 0);
-        assert!(!disp.dispatch(1, vec![1, 2, 3]));
+        assert!(disp.dispatch(1, vec![1, 2, 3]).is_err());
     }
 
     #[test]
@@ -1380,8 +1380,8 @@ mod tests {
         let mut rx2 = disp.register(2);
         assert_eq!(disp.stream_count(), 2);
 
-        assert!(disp.dispatch(1, vec![10]));
-        assert!(disp.dispatch(2, vec![20]));
+        assert!(disp.dispatch(1, vec![10]).is_ok());
+        assert!(disp.dispatch(2, vec![20]).is_ok());
 
         assert_eq!(rx1.try_recv().unwrap(), vec![10]);
         assert_eq!(rx2.try_recv().unwrap(), vec![20]);

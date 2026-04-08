@@ -5193,6 +5193,515 @@ mod tests {
         assert!(matches!(action, RecvAction::Continue));
     }
 
+    // ── Sync FFI tests (Phase 1+2: Strip Tokio) ─────────────────────────
+
+    /// Create a test crypto context with known keys for encrypt/decrypt testing.
+    fn make_test_crypto_context() -> ZtlpCryptoContext {
+        let send_key = [0x42u8; 32];
+        let recv_key = [0x99u8; 32];
+        let send_seq = Arc::new(AtomicU64::new(0));
+        let recv_window = crate::session::ReplayWindow::new(crate::session::DEFAULT_REPLAY_WINDOW);
+        let session_id = SessionId::generate();
+        let peer_addr: SocketAddr = "127.0.0.1:23095".parse().unwrap();
+        let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
+        let peer_addr_str = CString::new(peer_addr.to_string()).unwrap_or_default();
+
+        ZtlpCryptoContext {
+            send_key,
+            recv_key,
+            send_seq,
+            recv_window,
+            session_id,
+            peer_addr,
+            session_id_str,
+            peer_addr_str,
+        }
+    }
+
+    /// TEST: ztlp_frame_data builds correct envelope, ztlp_parse_frame extracts it.
+    #[test]
+    fn test_sync_frame_data_roundtrip() {
+        let payload = b"Hello, ZTLP tunnel!";
+        let data_seq: u64 = 42;
+
+        let mut frame_buf = [0u8; 9 + 64];
+        let mut written: usize = 0;
+        let rc = ztlp_frame_data(
+            payload.as_ptr(), payload.len(),
+            frame_buf.as_mut_ptr(), frame_buf.len(),
+            &mut written, data_seq,
+        );
+        assert_eq!(rc, 0, "frame_data should succeed");
+        assert_eq!(written, 1 + 8 + payload.len(), "frame length should be 1+8+payload");
+
+        // Verify structure: [0x00 | data_seq(8 BE) | payload]
+        assert_eq!(frame_buf[0], 0x00, "first byte should be FRAME_DATA");
+        let parsed_seq = u64::from_be_bytes(frame_buf[1..9].try_into().unwrap());
+        assert_eq!(parsed_seq, data_seq, "data_seq should match");
+        assert_eq!(&frame_buf[9..9 + payload.len()], payload, "payload should match");
+
+        // Now parse it back
+        let mut frame_type: u8 = 0;
+        let mut seq: u64 = 0;
+        let mut payload_ptr: *const u8 = std::ptr::null();
+        let mut payload_len: usize = 0;
+        let rc = ztlp_parse_frame(
+            frame_buf.as_ptr(), written,
+            &mut frame_type, &mut seq,
+            &mut payload_ptr, &mut payload_len,
+        );
+        assert_eq!(rc, 0, "parse_frame should succeed");
+        assert_eq!(frame_type, 0x00, "frame type should be FRAME_DATA");
+        assert_eq!(seq, data_seq, "parsed seq should match");
+        assert_eq!(payload_len, payload.len(), "payload length should match");
+
+        let parsed_payload = unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) };
+        assert_eq!(parsed_payload, payload, "parsed payload should match original");
+    }
+
+    /// TEST: ztlp_build_ack creates correct 9-byte ACK frame.
+    #[test]
+    fn test_sync_build_ack() {
+        let mut buf = [0u8; 9];
+        let mut written: usize = 0;
+        let rc = ztlp_build_ack(
+            12345u64,
+            buf.as_mut_ptr(), buf.len(),
+            &mut written,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(written, 9);
+        assert_eq!(buf[0], 0x01, "first byte should be FRAME_ACK");
+        let acked_seq = u64::from_be_bytes(buf[1..9].try_into().unwrap());
+        assert_eq!(acked_seq, 12345u64);
+
+        // Verify it parses correctly
+        let mut frame_type: u8 = 0;
+        let mut seq: u64 = 0;
+        let mut payload_ptr: *const u8 = std::ptr::null();
+        let mut payload_len: usize = 0;
+        let rc = ztlp_parse_frame(
+            buf.as_ptr(), 9,
+            &mut frame_type, &mut seq,
+            &mut payload_ptr, &mut payload_len,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(frame_type, 0x01, "should be FRAME_ACK");
+        assert_eq!(seq, 12345u64);
+    }
+
+    /// TEST: ztlp_build_ack rejects buffer too small.
+    #[test]
+    fn test_sync_build_ack_buffer_too_small() {
+        let mut buf = [0u8; 8]; // needs 9
+        let mut written: usize = 0;
+        let rc = ztlp_build_ack(1, buf.as_mut_ptr(), buf.len(), &mut written);
+        assert_ne!(rc, 0, "should fail with small buffer");
+    }
+
+    /// TEST: ztlp_encrypt_packet produces valid output, ztlp_decrypt_packet recovers original.
+    #[test]
+    fn test_sync_encrypt_decrypt_roundtrip() {
+        // Create two contexts: client (for encryption) and server (for decryption)
+        // In real usage: client encrypts with send_key (server's recv_key),
+        // server decrypts with recv_key (client's send_key).
+        let shared_key = [0xABu8; 32];
+
+        let mut client_ctx = make_test_crypto_context();
+        client_ctx.send_key = shared_key; // client encrypts with this
+        let mut server_ctx = make_test_crypto_context();
+        server_ctx.recv_key = shared_key; // server decrypts with this
+
+        // Also set server's send_key and client's recv_key for the reverse direction
+        let shared_key2 = [0xCDu8; 32];
+        client_ctx.recv_key = shared_key2;
+        server_ctx.send_key = shared_key2;
+
+        let plaintext = b"Test payload for ZTLP sync encrypt/decrypt!";
+
+        // Encrypt
+        let mut pkt_buf = [0u8; 65536];
+        let mut pkt_written: usize = 0;
+        let rc_enc = ztlp_encrypt_packet(
+            &mut client_ctx,
+            plaintext.as_ptr(), plaintext.len(),
+            pkt_buf.as_mut_ptr(), pkt_buf.len(),
+            &mut pkt_written,
+        );
+        assert_eq!(rc_enc, 0, "encrypt should succeed");
+        assert!(pkt_written > plaintext.len(), "encrypted packet should be larger than plaintext (header + auth tag)");
+
+        // Decrypt
+        let mut out_buf = [0u8; 65536];
+        let mut out_written: usize = 0;
+        let rc_dec = ztlp_decrypt_packet(
+            &mut server_ctx,
+            pkt_buf.as_ptr(), pkt_written,
+            out_buf.as_mut_ptr(), out_buf.len(),
+            &mut out_written,
+        );
+        assert_eq!(rc_dec, 0, "decrypt should succeed");
+        assert_eq!(out_written, plaintext.len(), "decrypted length should match original");
+
+        let decrypted = &out_buf[..out_written];
+        assert_eq!(decrypted, plaintext, "decrypted text should match original");
+    }
+
+    /// TEST: Seq counter increments on each encrypt.
+    #[test]
+    fn test_sync_encrypt_increments_seq() {
+        let mut ctx = make_test_crypto_context();
+        let payload = [0x55u8; 10];
+
+        let mut pkt1 = [0u8; 65536];
+        let mut w1: usize = 0;
+        assert_eq!(ztlp_encrypt_packet(&mut ctx, payload.as_ptr(), payload.len(), pkt1.as_mut_ptr(), pkt1.len(), &mut w1), 0);
+
+        let mut pkt2 = [0u8; 65536];
+        let mut w2: usize = 0;
+        assert_eq!(ztlp_encrypt_packet(&mut ctx, payload.as_ptr(), payload.len(), pkt2.as_mut_ptr(), pkt2.len(), &mut w2), 0);
+
+        // Both packets should have different seq numbers in the header
+        // Parse the packet sequence from the data header
+        let parse_header1 = crate::packet::DataHeader::deserialize(&pkt1[..w1]);
+        let parse_header2 = crate::packet::DataHeader::deserialize(&pkt2[..w2]);
+        assert!(parse_header1.is_ok());
+        assert!(parse_header2.is_ok());
+        let seq1 = parse_header1.unwrap().packet_seq;
+        let seq2 = parse_header2.unwrap().packet_seq;
+        assert_eq!(seq1, 0, "first encrypt should use seq 0");
+        assert_eq!(seq2, 1, "second encrypt should use seq 1");
+    }
+
+    /// TEST: Decrypt rejects replayed packets (same seq twice).
+    #[test]
+    fn test_sync_decrypt_rejects_replay() {
+        let mut client_ctx = make_test_crypto_context();
+        let mut server_ctx = make_test_crypto_context();
+        client_ctx.send_key = [0xFFu8; 32];
+        server_ctx.recv_key = [0xFFu8; 32];
+
+        let payload = b"Replay test message";
+
+        let mut pkt = [0u8; 65536];
+        let mut pkt_written: usize = 0;
+        let rc = ztlp_encrypt_packet(
+            &mut client_ctx,
+            payload.as_ptr(), payload.len(),
+            pkt.as_mut_ptr(), pkt.len(),
+            &mut pkt_written,
+        );
+        assert_eq!(rc, 0);
+
+        // First decrypt succeeds
+        let mut out1 = [0u8; 65536];
+        let mut w1: usize = 0;
+        let rc1 = ztlp_decrypt_packet(
+            &mut server_ctx,
+            pkt.as_ptr(), pkt_written,
+            out1.as_mut_ptr(), out1.len(),
+            &mut w1,
+        );
+        assert_eq!(rc1, 0, "first decrypt should succeed");
+        assert_eq!(&out1[..w1], payload);
+
+        // Second decrypt with same packet should fail (replay)
+        let mut out2 = [0u8; 65536];
+        let mut w2: usize = 0;
+        let rc2 = ztlp_decrypt_packet(
+            &mut server_ctx,
+            pkt.as_ptr(), pkt_written,
+            out2.as_mut_ptr(), out2.len(),
+            &mut w2,
+        );
+        assert_ne!(rc2, 0, "second decrypt should fail (replay detected)");
+    }
+
+    /// TEST: Out-of-order decrypt works within replay window.
+    #[test]
+    fn test_sync_decrypt_out_of_order_within_window() {
+        let mut client_ctx = make_test_crypto_context();
+        let key = [0xEEu8; 32];
+        client_ctx.send_key = key;
+
+        let mut server_ctx = make_test_crypto_context();
+        server_ctx.recv_key = key;
+
+        // Encrypt packets 0, 1, 2
+        let mut packets: Vec<(Vec<u8>, usize)> = Vec::new();
+        for i in 0..3 {
+            let payload = format!("packet {}", i);
+            let mut pkt = [0u8; 65536];
+            let mut w: usize = 0;
+            let rc = ztlp_encrypt_packet(
+                &mut client_ctx,
+                payload.as_ptr(), payload.len(),
+                pkt.as_mut_ptr(), pkt.len(),
+                &mut w,
+            );
+            assert_eq!(rc, 0);
+            packets.push((pkt.to_vec(), w));
+        }
+
+        // Decrypt in order 2, 0, 1 (all should succeed within window of 64)
+        let order = [2, 0, 1];
+        for &idx in &order {
+            let (pkt, pkt_len) = &packets[idx];
+            let mut out = [0u8; 65536];
+            let mut w: usize = 0;
+            let rc = ztlp_decrypt_packet(
+                &mut server_ctx,
+                pkt.as_ptr(), *pkt_len,
+                out.as_mut_ptr(), out.len(),
+                &mut w,
+            );
+            assert_eq!(rc, 0, "decrypt of packet {} should succeed", idx);
+            let expected = format!("packet {}", idx);
+            assert_eq!(&out[..w], expected.as_bytes(), "packet {} content should match", idx);
+        }
+    }
+
+    /// TEST: Null argument handling for sync functions.
+    #[test]
+    fn test_sync_null_args() {
+        // ztlp_frame_data — null payload
+        assert_ne!(ztlp_frame_data(
+            std::ptr::null(), 10,
+            std::ptr::null_mut(), 100,
+            &mut 0, 0
+        ), 0);
+
+        // ztlp_frame_data — null out_written
+        let payload = [0u8; 5];
+        let mut out = [0u8; 20];
+        assert_ne!(ztlp_frame_data(
+            payload.as_ptr(), payload.len(),
+            out.as_mut_ptr(), out.len(),
+            std::ptr::null_mut(), 0
+        ), 0);
+
+        // ztlp_frame_data — valid call should succeed
+        let mut w: usize = 0;
+        assert_eq!(ztlp_frame_data(
+            payload.as_ptr(), payload.len(),
+            out.as_mut_ptr(), out.len(),
+            &mut w, 42
+        ), 0);
+        assert_eq!(w, 1 + 8 + payload.len(), "frame should have correct length");
+
+        // ztlp_build_ack — null out_buf
+        assert_ne!(ztlp_build_ack(1, std::ptr::null_mut(), 9, &mut 0), 0);
+
+        // ztlp_build_ack — null out_written
+        let mut buf = [0u8; 9];
+        assert_ne!(ztlp_build_ack(1, buf.as_mut_ptr(), buf.len(), std::ptr::null_mut()), 0);
+    }
+
+    /// TEST: ztlp_encrypt_packet rejects output buffer too small.
+    #[test]
+    fn test_sync_encrypt_buffer_too_small() {
+        let mut ctx = make_test_crypto_context();
+        let payload = [0x11u8; 100];
+        let mut tiny_buf = [0u8; 10]; // way too small for header + encrypted payload
+        let mut written: usize = 0;
+        let rc = ztlp_encrypt_packet(
+            &mut ctx,
+            payload.as_ptr(), payload.len(),
+            tiny_buf.as_mut_ptr(), tiny_buf.len(),
+            &mut written,
+        );
+        assert_ne!(rc, 0, "encrypt should fail with tiny buffer");
+    }
+
+    /// TEST: ztlp_decrypt_packet rejects malformed packet (too short).
+    #[test]
+    fn test_sync_decrypt_malformed_packet() {
+        let mut ctx = make_test_crypto_context();
+        let mut out = [0u8; 65536];
+        let mut written: usize = 0;
+
+        // 5 bytes is way too short for a 46-byte data header
+        let short_pkt = [0x37u8, 0x5A, 0x01, 0x00, 0x00];
+        let rc = ztlp_decrypt_packet(
+            &mut ctx,
+            short_pkt.as_ptr(), short_pkt.len(),
+            out.as_mut_ptr(), out.len(),
+            &mut written,
+        );
+        assert_ne!(rc, 0, "decrypt should fail with too-short packet");
+    }
+
+    /// TEST: ztlp_encrypt_packet + ztlp_decrypt_packet with full frame data envelope.
+    #[test]
+    fn test_sync_full_data_frame_roundtrip() {
+        // Simulates the full Swift path: frame_data → encrypt → decrypt → parse_frame
+        let mut client_ctx = make_test_crypto_context();
+        let mut server_ctx = make_test_crypto_context();
+        let key = [0xDDu8; 32];
+        client_ctx.send_key = key;
+        server_ctx.recv_key = key;
+
+        // Build FRAME_DATA envelope
+        let payload = b"Some IP packet data would go here";
+        let data_seq: u64 = 7;
+        let mut frame_buf = [0u8; 2048];
+        let mut frame_len: usize = 0;
+        let rc = ztlp_frame_data(
+            payload.as_ptr(), payload.len(),
+            frame_buf.as_mut_ptr(), frame_buf.len(),
+            &mut frame_len, data_seq,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(frame_len, 1 + 8 + payload.len());
+
+        // Encrypt the frame
+        let mut pkt_buf = [0u8; 65536];
+        let mut pkt_len: usize = 0;
+        let rc = ztlp_encrypt_packet(
+            &mut client_ctx,
+            frame_buf.as_ptr(), frame_len,
+            pkt_buf.as_mut_ptr(), pkt_buf.len(),
+            &mut pkt_len,
+        );
+        assert_eq!(rc, 0);
+        assert!(pkt_len > payload.len());
+
+        // Decrypt
+        let mut out_buf = [0u8; 65536];
+        let mut out_len: usize = 0;
+        let rc = ztlp_decrypt_packet(
+            &mut server_ctx,
+            pkt_buf.as_ptr(), pkt_len,
+            out_buf.as_mut_ptr(), out_buf.len(),
+            &mut out_len,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(out_len, frame_len);
+
+        // Parse frame
+        let mut frame_type: u8 = 0;
+        let mut seq: u64 = 0;
+        let mut payload_ptr: *const u8 = std::ptr::null();
+        let mut payload_len: usize = 0;
+        let rc = ztlp_parse_frame(
+            out_buf.as_ptr(), out_len,
+            &mut frame_type, &mut seq,
+            &mut payload_ptr, &mut payload_len,
+        );
+        assert_eq!(rc, 0);
+        assert_eq!(frame_type, 0x00, "should be FRAME_DATA");
+        assert_eq!(seq, data_seq, "seq should match");
+        assert_eq!(payload_len, payload.len());
+
+        let parsed = unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) };
+        assert_eq!(parsed, payload, "final payload should match original");
+    }
+
+    /// TEST: ztlp_connect_sync fails gracefully with invalid target.
+    #[test]
+    fn test_sync_connect_invalid_target() {
+        let identity = ztlp_identity_generate();
+        assert!(!identity.is_null());
+
+        let config = ztlp_config_new();
+        let target = CString::new("not-an-address").unwrap();
+        let ctx = ztlp_connect_sync(
+            identity,
+            config,
+            target.as_ptr(),
+            500, // 500ms timeout
+        );
+
+        // Should return NULL (not a valid address format)
+        assert!(ctx.is_null(), "connect with invalid target should return NULL");
+        let err = ztlp_last_error();
+        assert!(!err.is_null(), "should have error message");
+
+        // Clean up
+        ztlp_config_free(config);
+        ztlp_identity_free(identity);
+    }
+
+    /// TEST: ztlp_connect_sync fails with timeout on unreachable target.
+    #[test]
+    fn test_sync_connect_timeout_unreachable() {
+        let identity = ztlp_identity_generate();
+        assert!(!identity.is_null());
+
+        let config = ztlp_config_new();
+        // Use a non-routable address that will timeout
+        let target = CString::new("192.0.2.1:23095").unwrap();
+
+        let start = std::time::Instant::now();
+        let ctx = ztlp_connect_sync(
+            identity,
+            config,
+            target.as_ptr(),
+            500, // 500ms timeout
+        );
+        let elapsed = start.elapsed();
+
+        assert!(ctx.is_null(), "connect to unreachable target should return NULL");
+        assert!(
+            elapsed.as_millis() < 5000,
+            "should timeout quickly, took {}ms",
+            elapsed.as_millis()
+        );
+
+        ztlp_config_free(config);
+        ztlp_identity_free(identity);
+    }
+
+    /// TEST: ztlp_crypto_context_extract returns NULL when no active session.
+    #[test]
+    fn test_crypto_context_extract_no_session() {
+        let identity = ztlp_identity_generate();
+        let client = ztlp_client_new(identity);
+        // identity ownership transferred to client — do NOT free it separately
+
+        let ctx = ztlp_crypto_context_extract(client);
+        assert!(ctx.is_null(), "extract should return NULL with no active session");
+
+        ztlp_client_free(client);
+    }
+
+    /// TEST: ztlp_crypto_context_accessors return null for null context.
+    #[test]
+    fn test_crypto_context_null_accessors() {
+        assert!(ztlp_crypto_context_session_id(std::ptr::null()).is_null());
+        assert!(ztlp_crypto_context_peer_addr(std::ptr::null()).is_null());
+    }
+
+    /// TEST: ztlp_encrypt_packet detects null context.
+    #[test]
+    fn test_encrypt_null_context() {
+        let payload = [0u8; 10];
+        let mut out = [0u8; 65536];
+        let mut w: usize = 0;
+        let rc = ztlp_encrypt_packet(
+            std::ptr::null_mut(),
+            payload.as_ptr(), payload.len(),
+            out.as_mut_ptr(), out.len(),
+            &mut w,
+        );
+        assert_ne!(rc, 0);
+    }
+
+    /// TEST: ztlp_decrypt_packet detects null context.
+    #[test]
+    fn test_decrypt_null_context() {
+        let pkt = [0u8; 100];
+        let mut out = [0u8; 65536];
+        let mut w: usize = 0;
+        let rc = ztlp_decrypt_packet(
+            std::ptr::null_mut(),
+            pkt.as_ptr(), pkt.len(),
+            out.as_mut_ptr(), out.len(),
+            &mut w,
+        );
+        assert_ne!(rc, 0);
+    }
+
     /// Helper to create a minimal ZtlpClientInner for testing.
     fn create_test_inner() -> ZtlpClientInner {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -570,7 +570,7 @@ int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
                                       void *user_data);
 
 /**
- * Register a callback for ACK packet sending via platform-native I/O.
+ * @brief Register a callback for ACK packet sending via platform-native I/O.
  *
  * When registered, the library will invoke this callback with pre-encrypted
  * ACK packets. The platform should send these bytes via a separate UDP
@@ -886,6 +886,81 @@ const char *ztlp_version(void);
  *         Valid until the next ZTLP call on this thread.
  */
 const char *ztlp_last_error(void);
+
+/* ─── NS Certificate Authority ─────────────────────────────────── */
+
+/**
+ * @brief Fetch the CA root certificate (DER) from the ZTLP-NS server.
+ *
+ * Sends a 0x14 0x01 query to the NS and returns the raw DER bytes.
+ * The returned buffer must be freed with ztlp_bytes_free().
+ *
+ * @param ns_server  NS server address as "host:port"
+ * @param timeout_ms Query timeout in milliseconds (0 = default 5000ms)
+ * @param out_data   Receives pointer to DER data (caller frees with ztlp_bytes_free)
+ * @param out_len    Receives length of DER data
+ * @return 0 on success, negative on error (check ztlp_last_error)
+ */
+int32_t ztlp_ns_fetch_ca_root(
+    const char *ns_server,
+    uint32_t timeout_ms,
+    uint8_t **out_data,
+    uint32_t *out_len
+);
+
+/**
+ * @brief Free a byte buffer returned by ztlp_ns_fetch_ca_root().
+ *
+ * @param data Pointer returned by ztlp_ns_fetch_ca_root
+ * @param len  Length returned by ztlp_ns_fetch_ca_root
+ */
+void ztlp_bytes_free(uint8_t *data, uint32_t len);
+
+/**
+ * @brief Fetch the CA chain (PEM) from the ZTLP-NS server.
+ *
+ * Returns a null-terminated PEM string containing the intermediate and
+ * root certificates. Caller must free with ztlp_string_free().
+ *
+ * @param ns_server  NS server address as "host:port"
+ * @param timeout_ms Query timeout in milliseconds (0 = default 5000ms)
+ * @return PEM string on success (free with ztlp_string_free), NULL on error
+ */
+char *ztlp_ns_fetch_ca_chain_pem(
+    const char *ns_server,
+    uint32_t timeout_ms
+);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Gateway Key Pinning (Certificate Pinning)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Pin a gateway's static Noise public key.
+ *
+ * Stores the key in ~/.ztlp/config.toml so that subsequent connections
+ * will reject gateways whose static key doesn't match any pinned key.
+ * Multiple keys can be pinned for key rotation support.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return ZTLP_OK on success, ZTLP_INVALID_ARGUMENT on bad input,
+ *         ZTLP_INTERNAL_ERROR on I/O failure.
+ */
+int32_t ztlp_pin_gateway_key(const char *key_hex);
+
+/**
+ * @brief Verify a gateway's static key against pinned keys.
+ *
+ * Checks if the given key matches any key in the pinned_gateway_keys
+ * configuration list.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return 1 if key matches (or no keys pinned), 0 if no match,
+ *         negative on error.
+ */
+int32_t ztlp_verify_gateway_pin(const char *key_hex);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -98,8 +98,19 @@ doubling cwnd per RTT until it blows past the path's capacity.
   recovers more stably.
 - initial_cwnd=10 is TCP standard. 32 was too aggressive for first RTT.
 
-### Expected outcome
-- Slower ramp-up but fewer loss events
-- Should complete 100KB-1MB transfers that currently fail
-- Throughput ceiling ~5-10 Mbps (limited by cwnd=64 × 1140 / RTT)
-- Can increase max_cwnd later once baseline is stable
+### Results: 5/11 passing (up from 3/11)
+Improved — 10KB and 100KB sizes now passing. Still stalls at larger sizes.
+
+Gateway log pattern:
+- cwnd grows to max_cwnd=64 → immediately hits "dup ACK plateau (20)"
+- cwnd slashed to 32, recovers, hits 64 again, crashes again
+- Sawtooth pattern: 64→32→64→32→25→... eventually stalls
+- "Fast retransmit" happening at buffer=55-64 (near ceiling)
+- Still getting "Stall detected: no ACK advance for 15s"
+
+Analysis: max_cwnd=64 is still too high for this relay→cellular path.
+The stable operating point appears to be cwnd 25-35 based on where
+recovery exits (acked advances when cwnd is around 25-31).
+The path can sustain ~25-35 × 1140 = 28-40KB inflight.
+
+Next step: lower max_cwnd to 32, keep everything else the same.

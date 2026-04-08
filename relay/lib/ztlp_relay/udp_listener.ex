@@ -549,37 +549,26 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
                 if is_pid(pid), do: Session.forward(pid)
 
-              # Client NAT rebinding: same IP as peer_a but different port.
-              # Cellular carriers frequently rebind UDP source ports during
-              # active flows. If we don't update peer_a, all ACKs from the
-              # phone get dropped after the rebind, causing session stalls.
-              sender_ip == elem(peer_a, 0) and sender_port != elem(peer_a, 1) ->
-                Logger.info(
-                  "Client NAT rebind: session #{Base.encode16(session_id)} " <>
-                    "peer_a #{inspect(peer_a)} → #{inspect(sender)} (same IP, port changed)"
-                )
-
-                # Update peer_a address so future packets match
-                SessionRegistry.update_peer_a(session_id, sender)
-
-                # Forward to gateway
-                {dest_ip, dest_port} = peer_b
-                :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                Stats.increment(:forwarded)
-                if is_pid(pid), do: Session.forward(pid)
-
               # Session-ID routing (Nebula-style): the sender has a valid session
-              # but doesn't match peer_a or peer_b's recorded address. This happens
-              # when the iOS client sends ACKs from a SEPARATE NWConnection socket
-              # (different source port) to avoid kernel sendto/recv contention on
-              # the main data socket. The session_id in the packet header is the
-              # routing key — the gateway's AEAD verification provides real security.
-              # We forward to gateway without updating peer_a (the main data socket
-              # address stays canonical for return traffic).
+              # but doesn't match peer_a or peer_b's exact address. This covers:
+              #
+              # 1. iOS separate ACK socket: Swift NWConnection sends ACKs from a
+              #    different source port than the main tokio data socket. Both are
+              #    from the same client IP. We MUST NOT update peer_a here or the
+              #    two ports will flip-flop peer_a back and forth every 5 seconds.
+              #
+              # 2. True cellular NAT rebinding: the carrier changed the port on
+              #    the main data socket. The client's next data packet will come
+              #    from the new port and match here too.
+              #
+              # In both cases, the session_id in the ZTLP header is the routing
+              # key. The gateway's AEAD verification provides real authentication.
+              # We forward to gateway WITHOUT updating peer_a (return traffic
+              # always goes to the address that last matched as peer_a).
               sender_ip not in gateway_ips ->
                 Logger.debug(
                   "Session-ID routed: session #{Base.encode16(session_id)} " <>
-                    "from #{inspect(sender)} (not peer_a=#{inspect(peer_a)}) → forwarding to gateway"
+                    "from #{inspect(sender)} (peer_a=#{inspect(peer_a)}) → forwarding to gateway"
                 )
 
                 {dest_ip, dest_port} = peer_b
@@ -620,7 +609,7 @@ defmodule ZtlpRelay.UdpListener do
                 # Sender IP might differ from registered addresses.
                 {sender_ip, sender_port} = sender
                 {_gw_ip, gw_port} = gateway_addr
-                {client_ip, _client_port} = client_addr
+                {_client_ip, _client_port} = client_addr
 
                 cond do
                   # Gateway IP migration (VPC vs EIP)
@@ -629,19 +618,9 @@ defmodule ZtlpRelay.UdpListener do
                     :gen_udp.send(state.socket, dest_ip, dest_port, data)
                     Stats.increment(:forwarded)
 
-                  # Client NAT rebinding — same IP, different port
-                  sender_ip == client_ip ->
-                    Logger.info(
-                      "Client NAT rebind (GW-fwd): session #{Base.encode16(session_id)} " <>
-                        "client #{inspect(client_addr)} → #{inspect(sender)}"
-                    )
-                    GatewayForwarder.update_client_addr(session_id, sender)
-                    {dest_ip, dest_port} = gateway_addr
-                    :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                    Stats.increment(:forwarded)
-
-                  # Session-ID routing (Nebula-style): sender has valid session_id
-                  # but from a different port/IP. Forward to gateway — AEAD verifies.
+                  # Session-ID routing: sender has valid session but from a
+                  # different port (ACK socket or NAT rebind). Forward without
+                  # updating client_addr to avoid flip-flop with dual sockets.
                   sender_ip not in GatewayForwarder.known_gateway_ips() ->
                     Logger.debug(
                       "Session-ID routed (GW-fwd): #{Base.encode16(session_id)} " <>

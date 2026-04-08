@@ -1198,10 +1198,15 @@ async fn recv_loop(
         ($frame:expr) => {{
             let frame_ref: &[u8] = &$frame;
 
-            // PRIORITY 1: Send via Swift NWConnection callback (non-blocking).
-            // This is the primary ACK path on iOS — it uses a separate socket
-            // that won't block the recv_loop if the main socket buffer is full.
             if let Some(cb) = ack_cb_fn {
+                // Callback registered — use it exclusively.
+                // The callback sends via a separate NWConnection socket,
+                // bypassing the main transport entirely. This avoids two problems:
+                //   1. send_data().await can block the recv_loop if socket is full
+                //   2. send_data() consumes packet_seq from the shared counter;
+                //      if it times out, the packet is lost but the seq is burned,
+                //      creating gaps in the gateway's recv_window that prevent
+                //      later ACK packets from being delivered in-order.
                 let seq = ack_seq_counter.fetch_add(1, Ordering::Relaxed);
                 match crate::ack_socket::build_encrypted_packet(
                     ack_session_id, &ack_send_key, seq, frame_ref,
@@ -1213,17 +1218,10 @@ async fn recv_loop(
                         tracing::warn!("send_ack_frame: callback encrypt failed: {}", e);
                     }
                 }
+            } else {
+                // No callback — fall back to main transport (desktop/CLI path).
+                let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
             }
-
-            // PRIORITY 2: Also try the main transport with a short timeout.
-            // If the socket send buffer is full, don't block the recv_loop —
-            // the callback path above already sent the ACK on a separate socket.
-            // A blocked send_data() here was the root cause of ACK starvation:
-            // the .await would block indefinitely, freezing the entire recv_loop.
-            let _transport_result = tokio::time::timeout(
-                Duration::from_millis(5),
-                ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr),
-            ).await;
         }};
     }
 

@@ -1197,12 +1197,10 @@ async fn recv_loop(
     macro_rules! send_ack_frame {
         ($frame:expr) => {{
             let frame_ref: &[u8] = &$frame;
-            // Always send ACK via the main transport (same socket as data).
-            // This ensures ACKs reach the gateway even if the separate ACK
-            // socket (NWConnection) is dead or its packets get lost.
-            let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
 
-            // Also send via Swift NWConnection callback if registered (belt + suspenders).
+            // PRIORITY 1: Send via Swift NWConnection callback (non-blocking).
+            // This is the primary ACK path on iOS — it uses a separate socket
+            // that won't block the recv_loop if the main socket buffer is full.
             if let Some(cb) = ack_cb_fn {
                 let seq = ack_seq_counter.fetch_add(1, Ordering::Relaxed);
                 match crate::ack_socket::build_encrypted_packet(
@@ -1212,10 +1210,20 @@ async fn recv_loop(
                         cb(ack_cb_ud.0, wire_bytes.as_ptr(), wire_bytes.len(), ack_peer_str.as_ptr());
                     }
                     Err(e) => {
-                        tracing::warn!("send_ack_frame: encrypt failed: {}", e);
+                        tracing::warn!("send_ack_frame: callback encrypt failed: {}", e);
                     }
                 }
             }
+
+            // PRIORITY 2: Also try the main transport with a short timeout.
+            // If the socket send buffer is full, don't block the recv_loop —
+            // the callback path above already sent the ACK on a separate socket.
+            // A blocked send_data() here was the root cause of ACK starvation:
+            // the .await would block indefinitely, freezing the entire recv_loop.
+            let _transport_result = tokio::time::timeout(
+                Duration::from_millis(5),
+                ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr),
+            ).await;
         }};
     }
 

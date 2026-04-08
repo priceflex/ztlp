@@ -112,8 +112,9 @@ echo "  ✓ Device library: $LIB_DIR/libztlp_proto_device.a"
 
 # Also create a single fat library for simple Xcode project setups
 # (Note: This can't include both arm64-device and arm64-sim in one .a)
-# For development, we default to the simulator library.
-cp "$FAT_SIM_LIB" "$LIB_DIR/libztlp_proto.a"
+# For device builds (Xcode default), use the device library.
+# Use libztlp_proto_sim.a for simulator builds.
+cp "$DEVICE_LIB" "$LIB_DIR/libztlp_proto.a"
 
 # Create xcframework (the modern approach)
 XCFRAMEWORK_PATH="$LIB_DIR/libztlp_proto.xcframework"

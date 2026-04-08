@@ -40,7 +40,7 @@ struct SendEntry {
     /// When this packet was first sent (for RTT measurement).
     sent_at: Instant,
     /// The transport-level sequence number assigned by `send_data()`.
-    send_seq: u64,
+    _send_seq: u64,
     /// How many times this packet has been retransmitted.
     retransmits: u32,
 }
@@ -171,7 +171,7 @@ impl SendController {
                 SendEntry {
                     data: framed,
                     sent_at: Instant::now(),
-                    send_seq: seq,
+                    _send_seq: seq,
                     retransmits: 0,
                 },
             );
@@ -198,7 +198,7 @@ impl SendController {
                 SendEntry {
                     data: framed,
                     sent_at: Instant::now(),
-                    send_seq: seq,
+                    _send_seq: seq,
                     retransmits: 0,
                 },
             );
@@ -508,7 +508,7 @@ mod tests {
             SendEntry {
                 data: vec![0x00],
                 sent_at: Instant::now(),
-                send_seq: 42,
+                _send_seq: 42,
                 retransmits: 0,
             },
         );
@@ -533,7 +533,7 @@ mod tests {
                 SendEntry {
                     data: vec![0x00],
                     sent_at: Instant::now(),
-                    send_seq: seq,
+                    _send_seq: seq,
                     retransmits: 0,
                 },
             );
@@ -596,7 +596,7 @@ mod tests {
             SendEntry {
                 data: vec![0x00],
                 sent_at: Instant::now(),
-                send_seq: 1,
+                _send_seq: 1,
                 retransmits: 0,
             },
         );

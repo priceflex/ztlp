@@ -1618,7 +1618,7 @@ async fn recv_loop(
                             if !dispatched && !backpressure && has_router {
                                 if let Some(ref mut router) = guard.packet_router {
                                     router.process_gateway_data(sid, &data);
-                                    dispatched = true;
+                                    
                                 }
                             }
 

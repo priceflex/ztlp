@@ -10,6 +10,7 @@
 //! - **Windows**: `certutil -addstore Root <cert.pem>`
 
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::Command;
 use thiserror::Error;
 #[allow(unused_imports)]
@@ -62,6 +63,7 @@ pub fn install_ca_cert(cert_path: &Path) -> Result<()> {
 }
 
 /// Remove a CA certificate from the system trust store.
+#[allow(unused_variables)]
 pub fn remove_ca_cert(cert_path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     return remove_macos(cert_path);

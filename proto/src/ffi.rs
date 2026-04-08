@@ -3442,6 +3442,423 @@ pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
     })
 }
 
+// ── Sync Crypto Context & FFI (Phase 1: Strip Tokio) ───────────────────
+
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Nonce,
+};
+use crate::pipeline::compute_header_auth_tag;
+use crate::session::ReplayWindow;
+
+/// Holds extracted session keys for sync encrypt/decrypt without tokio.
+/// Created after handshake completes (or post-connect). No tokio dependency.
+pub struct ZtlpCryptoContext {
+    /// Key for encrypting outbound packets.
+    pub send_key: [u8; 32],
+    /// Key for decrypting inbound packets.
+    pub recv_key: [u8; 32],
+    /// Monotonic outbound sequence counter (shared with ACK sender).
+    pub send_seq: Arc<AtomicU64>,
+    /// Anti-replay window for inbound packets.
+    pub recv_window: ReplayWindow,
+    pub session_id: SessionId,
+    pub peer_addr: SocketAddr,
+    // Cached CStrings for FFI accessors
+    session_id_str: CString,
+    peer_addr_str: CString,
+}
+
+// ── Sync crypto context lifecycle ──────────────────────────────────────────
+
+/// Extract a crypto context from a connected client (call after ztlp_connect succeeds).
+/// Returns NULL if no active session exists.
+///
+/// Ownership: caller must free with ztlp_crypto_context_free().
+#[no_mangle]
+pub extern "C" fn ztlp_crypto_context_extract(
+    client: *mut ZtlpClient,
+) -> *mut ZtlpCryptoContext {
+    if client.is_null() {
+        set_last_error("client is null");
+        return std::ptr::null_mut();
+    }
+    let client_ref = unsafe { &*client };
+    let guard = match client_ref.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("client lock poisoned");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let active_session = match &guard.active_session {
+        Some(s) => s,
+        None => {
+            set_last_error("no active session");
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Read keys from the pipeline under a block_on (pipeline is tokio::sync::Mutex).
+    let transport = Arc::clone(&active_session.transport);
+    let session_id = active_session.session_id;
+    let session_keys = guard.runtime.block_on(async {
+        let pipeline = transport.pipeline.lock().await;
+        pipeline.get_session(&session_id).map(|s| (s.send_key, s.recv_key))
+    });
+
+    let (send_key, recv_key) = match session_keys {
+        Some((sk, rk)) => (sk, rk),
+        None => {
+            set_last_error("no session keys in pipeline");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let session_id = active_session.session_id;
+    let peer_addr = active_session.peer_addr;
+    let send_seq = Arc::clone(&active_session.data_seq);
+    let replay_window = ReplayWindow::new(crate::session::DEFAULT_REPLAY_WINDOW);
+
+    let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
+    let peer_addr_str = CString::new(peer_addr.to_string()).unwrap_or_default();
+
+    let ctx = ZtlpCryptoContext {
+        send_key,
+        recv_key,
+        send_seq,
+        recv_window: replay_window,
+        session_id,
+        peer_addr,
+        session_id_str,
+        peer_addr_str,
+    };
+    Box::into_raw(Box::new(ctx))
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_crypto_context_free(ctx: *mut ZtlpCryptoContext) {
+    if !ctx.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ctx);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_crypto_context_session_id(
+    ctx: *const ZtlpCryptoContext,
+) -> *const c_char {
+    if ctx.is_null() {
+        return std::ptr::null();
+    }
+    let ctx = unsafe { &*ctx };
+    ctx.session_id_str.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_crypto_context_peer_addr(
+    ctx: *const ZtlpCryptoContext,
+) -> *const c_char {
+    if ctx.is_null() {
+        return std::ptr::null();
+    }
+    let ctx = unsafe { &*ctx };
+    ctx.peer_addr_str.as_ptr()
+}
+
+// ── Sync encrypt/decrypt FFI ──────────────────────────────────────────────
+
+/// Encrypt plaintext into a full ZTLP wire packet.
+///
+/// Args:
+///   ctx           — crypto context (from ztlp_crypto_context_extract)
+///   plaintext     — raw payload to encrypt (e.g., framed data)
+///   plaintext_len — length of plaintext
+///   out_buf       — output buffer (caller-allocated, must be large enough)
+///   out_buf_len   — size of out_buf
+///   out_written   — receives the number of bytes written
+///
+/// Returns 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn ztlp_encrypt_packet(
+    ctx: *mut ZtlpCryptoContext,
+    plaintext: *const u8,
+    plaintext_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if ctx.is_null() || plaintext.is_null() || out_buf.is_null() || out_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let ctx = unsafe { &mut *ctx };
+    let plaintext = unsafe { std::slice::from_raw_parts(plaintext, plaintext_len) };
+    let out_buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+
+    // Allocate seq from atomic counter (same counter shared with ACK sender)
+    let seq = ctx.send_seq.fetch_add(1, Ordering::Relaxed);
+
+    // Encrypt
+    let cipher = ChaCha20Poly1305::new((&ctx.send_key).into());
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&seq.to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let encrypted = match cipher.encrypt(nonce, plaintext) {
+        Ok(ct) => ct,
+        Err(e) => {
+            set_last_error(&format!("encryption failed: {}", e));
+            return ZtlpResult::EncryptionError as i32;
+        }
+    };
+
+    // Build data header with auth tag
+    let mut header = crate::packet::DataHeader::new(ctx.session_id, seq);
+    let aad = header.aad_bytes();
+    header.header_auth_tag = compute_header_auth_tag(&ctx.send_key, &aad);
+
+    // Serialize
+    let packet = crate::packet::ZtlpPacket::Data {
+        header,
+        payload: encrypted,
+    };
+    let serialized = packet.serialize();
+
+    if serialized.len() > out_buf_len {
+        set_last_error(&format!(
+            "output buffer too small: need {} got {}",
+            serialized.len(),
+            out_buf_len
+        ));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    out_buf[..serialized.len()].copy_from_slice(&serialized);
+    unsafe { *out_written = serialized.len() };
+    0
+}
+
+/// Decrypt a raw ZTLP wire packet into plaintext.
+///
+/// Args:
+///   ctx        — crypto context
+///   packet     — raw UDP payload (complete ZTLP packet)
+///   packet_len — length of packet
+///   out_buf    — output buffer for decrypted payload
+///   out_buf_len — size of out_buf
+///   out_written — receives number of bytes written
+///
+/// Returns 0 on success, negative error code on failure.
+/// On success, out_payload_data and out_payload_len are set to point
+/// into out_buf.
+#[no_mangle]
+pub extern "C" fn ztlp_decrypt_packet(
+    ctx: *mut ZtlpCryptoContext,
+    packet: *const u8,
+    packet_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if ctx.is_null() || packet.is_null() || out_buf.is_null() || out_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let ctx = unsafe { &mut *ctx };
+    let packet = unsafe { std::slice::from_raw_parts(packet, packet_len) };
+    let out_buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+
+    // Parse the packet header
+    let header = match crate::packet::DataHeader::deserialize(packet) {
+        Ok(h) => h,
+        Err(e) => {
+            set_last_error(&format!("header parse failed: {}", e));
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+
+    // Anti-replay check
+    if !ctx.recv_window.check_and_record(header.packet_seq) {
+        set_last_error("replay detected");
+        return ZtlpResult::InternalError as i32;
+    }
+
+    // Extract encrypted payload (after the data header)
+    let payload_start = crate::packet::DATA_HEADER_SIZE;
+    if packet.len() < payload_start {
+        set_last_error("packet too short for header");
+        return ZtlpResult::InternalError as i32;
+    }
+    let encrypted = &packet[payload_start..];
+
+    // Decrypt
+    let cipher = ChaCha20Poly1305::new((&ctx.recv_key).into());
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let plaintext = match cipher.decrypt(nonce, encrypted) {
+        Ok(pt) => pt,
+        Err(e) => {
+            set_last_error(&format!("decryption failed: {}", e));
+            return ZtlpResult::EncryptionError as i32;
+        }
+    };
+
+    if plaintext.len() > out_buf_len {
+        set_last_error(&format!(
+            "output buffer too small: need {} got {}",
+            plaintext.len(),
+            out_buf_len
+        ));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    out_buf[..plaintext.len()].copy_from_slice(&plaintext);
+    unsafe { *out_written = plaintext.len() };
+    0
+}
+
+// Frame type constants (matching recv_loop in ffi.rs)
+const FRAME_DATA: u8 = 0x00;
+const FRAME_ACK: u8 = 0x01;
+const FRAME_FIN: u8 = 0x02;
+const FRAME_NACK: u8 = 0x03;
+const FRAME_CLOSE: u8 = 0x05;
+
+/// Build a FRAME_DATA envelope: [0x00 | data_seq(8 bytes BE) | payload].
+///
+/// This wraps raw data for sending through the tunnel.
+/// Bumps and uses the context's internal data_seq counter.
+///
+/// Returns 0 on success, error code on failure.
+#[no_mangle]
+pub extern "C" fn ztlp_frame_data(
+    payload: *const u8,
+    payload_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+    data_seq_in: u64,
+) -> i32 {
+    // This function takes an explicit data_seq so the caller controls it
+    // (since it may be tracked separately from the transport pkt_seq).
+    if payload.is_null() || out_buf.is_null() || out_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let payload = unsafe { std::slice::from_raw_parts(payload, payload_len) };
+    let out_buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+
+    // Frame: [FRAME_DATA(1) | data_seq(8 BE) | payload]
+    let frame_len = 1 + 8 + payload_len;
+    if frame_len > out_buf_len {
+        set_last_error(&format!(
+            "output buffer too small: need {} got {}",
+            frame_len, out_buf_len
+        ));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    out_buf[0] = FRAME_DATA;
+    out_buf[1..9].copy_from_slice(&data_seq_in.to_be_bytes());
+    out_buf[9..9 + payload_len].copy_from_slice(payload);
+
+    unsafe { *out_written = frame_len };
+    0
+}
+
+/// Parse a decrypted frame — returns frame type and payload.
+///
+/// Args:
+///   decrypted      — decrypted packet payload
+///   decrypted_len  — length of decrypted data
+///   out_frame_type — receives the frame type byte (0x00=data, 0x01=ack, etc.)
+///   out_seq        — receives the data sequence number (8 bytes BE after frame type)
+///   out_payload    — receives pointer to payload start (within decrypted buffer)
+///   out_payload_len — receives payload length
+///
+/// Returns 0 on success, negative error code on failure.
+#[no_mangle]
+pub extern "C" fn ztlp_parse_frame(
+    decrypted: *const u8,
+    decrypted_len: usize,
+    out_frame_type: *mut u8,
+    out_seq: *mut u64,
+    out_payload: *mut *const u8,
+    out_payload_len: *mut usize,
+) -> i32 {
+    if decrypted.is_null()
+        || out_frame_type.is_null()
+        || out_seq.is_null()
+        || out_payload.is_null()
+        || out_payload_len.is_null()
+    {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let decrypted = unsafe { std::slice::from_raw_parts(decrypted, decrypted_len) };
+
+    if decrypted.is_empty() {
+        set_last_error("empty frame");
+        return ZtlpResult::InternalError as i32;
+    }
+
+    let frame_type = decrypted[0];
+    unsafe { *out_frame_type = frame_type };
+
+    if decrypted_len < 9 {
+        // Frame is shorter than type + 8-byte seq — treat as special (keepalive etc.)
+        unsafe {
+            *out_seq = 0;
+            *out_payload = decrypted.as_ptr();
+            *out_payload_len = decrypted_len;
+        }
+        return 0;
+    }
+
+    let seq = u64::from_be_bytes(decrypted[1..9].try_into().unwrap_or([0u8; 8]));
+    unsafe { *out_seq = seq };
+
+    let payload_offset = 9;
+    let payload_len = decrypted_len - payload_offset;
+    unsafe {
+        *out_payload = decrypted[payload_offset..].as_ptr();
+        *out_payload_len = payload_len;
+    }
+    0
+}
+
+/// Build an ACK frame: [FRAME_ACK(0x01) | ack_seq(8 bytes BE)].
+///
+/// Returns 0 on success, error code on failure.
+/// Written bytes: 9 total.
+#[no_mangle]
+pub extern "C" fn ztlp_build_ack(
+    ack_seq: u64,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    if out_buf_len < 9 {
+        set_last_error(&format!("output buffer too small: need 9 got {}", out_buf_len));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+    buf[0] = FRAME_ACK;
+    buf[1..9].copy_from_slice(&ack_seq.to_be_bytes());
+    unsafe { *out_written = 9 };
+    0
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]

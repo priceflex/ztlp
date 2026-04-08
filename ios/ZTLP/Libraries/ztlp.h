@@ -962,6 +962,141 @@ int32_t ztlp_pin_gateway_key(const char *key_hex);
  */
 int32_t ztlp_verify_gateway_pin(const char *key_hex);
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Sync Crypto Context (Phase 1: Strip Tokio)
+ *
+ * Synchronous encrypt/decrypt FFI that does NOT require the tokio runtime.
+ * Extract a context after handshake succeeds, then use it for sync
+ * packet encryption and decryption. This enables the tokio-free iOS
+ * architecture (Option 1 in IOS-MEMORY-OPTIMIZATION.md).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Opaque handle for sync crypto context. */
+typedef struct ZtlpCryptoContext ZtlpCryptoContext;
+
+/**
+ * @brief Extract a sync crypto context from a connected client.
+ *
+ * Call this AFTER ztlp_connect succeeds. The context holds the session
+ * keys, sequence counter, and anti-replay window needed for sync
+ * encrypt/decrypt without tokio.
+ *
+ * @param client  Connected ZtlpClient handle (must have active session).
+ * @return Opaque context handle on success, NULL on failure.
+ *         Caller must free with ztlp_crypto_context_free().
+ */
+ZtlpCryptoContext *ztlp_crypto_context_extract(ZtlpClient *client);
+
+/**
+ * @brief Free a crypto context handle.
+ *
+ * @param ctx  Context handle, or NULL (safe no-op).
+ */
+void ztlp_crypto_context_free(ZtlpCryptoContext *ctx);
+
+/** @brief Get the session ID string from a crypto context. */
+const char *ztlp_crypto_context_session_id(const ZtlpCryptoContext *ctx);
+
+/** @brief Get the peer address string from a crypto context. */
+const char *ztlp_crypto_context_peer_addr(const ZtlpCryptoContext *ctx);
+
+/**
+ * @brief Encrypt plaintext into a full ZTLP wire packet (sync, no tokio).
+ *
+ * Allocates a packet sequence number from the shared atomic counter,
+ * encrypts with ChaCha20-Poly1305, builds a DataHeader with auth tag,
+ * and serializes the complete ZTLP packet.
+ *
+ * @param ctx            Crypto context (from ztlp_crypto_context_extract).
+ * @param plaintext      Raw payload to encrypt.
+ * @param plaintext_len  Length of plaintext.
+ * @param out_buf        Output buffer (caller-allocated).
+ * @param out_buf_len    Size of out_buf.
+ * @param out_written    Receives number of bytes written.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_encrypt_packet(
+    ZtlpCryptoContext *ctx,
+    const uint8_t *plaintext, size_t plaintext_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+/**
+ * @brief Decrypt a raw ZTLP wire packet (sync, no tokio).
+ *
+ * Parses the packet header, checks the anti-replay window, and
+ * decrypts with ChaCha20-Poly1305.
+ *
+ * @param ctx         Crypto context.
+ * @param packet      Raw UDP payload (complete ZTLP packet).
+ * @param packet_len  Length of packet.
+ * @param out_buf     Output buffer for decrypted payload.
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives number of bytes written.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_decrypt_packet(
+    ZtlpCryptoContext *ctx,
+    const uint8_t *packet, size_t packet_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+/**
+ * @brief Build a FRAME_DATA envelope: [0x00 | data_seq(8 BE) | payload].
+ *
+ * Wraps raw payload data for tunneling through ZTLP.
+ *
+ * @param payload        Raw data payload.
+ * @param payload_len    Length of payload.
+ * @param out_buf        Output buffer.
+ * @param out_buf_len    Size of out_buf.
+ * @param out_written    Receives frame length (1+8+payload_len).
+ * @param data_seq       Data sequence number (caller-managed).
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_frame_data(
+    const uint8_t *payload, size_t payload_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written,
+    uint64_t data_seq
+);
+
+/**
+ * @brief Parse a decrypted frame into type, sequence, and payload.
+ *
+ * @param decrypted      Decrypted packet payload.
+ * @param decrypted_len  Length of decrypted data.
+ * @param out_frame_type Receives frame type (0x00=data, 0x01=ack, etc.).
+ * @param out_seq        Receives data sequence number (8 bytes BE after type).
+ * @param out_payload    Receives pointer to payload start (inside decrypted).
+ * @param out_payload_len Receives payload length.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_parse_frame(
+    const uint8_t *decrypted, size_t decrypted_len,
+    uint8_t *out_frame_type,
+    uint64_t *out_seq,
+    const uint8_t **out_payload,
+    size_t *out_payload_len
+);
+
+/**
+ * @brief Build an ACK frame: [0x01 | ack_seq(8 bytes BE)].
+ *
+ * @param ack_seq     Acknowledged data sequence number.
+ * @param out_buf     Output buffer (needs at least 9 bytes).
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives 9 on success.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_build_ack(
+    uint64_t ack_seq,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

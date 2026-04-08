@@ -1103,6 +1103,10 @@ async fn recv_loop(
     // = ~600KB max reassembly memory.
     const REASSEMBLY_MAX_ENTRIES: usize = 512;
 
+    // Cap for received_ahead BTreeSet (out-of-order tracking).
+    // 1024 entries × ~56 bytes per BTreeSet node = ~56KB max.
+    const RECEIVED_AHEAD_MAX: usize = 1024;
+
     // NAT keepalive: send an encrypted empty frame every 5s to keep
     // UDP NAT mappings alive. Nebula uses 5s which handles aggressive
     // cellular NATs (some have timeouts as low as 20-30s). The previous
@@ -1518,7 +1522,9 @@ async fn recv_loop(
                             gap_detected_at = None;
                         }
                     } else if data_seq > next_expected_seq {
-                        received_ahead.insert(data_seq);
+                        if received_ahead.len() < RECEIVED_AHEAD_MAX {
+                            received_ahead.insert(data_seq);
+                        }
                         // Start gap timer if this is first out-of-order packet
                         if gap_detected_at.is_none() {
                             gap_detected_at = Some(std::time::Instant::now());

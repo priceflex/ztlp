@@ -45,6 +45,10 @@ const TCP_MSS: u16 = 1360;
 /// Flow inactivity timeout in seconds.
 const FLOW_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum packets in outbound queue. Bounds memory for iOS NE (15MB limit).
+/// 256 packets × ~1400 bytes = ~350KB.
+const OUTBOUND_MAX_PACKETS: usize = 256;
+
 /// Default tunnel subnet: 10.122.0.0/16.
 const DEFAULT_SUBNET: Ipv4Addr = Ipv4Addr::new(10, 122, 0, 0);
 const DEFAULT_PREFIX_LEN: u32 = 16;
@@ -529,6 +533,7 @@ pub struct PacketRouter {
     /// Reverse lookup: stream_id → FlowKey.
     stream_to_flow: HashMap<u32, FlowKey>,
     /// Outbound packet queue (responses to inject back into utun).
+    /// Capped at OUTBOUND_MAX_PACKETS to bound memory in iOS NE (15MB limit).
     outbound: VecDeque<Vec<u8>>,
     /// The tunnel interface's own IP address (e.g., the utun source IP).
     #[allow(dead_code)]
@@ -900,6 +905,10 @@ impl PacketRouter {
             );
 
             flow.server_seq = flow.server_seq.wrapping_add(chunk.len() as u32);
+            // Cap outbound queue to prevent unbounded memory growth in iOS NE
+            if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
+                self.outbound.pop_front();
+            }
             self.outbound.push_back(pkt);
             offset = chunk_end;
         }

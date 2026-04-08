@@ -111,6 +111,11 @@ impl SendController {
     /// The payload will be sent when `flush()` is called and the congestion
     /// window allows it.
     pub fn enqueue(&mut self, framed_data: Vec<u8>) {
+        // Cap pending queue to bound memory (512 × ~1200B ≈ 600KB)
+        if self.pending_queue.len() >= 512 {
+            tracing::warn!("send_controller: pending_queue full (512), dropping oldest");
+            self.pending_queue.pop_front();
+        }
         self.pending_queue.push_back(framed_data);
     }
 
@@ -121,6 +126,10 @@ impl SendController {
     /// otherwise the gateway can't advance its send window, creating a
     /// circular deadlock.
     pub fn enqueue_priority(&mut self, framed_data: Vec<u8>) {
+        // Cap priority queue to bound memory (128 entries, ACK frames are small)
+        if self.priority_queue.len() >= 128 {
+            self.priority_queue.pop_front();
+        }
         self.priority_queue.push_back(framed_data);
     }
 
@@ -151,6 +160,12 @@ impl SendController {
                 seq, framed.len(), self.peer_addr
             );
 
+            // Cap priority_buffer to prevent unbounded growth
+            if self.priority_buffer.len() >= 128 {
+                if let Some(&oldest) = self.priority_buffer.keys().next() {
+                    self.priority_buffer.remove(&oldest);
+                }
+            }
             self.priority_buffer.insert(
                 seq,
                 SendEntry {

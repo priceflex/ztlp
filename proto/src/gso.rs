@@ -424,7 +424,7 @@ impl GroReceiver {
         let buf_size = if gro_enabled {
             GRO_RECV_BUF_SIZE
         } else {
-            65535
+            crate::transport::MAX_PACKET_SIZE
         };
 
         debug!(

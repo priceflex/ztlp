@@ -80,10 +80,10 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 /// Maximum read buffer size for TCP proxy connections.
-const TCP_READ_BUF_SIZE: usize = 65536;
+const TCP_READ_BUF_SIZE: usize = 8192;
 
 /// Maximum concurrent TCP connections per listener.
-const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
 
 /// TLS handshake timeout in seconds.
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -433,7 +433,7 @@ impl StreamDispatcher {
 
     /// Register a new stream and return the receiver for it.
     pub fn register(&self, stream_id: u32) -> mpsc::Receiver<Vec<u8>> {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(64);
         if let Ok(mut streams) = self.streams.lock() {
             streams.insert(stream_id, tx);
         }

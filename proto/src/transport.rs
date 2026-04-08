@@ -23,7 +23,10 @@ use crate::packet::{DataHeader, SessionId, ZtlpPacket};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
 
 /// Maximum UDP datagram size we'll handle.
-pub const MAX_PACKET_SIZE: usize = 65535;
+/// ZTLP packets are ~1400B (MTU-constrained). 2048 provides headroom
+/// while avoiding 64KB-per-recv allocations that cause memory pressure
+/// in iOS Network Extension (15MB limit).
+pub const MAX_PACKET_SIZE: usize = 2048;
 
 /// A ZTLP transport node — binds a UDP socket and processes packets.
 pub struct TransportNode {

@@ -2443,9 +2443,13 @@ async fn cmd_connect(
     let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
     ctx.read_message(noise_payload2)?;
 
-    // Message 3: final confirmation (with retransmit on timeout)
+    // Message 3: final confirmation with ClientProfile (for CC selection)
     eprintln!("{}", c_dim("→ Sending final confirmation (message 3/3)..."));
-    let msg3 = ctx.write_message(&[])?;
+    let profile = ztlp_proto::client_profile::ClientProfile::desktop(
+        format!("ztlp/{}", env!("CARGO_PKG_VERSION")),
+    );
+    let profile_cbor = profile.to_cbor();
+    let msg3 = ctx.write_message(&profile_cbor)?;
     let mut final_hdr = HandshakeHeader::new(MsgType::Data);
     final_hdr.session_id = session_id;
     final_hdr.src_node_id = *identity.node_id.as_bytes();

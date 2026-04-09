@@ -500,7 +500,7 @@
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lztlp_proto",
+					"-lztlp_proto_ne",
 					"-lresolv",
 					"-lz",
 				);
@@ -669,7 +669,7 @@
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"-lztlp_proto",
+					"-lztlp_proto_ne",
 					"-lresolv",
 					"-lz",
 				);

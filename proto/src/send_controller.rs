@@ -112,8 +112,8 @@ impl SendController {
     /// window allows it.
     pub fn enqueue(&mut self, framed_data: Vec<u8>) {
         // Cap pending queue to bound memory (512 × ~1200B ≈ 600KB)
-        if self.pending_queue.len() >= 512 {
-            tracing::warn!("send_controller: pending_queue full (512), dropping oldest");
+        if self.pending_queue.len() >= 2048 {
+            tracing::warn!("send_controller: pending_queue full (2048), dropping oldest");
             self.pending_queue.pop_front();
         }
         self.pending_queue.push_back(framed_data);

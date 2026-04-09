@@ -405,6 +405,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func loadOrCreateIdentitySync(config: TunnelConfiguration) throws -> OpaquePointer {
         let identityPath = config.identityPath ?? defaultIdentityPath()
 
+        // Try loading saved identity first (has node ID from previous session)
         if let path = identityPath, FileManager.default.fileExists(atPath: path) {
             let ptr = path.withCString { ztlp_identity_from_file($0) }
             if let ptr = ptr {
@@ -414,24 +415,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             logger.warn("Failed to load identity from \(path): \(lastError())", source: "Tunnel")
         }
 
-        // Try hardware identity first (Secure Enclave)
-        let hwPtr = ztlp_identity_from_hardware(1)
-        if let hwPtr = hwPtr {
-            logger.info("Created Secure Enclave identity", source: "Tunnel")
-            return hwPtr
-        }
-        logger.debug("Secure Enclave unavailable: \(lastError())", source: "Tunnel")
-
-        // Fall back to software identity
+        // Generate software identity (has node ID immediately).
+        // NOTE: Secure Enclave identity skipped — ztlp_connect_sync requires
+        // a node identity (node ID) which hardware keys don't have until
+        // enrollment via ztlp_client_new. Software identity works directly.
         guard let swPtr = ztlp_identity_generate() else {
             throw makeNSError("Failed to generate identity: \(lastError())")
         }
 
+        // Save so we reuse the same node ID on reconnects
         if let path = identityPath {
+            let dirPath = (path as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
             path.withCString { ztlp_identity_save(swPtr, $0) }
+            logger.info("Saved new identity to \(path)", source: "Tunnel")
         }
 
-        logger.info("Generated software identity", source: "Tunnel")
+        let nodeId = ztlp_identity_node_id(swPtr)
+        let nodeIdStr = nodeId != nil ? String(cString: nodeId!) : "unknown"
+        logger.info("Generated software identity: \(nodeIdStr)", source: "Tunnel")
         return swPtr
     }
 

@@ -14,9 +14,7 @@
 // Memory: TEXT segment ~1.65 MB (down from 4.7 MB with tokio).
 
 import NetworkExtension
-import Network
 import Foundation
-import CoreTelephony
 
 /// App Group identifier shared between the main app and this extension.
 private let appGroupId = "group.com.ztlp.shared"
@@ -209,47 +207,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.resolvedGateway = target
 
                 // Step 5: Set client profile for CC selection
-                // Detect interface type from NWPathMonitor (Network framework)
-                let interfaceType: UInt8 = {
-                    let monitor = NWPathMonitor()
-                    let currentPath = monitor.currentPath
-                    monitor.cancel()
-                    if currentPath.usesInterfaceType(.cellular) {
-                        return 1  // Cellular
-                    } else if currentPath.usesInterfaceType(.wifi) {
-                        return 2  // WiFi
-                    } else if currentPath.usesInterfaceType(.wiredEthernet) {
-                        return 3  // Wired
-                    } else {
-                        return 0  // Unknown
-                    }
-                }()
-
-                var radioTech: UInt8 = 0  // Unknown
-                let teleInfo = CTTelephonyNetworkInfo()
-                if let radioAccess = teleInfo.serviceCurrentRadioAccessTechnology?.values.first {
-                    switch radioAccess {
-                    case CTRadioAccessTechnologyGPRS, CTRadioAccessTechnologyEdge:
-                        radioTech = 1  // 2G
-                    case CTRadioAccessTechnologyWCDMA, CTRadioAccessTechnologyHSDPA, CTRadioAccessTechnologyHSUPA:
-                        radioTech = 2  // 3G
-                    case CTRadioAccessTechnologyLTE:
-                        radioTech = 3  // LTE
-                    default:
-                        if radioAccess.contains("NR") {
-                            radioTech = 4  // 5G
-                        }
-                    }
-                }
-
-                let isConstrained: UInt8 = {
-                    let monitor = NWPathMonitor()
-                    let constrained = monitor.currentPath.isConstrained
-                    monitor.cancel()
-                    return constrained ? 1 : 0
-                }()
-                self.logger.info("Client profile: iface=\(interfaceType) radio=\(radioTech) constrained=\(isConstrained)", source: "Tunnel")
-                ztlp_set_client_profile(interfaceType, radioTech, isConstrained)
+                // Lightweight: just declare mobile, skip NWPathMonitor/CTTelephonyNetworkInfo
+                // (those frameworks add ~4MB runtime memory, pushing NE over 15MB limit)
+                // TODO: Phase 2 — add lightweight interface detection without heavy frameworks
+                ztlp_set_client_profile(0, 0, 0)  // mobile + unknown interface
+                self.logger.info("Client profile: mobile (lightweight)", source: "Tunnel")
 
                 // Step 6: Sync connect (blocking, no tokio)
                 self.logger.info("Connecting to \(target) via ztlp_connect_sync...", source: "Tunnel")

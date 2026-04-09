@@ -292,9 +292,9 @@ pub fn detect_system(
             // and fills in ~28ms. Log this prominently for iOS diagnostics.
             if recv <= 1_048_576 {
                 warn!(
-                    "iOS-DIAG: UDP recv buffer capped at {}KB by kernel (requested {}KB). \
+                    "UDP recv buffer capped at {}KB by kernel (requested {}KB). \
                      This limits in-flight packets to ~{} before kernel drops begin. \
-                     This is a known iOS limitation.",
+                     Run `sudo ztlp tune --apply` to fix.",
                     recv / 1024, target_kb, recv / 1200
                 );
             } else {
@@ -309,7 +309,7 @@ pub fn detect_system(
     if let Some(send) = send_buffer_size {
         if send < TARGET_BUFFER_SIZE / 2 {
             warn!(
-                "iOS-DIAG: UDP send buffer is {}KB (target: {}KB). ACK sending may be delayed.",
+                "UDP send buffer is {}KB (target: {}KB). ACK sending may be delayed.",
                 send / 1024, target_kb
             );
         }

@@ -8753,20 +8753,47 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
         (rmem, wmem)
     };
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let (rmem_max, wmem_max) = {
+        // macOS: read UDP recv/send buffer limits via sysctl
+        fn read_sysctl(name: &str) -> usize {
+            std::process::Command::new("sysctl")
+                .arg("-n")
+                .arg(name)
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(0)
+        }
+        let recv = read_sysctl("net.inet.udp.recvspace");
+        let send = read_sysctl("net.inet.udp.maxdgram");
+        (recv, send)
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let (rmem_max, wmem_max) = (0usize, 0usize);
 
     // Display current state
     let rmem_ok = rmem_max >= target;
     let wmem_ok = wmem_max >= target;
 
+    // Platform-appropriate label names
+    #[cfg(target_os = "linux")]
+    let (recv_label, send_label) = ("rmem_max", "wmem_max");
+    #[cfg(target_os = "macos")]
+    let (recv_label, send_label) = ("net.inet.udp.recvspace", "net.inet.udp.maxdgram");
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (recv_label, send_label) = ("UDP recv buf", "UDP send buf");
+
     eprintln!(
-        "  {} rmem_max: {} ({})",
+        "  {} {}: {} ({})",
         if rmem_ok {
             c_green("✓")
         } else {
             c_yellow("⚠")
         },
+        recv_label,
         format_bytes(rmem_max),
         if rmem_ok {
             "OK".to_string()
@@ -8776,12 +8803,13 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
     );
 
     eprintln!(
-        "  {} wmem_max: {} ({})",
+        "  {} {}: {} ({})",
         if wmem_ok {
             c_green("✓")
         } else {
             c_yellow("⚠")
         },
+        send_label,
         format_bytes(wmem_max),
         if wmem_ok {
             "OK".to_string()
@@ -8790,11 +8818,22 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
         },
     );
 
-    // Check kernel version
+    // Check kernel/OS version
     #[cfg(target_os = "linux")]
     {
         if let Ok(ver) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
             eprintln!("  {} kernel: {}", c_dim("ℹ"), ver.trim());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+        {
+            if let Ok(ver) = String::from_utf8(output.stdout) {
+                eprintln!("  {} macOS: {}", c_dim("ℹ"), ver.trim());
+            }
         }
     }
 
@@ -8817,10 +8856,18 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
         eprintln!("    {} ztlp tune --apply --persist", c_cyan("sudo"));
         eprintln!();
         eprintln!("  Or manually:");
+        #[cfg(target_os = "linux")]
         eprintln!(
             "    sudo sysctl -w net.core.rmem_max={} net.core.wmem_max={}",
             target, target,
         );
+        #[cfg(target_os = "macos")]
+        {
+            eprintln!("    sudo sysctl -w net.inet.udp.recvspace={}", target);
+            eprintln!("    sudo sysctl -w net.inet.udp.maxdgram=65535");
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        eprintln!("    (see your OS documentation for UDP buffer tuning)");
         eprintln!();
         return Ok(());
     }
@@ -8889,16 +8936,91 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
         eprintln!();
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let target_str = target.to_string();
+
+        if !rmem_ok {
+            match Command::new("sysctl")
+                .arg("-w")
+                .arg(format!("net.inet.udp.recvspace={}", target_str))
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    eprintln!("  {} Set net.inet.udp.recvspace = {}", c_green("✓"), format_bytes(target));
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "  {} Failed to set recvspace: {} (run with sudo?)",
+                        c_red("✗"), err.trim()
+                    );
+                    return Err("insufficient permissions — run with sudo".into());
+                }
+                Err(e) => {
+                    eprintln!("  {} Failed to run sysctl: {}", c_red("✗"), e);
+                    return Err("sysctl not found".into());
+                }
+            }
+        }
+
+        if !wmem_ok {
+            match Command::new("sysctl")
+                .arg("-w")
+                .arg("net.inet.udp.maxdgram=65535")
+                .output()
+            {
+                Ok(o) if o.status.success() => {
+                    eprintln!("  {} Set net.inet.udp.maxdgram = 65535", c_green("✓"));
+                }
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "  {} Failed to set maxdgram: {} (run with sudo?)",
+                        c_red("✗"), err.trim()
+                    );
+                    return Err("insufficient permissions — run with sudo".into());
+                }
+                Err(e) => {
+                    eprintln!("  {} Failed to run sysctl: {}", c_red("✗"), e);
+                    return Err("sysctl not found".into());
+                }
+            }
+        }
+
+        if persist {
+            // macOS: persist via /etc/sysctl.conf (read at boot on some versions)
+            // or advise launchd plist for modern macOS
+            eprintln!(
+                "  {} macOS note: sysctl settings don't persist natively across reboots.",
+                c_yellow("⚠")
+            );
+            eprintln!(
+                "  {} Add to /etc/sysctl.conf or create a launchd plist:",
+                c_dim("ℹ")
+            );
+            eprintln!("    net.inet.udp.recvspace={}", target);
+            eprintln!("    net.inet.udp.maxdgram=65535");
+        }
+
+        eprintln!();
+        eprintln!(
+            "  {} System tuned for optimal ZTLP performance.",
+            c_green("✓")
+        );
+        eprintln!();
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         eprintln!(
-            "  {} Automatic tuning is only supported on Linux.",
+            "  {} Automatic tuning is not supported on this platform.",
             c_yellow("⚠")
         );
         eprintln!(
-            "  {} On macOS, increase with: sudo sysctl -w kern.ipc.maxsockbuf={}",
-            c_dim("ℹ"),
-            target * 2,
+            "  {} See your OS documentation for UDP socket buffer tuning.",
+            c_dim("ℹ")
         );
         eprintln!();
     }

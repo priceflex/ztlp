@@ -88,8 +88,38 @@ d6ec1d4 feat: iOS sync FFI sends mobile ClientProfile in handshake
 4ab240f fix: revert to single libztlp_proto.a for both targets
 ```
 
+## iOS Benchmark Result: 11/11 ✓
+
+Confirmed working at 19:51 UTC. All 11 tests pass with mobile CC profile.
+
+## Key Lessons Learned
+
+1. **NWPathMonitor + CTTelephonyNetworkInfo add ~4MB runtime memory** — pushed NE from ~15MB to 19.6MB, causing jetsam kills. Stripped in favor of lightweight `ztlp_set_client_profile(0,0,0)`.
+
+2. **Tokio FFI path needs `#[cfg(target_os = "ios")]` gating** — in-app benchmark uses tokio FFI which was sending `ClientProfile::desktop`, causing gateway to apply aggressive desktop CC (cwnd=64/256) that overwhelmed mobile connections. Now sends mobile on iOS, desktop on other platforms.
+
+3. **Two-lib approach works but fragile** — `libztlp_proto_ne.a` (26MB, no tokio) for NE, `libztlp_proto.a` (54MB, full tokio) for main app. pbxproj editing must match config IDs to targets via XCConfigurationList, not by line proximity.
+
+4. **Always sync ztlp.h** — `cp proto/include/ztlp.h ios/ZTLP/Libraries/ztlp.h` after any FFI changes. Git stash/pull can revert this.
+
+## Commits (full session)
+```
+ef227ba feat: add ciborium CBOR dep + ClientProfile struct
+e85ad15 feat: send ClientProfile in msg3 (desktop default)
+d6ec1d4 feat: iOS sync FFI sends mobile ClientProfile
+5b8a62a feat: iOS NE reports network type in client profile
+880c4a6 feat: gateway parses ClientProfile and selects CC profile
+4587756 fix: ztlp CLI connect also sends ClientProfile in msg3
+796610a fix: use NWPathMonitor instead of NEPacketTunnelProvider.defaultPath
+c897949 fix: correct two-lib linking — tunnel=_ne, app=_proto
+dff5c51 fix: strip NWPathMonitor/CoreTelephony from NE — saves ~4MB
+f774f12 fix: tokio FFI sends mobile profile on iOS, desktop elsewhere
+```
+
 ## Next Steps
-- Run iOS benchmark → expect 11/11 with mobile CC
-- Monitor gateway logs for `class=mobile iface=wifi/cellular`
+- Desktop/Linux testing — verify `class=desktop → cwnd=64/256` gives higher throughput
+- macOS testing — same desktop CC profile
+- Windows testing — cross-compile and verify
 - Phase 2: Mid-session NetworkStatusUpdate (WiFi↔cellular transitions)
 - Phase 3: Passive RTT-based fallback for legacy clients
+- Phase 2 iOS: Lightweight interface detection without heavy frameworks

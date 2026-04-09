@@ -443,15 +443,15 @@ defmodule ZtlpGateway.Session do
   # Start at 10 packets (standard TCP IW=10, RFC 6928) and grow via slow start.
   # cwnd doubles per RTT until ssthresh, then grows linearly (congestion avoidance).
   # On loss: cwnd halved (multiplicative decrease).
-  # 2026-04-09: Restored from conservative mobile tuning. The mobile CC was masking
-  # the real problem (iOS NE memory pressure). Now that memory is fixed (sync FFI,
-  # tokio stripped, buffers capped), the original CC values work for all clients.
-  # Kept: loss_beta 0.7 (Cubic-style), NewReno recovery, backpressure, stall timeout.
-  @initial_cwnd 64.0
-  # Maximum congestion window. 256 × 1140 = ~292KB inflight.
-  # Restored from mobile-tuned 32. Memory was the real bottleneck, not CC.
-  @max_cwnd 256
-  # Minimum cwnd — allow deep recovery backoff.
+  # 2026-04-07: Conservative mobile tuning. See TUNING-LOG.md for rationale.
+  # Previous: cwnd=32, max=512, ssthresh=512, beta=0.75 → dup ACK spirals at cwnd~60
+  # 2026-04-08: Phase 1 — Cubic-style beta for cellular. loss_beta 0.5→0.7, max_cwnd 24→32.
+  # See TUNING-LOG.md Change 4 for full rationale.
+  @initial_cwnd 10.0
+  # Maximum congestion window. 32 × 1140 = 36.5KB inflight max.
+  # Gives headroom above sustainable 16-24 range so sawtooth stays in range.
+  @max_cwnd 32
+  # Minimum cwnd — low floor allows meaningful recovery (cwnd 22→4 vs old 12→10)
   @min_cwnd 4
   # Minimum ssthresh floor. Low floor for deep lossy-path backoff.
   @min_ssthresh 8
@@ -470,9 +470,9 @@ defmodule ZtlpGateway.Session do
   # path died, etc). Tear it down so the phone reconnects with a fresh session.
   # 30s gives headroom for 5MB at 3 Mbps (~13s baseline + recovery delays).
   @stall_timeout_ms 30_000
-  # Slow-start threshold. Restored from mobile-tuned 64.
-  # Allows slow start to ramp up before entering congestion avoidance.
-  @initial_ssthresh 128
+  # Slow-start threshold — set above max_cwnd so slow start hits cwnd cap naturally.
+  # Previous 32=max_cwnd meant immediate CA entry at ceiling.
+  @initial_ssthresh 64
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
   @max_rto_retransmit_per_tick 8
@@ -481,12 +481,12 @@ defmodule ZtlpGateway.Session do
   @use_bbr true
 
   # Pacing interval: ms between burst sends.
-  # 1ms × 8 packets = 9120 bytes/ms = ~73 Mbps pacing rate.
-  # Restored from mobile-tuned 4ms×3 (~6.8 Mbps). Desktop needs full speed.
-  @pacing_interval_ms 1
-  # Max packets sent per pacing tick — 8×1140=9120 bytes per burst.
-  # Restored from mobile-tuned 3. Fast links need larger bursts.
-  @burst_size 8
+  # 4ms × 3 packets = 855 bytes/ms = ~6.8 Mbps pacing rate.
+  # Aligns with LTE TTI scheduling (1ms). Previous 5ms×2 = 3.6 Mbps was too slow.
+  @pacing_interval_ms 4
+  # Max packets sent per pacing tick — 3×1140=3420 bytes per burst.
+  # LTE handles 3-packet bursts well. Previous 2 was too conservative.
+  @burst_size 3
 
   # Maximum plaintext payload per ZTLP data packet.
   # Max plaintext payload per ZTLP packet.
@@ -630,7 +630,7 @@ defmodule ZtlpGateway.Session do
         in_recovery: false,
         recovery_data_seq: 0,
         # cwnd value at recovery entry — restored on exit (inflation is temporary)
-        recovery_cwnd: @initial_cwnd,  # restored from mobile-tuned 10.0
+        recovery_cwnd: @initial_cwnd,  # 16.0 after mobile tuning
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
         sacked_set: MapSet.new(),

@@ -47,6 +47,7 @@ ed25519-dalek = { version = "2", features = ["std"] }
 curve25519-dalek = "4"
 libc = "0.2"
 rustls-pemfile = "2"
+ciborium = "0.2"
 
 # --- Optional: tokio runtime + CLI deps (not needed for iOS NE) ---
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "signal", "macros", "process"], optional = true }

@@ -40,6 +40,7 @@ pub mod admission;
 #[cfg(feature = "tokio-runtime")]
 pub mod agent;
 pub mod android;
+pub mod client_profile;
 pub mod anti_replay;
 pub mod enrollment;
 pub mod error;

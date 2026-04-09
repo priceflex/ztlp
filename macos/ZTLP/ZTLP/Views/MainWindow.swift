@@ -11,6 +11,7 @@ struct MainWindow: View {
     @ObservedObject var settingsViewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
+    @ObservedObject var certManager: CertificateManager
 
     @State private var selectedTab: SidebarTab = .home
 
@@ -51,7 +52,8 @@ struct MainWindow: View {
                 SettingsView(
                     viewModel: settingsViewModel,
                     enrollmentViewModel: enrollmentViewModel,
-                    configuration: configuration
+                    configuration: configuration,
+                    certManager: certManager
                 )
             }
         }

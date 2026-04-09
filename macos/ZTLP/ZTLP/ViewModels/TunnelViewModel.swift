@@ -583,6 +583,11 @@ final class TunnelViewModel: ObservableObject {
             // Start DNS resolver (safe to call again — re-binds on new port)
             try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
 
+            // Auto-generate TLS certs for registered services (if mkcert available)
+            let certMgr = CertificateManager()
+            certMgr.generateServiceCert(hostname: "beta.techrockstars.ztlp")
+            certMgr.generateServiceCert(hostname: "vault.techrockstars.ztlp")
+
             await MainActor.run {
                 vipStatus = "VIP proxy active — beta + vault services"
             }

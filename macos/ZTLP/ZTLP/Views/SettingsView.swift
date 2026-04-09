@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
+    @ObservedObject var certManager: CertificateManager
 
     @State private var showAdvanced = false
     @State private var showRegenConfirm = false
@@ -22,6 +23,7 @@ struct SettingsView: View {
             generalSection
             identitySection
             enrollmentSection
+            CertificateTrustView(certManager: certManager)
 
             if showAdvanced {
                 connectionSection

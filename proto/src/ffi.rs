@@ -891,6 +891,12 @@ async fn do_connect(
         .map_err(|e| format!("handshake msg2: {}", e))?;
 
     // ── Message 3: final confirmation (with ClientProfile) ──
+    #[cfg(target_os = "ios")]
+    let profile = crate::client_profile::ClientProfile::mobile(
+        format!("ztlp-ios/{}", env!("CARGO_PKG_VERSION")),
+        crate::client_profile::InterfaceType::Unknown,
+    );
+    #[cfg(not(target_os = "ios"))]
     let profile = crate::client_profile::ClientProfile::desktop(
         format!("ztlp/{}", env!("CARGO_PKG_VERSION")),
     );

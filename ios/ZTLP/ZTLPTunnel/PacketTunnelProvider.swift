@@ -14,7 +14,9 @@
 // Memory: TEXT segment ~1.65 MB (down from 4.7 MB with tokio).
 
 import NetworkExtension
+import Network
 import Foundation
+import CoreTelephony
 
 /// App Group identifier shared between the main app and this extension.
 private let appGroupId = "group.com.ztlp.shared"
@@ -206,7 +208,44 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let target = try self.resolveGateway(config: config, svcName: svcName)
                 self.resolvedGateway = target
 
-                // Step 5: Sync connect (blocking, no tokio)
+                // Step 5: Set client profile for CC selection
+                let interfaceType: UInt8
+                if let path = self.defaultPath {
+                    if path.usesInterfaceType(.cellular) {
+                        interfaceType = 1  // Cellular
+                    } else if path.usesInterfaceType(.wifi) {
+                        interfaceType = 2  // WiFi
+                    } else if path.usesInterfaceType(.wiredEthernet) {
+                        interfaceType = 3  // Wired
+                    } else {
+                        interfaceType = 0  // Unknown
+                    }
+                } else {
+                    interfaceType = 0  // Unknown
+                }
+
+                var radioTech: UInt8 = 0  // Unknown
+                let teleInfo = CTTelephonyNetworkInfo()
+                if let radioAccess = teleInfo.serviceCurrentRadioAccessTechnology?.values.first {
+                    switch radioAccess {
+                    case CTRadioAccessTechnologyGPRS, CTRadioAccessTechnologyEdge:
+                        radioTech = 1  // 2G
+                    case CTRadioAccessTechnologyWCDMA, CTRadioAccessTechnologyHSDPA, CTRadioAccessTechnologyHSUPA:
+                        radioTech = 2  // 3G
+                    case CTRadioAccessTechnologyLTE:
+                        radioTech = 3  // LTE
+                    default:
+                        if radioAccess.contains("NR") {
+                            radioTech = 4  // 5G
+                        }
+                    }
+                }
+
+                let isConstrained: UInt8 = (self.defaultPath?.isConstrained ?? false) ? 1 : 0
+                self.logger.info("Client profile: iface=\(interfaceType) radio=\(radioTech) constrained=\(isConstrained)", source: "Tunnel")
+                ztlp_set_client_profile(interfaceType, radioTech, isConstrained)
+
+                // Step 6: Sync connect (blocking, no tokio)
                 self.logger.info("Connecting to \(target) via ztlp_connect_sync...", source: "Tunnel")
 
                 let cryptoCtx = target.withCString { targetCStr -> OpaquePointer? in

@@ -577,6 +577,10 @@ defmodule ZtlpGateway.Session do
         recv_window: MapSet.new(),
         recv_window_base: :unset,
         recv_buffer: %{},
+        # Timestamp when recv_window_base last advanced (for gap-skip detection)
+        recv_window_base_last_advance: nil,
+        # Timer ref for recv gap check
+        recv_gap_timer_ref: nil,
         send_seq: 0,
         # Tunnel framing: data_seq for ordered reassembly
         send_data_seq: 0,
@@ -871,6 +875,63 @@ defmodule ZtlpGateway.Session do
   end
 
   # Pacing timer — send next packet from queue if window allows
+  # Recv window gap-skip: if recv_window_base hasn't advanced for 2+ seconds
+  # and there are buffered packets beyond the gap, skip the missing packet(s).
+  def handle_info(:recv_gap_check, state) do
+    state = %{state | recv_gap_timer_ref: nil}
+
+    if state.phase != :established or state.recv_window_base == :unset do
+      {:noreply, state}
+    else
+      now = System.monotonic_time(:millisecond)
+      stuck_since = state.recv_window_base_last_advance || now
+      stuck_ms = now - stuck_since
+      buffered = map_size(state.recv_buffer)
+
+      if stuck_ms >= 2000 and buffered > 0 do
+        # Find the next available seq in the buffer
+        next_available = state.recv_buffer
+          |> Map.keys()
+          |> Enum.sort()
+          |> List.first()
+
+        if next_available && next_available > state.recv_window_base do
+          skipped = next_available - state.recv_window_base
+          Logger.warning("[Session] RECV_GAP_SKIP: base=#{state.recv_window_base} -> #{next_available} (skipped #{skipped} lost packets, #{buffered} buffered, stuck #{stuck_ms}ms)")
+
+          # Advance recv_window_base to the next available seq, clearing the gap
+          state = %{state |
+            recv_window_base: next_available,
+            recv_window: Enum.reduce(state.recv_window_base..(next_available - 1), state.recv_window, fn seq, win ->
+              MapSet.delete(win, seq)
+            end)
+          }
+
+          # Now try to deliver from the new base
+          case deliver_recv_window_loop(state, false) do
+            {:stop, reason, stop_state} ->
+              {:stop, reason, stop_state}
+
+            {:ok, new_state, true} ->
+              new_state = send_ack(new_state.recv_window_base - 1, new_state)
+              new_state = %{new_state | recv_window_base_last_advance: now}
+              {:noreply, new_state}
+
+            {:ok, new_state, false} ->
+              # Still stuck — reschedule
+              ref = Process.send_after(self(), :recv_gap_check, 2000)
+              {:noreply, %{new_state | recv_gap_timer_ref: ref}}
+          end
+        else
+          {:noreply, state}
+        end
+      else
+        # Not stuck long enough or no buffered packets
+        {:noreply, state}
+      end
+    end
+  end
+
   def handle_info(:pacing_tick, state) do
     queue_len = :queue.len(state.send_queue)
     buf_len = map_size(state.send_buffer)
@@ -1430,10 +1491,26 @@ defmodule ZtlpGateway.Session do
       {:ok, new_state, true} ->
         # Delivered at least one packet — send cumulative ACK
         new_state = send_ack(new_state.recv_window_base - 1, new_state)
+        # Base advanced — reset stuck timer
+        new_state = %{new_state | recv_window_base_last_advance: System.monotonic_time(:millisecond)}
+        new_state = cancel_recv_gap_timer(new_state)
         {:noreply, new_state}
 
       {:ok, new_state, false} ->
-        # No contiguous delivery possible (gap at base), packet is buffered
+        # No contiguous delivery possible (gap at base), packet is buffered.
+        # Schedule gap-skip timer if not already set and there are buffered packets.
+        new_state = if map_size(new_state.recv_buffer) > 0 and is_nil(new_state.recv_gap_timer_ref) do
+          now = System.monotonic_time(:millisecond)
+          new_state = if is_nil(new_state.recv_window_base_last_advance) do
+            %{new_state | recv_window_base_last_advance: now}
+          else
+            new_state
+          end
+          ref = Process.send_after(self(), :recv_gap_check, 2000)
+          %{new_state | recv_gap_timer_ref: ref}
+        else
+          new_state
+        end
         {:noreply, new_state}
     end
   end
@@ -2029,12 +2106,18 @@ defmodule ZtlpGateway.Session do
   end
   defp schedule_pacing_timer(state), do: state
 
+  defp cancel_recv_gap_timer(state) do
+    if state.recv_gap_timer_ref, do: Process.cancel_timer(state.recv_gap_timer_ref)
+    %{state | recv_gap_timer_ref: nil}
+  end
+
   # Cancel any pending retransmit, pacing, and rekey timers (used on RESET/cleanup).
   defp cancel_timers(state) do
     if state.retransmit_timer_ref, do: Process.cancel_timer(state.retransmit_timer_ref)
     if state.pacing_timer_ref, do: Process.cancel_timer(state.pacing_timer_ref)
     if state.rekey_timer_ref, do: Process.cancel_timer(state.rekey_timer_ref)
-    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil, rekey_timer_ref: nil}
+    if state.recv_gap_timer_ref, do: Process.cancel_timer(state.recv_gap_timer_ref)
+    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil, rekey_timer_ref: nil, recv_gap_timer_ref: nil}
   end
 
   defp encrypt_and_send(plaintext, state) do

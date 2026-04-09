@@ -890,9 +890,13 @@ async fn do_connect(
     ctx.read_message(noise_payload2)
         .map_err(|e| format!("handshake msg2: {}", e))?;
 
-    // ── Message 3: final confirmation ──
+    // ── Message 3: final confirmation (with ClientProfile) ──
+    let profile = crate::client_profile::ClientProfile::desktop(
+        format!("ztlp/{}", env!("CARGO_PKG_VERSION")),
+    );
+    let profile_cbor = profile.to_cbor();
     let msg3 = ctx
-        .write_message(&[])
+        .write_message(&profile_cbor)
         .map_err(|e| format!("handshake msg3: {}", e))?;
 
     let mut final_hdr = HandshakeHeader::new(MsgType::Data);

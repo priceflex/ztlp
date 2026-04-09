@@ -295,6 +295,24 @@ typedef void (*ZtlpRecvCallback)(void *user_data, const uint8_t *data,
 typedef void (*ZtlpDisconnectCallback)(void *user_data, ZtlpSession *session,
                                         int32_t reason);
 
+/**
+ * Callback for sending pre-encrypted ACK packets via a platform-native socket.
+ *
+ * The library encrypts ACK frames into full ZTLP wire packets and invokes
+ * this callback with the raw bytes and destination address. The platform
+ * should send via a separate UDP socket/NWConnection to avoid kernel
+ * contention with the library's internal recv socket.
+ *
+ * @param user_data  Opaque context passed during registration.
+ * @param data       Pre-encrypted ZTLP packet bytes (ready to send as-is).
+ * @param len        Length of the data in bytes.
+ * @param dest_addr  Destination address as "IP:port" string (e.g., "34.219.64.205:23095").
+ *
+ * @warning Invoked on the library's background thread. Do NOT block.
+ */
+typedef void (*ZtlpAckSendCallback)(void *user_data, const uint8_t *data,
+                                     size_t len, const char *dest_addr);
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -552,6 +570,22 @@ int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
                                       void *user_data);
 
 /**
+ * @brief Register a callback for ACK packet sending via platform-native I/O.
+ *
+ * When registered, the library will invoke this callback with pre-encrypted
+ * ACK packets. The platform should send these bytes via a separate UDP
+ * socket (e.g., NWConnection on iOS) to avoid kernel contention.
+ *
+ * @param client     The ZTLP client handle.
+ * @param callback   Function pointer for ACK sending.
+ * @param user_data  Opaque context passed to the callback.
+ * @return ZTLP_OK on success.
+ */
+int32_t ztlp_set_ack_send_callback(ZtlpClient *client,
+                                    ZtlpAckSendCallback callback,
+                                    void *user_data);
+
+/**
  * @brief Disconnect from the current session.
  *
  * Stops the background recv loop and releases the active session.
@@ -724,6 +758,87 @@ char *ztlp_ns_resolve(const char *service_name,
                        uint32_t timeout_ms);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * Packet Router (iOS utun / TUN interface)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Create a new packet router for the iOS utun interface.
+ *
+ * Initializes a userspace TCP/IP handler that processes raw IPv4 packets
+ * from the tunnel interface. Maps destination IPs in 10.122.0.0/16 to
+ * ZTLP service names and creates mux streams to the gateway.
+ *
+ * @param client       Valid client handle.
+ * @param tunnel_addr  IPv4 address of the utun interface (e.g., "10.122.0.100").
+ *                     Null-terminated C string.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_new(ZtlpClient *client, const char *tunnel_addr);
+
+/**
+ * @brief Register a VIP service with the packet router.
+ *
+ * Maps a VIP address to a ZTLP service name. Traffic to this VIP on any
+ * port will be routed through a ZTLP mux stream to the named service.
+ *
+ * Example: ztlp_router_add_service(client, "10.122.0.1", "vault")
+ *
+ * @param client        Valid client handle.
+ * @param vip           VIP IPv4 address (e.g., "10.122.0.1"). Null-terminated.
+ * @param service_name  ZTLP service name (e.g., "vault"). Null-terminated.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_add_service(ZtlpClient *client,
+                                 const char *vip,
+                                 const char *service_name);
+
+/**
+ * @brief Write a raw IPv4 packet into the packet router.
+ *
+ * Called from Swift when NEPacketTunnelProvider.readPackets() delivers a
+ * packet from the utun interface. The router parses IP/TCP, manages
+ * connection state, and queues response packets.
+ *
+ * After calling this, call ztlp_router_read_packet() to retrieve any
+ * outbound response packets (SYN-ACK, ACK, data, FIN).
+ *
+ * @param client  Valid client handle.
+ * @param data    Raw IPv4 packet bytes.
+ * @param len     Length of the packet in bytes.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_write_packet(ZtlpClient *client,
+                                  const uint8_t *data,
+                                  size_t len);
+
+/**
+ * @brief Read the next outbound IPv4 packet from the router.
+ *
+ * Returns one complete IPv4 packet to inject back into the utun interface
+ * via NEPacketTunnelProvider.writePackets(). Call in a loop until 0 is
+ * returned to drain all queued packets.
+ *
+ * @param client   Valid client handle.
+ * @param buf      Output buffer for the IPv4 packet.
+ * @param buf_len  Size of the output buffer in bytes.
+ * @return Positive: bytes written to buf. 0: no packets available. Negative: error.
+ */
+int32_t ztlp_router_read_packet(ZtlpClient *client,
+                                 uint8_t *buf,
+                                 size_t buf_len);
+
+/**
+ * @brief Stop and destroy the packet router.
+ *
+ * Cleans up all TCP flows and releases resources. Call when tearing down
+ * the VPN tunnel.
+ *
+ * @param client  Valid client handle.
+ * @return 0 on success, negative on error.
+ */
+int32_t ztlp_router_stop(ZtlpClient *client);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * Statistics
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -771,6 +886,321 @@ const char *ztlp_version(void);
  *         Valid until the next ZTLP call on this thread.
  */
 const char *ztlp_last_error(void);
+
+/* ─── NS Certificate Authority ─────────────────────────────────── */
+
+/**
+ * @brief Fetch the CA root certificate (DER) from the ZTLP-NS server.
+ *
+ * Sends a 0x14 0x01 query to the NS and returns the raw DER bytes.
+ * The returned buffer must be freed with ztlp_bytes_free().
+ *
+ * @param ns_server  NS server address as "host:port"
+ * @param timeout_ms Query timeout in milliseconds (0 = default 5000ms)
+ * @param out_data   Receives pointer to DER data (caller frees with ztlp_bytes_free)
+ * @param out_len    Receives length of DER data
+ * @return 0 on success, negative on error (check ztlp_last_error)
+ */
+int32_t ztlp_ns_fetch_ca_root(
+    const char *ns_server,
+    uint32_t timeout_ms,
+    uint8_t **out_data,
+    uint32_t *out_len
+);
+
+/**
+ * @brief Free a byte buffer returned by ztlp_ns_fetch_ca_root().
+ *
+ * @param data Pointer returned by ztlp_ns_fetch_ca_root
+ * @param len  Length returned by ztlp_ns_fetch_ca_root
+ */
+void ztlp_bytes_free(uint8_t *data, uint32_t len);
+
+/**
+ * @brief Fetch the CA chain (PEM) from the ZTLP-NS server.
+ *
+ * Returns a null-terminated PEM string containing the intermediate and
+ * root certificates. Caller must free with ztlp_string_free().
+ *
+ * @param ns_server  NS server address as "host:port"
+ * @param timeout_ms Query timeout in milliseconds (0 = default 5000ms)
+ * @return PEM string on success (free with ztlp_string_free), NULL on error
+ */
+char *ztlp_ns_fetch_ca_chain_pem(
+    const char *ns_server,
+    uint32_t timeout_ms
+);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Gateway Key Pinning (Certificate Pinning)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * @brief Pin a gateway's static Noise public key.
+ *
+ * Stores the key in ~/.ztlp/config.toml so that subsequent connections
+ * will reject gateways whose static key doesn't match any pinned key.
+ * Multiple keys can be pinned for key rotation support.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return ZTLP_OK on success, ZTLP_INVALID_ARGUMENT on bad input,
+ *         ZTLP_INTERNAL_ERROR on I/O failure.
+ */
+int32_t ztlp_pin_gateway_key(const char *key_hex);
+
+/**
+ * @brief Verify a gateway's static key against pinned keys.
+ *
+ * Checks if the given key matches any key in the pinned_gateway_keys
+ * configuration list.
+ *
+ * @param key_hex  Hex-encoded 32-byte X25519 public key (64 hex chars).
+ *                 Null-terminated C string.
+ * @return 1 if key matches (or no keys pinned), 0 if no match,
+ *         negative on error.
+ */
+int32_t ztlp_verify_gateway_pin(const char *key_hex);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Sync Crypto Context (Phase 1: Strip Tokio)
+ *
+ * Synchronous encrypt/decrypt FFI that does NOT require the tokio runtime.
+ * Extract a context after handshake succeeds, then use it for sync
+ * packet encryption and decryption. This enables the tokio-free iOS
+ * architecture (Option 1 in IOS-MEMORY-OPTIMIZATION.md).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Opaque handle for sync crypto context. */
+typedef struct ZtlpCryptoContext ZtlpCryptoContext;
+
+/**
+ * @brief Blocking synchronous connect using plain UDP (no tokio runtime).
+ *
+ * Performs the full Noise_XX 3-message handshake via std::net::UdpSocket
+ * and returns a ZtlpCryptoContext directly — no runtime, no callbacks,
+ * no background threads. The caller (Swift) handles recv via NWConnection.
+ *
+ * This is the iOS sync-connect entry point. Call it on a background
+ * queue so it doesn't block the main thread. After success, use
+ * ztlp_encrypt_packet/ztlp_decrypt_packet for all tunnel I/O.
+ *
+ * @param identity    ZTLP identity (from ztlp_identity_generate or ztlp_identity_from_file).
+ *                    Ownership is NOT transferred (identity must outlive the call).
+ * @param config      Optional connection config (relay, timeout, service_name), or NULL.
+ * @param target      Gateway/peer address as "host:port" (e.g. "relay.ztlp.net:4433").
+ * @param timeout_ms  Overall handshake timeout in milliseconds (0 = default 15000).
+ * @return ZtlpCryptoContext* on success (caller must free with ztlp_crypto_context_free).
+ *         NULL on failure (check ztlp_last_error).
+ */
+ZtlpCryptoContext *ztlp_connect_sync(
+    ZtlpIdentity *identity,
+    ZtlpConfig *config,
+    const char *target,
+    uint32_t timeout_ms
+);
+
+/**
+ * @brief Extract a sync crypto context from a connected client.
+ *
+ * Call this AFTER ztlp_connect succeeds. The context holds the session
+ * keys, sequence counter, and anti-replay window needed for sync
+ * encrypt/decrypt without tokio.
+ *
+ * @param client  Connected ZtlpClient handle (must have active session).
+ * @return Opaque context handle on success, NULL on failure.
+ *         Caller must free with ztlp_crypto_context_free().
+ */
+ZtlpCryptoContext *ztlp_crypto_context_extract(ZtlpClient *client);
+
+/**
+ * @brief Free a crypto context handle.
+ *
+ * @param ctx  Context handle, or NULL (safe no-op).
+ */
+void ztlp_crypto_context_free(ZtlpCryptoContext *ctx);
+
+/** @brief Get the session ID string from a crypto context. */
+const char *ztlp_crypto_context_session_id(const ZtlpCryptoContext *ctx);
+
+/** @brief Get the peer address string from a crypto context. */
+const char *ztlp_crypto_context_peer_addr(const ZtlpCryptoContext *ctx);
+
+/**
+ * @brief Encrypt plaintext into a full ZTLP wire packet (sync, no tokio).
+ *
+ * Allocates a packet sequence number from the shared atomic counter,
+ * encrypts with ChaCha20-Poly1305, builds a DataHeader with auth tag,
+ * and serializes the complete ZTLP packet.
+ *
+ * @param ctx            Crypto context (from ztlp_crypto_context_extract).
+ * @param plaintext      Raw payload to encrypt.
+ * @param plaintext_len  Length of plaintext.
+ * @param out_buf        Output buffer (caller-allocated).
+ * @param out_buf_len    Size of out_buf.
+ * @param out_written    Receives number of bytes written.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_encrypt_packet(
+    ZtlpCryptoContext *ctx,
+    const uint8_t *plaintext, size_t plaintext_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+/**
+ * @brief Decrypt a raw ZTLP wire packet (sync, no tokio).
+ *
+ * Parses the packet header, checks the anti-replay window, and
+ * decrypts with ChaCha20-Poly1305.
+ *
+ * @param ctx         Crypto context.
+ * @param packet      Raw UDP payload (complete ZTLP packet).
+ * @param packet_len  Length of packet.
+ * @param out_buf     Output buffer for decrypted payload.
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives number of bytes written.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_decrypt_packet(
+    ZtlpCryptoContext *ctx,
+    const uint8_t *packet, size_t packet_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+/**
+ * @brief Build a FRAME_DATA envelope: [0x00 | data_seq(8 BE) | payload].
+ *
+ * Wraps raw payload data for tunneling through ZTLP.
+ *
+ * @param payload        Raw data payload.
+ * @param payload_len    Length of payload.
+ * @param out_buf        Output buffer.
+ * @param out_buf_len    Size of out_buf.
+ * @param out_written    Receives frame length (1+8+payload_len).
+ * @param data_seq       Data sequence number (caller-managed).
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_frame_data(
+    const uint8_t *payload, size_t payload_len,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written,
+    uint64_t data_seq
+);
+
+/**
+ * @brief Parse a decrypted frame into type, sequence, and payload.
+ *
+ * @param decrypted      Decrypted packet payload.
+ * @param decrypted_len  Length of decrypted data.
+ * @param out_frame_type Receives frame type (0x00=data, 0x01=ack, etc.).
+ * @param out_seq        Receives data sequence number (8 bytes BE after type).
+ * @param out_payload    Receives pointer to payload start (inside decrypted).
+ * @param out_payload_len Receives payload length.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_parse_frame(
+    const uint8_t *decrypted, size_t decrypted_len,
+    uint8_t *out_frame_type,
+    uint64_t *out_seq,
+    const uint8_t **out_payload,
+    size_t *out_payload_len
+);
+
+/**
+ * @brief Build an ACK frame: [0x01 | ack_seq(8 bytes BE)].
+ *
+ * @param ack_seq     Acknowledged data sequence number.
+ * @param out_buf     Output buffer (needs at least 9 bytes).
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives 9 on success.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_build_ack(
+    uint64_t ack_seq,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+// ── Standalone Packet Router (ios-sync: no ZtlpClient needed) ──────────
+
+/**
+ * @brief Opaque handle for a standalone PacketRouter.
+ * Used in ios-sync builds where ZtlpClient is not available.
+ */
+typedef struct ZtlpPacketRouter ZtlpPacketRouter;
+
+/**
+ * @brief Create a standalone PacketRouter.
+ * @param tunnel_addr Tunnel interface IP (e.g., "10.122.0.1").
+ * @return Router handle, or NULL on error.
+ */
+ZtlpPacketRouter *ztlp_router_new_sync(const char *tunnel_addr);
+
+/**
+ * @brief Add a service to a standalone router.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_router_add_service_sync(
+    ZtlpPacketRouter *router,
+    const char *vip,
+    const char *service_name
+);
+
+/**
+ * @brief Write an IPv4 packet into the standalone router.
+ *
+ * Returns number of RouterActions generated. Actions are serialized into
+ * action_buf as: [1B type][4B stream_id BE][2B data_len BE][data...]
+ * Type: 0=OpenStream, 1=SendData, 2=CloseStream.
+ *
+ * @param router         Router handle.
+ * @param data           Raw IPv4 packet from utun.
+ * @param len            Packet length.
+ * @param action_buf     Output buffer for serialized actions.
+ * @param action_buf_len Size of action buffer.
+ * @param action_written Receives total bytes written to action_buf.
+ * @return Number of actions (>=0), or negative error code.
+ */
+int32_t ztlp_router_write_packet_sync(
+    ZtlpPacketRouter *router,
+    const uint8_t *data, size_t len,
+    uint8_t *action_buf, size_t action_buf_len,
+    size_t *action_written
+);
+
+/**
+ * @brief Read next outbound IPv4 packet from the standalone router.
+ * @return Bytes written (positive), 0 if no packets, negative on error.
+ */
+int32_t ztlp_router_read_packet_sync(
+    ZtlpPacketRouter *router,
+    uint8_t *buf, size_t buf_len
+);
+
+/**
+ * @brief Feed gateway response data into the router for a specific stream.
+ * Generates TCP data packets retrievable via ztlp_router_read_packet_sync().
+ */
+int32_t ztlp_router_gateway_data_sync(
+    ZtlpPacketRouter *router,
+    uint32_t stream_id,
+    const uint8_t *data, size_t len
+);
+
+/**
+ * @brief Notify the router that the gateway closed a stream.
+ */
+int32_t ztlp_router_gateway_close_sync(
+    ZtlpPacketRouter *router,
+    uint32_t stream_id
+);
+
+/**
+ * @brief Stop and free a standalone router.
+ */
+void ztlp_router_stop_sync(ZtlpPacketRouter *router);
 
 #ifdef __cplusplus
 } /* extern "C" */

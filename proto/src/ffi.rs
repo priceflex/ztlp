@@ -3503,6 +3503,233 @@ pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
     })
 }
 
+// ── Standalone Packet Router FFI (ios-sync: no ZtlpClient wrapper) ─────
+//
+// These functions operate on a raw PacketRouter pointer, bypassing the
+// ZtlpClient/tokio infrastructure. Used by the Swift NE when building
+// with --features ios-sync.
+
+/// Opaque handle for a standalone PacketRouter (no ZtlpClient needed).
+pub struct ZtlpPacketRouter {
+    inner: std::sync::Mutex<crate::packet_router::PacketRouter>,
+}
+
+/// Create a standalone PacketRouter. Returns null on error.
+#[no_mangle]
+pub extern "C" fn ztlp_router_new_sync(tunnel_addr: *const c_char) -> *mut ZtlpPacketRouter {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if tunnel_addr.is_null() {
+            set_last_error("tunnel_addr is null");
+            return std::ptr::null_mut();
+        }
+        let addr_str = unsafe { CStr::from_ptr(tunnel_addr) };
+        let addr_str = match addr_str.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(&format!("invalid UTF-8: {}", e));
+                return std::ptr::null_mut();
+            }
+        };
+        let ip: std::net::Ipv4Addr = match addr_str.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                set_last_error(&format!("invalid IPv4: {}", e));
+                return std::ptr::null_mut();
+            }
+        };
+        let router = crate::packet_router::PacketRouter::new(ip);
+        Box::into_raw(Box::new(ZtlpPacketRouter {
+            inner: std::sync::Mutex::new(router),
+        }))
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_router_new_sync");
+        std::ptr::null_mut()
+    })
+}
+
+/// Add a service to a standalone router.
+#[no_mangle]
+pub extern "C" fn ztlp_router_add_service_sync(
+    router: *mut ZtlpPacketRouter,
+    vip: *const c_char,
+    service_name: *const c_char,
+) -> i32 {
+    if router.is_null() || vip.is_null() || service_name.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let router = unsafe { &*router };
+    let vip_str = unsafe { CStr::from_ptr(vip) };
+    let svc_str = unsafe { CStr::from_ptr(service_name) };
+    let vip_str = match vip_str.to_str() {
+        Ok(s) => s,
+        Err(_) => { set_last_error("invalid UTF-8 in vip"); return ZtlpResult::InvalidArgument as i32; }
+    };
+    let svc_str = match svc_str.to_str() {
+        Ok(s) => s,
+        Err(_) => { set_last_error("invalid UTF-8 in service_name"); return ZtlpResult::InvalidArgument as i32; }
+    };
+    let ip: std::net::Ipv4Addr = match vip_str.parse() {
+        Ok(ip) => ip,
+        Err(e) => { set_last_error(&format!("invalid IPv4: {}", e)); return ZtlpResult::InvalidArgument as i32; }
+    };
+    match router.inner.lock() {
+        Ok(mut r) => { r.add_service(ip, svc_str.to_string()); ZtlpResult::Ok as i32 }
+        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+    }
+}
+
+/// Write an IPv4 packet into the standalone router. Returns router actions
+/// serialized as: [u8 action_type, u32 stream_id, ...data].
+/// action_type: 0=OpenStream (+ service_name bytes), 1=SendData (+ data), 2=CloseStream.
+/// Returns number of actions, or negative on error. Actions are buffered internally
+/// and retrieved via ztlp_router_next_action_sync().
+///
+/// For simplicity, this version just processes the packet and buffers outbound
+/// TCP packets. The caller should call ztlp_router_read_packet_sync() to drain them.
+/// RouterActions (OpenStream/SendData/CloseStream) are returned via a separate call.
+#[no_mangle]
+pub extern "C" fn ztlp_router_write_packet_sync(
+    router: *mut ZtlpPacketRouter,
+    data: *const u8,
+    len: usize,
+    // Output: action buffer. Caller provides buffer, we write serialized actions.
+    action_buf: *mut u8,
+    action_buf_len: usize,
+    action_written: *mut usize,
+) -> i32 {
+    if router.is_null() || data.is_null() || action_buf.is_null() || action_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let router = unsafe { &*router };
+    let packet = unsafe { std::slice::from_raw_parts(data, len) };
+    let out_buf = unsafe { std::slice::from_raw_parts_mut(action_buf, action_buf_len) };
+
+    match router.inner.lock() {
+        Ok(mut r) => {
+            let actions = r.process_inbound(packet);
+            // Serialize actions into the output buffer:
+            // Each action: [1 byte type][4 bytes stream_id BE][2 bytes data_len BE][data...]
+            // Type: 0=OpenStream, 1=SendData, 2=CloseStream
+            let mut offset = 0;
+            let mut count: i32 = 0;
+            for action in &actions {
+                match action {
+                    crate::packet_router::RouterAction::OpenStream { stream_id, service_name } => {
+                        let svc_bytes = service_name.as_bytes();
+                        let needed = 1 + 4 + 2 + svc_bytes.len();
+                        if offset + needed > action_buf_len { break; }
+                        out_buf[offset] = 0; offset += 1;
+                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
+                        out_buf[offset..offset+2].copy_from_slice(&(svc_bytes.len() as u16).to_be_bytes()); offset += 2;
+                        out_buf[offset..offset+svc_bytes.len()].copy_from_slice(svc_bytes); offset += svc_bytes.len();
+                        count += 1;
+                    }
+                    crate::packet_router::RouterAction::SendData { stream_id, data } => {
+                        let needed = 1 + 4 + 2 + data.len();
+                        if offset + needed > action_buf_len { break; }
+                        out_buf[offset] = 1; offset += 1;
+                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
+                        out_buf[offset..offset+2].copy_from_slice(&(data.len() as u16).to_be_bytes()); offset += 2;
+                        out_buf[offset..offset+data.len()].copy_from_slice(data); offset += data.len();
+                        count += 1;
+                    }
+                    crate::packet_router::RouterAction::CloseStream { stream_id } => {
+                        let needed = 1 + 4 + 2;
+                        if offset + needed > action_buf_len { break; }
+                        out_buf[offset] = 2; offset += 1;
+                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
+                        out_buf[offset..offset+2].copy_from_slice(&0u16.to_be_bytes()); offset += 2;
+                        count += 1;
+                    }
+                }
+            }
+            unsafe { *action_written = offset; }
+            count
+        }
+        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+    }
+}
+
+/// Read next outbound IPv4 packet from the standalone router.
+/// Returns bytes written (positive), 0 if no packets, negative on error.
+#[no_mangle]
+pub extern "C" fn ztlp_router_read_packet_sync(
+    router: *mut ZtlpPacketRouter,
+    buf: *mut u8,
+    buf_len: usize,
+) -> i32 {
+    if router.is_null() || buf.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let router = unsafe { &*router };
+    match router.inner.lock() {
+        Ok(mut r) => {
+            if let Some(pkt) = r.pop_outbound() {
+                if pkt.len() > buf_len {
+                    set_last_error("buffer too small");
+                    return ZtlpResult::InvalidArgument as i32;
+                }
+                let out = unsafe { std::slice::from_raw_parts_mut(buf, buf_len) };
+                out[..pkt.len()].copy_from_slice(&pkt);
+                pkt.len() as i32
+            } else {
+                0
+            }
+        }
+        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+    }
+}
+
+/// Feed gateway response data into the router for a specific stream.
+/// This generates TCP data packets that go back to the app via utun.
+#[no_mangle]
+pub extern "C" fn ztlp_router_gateway_data_sync(
+    router: *mut ZtlpPacketRouter,
+    stream_id: u32,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    if router.is_null() || data.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let router = unsafe { &*router };
+    let payload = unsafe { std::slice::from_raw_parts(data, len) };
+    match router.inner.lock() {
+        Ok(mut r) => { r.process_gateway_data(stream_id, payload); ZtlpResult::Ok as i32 }
+        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+    }
+}
+
+/// Notify the router that the gateway closed a stream (FIN).
+#[no_mangle]
+pub extern "C" fn ztlp_router_gateway_close_sync(
+    router: *mut ZtlpPacketRouter,
+    stream_id: u32,
+) -> i32 {
+    if router.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let router = unsafe { &*router };
+    match router.inner.lock() {
+        Ok(mut r) => { r.process_gateway_close(stream_id); ZtlpResult::Ok as i32 }
+        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+    }
+}
+
+/// Stop and free a standalone router.
+#[no_mangle]
+pub extern "C" fn ztlp_router_stop_sync(router: *mut ZtlpPacketRouter) {
+    if !router.is_null() {
+        unsafe { let _ = Box::from_raw(router); }
+    }
+}
+
 // ── Sync Crypto Context & FFI (Phase 1: Strip Tokio) ───────────────────
 
 use chacha20poly1305::{

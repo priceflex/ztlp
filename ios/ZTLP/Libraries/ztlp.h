@@ -1123,6 +1123,85 @@ int32_t ztlp_build_ack(
     size_t *out_written
 );
 
+// ── Standalone Packet Router (ios-sync: no ZtlpClient needed) ──────────
+
+/**
+ * @brief Opaque handle for a standalone PacketRouter.
+ * Used in ios-sync builds where ZtlpClient is not available.
+ */
+typedef struct ZtlpPacketRouter ZtlpPacketRouter;
+
+/**
+ * @brief Create a standalone PacketRouter.
+ * @param tunnel_addr Tunnel interface IP (e.g., "10.122.0.1").
+ * @return Router handle, or NULL on error.
+ */
+ZtlpPacketRouter *ztlp_router_new_sync(const char *tunnel_addr);
+
+/**
+ * @brief Add a service to a standalone router.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_router_add_service_sync(
+    ZtlpPacketRouter *router,
+    const char *vip,
+    const char *service_name
+);
+
+/**
+ * @brief Write an IPv4 packet into the standalone router.
+ *
+ * Returns number of RouterActions generated. Actions are serialized into
+ * action_buf as: [1B type][4B stream_id BE][2B data_len BE][data...]
+ * Type: 0=OpenStream, 1=SendData, 2=CloseStream.
+ *
+ * @param router         Router handle.
+ * @param data           Raw IPv4 packet from utun.
+ * @param len            Packet length.
+ * @param action_buf     Output buffer for serialized actions.
+ * @param action_buf_len Size of action buffer.
+ * @param action_written Receives total bytes written to action_buf.
+ * @return Number of actions (>=0), or negative error code.
+ */
+int32_t ztlp_router_write_packet_sync(
+    ZtlpPacketRouter *router,
+    const uint8_t *data, size_t len,
+    uint8_t *action_buf, size_t action_buf_len,
+    size_t *action_written
+);
+
+/**
+ * @brief Read next outbound IPv4 packet from the standalone router.
+ * @return Bytes written (positive), 0 if no packets, negative on error.
+ */
+int32_t ztlp_router_read_packet_sync(
+    ZtlpPacketRouter *router,
+    uint8_t *buf, size_t buf_len
+);
+
+/**
+ * @brief Feed gateway response data into the router for a specific stream.
+ * Generates TCP data packets retrievable via ztlp_router_read_packet_sync().
+ */
+int32_t ztlp_router_gateway_data_sync(
+    ZtlpPacketRouter *router,
+    uint32_t stream_id,
+    const uint8_t *data, size_t len
+);
+
+/**
+ * @brief Notify the router that the gateway closed a stream.
+ */
+int32_t ztlp_router_gateway_close_sync(
+    ZtlpPacketRouter *router,
+    uint32_t stream_id
+);
+
+/**
+ * @brief Stop and free a standalone router.
+ */
+void ztlp_router_stop_sync(ZtlpPacketRouter *router);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

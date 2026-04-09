@@ -385,6 +385,7 @@ defmodule ZtlpGateway.Session do
 
   alias ZtlpGateway.{
     Bbr,
+    Cbor,
     Config,
     Crypto,
     Handshake,
@@ -640,7 +641,11 @@ defmodule ZtlpGateway.Session do
         # Stall detection: track when ACK last advanced (monotonic ms).
         # If no ACK progress for @stall_timeout_ms while data is in flight,
         # the session is a zombie — tear it down so the phone reconnects.
-        last_ack_advance_at: System.monotonic_time(:millisecond)
+        last_ack_advance_at: System.monotonic_time(:millisecond),
+        # Client-type detection: parsed from msg3 CBOR payload
+        client_profile: nil,
+        # Per-session congestion control profile (selected from client_profile)
+        cc_profile: nil
       }
       |> Map.merge(rekey_state)
 
@@ -936,7 +941,7 @@ defmodule ZtlpGateway.Session do
     queue_len = :queue.len(state.send_queue)
     buf_len = map_size(state.send_buffer)
     if queue_len > 0 do
-      effective_window = min(trunc(state.cwnd), @max_cwnd)
+      effective_window = min(trunc(state.cwnd), cc_max_cwnd(state))
       window_open = buf_len < effective_window
       Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len}/#{effective_window} inflight/cwnd, ssthresh=#{trunc(state.ssthresh)} open=#{window_open}")
     end
@@ -1036,7 +1041,7 @@ defmodule ZtlpGateway.Session do
         # When in recovery, new packets timing out for the first time are part
         # of the same loss event that triggered recovery — don't double-punish.
         {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
-          new_ssthresh = max(trunc(acc.cwnd * @loss_beta), @min_ssthresh)
+          new_ssthresh = max(trunc(acc.cwnd * cc_loss_beta(acc)), @min_ssthresh)
           new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
           Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
           {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: acc.send_data_seq, recovery_cwnd: new_cwnd}, true}
@@ -1270,7 +1275,19 @@ defmodule ZtlpGateway.Session do
             Stats.handshake_fail()
             {:stop, :normal, state}
 
-          {hs, _payload} ->
+          {hs, profile_payload} ->
+            # Parse ClientProfile from msg3 payload (CBOR-encoded client type info)
+            client_profile = parse_client_profile(profile_payload)
+            cc_profile = select_cc_profile(client_profile)
+
+            Logger.info(
+              "[Session] ClientProfile: class=#{client_profile.client_class} " <>
+              "iface=#{client_profile.interface_type} radio=#{inspect(client_profile.radio_tech)} " <>
+              "→ CC: cwnd=#{cc_profile.initial_cwnd} max=#{cc_profile.max_cwnd} " <>
+              "ssthresh=#{cc_profile.ssthresh} pacing=#{cc_profile.pacing_interval_ms}ms " <>
+              "burst=#{cc_profile.burst_size} beta=#{cc_profile.loss_beta}"
+            )
+
             # Derive transport keys
             {:ok, keys} = Handshake.split(hs, state.session_id)
 
@@ -1309,7 +1326,12 @@ defmodule ZtlpGateway.Session do
                             backend_pid: backend_pid,
                             backend_addr: {host, port, self()},
                             pending_packets: [],
-                            rekey_timer_ref: rekey_timer_ref
+                            rekey_timer_ref: rekey_timer_ref,
+                            client_profile: client_profile,
+                            cc_profile: cc_profile,
+                            cwnd: cc_profile.initial_cwnd,
+                            ssthresh: cc_profile.ssthresh,
+                            recovery_cwnd: cc_profile.initial_cwnd
                         }
 
                       # Process any packets that arrived during handshake
@@ -2022,7 +2044,7 @@ defmodule ZtlpGateway.Session do
   # Paces sends by scheduling a timer for the next packet if the queue
   # is non-empty but the window is full.
   defp flush_send_queue(state) do
-    flush_send_queue(state, @burst_size)
+    flush_send_queue(state, cc_burst_size(state))
   end
 
   defp flush_send_queue(state, 0) do
@@ -2039,7 +2061,7 @@ defmodule ZtlpGateway.Session do
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window = min(trunc(state.cwnd), @max_cwnd)
+    effective_window = min(trunc(state.cwnd), cc_max_cwnd(state))
     window_full = inflight >= effective_window
     cond do
       :queue.is_empty(state.send_queue) ->
@@ -2101,7 +2123,7 @@ defmodule ZtlpGateway.Session do
   end
 
   defp schedule_pacing_timer(%{pacing_timer_ref: nil} = state) do
-    ref = Process.send_after(self(), :pacing_tick, @pacing_interval_ms)
+    ref = Process.send_after(self(), :pacing_tick, cc_pacing_interval_ms(state))
     %{state | pacing_timer_ref: ref}
   end
   defp schedule_pacing_timer(state), do: state
@@ -2458,12 +2480,13 @@ defmodule ZtlpGateway.Session do
       # TCP-style cwnd growth: slow start (exponential) then congestion avoidance (linear)
       cwnd = state.cwnd
       ssthresh = state.ssthresh
+      max_cw = cc_max_cwnd(state) * 1.0
       new_cwnd = if cwnd < ssthresh do
         # Slow start: grow by newly_acked (doubles per RTT)
-        min(cwnd + newly_acked, @max_cwnd * 1.0)
+        min(cwnd + newly_acked, max_cw)
       else
         # Congestion avoidance: grow by ~1 packet per RTT
-        min(cwnd + newly_acked / cwnd, @max_cwnd * 1.0)
+        min(cwnd + newly_acked / cwnd, max_cw)
       end
       %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq, last_ack_advance_at: now}
     else
@@ -2474,7 +2497,7 @@ defmodule ZtlpGateway.Session do
     # Restore cwnd to recovery_cwnd (the value at entry), stripping any
     # dup-ACK inflation that accumulated during recovery.
     state = if state.in_recovery and newly_acked > 0 and acked_data_seq > state.recovery_data_seq do
-      restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), @max_cwnd * 1.0)
+      restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), cc_max_cwnd(state) * 1.0)
       Logger.info("[Session] Exiting recovery (acked=#{acked_data_seq} > recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}")
       %{state | in_recovery: false, recovery_data_seq: 0, recovery_cwnd: 0, cwnd: restored_cwnd}
     else
@@ -2500,13 +2523,13 @@ defmodule ZtlpGateway.Session do
           # This catches the case where cwnd is too large for the path —
           # receiver has a hole it can't fill because we're flooding it.
           state = if new_count >= 20 and rem(new_count, 20) == 0 do
-            new_ssthresh = max(trunc(state.cwnd * @loss_beta), @min_ssthresh)
+            new_ssthresh = max(trunc(state.cwnd * cc_loss_beta(state)), @min_ssthresh)
             new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
             Logger.info("[Session] Dup ACK plateau (#{new_count}): path overwhelmed, cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}")
             %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, recovery_cwnd: new_cwnd}
           else
             inflight = map_size(send_buffer)
-            max_recovery_cwnd = min(state.ssthresh + inflight, @max_cwnd) * 1.0
+            max_recovery_cwnd = min(state.ssthresh + inflight, cc_max_cwnd(state)) * 1.0
             new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
             %{state | cwnd: new_cwnd}
           end
@@ -2665,4 +2688,133 @@ defmodule ZtlpGateway.Session do
     <<chunk::binary-size(max_size), rest::binary>> = data
     chunk_data_acc(rest, max_size, [chunk | acc])
   end
+
+  # ---------------------------------------------------------------------------
+  # Client-type detection: parse CBOR ClientProfile from msg3 payload
+  # ---------------------------------------------------------------------------
+
+  @doc false
+  defp parse_client_profile(<<>>), do: default_client_profile()
+
+  defp parse_client_profile(payload) when is_binary(payload) do
+    case Cbor.decode(payload) do
+      {:ok, map} when is_map(map) ->
+        %{
+          client_class: parse_client_class(Map.get(map, "c")),
+          interface_type: parse_interface_type(Map.get(map, "i")),
+          radio_tech: parse_radio_tech(Map.get(map, "r")),
+          is_constrained: Map.get(map, "l", false) == true,
+          software_id: Map.get(map, "s")
+        }
+
+      _ ->
+        Logger.debug("[Session] Could not decode ClientProfile CBOR, using defaults")
+        default_client_profile()
+    end
+  end
+
+  defp parse_client_profile(_), do: default_client_profile()
+
+  defp default_client_profile do
+    %{
+      client_class: :unknown,
+      interface_type: :unknown,
+      radio_tech: nil,
+      is_constrained: false,
+      software_id: nil
+    }
+  end
+
+  defp parse_client_class("m"), do: :mobile
+  defp parse_client_class("d"), do: :desktop
+  defp parse_client_class("v"), do: :server
+  defp parse_client_class(_), do: :unknown
+
+  defp parse_interface_type("c"), do: :cellular
+  defp parse_interface_type("w"), do: :wifi
+  defp parse_interface_type("e"), do: :wired
+  defp parse_interface_type(_), do: :unknown
+
+  defp parse_radio_tech("4"), do: :lte
+  defp parse_radio_tech("5n"), do: :nr_nsa
+  defp parse_radio_tech("5s"), do: :nr_sa
+  defp parse_radio_tech("3"), do: :gen3
+  defp parse_radio_tech("2"), do: :gen2
+  defp parse_radio_tech(_), do: nil
+
+  # ---------------------------------------------------------------------------
+  # CC profile selection based on client type
+  # ---------------------------------------------------------------------------
+
+  defp select_cc_profile(%{client_class: :mobile, interface_type: :cellular}) do
+    %{
+      initial_cwnd: 5.0,
+      max_cwnd: 16,
+      ssthresh: 32,
+      pacing_interval_ms: 6,
+      burst_size: 2,
+      loss_beta: 0.7
+    }
+  end
+
+  defp select_cc_profile(%{client_class: :mobile, interface_type: :wifi}) do
+    mobile_wifi_profile()
+  end
+
+  defp select_cc_profile(%{client_class: :mobile}) do
+    # mobile + other interface (unknown/wired) — same as wifi
+    mobile_wifi_profile()
+  end
+
+  defp select_cc_profile(%{client_class: :desktop}) do
+    %{
+      initial_cwnd: 64.0,
+      max_cwnd: 256,
+      ssthresh: 128,
+      pacing_interval_ms: 1,
+      burst_size: 8,
+      loss_beta: 0.7
+    }
+  end
+
+  defp select_cc_profile(%{client_class: :server}) do
+    %{
+      initial_cwnd: 64.0,
+      max_cwnd: 512,
+      ssthresh: 256,
+      pacing_interval_ms: 1,
+      burst_size: 16,
+      loss_beta: 0.7
+    }
+  end
+
+  # unknown / fallback — same as mobile+wifi (no regression from current defaults)
+  defp select_cc_profile(_) do
+    mobile_wifi_profile()
+  end
+
+  defp mobile_wifi_profile do
+    %{
+      initial_cwnd: 10.0,
+      max_cwnd: 32,
+      ssthresh: 64,
+      pacing_interval_ms: 4,
+      burst_size: 3,
+      loss_beta: 0.7
+    }
+  end
+
+  # CC profile accessors — fall back to module attributes when cc_profile is nil
+  # (during handshake, before profile is set).
+  defp cc_max_cwnd(%{cc_profile: %{max_cwnd: v}}), do: v
+  defp cc_max_cwnd(_state), do: @max_cwnd
+
+  defp cc_burst_size(%{cc_profile: %{burst_size: v}}), do: v
+  defp cc_burst_size(_state), do: @burst_size
+
+  defp cc_pacing_interval_ms(%{cc_profile: %{pacing_interval_ms: v}}), do: v
+  defp cc_pacing_interval_ms(_state), do: @pacing_interval_ms
+
+  defp cc_loss_beta(%{cc_profile: %{loss_beta: v}}), do: v
+  defp cc_loss_beta(_state), do: @loss_beta
 end

@@ -80,11 +80,11 @@ final class ZTLPTunnelConnection {
 
     /// Pending ACK sequences to batch-send. Reduces NWConnection queue pressure.
     private var pendingAcks: [UInt64] = []
-    private static let maxPendingAcks = 32
+    private static let maxPendingAcks = 64
 
     /// Backpressure: track in-flight NWConnection sends.
     private var sendsInFlight: Int = 0
-    private static let maxSendsInFlight = 64
+    private static let maxSendsInFlight = 512
 
     /// Reusable decrypt buffer (avoids repeated allocation).
     /// Max ZTLP packet is ~1500 bytes; 4KB is generous.
@@ -375,7 +375,12 @@ final class ZTLPTunnelConnection {
 
     // MARK: - Packet Processing
 
-    /// Process a received UDP datagram: decrypt → parse frame → dispatch.
+    /// Process a received UDP datagram: decrypt -> parse frame -> dispatch.
+    ///
+    /// Handles both legacy and multiplexed FRAME_DATA formats:
+    ///   Legacy: [0x00 | data_seq(8 BE) | payload]
+    ///   Mux:    [0x00 | stream_id(4 BE) | data_seq(8 BE) | mux_payload]
+    ///   ACK:    [0x01 | cumulative_ack(8 BE) | ...]
     private func handleReceivedPacket(_ wireData: Data) {
         // Step 1: Decrypt the packet
         var decryptWritten: Int = 0
@@ -395,17 +400,87 @@ final class ZTLPTunnelConnection {
         }
 
         guard decryptResult == 0, decryptWritten > 0 else {
-            // Decryption failed — could be replay, corruption, or wrong key.
-            // Drop silently (normal for UDP — stale/replayed packets).
             return
         }
 
         packetsReceived += 1
 
-        // Step 2: Parse the frame to get type, sequence, and payload.
-        // We use the decryptBuffer directly (class property — stable address)
-        // and copy payload data inside the unsafe scope to avoid dangling pointers.
-        var frameType: UInt8 = 0xFF
+        // Step 2: Parse frame manually to handle both mux and legacy formats.
+        // We do this in Swift instead of ztlp_parse_frame to correctly detect
+        // the multiplexed format where stream_id precedes data_seq.
+        guard decryptWritten >= 1 else { return }
+
+        let frameType = decryptBuffer[0]
+
+        if frameType == ZTLPFrameType.ack.rawValue {
+            // ACK frame: [0x01 | cumulative_ack(8 BE) | ...]
+            guard decryptWritten >= 9 else { return }
+            var seq: UInt64 = 0
+            for i in 1...8 {
+                seq = (seq << 8) | UInt64(decryptBuffer[i])
+            }
+            delegate?.tunnelConnection(self, didReceiveAck: seq)
+            return
+        }
+
+        if frameType == ZTLPFrameType.data.rawValue {
+            // Detect mux vs legacy FRAME_DATA:
+            // Mux:    [0x00 | stream_id(4 BE) | data_seq(8 BE) | payload] (13+ bytes, stream_id > 0)
+            // Legacy: [0x00 | data_seq(8 BE) | payload] (9+ bytes)
+            var seq: UInt64 = 0
+            var payloadData: Data? = nil
+
+            if decryptWritten >= 13 {
+                // Check candidate stream_id
+                let candidateStreamId = UInt32(decryptBuffer[1]) << 24
+                    | UInt32(decryptBuffer[2]) << 16
+                    | UInt32(decryptBuffer[3]) << 8
+                    | UInt32(decryptBuffer[4])
+
+                if candidateStreamId > 0 {
+                    // Mux format: data_seq at bytes [5..13], payload at [13..]
+                    for i in 5...12 {
+                        seq = (seq << 8) | UInt64(decryptBuffer[i])
+                    }
+                    let payloadLen = decryptWritten - 13
+                    if payloadLen > 0 {
+                        // Check for mux sentinel payloads (CLOSE=0x05, FIN=0x04)
+                        let firstByte = decryptBuffer[13]
+                        if payloadLen <= 2 && (firstByte == 0x05 || firstByte == 0x04) {
+                            // Mux CLOSE/FIN sentinel: build close frame for PTP demuxer
+                            var muxFrame = Data(capacity: 5)
+                            muxFrame.append(firstByte)  // 0x05 close or 0x04 fin
+                            muxFrame.append(contentsOf: decryptBuffer[1...4])  // stream_id
+                            payloadData = muxFrame
+                        } else {
+                            // Regular mux data: build [0x00 | stream_id(4) | http_data]
+                            var muxFrame = Data(capacity: 5 + payloadLen)
+                            muxFrame.append(0x00)  // mux data type
+                            muxFrame.append(contentsOf: decryptBuffer[1...4])  // stream_id
+                            muxFrame.append(contentsOf: decryptBuffer[13..<decryptWritten])
+                            payloadData = muxFrame
+                        }
+                    }
+                    handleDataFrame(sequence: seq, payload: payloadData)
+                    return
+                }
+            }
+
+            // Legacy format: data_seq at bytes [1..9], payload at [9..]
+            guard decryptWritten >= 9 else { return }
+            for i in 1...8 {
+                seq = (seq << 8) | UInt64(decryptBuffer[i])
+            }
+            let payloadLen = decryptWritten - 9
+            if payloadLen > 0 {
+                payloadData = Data(decryptBuffer[9..<decryptWritten])
+            }
+            handleDataFrame(sequence: seq, payload: payloadData)
+            return
+        }
+
+        // Unknown frame type -- use ztlp_parse_frame for forward compatibility
+        var frameTypeOut: UInt8 = 0xFF
         var seq: UInt64 = 0
         var payloadPtr: UnsafePointer<UInt8>? = nil
         var payloadLen: Int = 0
@@ -413,35 +488,17 @@ final class ZTLPTunnelConnection {
         let parseResult = ztlp_parse_frame(
             &decryptBuffer,
             decryptWritten,
-            &frameType,
+            &frameTypeOut,
             &seq,
             &payloadPtr,
             &payloadLen
         )
 
-        guard parseResult == 0 else {
-            // Malformed frame — drop
-            return
-        }
+        guard parseResult == 0 else { return }
 
-        // Copy payload data immediately (payloadPtr points into decryptBuffer
-        // which may be overwritten on next receive)
-        var payloadData: Data? = nil
         if let ptr = payloadPtr, payloadLen > 0 {
-            payloadData = Data(bytes: ptr, count: payloadLen)
-        }
-
-        // Step 3: Dispatch based on frame type
-        switch frameType {
-        case ZTLPFrameType.data.rawValue:
-            handleDataFrame(sequence: seq, payload: payloadData)
-
-        case ZTLPFrameType.ack.rawValue:
-            delegate?.tunnelConnection(self, didReceiveAck: seq)
-
-        default:
-            // Unknown frame type — ignore (forward compatibility)
-            break
+            let data = Data(bytes: ptr, count: payloadLen)
+            handleDataFrame(sequence: seq, payload: data)
         }
     }
 

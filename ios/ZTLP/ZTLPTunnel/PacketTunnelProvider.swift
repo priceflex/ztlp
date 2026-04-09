@@ -107,8 +107,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// ACK flush timer (10ms for low-latency ACKs).
     private var ackFlushTimer: DispatchSourceTimer?
 
-    /// Action buffer for router write results (reusable, 64KB).
-    private var actionBuffer = [UInt8](repeating: 0, count: 65536)
+    /// Action buffer for router write results (reusable, 256KB for large uploads).
+    private var actionBuffer = [UInt8](repeating: 0, count: 262144)
+
+    // MARK: - Mux Frame Constants
+    private static let MUX_FRAME_DATA: UInt8 = 0x00
+    private static let MUX_FRAME_OPEN: UInt8 = 0x06
+    private static let MUX_FRAME_CLOSE: UInt8 = 0x05
+    private static let MAX_MUX_PAYLOAD: Int = 1135  // 1140 - 5 byte mux header
 
     /// Packet read buffer (reusable, MTU-sized).
     private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
@@ -137,7 +143,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         updateConnectionState(.connecting)
         logger.info("═══════════════════════════════════════════", source: "Tunnel")
-        logger.info("ZTLP NE v5B — SYNC ARCHITECTURE (no tokio)", source: "Tunnel")
+        logger.info("ZTLP NE v5C — SYNC ARCHITECTURE (no tokio)", source: "Tunnel")
         logger.info("Build: \(Date())", source: "Tunnel")
         logger.info("═══════════════════════════════════════════", source: "Tunnel")
 
@@ -285,7 +291,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.sharedDefaults?.set(target, forKey: SharedKey.peerAddress)
 
                 self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
-                self.logger.info("TUNNEL ACTIVE — v5B SYNC (no tokio)", source: "Tunnel")
+                self.logger.info("TUNNEL ACTIVE — v5C SYNC (no tokio)", source: "Tunnel")
                 self.logger.info("TEXT seg: 1.65MB | Crypto: sync FFI", source: "Tunnel")
                 self.logger.info("Router: standalone | VIP: NWListener", source: "Tunnel")
                 self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
@@ -516,6 +522,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Parse and dispatch serialized RouterActions from the standalone router.
     /// Format: [1B type][4B stream_id BE][2B data_len BE][data...]
     /// Type: 0=OpenStream, 1=SendData, 2=CloseStream
+    ///
+    /// Each action is re-framed as a ZTLP mux frame before sending to gateway:
+    ///   OpenStream  -> [0x06 | stream_id(4 BE) | svc_name_len(1) | svc_name]
+    ///   SendData    -> [0x00 | stream_id(4 BE) | chunk...] (chunked to 1135 bytes)
+    ///   CloseStream -> [0x05 | stream_id(4 BE)]
     private func processRouterActions(actionBuffer: [UInt8], actionLen: Int) {
         var offset = 0
         while offset < actionLen {
@@ -524,10 +535,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let actionType = actionBuffer[offset]
             offset += 1
 
-            let streamId = UInt32(actionBuffer[offset]) << 24
-                | UInt32(actionBuffer[offset+1]) << 16
-                | UInt32(actionBuffer[offset+2]) << 8
-                | UInt32(actionBuffer[offset+3])
+            // Keep stream_id as raw bytes for mux framing
+            let streamIdBytes: [UInt8] = [
+                actionBuffer[offset],
+                actionBuffer[offset+1],
+                actionBuffer[offset+2],
+                actionBuffer[offset+3]
+            ]
             offset += 4
 
             let dataLen = Int(actionBuffer[offset]) << 8
@@ -540,21 +554,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             offset += dataLen
 
             switch actionType {
-            case 0: // OpenStream
-                // Stream opened by router — send stream open to gateway via tunnel
-                if let data = actionData {
-                    tunnelConnection?.sendData(data)
+            case 0: // OpenStream -> mux FRAME_OPEN
+                // [0x06 | stream_id(4 BE) | svc_name_len(1) | svc_name]
+                if let svcData = actionData {
+                    var frame = Data(capacity: 6 + svcData.count)
+                    frame.append(Self.MUX_FRAME_OPEN)
+                    frame.append(contentsOf: streamIdBytes)
+                    frame.append(UInt8(min(svcData.count, 255)))
+                    frame.append(svcData)
+                    tunnelConnection?.sendData(frame)
                 }
-            case 1: // SendData
-                // Forward data to gateway
-                if let data = actionData {
-                    tunnelConnection?.sendData(data)
+            case 1: // SendData -> mux FRAME_DATA (chunked to MAX_MUX_PAYLOAD)
+                // [0x00 | stream_id(4 BE) | chunk...]
+                if let payload = actionData {
+                    var chunkOffset = 0
+                    while chunkOffset < payload.count {
+                        let chunkEnd = min(chunkOffset + Self.MAX_MUX_PAYLOAD, payload.count)
+                        let chunk = payload[chunkOffset..<chunkEnd]
+                        var frame = Data(capacity: 5 + chunk.count)
+                        frame.append(Self.MUX_FRAME_DATA)
+                        frame.append(contentsOf: streamIdBytes)
+                        frame.append(chunk)
+                        tunnelConnection?.sendData(frame)
+                        chunkOffset = chunkEnd
+                    }
                 }
-            case 2: // CloseStream
-                // Stream closed — send close to gateway
-                if let data = actionData {
-                    tunnelConnection?.sendData(data)
-                }
+            case 2: // CloseStream -> mux FRAME_CLOSE
+                // [0x05 | stream_id(4 BE)]
+                var frame = Data(capacity: 5)
+                frame.append(Self.MUX_FRAME_CLOSE)
+                frame.append(contentsOf: streamIdBytes)
+                tunnelConnection?.sendData(frame)
             default:
                 logger.warn("Unknown router action type: \(actionType)", source: "Tunnel")
             }
@@ -929,15 +959,56 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
 
         markDataActivity()
 
-        // Feed decrypted gateway data into the packet router.
-        // The data contains mux stream frames — the router will generate
-        // TCP response packets that we read via flushOutboundPackets().
+        // The decrypted payload is a mux frame from the gateway.
+        // Demux it and feed the inner data to the correct router stream.
         //
-        // For now, we need to demux the data. The standalone router expects
-        // per-stream gateway_data calls. For single-stream mode, use stream 0.
+        // Mux frame formats (inner payload after tunnel FRAME_DATA stripped):
+        //   FRAME_DATA:  [0x00 | stream_id(4 BE) | http_data...]
+        //   FRAME_CLOSE: [0x05 | stream_id(4 BE)]
+        //   FRAME_FIN:   [0x04 | stream_id(4 BE)]
+        //
+        // Legacy (non-mux) format: just raw http_data (no mux header)
+
         data.withUnsafeBytes { ptr in
             guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            ztlp_router_gateway_data_sync(router, 0, baseAddr, ptr.count)
+            let len = ptr.count
+
+            if len >= 5 {
+                let frameType = baseAddr[0]
+
+                if frameType == 0x00 {
+                    // Mux FRAME_DATA: [0x00 | stream_id(4 BE) | payload...]
+                    let streamId = UInt32(baseAddr[1]) << 24
+                        | UInt32(baseAddr[2]) << 16
+                        | UInt32(baseAddr[3]) << 8
+                        | UInt32(baseAddr[4])
+
+                    if streamId > 0 {
+                        // Multiplexed data
+                        let payloadPtr = baseAddr + 5
+                        let payloadLen = len - 5
+                        if payloadLen > 0 {
+                            ztlp_router_gateway_data_sync(router, streamId, payloadPtr, payloadLen)
+                        }
+                    } else {
+                        // stream_id 0 = legacy format, entire data is payload
+                        ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
+                    }
+                } else if frameType == 0x05 || frameType == 0x04 {
+                    // Mux FRAME_CLOSE / FRAME_FIN: [type | stream_id(4 BE)]
+                    let streamId = UInt32(baseAddr[1]) << 24
+                        | UInt32(baseAddr[2]) << 16
+                        | UInt32(baseAddr[3]) << 8
+                        | UInt32(baseAddr[4])
+                    ztlp_router_gateway_close_sync(router, streamId)
+                } else {
+                    // Unknown type or legacy — treat as raw data for stream 0
+                    ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
+                }
+            } else if len > 0 {
+                // Short payload — legacy format, feed as stream 0
+                ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
+            }
         }
 
         // Immediately flush any generated packets

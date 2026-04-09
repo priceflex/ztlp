@@ -209,20 +209,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.resolvedGateway = target
 
                 // Step 5: Set client profile for CC selection
-                let interfaceType: UInt8
-                if let path = self.defaultPath {
-                    if path.usesInterfaceType(.cellular) {
-                        interfaceType = 1  // Cellular
-                    } else if path.usesInterfaceType(.wifi) {
-                        interfaceType = 2  // WiFi
-                    } else if path.usesInterfaceType(.wiredEthernet) {
-                        interfaceType = 3  // Wired
+                // Detect interface type from NWPathMonitor (Network framework)
+                let interfaceType: UInt8 = {
+                    let monitor = NWPathMonitor()
+                    let currentPath = monitor.currentPath
+                    monitor.cancel()
+                    if currentPath.usesInterfaceType(.cellular) {
+                        return 1  // Cellular
+                    } else if currentPath.usesInterfaceType(.wifi) {
+                        return 2  // WiFi
+                    } else if currentPath.usesInterfaceType(.wiredEthernet) {
+                        return 3  // Wired
                     } else {
-                        interfaceType = 0  // Unknown
+                        return 0  // Unknown
                     }
-                } else {
-                    interfaceType = 0  // Unknown
-                }
+                }()
 
                 var radioTech: UInt8 = 0  // Unknown
                 let teleInfo = CTTelephonyNetworkInfo()
@@ -241,7 +242,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     }
                 }
 
-                let isConstrained: UInt8 = (self.defaultPath?.isConstrained ?? false) ? 1 : 0
+                let isConstrained: UInt8 = {
+                    let monitor = NWPathMonitor()
+                    let constrained = monitor.currentPath.isConstrained
+                    monitor.cancel()
+                    return constrained ? 1 : 0
+                }()
                 self.logger.info("Client profile: iface=\(interfaceType) radio=\(radioTech) constrained=\(isConstrained)", source: "Tunnel")
                 ztlp_set_client_profile(interfaceType, radioTech, isConstrained)
 

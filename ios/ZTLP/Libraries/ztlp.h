@@ -993,6 +993,19 @@ typedef struct ZtlpCryptoContext ZtlpCryptoContext;
  * @return ZtlpCryptoContext* on success (caller must free with ztlp_crypto_context_free).
  *         NULL on failure (check ztlp_last_error).
  */
+/**
+ * @brief Set the client profile for the next sync connection.
+ *
+ * Call BEFORE ztlp_connect_sync(). The profile is consumed on connect.
+ * This tells the gateway what kind of client is connecting (mobile/desktop)
+ * so it can select appropriate congestion control parameters.
+ *
+ * @param interface_type  0=Unknown, 1=Cellular, 2=WiFi, 3=Wired
+ * @param radio_tech      0=None, 1=2G, 2=3G, 3=LTE, 4=5G-NSA, 5=5G-SA
+ * @param is_constrained  0=false, 1=true (iOS Low Data Mode)
+ */
+void ztlp_set_client_profile(uint8_t interface_type, uint8_t radio_tech, uint8_t is_constrained);
+
 ZtlpCryptoContext *ztlp_connect_sync(
     ZtlpIdentity *identity,
     ZtlpConfig *config,

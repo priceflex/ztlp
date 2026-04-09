@@ -26,8 +26,10 @@
 		85AD116F993661084DAE78B2 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 		A9B39F2D1DC497E8E0ED32DD /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */; };
 		AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */; };
+		B0E54781F41B69FC340C419C /* CertificateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1934078C4E1D7848FA49280D /* CertificateManager.swift */; };
 		B9D88DADB4E22192735094F1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF7E6453D407953E6432F115 /* Assets.xcassets */; };
 		C0FF6405C1784BC467FBF124 /* ZTLPTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD821F8690E1C2AE8E13038F /* ZTLPTests.swift */; };
+		C7BA8EA9B8BF1DA50D49E4C6 /* CertificateTrustView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DEF843A0920D40FADE7F95 /* CertificateTrustView.swift */; };
 		D008137D8E824C38186AC859 /* SystemExtensionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CC8B59C79DCD09DB315C397 /* SystemExtensionManager.swift */; };
 		D41D036BC41CFEBD9B0FD0CA /* IdentityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A7EB8A3208E156EA025CA71 /* IdentityView.swift */; };
 		E51EDC26405FAEE991E4076D /* ServicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */; };
@@ -71,10 +73,12 @@
 /* Begin PBXFileReference section */
 		01F23606D96D8A079F7E3FB9 /* ServicesViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServicesViewModel.swift; sourceTree = "<group>"; };
 		055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		1934078C4E1D7848FA49280D /* CertificateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateManager.swift; sourceTree = "<group>"; };
 		20C97C4B77AA52A20831FA3F /* ZTLPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPService.swift; sourceTree = "<group>"; };
 		2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		411B1DD85CF6221E04B3A45E /* ZTLP.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZTLP.entitlements; sourceTree = "<group>"; };
 		4A7EB8A3208E156EA025CA71 /* IdentityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityView.swift; sourceTree = "<group>"; };
+		59DEF843A0920D40FADE7F95 /* CertificateTrustView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateTrustView.swift; sourceTree = "<group>"; };
 		68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPConfiguration.swift; sourceTree = "<group>"; };
 		6A98A6B9F9DF87D848B72322 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		6CC8B59C79DCD09DB315C397 /* SystemExtensionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemExtensionManager.swift; sourceTree = "<group>"; };
@@ -166,6 +170,7 @@
 		8A6DDBEB8E0D55F62738A81A /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				59DEF843A0920D40FADE7F95 /* CertificateTrustView.swift */,
 				6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */,
 				89C24BDC82DF690F24190B2D /* HomeView.swift */,
 				4A7EB8A3208E156EA025CA71 /* IdentityView.swift */,
@@ -192,6 +197,7 @@
 		BF2D617A5D430681B31FD666 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				1934078C4E1D7848FA49280D /* CertificateManager.swift */,
 				7A6088FAAE6467A12BF10B72 /* KeychainService.swift */,
 				89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */,
 				6CC8B59C79DCD09DB315C397 /* SystemExtensionManager.swift */,
@@ -365,6 +371,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B0E54781F41B69FC340C419C /* CertificateManager.swift in Sources */,
+				C7BA8EA9B8BF1DA50D49E4C6 /* CertificateTrustView.swift in Sources */,
 				7BBA2C7800B66A538E2D1C6E /* Color+ZTLP.swift in Sources */,
 				76B1BFA372D65AFC479EBACB /* ConnectionStatus.swift in Sources */,
 				AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */,

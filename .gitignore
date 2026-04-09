@@ -42,3 +42,4 @@ ios/ZTLP/Libraries/*.xcframework/
 macos/ZTLP/Libraries/*.a
 *.xcuserstate
 macos/ZTLP/build/
+xcuserdata/

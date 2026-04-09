@@ -81,6 +81,11 @@ final class ZTLPVIPProxy {
     /// Logger reference.
     private let logger = TunnelLogger.shared
 
+    /// Reusable frame buffer (avoids per-call allocation in forwardToGateway).
+    private var frameBuf = [UInt8](repeating: 0, count: 16500)
+    /// Reusable encrypt buffer.
+    private var pktBuf = [UInt8](repeating: 0, count: 16700)
+
     // MARK: - Configuration
 
     /// Register a service to proxy. Call before start().
@@ -279,7 +284,9 @@ final class ZTLPVIPProxy {
               let ctx = cryptoCtx, let send = sendPacket else { return }
 
         // Step 1: Frame the payload (FRAME_DATA envelope)
-        var frameBuf = [UInt8](repeating: 0, count: data.count + 16)
+        // Ensure reusable buffers are large enough
+        let neededFrame = data.count + 16
+        if frameBuf.count < neededFrame { frameBuf = [UInt8](repeating: 0, count: neededFrame) }
         var frameLen: Int = 0
         let seq = conn.dataSeq
         conn.dataSeq += 1
@@ -299,8 +306,9 @@ final class ZTLPVIPProxy {
             return
         }
 
-        // Step 2: Encrypt the framed data into a ZTLP wire packet
-        var pktBuf = [UInt8](repeating: 0, count: frameLen + 128)
+        // Step 2: Encrypt the framed data
+        let neededPkt = frameLen + 128
+        if pktBuf.count < neededPkt { pktBuf = [UInt8](repeating: 0, count: neededPkt) }
         var pktLen: Int = 0
 
         let encResult = ztlp_encrypt_packet(

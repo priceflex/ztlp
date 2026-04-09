@@ -73,10 +73,18 @@ final class ZTLPTunnelConnection {
 
     /// Maximum number of seen sequences to track before pruning.
     /// At ~8 bytes per UInt64 + Set overhead, 10K entries ≈ ~160KB.
-    private static let maxSeenSequences = 10_000
+    private static let maxSeenSequences = 2_000
 
     /// Highest seen sequence (for pruning old entries).
     private var highestSeenSequence: UInt64 = 0
+
+    /// Pending ACK sequences to batch-send. Reduces NWConnection queue pressure.
+    private var pendingAcks: [UInt64] = []
+    private static let maxPendingAcks = 32
+
+    /// Backpressure: track in-flight NWConnection sends.
+    private var sendsInFlight: Int = 0
+    private static let maxSendsInFlight = 64
 
     /// Reusable decrypt buffer (avoids repeated allocation).
     /// Max ZTLP packet is ~1500 bytes; 4KB is generous.
@@ -168,10 +176,13 @@ final class ZTLPTunnelConnection {
         guard isActive else { return }
         isActive = false
 
+        flushPendingAcks()
+
         connection?.cancel()
         connection = nil
 
         seenSequences.removeAll()
+        pendingAcks.removeAll()
     }
 
     // MARK: - Send Path
@@ -226,60 +237,67 @@ final class ZTLPTunnelConnection {
 
         // Step 3: Send via NWConnection
         let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
+        guard sendsInFlight < Self.maxSendsInFlight else { return false }
+        sendsInFlight += 1
         conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
-            if let error = error {
-                // Log but don't fail — UDP is best-effort
-                _ = error  // Suppress unused warning; real impl would log
-            } else {
-                self?.bytesSent += UInt64(encryptWritten)
-                self?.packetsSent += 1
+            guard let self = self else { return }
+            self.sendsInFlight -= 1
+            if error == nil {
+                self.bytesSent += UInt64(encryptWritten)
+                self.packetsSent += 1
             }
         })
 
         return true
     }
 
-    /// Send an ACK for a received data sequence.
-    ///
-    /// - Parameter sequence: The data sequence number to acknowledge.
-    func sendAck(for sequence: UInt64) {
-        guard isActive, let conn = connection else { return }
+    /// Queue an ACK for batched sending. Flushed periodically or when full.
+    func queueAck(for sequence: UInt64) {
+        pendingAcks.append(sequence)
+        if pendingAcks.count >= Self.maxPendingAcks {
+            flushPendingAcks()
+        }
+    }
 
-        // Step 1: Build ACK frame
+    /// Flush pending ACKs as a single cumulative ACK (highest seq).
+    func flushPendingAcks() {
+        guard isActive, let conn = connection, !pendingAcks.isEmpty else { return }
+        guard sendsInFlight < Self.maxSendsInFlight else {
+            pendingAcks.removeAll(keepingCapacity: true)
+            return
+        }
+
+        guard let maxSeq = pendingAcks.max() else { return }
+        pendingAcks.removeAll(keepingCapacity: true)
+
         var ackWritten: Int = 0
-        let ackResult = ztlp_build_ack(
-            sequence,
-            &frameBuffer,
-            frameBuffer.count,
-            &ackWritten
-        )
-
+        let ackResult = ztlp_build_ack(maxSeq, &frameBuffer, frameBuffer.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }
 
-        // Step 2: Encrypt the ACK frame
         var encryptWritten: Int = 0
         let encryptResult = ztlp_encrypt_packet(
-            cryptoContext,
-            &frameBuffer,
-            ackWritten,
-            &encryptBuffer,
-            encryptBuffer.count,
-            &encryptWritten
+            cryptoContext, &frameBuffer, ackWritten,
+            &encryptBuffer, encryptBuffer.count, &encryptWritten
         )
-
         guard encryptResult == 0, encryptWritten > 0 else { return }
 
-        // Step 3: Send via NWConnection
         let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
-        conn.send(content: wireData, completion: .contentProcessed { _ in })
+        sendsInFlight += 1
+        conn.send(content: wireData, completion: .contentProcessed { [weak self] _ in
+            self?.sendsInFlight -= 1
+        })
     }
 
     /// Send a raw pre-encrypted packet (e.g., keepalive already built by caller).
     func sendRaw(_ data: Data) {
         guard isActive, let conn = connection else { return }
+        guard sendsInFlight < Self.maxSendsInFlight else { return }
+        sendsInFlight += 1
         conn.send(content: data, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            self.sendsInFlight -= 1
             if error == nil {
-                self?.bytesSent += UInt64(data.count)
+                self.bytesSent += UInt64(data.count)
             }
         })
     }
@@ -433,7 +451,7 @@ final class ZTLPTunnelConnection {
         if seenSequences.contains(sequence) {
             duplicatesDropped += 1
             // Still send ACK for duplicates (sender may have missed our first ACK)
-            sendAck(for: sequence)
+            queueAck(for: sequence)
             return
         }
 
@@ -441,7 +459,7 @@ final class ZTLPTunnelConnection {
         recordSequence(sequence)
 
         // Send ACK immediately
-        sendAck(for: sequence)
+        queueAck(for: sequence)
 
         // Deliver payload to delegate
         if let data = payload, !data.isEmpty {

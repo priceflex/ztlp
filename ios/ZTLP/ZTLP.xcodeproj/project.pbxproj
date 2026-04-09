@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		18BB853C28A8642292ADFDCA /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */; };
+		AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */; };
+		AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */; };
 		1FF175986BBFBA71175B2119 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */; };
 		36E4621982918E5519BE8E9E /* ZTLPConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */; };
 		39E8291BC07E74BD444149FC /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F0695B2755F6FFB3C3FA21 /* TunnelConfiguration.swift */; };
@@ -42,7 +44,6 @@
 		E5F6A7B8C9D0E1F2A3B4C5D6 /* TunnelLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6A7B8C9D0E1F2 /* TunnelLogger.swift */; };
 		F6A7B8C9D0E1F2A3B4C5D6E7 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F6A7B8C9D0E1F2A3 /* LogsView.swift */; };
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
-		F9A8B7C6D5E4F3A2B1C0D9E8 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 		BB11CC22DD33EE44FF550001 /* BenchmarkRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* BenchmarkRunner.swift */; };
 		BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550002 /* BenchmarkView.swift */; };
 		BB11CC22DD33EE44FF550003 /* TunnelConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* TunnelConfigurationTests.swift */; };
@@ -99,6 +100,8 @@
 		6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentView.swift; sourceTree = "<group>"; };
 		7A6088FAAE6467A12BF10B72 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPTunnelConnection.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPVIPProxy.swift; sourceTree = "<group>"; };
 		7EFF838E964E33540E20C97A /* ConnectionStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusTests.swift; sourceTree = "<group>"; };
 		80A0F034228B1159E45AAACD /* ZTLPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPBridgeTests.swift; sourceTree = "<group>"; };
 		89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
@@ -173,6 +176,8 @@
 			isa = PBXGroup;
 			children = (
 				7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */,
+				AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */,
+				AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */,
 				A9A4116144A5A959B0515225 /* TunnelConfiguration.swift */,
 				B6D5F375750724D890CC802C /* ZTLPTunnel-Bridging-Header.h */,
 				92920C6C8913A627EA5901B0 /* ZTLPTunnel.entitlements */,
@@ -397,9 +402,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				18BB853C28A8642292ADFDCA /* PacketTunnelProvider.swift in Sources */,
+				AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */,
+				AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */,
 				C55BFBBE8FE867873AAFB378 /* TunnelConfiguration.swift in Sources */,
 				E5F6A7B8C9D0E1F2A3B4C5D6 /* TunnelLogger.swift in Sources */,
-				F9A8B7C6D5E4F3A2B1C0D9E8 /* ZTLPBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

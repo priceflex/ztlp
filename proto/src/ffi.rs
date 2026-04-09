@@ -82,8 +82,23 @@ const MAX_FFI_ADDRESS_LEN: usize = 256;
 /// 65535 is the maximum UDP payload size.
 const MAX_RECV_PACKET_SIZE: usize = 65535;
 
+/// Encode a service name into a 16-byte buffer (sync-only fallback for no-tokio builds).
+/// The canonical version lives in tunnel.rs, but that module is gated behind tokio-runtime.
+#[cfg(not(feature = "tokio-runtime"))]
+fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
+    let bytes = name.as_bytes();
+    if bytes.len() > 16 {
+        return Err(format!("service name '{}' too long ({} bytes, max 16)", name, bytes.len()));
+    }
+    let mut buf = [0u8; 16];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(buf)
+}
+
+#[cfg(feature = "tokio-runtime")]
 use tokio::sync::RwLock as TokioRwLock;
 
+#[cfg(feature = "tokio-runtime")]
 use crate::dns::{VipRegistry, ZtlpDns};
 use crate::handshake::{
     HandshakeContext, INITIAL_HANDSHAKE_RETRY_MS, MAX_HANDSHAKE_RETRIES, MAX_HANDSHAKE_RETRY_MS,
@@ -98,8 +113,11 @@ use crate::reject::RejectFrame;
 // SessionState used for future session management features
 #[allow(unused_imports)]
 use crate::session::SessionState;
+#[cfg(feature = "tokio-runtime")]
 use crate::transport::TransportNode;
+#[cfg(feature = "tokio-runtime")]
 use crate::tunnel::encode_service_name;
+#[cfg(feature = "tokio-runtime")]
 use crate::vip::VipProxy;
 
 // ── Thread-local error storage ──────────────────────────────────────────
@@ -154,10 +172,12 @@ unsafe impl Send for SendPtr {}
 
 // ── Opaque handle types ─────────────────────────────────────────────────
 
+#[cfg(feature = "tokio-runtime")]
 pub struct ZtlpClient {
     inner: Arc<std::sync::Mutex<ZtlpClientInner>>,
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[allow(dead_code)]
 struct ZtlpClientInner {
     runtime: tokio::runtime::Runtime,
@@ -178,8 +198,10 @@ struct ZtlpClientInner {
     packet_router: Option<crate::packet_router::PacketRouter>,
 }
 
+#[cfg(feature = "tokio-runtime")]
 unsafe impl Send for ZtlpClientInner {}
 
+#[cfg(feature = "tokio-runtime")]
 /// Active session with real transport state.
 #[allow(dead_code)]
 struct ActiveSession {
@@ -398,6 +420,7 @@ pub extern "C" fn ztlp_identity_free(identity: *mut ZtlpIdentity) {
 
 // ── Client functions ────────────────────────────────────────────────────
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClient {
     // Diagnostic: confirm this library version is actually running
@@ -446,6 +469,7 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
     Box::into_raw(Box::new(client))
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_client_free(client: *mut ZtlpClient) {
     if !client.is_null() {
@@ -588,6 +612,7 @@ pub extern "C" fn ztlp_config_free(config: *mut ZtlpConfig) {
 ///
 /// After the handshake, starts a background receive loop.
 /// The callback is invoked when the handshake completes or fails.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_connect(
     client: *mut ZtlpClient,
@@ -756,6 +781,7 @@ pub extern "C" fn ztlp_connect(
 }
 
 /// Perform the actual Noise_XX handshake over UDP.
+#[cfg(feature = "tokio-runtime")]
 async fn do_connect(
     identity: &NodeIdentity,
     target: &str,
@@ -940,6 +966,7 @@ async fn do_connect(
     })
 }
 
+#[cfg(feature = "tokio-runtime")]
 /// Background receive loop — decrypts incoming packets and invokes the recv callback.
 /// Action to take after processing a received packet.
 enum RecvAction {
@@ -951,6 +978,7 @@ enum RecvAction {
     Noop,
 }
 
+#[cfg(feature = "tokio-runtime")]
 /// Process a single received packet, extracting the logic from recv_loop
 /// so it can be wrapped in `catch_unwind` for panic safety.
 ///
@@ -1026,6 +1054,7 @@ fn process_recv_packet(
     RecvAction::Noop
 }
 
+#[cfg(feature = "tokio-runtime")]
 async fn recv_loop(
     transport: Arc<TransportNode>,
     bytes_received: Arc<AtomicU64>,
@@ -1941,6 +1970,7 @@ async fn recv_loop(
 }
 
 /// Disconnect from the current session.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_disconnect(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -1978,6 +2008,7 @@ pub extern "C" fn ztlp_disconnect(client: *mut ZtlpClient) -> i32 {
 ///
 /// This avoids the need to rebind TCP ports (which drops in-flight connections)
 /// and prevents the admin password prompt that setupNetworking requires.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_disconnect_transport(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -2005,6 +2036,7 @@ pub extern "C" fn ztlp_disconnect_transport(client: *mut ZtlpClient) -> i32 {
 }
 
 /// Listen for incoming ZTLP connections (placeholder — used by responder/server).
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_listen(
     client: *mut ZtlpClient,
@@ -2027,6 +2059,7 @@ pub extern "C" fn ztlp_listen(
 /// The data is encrypted with ChaCha20-Poly1305 using the session keys
 /// derived from the Noise_XX handshake, wrapped in a ZTLP data packet,
 /// and sent over UDP to the peer.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_send(client: *mut ZtlpClient, data: *const u8, len: usize) -> i32 {
     if client.is_null() || data.is_null() {
@@ -2088,6 +2121,7 @@ pub extern "C" fn ztlp_send(client: *mut ZtlpClient, data: *const u8, len: usize
     ZtlpResult::Ok as i32
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_set_recv_callback(
     client: *mut ZtlpClient,
@@ -2110,6 +2144,7 @@ pub extern "C" fn ztlp_set_recv_callback(
     ZtlpResult::Ok as i32
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_set_disconnect_callback(
     client: *mut ZtlpClient,
@@ -2132,6 +2167,7 @@ pub extern "C" fn ztlp_set_disconnect_callback(
     ZtlpResult::Ok as i32
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_set_ack_send_callback(
     client: *mut ZtlpClient,
@@ -2189,6 +2225,7 @@ pub extern "C" fn ztlp_session_peer_addr(session: *const ZtlpSession) -> *const 
 // ── Stats functions ─────────────────────────────────────────────────────
 
 /// Get the number of bytes sent through the active session.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_bytes_sent(client: *const ZtlpClient) -> u64 {
     if client.is_null() {
@@ -2207,6 +2244,7 @@ pub extern "C" fn ztlp_bytes_sent(client: *const ZtlpClient) -> u64 {
 }
 
 /// Get the number of bytes received through the active session.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_bytes_received(client: *const ZtlpClient) -> u64 {
     if client.is_null() {
@@ -2226,6 +2264,7 @@ pub extern "C" fn ztlp_bytes_received(client: *const ZtlpClient) -> u64 {
 
 // ── Tunnel functions ────────────────────────────────────────────────────
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_tunnel_start(
     client: *mut ZtlpClient,
@@ -2254,6 +2293,7 @@ pub extern "C" fn ztlp_tunnel_start(
     ZtlpResult::Ok as i32
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_tunnel_stop(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -2300,6 +2340,7 @@ pub extern "C" fn ztlp_last_error() -> *const c_char {
 /// ztlp_vip_add_service(client, "beta", "127.0.55.1", 80);
 /// ztlp_vip_add_service(client, "beta", "127.0.55.1", 443);
 /// ```
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_vip_add_service(
     client: *mut ZtlpClient,
@@ -2373,6 +2414,7 @@ pub extern "C" fn ztlp_vip_add_service(
 ///
 /// Requires an active ZTLP session. Each registered service will get
 /// a TCP listener on its VIP:port that pipes data through the tunnel.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
     ios_log("[ZTLP] ztlp_vip_start called");
@@ -2471,6 +2513,7 @@ pub extern "C" fn ztlp_vip_start(client: *mut ZtlpClient) -> i32 {
 }
 
 /// Stop all VIP proxy listeners.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_vip_stop(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -2507,6 +2550,7 @@ pub extern "C" fn ztlp_vip_stop(client: *mut ZtlpClient) -> i32 {
 /// nameserver 127.0.55.53
 /// ```
 /// This tells macOS to route all `*.ztlp` queries to our DNS server.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_dns_start(client: *mut ZtlpClient, listen_addr: *const c_char) -> i32 {
     if client.is_null() || listen_addr.is_null() {
@@ -2563,6 +2607,7 @@ pub extern "C" fn ztlp_dns_start(client: *mut ZtlpClient, listen_addr: *const c_
 }
 
 /// Stop the ZTLP DNS resolver.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_dns_stop(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -2602,6 +2647,7 @@ pub extern "C" fn ztlp_dns_stop(client: *mut ZtlpClient) -> i32 {
 /// - `service_name`: The ZTLP-NS name to resolve (e.g., "beta.techrockstars.ztlp")
 /// - `ns_server`: The NS server address (e.g., "52.39.59.34:23096")
 /// - `timeout_ms`: Query timeout in milliseconds (0 = default 5000ms)
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_ns_resolve(
     service_name: *const c_char,
@@ -2713,6 +2759,7 @@ pub extern "C" fn ztlp_ns_resolve(
 /// - `timeout_ms`: Query timeout in milliseconds (0 = default 5000ms)
 /// - `out_data`: Pointer to receive the DER data pointer
 /// - `out_len`: Pointer to receive the data length
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_ns_fetch_ca_root(
     ns_server: *const c_char,
@@ -2851,6 +2898,7 @@ pub extern "C" fn ztlp_bytes_free(data: *mut u8, len: u32) {
 ///
 /// Returns a C string (null-terminated PEM). Caller must free with `ztlp_string_free()`.
 /// Returns null on error (check `ztlp_last_error()`).
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_ns_fetch_ca_chain_pem(
     ns_server: *const c_char,
@@ -2964,6 +3012,7 @@ pub extern "C" fn ztlp_ns_fetch_ca_chain_pem(
 /// `NEPacketTunnelProvider`.
 ///
 /// Returns 0 on success, or a negative error code.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c_char) -> i32 {
     if client.is_null() || tunnel_addr.is_null() {
@@ -3101,6 +3150,7 @@ pub extern "C" fn ztlp_router_new(client: *mut ZtlpClient, tunnel_addr: *const c
 /// a ZTLP mux stream to the named service on the gateway.
 ///
 /// Returns 0 on success, or a negative error code.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_router_add_service(
     client: *mut ZtlpClient,
@@ -3168,6 +3218,7 @@ pub extern "C" fn ztlp_router_add_service(
 /// packets (SYN-ACK, ACK, data responses).
 ///
 /// Returns 0 on success, or a negative error code.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_router_write_packet(
     client: *mut ZtlpClient,
@@ -3227,6 +3278,7 @@ pub extern "C" fn ztlp_router_write_packet(
 /// - Positive value: number of bytes written to `buf` (one complete IPv4 packet)
 /// - 0: no packets available
 /// - Negative: error
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_router_read_packet(
     client: *mut ZtlpClient,
@@ -3278,6 +3330,7 @@ pub extern "C" fn ztlp_router_read_packet(
 /// VPN tunnel is being torn down.
 ///
 /// Returns 0 on success.
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_router_stop(client: *mut ZtlpClient) -> i32 {
     if client.is_null() {
@@ -3311,6 +3364,7 @@ pub extern "C" fn ztlp_router_stop(client: *mut ZtlpClient) -> i32 {
 /// - `ZTLP_OK` on success
 /// - `ZTLP_INVALID_ARGUMENT` if `key_hex` is null, not valid hex, or wrong length
 /// - `ZTLP_INTERNAL_ERROR` on file I/O failure
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_pin_gateway_key(key_hex: *const c_char) -> i32 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -3386,6 +3440,7 @@ pub extern "C" fn ztlp_pin_gateway_key(key_hex: *const c_char) -> i32 {
 /// - `1` if the key matches a pinned key (or no keys are pinned)
 /// - `0` if the key does NOT match any pinned key
 /// - Negative error code on invalid input
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -3481,6 +3536,7 @@ pub struct ZtlpCryptoContext {
 /// Returns NULL if no active session exists.
 ///
 /// Ownership: caller must free with ztlp_crypto_context_free().
+#[cfg(feature = "tokio-runtime")]
 #[no_mangle]
 pub extern "C" fn ztlp_crypto_context_extract(
     client: *mut ZtlpClient,

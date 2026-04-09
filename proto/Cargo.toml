@@ -49,7 +49,7 @@ libc = "0.2"
 rustls-pemfile = "2"
 
 # --- Optional: tokio runtime + CLI deps (not needed for iOS NE) ---
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "signal", "macros"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "signal", "macros", "process"], optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 colored = { version = "2", optional = true }
@@ -60,13 +60,13 @@ qr2term = { version = "0.3", optional = true }
 dirs = { version = "5", optional = true }
 
 [profile.release]
-# iOS Network Extension has 15MB memory limit. LTO + strip removes dead
-# code from aws-lc-sys/rustls/tokio, cutting binary from ~9MB to ~5-6MB.
+# Default: optimize for speed on desktop/server platforms.
+# LTO gives good dead-code elimination without sacrificing speed.
 lto = true
 codegen-units = 1
 strip = true
-opt-level = "z"    # optimize for size over speed
-panic = "abort"    # smaller than unwinding
+opt-level = 3      # optimize for speed (default for desktop/server)
+# panic = "unwind" is the default — allows catch_unwind and RAII cleanup
 
 [[bin]]
 name = "ztlp-node"

@@ -433,13 +433,21 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         return std::ptr::null_mut();
     }
     let identity = unsafe { Box::from_raw(identity) };
-    // Limit tokio to 4 worker threads to reduce memory while avoiding task starvation.
-    // Default spawns N=num_cpus (6 on iPhone) × 2MB stack = ~12MB.
-    // 4 threads × 512KB stacks = ~2MB — recv_loop, VIP proxy writes, send, and listener
-    // all need concurrent scheduling. 2 threads caused VIP proxy write starvation.
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_stack_size(256 * 1024)
+    // Platform-specific tokio tuning:
+    // iOS NE: 2 workers × 256KB stacks = ~512KB (15MB memory limit).
+    // Desktop/server: system default workers (num_cpus) × 2MB stacks.
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    #[cfg(target_os = "ios")]
+    {
+        builder.worker_threads(2);
+        builder.thread_stack_size(256 * 1024);
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        // Use system defaults: num_cpus workers, 2MB stacks.
+        // Explicitly set only if we need to constrain.
+    }
+    let runtime = match builder
         .enable_all()
         .build()
     {

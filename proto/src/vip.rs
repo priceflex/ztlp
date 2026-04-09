@@ -80,16 +80,29 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 /// Maximum read buffer size for TCP proxy connections.
+/// iOS NE: 4KB to stay under 15MB memory limit.
+/// Desktop/server: 64KB for throughput on fast networks.
+#[cfg(target_os = "ios")]
 const TCP_READ_BUF_SIZE: usize = 4096;
+#[cfg(not(target_os = "ios"))]
+const TCP_READ_BUF_SIZE: usize = 65536;
 
 /// Maximum concurrent TCP connections per listener.
+/// iOS NE: 8 to limit memory. Desktop: 64 for parallel workloads.
+#[cfg(target_os = "ios")]
 const MAX_CONCURRENT_CONNECTIONS: usize = 8;
+#[cfg(not(target_os = "ios"))]
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
 /// TLS handshake timeout in seconds.
 const TLS_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
 /// TCP connection idle timeout in seconds (no data in either direction).
+/// iOS: 35s aggressive cleanup. Desktop: 300s for long-lived connections.
+#[cfg(target_os = "ios")]
 const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 35;
+#[cfg(not(target_os = "ios"))]
+const CONNECTION_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Frame type for tunnel data frames.
 const FRAME_DATA: u8 = 0x00;
@@ -433,7 +446,11 @@ impl StreamDispatcher {
 
     /// Register a new stream and return the receiver for it.
     pub fn register(&self, stream_id: u32) -> mpsc::Receiver<Vec<u8>> {
+        // iOS NE: 64 capacity to limit memory. Desktop: 256 for throughput.
+        #[cfg(target_os = "ios")]
         let (tx, rx) = mpsc::channel(64);
+        #[cfg(not(target_os = "ios"))]
+        let (tx, rx) = mpsc::channel(256);
         if let Ok(mut streams) = self.streams.lock() {
             streams.insert(stream_id, tx);
         }

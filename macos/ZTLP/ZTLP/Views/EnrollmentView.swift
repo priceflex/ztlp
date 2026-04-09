@@ -8,26 +8,43 @@ import SwiftUI
 
 struct EnrollmentView: View {
     @ObservedObject var viewModel: EnrollmentViewModel
+    @Environment(\.dismiss) private var dismiss
 
     @State private var manualEntryText = ""
 
     var body: some View {
-        Group {
-            switch viewModel.state {
-            case .idle:
-                idleView
-            case .tokenParsed(let tokenInfo):
-                tokenReviewView(tokenInfo)
-            case .enrolling:
-                enrollingView
-            case .success(let zoneName):
-                successView(zoneName)
-            case .error(let message):
-                errorView(message)
+        ZStack(alignment: .topTrailing) {
+            Group {
+                switch viewModel.state {
+                case .idle:
+                    idleView
+                case .tokenParsed(let tokenInfo):
+                    tokenReviewView(tokenInfo)
+                case .enrolling:
+                    enrollingView
+                case .success(let zoneName):
+                    successView(zoneName)
+                case .error(let message):
+                    errorView(message)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+
+            // Close button (top-right X)
+            Button {
+                viewModel.reset()
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title2)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .padding(12)
+            .help("Close")
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
     }
 
     // MARK: - State Views
@@ -136,7 +153,7 @@ struct EnrollmentView: View {
             Spacer()
             ProgressView()
                 .scaleEffect(1.2)
-            Text("Enrolling…")
+            Text("Enrolling\u{2026}")
                 .font(.title3)
                 .foregroundStyle(.secondary)
             Text("Generating identity and registering with the zone.")
@@ -170,6 +187,7 @@ struct EnrollmentView: View {
             Button("Done") {
                 viewModel.reset()
                 manualEntryText = ""
+                dismiss()
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.ztlpBlue)
@@ -196,8 +214,9 @@ struct EnrollmentView: View {
             Spacer()
 
             HStack(spacing: 12) {
-                Button("Cancel") {
+                Button("Close") {
                     viewModel.reset()
+                    dismiss()
                 }
                 .buttonStyle(.bordered)
 

@@ -30,7 +30,14 @@ struct OnboardingView: View {
         }
         .onChange(of: configuration.isEnrolled) { enrolled in
             if enrolled {
+                showEnrollment = false
                 withAnimation { currentStep = 2 }
+            }
+        }
+        .onAppear {
+            // Skip to complete if already enrolled
+            if configuration.isEnrolled {
+                currentStep = 2
             }
         }
     }

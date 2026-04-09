@@ -4144,6 +4144,57 @@ pub extern "C" fn ztlp_parse_frame(
 
 use std::net::UdpSocket;
 
+// ── Client Profile for sync FFI ──────────────────────────────────────────
+//
+// iOS calls ztlp_set_client_profile() before ztlp_connect_sync().
+// The profile is stored in a global and consumed by the next connect.
+
+static SYNC_CLIENT_PROFILE: std::sync::Mutex<Option<crate::client_profile::ClientProfile>> =
+    std::sync::Mutex::new(None);
+
+/// Set the client profile for the next sync connection.
+/// Call BEFORE ztlp_connect_sync(). Values are consumed on connect.
+///
+/// interface_type: 0=Unknown, 1=Cellular, 2=WiFi, 3=Wired
+/// radio_tech: 0=None, 1=2G, 2=3G, 3=LTE, 4=5G-NSA, 5=5G-SA
+/// is_constrained: 0=false, 1=true
+#[no_mangle]
+pub extern "C" fn ztlp_set_client_profile(
+    interface_type: u8,
+    radio_tech: u8,
+    is_constrained: u8,
+) {
+    use crate::client_profile::*;
+
+    let iface = match interface_type {
+        1 => InterfaceType::Cellular,
+        2 => InterfaceType::WiFi,
+        3 => InterfaceType::Wired,
+        _ => InterfaceType::Unknown,
+    };
+
+    let radio = match radio_tech {
+        1 => Some(RadioTech::Gen2),
+        2 => Some(RadioTech::Gen3),
+        3 => Some(RadioTech::LTE),
+        4 => Some(RadioTech::NrNsa),
+        5 => Some(RadioTech::NrSa),
+        _ => None,
+    };
+
+    let profile = ClientProfile {
+        client_class: ClientClass::Mobile,
+        interface_type: iface,
+        radio_tech: radio,
+        is_constrained: is_constrained != 0,
+        software_id: format!("ztlp-ios/{}", env!("CARGO_PKG_VERSION")),
+    };
+
+    if let Ok(mut guard) = SYNC_CLIENT_PROFILE.lock() {
+        *guard = Some(profile);
+    }
+}
+
 /// Blocking synchronous connect using std::net::UdpSocket.
 ///
 /// Performs the full Noise_XX 3-message handshake over plain UDP,
@@ -4339,9 +4390,15 @@ fn do_connect_sync(
     ctx.read_message(noise_payload2)
         .map_err(|e| format!("handshake msg2: {}", e))?;
 
-    // ── Message 3: final confirmation ──
+    // ── Message 3: final confirmation (with ClientProfile) ──
+    let profile_cbor = SYNC_CLIENT_PROFILE
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .map(|p| p.to_cbor())
+        .unwrap_or_default();
     let msg3 = ctx
-        .write_message(&[])
+        .write_message(&profile_cbor)
         .map_err(|e| format!("handshake msg3: {}", e))?;
 
     let mut final_hdr =

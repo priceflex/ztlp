@@ -564,10 +564,14 @@ final class TunnelViewModel: ObservableObject {
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8080)
             try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)
 
+            // Vaultwarden — vault service on its own VIP
+            try bridge.vipAddService(name: "vault", vip: "127.0.55.2", port: 8080)
+            try bridge.vipAddService(name: "vault", vip: "127.0.55.2", port: 8443)
+
             // Set up loopback aliases + pf redirect + DNS resolver (prompts for admin password once)
             // Skip on reconnect — networking config persists across tunnel sessions
             if !networkingConfigured {
-                try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+                try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.2", "127.0.55.53"])
                 networkingConfigured = true
             }
 
@@ -580,7 +584,7 @@ final class TunnelViewModel: ObservableObject {
             try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
 
             await MainActor.run {
-                vipStatus = "VIP proxy active — http://beta.techrockstars.ztlp"
+                vipStatus = "VIP proxy active — beta + vault services"
             }
         } catch {
             await MainActor.run {
@@ -600,7 +604,7 @@ final class TunnelViewModel: ObservableObject {
     /// Full teardown including networking — only called on explicit user disconnect.
     private func teardownAll() {
         stopVipProxy()
-        bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.53"])
+        bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.2", "127.0.55.53"])
         networkingConfigured = false
     }
 

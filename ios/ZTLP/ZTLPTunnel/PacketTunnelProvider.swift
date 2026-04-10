@@ -831,7 +831,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // Create new tunnel connection — send via relay
-        let udpTarget = config?.relayAddress ?? target
+        let udpTarget = config.relayAddress ?? target
         let conn = ZTLPTunnelConnection(
             cryptoContext: cryptoCtx,
             gatewayAddress: udpTarget,

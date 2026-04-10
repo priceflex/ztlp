@@ -93,6 +93,23 @@ impl std::fmt::Display for RelayHealth {
 
 // ─── Relay Entry ────────────────────────────────────────────────────────────
 
+/// Information about a relay from NS discovery (rich format with stats).
+#[derive(Debug, Clone)]
+pub struct RelayInfo {
+    /// Socket address of the relay.
+    pub addr: SocketAddr,
+    /// Geographic region (e.g., "us-west-2").
+    pub region: String,
+    /// Last measured latency from NS perspective (milliseconds).
+    pub latency_ms: u32,
+    /// Current load percentage (0-100).
+    pub load_pct: u8,
+    /// Number of active tunneled connections.
+    pub active_connections: u32,
+    /// Health state as reported by NS.
+    pub health: RelayHealth,
+}
+
 /// Tracks the state and history of a single relay.
 #[derive(Debug, Clone)]
 pub struct RelayEntry {
@@ -102,6 +119,12 @@ pub struct RelayEntry {
     pub health: RelayHealth,
     /// Measured latency (round-trip time of last successful probe).
     pub latency: Option<Duration>,
+    /// Geographic region (e.g., "us-west-2"), used for selection tiebreak.
+    pub region: String,
+    /// Current load percentage (0-100), used for load-adjusted scoring.
+    pub load_pct: u8,
+    /// Number of active tunneled connections, used for tiebreak.
+    pub active_connections: u32,
     /// When this relay was added to the pool.
     pub added_at: Instant,
     /// When we last successfully communicated with this relay.
@@ -125,6 +148,28 @@ impl RelayEntry {
             addr,
             health: RelayHealth::Healthy,
             latency: None,
+            region: String::new(),
+            load_pct: 0,
+            active_connections: 0,
+            added_at: Instant::now(),
+            last_success: None,
+            last_probe: None,
+            failure_times: Vec::new(),
+            consecutive_failures: 0,
+            backoff_until: None,
+            deprioritized_until: None,
+        }
+    }
+
+    /// Create a relay entry from NS discovery info (rich format).
+    pub fn from_info(info: &RelayInfo) -> Self {
+        Self {
+            addr: info.addr,
+            health: info.health,
+            latency: Some(Duration::from_millis(info.latency_ms as u64)),
+            region: info.region.clone(),
+            load_pct: info.load_pct,
+            active_connections: info.active_connections,
             added_at: Instant::now(),
             last_success: None,
             last_probe: None,
@@ -248,9 +293,20 @@ impl RelayEntry {
         }
     }
 
-    /// Sorting score: lower is better. Combines latency + health penalty.
+    /// Sorting score: lower is better. Load-adjusted formula with health penalty.
+    ///
+    /// Formula: `latency_ms * (1 + load_pct / 100) + health_penalty`
+    ///
+    /// Load-adjusted scoring: a relay at 20ms latency with 10% load scores 22,
+    /// while a relay at 15ms latency with 80% load scores 27 — the less-loaded
+    /// relay wins despite higher latency.
     pub fn score(&self) -> u64 {
         let latency_ms = self.latency.map(|d| d.as_millis() as u64).unwrap_or(10_000);
+
+        // Load-adjusted: multiply latency by (1 + load/100)
+        // load_pct is 0-100, so (1 + load/100) ranges from 1.0 to 2.0
+        // We use integer math: (latency_ms * (100 + load_pct)) / 100
+        let load_adjusted = (latency_ms * (100 + self.load_pct as u64)) / 100;
 
         let health_penalty = match self.health {
             RelayHealth::Healthy => 0,
@@ -259,7 +315,31 @@ impl RelayEntry {
             RelayHealth::Deprioritized => 200_000,
         };
 
-        latency_ms + health_penalty
+        load_adjusted + health_penalty
+    }
+
+    /// Compare two relays for selection, considering region preference.
+    ///
+    /// Returns `Ordering::Less` if `self` is preferred over `other`.
+    /// Tiebreak order: score → same-region bonus → fewer active connections.
+    pub fn cmp_for_selection(&self, other: &RelayEntry, gateway_region: &str) -> std::cmp::Ordering {
+        // Primary: score (lower is better)
+        let score_cmp = self.score().cmp(&other.score());
+        if score_cmp != std::cmp::Ordering::Equal {
+            return score_cmp;
+        }
+
+        // Tiebreak 1: same region as gateway wins (prefer local)
+        let self_local = self.region == gateway_region;
+        let other_local = other.region == gateway_region;
+        match (self_local, other_local) {
+            (true, false) => return std::cmp::Ordering::Less,
+            (false, true) => return std::cmp::Ordering::Greater,
+            _ => {}
+        }
+
+        // Tiebreak 2: fewer active connections wins
+        self.active_connections.cmp(&other.active_connections)
     }
 
     /// Current backoff duration remaining.
@@ -312,6 +392,8 @@ pub struct RelayPoolConfig {
     pub ns_server: Option<String>,
     /// Zone to query for relays.
     pub zone: Option<String>,
+    /// Gateway region for relay selection tiebreak (e.g., "us-west-2").
+    pub gateway_region: String,
 }
 
 impl Default for RelayPoolConfig {
@@ -322,6 +404,7 @@ impl Default for RelayPoolConfig {
             pinned_relay: None,
             ns_server: None,
             zone: None,
+            gateway_region: String::new(),
         }
     }
 }
@@ -423,6 +506,116 @@ impl RelayPool {
             "relay pool: updated from NS, {} relays available",
             self.relays.len()
         );
+    }
+
+    /// Update the pool with rich relay info from NS (includes stats).
+    ///
+    /// Unlike `update_from_ns`, this preserves and updates NS-provided
+    /// stats (region, load, active_connections) for existing relays.
+    pub fn update_from_ns_rich(&mut self, infos: Vec<RelayInfo>) {
+        self.last_ns_query = Some(Instant::now());
+
+        let mut fresh_addrs: std::collections::HashSet<SocketAddr> = Default::default();
+
+        for info in &infos {
+            fresh_addrs.insert(info.addr);
+
+            if let Some(existing) = self.relays.get_mut(&info.addr) {
+                // Update stats for existing relay (keep health history)
+                existing.region = info.region.clone();
+                existing.load_pct = info.load_pct;
+                existing.active_connections = info.active_connections;
+                // If NS reports the relay as Healthy, trust NS over our local health
+                // only if our local state is worse (not if we've detected issues locally)
+                if info.health == RelayHealth::Healthy
+                    && matches!(
+                        existing.health,
+                        RelayHealth::Healthy | RelayHealth::Degraded
+                    )
+                {
+                    existing.health = RelayHealth::Healthy;
+                } else if info.health == RelayHealth::Degraded
+                    && existing.health == RelayHealth::Healthy
+                {
+                    // NS says degraded but we haven't seen issues — trust NS as early signal
+                    existing.health = RelayHealth::Degraded;
+                }
+                // Don't override Dead/Deprioritized from NS — our local probe is more authoritative
+            } else {
+                // New relay from NS
+                self.add_relay_from_info(info);
+            }
+        }
+
+        // Prune relays that are both dead AND not in the fresh NS list
+        let to_remove: Vec<SocketAddr> = self
+            .relays
+            .iter()
+            .filter(|(addr, entry)| {
+                !fresh_addrs.contains(addr) && matches!(entry.health, RelayHealth::Dead)
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in to_remove {
+            self.remove_relay(&addr);
+        }
+
+        // Re-evaluate primary after stats update
+        if self.config.pinned_relay.is_none() {
+            if let Some(best) = self.best_available_relay() {
+                if self.primary != Some(best) {
+                    let old = self.primary;
+                    self.primary = Some(best);
+                    if old != Some(best) {
+                        info!(
+                            "relay pool: primary changed from {:?} to {} after NS stats update",
+                            old, best
+                        );
+                    }
+                }
+            }
+        }
+
+        info!(
+            "relay pool: updated from NS (rich), {} relays available",
+            self.relays.len()
+        );
+    }
+
+    /// Add a relay to the pool from NS discovery info.
+    pub fn add_relay_from_info(&mut self, info: &RelayInfo) {
+        if self.relays.len() >= MAX_POOL_SIZE {
+            if let Some(worst) = self.worst_relay() {
+                self.relays.remove(&worst);
+            }
+        }
+
+        self.relays
+            .entry(info.addr)
+            .or_insert_with(|| RelayEntry::from_info(info));
+
+        // Set primary if none exists
+        if self.primary.is_none() && self.config.pinned_relay.is_none() {
+            self.primary = Some(info.addr);
+        }
+    }
+
+    /// Select the best relay considering region preference.
+    ///
+    /// Unlike `best_available_relay()`, this uses `cmp_for_selection()` which
+    /// considers region tiebreak and active connections in addition to score.
+    pub fn select_best(&self, gateway_region: &str) -> Option<SocketAddr> {
+        let available: Vec<&RelayEntry> = self
+            .relays
+            .values()
+            .filter(|e| e.is_available())
+            .collect();
+
+        available
+            .into_iter()
+            .min_by(|a, b| a.cmp_for_selection(b, gateway_region))
+            .map(|e| e.addr)
     }
 
     /// Get the current primary relay address.
@@ -1631,5 +1824,335 @@ mod tests {
         }
 
         assert_eq!(orch.pool().len(), 2);
+    }
+
+    // ── Load-Adjusted Scoring Tests ────────────────────────────────
+
+    #[test]
+    fn test_score_load_adjusted_low_load_wins() {
+        // Relay A: 20ms latency, 10% load → score = 20 * 1.10 = 22
+        // Relay B: 15ms latency, 80% load → score = 15 * 1.80 = 27
+        // Relay A wins despite higher latency — it's less loaded
+        let mut low_load = RelayEntry::new(relay_addr(1));
+        low_load.latency = Some(Duration::from_millis(20));
+        low_load.load_pct = 10;
+
+        let mut high_load = RelayEntry::new(relay_addr(2));
+        high_load.latency = Some(Duration::from_millis(15));
+        high_load.load_pct = 80;
+
+        assert!(low_load.score() < high_load.score(),
+            "low load relay should score better: {} vs {}", low_load.score(), high_load.score());
+    }
+
+    #[test]
+    fn test_score_load_adjusted_same_load_latency_wins() {
+        // When both relays have same load, lower latency wins
+        let mut fast = RelayEntry::new(relay_addr(1));
+        fast.latency = Some(Duration::from_millis(10));
+        fast.load_pct = 50;
+
+        let mut slow = RelayEntry::new(relay_addr(2));
+        slow.latency = Some(Duration::from_millis(30));
+        slow.load_pct = 50;
+
+        assert!(fast.score() < slow.score());
+    }
+
+    #[test]
+    fn test_score_load_adjusted_zero_load() {
+        // 0% load: score = latency * 1.0 = latency
+        let mut entry = RelayEntry::new(relay_addr(1));
+        entry.latency = Some(Duration::from_millis(20));
+        entry.load_pct = 0;
+
+        assert_eq!(entry.score(), 20);
+    }
+
+    #[test]
+    fn test_score_load_adjusted_full_load() {
+        // 100% load: score = latency * 2.0
+        let mut entry = RelayEntry::new(relay_addr(1));
+        entry.latency = Some(Duration::from_millis(20));
+        entry.load_pct = 100;
+
+        assert_eq!(entry.score(), 40);
+    }
+
+    #[test]
+    fn test_score_health_penalty_still_applied() {
+        // Load-adjusted scoring + health penalty
+        let mut healthy = RelayEntry::new(relay_addr(1));
+        healthy.latency = Some(Duration::from_millis(20));
+        healthy.load_pct = 50;
+
+        let mut degraded = RelayEntry::new(relay_addr(2));
+        degraded.latency = Some(Duration::from_millis(20));
+        degraded.load_pct = 50;
+        degraded.health = RelayHealth::Degraded;
+
+        assert!(healthy.score() < degraded.score());
+    }
+
+    // ── Region Tiebreak Tests ───────────────────────────────────────
+
+    #[test]
+    fn test_cmp_for_selection_same_region_wins() {
+        let mut local = RelayEntry::new(relay_addr(1));
+        local.latency = Some(Duration::from_millis(20));
+        local.region = "us-west-2".to_string();
+
+        let mut remote = RelayEntry::new(relay_addr(2));
+        remote.latency = Some(Duration::from_millis(20));
+        remote.region = "us-east-1".to_string();
+
+        // Same score, but local matches gateway region
+        assert_eq!(
+            local.cmp_for_selection(&remote, "us-west-2"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_cmp_for_selection_score_overrides_region() {
+        let mut local_slow = RelayEntry::new(relay_addr(1));
+        local_slow.latency = Some(Duration::from_millis(100));
+        local_slow.region = "us-west-2".to_string();
+
+        let mut remote_fast = RelayEntry::new(relay_addr(2));
+        remote_fast.latency = Some(Duration::from_millis(10));
+        remote_fast.region = "us-east-1".to_string();
+
+        // Remote has better score (10 vs 100) — region doesn't override
+        assert_eq!(
+            local_slow.cmp_for_selection(&remote_fast, "us-west-2"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_cmp_for_selection_fewer_connections_tiebreak() {
+        let mut low_conn = RelayEntry::new(relay_addr(1));
+        low_conn.latency = Some(Duration::from_millis(20));
+        low_conn.region = "us-west-2".to_string();
+        low_conn.active_connections = 5;
+
+        let mut high_conn = RelayEntry::new(relay_addr(2));
+        high_conn.latency = Some(Duration::from_millis(20));
+        high_conn.region = "us-west-2".to_string();
+        high_conn.active_connections = 50;
+
+        // Same score, same region → fewer connections wins
+        assert_eq!(
+            low_conn.cmp_for_selection(&high_conn, "us-west-2"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    // ── RelayInfo / update_from_ns_rich Tests ───────────────────────
+
+    fn make_relay_info(
+        port: u16,
+        region: &str,
+        latency_ms: u32,
+        load: u8,
+        conns: u32,
+        health: RelayHealth,
+    ) -> RelayInfo {
+        RelayInfo {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), port),
+            region: region.to_string(),
+            latency_ms,
+            load_pct: load,
+            active_connections: conns,
+            health,
+        }
+    }
+
+    fn make_relay_info2(
+        port: u16,
+        region: &str,
+        latency_ms: u32,
+        load: u8,
+        conns: u32,
+        health: RelayHealth,
+    ) -> RelayInfo {
+        RelayInfo {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), port),
+            region: region.to_string(),
+            latency_ms,
+            load_pct: load,
+            active_connections: conns,
+            health,
+        }
+    }
+
+    #[test]
+    fn test_relay_entry_from_info() {
+        let info = make_relay_info(23095, "us-west-2", 12, 35, 42, RelayHealth::Healthy);
+        let entry = RelayEntry::from_info(&info);
+
+        assert_eq!(entry.addr, info.addr);
+        assert_eq!(entry.health, RelayHealth::Healthy);
+        assert_eq!(entry.latency, Some(Duration::from_millis(12)));
+        assert_eq!(entry.region, "us-west-2");
+        assert_eq!(entry.load_pct, 35);
+        assert_eq!(entry.active_connections, 42);
+    }
+
+    #[test]
+    fn test_update_from_ns_rich_adds_new_relays() {
+        let mut pool = RelayPool::new(default_config());
+        let infos = vec![
+            make_relay_info(1, "us-west-2", 12, 35, 42, RelayHealth::Healthy),
+            make_relay_info2(2, "us-east-1", 45, 80, 156, RelayHealth::Degraded),
+        ];
+
+        pool.update_from_ns_rich(infos);
+
+        assert_eq!(pool.len(), 2);
+        assert!(pool.get_relay(&relay_addr(1)).is_some());
+        assert!(pool.get_relay(&relay_addr2(2)).is_some());
+    }
+
+    #[test]
+    fn test_update_from_ns_rich_updates_existing_stats() {
+        let mut pool = RelayPool::new(default_config());
+        pool.add_relay(relay_addr(1));
+        pool.record_probe_success(relay_addr(1), Duration::from_millis(15));
+
+        // NS reports updated load
+        let infos = vec![
+            make_relay_info(1, "us-west-2", 12, 90, 200, RelayHealth::Healthy),
+        ];
+        pool.update_from_ns_rich(infos);
+
+        let entry = pool.get_relay(&relay_addr(1)).unwrap();
+        assert_eq!(entry.load_pct, 90);
+        assert_eq!(entry.active_connections, 200);
+        assert_eq!(entry.region, "us-west-2");
+        // Local latency measurement preserved (update_from_ns_rich updates stats, not latency)
+        assert_eq!(entry.latency, Some(Duration::from_millis(15)));
+    }
+
+    #[test]
+    fn test_update_from_ns_rich_ns_degraded_overrides_healthy() {
+        let mut pool = RelayPool::new(default_config());
+        pool.add_relay(relay_addr(1));
+        pool.record_probe_success(relay_addr(1), Duration::from_millis(15));
+
+        // NS reports relay as degraded — trust NS as early warning
+        let infos = vec![
+            make_relay_info(1, "us-west-2", 12, 95, 300, RelayHealth::Degraded),
+        ];
+        pool.update_from_ns_rich(infos);
+
+        let entry = pool.get_relay(&relay_addr(1)).unwrap();
+        assert_eq!(entry.health, RelayHealth::Degraded);
+    }
+
+    #[test]
+    fn test_update_from_ns_rich_does_not_override_dead() {
+        let mut pool = RelayPool::new(default_config());
+        pool.add_relay(relay_addr(1));
+        pool.record_probe_success(relay_addr(1), Duration::from_millis(15));
+        // Locally detected as dead
+        pool.record_probe_failure(relay_addr(1));
+
+        // NS still reports as healthy — don't override our local Dead state
+        let infos = vec![
+            make_relay_info(1, "us-west-2", 12, 35, 42, RelayHealth::Healthy),
+        ];
+        pool.update_from_ns_rich(infos);
+
+        let entry = pool.get_relay(&relay_addr(1)).unwrap();
+        // Dead/Deprioritized from local probes should NOT be overridden by NS
+        assert!(matches!(
+            entry.health,
+            RelayHealth::Dead | RelayHealth::Deprioritized
+        ));
+    }
+
+    #[test]
+    fn test_select_best_with_region() {
+        let mut pool = RelayPool::new(default_config());
+
+        // Add relays with same latency but different regions
+        let mut entry_west = RelayEntry::new(relay_addr(1));
+        entry_west.latency = Some(Duration::from_millis(20));
+        entry_west.region = "us-east-1".to_string(); // Different from gateway
+        entry_west.load_pct = 0;
+
+        let mut entry_east = RelayEntry::new(relay_addr(2));
+        entry_east.latency = Some(Duration::from_millis(20));
+        entry_east.region = "us-west-2".to_string(); // Same as gateway
+        entry_east.load_pct = 0;
+
+        pool.relays.insert(relay_addr(1), entry_west);
+        pool.relays.insert(relay_addr(2), entry_east);
+
+        // select_best with gateway in us-west-2 should prefer relay 2
+        let best = pool.select_best("us-west-2");
+        assert_eq!(best, Some(relay_addr(2)));
+    }
+
+    #[test]
+    fn test_select_best_load_beats_region() {
+        let mut pool = RelayPool::new(default_config());
+
+        // Local relay but heavily loaded
+        let mut local_loaded = RelayEntry::new(relay_addr(1));
+        local_loaded.latency = Some(Duration::from_millis(20));
+        local_loaded.region = "us-west-2".to_string();
+        local_loaded.load_pct = 90; // 20 * 1.90 = 38
+
+        // Remote relay but lightly loaded
+        let mut remote_light = RelayEntry::new(relay_addr(2));
+        remote_light.latency = Some(Duration::from_millis(15));
+        remote_light.region = "us-east-1".to_string();
+        remote_light.load_pct = 10; // 15 * 1.10 = 16
+
+        pool.relays.insert(relay_addr(1), local_loaded);
+        pool.relays.insert(relay_addr(2), remote_light);
+
+        // Remote relay wins on score despite not matching region
+        let best = pool.select_best("us-west-2");
+        assert_eq!(best, Some(relay_addr(2)));
+    }
+
+    #[test]
+    fn test_select_best_empty_pool() {
+        let pool = RelayPool::new(default_config());
+        assert_eq!(pool.select_best("us-west-2"), None);
+    }
+
+    #[test]
+    fn test_select_best_all_dead() {
+        let mut pool = RelayPool::new(default_config());
+        pool.add_relay(relay_addr(1));
+        pool.record_probe_failure(relay_addr(1));
+
+        assert_eq!(pool.select_best("us-west-2"), None);
+    }
+
+    #[test]
+    fn test_update_from_ns_rich_prunes_dead_not_in_list() {
+        let mut pool = RelayPool::new(default_config());
+        pool.add_relay(relay_addr(1));
+        pool.add_relay(relay_addr2(2));
+        pool.record_probe_success(relay_addr(1), Duration::from_millis(10));
+        pool.record_probe_success(relay_addr2(2), Duration::from_millis(20));
+        // Relay 1 dies
+        pool.record_probe_failure(relay_addr(1));
+
+        // NS returns only relay 2 (not relay 1)
+        let infos = vec![
+            make_relay_info2(2, "us-west-2", 20, 30, 10, RelayHealth::Healthy),
+        ];
+        pool.update_from_ns_rich(infos);
+
+        // Dead relay 1 not in NS list → pruned
+        assert!(pool.get_relay(&relay_addr(1)).is_none());
+        assert!(pool.get_relay(&relay_addr2(2)).is_some());
     }
 }

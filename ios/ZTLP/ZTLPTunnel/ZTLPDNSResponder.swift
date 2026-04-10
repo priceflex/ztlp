@@ -106,6 +106,8 @@ final class ZTLPDNSResponder {
             // Parse the question name
             var nameOffset = dnsOffset + 12
             var nameParts: [String] = []
+            // Debug: track parsing for logging
+            var debugNameParts: [String] = []
 
             while nameOffset < packet.count {
                 let labelLen = Int(bytes[nameOffset])
@@ -134,11 +136,18 @@ final class ZTLPDNSResponder {
             // Build the FQDN
             let fqdn = nameParts.joined(separator: ".")
 
+            // Log the query details
+            TunnelLogger.shared.debug("DNS: qname=\(fqdn) qtype=\(qtype) qclass=\(qclass) serviceMap=\(Array(serviceMap.keys))", source: "DNS")
+
             // Must end in .ztlp
-            guard fqdn.hasSuffix(".ztlp") else { return nil }
+            guard fqdn.hasSuffix(".ztlp") else {
+                TunnelLogger.shared.debug("DNS: rejected — not .ztlp suffix", source: "DNS")
+                return nil
+            }
 
             // Look up the VIP
             guard let vip = serviceMap[fqdn] else {
+                TunnelLogger.shared.debug("DNS: NXDOMAIN for \(fqdn)", source: "DNS")
                 // Unknown .ztlp name — return NXDOMAIN
                 return buildNXDomainResponse(
                     originalPacket: packet,

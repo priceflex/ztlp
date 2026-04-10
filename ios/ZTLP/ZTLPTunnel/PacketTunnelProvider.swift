@@ -616,10 +616,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Format: [1B type][4B stream_id BE][2B data_len BE][data...]
     /// Type: 0=OpenStream, 1=SendData, 2=CloseStream
     ///
-    /// Each action is re-framed as a ZTLP mux frame before sending to gateway:
-    ///   OpenStream  -> [0x06 | stream_id(4 BE) | svc_name_len(1) | svc_name]
-    ///   SendData    -> [0x00 | stream_id(4 BE) | chunk...] (chunked to 1135 bytes)
-    ///   CloseStream -> [0x05 | stream_id(4 BE)]
+    /// LEGACY MODE: Gateway does not support mux framing. Send raw data
+    /// directly without mux OPEN/DATA/CLOSE headers. Only the inner payload
+    /// from SendData actions is forwarded. OpenStream/CloseStream are logged
+    /// but not sent (gateway manages backend connections implicitly).
     private func processRouterActions(actionBuffer: [UInt8], actionLen: Int) {
         var offset = 0
         while offset < actionLen {
@@ -628,13 +628,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let actionType = actionBuffer[offset]
             offset += 1
 
-            // Keep stream_id as raw bytes for mux framing
-            let streamIdBytes: [UInt8] = [
-                actionBuffer[offset],
-                actionBuffer[offset+1],
-                actionBuffer[offset+2],
-                actionBuffer[offset+3]
-            ]
+            // Skip stream_id (not used in legacy mode)
             offset += 4
 
             let dataLen = Int(actionBuffer[offset]) << 8
@@ -647,37 +641,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             offset += dataLen
 
             switch actionType {
-            case 0: // OpenStream -> mux FRAME_OPEN
-                // [0x06 | stream_id(4 BE) | svc_name_len(1) | svc_name]
-                if let svcData = actionData {
-                    var frame = Data(capacity: 6 + svcData.count)
-                    frame.append(Self.MUX_FRAME_OPEN)
-                    frame.append(contentsOf: streamIdBytes)
-                    frame.append(UInt8(min(svcData.count, 255)))
-                    frame.append(svcData)
-                    tunnelConnection?.sendData(frame)
-                }
-            case 1: // SendData -> mux FRAME_DATA (chunked to MAX_MUX_PAYLOAD)
-                // [0x00 | stream_id(4 BE) | chunk...]
+            case 0: // OpenStream — skip in legacy mode (gateway opens backend on first data)
+                logger.debug("Router: OpenStream (legacy skip)", source: "Router")
+            case 1: // SendData — send raw payload (no mux framing)
                 if let payload = actionData {
-                    var chunkOffset = 0
-                    while chunkOffset < payload.count {
-                        let chunkEnd = min(chunkOffset + Self.MAX_MUX_PAYLOAD, payload.count)
-                        let chunk = payload[chunkOffset..<chunkEnd]
-                        var frame = Data(capacity: 5 + chunk.count)
-                        frame.append(Self.MUX_FRAME_DATA)
-                        frame.append(contentsOf: streamIdBytes)
-                        frame.append(chunk)
-                        tunnelConnection?.sendData(frame)
-                        chunkOffset = chunkEnd
-                    }
+                    tunnelConnection?.sendData(payload)
                 }
-            case 2: // CloseStream -> mux FRAME_CLOSE
-                // [0x05 | stream_id(4 BE)]
-                var frame = Data(capacity: 5)
-                frame.append(Self.MUX_FRAME_CLOSE)
-                frame.append(contentsOf: streamIdBytes)
-                tunnelConnection?.sendData(frame)
+            case 2: // CloseStream — skip in legacy mode
+                logger.debug("Router: CloseStream (legacy skip)", source: "Router")
             default:
                 logger.warn("Unknown router action type: \(actionType)", source: "Tunnel")
             }
@@ -1052,54 +1023,14 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
 
         markDataActivity()
 
-        // The decrypted payload is a mux frame from the gateway.
-        // Demux it and feed the inner data to the correct router stream.
-        //
-        // Mux frame formats (inner payload after tunnel FRAME_DATA stripped):
-        //   FRAME_DATA:  [0x00 | stream_id(4 BE) | http_data...]
-        //   FRAME_CLOSE: [0x05 | stream_id(4 BE)]
-        //   FRAME_FIN:   [0x04 | stream_id(4 BE)]
-        //
-        // Legacy (non-mux) format: just raw http_data (no mux header)
-
+        // LEGACY MODE: Gateway sends raw data (no mux framing).
+        // Feed all received data directly to the router as stream 0.
+        // The router reconstructs TCP segments and writes them to utun.
         data.withUnsafeBytes { ptr in
             guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             let len = ptr.count
-
-            if len >= 5 {
-                let frameType = baseAddr[0]
-
-                if frameType == 0x00 {
-                    // Mux FRAME_DATA: [0x00 | stream_id(4 BE) | payload...]
-                    let streamId = UInt32(baseAddr[1]) << 24
-                        | UInt32(baseAddr[2]) << 16
-                        | UInt32(baseAddr[3]) << 8
-                        | UInt32(baseAddr[4])
-
-                    if streamId > 0 {
-                        // Multiplexed data
-                        let payloadPtr = baseAddr + 5
-                        let payloadLen = len - 5
-                        if payloadLen > 0 {
-                            ztlp_router_gateway_data_sync(router, streamId, payloadPtr, payloadLen)
-                        }
-                    } else {
-                        // stream_id 0 = legacy format, entire data is payload
-                        ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
-                    }
-                } else if frameType == 0x05 || frameType == 0x04 {
-                    // Mux FRAME_CLOSE / FRAME_FIN: [type | stream_id(4 BE)]
-                    let streamId = UInt32(baseAddr[1]) << 24
-                        | UInt32(baseAddr[2]) << 16
-                        | UInt32(baseAddr[3]) << 8
-                        | UInt32(baseAddr[4])
-                    ztlp_router_gateway_close_sync(router, streamId)
-                } else {
-                    // Unknown type or legacy — treat as raw data for stream 0
-                    ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
-                }
-            } else if len > 0 {
-                // Short payload — legacy format, feed as stream 0
+            if len > 0 {
+                logger.debug("GW->NE: \(len) bytes (legacy)", source: "Tunnel")
                 ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
             }
         }

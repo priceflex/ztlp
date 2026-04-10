@@ -546,15 +546,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         packetFlow.readPackets { [weak self] packets, protocols in
             guard let self = self, self.isTunnelActive, let router = self.packetRouter else { return }
 
+            if !packets.isEmpty {
+                self.logger.debug("readPacketLoop: received \(packets.count) packet(s), sizes=\(packets.map { $0.count })", source: "Tunnel")
+            }
             for (i, packet) in packets.enumerated() {
                 let proto = protocols[i]
                 if proto.intValue == AF_INET {
                     // Intercept DNS queries for *.ztlp before they hit the router
-                    if let dns = self.dnsResponder, dns.isDNSQuery(packet),
-                       let response = dns.handleQuery(packet) {
-                        // Write DNS response directly back to utun
-                        self.packetFlow.writePackets([response], withProtocols: [NSNumber(value: AF_INET)])
-                        continue
+                    if let dns = self.dnsResponder, dns.isDNSQuery(packet) {
+                        self.logger.debug("DNS query intercepted (\(packet.count) bytes)", source: "DNS")
+                        if let response = dns.handleQuery(packet) {
+                            // Write DNS response directly back to utun
+                            self.packetFlow.writePackets([response], withProtocols: [NSNumber(value: AF_INET)])
+                            self.logger.debug("DNS response sent (\(response.count) bytes)", source: "DNS")
+                            continue
+                        } else {
+                            self.logger.warn("DNS query matched but no response generated", source: "DNS")
+                        }
+                    }
+
+                    // Log destination IP for debugging
+                    if packet.count >= 20 {
+                        packet.withUnsafeBytes { ptr in
+                            let bytes = ptr.bindMemory(to: UInt8.self)
+                            let dstIP = "\(bytes[16]).\(bytes[17]).\(bytes[18]).\(bytes[19])"
+                            let proto_num = bytes[9]
+                            self.logger.debug("Pkt: dst=\(dstIP) proto=\(proto_num) len=\(packet.count)", source: "Router")
+                        }
                     }
 
                     var actionWritten: Int = 0
@@ -573,6 +591,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
                     // Process router actions (OpenStream, SendData, CloseStream)
                     if actionCount > 0 && actionWritten > 0 {
+                        self.logger.debug("Router: \(actionCount) action(s), \(actionWritten) bytes", source: "Router")
                         self.processRouterActions(
                             actionBuffer: self.actionBuffer,
                             actionLen: actionWritten

@@ -204,8 +204,8 @@ struct HomeView: View {
                     name: "Vaultwarden",
                     hostname: "vault.\(zoneSuffix)",
                     vip: "10.122.0.4",
-                    port: 8200,
-                    proto: "http",
+                    port: 443,
+                    proto: "https",
                     isActive: true
                 )
 
@@ -214,7 +214,7 @@ struct HomeView: View {
                     name: svcName.capitalized,
                     hostname: "\(svcName).\(zoneSuffix)",
                     vip: "10.122.0.2",
-                    port: 8080,
+                    port: 80,
                     proto: "http",
                     isActive: true
                 )
@@ -224,7 +224,7 @@ struct HomeView: View {
                     name: "\(svcName.capitalized) (HTTPS)",
                     hostname: "\(svcName).\(zoneSuffix)",
                     vip: "10.122.0.2",
-                    port: 8443,
+                    port: 443,
                     proto: "https",
                     isActive: true
                 )
@@ -234,7 +234,7 @@ struct HomeView: View {
                     name: "HTTP Proxy",
                     hostname: "http.\(zoneSuffix)",
                     vip: "10.122.0.3",
-                    port: 8080,
+                    port: 80,
                     proto: "http",
                     isActive: true
                 )
@@ -485,22 +485,22 @@ private struct VaultAccessSheet: View {
 
                 VStack(spacing: 12) {
                     VaultLinkRow(
-                        title: "Web Vault (HTTP)",
-                        url: "http://10.122.0.4:8200",
-                        icon: "globe",
-                        note: "Direct tunnel access"
+                        title: "Web Vault",
+                        url: "https://vault.\(zoneSuffix)",
+                        icon: "lock.fill",
+                        note: "vault.\(zoneSuffix)"
                     )
 
                     VaultLinkRow(
-                        title: "Web Vault (HTTPS)",
-                        url: "https://vault.\(zoneSuffix):8443",
-                        icon: "lock.fill",
-                        note: "Requires CA trust"
+                        title: "Web Vault (HTTP)",
+                        url: "http://vault.\(zoneSuffix)",
+                        icon: "globe",
+                        note: "No certificate required"
                     )
 
                     VaultLinkRow(
                         title: "Bitwarden Sync URL",
-                        url: "http://10.122.0.4:8200",
+                        url: "http://vault.\(zoneSuffix)",
                         icon: "arrow.triangle.2.circlepath",
                         note: "Set this in Bitwarden app settings"
                     )

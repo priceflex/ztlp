@@ -98,6 +98,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Standalone packet router handle (replaces ZtlpClient-based router).
     private var packetRouter: OpaquePointer?  // ZtlpPacketRouter*
 
+    /// DNS responder for *.ztlp queries (answers directly on utun, no tokio).
+    private var dnsResponder: ZTLPDNSResponder?
+
     /// Keepalive timer.
     private var keepaliveTimer: DispatchSourceTimer?
 
@@ -244,10 +247,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 ]
                 try self.startPacketRouter(services: services)
 
+                // Step 7b: Start DNS responder for *.ztlp queries
+                let zone = config.zoneName ?? ""
+                self.dnsResponder = ZTLPDNSResponder(
+                    services: services.map { ($0.name, $0.vip) },
+                    zoneName: zone
+                )
+                self.logger.info("DNS responder active for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
+
                 // Step 8: Start VIP proxy (NWListener on 127.0.0.1)
                 // Note: VIP proxy needs its own crypto context or shares the
                 // tunnel connection for sending. We route through tunnelConnection.
                 let proxy = ZTLPVIPProxy()
+                // Standard ports: browsers use 80/443 by default
+                proxy.addService(name: svcName, port: 80)
+                proxy.addService(name: svcName, port: 443)
+                proxy.addService(name: "vault", port: 80)
+                proxy.addService(name: "vault", port: 443)
+                // Also keep legacy numbered ports for backward compat
                 proxy.addService(name: svcName, port: 8080)
                 proxy.addService(name: svcName, port: 8443)
                 proxy.addService(name: "vault", port: 8200)
@@ -255,7 +272,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self?.tunnelConnection?.sendRaw(data)
                 })
                 self.vipProxy = proxy
-                self.logger.info("VIP proxy started on 127.0.0.1:8080/8443/8200", source: "Tunnel")
+                self.logger.info("VIP proxy started on 127.0.0.1:80/443/8080/8443/8200", source: "Tunnel")
 
                 // Step 9: Apply tunnel network settings
                 let remoteAddr = config.relayAddress ?? target
@@ -339,6 +356,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.stopWritePacketTimer()
             self.ackFlushTimer?.cancel()
             self.ackFlushTimer = nil
+
+            // Stop DNS responder
+            self.dnsResponder = nil
+            self.logger.info("DNS responder stopped", source: "Tunnel")
 
             // Stop VIP proxy
             self.vipProxy?.stop()
@@ -492,6 +513,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             for (i, packet) in packets.enumerated() {
                 let proto = protocols[i]
                 if proto.intValue == AF_INET {
+                    // Intercept DNS queries for *.ztlp before they hit the router
+                    if let dns = self.dnsResponder, dns.isDNSQuery(packet),
+                       let response = dns.handleQuery(packet) {
+                        // Write DNS response directly back to utun
+                        self.packetFlow.writePackets([response], withProtocols: [NSNumber(value: AF_INET)])
+                        continue
+                    }
+
                     var actionWritten: Int = 0
 
                     let actionCount = packet.withUnsafeBytes { pktPtr -> Int32 in
@@ -888,7 +917,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             settings.ipv4Settings = ipv4
         }
 
-        let dns = NEDNSSettings(servers: ["127.0.55.53"])
+        let dns = NEDNSSettings(servers: ["10.122.0.1"])
         dns.matchDomains = ["ztlp"]
         settings.dnsSettings = dns
         settings.mtu = NSNumber(value: 1400)

@@ -26,6 +26,7 @@
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
 		AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */; };
 		AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */; };
+		BB22CC33DD44EE55FF660A01 /* ZTLPDNSResponder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */; };
 		AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */; };
 		B9D88DADB4E22192735094F1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF7E6453D407953E6432F115 /* Assets.xcassets */; };
 		BB04D01127B0CAF0F92194B7 /* SecureEnclaveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B4F28822E500B5DDB569CC /* SecureEnclaveService.swift */; };
@@ -119,6 +120,7 @@
 		AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkResultTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPTunnelConnection.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPVIPProxy.swift; sourceTree = "<group>"; };
+		BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPDNSResponder.swift; sourceTree = "<group>"; };
 		AA9B8795185D5093D8F95631 /* Color+ZTLP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Color+ZTLP.swift"; sourceTree = "<group>"; };
 		AB8947C5959711900EDC01C5 /* ZTLP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZTLP.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACE11ACE3E2B6FECE8814ABA /* EnrollmentViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentViewModelTests.swift; sourceTree = "<group>"; };
@@ -178,6 +180,7 @@
 				7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */,
 				AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */,
 				AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */,
+				BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */,
 				A9A4116144A5A959B0515225 /* TunnelConfiguration.swift */,
 				B6D5F375750724D890CC802C /* ZTLPTunnel-Bridging-Header.h */,
 				92920C6C8913A627EA5901B0 /* ZTLPTunnel.entitlements */,
@@ -404,6 +407,7 @@
 				18BB853C28A8642292ADFDCA /* PacketTunnelProvider.swift in Sources */,
 				AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */,
 				AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */,
+				BB22CC33DD44EE55FF660A01 /* ZTLPDNSResponder.swift in Sources */,
 				C55BFBBE8FE867873AAFB378 /* TunnelConfiguration.swift in Sources */,
 				E5F6A7B8C9D0E1F2A3B4C5D6 /* TunnelLogger.swift in Sources */,
 			);

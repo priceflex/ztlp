@@ -255,11 +255,11 @@ struct BenchmarkView: View {
 
     private func runConnectivityTests() async {
         let services: [(name: String, vip: String, port: UInt16, proto: String)] = [
-            ("Vault (HTTP)",  "10.122.0.4", 8200, "http"),
-            ("Vault (HTTPS)", "10.122.0.4", 8443, "https"),
-            ("Primary HTTP",  "10.122.0.2", 8080, "http"),
-            ("Primary HTTPS", "10.122.0.2", 8443, "https"),
-            ("HTTP Proxy",    "10.122.0.3", 8080, "http"),
+            ("Vault (HTTP)",  "10.122.0.4", 80,  "http"),
+            ("Vault (HTTPS)", "10.122.0.4", 443, "https"),
+            ("Primary HTTP",  "10.122.0.2", 80,  "http"),
+            ("Primary HTTPS", "10.122.0.2", 443, "https"),
+            ("HTTP Proxy",    "10.122.0.3", 80,  "http"),
         ]
 
         // Test 1: Tunnel interface check
@@ -287,25 +287,25 @@ struct BenchmarkView: View {
         }
 
         // Test 3: HTTP GET to vault (if reachable)
-        let (httpOk, httpMs, httpCode) = await httpGet(url: "http://10.122.0.4:8200/alive", timeoutSec: 10)
+        let (httpOk, httpMs, httpCode) = await httpGet(url: "http://10.122.0.4/alive", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Vault HTTP Response",
             value: httpOk ? "\(httpMs)" : "FAIL",
             unit: httpOk ? "ms" : "",
             status: httpOk ? .good : .error,
             detail: httpOk ? "HTTP \(httpCode)" : "No response",
-            openURL: httpOk ? "http://10.122.0.4:8200" : nil
+            openURL: httpOk ? "http://10.122.0.4" : nil
         ))
 
         // Test 4: HTTP GET through primary service
-        let (primaryOk, primaryMs, primaryCode) = await httpGet(url: "http://10.122.0.2:8080/", timeoutSec: 10)
+        let (primaryOk, primaryMs, primaryCode) = await httpGet(url: "http://10.122.0.2/", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Primary HTTP Response",
             value: primaryOk ? "\(primaryMs)" : "FAIL",
             unit: primaryOk ? "ms" : "",
             status: primaryOk ? .good : (primaryCode > 0 ? .warning : .error),
             detail: primaryOk ? "HTTP \(primaryCode)" : (primaryCode > 0 ? "HTTP \(primaryCode)" : "No response"),
-            openURL: primaryOk ? "http://10.122.0.2:8080" : nil
+            openURL: primaryOk ? "http://10.122.0.2" : nil
         ))
     }
 
@@ -313,11 +313,11 @@ struct BenchmarkView: View {
 
     private func runHTTPTests() async {
         let endpoints: [(name: String, url: String, openURL: String?)] = [
-            ("GET /alive (vault)", "http://10.122.0.4:8200/alive", "http://10.122.0.4:8200"),
-            ("GET / (vault web)", "http://10.122.0.4:8200/", "http://10.122.0.4:8200"),
-            ("GET /api/config (vault)", "http://10.122.0.4:8200/api/config", nil),
-            ("GET / (primary)", "http://10.122.0.2:8080/", "http://10.122.0.2:8080"),
-            ("GET / (http proxy)", "http://10.122.0.3:8080/", "http://10.122.0.3:8080"),
+            ("GET /alive (vault)", "http://10.122.0.4/alive", "http://10.122.0.4"),
+            ("GET / (vault web)", "http://10.122.0.4/", "http://10.122.0.4"),
+            ("GET /api/config (vault)", "http://10.122.0.4/api/config", nil),
+            ("GET / (primary)", "http://10.122.0.2/", "http://10.122.0.2"),
+            ("GET / (http proxy)", "http://10.122.0.3/", "http://10.122.0.3"),
         ]
 
         for ep in endpoints {
@@ -333,7 +333,7 @@ struct BenchmarkView: View {
         }
 
         // Throughput test: download a known endpoint repeatedly
-        let (throughput, count) = await httpThroughputTest(url: "http://10.122.0.4:8200/", iterations: 5)
+        let (throughput, count) = await httpThroughputTest(url: "http://10.122.0.4/", iterations: 5)
         await addResult(BenchmarkResult(
             name: "Throughput (\(count) reqs)",
             value: String(format: "%.1f", throughput),
@@ -346,28 +346,28 @@ struct BenchmarkView: View {
 
     private func runNetworkTests() async {
         // RTT measurement via TCP connect
-        let (_, rttMs) = await tcpConnect(host: "10.122.0.4", port: 8200, timeoutSec: 5)
+        let (_, rttMs) = await tcpConnect(host: "10.122.0.4", port: 443, timeoutSec: 5)
         await addResult(BenchmarkResult(
             name: "TCP RTT (vault VIP)",
             value: "\(rttMs)",
             unit: "ms",
             status: rttMs < 100 ? .good : (rttMs < 500 ? .warning : .error),
-            detail: "10.122.0.4:8200"
+            detail: "10.122.0.4:443"
         ))
 
-        let (_, rtt2) = await tcpConnect(host: "10.122.0.2", port: 8080, timeoutSec: 5)
+        let (_, rtt2) = await tcpConnect(host: "10.122.0.2", port: 80, timeoutSec: 5)
         await addResult(BenchmarkResult(
             name: "TCP RTT (primary VIP)",
             value: "\(rtt2)",
             unit: "ms",
             status: rtt2 < 100 ? .good : (rtt2 < 500 ? .warning : .error),
-            detail: "10.122.0.2:8080"
+            detail: "10.122.0.2:80"
         ))
 
         // Multiple RTT samples for jitter
         var rtts: [Int] = []
         for _ in 0..<5 {
-            let (ok, ms) = await tcpConnect(host: "10.122.0.4", port: 8200, timeoutSec: 5)
+            let (ok, ms) = await tcpConnect(host: "10.122.0.4", port: 443, timeoutSec: 5)
             if ok { rtts.append(ms) }
         }
         if rtts.count > 1 {

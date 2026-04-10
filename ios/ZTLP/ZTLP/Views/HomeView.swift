@@ -15,6 +15,11 @@ struct HomeView: View {
     @State private var pulseScale: CGFloat = 1.0
     @State private var showVaultSheet = false
 
+    /// Zone-qualified domain suffix (e.g., "techrockstars.ztlp")
+    private var zoneSuffix: String {
+        configuration.zoneName.isEmpty ? "ztlp" : "\(configuration.zoneName).ztlp"
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -94,7 +99,6 @@ struct HomeView: View {
                         .font(.system(size: 40, weight: .medium))
                         .foregroundStyle(viewModel.status.color)
 
-
                     Text(viewModel.status.label)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
@@ -165,13 +169,13 @@ struct HomeView: View {
             QuickActionButton(
                 icon: "lock.shield",
                 title: "Open Vault",
-                subtitle: "Vaultwarden",
+                subtitle: "vault.\(zoneSuffix)",
                 color: .ztlpBlue
             ) {
                 showVaultSheet = true
             }
             .sheet(isPresented: $showVaultSheet) {
-                VaultAccessSheet()
+                VaultAccessSheet(zoneSuffix: zoneSuffix)
             }
 
             QuickActionButton(
@@ -188,32 +192,50 @@ struct HomeView: View {
     // MARK: - Service Cards
 
     private var serviceCardsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let svcName = configuration.serviceName.isEmpty ? "vault" : configuration.serviceName
+
+        return VStack(alignment: .leading, spacing: 12) {
             Text("ACTIVE SERVICES")
                 .ztlpSectionHeader()
 
             VStack(spacing: 8) {
-                ServiceStatusCard(
+                ActiveServiceCard(
                     icon: "lock.shield.fill",
                     name: "Vaultwarden",
-                    endpoint: "vault.ztlp \u{2192} 10.122.0.4",
-                    port: "8200",
+                    hostname: "vault.\(zoneSuffix)",
+                    vip: "10.122.0.4",
+                    port: 8200,
+                    proto: "http",
                     isActive: true
                 )
 
-                ServiceStatusCard(
+                ActiveServiceCard(
                     icon: "globe",
-                    name: configuration.serviceName.isEmpty ? "Primary" : configuration.serviceName.capitalized,
-                    endpoint: "\(configuration.serviceName).ztlp \u{2192} 10.122.0.2",
-                    port: "8080 / 8443",
+                    name: svcName.capitalized,
+                    hostname: "\(svcName).\(zoneSuffix)",
+                    vip: "10.122.0.2",
+                    port: 8080,
+                    proto: "http",
                     isActive: true
                 )
 
-                ServiceStatusCard(
+                ActiveServiceCard(
+                    icon: "lock.fill",
+                    name: "\(svcName.capitalized) (HTTPS)",
+                    hostname: "\(svcName).\(zoneSuffix)",
+                    vip: "10.122.0.2",
+                    port: 8443,
+                    proto: "https",
+                    isActive: true
+                )
+
+                ActiveServiceCard(
                     icon: "network",
                     name: "HTTP Proxy",
-                    endpoint: "http.ztlp \u{2192} 10.122.0.3",
-                    port: "8080",
+                    hostname: "http.\(zoneSuffix)",
+                    vip: "10.122.0.3",
+                    port: 8080,
+                    proto: "http",
                     isActive: true
                 )
             }
@@ -331,7 +353,7 @@ private struct QuickActionButton: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                     Text(subtitle)
-                        .font(.caption2)
+                        .font(.caption2.monospaced())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -342,42 +364,62 @@ private struct QuickActionButton: View {
     }
 }
 
-// MARK: - Service Status Card
+// MARK: - Active Service Card (tappable — opens browser)
 
-private struct ServiceStatusCard: View {
+private struct ActiveServiceCard: View {
     let icon: String
     let name: String
-    let endpoint: String
-    let port: String
+    let hostname: String
+    let vip: String
+    let port: UInt16
+    let proto: String  // "http" or "https"
     let isActive: Bool
 
+    /// Build the URL to open in browser
+    private var serviceURL: String {
+        "\(proto)://\(vip):\(port)"
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(isActive ? Color.ztlpGreen : .secondary)
-                .frame(width: 32)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                    .font(.subheadline.weight(.medium))
-                Text(endpoint)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+        Button {
+            if let url = URL(string: serviceURL) {
+                UIApplication.shared.open(url)
             }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(isActive ? Color.ztlpGreen : .secondary)
+                    .frame(width: 32)
 
-            Spacer()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Text(hostname)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
 
-            VStack(alignment: .trailing, spacing: 2) {
-                Circle()
-                    .fill(isActive ? Color.ztlpGreen : Color.ztlpRed)
-                    .frame(width: 8, height: 8)
-                Text(":\(port)")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(isActive ? Color.ztlpGreen : Color.ztlpRed)
+                            .frame(width: 8, height: 8)
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption2)
+                            .foregroundStyle(Color.ztlpBlue)
+                    }
+                    Text("\(proto)://:\(String(port))")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
             }
+            .ztlpCard(padding: 12)
         }
-        .ztlpCard(padding: 12)
+        .buttonStyle(.plain)
     }
 }
 
@@ -411,6 +453,7 @@ private struct StatCard: View {
 // MARK: - Vault Access Sheet
 
 private struct VaultAccessSheet: View {
+    let zoneSuffix: String
     @Environment(\.dismiss) private var dismiss
     @State private var showCertInfo = false
 
@@ -431,6 +474,9 @@ private struct VaultAccessSheet: View {
                 VStack(spacing: 8) {
                     Text("Vaultwarden")
                         .font(.title2.weight(.bold))
+                    Text("vault.\(zoneSuffix)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Color.ztlpBlue)
                     Text("Your password vault is accessible through\nthe encrypted ZTLP tunnel.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -440,23 +486,23 @@ private struct VaultAccessSheet: View {
                 VStack(spacing: 12) {
                     VaultLinkRow(
                         title: "Web Vault (HTTP)",
-                        url: "http://127.0.0.1:8080",
+                        url: "http://10.122.0.4:8200",
                         icon: "globe",
                         note: "Direct tunnel access"
                     )
 
                     VaultLinkRow(
                         title: "Web Vault (HTTPS)",
-                        url: "https://vault.ztlp:8443",
+                        url: "https://vault.\(zoneSuffix):8443",
                         icon: "lock.fill",
                         note: "Requires CA trust"
                     )
 
                     VaultLinkRow(
-                        title: "Bitwarden Sync",
-                        url: "http://127.0.0.1:8200",
+                        title: "Bitwarden Sync URL",
+                        url: "http://10.122.0.4:8200",
                         icon: "arrow.triangle.2.circlepath",
-                        note: "Bitwarden app server URL"
+                        note: "Set this in Bitwarden app settings"
                     )
                 }
                 .padding(.horizontal)
@@ -513,14 +559,9 @@ private struct VaultLinkRow: View {
 
                 Spacer()
 
-                Text(url)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-
                 Image(systemName: "arrow.up.right.square")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.ztlpBlue)
             }
             .ztlpCard(padding: 12)
         }

@@ -1,8 +1,8 @@
 // ServicesView.swift
 // ZTLP
 //
-// Service discovery list with reachability indicators and pull-to-refresh.
-// Shows ZTLP-NS registered services in the current zone.
+// Service discovery list with reachability indicators, pull-to-refresh,
+// and tappable rows that open HTTP/HTTPS services in the browser.
 
 import SwiftUI
 
@@ -132,55 +132,83 @@ struct ServicesView: View {
 private struct ServiceRow: View {
     let service: ZTLPService
 
+    /// Whether this service can be opened in a browser
+    private var isBrowsable: Bool {
+        let proto = service.protocolType.lowercased()
+        return proto == "http" || proto == "https" || proto == "tls"
+    }
+
+    /// Build a URL for browsable services
+    private var browseURL: URL? {
+        guard isBrowsable else { return nil }
+        let scheme = service.protocolType.lowercased() == "https" || service.protocolType.lowercased() == "tls" ? "https" : "http"
+        return URL(string: "\(scheme)://\(service.hostname):\(service.port)")
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            // Reachability indicator
-            Circle()
-                .fill(service.isReachable ? Color.ztlpGreen : Color.ztlpRed)
-                .frame(width: 10, height: 10)
-                .accessibilityLabel(service.isReachable ? "Reachable" : "Unreachable")
+        Button {
+            if let url = browseURL {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                // Reachability indicator
+                Circle()
+                    .fill(service.isReachable ? Color.ztlpGreen : Color.ztlpRed)
+                    .frame(width: 10, height: 10)
+                    .accessibilityLabel(service.isReachable ? "Reachable" : "Unreachable")
 
-            // Service info
-            VStack(alignment: .leading, spacing: 4) {
-                Text(service.name)
-                    .font(.body.weight(.medium))
+                // Service info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(service.name)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
 
-                HStack(spacing: 8) {
-                    Text(service.endpoint)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text(service.endpoint)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
 
-                    Text(service.protocolType.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.ztlpBlue.opacity(0.12), in: Capsule())
-                        .foregroundStyle(Color.ztlpBlue)
+                        Text(service.protocolType.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.ztlpBlue.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Color.ztlpBlue)
+                    }
+
+                    if let description = service.description, !description.isEmpty {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
-                if let description = service.description, !description.isEmpty {
-                    Text(description)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                Spacer()
+
+                // Open in browser indicator
+                VStack(alignment: .trailing, spacing: 2) {
+                    if isBrowsable {
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption)
+                            .foregroundStyle(Color.ztlpBlue)
+                    } else {
+                        Image(systemName: iconForProtocol(service.protocolType))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let lastChecked = service.lastChecked {
+                        Text(lastChecked, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.quaternary)
+                    }
                 }
             }
-
-            Spacer()
-
-            // Host info
-            VStack(alignment: .trailing, spacing: 2) {
-                Image(systemName: iconForProtocol(service.protocolType))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if let lastChecked = service.lastChecked {
-                    Text(lastChecked, style: .relative)
-                        .font(.caption2)
-                        .foregroundStyle(.quaternary)
-                }
-            }
+            .padding(.vertical, 4)
         }
-        .padding(.vertical, 4)
+        .buttonStyle(.plain)
+        .disabled(!isBrowsable)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(service.name), \(service.endpoint), \(service.isReachable ? "reachable" : "unreachable")")
     }

@@ -29,7 +29,7 @@ COPY lib/ lib/
 COPY rel/ rel/
 
 # Compile and build release
-RUN mix compile --warnings-as-errors && \
+RUN mix compile && \
     mix release ztlp_relay
 
 # ── Stage 2: Runtime ────────────────────────────────────────

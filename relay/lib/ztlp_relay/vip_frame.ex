@@ -38,13 +38,6 @@ defmodule ZtlpRelay.VipFrame do
   @flag_fin 0x04
   @flag_rst 0x08
 
-  @type_flag_map %{
-    @flag_syn => :syn,
-    @flag_data => :data,
-    @flag_fin => :fin,
-    @flag_rst => :rst
-  }
-
   # Minimum frame size: connection_id(2) + flags(1) = 3 bytes
   @min_frame_size 3
 

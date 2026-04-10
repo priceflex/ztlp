@@ -236,8 +236,7 @@ defmodule ZtlpRelay.VipConnection do
   end
 
   # Client data frames
-  def handle_info({:client_data, frame}, %{backend_socket: nil} = state) do
-    # Data arrived before connection was established
+  def handle_info({:client_data, _frame}, %{backend_socket: nil} = state) do
     Logger.debug("[VIP] Data arrived before backend connected conn=#{state.connection_id}")
     {:noreply, state}
   end

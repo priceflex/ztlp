@@ -584,6 +584,7 @@ defmodule ZtlpRelay.UdpListener do
   defp handle_unknown_sender(data, sender, peer_a, peer_b, pid, state) do
     {sender_ip, sender_port} = sender
     {peer_b_ip, peer_b_port} = peer_b
+    _ = peer_b_ip  # used in gateway migration detection
     gateway_ips = GatewayForwarder.known_gateway_ips()
     same_port = sender_port == peer_b_port
 

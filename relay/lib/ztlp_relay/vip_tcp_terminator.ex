@@ -48,7 +48,6 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
   alias ZtlpRelay.{
     Packet,
-    Crypto,
     VipFrame,
     VipServiceTable,
     Stats,
@@ -249,7 +248,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
     end
   end
 
-  defp decrypt_payload(payload, session_key, parsed) do
+  defp decrypt_payload(payload, session_key, _parsed) do
     # The payload in a ZTLP data packet is the encrypted VIP tunnel data.
     # For iOS relay-side VIP, the payload format is:
     #   [AEAD_ciphertext][auth_tag]

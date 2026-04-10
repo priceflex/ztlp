@@ -130,24 +130,33 @@ final class ZTLPDNSResponder {
             let qtype = UInt16(bytes[nameOffset]) << 8 | UInt16(bytes[nameOffset + 1])
             let qclass = UInt16(bytes[nameOffset + 2]) << 8 | UInt16(bytes[nameOffset + 3])
 
-            // Only handle A record (type 1) IN class (1) queries
-            guard qtype == 1 && qclass == 1 else { return nil }
-
-            // Build the FQDN
+            // Build the FQDN first (need it for .ztlp check)
             let fqdn = nameParts.joined(separator: ".")
 
             // Log the query details
-            TunnelLogger.shared.debug("DNS: qname=\(fqdn) qtype=\(qtype) qclass=\(qclass) serviceMap=\(Array(serviceMap.keys))", source: "DNS")
+            TunnelLogger.shared.debug("DNS: qname=\(fqdn) qtype=\(qtype) qclass=\(qclass)", source: "DNS")
 
-            // Must end in .ztlp
+            // Must end in .ztlp — pass through non-.ztlp queries to real DNS
             guard fqdn.hasSuffix(".ztlp") else {
-                TunnelLogger.shared.debug("DNS: rejected — not .ztlp suffix", source: "DNS")
+                TunnelLogger.shared.debug("DNS: pass-through — not .ztlp suffix", source: "DNS")
                 return nil
             }
 
-            // Look up the VIP
+            // For AAAA (type 28) queries on .ztlp domains, return NXDOMAIN
+            // immediately so iOS doesn't wait/retry for IPv6 addresses
+            guard qtype == 1 && qclass == 1 else {
+                TunnelLogger.shared.debug("DNS: NXDOMAIN for non-A query type=\(qtype)", source: "DNS")
+                return buildNXDomainResponse(
+                    originalPacket: packet,
+                    ihl: ihl,
+                    txnID: txnID,
+                    questionEnd: nameOffset + 4
+                )
+            }
+
+            // Look up the VIP for A record queries
             guard let vip = serviceMap[fqdn] else {
-                TunnelLogger.shared.debug("DNS: NXDOMAIN for \(fqdn)", source: "DNS")
+                TunnelLogger.shared.debug("DNS: NXDOMAIN for \(fqdn) (not in map: \(Array(serviceMap.keys)))", source: "DNS")
                 // Unknown .ztlp name — return NXDOMAIN
                 return buildNXDomainResponse(
                     originalPacket: packet,

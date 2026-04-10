@@ -17,7 +17,8 @@ struct HomeView: View {
 
     /// Zone-qualified domain suffix (e.g., "techrockstars.ztlp")
     private var zoneSuffix: String {
-        configuration.zoneName.isEmpty ? "ztlp" : "\(configuration.zoneName).ztlp"
+        let bare = configuration.zoneName.replacingOccurrences(of: ".ztlp", with: "")
+        return bare.isEmpty ? "ztlp" : "\(bare).ztlp"
     }
 
     var body: some View {

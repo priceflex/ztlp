@@ -240,7 +240,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.tunnelConnection = conn
 
                 // Step 7: Discover services via NS, fall back to hardcoded
-                let zone = config.zoneName ?? ""
+                let zone = (config.zoneName ?? "").replacingOccurrences(of: ".ztlp", with: "")
                 var services: [(vip: String, name: String)] = []
 
                 // Try NS service discovery (sync UDP query)

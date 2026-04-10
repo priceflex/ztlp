@@ -187,7 +187,7 @@ final class TunnelViewModel: ObservableObject {
                 : configuration.relayAddress
 
             // Build provider configuration dictionary with all connection parameters
-            let zone = configuration.zoneName.isEmpty ? "techrockstars.ztlp" : configuration.zoneName
+            let zone = configuration.zoneName.isEmpty ? "techrockstars" : configuration.zoneName.replacingOccurrences(of: ".ztlp", with: "")
             let tunnelConfig = TunnelConfiguration(
                 targetNodeId: configuration.targetNodeId,
                 relayAddress: configuration.relayAddress.isEmpty ? nil : configuration.relayAddress,
@@ -244,7 +244,7 @@ final class TunnelViewModel: ObservableObject {
             let svc = configuration.serviceName
             if !svc.isEmpty {
                 serviceURL = "http://127.0.0.1:8080"
-                serviceDisplayName = "\(svc).\(zone)"
+                serviceDisplayName = "\(svc).\(zone).ztlp"
             }
 
         } catch {
@@ -316,9 +316,9 @@ final class TunnelViewModel: ObservableObject {
             let svc = configuration.serviceName
             if !svc.isEmpty {
                 serviceURL = "http://127.0.0.1:8080"
-                let zone = configuration.zoneName.isEmpty ? "techrockstars.ztlp" : configuration.zoneName
-                serviceDisplayName = "\(svc).\(zone)"
-                vipStatus = "VIP proxy active — \(svc).\(zone)"
+                let zone = configuration.zoneName.isEmpty ? "techrockstars" : configuration.zoneName.replacingOccurrences(of: ".ztlp", with: "")
+                serviceDisplayName = "\(svc).\(zone).ztlp"
+                vipStatus = "VIP proxy active — \(svc).\(zone).ztlp"
             }
 
             logger.info("VPN connected", source: "App")

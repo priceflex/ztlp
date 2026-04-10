@@ -1,23 +1,30 @@
 // PacketTunnelProvider.swift
 // ZTLPTunnel (Network Extension)
 //
-// Session 5B: Tokio-free architecture.
+// Session 5D: RELAY-SIDE VIP ARCHITECTURE.
 // Uses sync FFI (ztlp_connect_sync, ztlp_encrypt_packet, etc.) and
-// standalone PacketRouter — no tokio runtime, no ZTLPBridge dependency.
+// standalone PacketRouter — no tokio runtime, no VIP proxy listeners.
 //
 // Architecture:
-//   Identity + Config → ztlp_connect_sync() → ZtlpCryptoContext
+//   Identity + Config -> ztlp_connect_sync() -> ZtlpCryptoContext
 //   ZTLPTunnelConnection (NWConnection UDP) handles encrypt/decrypt via context
-//   ZTLPVIPProxy (NWListener TCP) bridges 127.0.0.1:port → ZTLP mux
-//   Standalone PacketRouter (ztlp_router_*_sync) handles utun ↔ ZTLP routing
+//   Standalone PacketRouter (ztlp_router_*_sync) handles utun <-> ZTLP routing
+//   RelayPool FFI -> query NS for RELAY records -> select best relay
+//   VIP traffic: packetFlow.writePackets() -> encrypted tunnel -> relay
 //
-// Memory: TEXT segment ~1.65 MB (down from 4.7 MB with tokio).
+// Memory: TEXT segment ~1.65 MB. NO NWListeners — ~10-13 MB total.
 
 import NetworkExtension
 import Foundation
 
 /// App Group identifier shared between the main app and this extension.
 private let appGroupId = "group.com.ztlp.shared"
+
+/// UDP port used for relay communication.
+private let defaultRelayPort: UInt16 = 4433
+
+/// NS record type for RELAY records.
+private let NS_RECORD_TYPE_RELAY: UInt8 = 3
 
 /// UserDefaults keys for shared state.
 private enum SharedKey {
@@ -27,6 +34,7 @@ private enum SharedKey {
     static let bytesReceived = "ztlp_bytes_received"
     static let peerAddress = "ztlp_peer_address"
     static let lastError = "ztlp_last_error"
+    static let selectedRelay = "ztlp_selected_relay"
 }
 
 /// Messages the main app can send to the extension.
@@ -66,9 +74,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Whether we're currently in a tunnel session.
     private var isTunnelActive = false
 
-    /// The resolved gateway address (for reconnects).
-    private var resolvedGateway: String?
-
     /// The tunnel configuration (cached for reconnects).
     private var currentConfig: TunnelConfiguration?
 
@@ -92,8 +97,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// The NWConnection-based tunnel connection (replaces tokio recv/send loop).
     private var tunnelConnection: ZTLPTunnelConnection?
 
-    /// The native VIP proxy (replaces tokio TcpListener).
-    private var vipProxy: ZTLPVIPProxy?
+    /// Relay pool for relay-side VIP selection and failover.
+    private var relayPool: OpaquePointer?  // ZtlpRelayPool*
+
+    /// Currently selected relay address ("host:port").
+    private var currentRelayAddress: String?
+
+    /// The address of the relay we're currently connected through.
+    private var activeRelayAddress: String?
 
     /// Standalone packet router handle (replaces ZtlpClient-based router).
     private var packetRouter: OpaquePointer?  // ZtlpPacketRouter*
@@ -146,7 +157,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         updateConnectionState(.connecting)
         logger.info("═══════════════════════════════════════════", source: "Tunnel")
-        logger.info("ZTLP NE v5C — SYNC ARCHITECTURE (no tokio)", source: "Tunnel")
+        logger.info("ZTLP NE v5D — RELAY-SIDE VIP (no NWListeners)", source: "Tunnel")
         logger.info("Build: \(Date())", source: "Tunnel")
         logger.info("═══════════════════════════════════════════", source: "Tunnel")
 
@@ -205,45 +216,51 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     self.logger.debug("Config: service=\(svcName)", source: "Tunnel")
                 }
 
-                // Step 4: NS resolution
-                let target = try self.resolveGateway(config: config, svcName: svcName)
-                self.resolvedGateway = target
+                // Step 4: Discover relays from NS -> RelayPool, then select best
+                self.logger.info("Discovering relays from NS...", source: "Relay")
+                self.discoverRelays(config: config)
+                guard let relayAddr = self.selectRelay(config: config) else {
+                    throw self.makeNSError("No relay available. Cannot establish tunnel.")
+                }
+                self.currentRelayAddress = relayAddr
+                self.logger.info("Relay selected: \(relayAddr)", source: "Relay")
+
+                // Build config with selected relay
+                let cfgPtr2 = ztlp_config_new()
+                guard let cfgPtr2 = cfgPtr2 else {
+                    throw self.makeNSError("ztlp_config_new failed for relay tunnel")
+                }
+                defer { ztlp_config_free(cfgPtr2) }
+
+                relayAddr.withCString { ztlp_config_set_relay(cfgPtr2, $0) }
+                ztlp_config_set_nat_assist(cfgPtr2, true)
+                ztlp_config_set_timeout_ms(cfgPtr2, 60000)
+                if !svcName.isEmpty {
+                    svcName.withCString { ztlp_config_set_service(cfgPtr2, $0) }
+                }
 
                 // Step 5: Set client profile for CC selection
-                // Lightweight: just declare mobile, skip NWPathMonitor/CTTelephonyNetworkInfo
-                // (those frameworks add ~4MB runtime memory, pushing NE over 15MB limit)
-                // TODO: Phase 2 — add lightweight interface detection without heavy frameworks
                 ztlp_set_client_profile(0, 0, 0)  // mobile + unknown interface
                 self.logger.info("Client profile: mobile (lightweight)", source: "Tunnel")
 
-                // Step 6: Sync connect (blocking, no tokio)
-                self.logger.info("Connecting to \(target) via ztlp_connect_sync...", source: "Tunnel")
+                // Step 6: Sync connect through selected relay
+                let target = config.targetNodeId  // gateway identity
+                self.logger.info("Connecting to \(target) via relay \(relayAddr)...", source: "Tunnel")
 
                 let cryptoCtx = target.withCString { targetCStr -> OpaquePointer? in
-                    return ztlp_connect_sync(identityPtr, cfgPtr, targetCStr, 20000)
+                    return ztlp_connect_sync(identityPtr, cfgPtr2, targetCStr, 20000)
                 }
 
                 guard let cryptoCtx = cryptoCtx else {
+                    // Report this relay as failed
+                    if let pool = self.relayPool {
+                        relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
+                    }
                     throw self.makeNSError("ztlp_connect_sync failed: \(self.lastError())")
                 }
 
-                self.logger.info("Connected to \(target)", source: "Tunnel")
-
-                // Step 6: Create ZTLPTunnelConnection (NWConnection UDP)
-                // IMPORTANT: Send to the relay, not the gateway directly.
-                // The handshake was established via relay, so the gateway's
-                // session is bound to the relay's address. Direct packets
-                // to the gateway would be rejected as "unknown_session".
-                let udpTarget = config.relayAddress ?? target
-                self.logger.info("UDP target: \(udpTarget) (relay=\(config.relayAddress ?? "none"), gw=\(target))", source: "Tunnel")
-                let conn = ZTLPTunnelConnection(
-                    cryptoContext: cryptoCtx,
-                    gatewayAddress: udpTarget,
-                    queue: self.tunnelQueue
-                )
-                conn.delegate = self
-                conn.start()
-                self.tunnelConnection = conn
+                self.logger.info("Connected to \(target) via relay \(relayAddr)", source: "Tunnel")
+                self.activeRelayAddress = relayAddr
 
                 // Step 7: Discover services via NS, fall back to hardcoded
                 let zone = (config.zoneName ?? "").replacingOccurrences(of: ".ztlp", with: "")
@@ -292,34 +309,31 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 self.logger.info("DNS responder active (\(services.count) services) for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
 
-                // Step 8: Start VIP proxy (NWListener on 127.0.0.1)
-                // Note: VIP proxy needs its own crypto context or shares the
-                // tunnel connection for sending. We route through tunnelConnection.
-                let proxy = ZTLPVIPProxy()
-                // Register standard ports for all discovered services
-                var registeredNames = Set<String>()
-                for svc in services {
-                    guard !registeredNames.contains(svc.name) else { continue }
-                    registeredNames.insert(svc.name)
-                    proxy.addService(name: svc.name, port: 80)
-                    proxy.addService(name: svc.name, port: 443)
+                // Step 8: Create ZTLPTunnelConnection (UDP NWConnection to relay)
+                // All traffic (including VIP-proxied services) flows through the relay.
+                // VIP traffic goes: packetFlow -> router -> send to tunnelConnection -> relay
+                self.logger.info("Creating tunnel connection to relay \(relayAddr)...", source: "Tunnel")
+                let conn = ZTLPTunnelConnection(
+                    cryptoContext: cryptoCtx,
+                    gatewayAddress: relayAddr,
+                    queue: self.tunnelQueue
+                )
+                conn.delegate = self
+                conn.start()
+                self.tunnelConnection = conn
+
+                // VIP traffic is now routed through packetFlow -> encrypted tunnel -> relay
+                // (relay-side TCP termination replaces in-extension NWListeners)
+                self.logger.info("VIP traffic routes: packetFlow -> tunnel -> relay \(relayAddr)", source: "Tunnel")
+
+                // Report successful relay connection
+                if let pool = self.relayPool {
+                    relayAddr.withCString { ztlp_relay_pool_report_success(pool, $0, 0) }
                 }
-                // Also keep legacy numbered ports for backward compat
-                proxy.addService(name: svcName, port: 8080)
-                proxy.addService(name: svcName, port: 8443)
-                if registeredNames.contains("vault") {
-                    proxy.addService(name: "vault", port: 8200)
-                }
-                try proxy.start(cryptoContext: cryptoCtx, sendHandler: { [weak self] data in
-                    self?.tunnelConnection?.sendRaw(data)
-                })
-                self.vipProxy = proxy
-                self.logger.info("VIP proxy started on 127.0.0.1:80/443/8080/8443/8200", source: "Tunnel")
 
                 // Step 9: Apply tunnel network settings
-                let remoteAddr = config.relayAddress ?? target
                 let tunSettings = self.createTunnelNetworkSettings(
-                    tunnelRemoteAddress: remoteAddr,
+                    tunnelRemoteAddress: relayAddr,
                     usePacketRouter: true
                 )
 
@@ -359,9 +373,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.sharedDefaults?.set(target, forKey: SharedKey.peerAddress)
 
                 self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
-                self.logger.info("TUNNEL ACTIVE — v5C SYNC (no tokio)", source: "Tunnel")
+                self.logger.info("TUNNEL ACTIVE — v5D RELAY-SIDE VIP (no NWListeners)", source: "Tunnel")
                 self.logger.info("TEXT seg: 1.65MB | Crypto: sync FFI", source: "Tunnel")
-                self.logger.info("Router: standalone | VIP: NWListener", source: "Tunnel")
+                self.logger.info("Router: standalone | VIP: relay-terminated", source: "Tunnel")
                 self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
                 completionHandler(nil)
 
@@ -403,11 +417,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.dnsResponder = nil
             self.logger.info("DNS responder stopped", source: "Tunnel")
 
-            // Stop VIP proxy
-            self.vipProxy?.stop()
-            self.vipProxy = nil
-            self.logger.info("VIP proxy stopped", source: "Tunnel")
-
             // Stop packet router
             if let router = self.packetRouter {
                 ztlp_router_stop_sync(router)
@@ -432,11 +441,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Update shared state
             self.updateConnectionState(.disconnected)
             self.connectedSince = nil
-            self.resolvedGateway = nil
+            self.currentRelayAddress = nil
+            self.activeRelayAddress = nil
             self.currentConfig = nil
+
+            // Free relay pool
+            if let pool = self.relayPool {
+                ztlp_relay_pool_free(pool)
+                self.relayPool = nil
+            }
+
             self.sharedDefaults?.removeObject(forKey: SharedKey.connectedSince)
             self.sharedDefaults?.removeObject(forKey: SharedKey.peerAddress)
             self.sharedDefaults?.removeObject(forKey: SharedKey.lastError)
+            self.sharedDefaults?.removeObject(forKey: SharedKey.selectedRelay)
             self.logger.info("Tunnel stopped", source: "Tunnel")
 
             completionHandler()
@@ -715,26 +733,110 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ackFlushTimer = timer
     }
 
-    // MARK: - NS Resolution (sync, no bridge)
+    // MARK: - Relay Discovery and Selection (sync NS + RelayPool FFI)
 
-    private func resolveGateway(config: TunnelConfiguration, svcName: String) throws -> String {
-        // NOTE: ztlp_ns_resolve is tokio-gated and unavailable in ios-sync builds.
-        // In sync mode, we use the targetNodeId directly (which contains the gateway
-        // address from the app config, e.g., "34.219.64.205:23095").
-        // TODO: Add ztlp_ns_resolve_sync or implement NS resolution in Swift.
-        var target = ""
-
-        let fallback = config.targetNodeId
-        if fallback.contains(":") {
-            target = fallback
-            logger.info("Using gateway address: \(target)", source: "Tunnel")
+    /// Discover relays via NS and populate the RelayPool.
+    private func discoverRelays(config: TunnelConfiguration) {
+        // Free existing pool if present
+        if let existing = relayPool {
+            ztlp_relay_pool_free(existing)
         }
 
-        guard !target.isEmpty else {
-            throw makeNSError("Could not resolve gateway address. Ensure targetNodeId is set to host:port.")
+        // Gateway region for selection tiebreak — derive from config
+        let regionStr = config.gatewayRegion ?? ""
+
+        relayPool = regionStr.withCString { ztlp_relay_pool_new($0) }
+        guard let pool = relayPool else {
+            logger.warn("Failed to create relay pool, will use fallback relay", source: "Relay")
+            return
         }
 
-        return target
+        // Query NS for RELAY records (type 3)
+        if let nsAddr = config.nsServer, !nsAddr.isEmpty {
+            let zoneName = (config.zoneName ?? "").replacingOccurrences(of: ".ztlp", with: "")
+            logger.info("Querying NS for RELAY records at \(nsAddr) (zone=\(zoneName))", source: "Relay")
+
+            let relayList = nsAddr.withCString { nsCStr in
+                zoneName.withCString { zoneCStr in
+                    ztlp_ns_resolve_relays_sync(nsCStr, zoneCStr, 5000)
+                }
+            }
+
+            if let relayList = relayList {
+                // Check for errors in the result
+                if let errMsg = relayList.pointee.error {
+                    let errorStr = String(cString: errMsg)
+                    logger.warn("NS relay query returned error: \(errorStr)", source: "Relay")
+                } else if relayList.pointee.count > 0 {
+                    let updateResult = ztlp_relay_pool_update_from_ns(pool, relayList)
+                    if updateResult == 0 {
+                        let healthy = ztlp_relay_pool_healthy_count(pool)
+                        let total = ztlp_relay_pool_total_count(pool)
+                        logger.info("Relay pool updated: \(total) total, \(healthy) healthy from NS", source: "Relay")
+
+                        // Log discovered relays
+                        for i in 0..<relayList.pointee.count {
+                            let addr = relayList.pointee.addresses[i]
+                            let region = relayList.pointee.regions[i]
+                            let latency = relayList.pointee.latency_ms[i]
+                            let load = relayList.pointee.load_pct[i]
+                            let health = relayList.pointee.health[i]
+                            let healthStr: String
+                            switch health {
+                                case 0: healthStr = "healthy"
+                                case 1: healthStr = "degraded"
+                                case 2: healthStr = "dead"
+                                case 3: healthStr = "deprioritized"
+                                default: healthStr = "unknown"
+                            }
+                            let regionStr = region != nil ? String(cString: region) : "?"
+                            logger.info("  Relay #\(i+1): \(String(cString: addr)) region=\(regionStr) lat=\(latency)ms load=\(load)% health=\(healthStr)", source: "Relay")
+                        }
+                    } else {
+                        logger.warn("Failed to update relay pool from NS", source: "Relay")
+                    }
+                } else {
+                    logger.info("NS returned no relay records", source: "Relay")
+                }
+                ztlp_relay_list_free(relayList)
+            } else {
+                logger.warn("NS relay query failed: \(lastError())", source: "Relay")
+            }
+        } else {
+            logger.info("No NS server configured for relay discovery", source: "Relay")
+        }
+    }
+
+    /// Select the best relay from the pool. Falls back to config relay if pool is empty.
+    private func selectRelay(config: TunnelConfiguration) -> String? {
+        guard let pool = relayPool, ztlp_relay_pool_healthy_count(pool) > 0 else {
+            // Fall back to configured relay or direct gateway
+            if let relay = config.relayAddress, !relay.isEmpty {
+                logger.info("No relay pool available, using configured fallback: \(relay)", source: "Relay")
+                return relay
+            }
+            logger.warn("No relay available (pool empty, no configured fallback)", source: "Relay")
+            return nil
+        }
+
+        let selected = ztlp_relay_pool_select(pool)
+        defer { if let s = selected { ztlp_string_free(s) } }
+
+        if let relayAddr = selected, let addrStr = String(utf8String: relayAddr), !addrStr.isEmpty {
+            logger.info("Selected relay: \(addrStr) (healthy=\(ztlp_relay_pool_healthy_count(pool)))", source: "Relay")
+            currentRelayAddress = addrStr
+            sharedDefaults?.set(addrStr, forKey: SharedKey.selectedRelay)
+            return addrStr
+        }
+
+        // Pool has relays but none selected — try configured relay
+        if let relay = config.relayAddress, !relay.isEmpty {
+            logger.info("Pool returned no relay, using configured fallback: \(relay)", source: "Relay")
+            return relay
+        }
+
+        logger.warn("No relay available from pool or config", source: "Relay")
+        return nil
     }
 
     // MARK: - Reconnect
@@ -779,7 +881,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         tunnelConnection?.stop()
         tunnelConnection = nil
 
-        // Re-resolve gateway
+        // Reload config
         let config = currentConfig ?? (try? loadTunnelConfiguration())
         guard let config = config else {
             logger.error("Failed to load config for reconnect", source: "Tunnel")
@@ -787,31 +889,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let svcName = config.serviceName ?? "vault"
-        var target = resolvedGateway ?? ""
-
-        // NS resolution unavailable in sync build — use cached gateway address
-        if target.isEmpty {
-            let fallback = config.targetNodeId
-            if fallback.contains(":") {
-                target = fallback
-            }
+        // Try to select a NEW relay (different from the failed one)
+        // First report the currently active relay as failed
+        if let pool = relayPool, let failedRelay = activeRelayAddress {
+            failedRelay.withCString { ztlp_relay_pool_report_failure(pool, $0) }
+            logger.info("Reported relay failure for \(failedRelay)", source: "Relay")
         }
 
-        guard !target.isEmpty else {
-            logger.warn("No gateway target for reconnect, will retry", source: "Tunnel")
+        // Re-query NS for fresh relay list if pool needs refresh
+        // Check if we need NS refresh before selecting
+        if let pool = relayPool, ztlp_relay_pool_needs_refresh(pool) {
+            logger.info("Relay pool stale, re-querying NS for refresh", source: "Relay")
+            discoverRelays(config: config)
+        }
+
+        // Select next best relay from pool
+        let svcName = config.serviceName ?? "vault"
+        guard let relayAddr = selectRelay(config: config) else {
+            logger.error("No relay available for reconnect", source: "Relay")
             scheduleReconnect()
             return
         }
 
-        // Build config for reconnect
+        logger.info("Reconnecting via relay \(relayAddr)...", source: "Relay")
+        currentRelayAddress = relayAddr
+
+        // Build config for reconnect through new relay
         let cfgPtr = ztlp_config_new()
         defer { if let c = cfgPtr { ztlp_config_free(c) } }
 
         if let cfgPtr = cfgPtr {
-            if let relay = config.relayAddress, !relay.isEmpty {
-                relay.withCString { ztlp_config_set_relay(cfgPtr, $0) }
-            }
+            relayAddr.withCString { ztlp_config_set_relay(cfgPtr, $0) }
             ztlp_config_set_nat_assist(cfgPtr, true)
             ztlp_config_set_timeout_ms(cfgPtr, 15000)
             if !svcName.isEmpty {
@@ -820,40 +928,50 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         // Reconnect (blocking sync)
+        let target = config.targetNodeId
         let cryptoCtx = target.withCString { targetCStr -> OpaquePointer? in
             return ztlp_connect_sync(identityPtr, cfgPtr, targetCStr, 15000)
         }
 
         guard let cryptoCtx = cryptoCtx else {
-            logger.warn("Reconnect failed: \(lastError()), will retry", source: "Tunnel")
+            // Report this relay as failed and retry
+            if let pool = relayPool {
+                relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
+            }
+            logger.warn("Reconnect to \(relayAddr) failed: \(lastError()), will retry", source: "Tunnel")
             scheduleReconnect()
             return
         }
 
-        // Create new tunnel connection — send via relay
-        let udpTarget = config.relayAddress ?? target
+        // Create new tunnel connection
         let conn = ZTLPTunnelConnection(
             cryptoContext: cryptoCtx,
-            gatewayAddress: udpTarget,
+            gatewayAddress: relayAddr,
             queue: tunnelQueue
         )
         conn.delegate = self
         conn.start()
         tunnelConnection = conn
 
-        // Update VIP proxy send handler
-        // (VIP proxy stays running — listeners are stable)
+        // Update active relay tracking
+        activeRelayAddress = relayAddr
+
+        // Report successful connection to relay
+        if let pool = relayPool {
+            relayAddr.withCString { ztlp_relay_pool_report_success(pool, $0, 0) }
+        }
 
         // Success
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
-        logger.info("Reconnected successfully to \(target)", source: "Tunnel")
+        logger.info("Reconnected successfully via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
             Date().timeIntervalSince1970,
             forKey: SharedKey.connectedSince
         )
+        sharedDefaults?.set(relayAddr, forKey: SharedKey.selectedRelay)
     }
 
     // MARK: - Keepalive
@@ -881,8 +999,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.consecutiveKeepaliveFailures = 0
             } else {
                 self.consecutiveKeepaliveFailures += 1
+                let relayInfo = self.activeRelayAddress ?? "unknown"
                 self.logger.debug(
-                    "Keepalive send failed (\(self.consecutiveKeepaliveFailures)/\(Self.keepaliveFailureThreshold))",
+                    "Keepalive send failed via relay \(relayInfo) (\(self.consecutiveKeepaliveFailures)/\(Self.keepaliveFailureThreshold))",
                     source: "Tunnel"
                 )
 
@@ -890,7 +1009,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     && !self.isDataActive
                     && self.isTunnelActive {
                     self.logger.warn(
-                        "Connection appears dead — \(self.consecutiveKeepaliveFailures) keepalive failures, no data for \(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s",
+                        "Connection appears dead — \(self.consecutiveKeepaliveFailures) keepalive failures via relay \(relayInfo), no data for \(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s",
                         source: "Tunnel"
                     )
                     self.scheduleReconnect()

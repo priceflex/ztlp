@@ -52,7 +52,15 @@ defmodule ZtlpRelay.Application do
     # (ZTLP_RELAY_GATEWAYS) and dynamic registration from gateways.
     gateway_children = [ZtlpRelay.GatewayForwarder]
 
-    children = base_children ++ mesh_children ++ gateway_children ++ [ZtlpRelay.UdpListener]
+    # VIP TCP termination components (only when VIP mode is enabled)
+    vip_children =
+      if ZtlpRelay.Config.vip_enabled?() do
+        [ZtlpRelay.VipServiceTable, ZtlpRelay.VipTcpTerminator]
+      else
+        []
+      end
+
+    children = base_children ++ mesh_children ++ gateway_children ++ vip_children ++ [ZtlpRelay.UdpListener]
 
     opts = [strategy: :one_for_one, name: ZtlpRelay.Supervisor]
     Supervisor.start_link(children, opts)

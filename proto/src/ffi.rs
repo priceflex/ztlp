@@ -4519,6 +4519,932 @@ pub extern "C" fn ztlp_build_ack(
     0
 }
 
+// ── Sync NS Resolution (no tokio) ──────────────────────────────────────
+//
+// Blocking NS queries using std::net::UdpSocket — same pattern as
+// ztlp_connect_sync. Available in both default and ios-sync builds.
+// Replaces the tokio-gated ztlp_ns_resolve for the NE code path.
+
+/// Default timeout for NS queries (5 seconds).
+const NS_SYNC_DEFAULT_TIMEOUT_MS: u32 = 5000;
+
+/// Maximum response buffer size for NS responses (4KB — ZTLP NS records
+/// are small, typically <500 bytes).
+const NS_SYNC_MAX_RESPONSE_SIZE: usize = 4096;
+
+/// Result of a sync NS resolution query.
+/// Owned by the caller; free with `ztlp_ns_result_free`.
+#[repr(C)]
+pub struct ZtlpNsResult {
+    /// Number of records found.
+    pub count: usize,
+    /// Array of record type bytes (1=KEY, 2=SVC, 3=RELAY).
+    /// Length = count. Owned, free with this struct.
+    pub record_types: *mut u8,
+    /// Array of C string pointers for record names.
+    /// Length = count. Each string owned, free with this struct.
+    pub record_names: *mut *mut c_char,
+    /// Array of pointers to raw CBOR data for each record.
+    /// Length = count. Each buffer owned, free with this struct.
+    pub record_data: *mut *mut u8,
+    /// Array of data lengths for each record's CBOR data.
+    /// Length = count.
+    pub record_data_lens: *mut usize,
+    /// Error message (null if success). Owned, free with this struct.
+    pub error: *mut c_char,
+}
+
+/// Result of relay-specific NS resolution.
+/// Owned by the caller; free with `ztlp_relay_list_free`.
+#[repr(C)]
+pub struct ZtlpRelayList {
+    /// Number of relays found.
+    pub count: usize,
+    /// Array of C string pointers for relay addresses ("ip:port").
+    /// Length = count. Each string owned, free with this struct.
+    pub addresses: *mut *mut c_char,
+    /// Array of C string pointers for relay regions.
+    /// Length = count. Each string owned, free with this struct.
+    pub regions: *mut *mut c_char,
+    /// Array of latency values (milliseconds).
+    /// Length = count.
+    pub latency_ms: *mut u32,
+    /// Array of load percentages (0-100).
+    /// Length = count.
+    pub load_pct: *mut u8,
+    /// Array of active connection counts.
+    /// Length = count.
+    pub active_connections: *mut u32,
+    /// Array of health states (0=Healthy, 1=Degraded, 2=Dead, 3=Deprioritized).
+    /// Length = count.
+    pub health: *mut u8,
+    /// Error message (null if success). Owned, free with this struct.
+    pub error: *mut c_char,
+}
+
+/// Perform a sync NS resolution query.
+///
+/// Sends a single UDP query to the NS server and returns parsed records.
+/// Uses `std::net::UdpSocket` — no tokio runtime needed.
+/// Safe to call from the iOS Network Extension.
+///
+/// # Parameters
+/// - `ns_server`: NS server address (e.g., "34.217.62.46:23096")
+/// - `name`: ZTLP name to resolve (e.g., "beta.techrockstars")
+/// - `record_type`: Record type (1=KEY, 2=SVC, 3=RELAY)
+/// - `timeout_ms`: Query timeout in ms (0 = default 5000ms)
+///
+/// # Returns
+/// Pointer to `ZtlpNsResult` on success (may have 0 records if not found).
+/// NULL only on catastrophic failure (invalid args, socket creation failure).
+/// Check `result->error` for partial failures.
+///
+/// Caller owns the result; free with `ztlp_ns_result_free`.
+#[no_mangle]
+pub extern "C" fn ztlp_ns_resolve_sync(
+    ns_server: *const c_char,
+    name: *const c_char,
+    record_type: u8,
+    timeout_ms: u32,
+) -> *mut ZtlpNsResult {
+    // Validate arguments
+    if ns_server.is_null() || name.is_null() {
+        set_last_error("ns_server or name is null");
+        return std::ptr::null_mut();
+    }
+
+    let ns_addr_str = match unsafe { CStr::from_ptr(ns_server) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in ns_server");
+            return make_ns_result_error("invalid UTF-8 in ns_server");
+        }
+    };
+
+    let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            set_last_error("invalid UTF-8 in name");
+            return make_ns_result_error("invalid UTF-8 in name");
+        }
+    };
+
+    let timeout = if timeout_ms == 0 {
+        NS_SYNC_DEFAULT_TIMEOUT_MS
+    } else {
+        timeout_ms
+    };
+
+    match do_ns_resolve_sync(&ns_addr_str, &name_str, record_type, timeout) {
+        Ok(records) => make_ns_result_records(records),
+        Err(e) => {
+            set_last_error(&e);
+            make_ns_result_error(&e)
+        }
+    }
+}
+
+/// Internal implementation of sync NS resolution.
+fn do_ns_resolve_sync(
+    ns_server: &str,
+    name: &str,
+    record_type: u8,
+    timeout_ms: u32,
+) -> Result<Vec<crate::ns_cbor::NsRecordPayload>, String> {
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("failed to bind UDP socket: {}", e))?;
+
+    socket
+        .set_read_timeout(Some(Duration::from_millis(timeout_ms as u64)))
+        .map_err(|e| format!("failed to set socket timeout: {}", e))?;
+
+    // Build query: [0x01] [name_len: u16 BE] [name: UTF-8] [record_type: u8]
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let mut query = Vec::with_capacity(4 + name_bytes.len());
+    query.push(0x01); // query opcode
+    query.extend_from_slice(&name_len.to_be_bytes());
+    query.extend_from_slice(name_bytes);
+    query.push(record_type);
+
+    socket
+        .send_to(&query, ns_addr)
+        .map_err(|e| format!("NS query send failed: {}", e))?;
+
+    diag_log!(
+        "[ZTLP] ns_resolve_sync: sent query name={} type={} to {}",
+        name,
+        record_type,
+        ns_addr
+    );
+
+    // Read response(s) — NS may send one record per response.
+    // Read up to a deadline to collect multiple records if available.
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    let mut all_records = Vec::new();
+    let mut buf = [0u8; NS_SYNC_MAX_RESPONSE_SIZE];
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        // Set remaining time as read timeout
+        let timeout_remaining = std::cmp::max(
+            Duration::from_millis(50),
+            remaining,
+        );
+        socket
+            .set_read_timeout(Some(timeout_remaining))
+            .ok();
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, _addr)) => {
+                let data = &buf[..len];
+                if let Some(record) = crate::ns_cbor::parse_ns_record(data) {
+                    match record.status {
+                        crate::ns_cbor::NsResponseStatus::Found => {
+                            all_records.push(record);
+                        }
+                        crate::ns_cbor::NsResponseStatus::NotFound => {
+                            // NOT_FOUND — no records exist for this name
+                            break;
+                        }
+                        crate::ns_cbor::NsResponseStatus::Revoked => {
+                            // REVOKED — record was explicitly revoked
+                            break;
+                        }
+                    }
+                }
+                // If parse fails, skip and keep reading
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+                {
+                    // Timeout — done waiting for responses
+                    break;
+                }
+                // Real socket error
+                return Err(format!("NS query recv failed: {}", e));
+            }
+        }
+
+        // If we've collected at least one record and this is a simple query
+        // (not a multi-record response), break after first response.
+        // For now, the NS server sends one record per query, so break after
+        // first successful parse.
+        if !all_records.is_empty() {
+            break;
+        }
+    }
+
+    if all_records.is_empty() && Instant::now() >= deadline {
+        return Err(format!(
+            "NS query timed out after {}ms (server: {}, name: {})",
+            timeout_ms, ns_server, name
+        ));
+    }
+
+    Ok(all_records)
+}
+
+/// Build a ZtlpNsResult with parsed records.
+fn make_ns_result_records(records: Vec<crate::ns_cbor::NsRecordPayload>) -> *mut ZtlpNsResult {
+    let count = records.len();
+    if count == 0 {
+        return make_ns_result_empty();
+    }
+
+    let mut record_types = Vec::with_capacity(count);
+    let mut record_names = Vec::with_capacity(count);
+    let mut record_data = Vec::with_capacity(count);
+    let mut record_data_lens = Vec::with_capacity(count);
+
+    for rec in &records {
+        record_types.push(rec.record_type);
+
+        let name_cstr = CString::new(rec.name.as_str()).unwrap_or_else(|_| CString::new("").unwrap());
+        record_names.push(name_cstr.into_raw());
+
+        let mut data = rec.data.clone();
+        let data_len = data.len();
+        let data_ptr = data.as_mut_ptr();
+        std::mem::forget(data); // transfer ownership
+        record_data.push(data_ptr);
+        record_data_lens.push(data_len);
+    }
+
+    let types_ptr = record_types.leak().as_mut_ptr();
+    let names_ptr = record_names.leak().as_mut_ptr();
+    let data_ptr = record_data.leak().as_mut_ptr();
+    let lens_ptr = record_data_lens.leak().as_mut_ptr();
+
+    Box::into_raw(Box::new(ZtlpNsResult {
+        count,
+        record_types: types_ptr,
+        record_names: names_ptr,
+        record_data: data_ptr,
+        record_data_lens: lens_ptr,
+        error: std::ptr::null_mut(),
+    }))
+}
+
+/// Build an empty ZtlpNsResult (0 records, no error).
+fn make_ns_result_empty() -> *mut ZtlpNsResult {
+    Box::into_raw(Box::new(ZtlpNsResult {
+        count: 0,
+        record_types: std::ptr::null_mut(),
+        record_names: std::ptr::null_mut(),
+        record_data: std::ptr::null_mut(),
+        record_data_lens: std::ptr::null_mut(),
+        error: std::ptr::null_mut(),
+    }))
+}
+
+/// Build a ZtlpNsResult with an error message.
+fn make_ns_result_error(msg: &str) -> *mut ZtlpNsResult {
+    let error_cstr = CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    Box::into_raw(Box::new(ZtlpNsResult {
+        count: 0,
+        record_types: std::ptr::null_mut(),
+        record_names: std::ptr::null_mut(),
+        record_data: std::ptr::null_mut(),
+        record_data_lens: std::ptr::null_mut(),
+        error: error_cstr.into_raw(),
+    }))
+}
+
+/// Free a ZtlpNsResult returned by `ztlp_ns_resolve_sync`.
+#[no_mangle]
+pub extern "C" fn ztlp_ns_result_free(result: *mut ZtlpNsResult) {
+    if result.is_null() {
+        return;
+    }
+    let r = unsafe { Box::from_raw(result) };
+    if r.count > 0 {
+        // Free record name strings
+        if !r.record_names.is_null() {
+            let names = unsafe { std::slice::from_raw_parts_mut(r.record_names, r.count) };
+            for ptr in names.iter() {
+                if !ptr.is_null() {
+                    let _ = unsafe { CString::from_raw(*ptr) };
+                }
+            }
+            unsafe { Vec::from_raw_parts(r.record_names, r.count, r.count) };
+        }
+        // Free record data buffers
+        if !r.record_data.is_null() && !r.record_data_lens.is_null() {
+            let data_ptrs = unsafe { std::slice::from_raw_parts_mut(r.record_data, r.count) };
+            let lens = unsafe { std::slice::from_raw_parts(r.record_data_lens, r.count) };
+            for (i, &ptr) in data_ptrs.iter().enumerate() {
+                if !ptr.is_null() && lens[i] > 0 {
+                    unsafe { Vec::from_raw_parts(ptr, lens[i], lens[i]) };
+                }
+            }
+            unsafe { Vec::from_raw_parts(r.record_data, r.count, r.count) };
+            unsafe { Vec::from_raw_parts(r.record_data_lens, r.count, r.count) };
+        }
+        // Free record types array
+        if !r.record_types.is_null() {
+            unsafe { Vec::from_raw_parts(r.record_types, r.count, r.count) };
+        }
+    }
+    // Free error string
+    if !r.error.is_null() {
+        let _ = unsafe { CString::from_raw(r.error) };
+    }
+}
+
+/// Get the address string from the first SVC record in an NS result.
+///
+/// Convenience function for the common case of resolving a service name
+/// and getting its "ip:port" address. Returns null if no SVC record found
+/// or if the CBOR data doesn't contain an "address" field.
+///
+/// Caller must free the returned string with `ztlp_string_free`.
+#[no_mangle]
+pub extern "C" fn ztlp_ns_result_get_address(result: *const ZtlpNsResult) -> *mut c_char {
+    if result.is_null() {
+        return std::ptr::null_mut();
+    }
+    let r = unsafe { &*result };
+
+    if r.count == 0 || r.record_data.is_null() || r.record_data_lens.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let data_ptrs = unsafe { std::slice::from_raw_parts(r.record_data, r.count) };
+    let lens = unsafe { std::slice::from_raw_parts(r.record_data_lens, r.count) };
+    let types = unsafe { std::slice::from_raw_parts(r.record_types, r.count) };
+
+    for (i, &type_byte) in types.iter().enumerate() {
+        if type_byte == 0x02 {
+            // SVC record — extract "address" from CBOR
+            if !data_ptrs[i].is_null() && lens[i] > 0 {
+                let data = unsafe { std::slice::from_raw_parts(data_ptrs[i], lens[i]) };
+                if let Some(addr) = crate::ns_cbor::cbor_extract_string(data, "address") {
+                    return CString::new(addr)
+                        .unwrap_or_else(|_| CString::new("").unwrap())
+                        .into_raw();
+                }
+            }
+        }
+    }
+
+    std::ptr::null_mut()
+}
+
+/// Resolve relays from NS and return parsed relay info.
+///
+/// Convenience wrapper that:
+/// 1. Calls `ztlp_ns_resolve_sync` with record_type=3 (RELAY)
+/// 2. Parses CBOR data from each record into typed relay info
+/// 3. Returns `ZtlpRelayList` ready for `RelayPool.update_from_ns()`
+///
+/// # Expected CBOR format for RELAY records
+/// Each relay's CBOR data is a map with keys:
+/// - "address": string "ip:port"
+/// - "region": string (e.g., "us-west-2")
+/// - "latency_ms": string or uint (milliseconds)
+/// - "load_pct": string or uint (0-100)
+/// - "active_connections": string or uint
+/// - "health": string ("healthy", "degraded", "dead")
+///
+/// # Parameters
+/// - `ns_server`: NS server address
+/// - `name`: Zone or service name (e.g., "techrockstars")
+/// - `timeout_ms`: Query timeout (0 = default 5000ms)
+///
+/// Caller owns the result; free with `ztlp_relay_list_free`.
+#[no_mangle]
+pub extern "C" fn ztlp_ns_resolve_relays_sync(
+    ns_server: *const c_char,
+    name: *const c_char,
+    timeout_ms: u32,
+) -> *mut ZtlpRelayList {
+    // Query NS for RELAY records (type 3)
+    let ns_result = ztlp_ns_resolve_sync(ns_server, name, 0x03, timeout_ms);
+
+    if ns_result.is_null() {
+        return make_relay_list_error("NS resolution returned null");
+    }
+
+    let r = unsafe { &*ns_result };
+
+    // Check for error
+    if !r.error.is_null() {
+        let err_cstr = unsafe { CStr::from_ptr(r.error) };
+        let err_msg = err_cstr.to_string_lossy().to_string();
+        ztlp_ns_result_free(ns_result as *mut ZtlpNsResult);
+        return make_relay_list_error(&err_msg);
+    }
+
+    if r.count == 0 {
+        ztlp_ns_result_free(ns_result as *mut ZtlpNsResult);
+        return make_relay_list_empty();
+    }
+
+    // Parse CBOR data for each record into relay info
+    let data_ptrs = unsafe { std::slice::from_raw_parts(r.record_data, r.count) };
+    let lens = unsafe { std::slice::from_raw_parts(r.record_data_lens, r.count) };
+
+    let mut addresses = Vec::new();
+    let mut regions = Vec::new();
+    let mut latency_ms = Vec::new();
+    let mut load_pct = Vec::new();
+    let mut active_connections = Vec::new();
+    let mut health = Vec::new();
+
+    for i in 0..r.count {
+        if data_ptrs[i].is_null() || lens[i] == 0 {
+            continue;
+        }
+        let data = unsafe { std::slice::from_raw_parts(data_ptrs[i], lens[i]) };
+
+        // Extract fields from CBOR
+        let addr_str = match crate::ns_cbor::cbor_extract_string(data, "address") {
+            Some(s) => s,
+            None => continue, // Skip records without address
+        };
+        let region_str = crate::ns_cbor::cbor_extract_string(data, "region")
+            .unwrap_or_else(|| "unknown".to_string());
+        let lat = crate::ns_cbor::cbor_extract_uint(data, "latency_ms")
+            .or_else(|| {
+                // Try parsing from string
+                crate::ns_cbor::cbor_extract_string(data, "latency_ms")
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(999) as u32;
+        let load = crate::ns_cbor::cbor_extract_uint(data, "load_pct")
+            .or_else(|| {
+                crate::ns_cbor::cbor_extract_string(data, "load_pct")
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0) as u8;
+        let conns = crate::ns_cbor::cbor_extract_uint(data, "active_connections")
+            .or_else(|| {
+                crate::ns_cbor::cbor_extract_string(data, "active_connections")
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0) as u32;
+        let health_byte = match crate::ns_cbor::cbor_extract_string(data, "health")
+            .as_deref()
+        {
+            Some("healthy") => 0u8,
+            Some("degraded") => 1u8,
+            Some("dead") => 2u8,
+            Some("deprioritized") => 3u8,
+            _ => 0u8, // Default to healthy
+        };
+
+        let addr_cstr = CString::new(addr_str).unwrap_or_else(|_| CString::new("").unwrap());
+        addresses.push(addr_cstr.into_raw());
+        let region_cstr = CString::new(region_str).unwrap_or_else(|_| CString::new("unknown").unwrap());
+        regions.push(region_cstr.into_raw());
+        latency_ms.push(lat);
+        load_pct.push(load);
+        active_connections.push(conns);
+        health.push(health_byte);
+    }
+
+    ztlp_ns_result_free(ns_result as *mut ZtlpNsResult);
+
+    let count = addresses.len();
+    if count == 0 {
+        return make_relay_list_empty();
+    }
+
+    let addrs_ptr = addresses.leak().as_mut_ptr();
+    let regions_ptr = regions.leak().as_mut_ptr();
+    let lat_ptr = latency_ms.leak().as_mut_ptr();
+    let load_ptr = load_pct.leak().as_mut_ptr();
+    let conns_ptr = active_connections.leak().as_mut_ptr();
+    let health_ptr = health.leak().as_mut_ptr();
+
+    Box::into_raw(Box::new(ZtlpRelayList {
+        count,
+        addresses: addrs_ptr,
+        regions: regions_ptr,
+        latency_ms: lat_ptr,
+        load_pct: load_ptr,
+        active_connections: conns_ptr,
+        health: health_ptr,
+        error: std::ptr::null_mut(),
+    }))
+}
+
+/// Build an empty ZtlpRelayList (0 relays, no error).
+fn make_relay_list_empty() -> *mut ZtlpRelayList {
+    Box::into_raw(Box::new(ZtlpRelayList {
+        count: 0,
+        addresses: std::ptr::null_mut(),
+        regions: std::ptr::null_mut(),
+        latency_ms: std::ptr::null_mut(),
+        load_pct: std::ptr::null_mut(),
+        active_connections: std::ptr::null_mut(),
+        health: std::ptr::null_mut(),
+        error: std::ptr::null_mut(),
+    }))
+}
+
+/// Build a ZtlpRelayList with an error message.
+fn make_relay_list_error(msg: &str) -> *mut ZtlpRelayList {
+    let error_cstr = CString::new(msg).unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    Box::into_raw(Box::new(ZtlpRelayList {
+        count: 0,
+        addresses: std::ptr::null_mut(),
+        regions: std::ptr::null_mut(),
+        latency_ms: std::ptr::null_mut(),
+        load_pct: std::ptr::null_mut(),
+        active_connections: std::ptr::null_mut(),
+        health: std::ptr::null_mut(),
+        error: error_cstr.into_raw(),
+    }))
+}
+
+/// Free a ZtlpRelayList returned by `ztlp_ns_resolve_relays_sync`.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_list_free(list: *mut ZtlpRelayList) {
+    if list.is_null() {
+        return;
+    }
+    let l = unsafe { Box::from_raw(list) };
+    if l.count > 0 {
+        // Free address strings
+        if !l.addresses.is_null() {
+            let addrs = unsafe { std::slice::from_raw_parts_mut(l.addresses, l.count) };
+            for ptr in addrs.iter() {
+                if !ptr.is_null() {
+                    let _ = unsafe { CString::from_raw(*ptr) };
+                }
+            }
+            unsafe { Vec::from_raw_parts(l.addresses, l.count, l.count) };
+        }
+        // Free region strings
+        if !l.regions.is_null() {
+            let regions = unsafe { std::slice::from_raw_parts_mut(l.regions, l.count) };
+            for ptr in regions.iter() {
+                if !ptr.is_null() {
+                    let _ = unsafe { CString::from_raw(*ptr) };
+                }
+            }
+            unsafe { Vec::from_raw_parts(l.regions, l.count, l.count) };
+        }
+        // Free numeric arrays
+        if !l.latency_ms.is_null() {
+            unsafe { Vec::from_raw_parts(l.latency_ms, l.count, l.count) };
+        }
+        if !l.load_pct.is_null() {
+            unsafe { Vec::from_raw_parts(l.load_pct, l.count, l.count) };
+        }
+        if !l.active_connections.is_null() {
+            unsafe { Vec::from_raw_parts(l.active_connections, l.count, l.count) };
+        }
+        if !l.health.is_null() {
+            unsafe { Vec::from_raw_parts(l.health, l.count, l.count) };
+        }
+    }
+    // Free error string
+    if !l.error.is_null() {
+        let _ = unsafe { CString::from_raw(l.error) };
+    }
+}
+
+// ── RelayPool FFI ──────────────────────────────────────────────────────────
+//
+// The NE code path: ztlp_ns_resolve_relays_sync() → ZtlpRelayList
+// → ztlp_relay_pool_update_from_ns() → ztlp_relay_pool_select()
+// → connect to best relay. All testable on Linux, no tokio, no Xcode.
+
+/// Opaque handle to a RelayPool.
+/// Created by `ztlp_relay_pool_new`, freed by `ztlp_relay_pool_free`.
+#[repr(C)]
+pub struct ZtlpRelayPool {
+    _private: [u8; 0], // opaque — actual RelayPool is Boxed behind the pointer
+}
+
+/// Create a new RelayPool with default configuration.
+///
+/// # Parameters
+/// - `gateway_region`: Region string for relay selection tiebreak (e.g., "us-west-2").
+///   Can be null or empty string to skip region preference.
+///
+/// # Returns
+/// Pointer to a new ZtlpRelayPool. Caller owns it; free with `ztlp_relay_pool_free`.
+/// Returns NULL on allocation failure.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_new(gateway_region: *const c_char) -> *mut ZtlpRelayPool {
+    let region = if gateway_region.is_null() {
+        String::new()
+    } else {
+        match unsafe { CStr::from_ptr(gateway_region) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => String::new(),
+        }
+    };
+
+    let config = crate::relay_pool::RelayPoolConfig {
+        gateway_region: region,
+        ..Default::default()
+    };
+
+    let pool = crate::relay_pool::RelayPool::new(config);
+    let boxed = Box::new(pool);
+    let raw = Box::into_raw(boxed);
+    raw as *mut ZtlpRelayPool
+}
+
+/// Update the relay pool with NS-discovered relay data.
+///
+/// Converts a `ZtlpRelayList` (from `ztlp_ns_resolve_relays_sync`) into
+/// `RelayInfo` structs and calls `RelayPool::update_from_ns_rich()`.
+/// This preserves the health state of existing relays while adding new ones
+/// and removing relays no longer in the NS response.
+///
+/// # Parameters
+/// - `pool`: Pointer returned by `ztlp_relay_pool_new`. Must not be null.
+/// - `relay_list`: Pointer returned by `ztlp_ns_resolve_relays_sync`. Can be null (no-op).
+///
+/// # Returns
+/// 0 on success, -1 on error (null pool).
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_update_from_ns(
+    pool: *mut ZtlpRelayPool,
+    relay_list: *const ZtlpRelayList,
+) -> i32 {
+    if pool.is_null() {
+        return -1;
+    }
+
+    let pool_ref = unsafe {
+        &mut *(pool as *mut crate::relay_pool::RelayPool)
+    };
+
+    if relay_list.is_null() {
+        return 0; // no-op, not an error
+    }
+
+    let list = unsafe { &*relay_list };
+
+    // Check for error in the relay list
+    if !list.error.is_null() {
+        return 0; // NS query failed — don't update the pool, keep existing relays
+    }
+
+    if list.count == 0 {
+        return 0; // no relays found — don't clear the pool
+    }
+
+    // Build RelayInfo vec from the parallel arrays
+    let mut infos = Vec::with_capacity(list.count);
+
+    let addrs = if list.addresses.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.addresses, list.count) }
+    };
+    let regions = if list.regions.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.regions, list.count) }
+    };
+    let latencies = if list.latency_ms.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.latency_ms, list.count) }
+    };
+    let loads = if list.load_pct.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.load_pct, list.count) }
+    };
+    let conns = if list.active_connections.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.active_connections, list.count) }
+    };
+    let healths = if list.health.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(list.health, list.count) }
+    };
+
+    for i in 0..list.count {
+        let addr_str = if i < addrs.len() && !addrs[i].is_null() {
+            match unsafe { CStr::from_ptr(addrs[i]) }.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            }
+        } else {
+            continue;
+        };
+
+        let addr: SocketAddr = match addr_str.parse() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+
+        let region = if i < regions.len() && !regions[i].is_null() {
+            match unsafe { CStr::from_ptr(regions[i]) }.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => "unknown".to_string(),
+            }
+        } else {
+            "unknown".to_string()
+        };
+
+        let latency = if i < latencies.len() { latencies[i] } else { 999 };
+        let load = if i < loads.len() { loads[i] } else { 0 };
+        let active_conns = if i < conns.len() { conns[i] } else { 0 };
+
+        let health = if i < healths.len() {
+            match healths[i] {
+                0 => crate::relay_pool::RelayHealth::Healthy,
+                1 => crate::relay_pool::RelayHealth::Degraded,
+                2 => crate::relay_pool::RelayHealth::Dead,
+                3 => crate::relay_pool::RelayHealth::Deprioritized,
+                _ => crate::relay_pool::RelayHealth::Healthy,
+            }
+        } else {
+            crate::relay_pool::RelayHealth::Healthy
+        };
+
+        infos.push(crate::relay_pool::RelayInfo {
+            addr,
+            region,
+            latency_ms: latency,
+            load_pct: load,
+            active_connections: active_conns,
+            health,
+        });
+    }
+
+    if !infos.is_empty() {
+        pool_ref.update_from_ns_rich(infos);
+    }
+
+    0
+}
+
+/// Select the best available relay from the pool.
+///
+/// Uses the relay pool's ranking algorithm (latency, load, region preference,
+/// health state, backoff) to pick the optimal relay.
+///
+/// # Parameters
+/// - `pool`: Pointer returned by `ztlp_relay_pool_new`. Must not be null.
+///
+/// # Returns
+/// C string with the best relay address (e.g., "34.219.64.205:443").
+/// Returns NULL if pool is null or no relay is available.
+/// Caller must free the returned string with `ztlp_string_free`.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_select(pool: *mut ZtlpRelayPool) -> *mut c_char {
+    if pool.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let pool_ref = unsafe {
+        &*(pool as *const crate::relay_pool::RelayPool)
+    };
+
+    match pool_ref.select_best(&pool_ref.config().gateway_region) {
+        Some(addr) => {
+            let addr_str = addr.to_string();
+            CString::new(addr_str)
+                .unwrap_or_else(|_| CString::new("").unwrap())
+                .into_raw()
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get the number of healthy relays in the pool.
+///
+/// Useful for diagnostics — shows how many relays are available for selection.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_healthy_count(pool: *const ZtlpRelayPool) -> usize {
+    if pool.is_null() {
+        return 0;
+    }
+    let pool_ref = unsafe {
+        &*(pool as *const crate::relay_pool::RelayPool)
+    };
+    pool_ref.healthy_count()
+}
+
+/// Get the total number of relays in the pool (including unhealthy).
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_total_count(pool: *const ZtlpRelayPool) -> usize {
+    if pool.is_null() {
+        return 0;
+    }
+    let pool_ref = unsafe {
+        &*(pool as *const crate::relay_pool::RelayPool)
+    };
+    pool_ref.total_count()
+}
+
+/// Report a successful connection to a relay.
+///
+/// Updates the relay's latency and resets its failure counter.
+/// Call this after a successful handshake or data transfer.
+///
+/// # Parameters
+/// - `pool`: Pointer returned by `ztlp_relay_pool_new`. Must not be null.
+/// - `addr`: Relay address string (e.g., "34.219.64.205:443").
+/// - `latency_ms`: Measured round-trip latency in milliseconds.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_report_success(
+    pool: *mut ZtlpRelayPool,
+    addr: *const c_char,
+    latency_ms: u32,
+) {
+    if pool.is_null() || addr.is_null() {
+        return;
+    }
+
+    let pool_ref = unsafe {
+        &mut *(pool as *mut crate::relay_pool::RelayPool)
+    };
+
+    let addr_str = match unsafe { CStr::from_ptr(addr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let socket_addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+
+    pool_ref.record_probe_success(socket_addr, Duration::from_millis(latency_ms as u64));
+}
+
+/// Report a failed connection to a relay.
+///
+/// Increments the relay's failure counter and may trigger deprioritization
+/// or backoff. Call this after a failed handshake or timeout.
+///
+/// # Parameters
+/// - `pool`: Pointer returned by `ztlp_relay_pool_new`. Must not be null.
+/// - `addr`: Relay address string (e.g., "34.219.64.205:443").
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_report_failure(
+    pool: *mut ZtlpRelayPool,
+    addr: *const c_char,
+) {
+    if pool.is_null() || addr.is_null() {
+        return;
+    }
+
+    let pool_ref = unsafe {
+        &mut *(pool as *mut crate::relay_pool::RelayPool)
+    };
+
+    let addr_str = match unsafe { CStr::from_ptr(addr) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let socket_addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+
+    pool_ref.record_probe_failure(socket_addr);
+}
+
+/// Check if the pool needs an NS refresh.
+///
+/// Returns true if the pool's relay data is stale and should be refreshed
+/// by calling `ztlp_ns_resolve_relays_sync` + `ztlp_relay_pool_update_from_ns`.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_needs_refresh(pool: *const ZtlpRelayPool) -> bool {
+    if pool.is_null() {
+        return false;
+    }
+    let pool_ref = unsafe {
+        &*(pool as *const crate::relay_pool::RelayPool)
+    };
+    pool_ref.needs_ns_refresh()
+}
+
+/// Free a ZtlpRelayPool returned by `ztlp_relay_pool_new`.
+#[no_mangle]
+pub extern "C" fn ztlp_relay_pool_free(pool: *mut ZtlpRelayPool) {
+    if pool.is_null() {
+        return;
+    }
+    let _ = unsafe { Box::from_raw(pool as *mut crate::relay_pool::RelayPool) };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -6087,5 +7013,199 @@ mod tests {
             vip_registry: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             packet_router: None,
         }
+    }
+
+    // ── Sync NS resolver tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_ns_resolve_sync_null_args() {
+        let result = ztlp_ns_resolve_sync(std::ptr::null(), std::ptr::null(), 2, 0);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_ns_resolve_sync_null_name() {
+        let server = CString::new("1.2.3.4:23096").unwrap();
+        let result = ztlp_ns_resolve_sync(server.as_ptr(), std::ptr::null(), 2, 0);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_ns_resolve_sync_invalid_server() {
+        let server = CString::new("not-a-valid-addr").unwrap();
+        let name = CString::new("test").unwrap();
+        let result = ztlp_ns_resolve_sync(server.as_ptr(), name.as_ptr(), 2, 100);
+        assert!(!result.is_null());
+        let r = unsafe { &*result };
+        assert!(!r.error.is_null());
+        ztlp_ns_result_free(result);
+    }
+
+    #[test]
+    fn test_ns_resolve_sync_timeout_on_bad_server() {
+        let server = CString::new("127.0.0.1:1").unwrap();
+        let name = CString::new("test.record").unwrap();
+        let result = ztlp_ns_resolve_sync(server.as_ptr(), name.as_ptr(), 2, 200);
+        assert!(!result.is_null());
+        let r = unsafe { &*result };
+        assert!(!r.error.is_null());
+        ztlp_ns_result_free(result);
+    }
+
+    #[test]
+    fn test_ns_result_free_null_safe() {
+        ztlp_ns_result_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_relay_list_free_null_safe() {
+        ztlp_relay_list_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_ns_result_get_address_null_safe() {
+        let addr = ztlp_ns_result_get_address(std::ptr::null());
+        assert!(addr.is_null());
+    }
+
+    #[test]
+    fn test_ns_resolve_relays_sync_null_args() {
+        let result = ztlp_ns_resolve_relays_sync(std::ptr::null(), std::ptr::null(), 0);
+        assert!(!result.is_null());
+        let r = unsafe { &*result };
+        assert!(r.count == 0);
+        ztlp_relay_list_free(result);
+    }
+
+    // ── RelayPool FFI tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_relay_pool_new_and_free() {
+        let region = CString::new("us-west-2").unwrap();
+        let pool = ztlp_relay_pool_new(region.as_ptr());
+        assert!(!pool.is_null());
+        ztlp_relay_pool_free(pool);
+    }
+
+    #[test]
+    fn test_relay_pool_new_null_region() {
+        let pool = ztlp_relay_pool_new(std::ptr::null());
+        assert!(!pool.is_null());
+        ztlp_relay_pool_free(pool);
+    }
+
+    #[test]
+    fn test_relay_pool_free_null_safe() {
+        ztlp_relay_pool_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_relay_pool_select_empty() {
+        let pool = ztlp_relay_pool_new(std::ptr::null());
+        let addr = ztlp_relay_pool_select(pool);
+        assert!(addr.is_null(), "empty pool should return null");
+        ztlp_relay_pool_free(pool);
+    }
+
+    #[test]
+    fn test_relay_pool_healthy_count_empty() {
+        let pool = ztlp_relay_pool_new(std::ptr::null());
+        assert_eq!(ztlp_relay_pool_healthy_count(pool), 0);
+        assert_eq!(ztlp_relay_pool_total_count(pool), 0);
+        ztlp_relay_pool_free(pool);
+    }
+
+    #[test]
+    fn test_relay_pool_update_from_ns_null_args() {
+        let pool = ztlp_relay_pool_new(std::ptr::null());
+        assert_eq!(ztlp_relay_pool_update_from_ns(std::ptr::null_mut(), std::ptr::null()), -1);
+        assert_eq!(ztlp_relay_pool_update_from_ns(pool, std::ptr::null()), 0);
+        ztlp_relay_pool_free(pool);
+    }
+
+    #[test]
+    fn test_relay_pool_update_and_select() {
+        use crate::relay_pool::{RelayHealth, RelayInfo, RelayPool, RelayPoolConfig};
+
+        // Test via the Rust API directly — the FFI is a thin wrapper around this
+        let config = RelayPoolConfig {
+            gateway_region: "us-west-2".to_string(),
+            ..Default::default()
+        };
+        let mut pool = RelayPool::new(config);
+
+        let addr: SocketAddr = "34.219.64.205:443".parse().unwrap();
+        let info = RelayInfo {
+            addr,
+            region: "us-west-2".to_string(),
+            latency_ms: 25,
+            load_pct: 30,
+            active_connections: 5,
+            health: RelayHealth::Healthy,
+        };
+
+        pool.update_from_ns_rich(vec![info]);
+
+        assert_eq!(pool.healthy_count(), 1);
+        let best = pool.select_best("us-west-2");
+        assert!(best.is_some());
+        assert_eq!(best.unwrap(), addr);
+
+        // Also test the FFI round-trip
+        let region = CString::new("us-west-2").unwrap();
+        let pool_ptr = ztlp_relay_pool_new(region.as_ptr());
+        assert!(!pool_ptr.is_null());
+
+        // Build a synthetic ZtlpRelayList
+        let addr_cstr = CString::new("34.219.64.205:443").unwrap();
+        let region_cstr = CString::new("us-west-2").unwrap();
+        let mut addresses = vec![addr_cstr.into_raw()];
+        let mut regions = vec![region_cstr.into_raw()];
+        let latency_arr = vec![25u32];
+        let load_arr = vec![30u8];
+        let conns_arr = vec![5u32];
+        let health_arr = vec![0u8]; // Healthy
+
+        let relay_list = Box::into_raw(Box::new(ZtlpRelayList {
+            count: 1,
+            addresses: addresses.as_mut_ptr(),
+            regions: regions.as_mut_ptr(),
+            latency_ms: latency_arr.as_ptr() as *mut u32,
+            load_pct: load_arr.as_ptr() as *mut u8,
+            active_connections: conns_arr.as_ptr() as *mut u32,
+            health: health_arr.as_ptr() as *mut u8,
+            error: std::ptr::null_mut(),
+        }));
+
+        std::mem::forget(addresses);
+        std::mem::forget(regions);
+        std::mem::forget(latency_arr);
+        std::mem::forget(load_arr);
+        std::mem::forget(conns_arr);
+        std::mem::forget(health_arr);
+
+        let rc = ztlp_relay_pool_update_from_ns(pool_ptr, relay_list);
+        assert_eq!(rc, 0);
+
+        assert_eq!(ztlp_relay_pool_healthy_count(pool_ptr), 1);
+
+        let addr = ztlp_relay_pool_select(pool_ptr);
+        assert!(!addr.is_null());
+        let addr_str = unsafe { CStr::from_ptr(addr) }.to_str().unwrap();
+        assert_eq!(addr_str, "34.219.64.205:443");
+        let _ = unsafe { CString::from_raw(addr as *mut i8) };
+
+        ztlp_relay_pool_free(pool_ptr);
+    }
+
+    #[test]
+    fn test_relay_pool_report_success_failure_null_safe() {
+        ztlp_relay_pool_report_success(std::ptr::null_mut(), std::ptr::null(), 10);
+        ztlp_relay_pool_report_failure(std::ptr::null_mut(), std::ptr::null());
+    }
+
+    #[test]
+    fn test_relay_pool_needs_refresh_null() {
+        assert_eq!(ztlp_relay_pool_needs_refresh(std::ptr::null()), false);
     }
 }

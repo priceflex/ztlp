@@ -29,6 +29,32 @@ with zero NWListeners, saving ~5-8MB and dropping NE memory from 18-21MB to ~10-
 
 ## Architecture
 
+### Normative mode split: classic relay vs iOS relay-side VIP
+
+This document defines two distinct relay operating modes. They MUST NOT be conflated.
+
+#### Mode A: Classic relay mode (existing ZTLP behavior)
+- Relay forwards opaque ZTLP packets by SessionID.
+- Relay does not terminate application TCP.
+- Relay does not have application plaintext.
+- Relay is not the endpoint of the client tunnel's application semantics.
+- This remains the default relay model for ordinary ZTLP traffic.
+
+#### Mode B: iOS relay-side VIP mode (new, iOS-first)
+- iPhone Network Extension establishes a tunnel through a selected relay.
+- Relay decrypts the tunnel payload for designated VIP-proxied services.
+- Relay terminates TCP on behalf of the iPhone for those services.
+- Relay connects to the backend service and proxies request/response traffic.
+- Relay can see plaintext for those proxied VIP services.
+- This mode exists specifically to remove VIP listener/proxy memory from the iOS Network Extension.
+
+#### Normative trust statement
+- In classic relay mode, the statement "the relay never sees plaintext" remains true.
+- In iOS relay-side VIP mode, that statement is false for the proxied VIP services handled by the relay.
+- Relay-side VIP mode therefore makes the relay part of the trusted computing base for those services.
+- Relay→backend TLS or mTLS SHOULD be used wherever possible.
+- Future upgrades MAY add double-encryption or other mechanisms to reduce relay plaintext exposure, but that is not part of phase 1.
+
 ### Current flow (VIP proxy in NE)
 ```
 App → TCP connect 127.0.0.1:443 → NWListener accepts → NWConnection
@@ -65,6 +91,19 @@ NE memory: ~10-13 MB
 7. NE reconnects tunnel through new relay
 8. If FailoverDecision::NoRelaysAvailable → error, stop tunnel
 ```
+
+### Normative failover semantics
+
+Phase 1 failover is tunnel failover, not transparent stream migration.
+
+- If the selected relay dies, all active VIP-proxied TCP streams through that relay are lost.
+- The NE MUST treat relay failure as a tunnel-path failure and reselect a relay.
+- The NE MUST NOT claim transparent preservation of active TCP sessions in phase 1.
+- After failover, new app connections SHOULD succeed through the newly selected relay.
+- Existing app connections MAY be retried by the app or higher-level protocol, but that is outside the relay failover contract.
+- If no relay is available, the tunnel MUST fail closed rather than silently bypassing relay-side VIP semantics.
+
+Operationally, the user-visible behavior in phase 1 is: brief connection interruption, existing flows reset, new flows recover after relay reselection.
 
 ## NS Relay Discovery Protocol
 
@@ -239,6 +278,32 @@ let selected = ztlp_relay_pool_select(pool)
 
 ## Relay-side TCP Termination
 
+### Responsibility boundary: relay vs gateway vs NS
+
+To avoid architectural ambiguity, the components have separate responsibilities.
+
+#### NS responsibilities
+- Source of truth for relay discovery metadata.
+- Publishes relay addresses plus selection metadata (`region`, `latency_ms`, `load_pct`, `active_connections`, `health`).
+- Does not proxy traffic.
+- Does not terminate client TCP streams.
+
+#### Relay responsibilities in iOS relay-side VIP mode
+- Terminates designated VIP-proxied TCP traffic on behalf of the iPhone.
+- Decrypts tunnel payload for those proxied services.
+- Routes traffic to the configured backend for the target service.
+- Reports health/load/region data suitable for NS publication.
+- Performs no independent identity issuance or policy authority.
+
+#### Gateway responsibilities
+- Remains the system component for gateway-style service bridging, policy enforcement, and existing non-iOS VIP/gateway behaviors.
+- Is not redefined by this document as the control-plane source of truth for relay selection.
+- MAY still sit behind the relay as a backend target for some services, but that is a deployment choice, not a requirement of the architecture.
+
+#### Normative boundary rule
+The relay-side VIP feature is a transport/service-proxy optimization for memory-constrained iOS clients. It does not make the relay the authority for identity, namespace, or policy.
+
+
 ### What the relay needs to do
 1. Accept ZTLP-encrypted UDP packets from NE
 2. Decrypt using session keys (same as gateway)
@@ -258,6 +323,12 @@ api     → 127.0.0.1:8443
 
 This is similar to what `ZTLPVIPProxy.swift` does today, but on the server side
 where memory is unlimited.
+
+#### Normative routing rule
+- Routing MUST be based on trusted ZTLP mux/service metadata, not on sniffing HTTP Host headers, SNI, or other app-layer hints.
+- The relay MUST receive enough service identity in the proxied frame to select the backend deterministically.
+- Service routing configuration MUST be explicit and auditable (`service name -> backend address`).
+- App-layer metadata MAY be logged for debugging, but MUST NOT be the source of routing truth.
 
 ### Relay crypto
 The relay already handles ZTLP encryption for relayed packets. For VIP proxying,

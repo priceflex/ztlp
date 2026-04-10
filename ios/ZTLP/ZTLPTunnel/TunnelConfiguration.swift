@@ -47,13 +47,16 @@ struct TunnelConfiguration {
     /// Used by the extension to resolve service names to gateway addresses.
     let nsServer: String?
 
-    /// Service name for NS resolution and VIP proxy (e.g., "vault").
-    /// The extension registers VIP proxy listeners for this service.
+    /// Service name for service routing and VIP.
     let serviceName: String?
 
     /// Zone name (e.g., "techrockstars.ztlp").
     /// Used to construct the full NS name: "{serviceName}.{zoneName}".
     let zoneName: String?
+
+    /// The gateway's region (e.g., "us-west-2").
+    /// Used for relay selection tiebreak — prefer relays in same region.
+    let gatewayRegion: String?
 
     // MARK: - Serialization
 
@@ -83,6 +86,9 @@ struct TunnelConfiguration {
         if let zone = zoneName {
             dict["zoneName"] = zone
         }
+        if let region = gatewayRegion {
+            dict["gatewayRegion"] = region
+        }
         return dict
     }
 
@@ -103,7 +109,8 @@ struct TunnelConfiguration {
             fullTunnel: dict["fullTunnel"] as? Bool ?? false,
             nsServer: dict["nsServer"] as? String,
             serviceName: dict["serviceName"] as? String,
-            zoneName: dict["zoneName"] as? String
+            zoneName: dict["zoneName"] as? String,
+            gatewayRegion: dict["gatewayRegion"] as? String
         )
     }
 }

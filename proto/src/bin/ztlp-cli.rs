@@ -2163,6 +2163,7 @@ async fn cmd_connect(
             },
             ns_server: ns_server.clone(),
             zone: None,
+            gateway_region: String::new(),
         };
         let mut pool = RelayPool::new(pool_config);
         pool.add_relay(send_addr);

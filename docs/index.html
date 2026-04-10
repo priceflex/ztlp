@@ -735,7 +735,7 @@
     <div class="card">
       <div class="card-icon">🛡️</div>
       <div class="card-title">Zero Trust</div>
-      <div class="card-desc">No implicit trust. Every packet is verified. Relays never see plaintext. The network proves or doesn't exist.</div>
+      <div class="card-desc">No implicit trust. Every packet is verified. Classic relays never see plaintext; the new iOS relay-side VIP path is an explicit exception for selected mobile services.</div>
     </div>
     <div class="card">
       <div class="card-icon">⚡</div>
@@ -783,7 +783,7 @@ graph TB
     </thead>
     <tbody>
       <tr><td><strong>Client</strong> (<code>proto/</code>)</td><td>Rust</td><td>Identity, Noise_XX handshake, encrypted transport</td><td>781</td><td><span class="badge badge-green">Complete</span></td></tr>
-      <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding (zero-trust)</td><td>565</td><td><span class="badge badge-green">Complete</span></td></tr>
+      <tr><td><strong>Relay</strong> (<code>relay/</code>)</td><td>Elixir/OTP</td><td>SessionID-based packet forwarding plus iOS-first relay-side VIP termination for memory-constrained mobile clients</td><td>565</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>ZTLP-NS</strong> (<code>ns/</code>)</td><td>Elixir/OTP</td><td>Distributed trust namespace, Ed25519-signed records</td><td>722</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>Gateway</strong> (<code>gateway/</code>)</td><td>Elixir/OTP</td><td>ZTLP ↔ legacy TCP bridge, TLS termination, mTLS, policy enforcement</td><td>555</td><td><span class="badge badge-green">Complete</span></td></tr>
       <tr><td><strong>eBPF/XDP</strong> (<code>ebpf/</code>)</td><td>C</td><td>Kernel-level Layer 1+2 at NIC driver speed</td><td>—</td><td><span class="badge badge-green">Complete</span></td></tr>
@@ -922,7 +922,7 @@ bash interop/run_test.sh</code></pre></div>
      ═══════════════════════════════════════════════════════ -->
 <section class="page-section" id="architecture" data-search-title="Architecture — Deep Dive">
   <h1>Architecture Deep Dive</h1>
-  <p class="page-subtitle">Packet format, admission pipeline, handshake protocol, and connection flows.</p>
+  <p class="page-subtitle">Packet format, admission pipeline, handshake protocol, connection flows, and the iOS-first relay-side VIP architecture update.</p>
 
   <h2 id="arch-packet-format">Packet Format</h2>
   <p>ZTLP uses two header formats — discriminated by the <code>HdrLen</code> field (not packet size):</p>
@@ -1336,13 +1336,14 @@ config :ztlp_relay,
 └── ZtlpRelay.UdpListener        — GenServer wrapping :gen_udp</code></pre></div>
 
   <h3>Mesh Architecture <span class="badge badge-blue">v0.10.0+</span></h3>
-  <p>Relays form a mesh network for multi-hop forwarding and high availability:</p>
+  <p>Relays form a mesh network for multi-hop forwarding and high availability. For classic relay traffic they remain zero-trust forwarders; for the new iOS-first relay-side VIP path they may also host selected service-termination logic.</p>
   <ul>
     <li><strong>Relay Admission Tokens (RAT)</strong> — cryptographically signed tokens issued by ZTLP-NS. Relays validate RATs before accepting session registrations, preventing unauthorized relay usage.</li>
     <li><strong>Consistent hash ring</strong> — sessions are distributed across relay peers using a consistent hash ring, enabling horizontal scaling with minimal session migration on topology changes.</li>
     <li><strong>PathScore</strong> — latency-aware path selection ranks relay paths by measured RTT, jitter, and packet loss. Clients receive ranked path suggestions during session setup.</li>
     <li><strong>Multi-hop forwarding</strong> — packets can traverse multiple relays when direct connectivity is unavailable. Each hop is zero-trust (relays never see plaintext).</li>
     <li><strong>NS-based discovery</strong> — relays register as <code>ZTLP_RELAY</code> records in the namespace with capacity, region, and health metadata. Clients discover relays through NS queries.</li>
+    <li><strong>iOS-first relay-side VIP</strong> — selected iPhone traffic can move VIP TCP termination off-device and onto the relay to stay under the Network Extension memory limit; this path intentionally changes plaintext visibility and should use relay→backend TLS/mTLS.</li>
     <li><strong>Mnesia storage</strong> — session state persisted to Mnesia for crash recovery and cluster replication across relay nodes.</li>
   </ul>
 
@@ -1379,6 +1380,9 @@ def verify_header_auth_tag(aad, auth_tag, session_key) :: boolean()
 
 @doc "Compute a HeaderAuthTag for outbound packets"
 def compute_header_auth_tag(aad, session_key) :: binary()</code></pre></div>
+
+  <h3>iOS-first relay-side VIP update</h3>
+  <p>For memory-constrained iPhone clients, selected VIP TCP termination can move from the Network Extension to the relay. That keeps the NE focused on packet encryption/decryption, relay selection, and failover, at the cost of making the relay a trusted plaintext processor for those proxied services. Use relay→backend TLS/mTLS and see <code>docs/RELAY-VIP-ARCHITECTURE.md</code> for the detailed design.</p>
 
   <h3>Key Design Decisions</h3>
   <ul>

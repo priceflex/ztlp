@@ -1215,6 +1215,175 @@ int32_t ztlp_router_gateway_close_sync(
  */
 void ztlp_router_stop_sync(ZtlpPacketRouter *router);
 
+// ── Sync NS Resolution (no tokio, ios-safe) ─────────────────────────────
+
+/**
+ * @brief Result of a sync NS resolution query.
+ *
+ * Contains parsed records from a ZTLP-NS query. Free with ztlp_ns_result_free().
+ * Available in both default and ios-sync builds (no tokio dependency).
+ */
+typedef struct ZtlpNsResult {
+    size_t count;               /** Number of records found */
+    uint8_t *record_types;      /** Array of record types (1=KEY, 2=SVC, 3=RELAY) */
+    char **record_names;        /** Array of record name strings */
+    uint8_t **record_data;      /** Array of raw CBOR data buffers */
+    size_t *record_data_lens;   /** Array of CBOR data lengths */
+    char *error;                /** Error message (NULL on success) */
+} ZtlpNsResult;
+
+/**
+ * @brief Perform a sync NS resolution query.
+ *
+ * Uses std::net::UdpSocket — no tokio runtime needed.
+ * Safe to call from the iOS Network Extension.
+ *
+ * @param ns_server   NS server address (e.g., "34.217.62.46:23096")
+ * @param name        ZTLP name to resolve (e.g., "beta.techrockstars")
+ * @param record_type Record type (1=KEY, 2=SVC, 3=RELAY)
+ * @param timeout_ms  Query timeout in ms (0 = default 5000ms)
+ * @return ZtlpNsResult pointer (NULL only on null args). Free with ztlp_ns_result_free().
+ */
+ZtlpNsResult *ztlp_ns_resolve_sync(
+    const char *ns_server,
+    const char *name,
+    uint8_t record_type,
+    uint32_t timeout_ms
+);
+
+/**
+ * @brief Free a ZtlpNsResult.
+ */
+void ztlp_ns_result_free(ZtlpNsResult *result);
+
+/**
+ * @brief Get the address string from the first SVC record in an NS result.
+ *
+ * Convenience for the common case of resolving a service name
+ * and getting its "ip:port" address.
+ *
+ * @return Address string (caller must free with ztlp_string_free), or NULL.
+ */
+char *ztlp_ns_result_get_address(const ZtlpNsResult *result);
+
+/**
+ * @brief Result of relay-specific NS resolution.
+ *
+ * Contains parsed relay info ready for RelayPool. Free with ztlp_relay_list_free().
+ */
+typedef struct ZtlpRelayList {
+    size_t count;               /** Number of relays found */
+    char **addresses;           /** Array of "ip:port" strings */
+    char **regions;             /** Array of region strings */
+    uint32_t *latency_ms;       /** Array of latency values (ms) */
+    uint8_t *load_pct;          /** Array of load percentages (0-100) */
+    uint32_t *active_connections; /** Array of connection counts */
+    uint8_t *health;            /** Array of health states (0=healthy,1=degraded,2=dead,3=deprioritized) */
+    char *error;                /** Error message (NULL on success) */
+} ZtlpRelayList;
+
+/**
+ * @brief Resolve relays from NS and return parsed relay info.
+ *
+ * Convenience wrapper that calls ztlp_ns_resolve_sync with record_type=3 (RELAY)
+ * and parses CBOR data into typed relay fields.
+ *
+ * @param ns_server   NS server address
+ * @param name        Zone or service name (e.g., "techrockstars")
+ * @param timeout_ms  Query timeout (0 = default 5000ms)
+ * @return ZtlpRelayList pointer. Free with ztlp_relay_list_free().
+ */
+ZtlpRelayList *ztlp_ns_resolve_relays_sync(
+    const char *ns_server,
+    const char *name,
+    uint32_t timeout_ms
+);
+
+/**
+ * @brief Free a ZtlpRelayList.
+ */
+void ztlp_relay_list_free(ZtlpRelayList *list);
+
+/* ── RelayPool FFI ───────────────────────────────────────────────────── */
+
+/**
+ * @brief Opaque handle to a RelayPool.
+ *
+ * Created by ztlp_relay_pool_new(), freed by ztlp_relay_pool_free().
+ */
+typedef struct ZtlpRelayPool ZtlpRelayPool;
+
+/**
+ * @brief Create a new RelayPool with default configuration.
+ *
+ * @param gateway_region  Region for relay selection tiebreak (e.g., "us-west-2").
+ *                        Can be NULL for no preference.
+ * @return Pointer to a new ZtlpRelayPool. Free with ztlp_relay_pool_free().
+ */
+ZtlpRelayPool *ztlp_relay_pool_new(const char *gateway_region);
+
+/**
+ * @brief Update the relay pool with NS-discovered relay data.
+ *
+ * Feeds a ZtlpRelayList into the pool, preserving health state of existing
+ * relays while adding new ones and pruning dead ones not in the NS response.
+ *
+ * @param pool        Pointer from ztlp_relay_pool_new(). Must not be NULL.
+ * @param relay_list  Pointer from ztlp_ns_resolve_relays_sync(). Can be NULL (no-op).
+ * @return 0 on success, -1 on error (null pool).
+ */
+int ztlp_relay_pool_update_from_ns(ZtlpRelayPool *pool, const ZtlpRelayList *relay_list);
+
+/**
+ * @brief Select the best available relay from the pool.
+ *
+ * Uses ranking (latency, load, region preference, health, backoff).
+ *
+ * @param pool  Pointer from ztlp_relay_pool_new(). Must not be NULL.
+ * @return C string with relay address (e.g., "34.219.64.205:443"), or NULL if none available.
+ *         Free with ztlp_string_free().
+ */
+char *ztlp_relay_pool_select(ZtlpRelayPool *pool);
+
+/**
+ * @brief Get number of healthy relays in the pool.
+ */
+size_t ztlp_relay_pool_healthy_count(const ZtlpRelayPool *pool);
+
+/**
+ * @brief Get total number of relays (including unhealthy).
+ */
+size_t ztlp_relay_pool_total_count(const ZtlpRelayPool *pool);
+
+/**
+ * @brief Report a successful connection to a relay.
+ *
+ * @param pool         Pointer from ztlp_relay_pool_new().
+ * @param addr         Relay address string (e.g., "34.219.64.205:443").
+ * @param latency_ms   Measured RTT in milliseconds.
+ */
+void ztlp_relay_pool_report_success(ZtlpRelayPool *pool, const char *addr, uint32_t latency_ms);
+
+/**
+ * @brief Report a failed connection to a relay.
+ *
+ * @param pool  Pointer from ztlp_relay_pool_new().
+ * @param addr  Relay address string.
+ */
+void ztlp_relay_pool_report_failure(ZtlpRelayPool *pool, const char *addr);
+
+/**
+ * @brief Check if the pool needs an NS refresh.
+ *
+ * @return true if relay data is stale.
+ */
+bool ztlp_relay_pool_needs_refresh(const ZtlpRelayPool *pool);
+
+/**
+ * @brief Free a ZtlpRelayPool.
+ */
+void ztlp_relay_pool_free(ZtlpRelayPool *pool);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

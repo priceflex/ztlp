@@ -1,18 +1,26 @@
 // ZTLPVIPProxy.swift
 // ZTLPTunnel (Network Extension)
 //
-// Native Swift VIP proxy replacing the tokio-based TcpListener in the Rust
-// library. Accepts TCP connections on 127.0.0.1:port via NWListener and
-// bridges them to ZTLP mux streams through the sync crypto path.
+// *** CONDITIONALLY DISABLED — replaced by relay-side VIP ***
+// This file is retained for potential rollback but not compiled into the
+// NE target. To re-enable, uncomment the #if block in the pbxproj file
+// settings for this file, or remove the SWIFT_ACTIVE_COMPILATION_CONDITIONS
+// exclusion for ZTLPVIP_PROXY_DISABLED.
 //
-// Architecture:
+// Original purpose: Native Swift VIP proxy replacing the tokio-based TcpListener.
+// Accepted TCP connections on 127.0.0.1:port via NWListener and bridged them
+// to ZTLP mux streams through the sync crypto path.
+//
+// Architecture (OLD):
 //   App → TCP connect 127.0.0.1:8080 → NWListener accepts → NWConnection
 //     → read data → ztlp_frame_data() → ztlp_encrypt_packet() → sendPacket()
 //   Gateway response → ztlp_decrypt_packet() → ztlp_parse_frame()
 //     → deliverData() → NWConnection write → App receives HTTP response
 //
-// This avoids spinning up tokio TcpListeners in the extension process,
-// saving ~2-3 MB of memory in the 15 MB-limited Network Extension.
+// NEW: VIP traffic routes through packetFlow → encrypted tunnel → relay
+// (relay-side TCP termination, no NWListeners in the extension).
+
+#if DISABLED_ZTLPVIPPROXY
 
 import Foundation
 import Network
@@ -388,3 +396,5 @@ final class ZTLPVIPProxy {
         return Array(listeners.keys).sorted()
     }
 }
+
+#endif // DISABLED_ZTLPVIPPROXY

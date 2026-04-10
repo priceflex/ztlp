@@ -2,9 +2,11 @@
 
 An Elixir/OTP implementation of a **Zero Trust Layer Protocol** relay node.
 
-The relay forwards encrypted ZTLP packets between peers by SessionID. It never
-sees plaintext — it only routes packets based on the 96-bit SessionID routing
-key. This is the Elixir companion to the [Rust ZTLP prototype](../proto/).
+The relay forwards encrypted ZTLP packets between peers by SessionID. In classic
+relay mode it never sees plaintext — it only routes packets based on the 96-bit
+SessionID routing key. This is the Elixir companion to the [Rust ZTLP prototype](../proto/).
+
+Important: the new iOS-first relay-side VIP architecture introduces a second relay role for selected iPhone traffic. In that mode, the relay terminates VIP TCP services on behalf of the iOS Network Extension to save 5-8 MB of NE memory. That proxied VIP path is not zero-plaintext at the relay, so the relay becomes part of the trusted computing base for those services. See `../docs/RELAY-VIP-ARCHITECTURE.md`.
 
 ## What It Does
 
@@ -14,9 +16,25 @@ directly, they communicate through a relay. The relay:
 - Receives UDP packets from peers
 - Runs a **three-layer admission pipeline** (magic check → SessionID lookup → HeaderAuthTag verification)
 - Forwards packets to the other peer in the session
-- Never decrypts or inspects payload data
+- In classic relay mode, never decrypts or inspects payload data
+- In the iOS-first relay-side VIP design, can optionally terminate selected VIP TCP services for memory-constrained iPhone clients
 
 ## Architecture
+
+### Two relay operating modes
+
+1. Classic zero-trust relay mode
+   - Relay forwards opaque ZTLP packets by SessionID
+   - Relay has no application plaintext
+   - This remains the default relay model for ordinary ZTLP traffic
+
+2. iOS-first relay-side VIP mode
+   - iPhone NE sends encrypted tunnel traffic to a selected relay
+   - Relay decrypts the client tunnel payload, terminates selected VIP TCP services, and connects to the backend service
+   - This exists specifically to move VIP proxy memory out of the iOS Network Extension
+   - Recommended hardening is relay→backend TLS/mTLS
+
+The iOS relay-side VIP design does not replace classic relay forwarding. It adds a specialized service-termination role for memory-constrained mobile clients.
 
 ```
 ZtlpRelay.Application (Supervisor)
@@ -126,6 +144,18 @@ Tests cover:
 - **Integration** — Full flow: register session → send packet → verify forwarding
 
 ## Configuration
+
+### Additional requirements for iOS relay-side VIP
+
+The relay-side VIP path needs configuration beyond ordinary SessionID forwarding:
+
+- service routing table (`service name -> backend address`)
+- health and load reporting suitable for NS-published relay records
+- region metadata for relay selection
+- relay→backend TLS/mTLS where possible
+- failover-aware behavior so iOS clients can reselect a different relay cleanly
+
+See `../docs/RELAY-VIP-ARCHITECTURE.md` for the full design.
 
 In `config/config.exs`:
 

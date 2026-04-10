@@ -9,6 +9,7 @@ defmodule ZtlpRelay.UdpListener do
   1. Run through the three-layer pipeline
   2. If pass: look up session, forward to other peer via `:gen_udp.send`
   3. If handshake (HELLO/HELLO_ACK): handled for future session creation
+  4. If VIP-proxied service: dispatch to VipTcpTerminator for TCP termination
 
   For relay forwarding: receive from peer A, send to peer B (same socket).
 
@@ -32,7 +33,8 @@ defmodule ZtlpRelay.UdpListener do
     InterRelay,
     MeshManager,
     GatewayForwarder,
-    Packet
+    Packet,
+    VipTcpTerminator
   }
 
   @type state :: %{
@@ -104,11 +106,6 @@ defmodule ZtlpRelay.UdpListener do
   @impl true
   def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
-
-    # Debug: log all packets from known gateway IPs
-    if src_ip == {54, 149, 48, 6} do
-      Logger.info("[UdpListener] Packet from gateway #{inspect(sender)} len=#{byte_size(data)} first=#{if byte_size(data) > 0, do: :binary.at(data, 0), else: :empty}")
-    end
 
     # Check for GATEWAY_REGISTER packet before the pipeline
     case data do
@@ -338,7 +335,7 @@ defmodule ZtlpRelay.UdpListener do
 
   # HELLO packets — first message of a new handshake.
   # If gateways are configured, forward the HELLO to a gateway and track
-  # the session for bidirectional forwarding (client ↔ relay ↔ gateway).
+  # the session for bidirectional forwarding (client <-> relay <-> gateway).
   # Otherwise, creates a HALF_OPEN session with peer_a = sender (legacy).
   defp handle_admitted_packet(
          %{type: :handshake, msg_type: :hello} = parsed,
@@ -465,133 +462,34 @@ defmodule ZtlpRelay.UdpListener do
   # OTHER peer's address, then forward the raw packet unchanged.  The relay
   # never decrypts, modifies, or inspects the payload — it's an opaque
   # forwarder keyed on SessionID.
+  #
+  # VIP intercept: if the session is from an iOS VIP client and the packet
+  # targets a VIP-proxied service, the VIP TCP terminator handles it.
   defp handle_admitted_packet(parsed, data, sender, state) do
     session_id = parsed.session_id
 
     case SessionRegistry.lookup_session(session_id) do
       {:ok, {peer_a, peer_b, pid}} ->
-        cond do
-          # Known peer_a — forward to peer_b
-          sender == peer_a and peer_b != nil ->
-            {dest_ip, dest_port} = peer_b
-            :gen_udp.send(state.socket, dest_ip, dest_port, data)
-            Stats.increment(:forwarded)
-            if is_pid(pid), do: Session.forward(pid)
+        # VIP intercept: try VIP TCP termination first for data packets from peer_a
+        if parsed.type == :data_compact and sender == peer_a do
+          case VipTcpTerminator.handle_vip_packet(parsed, data, sender, state.socket) do
+            :vip_handled ->
+              Stats.increment(:vip_packets_processed)
+              if is_pid(pid), do: Session.forward(pid)
 
-          # Known peer_b — forward to peer_a
-          sender == peer_b ->
-            {dest_ip, dest_port} = peer_a
-            :gen_udp.send(state.socket, dest_ip, dest_port, data)
-            Stats.increment(:forwarded)
-            if is_pid(pid), do: Session.forward(pid)
+            :not_vip_service ->
+              forward_classic(data, sender, peer_a, peer_b, pid, state)
 
-          # Half-open session, new sender is peer_b
-          peer_b == nil and sender != peer_a and is_pid(pid) ->
-            case Session.set_peer_b(pid, sender) do
-              :ok ->
-                Logger.debug(
-                  "Learned peer_b #{inspect(sender)} from data packet — session #{Base.encode16(session_id)} now ESTABLISHED"
-                )
-
-                # Forward this packet to peer_a
-                {dest_ip, dest_port} = peer_a
-                :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                Stats.increment(:forwarded)
-
-              {:error, _} ->
-                :ok
-            end
-
-          # peer_a sent but peer_b not yet known — buffer situation
-          sender == peer_a and peer_b == nil ->
-            Logger.debug(
-              "Packet from peer_a but peer_b unknown for session #{Base.encode16(session_id)} — dropping"
-            )
-
-            :ok
-
-          # Unknown sender on existing session — check if it's a known gateway
-          # whose IP changed (e.g., AWS VPC internal IP vs public Elastic IP).
-          # This is the classic dual-NIC / Elastic IP problem: the relay registered
-          # peer_b from the public IP seen in the HELLO_ACK, but subsequent data
-          # packets may arrive from the VPC-internal IP.
-          #
-          # IMPORTANT: Only migrate if the IP changed but the port stayed the
-          # same, OR if the full {ip, port} matches a registered gateway address.
-          # We must NOT migrate when the gateway's registration packet arrives
-          # from an ephemeral source port — that would redirect session traffic
-          # to a port the gateway isn't listening on.
-          true ->
-            {sender_ip, sender_port} = sender
-            {_peer_b_ip, peer_b_port} = peer_b
-            gateway_ips = GatewayForwarder.known_gateway_ips()
-
-            # Allow migration only if:
-            # 1. The IP is a known gateway IP, AND
-            # 2. The port matches peer_b's original port (IP-only change, e.g. VPC→EIP)
-            same_port = sender_port == peer_b_port
-
-            cond do
-              sender_ip in gateway_ips and same_port ->
-                # Sender is a registered gateway with matching port — safe to migrate
-                Logger.info(
-                  "Gateway address migration: session #{Base.encode16(session_id)} " <>
-                    "peer_b #{inspect(peer_b)} → #{inspect(sender)} (known gateway IP, same port)"
-                )
-
-                # Update session registry so future packets match on first check
-                if is_pid(pid), do: Session.update_peer_b(pid, sender)
-                SessionRegistry.update_peer_b(session_id, sender)
-
-                # Forward to client
-                {dest_ip, dest_port} = peer_a
-                :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                Stats.increment(:forwarded)
-                if is_pid(pid), do: Session.forward(pid)
-
-              # Session-ID routing (Nebula-style): the sender has a valid session
-              # but doesn't match peer_a or peer_b's exact address. This covers:
-              #
-              # 1. iOS separate ACK socket: Swift NWConnection sends ACKs from a
-              #    different source port than the main tokio data socket. Both are
-              #    from the same client IP. We MUST NOT update peer_a here or the
-              #    two ports will flip-flop peer_a back and forth every 5 seconds.
-              #
-              # 2. True cellular NAT rebinding: the carrier changed the port on
-              #    the main data socket. The client's next data packet will come
-              #    from the new port and match here too.
-              #
-              # In both cases, the session_id in the ZTLP header is the routing
-              # key. The gateway's AEAD verification provides real authentication.
-              # We forward to gateway WITHOUT updating peer_a (return traffic
-              # always goes to the address that last matched as peer_a).
-              sender_ip not in gateway_ips ->
-                Logger.debug(
-                  "Session-ID routed: session #{Base.encode16(session_id)} " <>
-                    "from #{inspect(sender)} (peer_a=#{inspect(peer_a)}) → forwarding to gateway"
-                )
-
-                {dest_ip, dest_port} = peer_b
-                :gen_udp.send(state.socket, dest_ip, dest_port, data)
-                Stats.increment(:forwarded)
-                if is_pid(pid), do: Session.forward(pid)
-
-              true ->
-                if state.mesh_enabled do
-                  mesh_route_packet(session_id, data, sender, state)
-                else
-                  Logger.debug(
-                    "Unknown sender #{inspect(sender)} for session #{Base.encode16(session_id)} " <>
-                      "(peer_a=#{inspect(peer_a)} peer_b=#{inspect(peer_b)})"
-                  )
-
-                :ok
-              end
-            end
+            :vip_error ->
+              Logger.debug("VIP processing failed for session #{Base.encode16(session_id)}")
+              forward_classic(data, sender, peer_a, peer_b, pid, state)
+          end
+        else
+          forward_classic(data, sender, peer_a, peer_b, pid, state)
         end
 
       :error ->
-        # Session not in SessionRegistry — try GatewayForwarder (dynamic gateway sessions)
+        # Session not in SessionRegistry — try GatewayForwarder
         case GatewayForwarder.lookup(session_id) do
           {:ok, %{client: client_addr, gateway: gateway_addr}} ->
             cond do
@@ -606,25 +504,19 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
 
               true ->
-                # Sender IP might differ from registered addresses.
                 {sender_ip, sender_port} = sender
                 {_gw_ip, gw_port} = gateway_addr
-                {_client_ip, _client_port} = client_addr
 
                 cond do
-                  # Gateway IP migration (VPC vs EIP)
                   sender_ip in GatewayForwarder.known_gateway_ips() and sender_port == gw_port ->
                     {dest_ip, dest_port} = client_addr
                     :gen_udp.send(state.socket, dest_ip, dest_port, data)
                     Stats.increment(:forwarded)
 
-                  # Session-ID routing: sender has valid session but from a
-                  # different port (ACK socket or NAT rebind). Forward without
-                  # updating client_addr to avoid flip-flop with dual sockets.
                   sender_ip not in GatewayForwarder.known_gateway_ips() ->
                     Logger.debug(
                       "Session-ID routed (GW-fwd): #{Base.encode16(session_id)} " <>
-                        "from #{inspect(sender)} → forwarding to gateway"
+                        "from #{inspect(sender)} -> forwarding to gateway"
                     )
                     {dest_ip, dest_port} = gateway_addr
                     :gen_udp.send(state.socket, dest_ip, dest_port, data)
@@ -648,9 +540,96 @@ defmodule ZtlpRelay.UdpListener do
     end
   end
 
+  # Classic opaque relay forwarding — the path that never changes.
+  defp forward_classic(data, sender, peer_a, peer_b, pid, state) do
+    cond do
+      # Known peer_a — forward to peer_b
+      sender == peer_a and peer_b != nil ->
+        send_forward(state.socket, peer_b, data, pid)
+
+      # Known peer_b — forward to peer_a
+      sender == peer_b ->
+        send_forward(state.socket, peer_a, data, pid)
+
+      # Half-open session, new sender is peer_b
+      peer_b == nil and sender != peer_a and is_pid(pid) ->
+        case Session.set_peer_b(pid, sender) do
+          :ok ->
+            Logger.debug(
+              "Learned peer_b #{inspect(sender)} from data packet — session now ESTABLISHED"
+            )
+
+            {dest_ip, dest_port} = peer_a
+            :gen_udp.send(state.socket, dest_ip, dest_port, data)
+            Stats.increment(:forwarded)
+
+          {:error, _} ->
+            :ok
+        end
+
+      # peer_a sent but peer_b not yet known
+      sender == peer_a and peer_b == nil ->
+        Logger.debug(
+          "Packet from peer_a but peer_b unknown — dropping"
+        )
+
+        :ok
+
+      # Unknown sender on existing session — gateway migration or session-ID routing
+      true ->
+        handle_unknown_sender(data, sender, peer_a, peer_b, pid, state)
+    end
+  end
+
+  defp handle_unknown_sender(data, sender, peer_a, peer_b, pid, state) do
+    {sender_ip, sender_port} = sender
+    {peer_b_ip, peer_b_port} = peer_b
+    gateway_ips = GatewayForwarder.known_gateway_ips()
+    same_port = sender_port == peer_b_port
+
+    cond do
+      sender_ip in gateway_ips and same_port ->
+        Logger.info(
+          "Gateway address migration: peer_b #{inspect(peer_b)} -> #{inspect(sender)}"
+        )
+
+        if is_pid(pid), do: Session.update_peer_b(pid, sender)
+        SessionRegistry.update_peer_b(state.session_id, sender)
+
+        {dest_ip, dest_port} = peer_a
+        :gen_udp.send(state.socket, dest_ip, dest_port, data)
+        Stats.increment(:forwarded)
+        if is_pid(pid), do: Session.forward(pid)
+
+      sender_ip not in gateway_ips ->
+        Logger.debug(
+          "Session-ID routed: from #{inspect(sender)} -> forwarding to gateway"
+        )
+
+        {dest_ip, dest_port} = peer_b
+        :gen_udp.send(state.socket, dest_ip, dest_port, data)
+        Stats.increment(:forwarded)
+        if is_pid(pid), do: Session.forward(pid)
+
+      state.mesh_enabled ->
+        mesh_route_packet(state.session_id, data, sender, state)
+
+      true ->
+        Logger.debug(
+          "Unknown sender #{inspect(sender)} for session (peer_a=#{inspect(peer_a)} peer_b=#{inspect(peer_b)})"
+        )
+
+        :ok
+    end
+  end
+
+  defp send_forward(socket, {dest_ip, dest_port}, data, pid) do
+    :gen_udp.send(socket, dest_ip, dest_port, data)
+    Stats.increment(:forwarded)
+    if is_pid(pid), do: Session.forward(pid)
+  end
+
   # Forward a HELLO to a configured gateway.
-  # The relay registers the session as {client, gateway} so that responses
-  # from the gateway are forwarded back to the client.
   defp forward_hello_to_gateway(session_id, data, client_addr, parsed, state) do
     # Extract service name from HELLO dst_svc_id (16 bytes, zero-padded)
     service_name =
@@ -690,8 +669,6 @@ defmodule ZtlpRelay.UdpListener do
              ) do
           {:ok, pid} ->
             SessionRegistry.update_session_pid(session_id, pid)
-
-            # Set peer_b immediately (session is pre-established)
             Session.set_peer_b(pid, gateway_addr)
 
           {:error, reason} ->

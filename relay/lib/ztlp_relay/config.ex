@@ -351,4 +351,50 @@ defmodule ZtlpRelay.Config do
         :error
     end
   end
+
+  # --- VIP configuration ---
+
+  @doc """
+  Whether VIP TCP termination mode is enabled. Default: false.
+  """
+  @spec vip_enabled?() :: boolean()
+  def vip_enabled? do
+    case System.get_env("ZTLP_RELAY_VIP_ENABLED") do
+      "true" -> true
+      "1" -> true
+      nil -> Application.get_env(:ztlp_relay, :vip_enabled, false)
+      _ -> false
+    end
+  end
+
+  @doc """
+  Whether relay→backend TLS is enabled for VIP connections. Default: false.
+  """
+  @spec vip_tls_enabled?() :: boolean()
+  def vip_tls_enabled? do
+    case System.get_env("ZTLP_RELAY_VIP_TLS_ENABLED") do
+      "true" -> true
+      "1" -> true
+      nil -> Application.get_env(:ztlp_relay, :vip_tls_enabled, false)
+      _ -> false
+    end
+  end
+
+  @doc """
+  The session key for VIP tunnel decryption.
+
+  This is the shared symmetric key between the iPhone NE and the relay
+  for tunnel encryption. Returns nil if not configured (VIP mode disabled).
+  """
+  @spec vip_session_key() :: binary() | nil
+  def vip_session_key do
+    case System.get_env("ZTLP_RELAY_VIP_SESSION_KEY") do
+      nil -> Application.get_env(:ztlp_relay, :vip_session_key)
+      hex ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, <<key::binary-size(32)>>} -> key
+          _ -> nil
+        end
+    end
+  end
 end

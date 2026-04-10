@@ -853,6 +853,11 @@ impl RelayPool {
         self.relays.is_empty()
     }
 
+    /// Total number of relays in the pool (including unhealthy).
+    pub fn total_count(&self) -> usize {
+        self.relays.len()
+    }
+
     /// Number of healthy relays.
     pub fn healthy_count(&self) -> usize {
         self.relays

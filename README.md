@@ -30,6 +30,8 @@ designed to carry any packet from any source, with security left as an
 afterthought for endpoints and applications to solve individually. ZTLP
 (Zero Trust Layer Protocol) is a direct response to this design flaw.
 
+Current implementation work also includes an iOS-first relay-side VIP architecture for memory-constrained mobile clients: selected VIP TCP termination moves from the iPhone Network Extension onto relay servers so the NE can stay under Apple's practical memory ceiling while preserving ZTLP identity, relay discovery, and failover semantics.
+
 ZTLP defines a secure, identity-first network overlay that enforces
 cryptographic authentication before any network state is allocated.
 Invalid packets are rejected in a three-layer pipeline - Magic byte
@@ -60,6 +62,7 @@ View the full documentation — including quick start guides, architecture deep 
 Additional documentation:
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** — Comprehensive deployment guide covering Docker, federation, monitoring, and production hardening.
 - **[IDENTITY.md](IDENTITY.md)** — Detailed design document for the v0.9.0 identity model (DEVICE, USER, GROUP records and group-based policy).
+- **[docs/RELAY-VIP-ARCHITECTURE.md](docs/RELAY-VIP-ARCHITECTURE.md)** — iOS-first relay-side VIP architecture: move VIP TCP termination off the iPhone Network Extension and onto relay servers to recover 5-8 MB of NE memory.
 
 ## Table of Contents
 
@@ -1169,7 +1172,7 @@ graph TD
 |-------------|-------------|---------|
 | `ZTLP_KEY` | Node's public key and Node ID. | node1.office.acmedental.ztlp → NodeID + pubkey |
 | `ZTLP_SVC` | Service definition: ServiceID, allowed Node IDs, policy. | rdp.acmedental.ztlp → ServiceID + policy |
-| `ZTLP_RELAY` | Relay node: Node ID, IPv6 endpoints, capacity metrics. | relay1.apac.ztlp → NodeID + endpoints |
+| `ZTLP_RELAY` | Relay node: Node ID, endpoints, capacity metrics, and selection metadata such as region/load for clients. | relay1.apac.ztlp → NodeID + endpoints |
 | `ZTLP_POLICY` | Access policy: which Node IDs can reach which Service IDs. | policy.acmedental.ztlp → ACL |
 | `ZTLP_REVOKE` | Revocation notice for a Node ID or Token ID. | revoke.acmedental.ztlp → revoked IDs + timestamp |
 | `ZTLP_BOOTSTRAP` | Signed list of relay nodes for initial discovery. | bootstrap.ztlp → signed relay list |
@@ -2053,6 +2056,7 @@ Relay nodes MUST:
 
 -   Publish latency and capacity metrics no less than once per 60
     seconds.
+-   For iOS-first relay-side VIP deployments, publish enough region/load/health metadata for NS-driven relay selection and failover.
 
 -   Support all four transport modes defined in Section 14 (Transport Fallback and NAT Traversal).
 

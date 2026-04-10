@@ -165,46 +165,15 @@ pub async fn ns_resolve(
 
 /// Parse a SVC record response to extract the endpoint address.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    if data.is_empty() || data[0] != 0x02 {
-        return Err("invalid NS response (expected response opcode 0x02)".into());
+    let record = parse_ns_record(data)
+        .ok_or("invalid NS response (parse failed)")?;
+    if record.status != NsResponseStatus::Found {
+        return Err("NS response: record not found or revoked".into());
     }
-
-    // Skip optional truncation flag (0x01) inserted by NS amplification prevention.
-    // Truncated format: [0x02 | 0x01 | type_byte | rname_len(2) | ...]
-    // Normal format:    [0x02 | type_byte | rname_len(2) | ...]
-    let record = if data.len() > 1 && data[1] == 0x01 {
-        &data[2..]
-    } else {
-        &data[1..]
-    };
-    if record.len() < 4 {
-        return Err("NS response too short".into());
-    }
-
-    let _type_byte = record[0];
-    let rname_len = u16::from_be_bytes([record[1], record[2]]) as usize;
-    if record.len() < 3 + rname_len + 4 {
-        return Err("NS response truncated (name)".into());
-    }
-
-    let offset = 3 + rname_len;
-    let data_len = u32::from_be_bytes([
-        record[offset],
-        record[offset + 1],
-        record[offset + 2],
-        record[offset + 3],
-    ]) as usize;
-
-    if record.len() < offset + 4 + data_len {
-        return Err("NS response truncated (data)".into());
-    }
-
-    let data_start = offset + 4;
-    let data_bytes = &record[data_start..data_start + data_len];
 
     // Extract "address" field from CBOR
     let address_str =
-        cbor_extract_string(data_bytes, "address").ok_or("SVC record missing 'address' field")?;
+        cbor_extract_string(&record.data, "address").ok_or("SVC record missing 'address' field")?;
 
     address_str
         .parse()
@@ -213,43 +182,14 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
 
 /// Parse a KEY record response to extract the NodeID.
 fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + Send + Sync>> {
-    if data.is_empty() || data[0] != 0x02 {
-        return Err("invalid NS response".into());
+    let record = parse_ns_record(data)
+        .ok_or("invalid NS response (parse failed)")?;
+    if record.status != NsResponseStatus::Found {
+        return Err("NS response: record not found or revoked".into());
     }
-
-    // Skip optional truncation flag (0x01) from NS amplification prevention.
-    let record = if data.len() > 1 && data[1] == 0x01 {
-        &data[2..]
-    } else {
-        &data[1..]
-    };
-    if record.len() < 4 {
-        return Err("NS response too short".into());
-    }
-
-    let _type_byte = record[0];
-    let rname_len = u16::from_be_bytes([record[1], record[2]]) as usize;
-    if record.len() < 3 + rname_len + 4 {
-        return Err("NS response truncated".into());
-    }
-
-    let offset = 3 + rname_len;
-    let data_len = u32::from_be_bytes([
-        record[offset],
-        record[offset + 1],
-        record[offset + 2],
-        record[offset + 3],
-    ]) as usize;
-
-    if record.len() < offset + 4 + data_len {
-        return Err("NS response truncated".into());
-    }
-
-    let data_start = offset + 4;
-    let data_bytes = &record[data_start..data_start + data_len];
 
     let nid_hex =
-        cbor_extract_string(data_bytes, "node_id").ok_or("KEY record missing 'node_id'")?;
+        cbor_extract_string(&record.data, "node_id").ok_or("KEY record missing 'node_id'")?;
 
     if nid_hex.len() != 32 {
         return Err(format!("invalid NodeID hex length: {}", nid_hex.len()).into());
@@ -265,83 +205,8 @@ fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + 
     Ok(NodeId::from_bytes(nid))
 }
 
-/// Minimal CBOR string extraction (matches the CLI's implementation).
-fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
-    if data.is_empty() {
-        return None;
-    }
-
-    let mut pos = 0;
-    let initial = data[pos];
-    let major = initial >> 5;
-    let additional = initial & 0x1F;
-    pos += 1;
-
-    // Must be a map (major type 5)
-    if major != 5 {
-        return None;
-    }
-
-    let (arity, new_pos) = cbor_read_uint(additional, data, pos)?;
-    pos = new_pos;
-
-    for _ in 0..arity {
-        let (key_str, new_pos) = cbor_read_text(data, pos)?;
-        pos = new_pos;
-        let (val_str, new_pos) = cbor_read_text(data, pos)?;
-        pos = new_pos;
-
-        if key_str == target_key {
-            return Some(val_str);
-        }
-    }
-
-    None
-}
-
-fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize, usize)> {
-    if additional < 24 {
-        Some((additional as usize, pos))
-    } else if additional == 24 {
-        if pos >= data.len() {
-            return None;
-        }
-        Some((data[pos] as usize, pos + 1))
-    } else if additional == 25 {
-        if pos + 2 > data.len() {
-            return None;
-        }
-        let n = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-        Some((n, pos + 2))
-    } else if additional == 26 {
-        if pos + 4 > data.len() {
-            return None;
-        }
-        let n =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        Some((n, pos + 4))
-    } else {
-        None
-    }
-}
-
-fn cbor_read_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
-    if pos >= data.len() {
-        return None;
-    }
-    let initial = data[pos];
-    let major = initial >> 5;
-    let additional = initial & 0x1F;
-    if major != 3 {
-        return None;
-    }
-    let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
-    if new_pos + len > data.len() {
-        return None;
-    }
-    let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
-    Some((s.to_string(), new_pos + len))
-}
+// Delegate CBOR parsing to the shared ns_cbor module (also available in ios-sync builds).
+use crate::ns_cbor::{cbor_extract_string, parse_ns_record, NsResponseStatus};
 
 // ─── Proxy Command ──────────────────────────────────────────────────────────
 

@@ -50,6 +50,7 @@ pub mod ffi;
 pub mod handshake;
 pub mod identity;
 pub mod metrics;
+pub mod ns_cbor;
 pub mod packet;
 pub mod packet_router;
 pub mod pipeline;

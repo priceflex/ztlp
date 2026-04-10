@@ -17,7 +17,9 @@ defmodule ZtlpRelay.Stats do
           layer2_drops: non_neg_integer(),
           layer3_drops: non_neg_integer(),
           passed: non_neg_integer(),
-          forwarded: non_neg_integer()
+          forwarded: non_neg_integer(),
+          vip_packets_processed: non_neg_integer(),
+          vip_connections_started: non_neg_integer()
         }
 
   @doc """
@@ -41,7 +43,7 @@ defmodule ZtlpRelay.Stats do
   """
   @spec increment(atom()) :: :ok
   def increment(counter)
-      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
+      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded, :vip_packets_processed, :vip_connections_started] do
     Agent.update(__MODULE__, fn stats ->
       Map.update!(stats, counter, &(&1 + 1))
     end)
@@ -52,7 +54,7 @@ defmodule ZtlpRelay.Stats do
   """
   @spec increment(atom(), non_neg_integer()) :: :ok
   def increment(counter, amount)
-      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded] do
+      when counter in [:layer1_drops, :layer2_drops, :layer3_drops, :passed, :forwarded, :vip_packets_processed, :vip_connections_started] do
     Agent.update(__MODULE__, fn stats ->
       Map.update!(stats, counter, &(&1 + amount))
     end)
@@ -73,7 +75,9 @@ defmodule ZtlpRelay.Stats do
       layer2_drops: 0,
       layer3_drops: 0,
       passed: 0,
-      forwarded: 0
+      forwarded: 0,
+      vip_packets_processed: 0,
+      vip_connections_started: 0
     }
   end
 end

@@ -230,9 +230,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.logger.info("Connected to \(target)", source: "Tunnel")
 
                 // Step 6: Create ZTLPTunnelConnection (NWConnection UDP)
+                // IMPORTANT: Send to the relay, not the gateway directly.
+                // The handshake was established via relay, so the gateway's
+                // session is bound to the relay's address. Direct packets
+                // to the gateway would be rejected as "unknown_session".
+                let udpTarget = config.relayAddress ?? target
+                self.logger.info("UDP target: \(udpTarget) (relay=\(config.relayAddress ?? "none"), gw=\(target))", source: "Tunnel")
                 let conn = ZTLPTunnelConnection(
                     cryptoContext: cryptoCtx,
-                    gatewayAddress: target,
+                    gatewayAddress: udpTarget,
                     queue: self.tunnelQueue
                 )
                 conn.delegate = self
@@ -824,10 +830,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // Create new tunnel connection
+        // Create new tunnel connection — send via relay
+        let udpTarget = config?.relayAddress ?? target
         let conn = ZTLPTunnelConnection(
             cryptoContext: cryptoCtx,
-            gatewayAddress: target,
+            gatewayAddress: udpTarget,
             queue: tunnelQueue
         )
         conn.delegate = self

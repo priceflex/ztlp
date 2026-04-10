@@ -2,17 +2,17 @@
 // ZTLP
 //
 // Root tab navigation — 5 tabs: Home, Services, Logs, Bench, Settings.
-// Clean layout matching the macOS app structure.
+// Professional layout with connection-aware badge on Home tab.
 
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var configuration: ZTLPConfiguration
+    @EnvironmentObject var networkMonitor: NetworkMonitor
 
     @State private var selectedTab: Tab = .home
 
-    /// We initialize view models lazily on first appearance,
-    /// since @EnvironmentObject isn't available in init().
+    /// View models initialized lazily (requires @EnvironmentObject).
     @State private var tunnelVM: TunnelViewModel?
     @State private var servicesVM: ServicesViewModel?
     @State private var settingsVM: SettingsViewModel?
@@ -35,15 +35,16 @@ struct ContentView: View {
                             Label("Home", systemImage: "shield.checkered")
                         }
                         .tag(Tab.home)
+                        .badge(tunnelVM.status.isActive ? "●" : nil)
 
                     ServicesView(
                         viewModel: servicesVM,
                         tunnelViewModel: tunnelVM
                     )
-                        .tabItem {
-                            Label("Services", systemImage: "server.rack")
-                        }
-                        .tag(Tab.services)
+                    .tabItem {
+                        Label("Services", systemImage: "server.rack")
+                    }
+                    .tag(Tab.services)
 
                     LogsView()
                         .tabItem {
@@ -62,14 +63,14 @@ struct ContentView: View {
                         enrollmentViewModel: enrollmentVM,
                         configuration: configuration
                     )
-                        .tabItem {
-                            Label("Settings", systemImage: "gear")
-                        }
-                        .tag(Tab.settings)
+                    .tabItem {
+                        Label("Settings", systemImage: "gear")
+                    }
+                    .tag(Tab.settings)
                 }
                 .tint(Color.ztlpBlue)
             } else {
-                ProgressView("Loading…")
+                ProgressView("Loading\u{2026}")
                     .onAppear { initializeViewModels() }
             }
         }

@@ -1,8 +1,9 @@
 // SettingsView.swift
 // ZTLP
 //
-// Unified settings: General, Identity, Enrollment, Advanced (collapsed), About, Danger Zone.
-// Mirrors the macOS SettingsView structure with iOS-appropriate controls.
+// Comprehensive settings with grouped form layout.
+// Sections: General, Identity, Enrollment, Certificate Trust,
+// Connection, About, Danger Zone.
 
 import SwiftUI
 
@@ -10,12 +11,12 @@ struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
-    @StateObject private var certService = CertificateService.shared
 
+    @State private var showEnrollment = false
+    @State private var showResetConfirmation = false
+    @State private var showRemoveVPNConfirmation = false
     @State private var showAdvanced = false
-    @State private var showRegenConfirm = false
-    @State private var showResetConfirm = false
-    @State private var showEnrollmentSheet = false
+    @State private var showCertTrust = false
     @State private var showLicenses = false
 
     var body: some View {
@@ -24,390 +25,287 @@ struct SettingsView: View {
                 generalSection
                 identitySection
                 enrollmentSection
-                certificateTrustSection
+                certificateSection
 
                 if showAdvanced {
                     connectionSection
                     tunnelSection
                 }
 
-                advancedToggle
+                advancedToggleSection
                 aboutSection
                 dangerZoneSection
             }
+            
             .navigationTitle("Settings")
-            .sheet(isPresented: $showEnrollmentSheet) {
-                NavigationStack {
-                    EnrollmentView(viewModel: enrollmentViewModel)
-                        .navigationTitle("Enroll Device")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Done") { showEnrollmentSheet = false }
-                            }
-                        }
-                }
+            .sheet(isPresented: $showEnrollment) {
+                EnrollmentView(
+                    viewModel: enrollmentViewModel,
+                    onComplete: nil
+                )
             }
-            .animation(.easeInOut(duration: 0.25), value: showAdvanced)
-            .animation(.easeInOut(duration: 0.25), value: showLicenses)
+            .sheet(isPresented: $showCertTrust) {
+                CertificateTrustGuide()
+            }
+            .sheet(isPresented: $showLicenses) {
+                licensesSheet
+            }
         }
     }
 
     // MARK: - General
 
     private var generalSection: some View {
-        Section("General") {
+        Section {
             Toggle(isOn: $configuration.autoConnect) {
-                Label("Connect on Launch", systemImage: "bolt.fill")
+                Label("Auto-Connect on Launch", systemImage: "bolt.fill")
             }
+            .tint(Color.ztlpBlue)
 
             Toggle(isOn: $configuration.natAssist) {
-                Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
+                Label("NAT Traversal Assist", systemImage: "point.3.connected.trianglepath.dotted")
             }
+            .tint(Color.ztlpBlue)
 
             Toggle(isOn: $configuration.useSecureEnclave) {
-                Label("Use Secure Enclave", systemImage: "cpu")
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Secure Enclave Keys")
+                        if !viewModel.secureEnclaveAvailable {
+                            Text("Not available on this device")
+                                .font(.caption2)
+                                .foregroundStyle(Color.ztlpOrange)
+                        }
+                    }
+                } icon: {
+                    Image(systemName: "cpu")
+                }
             }
+            .tint(Color.ztlpBlue)
             .disabled(!viewModel.secureEnclaveAvailable)
-
-            if !viewModel.secureEnclaveAvailable {
-                Text("Secure Enclave is not available on this device.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        } header: {
+            Text("General")
+                .ztlpSectionHeader()
         }
     }
 
     // MARK: - Identity
 
     private var identitySection: some View {
-        Section("Identity") {
+        Section {
             if let identity = viewModel.identity {
                 HStack {
-                    Label("Node ID", systemImage: "number")
-                        .foregroundStyle(.secondary)
+                    Label("Node ID", systemImage: "person.badge.key")
                     Spacer()
                     Text(identity.shortNodeId)
                         .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                    CopyButton(text: identity.nodeId)
                 }
 
                 HStack {
-                    Label("Public Key", systemImage: "key")
-                        .foregroundStyle(.secondary)
+                    Label("Public Key", systemImage: "key.fill")
                     Spacer()
                     Text(identity.shortPublicKey)
                         .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                    CopyButton(text: identity.publicKey)
                 }
 
                 HStack {
-                    Label("Provider", systemImage: identity.isHardwareBacked ? "cpu" : "doc.text")
-                        .foregroundStyle(.secondary)
+                    Label("Provider", systemImage: identity.isHardwareBacked ? "cpu" : "doc.fill")
                     Spacer()
-                    HStack(spacing: 4) {
-                        if identity.isHardwareBacked {
-                            Image(systemName: "checkmark.shield.fill")
-                                .font(.caption2)
-                                .foregroundStyle(Color.ztlpGreen)
-                        }
-                        Text(identity.providerType.replacingOccurrences(of: "_", with: " ").capitalized)
-                            .font(.caption)
-                    }
-                }
-
-                Button {
-                    showRegenConfirm = true
-                } label: {
-                    Label("Regenerate Identity", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.callout)
-                }
-                .confirmationDialog(
-                    "Regenerate Identity?",
-                    isPresented: $showRegenConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Regenerate", role: .destructive) {
-                        Task { await viewModel.regenerateIdentity() }
-                    }
-                } message: {
-                    Text("This will create a new Node ID. Your existing enrollment and connections will be lost.")
+                    Text(identity.providerType.replacingOccurrences(of: "_", with: " ").capitalized)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             } else {
-                VStack(spacing: 8) {
-                    Text("No identity generated")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-
-                    Button("Generate Identity") {
-                        Task { await viewModel.regenerateIdentity() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.ztlpBlue)
-                    .controlSize(.small)
+                HStack {
+                    Label("No Identity", systemImage: "person.badge.key")
+                    Spacer()
+                    Text("Not generated")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
             }
+        } header: {
+            Text("Identity")
+                .ztlpSectionHeader()
         }
     }
 
     // MARK: - Enrollment
 
     private var enrollmentSection: some View {
-        Section("Enrollment") {
+        Section {
             HStack {
-                Label("Status", systemImage: "checkmark.seal")
-                    .foregroundStyle(.secondary)
+                Label("Status", systemImage: "ticket")
                 Spacer()
                 if configuration.isEnrolled {
                     Label("Enrolled", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
                         .foregroundStyle(Color.ztlpGreen)
-                        .font(.callout)
                 } else {
-                    Label("Not Enrolled", systemImage: "xmark.circle")
-                        .foregroundStyle(Color.ztlpOrange)
-                        .font(.callout)
+                    Text("Not Enrolled")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
             if !configuration.zoneName.isEmpty {
                 HStack {
-                    Label("Zone", systemImage: "globe")
-                        .foregroundStyle(.secondary)
+                    Label("Zone", systemImage: "globe.americas")
                     Spacer()
                     Text(configuration.zoneName)
-                        .font(.callout.monospaced())
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Button {
-                showEnrollmentSheet = true
-            } label: {
-                Label(
-                    configuration.isEnrolled ? "Re-enroll Device" : "Enroll Device",
-                    systemImage: "ticket"
-                )
-                .font(.callout)
+            if !configuration.isEnrolled {
+                Button {
+                    showEnrollment = true
+                } label: {
+                    Label("Enroll Device", systemImage: "qrcode.viewfinder")
+                }
+            } else {
+                Button {
+                    showEnrollment = true
+                } label: {
+                    Label("Re-enroll Device", systemImage: "arrow.clockwise")
+                }
             }
+        } header: {
+            Text("Enrollment")
+                .ztlpSectionHeader()
         }
     }
 
     // MARK: - Certificate Trust
 
-    private var certificateTrustSection: some View {
-        Section("Certificate Trust") {
-            // CA cert status
-            HStack {
-                Label("ZTLP CA", systemImage: "lock.shield")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if certService.isInstalled {
-                    Label("Trusted", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(Color.ztlpGreen)
-                        .font(.callout)
-                } else if certService.caRootDER != nil {
-                    Label("Downloaded", systemImage: "arrow.down.circle.fill")
-                        .foregroundStyle(Color.ztlpOrange)
-                        .font(.callout)
-                } else {
-                    Label("Not Available", systemImage: "xmark.circle")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                }
-            }
-
-            if certService.caRootDER == nil {
-                // Fetch button
-                Button {
-                    Task {
-                        let ns = configuration.nsServer.isEmpty ? "34.217.62.46:23096" : configuration.nsServer
-                        await certService.fetchCARootCert(nsServer: ns)
-                    }
-                } label: {
-                    HStack {
-                        Label("Fetch CA Certificate", systemImage: "arrow.down.doc")
-                            .font(.callout)
-                        if certService.isFetching {
-                            Spacer()
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                    }
-                }
-                .disabled(certService.isFetching)
-            } else if !certService.isInstalled {
-                // Install button
-                Button {
-                    certService.installCACert()
-                } label: {
-                    Label("Install CA Certificate", systemImage: "square.and.arrow.down")
-                        .font(.callout)
-                }
-
-                // Instructions
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("After downloading:")
-                        .font(.caption.weight(.medium))
-                    Text("1. Go to Settings → General → VPN & Device Management")
-                        .font(.caption2)
-                    Text("2. Tap the 'ZTLP Network Trust' profile")
-                        .font(.caption2)
-                    Text("3. Tap Install and enter your passcode")
-                        .font(.caption2)
-                    Text("4. Go to Settings → General → About → Certificate Trust Settings")
-                        .font(.caption2)
-                    Text("5. Enable full trust for 'ZTLP Root CA'")
-                        .font(.caption2)
-                }
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
-
-                // Mark as installed button
-                Button {
-                    certService.markAsInstalled()
-                } label: {
-                    Label("I've Installed the Certificate", systemImage: "checkmark")
-                        .font(.callout)
-                        .foregroundStyle(Color.ztlpGreen)
-                }
-            } else {
-                // Already installed
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("ZTLP services using .ztlp domains are trusted for HTTPS.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let error = certService.errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-        }
-    }
-
-    // MARK: - Advanced Toggle
-
-    private var advancedToggle: some View {
+    private var certificateSection: some View {
         Section {
             Button {
-                showAdvanced.toggle()
+                showCertTrust = true
             } label: {
-                HStack {
-                    Label("Advanced Settings", systemImage: "slider.horizontal.3")
-                    Spacer()
-                    Image(systemName: showAdvanced ? "chevron.up" : "chevron.down")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Install HTTPS Certificate")
+                        Text("Required for HTTPS access to services")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "checkmark.shield")
                 }
             }
-            .buttonStyle(.plain)
+        } header: {
+            Text("Certificate Trust")
+                .ztlpSectionHeader()
+        } footer: {
+            Text("The tunnel is already end-to-end encrypted. This certificate enables browser HTTPS trust for web vault access.")
         }
     }
 
     // MARK: - Connection (Advanced)
 
     private var connectionSection: some View {
-        Section("Connection") {
+        Section {
             HStack {
-                Label("Relay Server", systemImage: "antenna.radiowaves.left.and.right")
+                Label("Relay Server", systemImage: "point.3.connected.trianglepath.dotted")
                 Spacer()
                 TextField("relay.ztlp.net:4433", text: $configuration.relayAddress)
+                    .font(.caption.monospaced())
                     .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
             }
 
             HStack {
-                Label("NS Server", systemImage: "globe.americas")
+                Label("Gateway", systemImage: "server.rack")
                 Spacer()
-                TextField("52.39.59.34:23096", text: $configuration.nsServer)
+                TextField("host:port", text: $configuration.targetNodeId)
+                    .font(.caption.monospaced())
                     .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
             }
 
             HStack {
-                Label("Service Name", systemImage: "server.rack")
+                Label("NS Server", systemImage: "network")
+                Spacer()
+                TextField("ns.ztlp.net:23096", text: $configuration.nsServer)
+                    .font(.caption.monospaced())
+                    .multilineTextAlignment(.trailing)
+            }
+
+            HStack {
+                Label("Service Name", systemImage: "tag")
                 Spacer()
                 TextField("vault", text: $configuration.serviceName)
+                    .font(.caption.monospaced())
                     .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
             }
 
             HStack {
-                Label("STUN Server", systemImage: "network")
+                Label("STUN Server", systemImage: "antenna.radiowaves.left.and.right")
                 Spacer()
                 TextField("stun.l.google.com:19302", text: $configuration.stunServer)
+                    .font(.caption.monospaced())
                     .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
             }
-
-            HStack {
-                Label("Target Node ID", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                Spacer()
-                TextField("Peer node ID (hex)", text: $configuration.targetNodeId)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
+        } header: {
+            Text("Connection")
+                .ztlpSectionHeader()
         }
     }
 
     // MARK: - Tunnel (Advanced)
 
     private var tunnelSection: some View {
-        Section("Tunnel") {
+        Section {
             HStack {
                 Label("Tunnel Address", systemImage: "network.badge.shield.half.filled")
                 Spacer()
                 TextField("10.0.0.2", text: $configuration.tunnelAddress)
+                    .font(.caption.monospaced())
                     .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.numbersAndPunctuation)
             }
 
-            HStack {
-                Label("DNS Servers", systemImage: "server.rack")
-                Spacer()
-                TextField("1.1.1.1, 8.8.8.8", text: Binding(
-                    get: { configuration.dnsServers.joined(separator: ", ") },
-                    set: { newValue in
-                        configuration.dnsServers = newValue
-                            .split(separator: ",")
-                            .map { $0.trimmingCharacters(in: .whitespaces) }
-                    }
-                ))
-                .multilineTextAlignment(.trailing)
-                .font(.callout.monospaced())
-                .textInputAutocapitalization(.never)
-                .keyboardType(.numbersAndPunctuation)
-            }
-
-            Stepper(value: $configuration.mtu, in: 1200...1500, step: 50) {
-                Label("MTU: \(configuration.mtu)", systemImage: "arrow.left.and.right")
+            Picker(selection: $configuration.mtu) {
+                Text("1280").tag(1280)
+                Text("1400 (recommended)").tag(1400)
+                Text("1500").tag(1500)
+            } label: {
+                Label("MTU", systemImage: "ruler")
             }
 
             Toggle(isOn: $configuration.fullTunnel) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Full Tunnel", systemImage: "shield.fill")
-                    Text("Route all traffic through VPN (default: .ztlp domains only)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Full Tunnel Mode")
+                        Text("Route all traffic through ZTLP")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "arrow.triangle.branch")
                 }
+            }
+            .tint(Color.ztlpBlue)
+        } header: {
+            Text("Tunnel")
+                .ztlpSectionHeader()
+        }
+    }
+
+    // MARK: - Advanced Toggle
+
+    private var advancedToggleSection: some View {
+        Section {
+            Button {
+                withAnimation { showAdvanced.toggle() }
+            } label: {
+                Label(
+                    showAdvanced ? "Hide Advanced Settings" : "Show Advanced Settings",
+                    systemImage: showAdvanced ? "chevron.up" : "chevron.down"
+                )
             }
         }
     }
@@ -415,146 +313,48 @@ struct SettingsView: View {
     // MARK: - About
 
     private var aboutSection: some View {
-        Section("About") {
-            // App info
-            VStack(spacing: 12) {
-                Image(systemName: "shield.checkered")
-                    .font(.system(size: 36))
-                    .foregroundStyle(Color.ztlpBlue)
-
-                Text("ZTLP")
-                    .font(.title2.weight(.bold))
-
-                Text("Zero Trust Layer Protocol")
-                    .font(.callout)
+        Section {
+            HStack {
+                Label("App Version", systemImage: "info.circle")
+                Spacer()
+                Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+            }
 
-                Text("v\(viewModel.libraryVersion)")
+            HStack {
+                Label("Library Version", systemImage: "gearshape.2")
+                Spacer()
+                Text(viewModel.libraryVersion)
                     .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-
-            // Author
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label("Author", systemImage: "person.fill")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Steven Price")
-                        .font(.callout)
-                }
-                HStack {
-                    Label("Organization", systemImage: "building.2")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Tech Rockstar Academy")
-                        .font(.callout)
-                }
+                    .foregroundStyle(.secondary)
             }
 
-            // Links
             HStack {
+                Label("Author", systemImage: "person")
+                Spacer()
+                Text("Steven Price / Tech Rockstars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Link(destination: URL(string: "https://ztlp.org")!) {
                 Label("Website", systemImage: "globe")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Link("ztlp.org", destination: URL(string: "https://ztlp.org")!)
-                    .font(.callout)
             }
 
-            HStack {
-                Label("Source", systemImage: "chevron.left.forwardslash.chevron.right")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Link("GitHub", destination: URL(string: "https://github.com/priceflex/ztlp")!)
-                    .font(.callout)
+            Link(destination: URL(string: "https://github.com/priceflex/ztlp")!) {
+                Label("Source Code", systemImage: "chevron.left.forwardslash.chevron.right")
             }
 
-            HStack {
-                Label("License", systemImage: "doc.text")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("Apache 2.0")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            // Version info
-            infoRow(icon: "app", label: "App Version", value: appVersion)
-            infoRow(icon: "iphone", label: "iOS", value: UIDevice.current.systemVersion)
-
-            // Open Source
             Button {
-                showLicenses.toggle()
+                showLicenses = true
             } label: {
-                HStack {
-                    Label("Open Source Licenses", systemImage: "heart.fill")
-                        .foregroundStyle(Color.ztlpBlue)
-                    Spacer()
-                    Image(systemName: showLicenses ? "chevron.up" : "chevron.down")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                Label("Open Source Licenses", systemImage: "doc.text")
             }
-            .buttonStyle(.plain)
-
-            if showLicenses {
-                openSourceCredits
-            }
+        } header: {
+            Text("About")
+                .ztlpSectionHeader()
         }
-    }
-
-    // MARK: - Open Source Credits
-
-    private var openSourceCredits: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("ZTLP is built with these outstanding open source projects:")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
-
-            // Cryptography
-            licenseSectionHeader("Cryptography")
-            licenseRow("snow", desc: "Noise Protocol Framework", license: "Apache-2.0", url: "https://github.com/mcginty/snow")
-            licenseRow("chacha20poly1305", desc: "AEAD cipher", license: "Apache-2.0/MIT", url: "https://github.com/RustCrypto/AEADs")
-            licenseRow("ed25519-dalek", desc: "Ed25519 signatures", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/ed25519-dalek")
-            licenseRow("curve25519-dalek", desc: "Elliptic curve operations", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/curve25519-dalek")
-            licenseRow("blake2", desc: "BLAKE2 hash function", license: "Apache-2.0/MIT", url: "https://github.com/RustCrypto/hashes")
-            licenseRow("subtle", desc: "Constant-time operations", license: "BSD-3-Clause", url: "https://github.com/dalek-cryptography/subtle")
-
-            // Runtime & Async
-            licenseSectionHeader("Runtime")
-            licenseRow("tokio", desc: "Async runtime for Rust", license: "MIT", url: "https://github.com/tokio-rs/tokio")
-            licenseRow("tokio-rustls", desc: "TLS for async I/O", license: "Apache-2.0/MIT", url: "https://github.com/rustls/tokio-rustls")
-            licenseRow("tracing", desc: "Structured logging", license: "MIT", url: "https://github.com/tokio-rs/tracing")
-
-            // Serialization
-            licenseSectionHeader("Serialization & CLI")
-            licenseRow("serde", desc: "Serialization framework", license: "Apache-2.0/MIT", url: "https://github.com/serde-rs/serde")
-            licenseRow("clap", desc: "Command-line argument parser", license: "Apache-2.0/MIT", url: "https://github.com/clap-rs/clap")
-            licenseRow("toml", desc: "TOML parser", license: "Apache-2.0/MIT", url: "https://github.com/toml-rs/toml")
-            licenseRow("base64", desc: "Base64 encoding", license: "Apache-2.0/MIT", url: "https://github.com/marshallpierce/rust-base64")
-            licenseRow("hex", desc: "Hex encoding", license: "Apache-2.0/MIT", url: "https://github.com/KokaKiwi/rust-hex")
-
-            // Utilities
-            licenseSectionHeader("Utilities")
-            licenseRow("rand", desc: "Random number generation", license: "Apache-2.0/MIT", url: "https://github.com/rust-random/rand")
-            licenseRow("thiserror", desc: "Error derive macros", license: "Apache-2.0/MIT", url: "https://github.com/dtolnay/thiserror")
-            licenseRow("dialoguer", desc: "Terminal prompts", license: "MIT", url: "https://github.com/console-rs/dialoguer")
-            licenseRow("indicatif", desc: "Progress bars", license: "MIT", url: "https://github.com/console-rs/indicatif")
-            licenseRow("colored", desc: "Terminal colors", license: "MPL-2.0", url: "https://github.com/mackwic/colored")
-            licenseRow("qr2term", desc: "QR codes in terminal", license: "MIT", url: "https://github.com/nickel-org/qr2term")
-            licenseRow("dirs", desc: "Platform directories", license: "Apache-2.0/MIT", url: "https://github.com/dirs-dev/dirs-rs")
-            licenseRow("hostname", desc: "System hostname", license: "MIT", url: "https://github.com/svartalf/hostname")
-            licenseRow("libc", desc: "C library bindings", license: "Apache-2.0/MIT", url: "https://github.com/rust-lang/libc")
-
-            // Elixir / OTP
-            licenseSectionHeader("Server (Elixir/OTP)")
-            licenseRow("Elixir", desc: "Dynamic, functional language", license: "Apache-2.0", url: "https://github.com/elixir-lang/elixir")
-            licenseRow("Erlang/OTP", desc: "Concurrent runtime system", license: "Apache-2.0", url: "https://github.com/erlang/otp")
-        }
-        .padding(.vertical, 4)
     }
 
     // MARK: - Danger Zone
@@ -562,74 +362,141 @@ struct SettingsView: View {
     private var dangerZoneSection: some View {
         Section {
             Button(role: .destructive) {
-                Task { await viewModel.removeVPNConfiguration() }
+                showRemoveVPNConfirmation = true
             } label: {
-                Label("Remove VPN Configuration", systemImage: "xmark.shield")
-                    .font(.callout)
+                Label("Remove VPN Configuration", systemImage: "trash")
+            }
+            .confirmationDialog(
+                "Remove VPN Configuration?",
+                isPresented: $showRemoveVPNConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Remove", role: .destructive) {
+                    Task { await viewModel.removeVPNConfiguration() }
+                }
+            } message: {
+                Text("This will remove the ZTLP VPN profile from this device. You can re-add it by connecting again.")
             }
 
             Button(role: .destructive) {
-                showResetConfirm = true
+                showResetConfirmation = true
             } label: {
-                Label("Factory Reset", systemImage: "trash")
-                    .font(.callout)
+                Label("Factory Reset", systemImage: "exclamationmark.triangle")
             }
             .confirmationDialog(
                 "Factory Reset?",
-                isPresented: $showResetConfirm,
+                isPresented: $showResetConfirmation,
                 titleVisibility: .visible
             ) {
                 Button("Reset Everything", role: .destructive) {
-                    Task { await viewModel.factoryReset() }
+                    Task {
+                        await viewModel.factoryReset()
+                        await MainActor.run { configuration.reset() }
+                    }
                 }
             } message: {
-                Text("This will delete your identity, enrollment, VPN configuration, and all settings. This cannot be undone.")
+                Text("This will delete your identity, enrollment, and all settings. This cannot be undone.")
             }
         } header: {
             Text("Danger Zone")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.ztlpRed)
+                .textCase(.uppercase)
+                .tracking(0.5)
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - Licenses Sheet
 
-    private func infoRow(icon: String, label: String, value: String) -> some View {
-        HStack {
-            Label(label, systemImage: icon)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.caption.monospaced())
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private func licenseSectionHeader(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.tertiary)
-            .padding(.top, 4)
-    }
-
-    private func licenseRow(_ name: String, desc: String, license: String, url: String) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Link(name, destination: URL(string: url)!)
-                    .font(.caption.weight(.medium))
-                Text(desc)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+    private var licensesSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Group {
+                        LicenseEntry(
+                            name: "ZTLP Protocol Library",
+                            license: "Proprietary \u{2014} Tech Rockstars LLC",
+                            url: "https://github.com/priceflex/ztlp"
+                        )
+                        LicenseEntry(
+                            name: "snow (Noise Protocol)",
+                            license: "Apache-2.0",
+                            url: "https://github.com/mcginty/snow"
+                        )
+                        LicenseEntry(
+                            name: "x25519-dalek",
+                            license: "BSD-3-Clause",
+                            url: "https://github.com/dalek-cryptography/x25519-dalek"
+                        )
+                        LicenseEntry(
+                            name: "blake2",
+                            license: "MIT OR Apache-2.0",
+                            url: "https://github.com/RustCrypto/hashes"
+                        )
+                        LicenseEntry(
+                            name: "chacha20poly1305",
+                            license: "MIT OR Apache-2.0",
+                            url: "https://github.com/RustCrypto/AEADs"
+                        )
+                    }
+                }
+                .padding()
             }
-            Spacer()
-            Text(license)
-                .font(.caption2.monospaced())
-                .foregroundStyle(.tertiary)
+            .navigationTitle("Open Source Licenses")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { showLicenses = false }
+                }
+            }
         }
     }
+}
 
-    private var appVersion: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        return "\(version) (\(build))"
+// MARK: - Copy Button
+
+private struct CopyButton: View {
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.caption2)
+                .foregroundStyle(copied ? Color.ztlpGreen : Color.ztlpBlue)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - License Entry
+
+private struct LicenseEntry: View {
+    let name: String
+    let license: String
+    let url: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(name)
+                .font(.subheadline.weight(.semibold))
+            Text(license)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let link = URL(string: url) {
+                Link(url, destination: link)
+                    .font(.caption2)
+                    .foregroundStyle(Color.ztlpBlue)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

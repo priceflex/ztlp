@@ -1,405 +1,672 @@
 // HomeView.swift
 // ZTLP
 //
-// Main connect/disconnect screen with status indicator,
-// connection timer, traffic stats, and VIP proxy access.
-//
-// When connected via Direct Connect, shows the VIP proxy URL
-// (http://127.0.0.1:8080) with a tap-to-open button for Safari.
+// Main connection screen with hero status ring, service cards,
+// traffic stats, and quick-access vault button.
 
 import SwiftUI
 
 struct HomeView: View {
     @ObservedObject var viewModel: TunnelViewModel
     @ObservedObject var configuration: ZTLPConfiguration
-    @StateObject private var certService = CertificateService.shared
     @EnvironmentObject var networkMonitor: NetworkMonitor
 
-    /// Animation state for the pulsing status ring.
-    @State private var isPulsing = false
-
-    /// Timer for updating the duration display.
-    @State private var durationTimer = Timer.publish(every: 1, on: .main, in: .common)
-        .autoconnect()
-    @State private var currentDuration: String = "--:--:--"
-
-    /// VIP proxy URL for Safari access.
-    private let vipURL = "http://127.0.0.1:8080"
+    @State private var ringRotation: Double = 0
+    @State private var pulseScale: CGFloat = 1.0
+    @State private var showVaultSheet = false
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                // Background gradient
-                backgroundGradient
-                    .ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 24) {
+                    // Hero connection ring
+                    heroSection
 
-                VStack(spacing: 32) {
-                    Spacer()
-
-                    // Zone name
-                    if !viewModel.zoneName.isEmpty {
-                        Text(viewModel.zoneName)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
+                    // Quick actions
+                    if viewModel.status.isActive {
+                        quickActionsSection
                     }
 
-                    // Status indicator + connect button
-                    statusButton
-
-                    // Status label
-                    Text(viewModel.status.label)
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(viewModel.status.color)
-                        .animation(.easeInOut, value: viewModel.status)
-
-                    // CA Trust card (shown after enrollment, before cert is installed)
-                    if configuration.isEnrolled && !certService.isInstalled {
-                        caTrustCard
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                    // Service status cards
+                    if viewModel.status.isActive {
+                        serviceCardsSection
                     }
-
-                    // Connection duration
-                    if viewModel.status == .connected {
-                        Text(currentDuration)
-                            .font(.system(.title3, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .onReceive(durationTimer) { _ in
-                                currentDuration = viewModel.stats.formattedDuration
-                            }
-                    }
-
-                    // VIP proxy access card (when connected)
-                    if viewModel.status == .connected {
-                        vipAccessCard
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-
-                    Spacer()
 
                     // Traffic stats
-                    if viewModel.status.isActive {
-                        trafficStatsView
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    if viewModel.status.isActive || viewModel.stats.bytesSent > 0 {
+                        trafficStatsSection
                     }
 
-                    // Network indicator
-                    networkIndicator
-
-                    // Error message
-                    if let error = viewModel.lastError {
-                        errorBanner(error)
-                    }
+                    // Network info
+                    networkInfoSection
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.bottom, 32)
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("ZTLP")
-            .navigationBarTitleDisplayMode(.inline)
-            .animation(.spring(response: 0.4), value: viewModel.status)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    connectionBadge
+                }
+            }
         }
     }
 
-    // MARK: - Subviews
+    // MARK: - Hero Section
 
-    /// The main connect/disconnect button with animated status ring.
-    private var statusButton: some View {
-        Button {
-            viewModel.toggleConnection()
-        } label: {
+    private var heroSection: some View {
+        VStack(spacing: 20) {
             ZStack {
-                // Outer pulsing ring (when connected)
-                if viewModel.status == .connected {
-                    Circle()
-                        .stroke(viewModel.status.color.opacity(0.3), lineWidth: 4)
-                        .frame(width: 180, height: 180)
-                        .scaleEffect(isPulsing ? 1.15 : 1.0)
-                        .opacity(isPulsing ? 0.0 : 0.6)
-                        .animation(
-                            .easeInOut(duration: 2.0).repeatForever(autoreverses: false),
-                            value: isPulsing
-                        )
-                }
-
-                // Status ring
+                // Outer glow ring
                 Circle()
-                    .stroke(viewModel.status.color, lineWidth: 6)
+                    .stroke(
+                        viewModel.status.gradient,
+                        lineWidth: 4
+                    )
+                    .frame(width: 180, height: 180)
+                    .scaleEffect(pulseScale)
+                    .opacity(viewModel.status.isActive ? 0.3 : 0)
+
+                // Main ring
+                Circle()
+                    .stroke(
+                        viewModel.status.gradient,
+                        lineWidth: 6
+                    )
                     .frame(width: 160, height: 160)
 
-                // Spinning ring (when transitioning)
+                // Rotating accent (when connecting)
                 if viewModel.status.isTransitioning {
                     Circle()
                         .trim(from: 0, to: 0.3)
-                        .stroke(viewModel.status.color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                        .frame(width: 160, height: 160)
-                        .rotationEffect(.degrees(isPulsing ? 360 : 0))
-                        .animation(
-                            .linear(duration: 1.0).repeatForever(autoreverses: false),
-                            value: isPulsing
+                        .stroke(
+                            Color.ztlpOrange,
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
                         )
+                        .frame(width: 160, height: 160)
+                        .rotationEffect(.degrees(ringRotation))
                 }
 
-                // Center icon
+                // Center content
                 VStack(spacing: 8) {
                     Image(systemName: viewModel.status.systemImage)
-                        .font(.system(size: 48))
+                        .font(.system(size: 40, weight: .medium))
                         .foregroundStyle(viewModel.status.color)
 
-                    Text(viewModel.status.canConnect ? "Connect" : "Disconnect")
-                        .font(.caption.weight(.medium))
+
+                    Text(viewModel.status.label)
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+
+                    if viewModel.status.isActive {
+                        Text(viewModel.stats.formattedDuration)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
-        }
-        .buttonStyle(.plain)
-        .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
-        .accessibilityLabel(viewModel.status.canConnect ? "Connect" : "Disconnect")
-        .accessibilityHint(viewModel.status.label)
-        .onAppear { isPulsing = true }
-    }
-
-    /// CA trust card — prompts user to install the ZTLP CA certificate.
-    private var caTrustCard: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.title2)
-                    .foregroundStyle(Color.ztlpOrange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Install ZTLP Certificate")
-                        .font(.callout.weight(.semibold))
-                    Text("Required for HTTPS access to ZTLP services")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            .onAppear {
+                withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                    ringRotation = 360
                 }
-                Spacer()
-            }
-
-            if certService.caRootDER != nil {
-                // Cert is fetched, ready to install
-                Button {
-                    certService.installCACert()
-                } label: {
-                    HStack {
-                        Image(systemName: "square.and.arrow.down.fill")
-                        Text("Install Certificate")
-                            .font(.callout.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.ztlpBlue, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
-                }
-
-                // After Safari opens, show confirm button
-                if UserDefaults.standard.bool(forKey: "ztlp_ca_install_attempted") {
-                    Button {
-                        certService.markAsInstalled()
-                    } label: {
-                        HStack {
-                            Image(systemName: "checkmark.circle")
-                            Text("Done — I've installed it")
-                                .font(.caption)
-                        }
-                        .foregroundStyle(Color.ztlpGreen)
-                    }
-                    .padding(.top, 4)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("After downloading in Safari:")
-                            .font(.caption2.weight(.medium))
-                        Text("Settings → General → VPN & Device Mgmt → Install")
-                            .font(.caption2)
-                        Text("Settings → General → About → Certificate Trust → Enable")
-                            .font(.caption2)
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                // Need to fetch first
-                Button {
-                    Task {
-                        let ns = configuration.nsServer.isEmpty ? "34.217.62.46:23096" : configuration.nsServer
-                        await certService.fetchCARootCert(nsServer: ns)
-                    }
-                } label: {
-                    HStack {
-                        if certService.isFetching {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "arrow.down.circle.fill")
-                        }
-                        Text(certService.isFetching ? "Fetching..." : "Download Certificate")
-                            .font(.callout.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color.ztlpOrange, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
-                }
-                .disabled(certService.isFetching)
-            }
-
-            if let error = certService.errorMessage {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    /// VIP proxy access card — shows URL and tap-to-open button.
-    private var vipAccessCard: some View {
-        VStack(spacing: 12) {
-            // VIP status
-            if let vipStatus = viewModel.vipStatus {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                    Text(vipStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                    pulseScale = 1.08
                 }
             }
 
-            // Access URL button
+            // Connect / Disconnect button
             Button {
-                if let url = URL(string: vipURL) {
-                    UIApplication.shared.open(url)
+                if viewModel.status.canConnect {
+                    viewModel.connect()
+                } else if viewModel.status.canDisconnect {
+                    viewModel.disconnect()
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "safari")
-                        .font(.title3)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Open in Safari")
-                            .font(.callout.weight(.semibold))
-                        Text(vipURL)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
+                    if viewModel.status.isTransitioning {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(0.8)
                     }
-                    Spacer()
-                    Image(systemName: "arrow.up.right.square")
+                    Text(connectButtonLabel)
+                        .font(.headline)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(connectButtonGradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .foregroundColor(.white)
+            }
+            .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
+            .padding(.horizontal, 40)
+
+            // Error banner
+            if let error = viewModel.lastError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.ztlpOrange)
+                    Text(error)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Color.ztlpBlue.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                .padding(12)
+                .background(Color.ztlpOrange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.horizontal)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open service in Safari at \(vipURL)")
+        }
+        .padding(.top, 12)
+    }
 
-            // Peer address
-            if !viewModel.peerAddress.isEmpty {
-                HStack(spacing: 4) {
-                    Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+    // MARK: - Quick Actions
+
+    private var quickActionsSection: some View {
+        HStack(spacing: 12) {
+            QuickActionButton(
+                icon: "lock.shield",
+                title: "Open Vault",
+                subtitle: "Vaultwarden",
+                color: .ztlpBlue
+            ) {
+                showVaultSheet = true
+            }
+            .sheet(isPresented: $showVaultSheet) {
+                VaultAccessSheet()
+            }
+
+            QuickActionButton(
+                icon: "doc.text.magnifyingglass",
+                title: "View Logs",
+                subtitle: "Live tunnel",
+                color: .ztlpGreen
+            ) {
+                // Navigate to logs tab
+            }
+        }
+    }
+
+    // MARK: - Service Cards
+
+    private var serviceCardsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("ACTIVE SERVICES")
+                .ztlpSectionHeader()
+
+            VStack(spacing: 8) {
+                ServiceStatusCard(
+                    icon: "lock.shield.fill",
+                    name: "Vaultwarden",
+                    endpoint: "vault.ztlp \u{2192} 10.122.0.4",
+                    port: "8200",
+                    isActive: true
+                )
+
+                ServiceStatusCard(
+                    icon: "globe",
+                    name: configuration.serviceName.isEmpty ? "Primary" : configuration.serviceName.capitalized,
+                    endpoint: "\(configuration.serviceName).ztlp \u{2192} 10.122.0.2",
+                    port: "8080 / 8443",
+                    isActive: true
+                )
+
+                ServiceStatusCard(
+                    icon: "network",
+                    name: "HTTP Proxy",
+                    endpoint: "http.ztlp \u{2192} 10.122.0.3",
+                    port: "8080",
+                    isActive: true
+                )
+            }
+        }
+    }
+
+    // MARK: - Traffic Stats
+
+    private var trafficStatsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("TRAFFIC")
+                .ztlpSectionHeader()
+
+            HStack(spacing: 16) {
+                StatCard(
+                    icon: "arrow.up.circle.fill",
+                    label: "Sent",
+                    value: viewModel.stats.formattedBytesSent,
+                    color: .ztlpBlue
+                )
+
+                StatCard(
+                    icon: "arrow.down.circle.fill",
+                    label: "Received",
+                    value: viewModel.stats.formattedBytesReceived,
+                    color: .ztlpGreen
+                )
+            }
+        }
+    }
+
+    // MARK: - Network Info
+
+    private var networkInfoSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("NETWORK")
+                .ztlpSectionHeader()
+
+            HStack(spacing: 12) {
+                Label {
+                    Text(String(describing: networkMonitor.interfaceType))
+                        .font(.subheadline)
+                } icon: {
+                    Image(systemName: networkMonitor.isConnected ? "wifi" : "wifi.slash")
+                        .foregroundStyle(networkMonitor.isConnected ? Color.ztlpGreen : Color.ztlpRed)
+                }
+
+                Spacer()
+
+                if !configuration.zoneName.isEmpty {
+                    Label {
+                        Text(configuration.zoneName)
+                            .font(.caption.monospaced())
+                    } icon: {
+                        Image(systemName: "globe.americas")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .ztlpCard()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var connectionBadge: some View {
+        Circle()
+            .fill(viewModel.status.color)
+            .frame(width: 10, height: 10)
+            .overlay(
+                Circle()
+                    .stroke(Color(.systemBackground), lineWidth: 2)
+            )
+    }
+
+    private var connectButtonLabel: String {
+        switch viewModel.status {
+        case .disconnected:  return "Connect"
+        case .connecting:    return "Connecting\u{2026}"
+        case .connected:     return "Disconnect"
+        case .reconnecting:  return "Reconnecting\u{2026}"
+        case .disconnecting: return "Disconnecting\u{2026}"
+        }
+    }
+
+    private var connectButtonGradient: LinearGradient {
+        if viewModel.status.canConnect {
+            return .ztlpConnected
+        } else if viewModel.status.canDisconnect {
+            return LinearGradient(colors: [Color.ztlpRed, Color.ztlpRed.opacity(0.8)], startPoint: .leading, endPoint: .trailing)
+        } else {
+            return .ztlpDisconnected
+        }
+    }
+}
+
+// MARK: - Quick Action Button
+
+private struct QuickActionButton: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundStyle(color)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text("Peer: \(viewModel.peerAddress)")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .ztlpCard()
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Service Status Card
+
+private struct ServiceStatusCard: View {
+    let icon: String
+    let name: String
+    let endpoint: String
+    let port: String
+    let isActive: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(isActive ? Color.ztlpGreen : .secondary)
+                .frame(width: 32)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.subheadline.weight(.medium))
+                Text(endpoint)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Circle()
+                    .fill(isActive ? Color.ztlpGreen : Color.ztlpRed)
+                    .frame(width: 8, height: 8)
+                Text(":\(port)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .ztlpCard(padding: 12)
+    }
+}
+
+// MARK: - Stat Card
+
+private struct StatCard: View {
+    let icon: String
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(color)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .ztlpCard(padding: 12)
+    }
+}
+
+// MARK: - Vault Access Sheet
+
+private struct VaultAccessSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var showCertInfo = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                // Vault icon
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient.ztlpShield)
+                        .frame(width: 80, height: 80)
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.white)
+                }
+                .padding(.top, 20)
+
+                VStack(spacing: 8) {
+                    Text("Vaultwarden")
+                        .font(.title2.weight(.bold))
+                    Text("Your password vault is accessible through\nthe encrypted ZTLP tunnel.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 12) {
+                    VaultLinkRow(
+                        title: "Web Vault (HTTP)",
+                        url: "http://127.0.0.1:8080",
+                        icon: "globe",
+                        note: "Direct tunnel access"
+                    )
+
+                    VaultLinkRow(
+                        title: "Web Vault (HTTPS)",
+                        url: "https://vault.ztlp:8443",
+                        icon: "lock.fill",
+                        note: "Requires CA trust"
+                    )
+
+                    VaultLinkRow(
+                        title: "Bitwarden Sync",
+                        url: "http://127.0.0.1:8200",
+                        icon: "arrow.triangle.2.circlepath",
+                        note: "Bitwarden app server URL"
+                    )
+                }
+                .padding(.horizontal)
+
+                Button {
+                    showCertInfo = true
+                } label: {
+                    Label("Set up HTTPS Certificate", systemImage: "checkmark.shield")
+                        .font(.subheadline)
+                }
+                .sheet(isPresented: $showCertInfo) {
+                    CertificateTrustGuide()
+                }
+
+                Spacer()
+            }
+            .navigationTitle("Vault Access")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
                 }
             }
         }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
+}
 
-    /// Traffic statistics (upload/download).
-    private var trafficStatsView: some View {
-        HStack(spacing: 40) {
-            // Upload
-            VStack(spacing: 4) {
-                Image(systemName: "arrow.up")
+private struct VaultLinkRow: View {
+    let title: String
+    let url: String
+    let icon: String
+    let note: String
+
+    var body: some View {
+        Button {
+            if let url = URL(string: url) {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(Color.ztlpBlue)
+                    .frame(width: 32)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Text(url)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+
+                Image(systemName: "arrow.up.right.square")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(viewModel.stats.formattedBytesSent)
-                    .font(.system(.body, design: .monospaced))
-                Text("Sent")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Sent \(viewModel.stats.formattedBytesSent)")
+            .ztlpCard(padding: 12)
+        }
+        .buttonStyle(.plain)
+    }
+}
 
-            // Divider
-            Rectangle()
-                .fill(.quaternary)
-                .frame(width: 1, height: 40)
+// MARK: - Certificate Trust Guide
 
-            // Download
-            VStack(spacing: 4) {
-                Image(systemName: "arrow.down")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(viewModel.stats.formattedBytesReceived)
-                    .font(.system(.body, design: .monospaced))
-                Text("Received")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+struct CertificateTrustGuide: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var isInstallingCert = false
+    @State private var certError: String?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Header
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.system(size: 48))
+                            .foregroundStyle(Color.ztlpGreen)
+
+                        Text("HTTPS Certificate Trust")
+                            .font(.title3.weight(.bold))
+
+                        Text("Install the ZTLP CA certificate to access services over HTTPS without browser warnings.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 12)
+
+                    // Steps
+                    VStack(alignment: .leading, spacing: 16) {
+                        StepRow(number: 1, text: "Tap \"Install Certificate\" below to download the CA profile")
+                        StepRow(number: 2, text: "Open Settings \u{2192} General \u{2192} VPN & Device Management")
+                        StepRow(number: 3, text: "Tap the ZTLP CA profile and tap Install")
+                        StepRow(number: 4, text: "Go to Settings \u{2192} General \u{2192} About \u{2192} Certificate Trust Settings")
+                        StepRow(number: 5, text: "Enable full trust for the ZTLP CA certificate")
+                    }
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    // Install button
+                    Button {
+                        installCertificate()
+                    } label: {
+                        HStack {
+                            if isInstallingCert {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            }
+                            Text("Install Certificate")
+                                .font(.headline)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.ztlpBlue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .foregroundColor(.white)
+                    }
+                    .disabled(isInstallingCert)
+
+                    if let error = certError {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(Color.ztlpRed)
+                    }
+
+                    // Note
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Color.ztlpBlue)
+                        Text("The tunnel itself is already encrypted with Noise_XX. HTTPS adds browser-level trust for web vault access. This step is optional.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                    .background(Color.ztlpBlue.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .padding()
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Received \(viewModel.stats.formattedBytesReceived)")
-        }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    /// Network connectivity indicator.
-    private var networkIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(networkMonitor.isConnected ? .green : .red)
-                .frame(width: 8, height: 8)
-            Text(networkMonitor.interfaceType.rawValue)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if networkMonitor.isExpensive {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            .navigationTitle("Certificate Setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
-        .padding(.bottom, 8)
     }
 
-    /// Error banner.
-    private func errorBanner(_ message: String) -> some View {
-        HStack {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+    private func installCertificate() {
+        isInstallingCert = true
+        certError = nil
+
+        // installCACert handles everything: generates .mobileconfig,
+        // starts local HTTP server, and opens Safari
+        CertificateService.shared.installCACert()
+
+        // Give it a moment then reset state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            isInstallingCert = false
         }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
+}
 
-    /// Background gradient that shifts based on connection state.
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                viewModel.status == .connected
-                    ? Color.ztlpBlue.opacity(0.08)
-                    : Color.clear,
-                Color(.systemBackground)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+private struct StepRow: View {
+    let number: Int
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(Color.ztlpBlue, in: Circle())
+
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+        }
     }
+}
+
+// MARK: - Previews
+
+#Preview("Connected") {
+    let config = ZTLPConfiguration()
+    HomeView(
+        viewModel: TunnelViewModel(configuration: config),
+        configuration: config
+    )
+    .environmentObject(NetworkMonitor.shared)
 }
 
 #Preview("Disconnected") {
     let config = ZTLPConfiguration()
-    HomeView(viewModel: TunnelViewModel(configuration: config), configuration: config)
-        .environmentObject(NetworkMonitor.shared)
+    HomeView(
+        viewModel: TunnelViewModel(configuration: config),
+        configuration: config
+    )
+    .environmentObject(NetworkMonitor.shared)
 }

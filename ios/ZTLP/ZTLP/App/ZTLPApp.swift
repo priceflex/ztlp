@@ -31,6 +31,7 @@ struct ZTLPApp: App {
 struct RootView: View {
     @EnvironmentObject var configuration: ZTLPConfiguration
     @State private var isReady = false
+    @State private var showShield = true
 
     var body: some View {
         if isReady {
@@ -40,33 +41,69 @@ struct RootView: View {
                 OnboardingView()
             }
         } else {
-            // Launch screen — shown while ZTLP library initializes
+            // Professional launch screen
             ZStack {
-                Color(.systemBackground)
-                    .ignoresSafeArea()
-                VStack(spacing: 16) {
-                    Image(systemName: "shield.checkered")
-                        .font(.system(size: 64))
-                        .foregroundColor(.accentColor)
-                    Text("ZTLP")
-                        .font(.title.bold())
+                // Background
+                LinearGradient(
+                    colors: [
+                        Color(.systemBackground),
+                        Color.ztlpBlue.opacity(0.03)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+
+                VStack(spacing: 20) {
+                    // Animated shield
+                    ZStack {
+                        Circle()
+                            .fill(Color.ztlpBlue.opacity(0.08))
+                            .frame(width: 120, height: 120)
+                            .scaleEffect(showShield ? 1 : 0.8)
+
+                        Image(systemName: "shield.checkered")
+                            .font(.system(size: 56, weight: .medium))
+                            .foregroundStyle(LinearGradient.ztlpShield)
+                            .scaleEffect(showShield ? 1 : 0.5)
+                            .opacity(showShield ? 1 : 0)
+                    }
+                    .animation(.spring(response: 0.6, dampingFraction: 0.7), value: showShield)
+
+                    VStack(spacing: 6) {
+                        Text("ZTLP")
+                            .font(.title.weight(.bold))
+                            .tracking(2)
+
+                        Text("Zero Trust Lattice Protocol")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .tracking(0.5)
+                    }
+
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle())
-                    Text("Initializing...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .tint(Color.ztlpBlue)
+                        .padding(.top, 8)
                 }
             }
             .task {
-                // Move initialization off the immediate SwiftUI render path
+                // Initialize
                 do {
                     try ZTLPBridge.shared.initialize()
                 } catch {
                     print("[ZTLP] Library initialization failed: \(error)")
                 }
-                // Brief delay so the launch screen is visible (avoids flicker)
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                isReady = true
+                // Brief delay for polish
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                withAnimation(.easeOut(duration: 0.3)) {
+                    isReady = true
+                }
+            }
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.5).delay(0.1)) {
+                    showShield = true
+                }
             }
         }
     }

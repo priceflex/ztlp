@@ -240,6 +240,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let services: [(vip: String, name: String)] = [
                     ("10.122.0.2", svcName),
                     ("10.122.0.3", "http"),
+                    ("10.122.0.4", "vault"),
                 ]
                 try self.startPacketRouter(services: services)
 
@@ -249,11 +250,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let proxy = ZTLPVIPProxy()
                 proxy.addService(name: svcName, port: 8080)
                 proxy.addService(name: svcName, port: 8443)
+                proxy.addService(name: "vault", port: 8200)
                 try proxy.start(cryptoContext: cryptoCtx, sendHandler: { [weak self] data in
                     self?.tunnelConnection?.sendRaw(data)
                 })
                 self.vipProxy = proxy
-                self.logger.info("VIP proxy started on 127.0.0.1:8080/8443", source: "Tunnel")
+                self.logger.info("VIP proxy started on 127.0.0.1:8080/8443/8200", source: "Tunnel")
 
                 // Step 9: Apply tunnel network settings
                 let remoteAddr = config.relayAddress ?? target

@@ -1,24 +1,23 @@
 // LogsView.swift
 // ZTLP
 //
-// Real-time log viewer with level filtering, search, export, and clear.
+// Real-time log viewer with level filtering, search, and export.
+// Shows logs from both the main app and the Network Extension.
 
 import SwiftUI
 
 struct LogsView: View {
     @StateObject private var viewModel = LogsViewModel()
     @State private var autoScroll = true
-    @State private var showClearConfirmation = false
+    @State private var showExportSheet = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Filter bar
+                // Filter capsules
                 filterBar
 
-                Divider()
-
-                // Log list
+                // Log entries
                 if viewModel.filteredEntries.isEmpty {
                     emptyState
                 } else {
@@ -26,48 +25,39 @@ struct LogsView: View {
                 }
             }
             .navigationTitle("Logs")
-            .searchable(text: $viewModel.searchText, prompt: "Filter logs…")
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    // Auto-scroll toggle
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Button {
                         autoScroll.toggle()
                     } label: {
-                        Image(systemName: autoScroll
-                              ? "arrow.down.to.line.compact"
-                              : "arrow.down.to.line")
+                        Image(systemName: autoScroll ? "arrow.down.to.line.compact" : "arrow.down.to.line")
+                            .foregroundStyle(autoScroll ? Color.ztlpBlue : .secondary)
                     }
-                    .tint(autoScroll ? Color.ztlpBlue : .secondary)
                     .accessibilityLabel(autoScroll ? "Auto-scroll on" : "Auto-scroll off")
 
-                    // Share
-                    ShareLink(
-                        item: String(data: viewModel.exportData(), encoding: .utf8) ?? "",
-                        subject: Text("ZTLP Logs"),
-                        message: Text("ZTLP tunnel logs export")
-                    ) {
-                        Image(systemName: "square.and.arrow.up")
-                    }
+                    Menu {
+                        Button {
+                            showExportSheet = true
+                        } label: {
+                            Label("Export Logs", systemImage: "square.and.arrow.up")
+                        }
 
-                    // Clear
-                    Button(role: .destructive) {
-                        showClearConfirmation = true
+                        Button(role: .destructive) {
+                            viewModel.clear()
+                        } label: {
+                            Label("Clear Logs", systemImage: "trash")
+                        }
                     } label: {
-                        Image(systemName: "trash")
+                        Image(systemName: "ellipsis.circle")
                     }
                 }
             }
-            .confirmationDialog(
-                "Clear all logs?",
-                isPresented: $showClearConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("Clear Logs", role: .destructive) {
-                    viewModel.clear()
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This cannot be undone.")
+            .searchable(text: $viewModel.searchText, prompt: "Search logs")
+            .sheet(isPresented: $showExportSheet) {
+                let data = viewModel.exportData()
+                    if let tmpURL = exportToTmpFile(data) {
+                        ShareSheet(items: [tmpURL])
+                    }
             }
         }
     }
@@ -78,41 +68,67 @@ struct LogsView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 FilterCapsule(
-                    title: "All",
+                    label: "All",
                     isSelected: viewModel.filterLevel == nil
                 ) {
                     viewModel.filterLevel = nil
                 }
 
-                ForEach(LogLevel.allCases, id: \.self) { level in
-                    FilterCapsule(
-                        title: level.rawValue.capitalized,
-                        isSelected: viewModel.filterLevel == level,
-                        color: level.color
-                    ) {
-                        viewModel.filterLevel = level
-                    }
+                FilterCapsule(
+                    label: "Debug",
+                    isSelected: viewModel.filterLevel == .debug,
+                    color: .secondary
+                ) {
+                    viewModel.filterLevel = .debug
+                }
+
+                FilterCapsule(
+                    label: "Info",
+                    isSelected: viewModel.filterLevel == .info,
+                    color: Color.ztlpBlue
+                ) {
+                    viewModel.filterLevel = .info
+                }
+
+                FilterCapsule(
+                    label: "Warn",
+                    isSelected: viewModel.filterLevel == .warn,
+                    color: Color.ztlpOrange
+                ) {
+                    viewModel.filterLevel = .warn
+                }
+
+                FilterCapsule(
+                    label: "Error",
+                    isSelected: viewModel.filterLevel == .error,
+                    color: Color.ztlpRed
+                ) {
+                    viewModel.filterLevel = .error
                 }
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+        .background(Color(.systemGroupedBackground))
     }
 
     // MARK: - Log List
 
     private var logList: some View {
         ScrollViewReader { proxy in
-            List(viewModel.filteredEntries) { entry in
-                LogEntryRow(entry: entry)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
-                    .id(entry.id)
+            List {
+                ForEach(Array(viewModel.filteredEntries.enumerated()), id: \.offset) { index, entry in
+                    LogEntryRow(entry: entry)
+                        .id(index)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                }
             }
             .listStyle(.plain)
+            .font(.caption.monospaced())
             .onChange(of: viewModel.filteredEntries.count) { _ in
-                if autoScroll, let last = viewModel.filteredEntries.last {
-                    withAnimation {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                if autoScroll, let lastIndex = viewModel.filteredEntries.indices.last {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(lastIndex, anchor: .bottom)
                     }
                 }
             }
@@ -122,111 +138,119 @@ struct LogsView: View {
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Spacer()
             Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 48))
+                .font(.system(size: 40))
                 .foregroundStyle(.secondary)
             Text("No Logs")
-                .font(.title2.weight(.semibold))
+                .font(.title3.weight(.semibold))
+            Text("Log entries from the app and tunnel\nextension will appear here.")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-            if viewModel.entries.isEmpty {
-                Text("No logs yet. Connect to start logging.")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
-            } else {
-                Text("No logs match the current filter.")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
-            }
+                .multilineTextAlignment(.center)
             Spacer()
         }
-        .frame(maxWidth: .infinity)
     }
 }
 
-// MARK: - LogEntryRow
-
-private struct LogEntryRow: View {
-    let entry: LogEntry
-
-    private static let timeFormatter: DateFormatter = {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss.SSS"
-        return fmt
-    }()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                // Timestamp
-                Text(Self.timeFormatter.string(from: entry.timestamp))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-
-                // Level badge
-                Text(entry.level.rawValue)
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(entry.level.color.opacity(0.2))
-                    .foregroundStyle(entry.level.color)
-                    .clipShape(Capsule())
-
-                // Source tag
-                Text(entry.source)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-            }
-
-            // Message
-            Text(entry.message)
-                .font(.callout)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-        }
-    }
-}
-
-// MARK: - FilterCapsule
+// MARK: - Filter Capsule
 
 private struct FilterCapsule: View {
-    let title: String
+    let label: String
     let isSelected: Bool
-    var color: Color = .ztlpBlue
+    var color: Color = Color.ztlpBlue
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
+            Text(label)
                 .font(.caption.weight(.medium))
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 6)
                 .background(
-                    isSelected ? color.opacity(0.2) : Color(.systemGray5)
+                    isSelected ? color.opacity(0.15) : Color(.tertiarySystemGroupedBackground),
+                    in: Capsule()
                 )
                 .foregroundStyle(isSelected ? color : .secondary)
-                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(isSelected ? color.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
         }
         .buttonStyle(.plain)
     }
 }
 
-// MARK: - LogLevel Color Extension
+// MARK: - Log Entry Row
 
-extension LogLevel {
-    /// Color associated with each log level.
-    var color: Color {
-        switch self {
-        case .debug: return .gray
-        case .info:  return .ztlpBlue
-        case .warn:  return .ztlpOrange
-        case .error: return .ztlpRed
+private struct LogEntryRow: View {
+    let entry: LogEntry
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // Level indicator
+            Circle()
+                .fill(levelColor)
+                .frame(width: 6, height: 6)
+                .padding(.top, 5)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(entry.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+
+                    if !entry.source.isEmpty {
+                        Text("[\(entry.source)]")
+                            .font(.caption2)
+                            .foregroundStyle(Color.ztlpBlue.opacity(0.6))
+                    }
+                }
+
+                Text(entry.message)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(entry.level == .error ? Color.ztlpRed : .primary)
+            }
+        }
+    }
+
+    private var levelColor: Color {
+        switch entry.level {
+        case .debug: return .secondary
+        case .info:  return Color.ztlpBlue
+        case .warn:  return Color.ztlpOrange
+        case .error: return Color.ztlpRed
         }
     }
 }
+
+// MARK: - Export Helper
+
+private func exportToTmpFile(_ data: Data) -> URL? {
+    let tmpDir = FileManager.default.temporaryDirectory
+    let url = tmpDir.appendingPathComponent("ztlp-logs-\(Int(Date().timeIntervalSince1970)).txt")
+    do {
+        try data.write(to: url)
+        return url
+    } catch {
+        return nil
+    }
+}
+
+// MARK: - Share Sheet
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - Preview
 
 #Preview {
     LogsView()

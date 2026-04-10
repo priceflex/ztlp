@@ -93,21 +93,35 @@ struct ServicesView: View {
     private var emptyState: some View {
         VStack(spacing: 20) {
             Spacer()
-            Image(systemName: "server.rack")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("No Services")
-                .font(.title2.weight(.semibold))
-            Text("Services in your ZTLP zone will appear here. Connect to the tunnel and pull to refresh.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-            Button("Refresh") {
+
+            ZStack {
+                Circle()
+                    .fill(Color.ztlpBlue.opacity(0.08))
+                    .frame(width: 100, height: 100)
+                Image(systemName: "server.rack")
+                    .font(.system(size: 40))
+                    .foregroundStyle(Color.ztlpBlue.opacity(0.6))
+            }
+
+            VStack(spacing: 8) {
+                Text("No Services")
+                    .font(.title3.weight(.semibold))
+                Text("Services in your ZTLP zone will appear here.\nConnect to the tunnel and pull to refresh.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
                 Task { await viewModel.refresh() }
+            } label: {
+                Text("Refresh")
+                    .font(.subheadline.weight(.medium))
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.ztlpBlue)
+
             Spacer()
         }
     }
@@ -115,13 +129,12 @@ struct ServicesView: View {
 
 // MARK: - Service Row
 
-/// A single service row in the list.
 private struct ServiceRow: View {
     let service: ZTLPService
 
     var body: some View {
         HStack(spacing: 12) {
-            // Reachability dot
+            // Reachability indicator
             Circle()
                 .fill(service.isReachable ? Color.ztlpGreen : Color.ztlpRed)
                 .frame(width: 10, height: 10)
@@ -154,7 +167,7 @@ private struct ServiceRow: View {
 
             Spacer()
 
-            // Host node badge
+            // Host info
             VStack(alignment: .trailing, spacing: 2) {
                 Image(systemName: iconForProtocol(service.protocolType))
                     .font(.caption)
@@ -172,7 +185,7 @@ private struct ServiceRow: View {
         .accessibilityLabel("\(service.name), \(service.endpoint), \(service.isReachable ? "reachable" : "unreachable")")
     }
 
-    /// Map protocol type to an SF Symbol.
+    /// Map protocol type to SF Symbol.
     private func iconForProtocol(_ proto: String) -> String {
         switch proto.lowercased() {
         case "https", "tls":  return "lock.fill"
@@ -187,7 +200,6 @@ private struct ServiceRow: View {
 
 // MARK: - Tags View
 
-/// Horizontal tag row for service categorization.
 private struct TagsView: View {
     let tags: [String]
 

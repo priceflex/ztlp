@@ -5,21 +5,34 @@
 // enrollment request → identity provisioning.
 //
 // Enrollment URI format: ztlp://enroll/<base64url-encoded-token>
-// Query-param format: ztlp://enroll/?zone=foo&ns=1.2.3.4:23096&token=abcd&expires=...
+// Query-param format: ztlp://enroll/?zone=foo&ns=1.2.3.4:23096&token=***
 
 import Foundation
 import UIKit
 import Combine
 import AVFoundation
 
-/// State of the enrollment flow.
+/// Simplified state for the enrollment flow (used by EnrollmentView).
 enum EnrollmentState: Equatable {
     case idle
-    case scanning
-    case tokenParsed(EnrollmentTokenInfo)
+    case tokenParsed
     case enrolling
-    case success(zoneName: String)
-    case error(String)
+    case success
+    case error
+
+    // Legacy compat — scanning maps to idle, success/tokenParsed carry data via VM properties
+    static func == (lhs: EnrollmentState, rhs: EnrollmentState) -> Bool {
+        switch (lhs, rhs) {
+        case (.idle, .idle),
+             (.tokenParsed, .tokenParsed),
+             (.enrolling, .enrolling),
+             (.success, .success),
+             (.error, .error):
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// Parsed enrollment token information for display.
@@ -55,7 +68,20 @@ final class EnrollmentViewModel: ObservableObject {
     @Published private(set) var state: EnrollmentState = .idle
 
     /// Whether the camera is authorized for QR scanning.
-    @Published private(set) var cameraAuthorized: Bool = false
+    @Published private(set) var hasCameraPermission: Bool = false
+
+    /// Error message (set when state == .error).
+    @Published private(set) var errorMessage: String?
+
+    /// Parsed token fields for display in the review card.
+    @Published private(set) var parsedZone: String?
+    @Published private(set) var parsedRelay: String?
+    @Published private(set) var parsedGateway: String?
+    @Published private(set) var parsedNS: String?
+
+    // MARK: - Internal
+
+    private var currentToken: EnrollmentTokenInfo?
 
     // MARK: - Dependencies
 
@@ -72,68 +98,63 @@ final class EnrollmentViewModel: ObservableObject {
 
     // MARK: - Camera Permission
 
-    /// Check and request camera permission for QR scanning.
-    func checkCameraPermission() {
+    /// Request camera permission for QR scanning.
+    func requestCameraPermission() {
+        checkCameraPermission()
+    }
+
+    private func checkCameraPermission() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            cameraAuthorized = true
+            hasCameraPermission = true
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 Task { @MainActor in
-                    self?.cameraAuthorized = granted
+                    self?.hasCameraPermission = granted
                 }
             }
         case .denied, .restricted:
-            cameraAuthorized = false
+            hasCameraPermission = false
         @unknown default:
-            cameraAuthorized = false
+            hasCameraPermission = false
         }
     }
 
-    // MARK: - Scanning
+    // MARK: - Token Parsing
 
-    /// Start the QR scanning mode.
-    func startScanning() {
-        state = .scanning
-    }
-
-    /// Cancel scanning and return to idle.
-    func cancelScanning() {
-        state = .idle
-    }
-
-    /// Handle a scanned QR code string.
-    ///
-    /// Parses the enrollment URI and transitions to the token-parsed state.
-    func handleScannedCode(_ code: String) {
+    /// Parse a scanned QR code or manually entered URI.
+    func parseToken(from code: String) {
         guard let tokenInfo = parseEnrollmentURI(code) else {
-            state = .error("Invalid enrollment code. Expected ztlp://enroll/... URI.")
+            errorMessage = "Invalid enrollment code. Expected ztlp://enroll/... URI."
+            state = .error
             return
         }
 
         if tokenInfo.isExpired {
             logger.warn("Enrollment token expired", source: "Enrollment")
-            state = .error("This enrollment token has expired.")
+            errorMessage = "This enrollment token has expired."
+            state = .error
             return
         }
 
-        logger.info("Parsed enrollment token for zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress)", source: "Enrollment")
-        state = .tokenParsed(tokenInfo)
-    }
+        currentToken = tokenInfo
+        parsedZone = tokenInfo.zone
+        parsedNS = tokenInfo.nsAddress
+        parsedRelay = tokenInfo.relayAddresses.first
+        parsedGateway = tokenInfo.gatewayAddress
 
-    /// Handle manual entry of an enrollment URI.
-    func handleManualEntry(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        handleScannedCode(trimmed)
+        logger.info("Parsed enrollment token for zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress)", source: "Enrollment")
+        state = .tokenParsed
     }
 
     // MARK: - Enrollment
 
     /// Execute the enrollment with the parsed token.
     func enroll() {
-        guard case .tokenParsed(let tokenInfo) = state else { return }
+        guard let tokenInfo = currentToken else { return }
 
         state = .enrolling
+        errorMessage = nil
         logger.info("Starting enrollment for zone: \(tokenInfo.zone)", source: "Enrollment")
 
         Task {
@@ -161,7 +182,8 @@ final class EnrollmentViewModel: ObservableObject {
                 }
 
                 guard let nodeId = identity.nodeId else {
-                    state = .error("Failed to get node ID from identity")
+                    errorMessage = "Failed to get node ID from identity"
+                    state = .error
                     logger.error("Identity has no node ID", source: "Enrollment")
                     return
                 }
@@ -177,8 +199,8 @@ final class EnrollmentViewModel: ObservableObject {
                 // Step 4: Update configuration with enrollment info
                 configuration.zoneName = tokenInfo.zone
                 configuration.nsServer = tokenInfo.nsAddress
-                configuration.targetNodeId = tokenInfo.nsAddress  // backward compat
-                configuration.serviceName = "vault"  // default service
+                configuration.targetNodeId = tokenInfo.gatewayAddress ?? tokenInfo.nsAddress
+                configuration.serviceName = "vault"
 
                 if let relay = tokenInfo.relayAddresses.first {
                     configuration.relayAddress = relay
@@ -188,14 +210,12 @@ final class EnrollmentViewModel: ObservableObject {
                 configuration.isEnrolled = true
                 configuration.hasCompletedOnboarding = true
 
-                logger.info("Enrollment config saved — Zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress), Relay: \(tokenInfo.relayAddresses.first ?? "none"), Service: vault", source: "Enrollment")
+                logger.info(
+                    "Enrollment config saved — Zone: \(tokenInfo.zone), NS: \(tokenInfo.nsAddress), Relay: \(tokenInfo.relayAddresses.first ?? "none"), Service: vault",
+                    source: "Enrollment"
+                )
 
                 // Step 5: NS registration stub
-                // In a full implementation, this would:
-                //   1. Connect to the NS at tokenInfo.nsAddress
-                //   2. Present the enrollment token + our public key
-                //   3. NS validates the token and registers our node
-                //   4. NS returns our zone assignment + peer addresses
                 logger.warn("Enrollment stub: NS registration not yet implemented. Config saved locally only.", source: "Enrollment")
 
                 // Step 6: Fetch and store the ZTLP CA root certificate
@@ -213,14 +233,14 @@ final class EnrollmentViewModel: ObservableObject {
 
                 // Success!
                 logger.info("Enrollment complete for zone: \(tokenInfo.zone)", source: "Enrollment")
-                state = .success(zoneName: tokenInfo.zone)
+                state = .success
 
-                // Haptic feedback
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
 
             } catch {
                 logger.error("Enrollment failed: \(error.localizedDescription)", source: "Enrollment")
-                state = .error("Enrollment failed: \(error.localizedDescription)")
+                errorMessage = error.localizedDescription
+                state = .error
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
             }
         }
@@ -229,15 +249,17 @@ final class EnrollmentViewModel: ObservableObject {
     /// Reset state to allow re-scanning.
     func reset() {
         state = .idle
+        errorMessage = nil
+        currentToken = nil
+        parsedZone = nil
+        parsedRelay = nil
+        parsedGateway = nil
+        parsedNS = nil
     }
 
-    // MARK: - Token Parsing
+    // MARK: - Token Parsing (Private)
 
     /// Parse a ztlp://enroll/ URI into an EnrollmentTokenInfo.
-    ///
-    /// Supports two formats:
-    ///   1. Binary: ztlp://enroll/<base64url>
-    ///   2. Query-param: ztlp://enroll/?zone=foo&ns=1.2.3.4:23096&relay=...
     private func parseEnrollmentURI(_ uri: String) -> EnrollmentTokenInfo? {
         guard uri.hasPrefix("ztlp://enroll/") else { return nil }
 
@@ -284,7 +306,7 @@ final class EnrollmentViewModel: ObservableObject {
             zone: zone,
             nsAddress: ns,
             relayAddresses: relays,
-            gatewayAddress: params["gateway"],
+            gatewayAddress: params["gw"] ?? params["gateway"],
             expiresAt: expires,
             maxUses: Int(params["max_uses"] ?? "0") ?? 0,
             rawURI: rawURI
@@ -293,12 +315,10 @@ final class EnrollmentViewModel: ObservableObject {
 
     /// Parse binary (base64url) enrollment token.
     private func parseBinaryEnrollment(_ b64: String, rawURI: String) -> EnrollmentTokenInfo? {
-        // Decode base64url
         var base64 = b64
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
 
-        // Add padding if needed
         let padLength = (4 - base64.count % 4) % 4
         base64 += String(repeating: "=", count: padLength)
 
@@ -306,27 +326,20 @@ final class EnrollmentViewModel: ObservableObject {
             return nil
         }
 
-        // Parse the binary wire format (see enrollment.rs for the spec)
         var pos = 0
 
-        // Version (1 byte)
         guard data.count > pos else { return nil }
         let version = data[pos]
         pos += 1
         guard version == 0x01 else { return nil }
 
-        // Flags (1 byte)
         guard data.count > pos else { return nil }
         let flags = data[pos]
         pos += 1
 
-        // Zone (length-prefixed string)
         guard let zone = readLenPrefixedString(data, &pos) else { return nil }
-
-        // NS address (length-prefixed string)
         guard let nsAddr = readLenPrefixedString(data, &pos) else { return nil }
 
-        // Relay addresses
         guard data.count > pos else { return nil }
         let relayCount = Int(data[pos])
         pos += 1
@@ -337,18 +350,15 @@ final class EnrollmentViewModel: ObservableObject {
             relays.append(relay)
         }
 
-        // Gateway (optional)
         var gateway: String?
         if flags & 0x01 != 0 {
             gateway = readLenPrefixedString(data, &pos)
         }
 
-        // Max uses (2 bytes, big-endian)
         guard data.count >= pos + 2 else { return nil }
         let maxUses = Int(UInt16(data[pos]) << 8 | UInt16(data[pos + 1]))
         pos += 2
 
-        // Expires at (8 bytes, big-endian)
         guard data.count >= pos + 8 else { return nil }
         var expiresRaw: UInt64 = 0
         for i in 0..<8 {

@@ -1,8 +1,8 @@
 // EnrollmentView.swift
 // ZTLP
 //
-// QR code scanner for enrollment. Scans ztlp://enroll/ URIs,
-// displays parsed token info, and executes the enrollment flow.
+// QR code enrollment scanner with manual entry fallback.
+// Streamlined flow: scan/paste → review → enroll → done.
 
 import SwiftUI
 import AVFoundation
@@ -11,450 +11,500 @@ struct EnrollmentView: View {
     @ObservedObject var viewModel: EnrollmentViewModel
     @Environment(\.dismiss) private var dismiss
 
-    /// For manual entry when camera isn't available.
-    @State private var manualEntryText = ""
+    /// Callback when enrollment completes successfully.
+    var onComplete: (() -> Void)?
+
     @State private var showManualEntry = false
+    @State private var manualURI = ""
 
     var body: some View {
         NavigationStack {
-            Group {
+            ZStack {
+                Color(.systemGroupedBackground).ignoresSafeArea()
+
                 switch viewModel.state {
                 case .idle:
-                    idleView
-                case .scanning:
                     scannerView
-                case .tokenParsed(let tokenInfo):
-                    tokenReviewView(tokenInfo)
+                case .tokenParsed:
+                    tokenReviewView
                 case .enrolling:
                     enrollingView
-                case .success(let zoneName):
-                    successView(zoneName)
-                case .error(let message):
-                    errorView(message)
+                case .success:
+                    successView
+                case .error:
+                    errorView
                 }
             }
             .navigationTitle("Enroll Device")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if viewModel.state != .enrolling {
+                        Button("Cancel") { dismiss() }
                     }
                 }
             }
         }
     }
 
-    // MARK: - State Views
+    // MARK: - Scanner View
 
-    /// Idle state — prompt to scan.
-    private var idleView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            Image(systemName: "qrcode.viewfinder")
-                .font(.system(size: 80))
-                .foregroundStyle(Color.ztlpBlue)
-                .accessibilityHidden(true)
-
-            Text("Scan Enrollment QR Code")
-                .font(.title2.weight(.semibold))
-
-            Text("Your administrator will provide a QR code to enroll this device in your ZTLP zone.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button {
-                    viewModel.startScanning()
-                } label: {
-                    Label("Scan QR Code", systemImage: "camera")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.ztlpBlue)
-                .controlSize(.large)
-                .disabled(!viewModel.cameraAuthorized)
-
-                Button {
-                    showManualEntry = true
-                } label: {
-                    Text("Enter code manually")
-                        .font(.callout)
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 32)
-        }
-        .sheet(isPresented: $showManualEntry) {
-            manualEntrySheet
-        }
-    }
-
-    /// QR scanner using AVFoundation.
     private var scannerView: some View {
-        ZStack {
-            QRScannerView { code in
-                viewModel.handleScannedCode(code)
-            }
-            .ignoresSafeArea()
+        VStack(spacing: 24) {
+            // Camera scanner
+            ZStack {
+                if viewModel.hasCameraPermission {
+                    QRScannerView(onCodeScanned: { code in
+                        viewModel.parseToken(from: code)
+                    })
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-            // Overlay with viewfinder
-            VStack {
-                Spacer()
+                    // Scanner overlay
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Color.ztlpBlue, lineWidth: 2)
 
-                // Viewfinder frame
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(.white.opacity(0.8), lineWidth: 3)
-                    .frame(width: 250, height: 250)
-                    .background(.clear)
+                    // Corner markers
+                    ScannerCornersOverlay()
+                } else {
+                    VStack(spacing: 16) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text("Camera access required")
+                            .font(.headline)
+                        Text("Allow camera access to scan enrollment QR codes.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
 
-                Spacer()
-
-                // Instructions
-                Text("Point camera at enrollment QR code")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.white)
-                    .padding()
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 48)
-            }
-
-            // Cancel button overlay
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        viewModel.cancelScanning()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title)
-                            .foregroundStyle(.white.opacity(0.8))
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.ztlpBlue)
                     }
-                    .padding()
+                    .padding(32)
+                    .frame(maxWidth: .infinity, maxHeight: 300)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 }
-                Spacer()
+            }
+            .frame(height: 300)
+            .padding(.horizontal)
+
+            // Instructions
+            VStack(spacing: 8) {
+                Text("Scan QR Code")
+                    .font(.headline)
+                Text("Point your camera at a ZTLP enrollment QR code")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Manual entry
+            Button {
+                showManualEntry = true
+            } label: {
+                Label("Enter URI Manually", systemImage: "text.cursor")
+                    .font(.subheadline)
+            }
+            .sheet(isPresented: $showManualEntry) {
+                manualEntrySheet
+            }
+
+            Spacer()
+        }
+        .padding(.top, 16)
+        .onAppear {
+            viewModel.requestCameraPermission()
+        }
+    }
+
+    // MARK: - Token Review
+
+    private var tokenReviewView: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Header
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(Color.ztlpGreen)
+                    .padding(.top, 20)
+
+                Text("Enrollment Token Found")
+                    .font(.title3.weight(.bold))
+
+                // Token details card
+                VStack(alignment: .leading, spacing: 16) {
+                    if let zone = viewModel.parsedZone {
+                        TokenDetailRow(label: "Zone", value: zone, icon: "globe.americas")
+                    }
+                    if let relay = viewModel.parsedRelay {
+                        TokenDetailRow(label: "Relay", value: relay, icon: "point.3.connected.trianglepath.dotted")
+                    }
+                    if let gateway = viewModel.parsedGateway {
+                        TokenDetailRow(label: "Gateway", value: gateway, icon: "server.rack")
+                    }
+                    if let ns = viewModel.parsedNS {
+                        TokenDetailRow(label: "Name Server", value: ns, icon: "network")
+                    }
+                }
+                .ztlpCard()
+                .padding(.horizontal)
+
+                // Security note
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "lock.fill")
+                        .foregroundStyle(Color.ztlpBlue)
+                    Text("A Noise_XX identity will be generated and enrolled in this zone. Keys are stored in the Secure Enclave when available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 24)
+
+                // Enroll button
+                Button {
+                    viewModel.enroll()
+                } label: {
+                    Text("Enroll This Device")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(
+                            LinearGradient.ztlpConnected,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 24)
+
+                Button("Scan Again") {
+                    viewModel.reset()
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             }
         }
     }
 
-    /// Token review before enrollment.
-    private func tokenReviewView(_ tokenInfo: EnrollmentTokenInfo) -> some View {
+    // MARK: - Enrolling
+
+    private var enrollingView: some View {
         VStack(spacing: 24) {
             Spacer()
 
-            Image(systemName: "checkmark.seal")
-                .font(.system(size: 60))
-                .foregroundStyle(Color.ztlpBlue)
+            ProgressView()
+                .scaleEffect(1.5)
 
-            Text("Enrollment Token Found")
-                .font(.title2.weight(.semibold))
-
-            // Token details
-            VStack(alignment: .leading, spacing: 12) {
-                tokenRow(label: "Zone", value: tokenInfo.zone, systemImage: "globe")
-                tokenRow(label: "Name Service", value: tokenInfo.nsAddress, systemImage: "server.rack")
-
-                if !tokenInfo.relayAddresses.isEmpty {
-                    tokenRow(
-                        label: "Relays",
-                        value: tokenInfo.relayAddresses.joined(separator: ", "),
-                        systemImage: "antenna.radiowaves.left.and.right"
-                    )
-                }
-
-                if let gateway = tokenInfo.gatewayAddress {
-                    tokenRow(label: "Gateway", value: gateway, systemImage: "door.left.hand.open")
-                }
-
-                tokenRow(
-                    label: "Expires",
-                    value: tokenInfo.expiryDescription,
-                    systemImage: "clock"
-                )
+            VStack(spacing: 8) {
+                Text("Enrolling\u{2026}")
+                    .font(.title3.weight(.semibold))
+                Text("Generating identity and registering with the zone.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
-            .padding()
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Success
+
+    private var successView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            ZStack {
+                Circle()
+                    .fill(Color.ztlpGreen.opacity(0.1))
+                    .frame(width: 120, height: 120)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(Color.ztlpGreen)
+            }
+
+            VStack(spacing: 8) {
+                Text("Enrolled!")
+                    .font(.title2.weight(.bold))
+                Text("Your device is now enrolled in the ZTLP zone.\nYou can connect to the tunnel from the Home screen.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
+                onComplete?()
+                dismiss()
+            } label: {
+                Text("Get Started")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        LinearGradient.ztlpConnected,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .foregroundColor(.white)
+            }
             .padding(.horizontal, 24)
 
             Spacer()
+        }
+    }
+
+    // MARK: - Error
+
+    private var errorView: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(Color.ztlpOrange)
+
+            VStack(spacing: 8) {
+                Text("Enrollment Failed")
+                    .font(.title3.weight(.bold))
+                if let error = viewModel.errorMessage {
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+            }
 
             VStack(spacing: 12) {
                 Button {
                     viewModel.enroll()
                 } label: {
-                    Label("Enroll Device", systemImage: "checkmark.circle")
+                    Text("Retry")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.ztlpBlue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .foregroundColor(.white)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.ztlpBlue)
-                .controlSize(.large)
 
-                Button {
+                Button("Start Over") {
                     viewModel.reset()
-                } label: {
-                    Text("Cancel")
                 }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 32)
-        }
-    }
-
-    /// Enrolling progress.
-    private var enrollingView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            ProgressView()
-                .scaleEffect(1.5)
-            Text("Enrolling…")
-                .font(.title3)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("Generating identity and registering with the zone.")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
-            Spacer()
-        }
-    }
-
-    /// Enrollment success.
-    private func successView(_ zoneName: String) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 80))
-                .foregroundStyle(Color.ztlpGreen)
-
-            Text("Enrolled!")
-                .font(.title.weight(.bold))
-
-            Text("Your device is now enrolled in zone **\(zoneName)**.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            Spacer()
-
-            Button {
-                dismiss()
-            } label: {
-                Text("Done")
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.ztlpBlue)
-            .controlSize(.large)
-            .padding(.horizontal, 32)
-            .padding(.bottom, 32)
+            .padding(.horizontal, 24)
+
+            Spacer()
         }
     }
 
-    /// Enrollment error.
-    private func errorView(_ message: String) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
+    // MARK: - Manual Entry Sheet
 
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 60))
-                .foregroundStyle(Color.ztlpOrange)
-
-            Text("Enrollment Failed")
-                .font(.title2.weight(.semibold))
-
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            Spacer()
-
-            VStack(spacing: 12) {
-                Button {
-                    viewModel.startScanning()
-                } label: {
-                    Label("Try Again", systemImage: "arrow.clockwise")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.ztlpBlue)
-                .controlSize(.large)
-
-                Button {
-                    viewModel.reset()
-                } label: {
-                    Text("Cancel")
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 32)
-            .padding(.bottom, 32)
-        }
-    }
-
-    /// Manual entry sheet.
     private var manualEntrySheet: some View {
         NavigationStack {
-            VStack(spacing: 16) {
+            VStack(spacing: 20) {
                 Text("Paste your enrollment URI below:")
-                    .font(.callout)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                TextField("ztlp://enroll/...", text: $manualEntryText, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.callout.monospaced())
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .lineLimit(3...6)
-                    .padding(.horizontal)
+                TextEditor(text: $manualURI)
+                    .font(.caption.monospaced())
+                    .frame(height: 120)
+                    .padding(8)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.ztlpBlue.opacity(0.3), lineWidth: 1)
+                    )
+
+                Text("Format: ztlp://enroll?zone=\u{2026}&relay=\u{2026}&gw=\u{2026}")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
 
                 Button {
+                    viewModel.parseToken(from: manualURI.trimmingCharacters(in: .whitespacesAndNewlines))
                     showManualEntry = false
-                    viewModel.handleManualEntry(manualEntryText)
                 } label: {
-                    Text("Submit")
+                    Text("Parse Token")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.ztlpBlue, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .foregroundColor(.white)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.ztlpBlue)
-                .disabled(manualEntryText.isEmpty)
-                .padding(.horizontal)
+                .disabled(manualURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 Spacer()
             }
-            .padding(.top)
+            .padding()
             .navigationTitle("Manual Entry")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Cancel") { showManualEntry = false }
                 }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        if let clipboard = UIPasteboard.general.string {
+                            manualURI = clipboard
+                        }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
             }
-        }
-        .presentationDetents([.medium])
-    }
-
-    // MARK: - Components
-
-    /// A row showing a token detail field.
-    private func tokenRow(label: String, value: String, systemImage: String) -> some View {
-        HStack {
-            Label(label, systemImage: systemImage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .leading)
-            Text(value)
-                .font(.callout.monospaced())
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
     }
 }
 
-// MARK: - QR Scanner (AVFoundation)
+// MARK: - Token Detail Row
 
-/// UIViewRepresentable wrapping AVCaptureSession for QR code scanning.
-struct QRScannerView: UIViewRepresentable {
+private struct TokenDetailRow: View {
+    let label: String
+    let value: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.body)
+                .foregroundStyle(Color.ztlpBlue)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.subheadline.monospaced())
+            }
+        }
+    }
+}
+
+// MARK: - Scanner Corners Overlay
+
+private struct ScannerCornersOverlay: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let size = min(geometry.size.width, geometry.size.height) * 0.6
+            let offsetX = (geometry.size.width - size) / 2
+            let offsetY = (geometry.size.height - size) / 2
+            let cornerLength: CGFloat = 30
+            let lineWidth: CGFloat = 3
+
+            // Top-left
+            Path { path in
+                path.move(to: CGPoint(x: offsetX, y: offsetY + cornerLength))
+                path.addLine(to: CGPoint(x: offsetX, y: offsetY))
+                path.addLine(to: CGPoint(x: offsetX + cornerLength, y: offsetY))
+            }
+            .stroke(Color.ztlpBlue, lineWidth: lineWidth)
+
+            // Top-right
+            Path { path in
+                path.move(to: CGPoint(x: offsetX + size - cornerLength, y: offsetY))
+                path.addLine(to: CGPoint(x: offsetX + size, y: offsetY))
+                path.addLine(to: CGPoint(x: offsetX + size, y: offsetY + cornerLength))
+            }
+            .stroke(Color.ztlpBlue, lineWidth: lineWidth)
+
+            // Bottom-left
+            Path { path in
+                path.move(to: CGPoint(x: offsetX, y: offsetY + size - cornerLength))
+                path.addLine(to: CGPoint(x: offsetX, y: offsetY + size))
+                path.addLine(to: CGPoint(x: offsetX + cornerLength, y: offsetY + size))
+            }
+            .stroke(Color.ztlpBlue, lineWidth: lineWidth)
+
+            // Bottom-right
+            Path { path in
+                path.move(to: CGPoint(x: offsetX + size - cornerLength, y: offsetY + size))
+                path.addLine(to: CGPoint(x: offsetX + size, y: offsetY + size))
+                path.addLine(to: CGPoint(x: offsetX + size, y: offsetY + size - cornerLength))
+            }
+            .stroke(Color.ztlpBlue, lineWidth: lineWidth)
+        }
+    }
+}
+
+// MARK: - QR Scanner UIKit Bridge
+
+struct QRScannerView: UIViewControllerRepresentable {
     let onCodeScanned: (String) -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onCodeScanned: onCodeScanned)
+    func makeUIViewController(context: Context) -> QRScannerViewController {
+        let vc = QRScannerViewController()
+        vc.onCodeScanned = onCodeScanned
+        return vc
     }
 
-    func makeUIView(context: Context) -> QRPreviewUIView {
-        let view = QRPreviewUIView()
+    func updateUIViewController(_ uiViewController: QRScannerViewController, context: Context) {}
+}
 
+class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    var onCodeScanned: ((String) -> Void)?
+    private var captureSession: AVCaptureSession?
+    private var hasScanned = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupCamera()
+    }
+
+    private func setupCamera() {
         let session = AVCaptureSession()
-        context.coordinator.session = session
-
         guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device) else {
-            return view
-        }
+              let input = try? AVCaptureDeviceInput(device: device) else { return }
 
-        if session.canAddInput(input) {
-            session.addInput(input)
-        }
+        session.addInput(input)
 
         let output = AVCaptureMetadataOutput()
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(context.coordinator, queue: .main)
-            output.metadataObjectTypes = [.qr]
-        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
 
         let previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.frame = view.bounds
         previewLayer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(previewLayer)
-        view.previewLayer = previewLayer
-        context.coordinator.previewLayer = previewLayer
+
+        captureSession = session
 
         DispatchQueue.global(qos: .userInitiated).async {
             session.startRunning()
         }
-
-        return view
     }
 
-    func updateUIView(_ uiView: QRPreviewUIView, context: Context) {
-        // Frame updates handled by QRPreviewUIView.layoutSubviews
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !hasScanned,
+              let metadata = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              let value = metadata.stringValue else { return }
+
+        hasScanned = true
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        onCodeScanned?(value)
     }
 
-    static func dismantleUIView(_ uiView: QRPreviewUIView, coordinator: Coordinator) {
-        coordinator.session?.stopRunning()
-    }
-
-/// Custom UIView subclass that keeps the preview layer sized correctly.
-    class QRPreviewUIView: UIView {
-        var previewLayer: AVCaptureVideoPreviewLayer?
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            previewLayer?.frame = bounds
-        }
-    }
-
-        class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
-        let onCodeScanned: (String) -> Void
-        var session: AVCaptureSession?
-        var previewLayer: AVCaptureVideoPreviewLayer?
-        private var hasScanned = false
-
-        init(onCodeScanned: @escaping (String) -> Void) {
-            self.onCodeScanned = onCodeScanned
-        }
-
-        func metadataOutput(
-            _ output: AVCaptureMetadataOutput,
-            didOutput metadataObjects: [AVMetadataObject],
-            from connection: AVCaptureConnection
-        ) {
-            guard !hasScanned,
-                  let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-                  let code = object.stringValue,
-                  code.hasPrefix("ztlp://") else { return }
-
-            hasScanned = true
-            session?.stopRunning()
-
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            onCodeScanned(code)
-        }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        captureSession?.stopRunning()
     }
 }
 
 // MARK: - Previews
 
-#Preview("Idle") {
-    EnrollmentView(viewModel: EnrollmentViewModel(configuration: ZTLPConfiguration()))
+#Preview("Scanner") {
+    EnrollmentView(
+        viewModel: EnrollmentViewModel(configuration: ZTLPConfiguration())
+    )
 }

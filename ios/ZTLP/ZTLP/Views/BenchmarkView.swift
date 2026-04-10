@@ -275,14 +275,20 @@ struct BenchmarkView: View {
         // Test 2: TCP connect to each service VIP
         for svc in services {
             let (reachable, latencyMs) = await tcpConnect(host: svc.vip, port: svc.port, timeoutSec: 5)
-            let url = "\(svc.proto)://\(svc.vip):\(svc.port)"
+            // Use hostname for browser links (DNS resolves to VIP)
+            let svcShortName = svc.name.lowercased()
+                .replacingOccurrences(of: " (https)", with: "")
+                .replacingOccurrences(of: " (http)", with: "")
+            let scheme = svc.proto
+            let browseURL = svc.port == 443 ? "\(scheme)://\(svcShortName).ztlp" :
+                                              "\(scheme)://\(svcShortName).ztlp"
             await addResult(BenchmarkResult(
                 name: svc.name,
                 value: reachable ? "\(latencyMs)" : "FAIL",
                 unit: reachable ? "ms" : "",
                 status: reachable ? .good : .error,
                 detail: "\(svc.vip):\(svc.port)",
-                openURL: reachable ? url : nil
+                openURL: reachable ? browseURL : nil
             ))
         }
 
@@ -294,7 +300,7 @@ struct BenchmarkView: View {
             unit: httpOk ? "ms" : "",
             status: httpOk ? .good : .error,
             detail: httpOk ? "HTTP \(httpCode)" : "No response",
-            openURL: httpOk ? "http://10.122.0.4" : nil
+            openURL: httpOk ? "http://vault.ztlp" : nil
         ))
 
         // Test 4: HTTP GET through primary service
@@ -305,7 +311,7 @@ struct BenchmarkView: View {
             unit: primaryOk ? "ms" : "",
             status: primaryOk ? .good : (primaryCode > 0 ? .warning : .error),
             detail: primaryOk ? "HTTP \(primaryCode)" : (primaryCode > 0 ? "HTTP \(primaryCode)" : "No response"),
-            openURL: primaryOk ? "http://10.122.0.2" : nil
+            openURL: primaryOk ? "http://vault.ztlp" : nil
         ))
     }
 
@@ -313,11 +319,11 @@ struct BenchmarkView: View {
 
     private func runHTTPTests() async {
         let endpoints: [(name: String, url: String, openURL: String?)] = [
-            ("GET /alive (vault)", "http://10.122.0.4/alive", "http://10.122.0.4"),
+            ("GET /alive (vault)", "http://10.122.0.4/alive", "http://vault.ztlp"),
             ("GET / (vault web)", "http://10.122.0.4/", "http://10.122.0.4"),
             ("GET /api/config (vault)", "http://10.122.0.4/api/config", nil),
-            ("GET / (primary)", "http://10.122.0.2/", "http://10.122.0.2"),
-            ("GET / (http proxy)", "http://10.122.0.3/", "http://10.122.0.3"),
+            ("GET / (primary)", "http://10.122.0.2/", "http://vault.ztlp"),
+            ("GET / (http proxy)", "http://10.122.0.3/", "http://http.ztlp"),
         ]
 
         for ep in endpoints {

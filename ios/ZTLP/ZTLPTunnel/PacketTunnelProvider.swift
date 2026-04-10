@@ -239,35 +239,71 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 conn.start()
                 self.tunnelConnection = conn
 
-                // Step 7: Start standalone packet router
-                let services: [(vip: String, name: String)] = [
-                    ("10.122.0.2", svcName),
-                    ("10.122.0.3", "http"),
-                    ("10.122.0.4", "vault"),
-                ]
+                // Step 7: Discover services via NS, fall back to hardcoded
+                let zone = config.zoneName ?? ""
+                var services: [(vip: String, name: String)] = []
+
+                // Try NS service discovery (sync UDP query)
+                if let nsAddr = config.nsServer, !nsAddr.isEmpty {
+                    self.logger.info("Querying NS at \(nsAddr) for services...", source: "Tunnel")
+                    let nsClient = ZTLPNSClient(timeoutSec: 3)
+                    let discovered = nsClient.discoverServices(
+                        zoneName: zone,
+                        nsServer: nsAddr
+                    )
+                    if !discovered.isEmpty {
+                        // Assign VIPs dynamically: 10.122.0.2, 10.122.0.3, ...
+                        var nextVIP: UInt8 = 2
+                        for record in discovered {
+                            let shortName = record.name
+                                .replacingOccurrences(of: ".\(zone).ztlp", with: "")
+                                .replacingOccurrences(of: ".ztlp", with: "")
+                            let vip = "10.122.0.\(nextVIP)"
+                            services.append((vip, shortName))
+                            self.logger.info("NS discovered: \(shortName) -> \(record.address) (VIP \(vip))", source: "Tunnel")
+                            nextVIP += 1
+                            if nextVIP > 254 { break }
+                        }
+                    }
+                }
+
+                // Fall back to hardcoded services if NS discovery found nothing
+                if services.isEmpty {
+                    self.logger.info("Using default service map (NS unavailable or empty)", source: "Tunnel")
+                    services = [
+                        ("10.122.0.2", svcName),
+                        ("10.122.0.3", "http"),
+                        ("10.122.0.4", "vault"),
+                    ]
+                }
+
                 try self.startPacketRouter(services: services)
 
                 // Step 7b: Start DNS responder for *.ztlp queries
-                let zone = config.zoneName ?? ""
                 self.dnsResponder = ZTLPDNSResponder(
                     services: services.map { ($0.name, $0.vip) },
                     zoneName: zone
                 )
-                self.logger.info("DNS responder active for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
+                self.logger.info("DNS responder active (\(services.count) services) for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
 
                 // Step 8: Start VIP proxy (NWListener on 127.0.0.1)
                 // Note: VIP proxy needs its own crypto context or shares the
                 // tunnel connection for sending. We route through tunnelConnection.
                 let proxy = ZTLPVIPProxy()
-                // Standard ports: browsers use 80/443 by default
-                proxy.addService(name: svcName, port: 80)
-                proxy.addService(name: svcName, port: 443)
-                proxy.addService(name: "vault", port: 80)
-                proxy.addService(name: "vault", port: 443)
+                // Register standard ports for all discovered services
+                var registeredNames = Set<String>()
+                for svc in services {
+                    guard !registeredNames.contains(svc.name) else { continue }
+                    registeredNames.insert(svc.name)
+                    proxy.addService(name: svc.name, port: 80)
+                    proxy.addService(name: svc.name, port: 443)
+                }
                 // Also keep legacy numbered ports for backward compat
                 proxy.addService(name: svcName, port: 8080)
                 proxy.addService(name: svcName, port: 8443)
-                proxy.addService(name: "vault", port: 8200)
+                if registeredNames.contains("vault") {
+                    proxy.addService(name: "vault", port: 8200)
+                }
                 try proxy.start(cryptoContext: cryptoCtx, sendHandler: { [weak self] data in
                     self?.tunnelConnection?.sendRaw(data)
                 })

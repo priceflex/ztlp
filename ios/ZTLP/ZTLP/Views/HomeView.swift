@@ -375,9 +375,12 @@ private struct ActiveServiceCard: View {
     let proto: String  // "http" or "https"
     let isActive: Bool
 
-    /// Build the URL to open in browser
+    /// Build the URL to open in browser — use hostname for DNS resolution
     private var serviceURL: String {
-        "\(proto)://\(vip):\(port)"
+        if port == 80 || port == 443 {
+            return "\(proto)://\(hostname)"
+        }
+        return "\(proto)://\(hostname):\(port)"
     }
 
     var body: some View {
@@ -412,7 +415,7 @@ private struct ActiveServiceCard: View {
                             .font(.caption2)
                             .foregroundStyle(Color.ztlpBlue)
                     }
-                    Text("\(proto)://:\(String(port))")
+                    Text(vip)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                 }

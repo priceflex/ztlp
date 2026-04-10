@@ -548,6 +548,7 @@ compilation on the async-only functions.
 
 ## Option 3 (PARALLEL) — Split VIP Proxy to Main App
 
+**SUPERSEDED** — See IOS-RELAY-ARCHITECTURE.md — Decision 2026-04-10: move VIP proxy to iPhone relay instead of XPC. Single tunnel saves 5-8MB. XPC kept for reference only.
 Independent of the above. Move VipProxy + PacketRouter async tasks
 to the main app process via XPC/IPC. NE only does tunnel I/O
 (encrypt/decrypt/forward). Main app has no memory limit.

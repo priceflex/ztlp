@@ -76,6 +76,9 @@ defmodule ZtlpNs.Application do
 
     case result do
       {:ok, pid} ->
+        # Seed initial relay records (rich format for iOS relay-side VIP)
+        ZtlpNs.RelaySeeder.seed()
+
         if ZtlpNs.Cluster.clustered?() do
           Logger.info("[ztlp-ns] Started in cluster mode with #{length(ZtlpNs.Cluster.members())} nodes")
         else

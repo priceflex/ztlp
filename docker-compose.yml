@@ -31,6 +31,7 @@ services:
       ZTLP_NS_RATE_LIMIT_PER_SEC: "100"
       ZTLP_NS_RATE_LIMIT_BURST: "200"
       ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"  # Dev/demo mode — remove for production
+      ZTLP_NS_RELAY_RECORDS: "name=relay1,address=relay:23095,region=us-west-2,latency_ms=5,load_pct=0,active_connections=0,health=healthy|name=relay2,address=10.0.0.5:23096,region=us-east-1,latency_ms=45,load_pct=10,active_connections=5,health=healthy"
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 30s
@@ -60,6 +61,11 @@ services:
       ZTLP_RELAY_METRICS_PORT: "9101"
       ZTLP_RELAY_BACKPRESSURE_SOFT_PCT: "80"
       ZTLP_RELAY_BACKPRESSURE_HARD_PCT: "95"
+      # ── iOS Relay-side VIP ──
+      ZTLP_RELAY_VIP_ENABLED: "true"
+      ZTLP_RELAY_VIP_SERVICES: "vault=127.0.0.1:8080,web=echo-backend:8080,api=127.0.0.1:8443"
+      ZTLP_RELAY_VIP_SESSION_KEY: ""
+      ZTLP_RELAY_VIP_TLS_ENABLED: "false"
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 30s

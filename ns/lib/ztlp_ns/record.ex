@@ -295,6 +295,46 @@ defmodule ZtlpNs.Record do
     }
   end
 
+  @doc """
+  Create a ZTLP_RELAY record with rich stats (for iOS relay-side VIP discovery).
+
+  The CBOR data matches the rich format expected by `ztlp_ns_resolve_relays_sync`:
+  - `address`: string "ip:port" (primary endpoint)
+  - `region`: string (e.g., "us-west-2")
+  - `latency_ms`: uint (NS-reported latency baseline)
+  - `load_pct`: uint (0-100)
+  - `active_connections`: uint
+  - `health`: string ("healthy" | "degraded" | "dead")
+  - `endpoints`: fallback legacy list for old clients
+  - `node_id`: hex-encoded node identifier
+  """
+  @spec new_relay_rich(String.t(), String.t(), String.t(), keyword()) :: t()
+  def new_relay_rich(name, address, region, opts \\ []) do
+    latency_ms = Keyword.get(opts, :latency_ms, 0)
+    load_pct = Keyword.get(opts, :load_pct, 0)
+    active_connections = Keyword.get(opts, :active_connections, 0)
+    health = Keyword.get(opts, :health, "healthy")
+
+    %__MODULE__{
+      name: name,
+      type: :relay,
+      data: %{
+        "address" => address,
+        "region" => region,
+        "latency_ms" => latency_ms,
+        "load_pct" => load_pct,
+        "active_connections" => active_connections,
+        "health" => health,
+        # Legacy fallback for old clients
+        "endpoints" => [address],
+        "node_id" => opts[:node_id_hex] || ""
+      },
+      created_at: opts[:created_at] || System.system_time(:second),
+      ttl: opts[:ttl] || 3600,
+      serial: opts[:serial] || 1
+    }
+  end
+
   @doc "Create a ZTLP_POLICY record (access control rules)."
   @spec new_policy(String.t(), [binary()], [String.t()], [binary()], keyword()) :: t()
   def new_policy(name, allowed_node_ids, allowed_services, deny_node_ids, opts \\ []) do

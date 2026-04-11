@@ -145,6 +145,8 @@ Rails.application.routes.draw do
     post "enrollment/confirm", to: "enrollment#confirm", as: :enrollment_confirm
     post "heartbeat", to: "status#heartbeat", as: :heartbeat
     post "events", to: "status#event", as: :events
+    get  "benchmarks", to: "benchmarks#index", as: :benchmarks
+    post "benchmarks", to: "benchmarks#create", as: :create_benchmark
   end
 
   # Documentation

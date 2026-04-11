@@ -26,7 +26,7 @@ defmodule ZtlpNs.RelaySeeder do
 
   require Logger
 
-  alias ZtlpNs.{Record, Store}
+  alias ZtlpNs.{Crypto, Record, Store}
 
   @doc "Seed relay records from env on startup."
   def seed do
@@ -38,10 +38,13 @@ defmodule ZtlpNs.RelaySeeder do
     else
       entries = String.split(raw, "|")
 
+      # Get the signing key before seeding individual records
+      signing_key = get_or_create_signing_key()
+
       seeded =
         for entry <- entries,
             String.trim(entry) != "",
-            do: seed_one(entry)
+            do: seed_one(entry, signing_key)
 
       count = Enum.count(seeded, &(&1 == :ok))
       errors = Enum.count(seeded, &(&1 != :ok))
@@ -54,7 +57,23 @@ defmodule ZtlpNs.RelaySeeder do
     end
   end
 
-  defp seed_one(entry) do
+  # Fetch the NS registration signing key, creating one if needed
+  # (matches the pattern in server.ex ensure_registration_key/0)
+  defp get_or_create_signing_key do
+    case Application.get_env(:ztlp_ns, :registration_private_key) do
+      nil ->
+        # Generate a new key and store it so it persists across restarts
+        {_pub, priv} = Crypto.generate_keypair()
+        Application.put_env(:ztlp_ns, :registration_private_key, priv)
+        Logger.info("[ztlp-ns] Generated new NS signing key for relay seeding")
+        priv
+
+      priv ->
+        priv
+    end
+  end
+
+  defp seed_one(entry, signing_key) do
     parts = String.split(entry, ",")
     kv = Enum.reduce(parts, %{}, fn part, acc ->
       case String.split(part, "=", parts: 2) do
@@ -84,7 +103,10 @@ defmodule ZtlpNs.RelaySeeder do
           node_id_hex: node_id_hex
         )
 
-        case Store.insert(record) do
+        # Sign the record with the NS signing key before inserting
+        signed_record = Record.sign(record, signing_key)
+
+        case Store.insert(signed_record) do
           :ok ->
             Logger.info("[ztlp-ns] Seeded relay: #{name} -> #{address} (#{region}, #{health})")
             :ok

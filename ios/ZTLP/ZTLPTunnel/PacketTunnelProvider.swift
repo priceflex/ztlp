@@ -789,8 +789,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                 case 3: healthStr = "deprioritized"
                                 default: healthStr = "unknown"
                             }
-                            let regionStr = region != nil ? String(cString: region) : "?"
-                            logger.info("  Relay #\(i+1): \(String(cString: addr)) region=\(regionStr) lat=\(latency)ms load=\(load)% health=\(healthStr)", source: "Relay")
+                            let regionStr = region.map { String(cString: $0) } ?? "?"
+                            let addrStr = addr.map { String(cString: $0) } ?? "?"
+                            logger.info("  Relay #\(i+1): \(addrStr) region=\(regionStr) lat=\(latency)ms load=\(load)% health=\(healthStr)", source: "Relay")
                         }
                     } else {
                         logger.warn("Failed to update relay pool from NS", source: "Relay")

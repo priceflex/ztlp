@@ -63,7 +63,7 @@ private func deviceLogStats(_ logs: String?) -> (lineCount: Int, byteCount: Int)
 
 
 enum bootstrapDefaults {
-    static let url = "http://10.96.95.12:3000"
+    static let url = "http://10.69.95.12:3000"
 }
 
 class BenchmarkReporter {

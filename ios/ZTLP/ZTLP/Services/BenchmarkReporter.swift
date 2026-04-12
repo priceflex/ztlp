@@ -39,6 +39,10 @@ struct BenchmarkReport: Codable {
     let errors: String?
 }
 
+
+enum bootstrapDefaults {
+    static let url = "http://10.69.95.12:3000"
+}
 class BenchmarkReporter {
     static let shared = BenchmarkReporter()
 
@@ -47,7 +51,8 @@ class BenchmarkReporter {
 
     init(bootstrapURL: URL? = nil, apiToken: String? = nil) {
         self.bootstrapURL = bootstrapURL?.absoluteString ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url") ?? bootstrapDefaults.url
-        self.apiToken= apiToken ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") ?? bootstrapDefaults.enrollmentSecret
+        let TOKEN = "2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079"
+        self.apiToken = apiToken ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") ?? TOKEN
     }
 
     /// Send a benchmark report to the bootstrap server.

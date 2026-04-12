@@ -66,21 +66,15 @@ module Api
     private
 
     def authenticate_api_token!
-      token = request.headers["Authorization"]&.gsub(/^Bearer\s+/i, "")
+      token = request.headers["Authorization"].to_s.gsub(/^Bearer\s+/i, "").strip
       return render json: { error: "Unauthorized" }, status: :unauthorized if token.blank?
 
       @api_network = Network.all.find do |n|
-        # Try decrypted value (for encrypted data)
-        secret = begin
-          ActiveRecord::Encryption.encryptor.decrypt(
-            n[:enrollment_secret_ciphertext],
-            message_serializer: ActiveRecord::Encryption::MessageSerializer
-          )
-        rescue
-          n[:enrollment_secret_ciphertext]
-        end
-        secret.nil? ? false : secret.strip == token.strip
+        # Compare against raw DB value (bypasses encryption)
+        raw = n.read_attribute(:enrollment_secret_ciphertext)
+        raw && raw.strip == token
       end
+
       return render json: { error: "Unauthorized" }, status: :unauthorized unless @api_network
     end
 

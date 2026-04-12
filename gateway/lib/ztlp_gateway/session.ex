@@ -1662,6 +1662,21 @@ defmodule ZtlpGateway.Session do
     end
   end
 
+  defp mux_payload?(<<type, _rest::binary>>) when type in [@frame_open, @frame_close] do
+    true
+  end
+
+  defp mux_payload?(<<@frame_data, stream_id::big-32, _payload::binary>>) when stream_id > 0 do
+    true
+  end
+
+  defp mux_payload?(_), do: false
+
+  defp handle_inner_mux_payload(payload, state) do
+    state = %{state | mux_mode: true}
+    handle_tunnel_frame(payload, state)
+  end
+
   # Keepalive: exactly 1-byte 0x01 frame from iOS VPN extension.
   # This matches BEFORE the ACK handler because @frame_ack == 0x01 and a
   # proper ACK frame is 9+ bytes (1 type + 8 data_seq). A single-byte 0x01
@@ -1832,21 +1847,6 @@ defmodule ZtlpGateway.Session do
       :error ->
         terminate_session(state, :no_backend)
     end
-  end
-
-  defp mux_payload?(<<type, _rest::binary>>) when type in [@frame_open, @frame_close] do
-    true
-  end
-
-  defp mux_payload?(<<@frame_data, stream_id::big-32, _payload::binary>>) when stream_id > 0 do
-    true
-  end
-
-  defp mux_payload?(_), do: false
-
-  defp handle_inner_mux_payload(payload, state) do
-    state = %{state | mux_mode: true}
-    handle_tunnel_frame(payload, state)
   end
 
   # FRAME_OPEN with service name: [0x06 | stream_id(4) | svc_len(1) | svc_name]

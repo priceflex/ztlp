@@ -258,8 +258,8 @@ struct BenchmarkView: View {
 
     @_disfavoredOverload
     private func submitResultsToBootstrap() {
-        let reporterResults: [BenchmarkReporter.BenchmarkResult] = results.map {
-            BenchmarkReporter.BenchmarkResult(
+        let reporterResults: [BenchmarkUploadResult] = results.map {
+            BenchmarkUploadResult(
                 name: $0.name,
                 passed: $0.status != .error,
                 latency_ms: Double($0.value) ?? nil,

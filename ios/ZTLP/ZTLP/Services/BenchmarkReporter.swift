@@ -7,7 +7,7 @@
 import Foundation
 import UIKit
 
-struct BenchmarkResult: Codable {
+struct BenchmarkUploadResult: Codable {
     let name: String
     let passed: Bool
     let latency_ms: Double?
@@ -17,7 +17,7 @@ struct BenchmarkResult: Codable {
     let error: String?
 }
 
-struct BenchmarkReport: Codable {
+struct BenchmarkUploadReport: Codable {
     var summaryScore: String { "\(benchmarks_passed)/\(benchmarks_total)" }
 
     let device_id: String?
@@ -31,7 +31,7 @@ struct BenchmarkReport: Codable {
     let ne_memory_pass: Bool
     let benchmarks_passed: Int
     let benchmarks_total: Int
-    let individual_results: [BenchmarkResult]?
+    let individual_results: [BenchmarkUploadResult]?
     let relay_address: String?
     let gateway_address: String?
     let ns_address: String?
@@ -87,7 +87,7 @@ class BenchmarkReporter {
 
     /// Send a benchmark report to the bootstrap server.
     /// Call this after the benchmark suite finishes.
-    func submit(_ report: BenchmarkReport, completion: @escaping (Result<Void, Error>) -> Void) {
+    func submit(_ report: BenchmarkUploadReport, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let authToken = apiToken, !authToken.isEmpty else {
             logger.error("Benchmark upload skipped: missing bootstrap auth token", source: "BenchUpload")
             completion(.failure(ReporterError.noAuthToken))
@@ -163,7 +163,7 @@ class BenchmarkReporter {
         neVirtualMB: Int?,
         passedCount: Int,
         totalCount: Int,
-        individualResults: [BenchmarkResult]? = nil,
+        individualResults: [BenchmarkUploadResult]? = nil,
         relayAddress: String? = nil,
         gatewayAddress: String? = nil,
         nsAddress: String? = nil,
@@ -173,7 +173,7 @@ class BenchmarkReporter {
         packetLossPct: Int? = nil,
         errors: String? = nil
     ) {
-        let report = BenchmarkReport(
+        let report = BenchmarkUploadReport(
             device_id: deviceID,
             node_id: nodeID,
             app_version: appVersion,

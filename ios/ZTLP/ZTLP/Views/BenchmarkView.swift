@@ -247,8 +247,39 @@ struct BenchmarkView: View {
             case .local:
                 await runLocalTests()
             }
-            await MainActor.run { isRunning = false }
+            await MainActor.run {
+                isRunning = false
+                submitResultsToBootstrap()
+            }
         }
+    }
+
+    // MARK: - Bootstrap Submission
+
+    @_disfavoredOverload
+    private func submitResultsToBootstrap() {
+        let reporterResults: [BenchmarkReporter.BenchmarkResult] = results.map {
+            BenchmarkReporter.BenchmarkResult(
+                name: $0.name,
+                passed: $0.status != .error,
+                latency_ms: Double($0.value) ?? nil,
+                throughput_kbps: nil,
+                p99_latency_ms: nil,
+                packet_loss_pct: nil,
+                error: $0.status == .error ? $0.detail : nil
+            )
+        }
+
+        let passedCount = results.filter { $0.status != .error }.count
+        let totalCount = results.count
+
+        BenchmarkReporter.shared.submit(
+            neMemoryMB: nil,
+            neVirtualMB: nil,
+            passedCount: passedCount,
+            totalCount: totalCount,
+            individualResults: reporterResults
+        )
     }
 
     // MARK: - Connectivity Tests (real)

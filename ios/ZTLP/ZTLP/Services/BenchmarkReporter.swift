@@ -37,6 +37,17 @@ struct BenchmarkReport: Codable {
     let p99_latency_ms: Int?
     let packet_loss_pct: Int?
     let errors: String?
+    let device_logs: String?
+}
+
+/// Read ztlp.log from the shared App Group container
+func readDeviceLogs() -> String? {
+    guard let containerURL = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: "group.com.ztlp.shared") else {
+        return nil
+    }
+    let logURL = containerURL.appendingPathComponent("ztlp.log")
+    return try? String(contentsOf: logURL, encoding: .utf8)
 }
 
 
@@ -142,7 +153,8 @@ class BenchmarkReporter {
             throughput_kbps: throughputKbps,
             p99_latency_ms: p99LatencyMs,
             packet_loss_pct: packetLossPct,
-            errors: errors
+            errors: errors,
+            device_logs: readDeviceLogs()
         )
 
         submit(report) { result in

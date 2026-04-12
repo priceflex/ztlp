@@ -14,6 +14,8 @@ struct LogsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                phoneLogStatusSection
+
                 // Filter capsules
                 filterBar
 
@@ -60,6 +62,59 @@ struct LogsView: View {
                     }
             }
         }
+    }
+
+    // MARK: - Phone Log Status
+
+    private var phoneLogStatusSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Phone log send status", systemImage: "iphone.and.arrow.forward")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(viewModel.uploadEntries.count) events")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let latest = viewModel.uploadEntries.last {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(latest.message)
+                        .font(.caption.weight(.medium))
+                    Text(latest.timestamp.formatted(date: .omitted, time: .standard))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("No benchmark/log uploads recorded yet on this phone.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.uploadEntries.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(viewModel.uploadEntries.suffix(5))) { entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.timestamp, style: .time)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(entry.message)
+                                    .font(.caption2.monospaced())
+                                    .lineLimit(3)
+                            }
+                            .frame(width: 220, alignment: .leading)
+                            .padding(8)
+                            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+        .background(Color(.systemBackground))
     }
 
     // MARK: - Filter Bar

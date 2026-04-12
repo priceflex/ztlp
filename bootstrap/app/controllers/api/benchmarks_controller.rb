@@ -50,6 +50,10 @@ module Api
             all_passed: benchmark.all_passed?,
             memory_ok: benchmark.memory_ok?,
             score: "#{benchmark.benchmarks_passed}/#{benchmark.benchmarks_total}"
+          },
+          device_logs_summary: {
+            lines: benchmark.device_logs.to_s.lines.count,
+            bytes: benchmark.device_logs.to_s.bytesize
           }
         }, status: :created
       else
@@ -61,7 +65,14 @@ module Api
     def index
       scope = @api_network.benchmark_results.includes(:ztlp_device)
       scope = scope.recent.limit(params[:limit] || 50)
-      render json: scope.as_json(include: { ztlp_device: { only: %i[node_id name] } })
+      render json: scope.map { |benchmark|
+        benchmark.as_json(include: { ztlp_device: { only: %i[node_id name] } }).merge(
+          "device_logs_summary" => {
+            "lines" => benchmark.device_logs.to_s.lines.count,
+            "bytes" => benchmark.device_logs.to_s.bytesize
+          }
+        )
+      }
     end
 
     private

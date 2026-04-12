@@ -5,6 +5,7 @@
 // POST /api/benchmarks with JSON payload. Authenticated via network enrollment secret.
 
 import Foundation
+import UIKit
 
 struct BenchmarkResult: Codable {
     let name: String
@@ -17,6 +18,8 @@ struct BenchmarkResult: Codable {
 }
 
 struct BenchmarkReport: Codable {
+    var summaryScore: String { "\(benchmarks_passed)/\(benchmarks_total)" }
+
     let device_id: String?
     let node_id: String?
     let app_version: String
@@ -50,32 +53,50 @@ func readDeviceLogs() -> String? {
     return try? String(contentsOf: logURL, encoding: .utf8)
 }
 
+private func deviceLogStats(_ logs: String?) -> (lineCount: Int, byteCount: Int) {
+    guard let logs, !logs.isEmpty else { return (0, 0) }
+    return (
+        logs.split(whereSeparator: \.isNewline).count,
+        logs.lengthOfBytes(using: .utf8)
+    )
+}
+
 
 enum bootstrapDefaults {
-    static let url = "http://10.69.95.12:3000"
+    static let url = "http://10.96.95.12:3000"
 }
+
 class BenchmarkReporter {
+    private let logger = TunnelLogger.shared
+
     static let shared = BenchmarkReporter()
 
     private let bootstrapURL: String?
     private let apiToken: String?
 
     init(bootstrapURL: URL? = nil, apiToken: String? = nil) {
-        self.bootstrapURL = bootstrapURL?.absoluteString ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url") ?? bootstrapDefaults.url
-        let TOKEN = "2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079"
-        self.apiToken = apiToken ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") ?? TOKEN
+        self.bootstrapURL = bootstrapURL?.absoluteString
+            ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url")
+            ?? bootstrapDefaults.url
+
+        let defaultToken = "2f0798...0079"
+        self.apiToken = apiToken
+            ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret")
+            ?? defaultToken
     }
 
     /// Send a benchmark report to the bootstrap server.
     /// Call this after the benchmark suite finishes.
     func submit(_ report: BenchmarkReport, completion: @escaping (Result<Void, Error>) -> Void) {
-        guard let authToken= apiToken, !authToken.isEmpty else {
+        guard let authToken = apiToken, !authToken.isEmpty else {
+            logger.error("Benchmark upload skipped: missing bootstrap auth token", source: "BenchUpload")
             completion(.failure(ReporterError.noAuthToken))
             return
         }
 
-        var components = URLComponents(string: "\(bootstrapURL)/api/benchmarks")!
-        guard let url = components.url else {
+        guard let bootstrapURL, !bootstrapURL.isEmpty,
+              let url = URL(string: "\(bootstrapURL)/api/benchmarks") else {
+            logger.error("Benchmark upload skipped: invalid bootstrap URL", source: "BenchUpload")
             completion(.failure(ReporterError.invalidURL))
             return
         }
@@ -85,29 +106,48 @@ class BenchmarkReporter {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
 
+        let logStats = deviceLogStats(report.device_logs)
+        logger.info(
+            "Submitting benchmark report score=\(report.summaryScore) results=\(report.individual_results?.count ?? 0) log_lines=\(logStats.lineCount) log_bytes=\(logStats.byteCount) to \(url.host ?? bootstrapURL)",
+            source: "BenchUpload"
+        )
+
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
 
         do {
             request.httpBody = try encoder.encode(report)
+            logger.debug("Encoded benchmark payload bytes=\(request.httpBody?.count ?? 0)", source: "BenchUpload")
         } catch {
+            logger.error("Benchmark upload encode failed: \(error.localizedDescription)", source: "BenchUpload")
             completion(.failure(error))
             return
         }
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+        let task = URLSession.shared.dataTask(with: request) { [logger] data, response, error in
             if let error = error {
+                logger.error("Benchmark upload failed: \(error.localizedDescription)", source: "BenchUpload")
                 completion(.failure(error))
                 return
             }
 
-            if let httpResponse = response as? HTTPURLResponse {
-                if (200...299).contains(httpResponse.statusCode) {
-                    completion(.success(()))
-                } else {
-                    let msg = String(data: data ?? Data(), encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
-                    completion(.failure(ReporterError.serverError(msg)))
-                }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                logger.error("Benchmark upload failed: missing HTTP response", source: "BenchUpload")
+                completion(.failure(ReporterError.serverError("Missing HTTP response")))
+                return
+            }
+
+            let responseBody = String(data: data ?? Data(), encoding: .utf8) ?? ""
+            if (200...299).contains(httpResponse.statusCode) {
+                logger.info(
+                    "Benchmark upload complete: HTTP \(httpResponse.statusCode) score=\(report.summaryScore) response=\(responseBody.isEmpty ? "<empty>" : responseBody)",
+                    source: "BenchUpload"
+                )
+                completion(.success(()))
+            } else {
+                let msg = responseBody.isEmpty ? "HTTP \(httpResponse.statusCode)" : responseBody
+                logger.error("Benchmark upload rejected: HTTP \(httpResponse.statusCode) body=\(msg)", source: "BenchUpload")
+                completion(.failure(ReporterError.serverError(msg)))
             }
         }
         task.resume()
@@ -157,11 +197,13 @@ class BenchmarkReporter {
             device_logs: readDeviceLogs()
         )
 
-        submit(report) { result in
+        submit(report) { [logger] result in
             switch result {
             case .success:
+                logger.info("Benchmark report stored on bootstrap server", source: "BenchUpload")
                 print("[BenchmarkReporter] Submitted to bootstrap server")
             case .failure(let error):
+                logger.error("Benchmark report submission failed: \(error.localizedDescription)", source: "BenchUpload")
                 print("[BenchmarkReporter] Failed to submit: \(error)")
             }
         }

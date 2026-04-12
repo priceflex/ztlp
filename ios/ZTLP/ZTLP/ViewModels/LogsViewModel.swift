@@ -22,6 +22,9 @@ final class LogsViewModel: ObservableObject {
     /// Text search filter.
     @Published var searchText: String = ""
 
+    /// Upload-related entries shown in the phone logs status section.
+    @Published var uploadEntries: [LogEntry] = []
+
     // MARK: - Computed
 
     /// Entries after applying level and text filters.
@@ -45,6 +48,8 @@ final class LogsViewModel: ObservableObject {
     // MARK: - Private
 
     private let logger = TunnelLogger.shared
+    private let uploadSources: Set<String> = ["BenchUpload"]
+    private let uploadKeywords = ["submitted to bootstrap", "benchmark upload", "benchmark report"]
     private var cancellable: AnyCancellable?
 
     // MARK: - Init
@@ -62,6 +67,9 @@ final class LogsViewModel: ObservableObject {
             guard let self = self,
                   let entry = notification.object as? LogEntry else { return }
             self.entries.append(entry)
+            if self.isUploadEntry(entry) {
+                self.uploadEntries.append(entry)
+            }
         }
     }
 
@@ -70,16 +78,30 @@ final class LogsViewModel: ObservableObject {
     /// Reload all entries from the log file.
     func refresh() {
         entries = logger.readAll()
+        refreshUploadEntries()
     }
 
     /// Clear all logs.
     func clear() {
         logger.clear()
         entries = []
+        uploadEntries = []
     }
 
     /// Export all logs as UTF-8 data.
     func exportData() -> Data {
         logger.exportData()
+    }
+
+    private func refreshUploadEntries() {
+        uploadEntries = entries.filter(isUploadEntry)
+    }
+
+    private func isUploadEntry(_ entry: LogEntry) -> Bool {
+        if uploadSources.contains(entry.source) {
+            return true
+        }
+        let message = entry.message.lowercased()
+        return uploadKeywords.contains { message.contains($0) }
     }
 }

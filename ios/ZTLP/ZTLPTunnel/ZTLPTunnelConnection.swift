@@ -14,6 +14,7 @@
 
 import Foundation
 import Network
+import os.log
 
 // MARK: - Frame Type Constants
 
@@ -286,8 +287,14 @@ final class ZTLPTunnelConnection {
 
         let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
         sendsInFlight += 1
-        conn.send(content: wireData, completion: .contentProcessed { [weak self] _ in
-            self?.sendsInFlight -= 1
+        conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            self.sendsInFlight -= 1
+            if let error = error {
+                os_log("ZTLP ACK send failed: %{public}@", type: .error, String(describing: error))
+            } else {
+                os_log("ZTLP ACK sent seq=%{public}llu bytes=%{public}d inflight=%{public}d", type: .debug, maxSeq, encryptWritten, self.sendsInFlight)
+            }
         })
     }
 
@@ -403,6 +410,7 @@ final class ZTLPTunnelConnection {
         }
 
         guard decryptResult == 0, decryptWritten > 0 else {
+            os_log("ZTLP decrypt failed rc=%{public}d wire=%{public}d", type: .error, decryptResult, wireData.count)
             return
         }
 
@@ -519,6 +527,7 @@ final class ZTLPTunnelConnection {
         recordSequence(sequence)
 
         // Send ACK immediately
+        os_log("ZTLP RX data seq=%{public}llu payload=%{public}d dup=%{public}@", type: .debug, sequence, payload?.count ?? 0, seenSequences.contains(sequence) ? "true" : "false")
         queueAck(for: sequence)
 
         // Deliver payload to delegate

@@ -44,6 +44,7 @@
 		DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */; };
 		DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */; };
 		DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660003 /* CertificateService.swift */; };
+		EE44FF55AA66BB77CC880001 /* BenchmarkReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */; };
 		DDC1C5EB291E61F7B1E73F8A /* ZTLPTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 10C2CD7B7A6A52F505808697 /* ZTLPTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E0DA0743CED83D9419B89819 /* ConnectionStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFF838E964E33540E20C97A /* ConnectionStatusTests.swift */; };
 		E51EDC26405FAEE991E4076D /* ServicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */; };
@@ -134,6 +135,7 @@
 		CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBenchmark.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPBenchmark.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660003 /* CertificateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateService.swift; sourceTree = "<group>"; };
+		EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkReporter.swift; sourceTree = "<group>"; };
 		D5AF8045644C273E351706D4 /* ConnectionStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatus.swift; sourceTree = "<group>"; };
 		DDB9E741DCE93E4761DE08F4 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DF7E6453D407953E6432F115 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -253,6 +255,7 @@
 				CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */,
 				CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */,
 				CC22DD33EE44FF55AA660003 /* CertificateService.swift */,
+				EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -466,6 +469,7 @@
 				DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */,
 				DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */,
 				DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */,
+				EE44FF55AA66BB77CC880001 /* BenchmarkReporter.swift in Sources */,
 				BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

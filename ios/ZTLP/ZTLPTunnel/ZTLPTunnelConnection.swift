@@ -571,7 +571,7 @@ final class ZTLPTunnelConnection {
         guard decryptResult == 0, decryptWritten > 0 else {
             if decryptResult == Int32(ZTLP_REPLAY_REJECTED) {
                 replayRejectedCount += 1
-                sharedDefaults?.set(Int(replayRejectedCount), forKey: SharedKey.replayRejectCount)
+                sharedDefaults?.set(Int(replayRejectedCount), forKey: "ztlp_replay_reject_count")
 
                 if replayRejectedCount == 1 || replayRejectedCount % 10 == 0 {
                     logger.debug(

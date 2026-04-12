@@ -92,6 +92,7 @@ final class ZTLPTunnelConnection {
     /// Backpressure: track in-flight NWConnection sends.
     private var sendsInFlight: Int = 0
     private static let maxSendsInFlight = 512
+    private var lastOverloadLogAt: Date = .distantPast
 
     /// Reusable decrypt buffer (avoids repeated allocation).
     /// Max ZTLP packet is ~1500 bytes; 4KB is generous.
@@ -352,6 +353,10 @@ final class ZTLPTunnelConnection {
     func sendData(_ payload: Data) -> Bool {
         guard let cryptoContext else { return false }
         guard isActive, let conn = connection else { return false }
+        guard sendsInFlight < Self.maxSendsInFlight else {
+            maybeLogOverload(context: "sendData")
+            return false
+        }
 
         // Step 1: Frame the payload as FRAME_DATA
         let seq = nextSendSequence()
@@ -392,7 +397,6 @@ final class ZTLPTunnelConnection {
 
         // Step 3: Send via NWConnection
         let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
-        guard sendsInFlight < Self.maxSendsInFlight else { return false }
         sendsInFlight += 1
         conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
             guard let self = self else { return }
@@ -417,12 +421,24 @@ final class ZTLPTunnelConnection {
     }
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
+    var isOverloaded: Bool {
+        sendsInFlight >= (Self.maxSendsInFlight - 32)
+    }
+
+    private func maybeLogOverload(context: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastOverloadLogAt) >= 1.0 else { return }
+        lastOverloadLogAt = now
+        logger.warn("ZTLP send overload in \(context): sendsInFlight=\(sendsInFlight)/\(Self.maxSendsInFlight)", source: "Tunnel")
+    }
+
     func flushPendingAcks() {
         guard let cryptoContext else { return }
         guard isActive, let conn = connection, !pendingAcks.isEmpty else { return }
         guard sendsInFlight < Self.maxSendsInFlight else {
             // Do NOT drop pending ACKs under backpressure — keep them queued and
             // retry on the next flush. Dropping ACKs causes gateway-side stalls.
+            maybeLogOverload(context: "flushPendingAcks")
             return
         }
 

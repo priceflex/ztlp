@@ -468,6 +468,11 @@ defmodule ZtlpGateway.Session do
   # when the backend dumps a large response faster than the tunnel can deliver.
   @queue_high 256
   @queue_low 64
+  # Hard safety limits for mux fan-out during browser-style workloads.
+  # @max_mux_streams bounds the total concurrent connected + connecting streams.
+  # @max_connecting_buffer_bytes bounds early data accepted before a backend finishes connecting.
+  @max_mux_streams 32
+  @max_connecting_buffer_bytes 65_536
   # Session stall detection. If ACK sequence hasn't advanced for this long
   # while data is in flight, the session is a zombie (phone dropped off,
   # path died, etc). Tear it down so the phone reconnects with a fresh session.
@@ -1106,7 +1111,13 @@ defmodule ZtlpGateway.Session do
         # Link the backend to this session (it was unlinked from the spawner)
         Process.link(pid)
 
-        Logger.info("[Session] Stream #{stream_id} connected, flushing #{length(stream.buffer)} buffered chunks")
+        buffered_chunks = length(stream.buffer)
+        buffered_bytes = stream[:connect_buffer_bytes] || connecting_buffer_bytes(stream)
+        Logger.info("[Session] Stream #{stream_id} connected, buffered_chunks=#{buffered_chunks} buffered_bytes=#{buffered_bytes}")
+
+        if state.backends_paused do
+          Backend.pause_read(pid)
+        end
 
         # Flush buffered data to the backend (buffer is prepend-order, reverse for FIFO)
         flush_stream_buffer(stream, pid)
@@ -1115,6 +1126,7 @@ defmodule ZtlpGateway.Session do
           state: :connected,
           backend_pid: pid,
           buffer: [],
+          connect_buffer_bytes: 0,
           connect_timeout_ref: nil
         }
         streams = Map.put(state.streams, stream_id, updated)
@@ -1641,11 +1653,23 @@ defmodule ZtlpGateway.Session do
               end
 
             %{state: :connecting, buffer: buffer} = stream ->
-              # Stream is still connecting — buffer data for flush on connect
+              # Stream is still connecting — buffer data for flush on connect,
+              # but protect gateway memory with a strict per-stream cap.
               if byte_size(payload) > 0 do
-                Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect")
-                updated = %{stream | buffer: [payload | buffer]}
-                %{state | streams: Map.put(state.streams, stream_id, updated)}
+                current_bytes = stream[:connect_buffer_bytes] || connecting_buffer_bytes(stream)
+                new_bytes = current_bytes + byte_size(payload)
+
+                if new_bytes > @max_connecting_buffer_bytes do
+                  Logger.warning("[Session] Stream #{stream_id} exceeded connecting buffer cap (#{new_bytes} > #{@max_connecting_buffer_bytes}), closing stream")
+                  send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+                  streams = Map.delete(state.streams, stream_id)
+                  state = %{state | send_queue: send_queue, streams: streams}
+                  flush_send_queue(state)
+                else
+                  Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect (total=#{new_bytes})")
+                  updated = %{stream | buffer: [payload | buffer], connect_buffer_bytes: new_bytes}
+                  %{state | streams: Map.put(state.streams, stream_id, updated)}
+                end
               else
                 state
               end
@@ -1963,54 +1987,83 @@ defmodule ZtlpGateway.Session do
 
   # ── Mux stream opener (extracted to avoid splitting handle_tunnel_frame clauses) ──
 
+  defp reject_mux_stream(stream_id, reason, state) do
+    Logger.warning("[Session] Rejecting mux stream #{stream_id}: #{reason}")
+    send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
+    state = %{state | send_queue: send_queue}
+    state = flush_send_queue(state)
+    {:noreply, state}
+  end
+
+  defp connecting_buffer_bytes(stream) do
+    stream.buffer
+    |> Enum.reduce(0, fn chunk, acc -> acc + byte_size(chunk) end)
+  end
+
   defp open_mux_stream(stream_id, service_name, state) do
     # Once we see a FRAME_OPEN, this session is permanently in mux mode.
     # This prevents a race where all streams close temporarily and the next
     # FRAME_DATA gets misinterpreted as legacy format.
     state = %{state | mux_mode: true}
     backends = Config.get(:backends)
+    queue_len = :queue.len(state.send_queue)
+    total_streams = map_size(state.streams)
 
-    case find_backend(backends, service_name) do
-      {:ok, %{host: host, port: port}} ->
-        # Check if we should do TLS termination for this stream.
-        # When a cert is provisioned for this service, gateway terminates
-        # TLS and forwards plain HTTP to the backend.
-        tls_creds = case CertProvisioner.lookup(service_name) do
-          {:ok, creds} -> creds
-          :error -> nil
-        end
-
-        # Async backend connection: spawn a process to connect without
-        # blocking the session GenServer. Data arriving for this stream
-        # during connection is buffered and flushed on success.
-        # Uses the BackendPool for connection reuse across mux streams.
-        session_pid = self()
-        spawn(fn ->
-          result = BackendPool.checkout(host, port, session_pid, stream_id)
-          send(session_pid, {:backend_connect_result, stream_id, result})
-        end)
-
-        # 10-second connect timeout prevents hanging streams
-        timeout_ref = Process.send_after(self(), {:connect_timeout, stream_id}, 10_000)
-
-        stream_state = %{
-          state: :connecting,
-          backend_pid: nil,
-          buffer: [],
-          connect_timeout_ref: timeout_ref,
-          tls_state: if(tls_creds, do: :pending_handshake, else: nil),
-          tls_creds: tls_creds,
-          tls_socket: nil,
-          tls_bridge_pid: nil,
-          service: service_name
-        }
-        streams = Map.put(state.streams, stream_id, stream_state)
-        Logger.info("[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}")
-        {:noreply, %{state | streams: streams}}
-
-      :error ->
-        Logger.warning("[Session] No backend for service #{service_name}")
+    cond do
+      Map.has_key?(state.streams, stream_id) ->
+        Logger.warning("[Session] Duplicate FRAME_OPEN for existing stream #{stream_id}, ignoring")
         {:noreply, state}
+
+      total_streams >= @max_mux_streams ->
+        reject_mux_stream(stream_id, "max mux streams reached (#{total_streams}/#{@max_mux_streams})", state)
+
+      queue_len >= @queue_high ->
+        reject_mux_stream(stream_id, "send_queue already overloaded (queue=#{queue_len}, high=#{@queue_high})", state)
+
+      true ->
+        case find_backend(backends, service_name) do
+          {:ok, %{host: host, port: port}} ->
+            # Check if we should do TLS termination for this stream.
+            # When a cert is provisioned for this service, gateway terminates
+            # TLS and forwards plain HTTP to the backend.
+            tls_creds = case CertProvisioner.lookup(service_name) do
+              {:ok, creds} -> creds
+              :error -> nil
+            end
+
+            # Async backend connection: spawn a process to connect without
+            # blocking the session GenServer. Data arriving for this stream
+            # during connection is buffered and flushed on success.
+            # Uses the BackendPool for connection reuse across mux streams.
+            session_pid = self()
+            spawn(fn ->
+              result = BackendPool.checkout(host, port, session_pid, stream_id)
+              send(session_pid, {:backend_connect_result, stream_id, result})
+            end)
+
+            # 10-second connect timeout prevents hanging streams
+            timeout_ref = Process.send_after(self(), {:connect_timeout, stream_id}, 10_000)
+
+            stream_state = %{
+              state: :connecting,
+              backend_pid: nil,
+              buffer: [],
+              connect_buffer_bytes: 0,
+              connect_timeout_ref: timeout_ref,
+              tls_state: if(tls_creds, do: :pending_handshake, else: nil),
+              tls_creds: tls_creds,
+              tls_socket: nil,
+              tls_bridge_pid: nil,
+              service: service_name
+            }
+            streams = Map.put(state.streams, stream_id, stream_state)
+            Logger.info("[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}, queue=#{queue_len}")
+            {:noreply, %{state | streams: streams}}
+
+          :error ->
+            Logger.warning("[Session] No backend for service #{service_name}")
+            {:noreply, state}
+        end
     end
   end
 

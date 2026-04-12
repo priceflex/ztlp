@@ -133,6 +133,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let MUX_FRAME_OPEN: UInt8 = 0x06
     private static let MUX_FRAME_CLOSE: UInt8 = 0x05
     private static let MAX_MUX_PAYLOAD: Int = 1135  // 1140 - 5 byte mux header
+    private static let maxRouterActionsPerCycle: Int = 64
+    private static let maxPacketsPerReadCycle: Int = 32
+    private static let maxOutboundPacketsPerFlush: Int = 64
+    private static let memorySoftLimitMB: Double = 12.0
 
     /// Packet read buffer (reusable, MTU-sized).
     private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
@@ -151,6 +155,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private var isDataActive: Bool {
         return Date().timeIntervalSince(lastDataActivity) < Self.activityGracePeriod
+    }
+
+    private func currentResidentMemoryMB() -> Double? {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+
+        guard result == KERN_SUCCESS else { return nil }
+        return Double(info.resident_size) / 1_048_576.0
+    }
+
+    private func shouldThrottleRouterWork() -> Bool {
+        if let residentMB = currentResidentMemoryMB(), residentMB >= Self.memorySoftLimitMB {
+            logger.warn(
+                "Router throttle: resident=\(String(format: "%.1f", residentMB))MB exceeds soft limit \(Self.memorySoftLimitMB)MB",
+                source: "Tunnel"
+            )
+            return true
+        }
+
+        if let tunnelConnection, tunnelConnection.isOverloaded {
+            logger.debug("Router throttle: tunnelConnection overloaded, yielding read loop", source: "Tunnel")
+            return true
+        }
+
+        return false
     }
 
     // MARK: - NEPacketTunnelProvider Overrides
@@ -590,7 +624,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if !packets.isEmpty {
                 self.logger.debug("readPacketLoop: received \(packets.count) packet(s), sizes=\(packets.map { $0.count })", source: "Tunnel")
             }
+
+            var packetsProcessed = 0
+            let packetLimit = Self.maxPacketsPerReadCycle
             for (i, packet) in packets.enumerated() {
+                if packetsProcessed >= packetLimit {
+                    self.logger.debug("readPacketLoop: packet limit \(packetLimit) reached, yielding", source: "Tunnel")
+                    break
+                }
+                if self.shouldThrottleRouterWork() {
+                    self.logger.debug("readPacketLoop: throttling router work to give inbound UDP/ACK handling room", source: "Tunnel")
+                    break
+                }
+
                 let proto = protocols[i]
                 if proto.intValue == AF_INET {
                     // Intercept DNS queries for *.ztlp before they hit the router
@@ -600,6 +646,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                             // Write DNS response directly back to utun
                             self.packetFlow.writePackets([response], withProtocols: [NSNumber(value: AF_INET)])
                             self.logger.debug("DNS response sent (\(response.count) bytes)", source: "DNS")
+                            packetsProcessed += 1
                             continue
                         } else {
                             self.logger.warn("DNS query matched but no response generated", source: "DNS")
@@ -635,9 +682,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                         self.logger.debug("Router: \(actionCount) action(s), \(actionWritten) bytes", source: "Router")
                         self.processRouterActions(
                             actionBuffer: self.actionBuffer,
-                            actionLen: actionWritten
+                            actionLen: actionWritten,
+                            maxActions: Self.maxRouterActionsPerCycle
                         )
                     }
+
+                    packetsProcessed += 1
                 }
             }
 
@@ -645,11 +695,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.markDataActivity()
             }
 
-            // Flush outbound response packets immediately
-            self.flushOutboundPackets()
+            // Flush outbound response packets immediately, but in bounded batches.
+            self.flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
 
-            // Continue reading
-            self.readPacketLoop()
+            // Continue reading. Yield a tick when overloaded so the runloop can service
+            // inbound NWConnection data and emit ACKs back to the gateway.
+            if self.shouldThrottleRouterWork() {
+                self.tunnelQueue.asyncAfter(deadline: .now() + .milliseconds(1)) {
+                    self.readPacketLoop()
+                }
+            } else {
+                self.readPacketLoop()
+            }
         }
     }
 
@@ -664,9 +721,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ///
     /// tunnelConnection.sendData() then wraps those mux payloads in the outer
     /// encrypted FRAME_DATA transport envelope.
-    private func processRouterActions(actionBuffer: [UInt8], actionLen: Int) {
+    private func processRouterActions(actionBuffer: [UInt8], actionLen: Int, maxActions: Int = Int.max) {
         var offset = 0
+        var actionsProcessed = 0
         while offset < actionLen {
+            if actionsProcessed >= maxActions {
+                logger.debug("Router: reached action budget \(maxActions), deferring remaining work", source: "Router")
+                break
+            }
+            if shouldThrottleRouterWork() {
+                logger.debug("Router: throttling action processing to protect ACK handling", source: "Router")
+                break
+            }
             guard offset + 7 <= actionLen else { break }  // min: 1+4+2 = 7 bytes
 
             let actionType = actionBuffer[offset]
@@ -686,6 +752,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             let actionData: Data? = dataLen > 0 ? Data(actionBuffer[offset..<(offset+dataLen)]) : nil
             offset += dataLen
+            actionsProcessed += 1
 
             switch actionType {
             case 0: // OpenStream
@@ -699,7 +766,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxOpen.append(UInt8(serviceData.count))
                 muxOpen.append(serviceData)
                 logger.debug("Router: OpenStream stream=\(streamId) service=\(String(data: serviceData, encoding: .utf8) ?? "?")", source: "Router")
-                _ = tunnelConnection?.sendData(muxOpen)
+                if tunnelConnection?.sendData(muxOpen) != true {
+                    logger.warn("Router: OpenStream backpressured for stream \(streamId)", source: "Router")
+                    return
+                }
 
             case 1: // SendData
                 guard let payload = actionData else { continue }
@@ -708,14 +778,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxData.append(contentsOf: beStreamIdBytes(streamId))
                 muxData.append(payload)
                 logger.debug("Router: SendData stream=\(streamId) bytes=\(payload.count)", source: "Router")
-                _ = tunnelConnection?.sendData(muxData)
+                if tunnelConnection?.sendData(muxData) != true {
+                    logger.warn("Router: SendData backpressured for stream \(streamId) bytes=\(payload.count)", source: "Router")
+                    return
+                }
 
             case 2: // CloseStream
                 var muxClose = Data(capacity: 5)
                 muxClose.append(Self.MUX_FRAME_CLOSE)
                 muxClose.append(contentsOf: beStreamIdBytes(streamId))
                 logger.debug("Router: CloseStream stream=\(streamId)", source: "Router")
-                _ = tunnelConnection?.sendData(muxClose)
+                if tunnelConnection?.sendData(muxClose) != true {
+                    logger.warn("Router: CloseStream backpressured for stream \(streamId)", source: "Router")
+                    return
+                }
 
             default:
                 logger.warn("Unknown router action type: \(actionType)", source: "Tunnel")
@@ -766,14 +842,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Write response packets from the router back to the utun interface.
-    private func flushOutboundPackets() {
+    private func flushOutboundPackets(maxPackets: Int = Int.max) {
         guard let router = packetRouter else { return }
 
         var packets: [Data] = []
         var protocols: [NSNumber] = []
+        var drained = 0
 
-        // Drain all available outbound packets
-        while true {
+        // Drain available outbound packets in bounded batches so the runloop can
+        // get back to inbound UDP processing and ACK generation.
+        while drained < maxPackets {
             let bytesRead = ztlp_router_read_packet_sync(
                 router,
                 &readPacketBuffer,
@@ -783,6 +861,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             packets.append(Data(readPacketBuffer[0..<Int(bytesRead)]))
             protocols.append(NSNumber(value: AF_INET))
+            drained += 1
+
+            if shouldThrottleRouterWork() {
+                logger.debug("flushOutboundPackets: throttling after \(drained) packet(s)", source: "Tunnel")
+                break
+            }
         }
 
         if !packets.isEmpty {

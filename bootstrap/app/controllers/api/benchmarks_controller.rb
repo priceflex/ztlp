@@ -9,7 +9,7 @@ module Api
       # Try to find the device by node_id or device_id
       device = find_device(params[:node_id] || params[:device_id])
 
-      benchmark = Benchmark.new(
+      benchmark = BenchmarkResult.new(
         ztlp_device: device,
         network: @api_network,
         device_id: params[:device_id],
@@ -58,7 +58,7 @@ module Api
 
     # GET /api/benchmarks
     def index
-      scope = @api_network.benchmarks.includes(:ztlp_device)
+      scope = @api_network.benchmark_results.includes(:ztlp_device)
       scope = scope.recent.limit(params[:limit] || 50)
       render json: scope.as_json(include: { ztlp_device: { only: %i[node_id name] } })
     end
@@ -69,7 +69,18 @@ module Api
       token = request.headers["Authorization"]&.gsub(/^Bearer\s+/i, "")
       return render json: { error: "Unauthorized" }, status: :unauthorized if token.blank?
 
-      @api_network = Network.all.find { |n| n.enrollment_secret_ciphertext == token }
+      @api_network = Network.all.find do |n|
+        # Try decrypted value (for encrypted data)
+        secret = begin
+          ActiveRecord::Encryption.encryptor.decrypt(
+            n[:enrollment_secret_ciphertext],
+            message_serializer: ActiveRecord::Encryption::MessageSerializer
+          )
+        rescue
+          n[:enrollment_secret_ciphertext]
+        end
+        secret.nil? ? false : secret.strip == token.strip
+      end
       return render json: { error: "Unauthorized" }, status: :unauthorized unless @api_network
     end
 

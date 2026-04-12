@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
-class Benchmark < ApplicationRecord
-  belongs_to :ztlp_device, optional: true
+class BenchmarkResult < ApplicationRecord
+  self.table_name = "benchmarks"
+  belongs_to :ztlp_device, optional: true, class_name: "ZtlpDevice"
   belongs_to :network
 
   validates :app_version, presence: true

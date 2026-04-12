@@ -46,15 +46,14 @@ class BenchmarkReporter {
     private let apiToken: String?
 
     init(bootstrapURL: URL? = nil, apiToken: String? = nil) {
-        // Default to the bootstrap server configured in your network
-        self.bootstrapURL = bootstrapURL?.absoluteString ?? "http://10.69.95.12:3000"
-        self.apiToken = apiToken
+        self.bootstrapURL = bootstrapURL?.absoluteString ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url") ?? bootstrapDefaults.url
+        self.apiToken= apiToken ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") ?? bootstrapDefaults.enrollmentSecret
     }
 
     /// Send a benchmark report to the bootstrap server.
     /// Call this after the benchmark suite finishes.
     func submit(_ report: BenchmarkReport, completion: @escaping (Result<Void, Error>) -> Void) {
-        guard let authToken = apiToken else {
+        guard let authToken= apiToken, !authToken.isEmpty else {
             completion(.failure(ReporterError.noAuthToken))
             return
         }

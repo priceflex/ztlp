@@ -19,6 +19,14 @@ class Network < ApplicationRecord
   encrypts :enrollment_secret_ciphertext
   encrypts :zone_key_ciphertext
 
+  has_many :benchmark_results, class_name: "BenchmarkResult", dependent: :destroy
+
+  def enrollment_secret
+    # The column is named enrollment_secret_ciphertext but encrypts makes it
+    # auto-decrypt on read. We alias for clarity.
+    enrollment_secret_ciphertext
+  end
+
   validates :name, presence: true, uniqueness: true
   validates :zone, presence: true, uniqueness: true,
     format: { with: /\A[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?\z/, message: "must be a valid ZTLP zone name" }

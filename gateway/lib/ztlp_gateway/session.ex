@@ -1628,28 +1628,37 @@ defmodule ZtlpGateway.Session do
       <<data_seq::big-64, payload::binary>> = rest
       Logger.debug("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
 
-      # Reconnect backend if it was closed (e.g. idle timeout from vaultwarden)
-      state =
-        if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
-          Logger.debug("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
-          case Backend.start_link(state.backend_addr) do
-            {:ok, pid} ->
-              Logger.debug("[Session] Legacy backend reconnected: #{inspect(pid)}")
-              %{state | backend_pid: pid}
-            {:error, reason} ->
-              Logger.warning("[Session] Legacy backend reconnect failed: #{inspect(reason)}")
-              state
+      # Relay-side VIP on iOS wraps mux OPEN/DATA/CLOSE frames inside the outer
+      # transport FRAME_DATA envelope. When the session starts in legacy mode,
+      # detect those inner mux payloads here and dispatch them through the mux
+      # handlers instead of forwarding the raw control bytes to the backend.
+      if byte_size(payload) > 0 and mux_payload?(payload) do
+        Logger.info("[Session] Detected inner mux payload while in legacy mode; dispatching as mux frame")
+        handle_inner_mux_payload(payload, state)
+      else
+        # Reconnect backend if it was closed (e.g. idle timeout from vaultwarden)
+        state =
+          if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
+            Logger.debug("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
+            case Backend.start_link(state.backend_addr) do
+              {:ok, pid} ->
+                Logger.debug("[Session] Legacy backend reconnected: #{inspect(pid)}")
+                %{state | backend_pid: pid}
+              {:error, reason} ->
+                Logger.warning("[Session] Legacy backend reconnect failed: #{inspect(reason)}")
+                state
+            end
+          else
+            state
           end
-        else
-          state
-        end
 
-      if state.backend_pid && byte_size(payload) > 0 do
-        Logger.debug("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
-        Backend.send_data(state.backend_pid, payload)
+        if state.backend_pid && byte_size(payload) > 0 do
+          Logger.debug("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+          Backend.send_data(state.backend_pid, payload)
+        end
+        # ACK is sent by deliver_recv_window after in-order delivery
+        {:noreply, state}
       end
-      # ACK is sent by deliver_recv_window after in-order delivery
-      {:noreply, state}
     end
   end
 
@@ -1823,6 +1832,21 @@ defmodule ZtlpGateway.Session do
       :error ->
         terminate_session(state, :no_backend)
     end
+  end
+
+  defp mux_payload?(<<type, _rest::binary>>) when type in [@frame_open, @frame_close] do
+    true
+  end
+
+  defp mux_payload?(<<@frame_data, stream_id::big-32, _payload::binary>>) when stream_id > 0 do
+    true
+  end
+
+  defp mux_payload?(_), do: false
+
+  defp handle_inner_mux_payload(payload, state) do
+    state = %{state | mux_mode: true}
+    handle_tunnel_frame(payload, state)
   end
 
   # FRAME_OPEN with service name: [0x06 | stream_id(4) | svc_len(1) | svc_name]

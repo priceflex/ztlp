@@ -1582,59 +1582,81 @@ defmodule ZtlpGateway.Session do
   # this flag, the FRAME_DATA gets misinterpreted as legacy format.
   defp handle_tunnel_frame(<<@frame_data, rest::binary>>, state) do
     if state.mux_mode do
-      # Multiplexed mode: [stream_id(4) | payload]
-      <<stream_id::big-32, payload::binary>> = rest
-      state =
-        case Map.get(state.streams, stream_id) do
-          %{tls_state: :active, tls_socket: tls_sock} when tls_sock != nil ->
-            # TLS-terminated stream: write encrypted data to local TLS bridge socket
-            if byte_size(payload) > 0 do
-              :gen_tcp.send(tls_sock, payload)
-            end
-            state
+      # Support BOTH inbound client formats:
+      #   1. True mux outer frame:   [stream_id(4) | payload]
+      #   2. Legacy outer frame:     [data_seq(8) | inner_mux_payload]
+      # iOS relay-side VIP currently uses (2): ztlp_frame_data wraps the inner
+      # mux OPEN/DATA/CLOSE payload in the legacy transport envelope. Once
+      # mux_mode flips true after FRAME_OPEN, keep accepting that legacy outer
+      # framing or later packets get misparsed as stream_id=0.
+      <<candidate::big-32, _::binary>> = rest
 
-          %{tls_state: :pending_handshake, tls_creds: creds} = stream ->
-            # First data on a TLS stream — start the TLS bridge and write the ClientHello
-            case TlsTerminator.start_bridge(
-              creds.cert_pem, creds.key_pem, creds.chain_pem,
-              self(), stream_id
-            ) do
-              {:ok, client_socket, bridge_pid} ->
-                if byte_size(payload) > 0 do
-                  :gen_tcp.send(client_socket, payload)
-                end
-                updated = %{stream | tls_state: :active, tls_socket: client_socket, tls_bridge_pid: bridge_pid}
-                %{state | streams: Map.put(state.streams, stream_id, updated)}
+      if candidate == 0 and byte_size(rest) >= 8 do
+        <<data_seq::big-64, payload::binary>> = rest
+        Logger.debug("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)} mux_mode_legacy_outer=true")
 
-              {:error, reason} ->
-                Logger.warning("[Session] TLS bridge failed for stream #{stream_id}: #{inspect(reason)}")
-                state
-            end
-
-          %{state: :connecting, buffer: buffer} = stream ->
-            # Stream is still connecting — buffer data for flush on connect
-            if byte_size(payload) > 0 do
-              Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect")
-              updated = %{stream | buffer: [payload | buffer]}
-              %{state | streams: Map.put(state.streams, stream_id, updated)}
-            else
-              state
-            end
-
-          %{backend_pid: pid} when pid != nil ->
-            # Plain stream: forward directly to backend
-            if byte_size(payload) > 0 do
-              Logger.debug("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
-              Backend.send_data(pid, payload)
-            end
-            state
-
-          _ ->
-            Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
-            state
+        if byte_size(payload) > 0 and mux_payload?(payload) do
+          Logger.info("[Session] Detected inner mux payload while in mux mode with legacy outer framing; dispatching as mux frame")
+          handle_inner_mux_payload(payload, state)
+        else
+          Logger.warning("[Session] Legacy-outer FRAME_DATA in mux mode without inner mux payload, dropping #{byte_size(payload)} bytes")
+          {:noreply, state}
         end
-      # ACK is sent by deliver_recv_window after in-order delivery
-      {:noreply, state}
+      else
+        # True mux outer frame: [stream_id(4) | payload]
+        <<stream_id::big-32, payload::binary>> = rest
+        state =
+          case Map.get(state.streams, stream_id) do
+            %{tls_state: :active, tls_socket: tls_sock} when tls_sock != nil ->
+              # TLS-terminated stream: write encrypted data to local TLS bridge socket
+              if byte_size(payload) > 0 do
+                :gen_tcp.send(tls_sock, payload)
+              end
+              state
+
+            %{tls_state: :pending_handshake, tls_creds: creds} = stream ->
+              # First data on a TLS stream — start the TLS bridge and write the ClientHello
+              case TlsTerminator.start_bridge(
+                creds.cert_pem, creds.key_pem, creds.chain_pem,
+                self(), stream_id
+              ) do
+                {:ok, client_socket, bridge_pid} ->
+                  if byte_size(payload) > 0 do
+                    :gen_tcp.send(client_socket, payload)
+                  end
+                  updated = %{stream | tls_state: :active, tls_socket: client_socket, tls_bridge_pid: bridge_pid}
+                  %{state | streams: Map.put(state.streams, stream_id, updated)}
+
+                {:error, reason} ->
+                  Logger.warning("[Session] TLS bridge failed for stream #{stream_id}: #{inspect(reason)}")
+                  state
+              end
+
+            %{state: :connecting, buffer: buffer} = stream ->
+              # Stream is still connecting — buffer data for flush on connect
+              if byte_size(payload) > 0 do
+                Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect")
+                updated = %{stream | buffer: [payload | buffer]}
+                %{state | streams: Map.put(state.streams, stream_id, updated)}
+              else
+                state
+              end
+
+            %{backend_pid: pid} when pid != nil ->
+              # Plain stream: forward directly to backend
+              if byte_size(payload) > 0 do
+                Logger.debug("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+                Backend.send_data(pid, payload)
+              end
+              state
+
+            _ ->
+              Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
+              state
+          end
+        # ACK is sent by deliver_recv_window after in-order delivery
+        {:noreply, state}
+      end
     else
       # Legacy single-stream mode: [data_seq(8) | payload]
       <<data_seq::big-64, payload::binary>> = rest

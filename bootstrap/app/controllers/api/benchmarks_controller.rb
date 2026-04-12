@@ -31,7 +31,7 @@ module Api
         throughput_kbps: params[:throughput_kbps],
         p99_latency_ms: params[:p99_latency_ms],
         packet_loss_pct: params[:packet_loss_pct],
-        errors: params[:errors],
+        error_details: params[:errors],
         device_logs: params[:device_logs]
       )
 

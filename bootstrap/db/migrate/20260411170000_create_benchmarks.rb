@@ -24,7 +24,7 @@ class CreateBenchmarks < ActiveRecord::Migration[7.1]
       t.integer :throughput_kbps
       t.integer :p99_latency_ms
       t.integer :packet_loss_pct
-      t.text :errors
+      t.text :error_details
       t.timestamps
     end
 

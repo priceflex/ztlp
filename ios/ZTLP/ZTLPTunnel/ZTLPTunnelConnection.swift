@@ -14,7 +14,6 @@
 
 import Foundation
 import Network
-import os.log
 
 // MARK: - Frame Type Constants
 
@@ -44,6 +43,8 @@ protocol ZTLPTunnelConnectionDelegate: AnyObject {
 /// Manages the NWConnection (UDP) to the ZTLP gateway and handles
 /// encrypt/decrypt via sync FFI calls. No tokio runtime needed.
 final class ZTLPTunnelConnection {
+
+    private let logger = TunnelLogger.shared
 
     // MARK: - Properties
 
@@ -291,9 +292,9 @@ final class ZTLPTunnelConnection {
             guard let self = self else { return }
             self.sendsInFlight -= 1
             if let error = error {
-                os_log("ZTLP ACK send failed: %{public}@", type: .error, String(describing: error))
+                self.logger.error("ZTLP ACK send failed: \(error)", source: "Tunnel")
             } else {
-                os_log("ZTLP ACK sent seq=%{public}llu bytes=%{public}d inflight=%{public}d", type: .debug, maxSeq, encryptWritten, self.sendsInFlight)
+                self.logger.debug("ZTLP ACK sent seq=\(maxSeq) bytes=\(encryptWritten) inflight=\(self.sendsInFlight)", source: "Tunnel")
             }
         })
     }
@@ -410,7 +411,7 @@ final class ZTLPTunnelConnection {
         }
 
         guard decryptResult == 0, decryptWritten > 0 else {
-            os_log("ZTLP decrypt failed rc=%{public}d wire=%{public}d", type: .error, decryptResult, wireData.count)
+            logger.error("ZTLP decrypt failed rc=\(decryptResult) wire=\(wireData.count)", source: "Tunnel")
             return
         }
 
@@ -527,7 +528,7 @@ final class ZTLPTunnelConnection {
         recordSequence(sequence)
 
         // Send ACK immediately
-        os_log("ZTLP RX data seq=%{public}llu payload=%{public}d dup=%{public}@", type: .debug, sequence, payload?.count ?? 0, seenSequences.contains(sequence) ? "true" : "false")
+        logger.debug("ZTLP RX data seq=\(sequence) payload=\(payload?.count ?? 0)", source: "Tunnel")
         queueAck(for: sequence)
 
         // Deliver payload to delegate

@@ -3775,6 +3775,290 @@ pub struct ZtlpCryptoContext {
     peer_addr_str: CString,
 }
 
+/// Opaque initiator-side handshake state for sync FFI callers that want to
+/// drive transport I/O themselves (for example, iOS NWConnection so handshake
+/// and data share the same UDP source port).
+pub struct ZtlpHandshakeState {
+    ctx: HandshakeContext,
+    session_id: SessionId,
+    send_addr: SocketAddr,
+    peer_node_id: Option<NodeId>,
+}
+
+fn write_bytes_to_out_buf(bytes: &[u8], out_buf: *mut u8, out_buf_len: usize, out_written: *mut usize) -> Result<(), String> {
+    if out_buf.is_null() || out_written.is_null() {
+        return Err("null output buffer".to_string());
+    }
+    if out_buf_len < bytes.len() {
+        return Err(format!("output buffer too small: need {} got {}", bytes.len(), out_buf_len));
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        *out_written = bytes.len();
+    }
+    Ok(())
+}
+
+fn build_sync_crypto_context(
+    session_state: crate::session::SessionState,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+) -> ZtlpCryptoContext {
+    let send_seq = Arc::new(AtomicU64::new(0));
+    let recv_window = crate::session::ReplayWindow::new(
+        crate::session::DEFAULT_REPLAY_WINDOW,
+    );
+    let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
+    let peer_addr_str = CString::new(peer_addr.to_string()).unwrap_or_default();
+
+    ZtlpCryptoContext {
+        send_key: session_state.send_key,
+        recv_key: session_state.recv_key,
+        send_seq,
+        recv_window,
+        session_id,
+        peer_addr,
+        session_id_str,
+        peer_addr_str,
+    }
+}
+
+// ── Sync crypto context lifecycle ──────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn ztlp_handshake_start(
+    identity: *mut ZtlpIdentity,
+    config: *mut ZtlpConfig,
+    target: *const c_char,
+    out_msg1: *mut u8,
+    out_msg1_len: usize,
+    out_msg1_written: *mut usize,
+) -> *mut ZtlpHandshakeState {
+    if identity.is_null() || target.is_null() {
+        set_last_error("identity or target is null");
+        return std::ptr::null_mut();
+    }
+
+    let identity = unsafe { &*identity };
+    let target_str = unsafe { CStr::from_ptr(target) };
+    let target_str = match target_str.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(&format!("invalid UTF-8 in target: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let node_identity = match identity.provider.as_node_identity() {
+        Some(id) => id,
+        None => {
+            set_last_error("identity provider has no node identity");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let target_addr: SocketAddr = match target_str.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            set_last_error(&format!("invalid target address '{}': {}", target_str, e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let service_name: Option<&str> = unsafe { config.as_ref() }.and_then(|cfg| cfg.service_name.as_deref());
+    let relay_address: Option<&str> = unsafe { config.as_ref() }.and_then(|cfg| cfg.relay_address.as_deref());
+    let send_addr: SocketAddr = if let Some(relay) = relay_address {
+        match relay.parse() {
+            Ok(addr) => addr,
+            Err(e) => {
+                set_last_error(&format!("invalid relay address '{}': {}", relay, e));
+                return std::ptr::null_mut();
+            }
+        }
+    } else {
+        target_addr
+    };
+
+    let mut ctx = match HandshakeContext::new_initiator(node_identity) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            set_last_error(&format!("handshake init: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+    let session_id = SessionId::generate();
+
+    let msg1 = match ctx.write_message(&[]) {
+        Ok(msg) => msg,
+        Err(e) => {
+            set_last_error(&format!("handshake msg1: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let mut hello_hdr = crate::packet::HandshakeHeader::new(crate::packet::MsgType::Hello);
+    hello_hdr.session_id = session_id;
+    hello_hdr.src_node_id = *node_identity.node_id.as_bytes();
+    hello_hdr.payload_len = msg1.len() as u16;
+    if let Some(svc) = service_name {
+        hello_hdr.dst_svc_id = match encode_service_name(svc) {
+            Ok(svc_id) => svc_id,
+            Err(e) => {
+                set_last_error(&format!("bad service name: {}", e));
+                return std::ptr::null_mut();
+            }
+        };
+    }
+
+    let mut pkt1 = hello_hdr.serialize();
+    pkt1.extend_from_slice(&msg1);
+
+    if let Err(e) = write_bytes_to_out_buf(&pkt1, out_msg1, out_msg1_len, out_msg1_written) {
+        set_last_error(&e);
+        return std::ptr::null_mut();
+    }
+
+    Box::into_raw(Box::new(ZtlpHandshakeState {
+        ctx,
+        session_id,
+        send_addr,
+        peer_node_id: None,
+    }))
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_handshake_process_msg2(
+    state: *mut ZtlpHandshakeState,
+    msg2_data: *const u8,
+    msg2_len: usize,
+    out_msg3: *mut u8,
+    out_msg3_len: usize,
+    out_msg3_written: *mut usize,
+) -> i32 {
+    if state.is_null() || msg2_data.is_null() {
+        set_last_error("state or msg2_data is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let state = unsafe { &mut *state };
+    let msg2 = unsafe { std::slice::from_raw_parts(msg2_data, msg2_len) };
+    if msg2.len() < crate::packet::HANDSHAKE_HEADER_SIZE {
+        set_last_error("msg2 too short for handshake header");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let header = match crate::packet::HandshakeHeader::deserialize(msg2) {
+        Ok(hdr) => hdr,
+        Err(e) => {
+            set_last_error(&format!("msg2 header parse: {}", e));
+            return ZtlpResult::ConnectionError as i32;
+        }
+    };
+
+    if header.msg_type != crate::packet::MsgType::HelloAck {
+        set_last_error(&format!("expected HELLO_ACK, got {:?}", header.msg_type));
+        return ZtlpResult::ConnectionError as i32;
+    }
+    if header.session_id != state.session_id {
+        set_last_error("HELLO_ACK session_id mismatch");
+        return ZtlpResult::ConnectionError as i32;
+    }
+
+    let noise_payload2 = &msg2[crate::packet::HANDSHAKE_HEADER_SIZE..];
+    if let Err(e) = state.ctx.read_message(noise_payload2) {
+        set_last_error(&format!("handshake msg2: {}", e));
+        return ZtlpResult::ConnectionError as i32;
+    }
+
+    let profile_cbor = SYNC_CLIENT_PROFILE
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .map(|p| p.to_cbor())
+        .unwrap_or_default();
+    let msg3 = match state.ctx.write_message(&profile_cbor) {
+        Ok(msg) => msg,
+        Err(e) => {
+            set_last_error(&format!("handshake msg3: {}", e));
+            return ZtlpResult::ConnectionError as i32;
+        }
+    };
+
+    let mut final_hdr = crate::packet::HandshakeHeader::new(crate::packet::MsgType::Data);
+    final_hdr.session_id = state.session_id;
+    final_hdr.src_node_id = *state.ctx.identity.node_id.as_bytes();
+    final_hdr.payload_len = msg3.len() as u16;
+
+    let mut pkt3 = final_hdr.serialize();
+    pkt3.extend_from_slice(&msg3);
+
+    if let Err(e) = write_bytes_to_out_buf(&pkt3, out_msg3, out_msg3_len, out_msg3_written) {
+        set_last_error(&e);
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    state.peer_node_id = Some(NodeId::from_bytes(header.src_node_id));
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_handshake_finalize(
+    state: *mut ZtlpHandshakeState,
+    extra_data: *const u8,
+    extra_len: usize,
+) -> *mut ZtlpCryptoContext {
+    if state.is_null() {
+        set_last_error("state is null");
+        return std::ptr::null_mut();
+    }
+
+    let state = unsafe { Box::from_raw(state) };
+
+    if !extra_data.is_null() && extra_len > 0 {
+        let extra = unsafe { std::slice::from_raw_parts(extra_data, extra_len) };
+        if crate::reject::RejectFrame::is_reject(extra) {
+            if let Some(reject) = crate::reject::RejectFrame::decode(extra) {
+                set_last_error(&format!("access denied: {} ({})", reject.message, reject.reason));
+                return std::ptr::null_mut();
+            }
+        }
+    }
+
+    if !state.ctx.is_finished() {
+        set_last_error("handshake did not complete after 3 messages");
+        return std::ptr::null_mut();
+    }
+
+    let peer_node_id = match state.peer_node_id {
+        Some(id) => id,
+        None => {
+            set_last_error("handshake finalize called before msg2 processed");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let (_transport_state, session_state) = match state.ctx.finalize(peer_node_id, state.session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&format!("handshake finalize: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let ctx = build_sync_crypto_context(session_state, state.session_id, state.send_addr);
+    Box::into_raw(Box::new(ctx))
+}
+
+#[no_mangle]
+pub extern "C" fn ztlp_handshake_free(state: *mut ZtlpHandshakeState) {
+    if !state.is_null() {
+        unsafe {
+            let _ = Box::from_raw(state);
+        }
+    }
+}
+
 // ── Sync crypto context lifecycle ──────────────────────────────────────────
 
 /// Extract a crypto context from a connected client (call after ztlp_connect succeeds).
@@ -4473,23 +4757,7 @@ fn do_connect_sync(
     );
 
     // Build the crypto context
-    let send_seq = Arc::new(AtomicU64::new(0));
-    let recv_window = crate::session::ReplayWindow::new(
-        crate::session::DEFAULT_REPLAY_WINDOW,
-    );
-    let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
-    let peer_addr_str = CString::new(send_addr.to_string()).unwrap_or_default();
-
-    Ok(ZtlpCryptoContext {
-        send_key: session_state.send_key,
-        recv_key: session_state.recv_key,
-        send_seq,
-        recv_window,
-        session_id,
-        peer_addr: send_addr,
-        session_id_str,
-        peer_addr_str,
-    })
+    Ok(build_sync_crypto_context(session_state, session_id, send_addr))
 }
 
 /// Build an ACK frame: [FRAME_ACK(0x01) | ack_seq(8 bytes BE)].

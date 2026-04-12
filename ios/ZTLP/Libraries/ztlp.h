@@ -974,6 +974,9 @@ int32_t ztlp_verify_gateway_pin(const char *key_hex);
 /** Opaque handle for sync crypto context. */
 typedef struct ZtlpCryptoContext ZtlpCryptoContext;
 
+/** Opaque handle for sync step-by-step handshake state. */
+typedef struct ZtlpHandshakeState ZtlpHandshakeState;
+
 /**
  * @brief Blocking synchronous connect using plain UDP (no tokio runtime).
  *
@@ -1005,6 +1008,32 @@ typedef struct ZtlpCryptoContext ZtlpCryptoContext;
  * @param is_constrained  0=false, 1=true (iOS Low Data Mode)
  */
 void ztlp_set_client_profile(uint8_t interface_type, uint8_t radio_tech, uint8_t is_constrained);
+
+ZtlpHandshakeState *ztlp_handshake_start(
+    ZtlpIdentity *identity,
+    ZtlpConfig *config,
+    const char *target,
+    uint8_t *out_msg1,
+    size_t out_msg1_len,
+    size_t *out_msg1_written
+);
+
+int32_t ztlp_handshake_process_msg2(
+    ZtlpHandshakeState *state,
+    const uint8_t *msg2_data,
+    size_t msg2_len,
+    uint8_t *out_msg3,
+    size_t out_msg3_len,
+    size_t *out_msg3_written
+);
+
+ZtlpCryptoContext *ztlp_handshake_finalize(
+    ZtlpHandshakeState *state,
+    const uint8_t *extra_data,
+    size_t extra_len
+);
+
+void ztlp_handshake_free(ZtlpHandshakeState *state);
 
 ZtlpCryptoContext *ztlp_connect_sync(
     ZtlpIdentity *identity,

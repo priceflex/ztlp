@@ -243,20 +243,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 ztlp_set_client_profile(0, 0, 0)  // mobile + unknown interface
                 self.logger.info("Client profile: mobile (lightweight)", source: "Tunnel")
 
-                // Step 6: Sync connect through selected relay
+                // Step 6: Create tunnel connection first, then do handshake on the same NWConnection
                 let target = config.targetNodeId  // gateway identity
-                self.logger.info("Connecting to \(target) via relay \(relayAddr)...", source: "Tunnel")
+                self.logger.info("Connecting to \(target) via relay \(relayAddr) using NWConnection handshake...", source: "Tunnel")
 
-                let cryptoCtx = target.withCString { targetCStr -> OpaquePointer? in
-                    return ztlp_connect_sync(identityPtr, cfgPtr2, targetCStr, 20000)
+                let conn = ZTLPTunnelConnection(
+                    gatewayAddress: relayAddr,
+                    queue: self.tunnelQueue
+                )
+                conn.delegate = self
+                conn.start()
+
+                let handshakeSemaphore = DispatchSemaphore(value: 0)
+                var handshakeError: Error?
+                conn.performHandshake(identity: identityPtr, config: cfgPtr2, target: target, timeoutMs: 20000) { result in
+                    switch result {
+                    case .success:
+                        break
+                    case .failure(let error):
+                        handshakeError = error
+                    }
+                    handshakeSemaphore.signal()
                 }
+                handshakeSemaphore.wait()
 
-                guard let cryptoCtx = cryptoCtx else {
+                if let handshakeError = handshakeError {
+                    conn.stop()
                     // Report this relay as failed
                     if let pool = self.relayPool {
                         relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
                     }
-                    throw self.makeNSError("ztlp_connect_sync failed: \(self.lastError())")
+                    throw self.makeNSError("NWConnection handshake failed: \(handshakeError.localizedDescription)")
                 }
 
                 self.logger.info("Connected to \(target) via relay \(relayAddr)", source: "Tunnel")
@@ -309,17 +326,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 self.logger.info("DNS responder active (\(services.count) services) for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
 
-                // Step 8: Create ZTLPTunnelConnection (UDP NWConnection to relay)
+                // Step 8: Reuse the handshaken ZTLPTunnelConnection (UDP NWConnection to relay)
                 // All traffic (including VIP-proxied services) flows through the relay.
                 // VIP traffic goes: packetFlow -> router -> send to tunnelConnection -> relay
-                self.logger.info("Creating tunnel connection to relay \(relayAddr)...", source: "Tunnel")
-                let conn = ZTLPTunnelConnection(
-                    cryptoContext: cryptoCtx,
-                    gatewayAddress: relayAddr,
-                    queue: self.tunnelQueue
-                )
-                conn.delegate = self
-                conn.start()
+                self.logger.info("Tunnel connection ready on relay \(relayAddr) with shared handshake/data socket", source: "Tunnel")
                 self.tunnelConnection = conn
 
                 // VIP traffic is now routed through packetFlow -> encrypted tunnel -> relay
@@ -997,30 +1007,39 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
-        // Reconnect (blocking sync)
+        // Reconnect using handshake on the same NWConnection that will carry data
         let target = config.targetNodeId
-        let cryptoCtx = target.withCString { targetCStr -> OpaquePointer? in
-            return ztlp_connect_sync(identityPtr, cfgPtr, targetCStr, 15000)
-        }
-
-        guard let cryptoCtx = cryptoCtx else {
-            // Report this relay as failed and retry
-            if let pool = relayPool {
-                relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
-            }
-            logger.warn("Reconnect to \(relayAddr) failed: \(lastError()), will retry", source: "Tunnel")
-            scheduleReconnect()
-            return
-        }
-
-        // Create new tunnel connection
         let conn = ZTLPTunnelConnection(
-            cryptoContext: cryptoCtx,
             gatewayAddress: relayAddr,
             queue: tunnelQueue
         )
         conn.delegate = self
         conn.start()
+
+        let handshakeSemaphore = DispatchSemaphore(value: 0)
+        var handshakeError: Error?
+        conn.performHandshake(identity: identityPtr, config: cfgPtr, target: target, timeoutMs: 15000) { result in
+            switch result {
+            case .success:
+                break
+            case .failure(let error):
+                handshakeError = error
+            }
+            handshakeSemaphore.signal()
+        }
+        handshakeSemaphore.wait()
+
+        if let handshakeError = handshakeError {
+            conn.stop()
+            // Report this relay as failed and retry
+            if let pool = relayPool {
+                relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
+            }
+            logger.warn("Reconnect to \(relayAddr) failed: \(handshakeError.localizedDescription), will retry", source: "Tunnel")
+            scheduleReconnect()
+            return
+        }
+
         tunnelConnection = conn
 
         // Update active relay tracking

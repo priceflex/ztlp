@@ -52,13 +52,17 @@ final class ZTLPTunnelConnection {
     private var connection: NWConnection?
 
     /// Crypto context extracted after handshake (owns session keys).
-    private let cryptoContext: OpaquePointer
+    private var cryptoContext: OpaquePointer?
 
     /// Gateway endpoint address string (e.g., "34.219.64.205:23095").
     let gatewayAddress: String
 
-    /// Dedicated serial queue for all connection I/O and state.
+    /// Dedicated serial queue for tunnel state / caller coordination.
     private let queue: DispatchQueue
+
+    /// Separate NWConnection callback queue so PacketTunnelProvider can synchronously
+    /// wait for handshake completion on tunnelQueue without deadlocking Network callbacks.
+    private let nwQueue = DispatchQueue(label: "com.ztlp.tunnel.connection.nw")
 
     /// Delegate for delivering decrypted payloads.
     weak var delegate: ZTLPTunnelConnectionDelegate?
@@ -126,7 +130,7 @@ final class ZTLPTunnelConnection {
     ///                    to this class — it will be freed on deinit.
     ///   - gatewayAddress: Gateway "host:port" string.
     ///   - queue: Dispatch queue for all I/O (caller should use a dedicated serial queue).
-    init(cryptoContext: OpaquePointer, gatewayAddress: String, queue: DispatchQueue) {
+    init(cryptoContext: OpaquePointer? = nil, gatewayAddress: String, queue: DispatchQueue) {
         self.cryptoContext = cryptoContext
         self.gatewayAddress = gatewayAddress
         self.queue = queue
@@ -134,10 +138,153 @@ final class ZTLPTunnelConnection {
 
     deinit {
         stop()
-        ztlp_crypto_context_free(cryptoContext)
+        if let cryptoContext {
+            ztlp_crypto_context_free(cryptoContext)
+        }
     }
 
     // MARK: - Lifecycle
+
+    /// Simple receive helper for handshake mode. Delivers a single UDP datagram.
+    private func receiveOnce(timeout: TimeInterval, completion: @escaping (Result<Data, Error>) -> Void) {
+        guard isActive, let conn = connection else {
+            completion(.failure(makeError("Connection not active")))
+            return
+        }
+
+        var finished = false
+        let timeoutWork = DispatchWorkItem { [weak self] in
+            guard let self = self, !finished else { return }
+            finished = true
+            completion(.failure(self.makeError("Handshake receive timeout")))
+        }
+        nwQueue.asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
+
+        conn.receiveMessage { [weak self] content, _, _, error in
+            guard let self = self, self.isActive, !finished else { return }
+            finished = true
+            timeoutWork.cancel()
+
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            guard let data = content, !data.isEmpty else {
+                completion(.failure(self.makeError("Received empty handshake datagram")))
+                return
+            }
+            completion(.success(data))
+        }
+    }
+
+    func performHandshake(
+        identity: OpaquePointer,
+        config: OpaquePointer?,
+        target: String,
+        timeoutMs: UInt32 = 20_000,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard isActive else {
+            completion(.failure(makeError("Connection not started")))
+            return
+        }
+        guard cryptoContext == nil else {
+            completion(.success(()))
+            return
+        }
+
+        let overallDeadline = Date().addingTimeInterval(TimeInterval(timeoutMs) / 1000.0)
+        let msgBufferSize = 8192
+        let receiveSlice: TimeInterval = 1.0
+        var msg1 = [UInt8](repeating: 0, count: msgBufferSize)
+        var msg1Written = 0
+
+        let handshakeState: OpaquePointer? = target.withCString { targetCStr in
+            ztlp_handshake_start(identity, config, targetCStr, &msg1, msg1.count, &msg1Written)
+        }
+
+        guard let handshakeState else {
+            completion(.failure(makeError("ztlp_handshake_start failed: \(ztlpLastError())")))
+            return
+        }
+
+        let sendMsg1 = { [weak self] in
+            guard let self = self, let conn = self.connection else { return }
+            let data = Data(msg1.prefix(msg1Written))
+            conn.send(content: data, completion: .contentProcessed { error in
+                if let error = error {
+                    completion(.failure(error))
+                }
+            })
+        }
+
+        func finishFailure(_ error: Error) {
+            ztlp_handshake_free(handshakeState)
+            completion(.failure(error))
+        }
+
+        func awaitMsg2(retries: Int, retryDelay: TimeInterval) {
+            if Date() >= overallDeadline {
+                finishFailure(makeError("Handshake timed out waiting for HELLO_ACK"))
+                return
+            }
+
+            self.receiveOnce(timeout: min(receiveSlice, max(0.05, overallDeadline.timeIntervalSinceNow))) { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let msg2Data):
+                    var msg3 = [UInt8](repeating: 0, count: msgBufferSize)
+                    var msg3Written = 0
+                    let rc = msg2Data.withUnsafeBytes { msg2Ptr -> Int32 in
+                        guard let base = msg2Ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+                        return ztlp_handshake_process_msg2(
+                            handshakeState,
+                            base,
+                            msg2Ptr.count,
+                            &msg3,
+                            msg3.count,
+                            &msg3Written
+                        )
+                    }
+                    guard rc == 0 else {
+                        finishFailure(self.makeError("ztlp_handshake_process_msg2 failed: \(self.ztlpLastError())"))
+                        return
+                    }
+
+                    let msg3Data = Data(msg3.prefix(msg3Written))
+                    self.connection?.send(content: msg3Data, completion: .contentProcessed { error in
+                        if let error = error {
+                            finishFailure(error)
+                            return
+                        }
+
+                        let cryptoCtx = ztlp_handshake_finalize(handshakeState, nil, 0)
+                        guard let cryptoCtx else {
+                            finishFailure(self.makeError("ztlp_handshake_finalize failed: \(self.ztlpLastError())"))
+                            return
+                        }
+
+                        self.cryptoContext = cryptoCtx
+                        self.startReceiveLoop()
+                        completion(.success(()))
+                    })
+
+                case .failure:
+                    guard retries < 6 else {
+                        finishFailure(self.makeError("Handshake failed: no HELLO_ACK after retransmits"))
+                        return
+                    }
+                    sendMsg1()
+                    self.queue.asyncAfter(deadline: .now() + retryDelay) {
+                        awaitMsg2(retries: retries + 1, retryDelay: min(retryDelay * 2, 1.6))
+                    }
+                }
+            }
+        }
+
+        sendMsg1()
+        awaitMsg2(retries: 0, retryDelay: 0.1)
+    }
 
     /// Start the UDP connection and begin receiving.
     func start() {
@@ -169,8 +316,9 @@ final class ZTLPTunnelConnection {
         self.connection = conn
         self.isActive = true
 
-        // Start the connection on our dedicated queue
-        conn.start(queue: queue)
+        // Start the connection on a separate NW callback queue. This avoids a deadlock
+        // when PacketTunnelProvider blocks tunnelQueue waiting for handshake completion.
+        conn.start(queue: nwQueue)
     }
 
     /// Stop the connection and clean up.
@@ -198,6 +346,7 @@ final class ZTLPTunnelConnection {
     /// - Returns: true on success, false on error.
     @discardableResult
     func sendData(_ payload: Data) -> Bool {
+        guard let cryptoContext else { return false }
         guard isActive, let conn = connection else { return false }
 
         // Step 1: Frame the payload as FRAME_DATA
@@ -265,6 +414,7 @@ final class ZTLPTunnelConnection {
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
     func flushPendingAcks() {
+        guard let cryptoContext else { return }
         guard isActive, let conn = connection, !pendingAcks.isEmpty else { return }
         guard sendsInFlight < Self.maxSendsInFlight else {
             // Do NOT drop pending ACKs under backpressure — keep them queued and
@@ -317,7 +467,8 @@ final class ZTLPTunnelConnection {
 
     /// The session ID from the crypto context.
     var sessionId: String? {
-        guard let cStr = ztlp_crypto_context_session_id(cryptoContext) else {
+        guard let cryptoContext,
+              let cStr = ztlp_crypto_context_session_id(cryptoContext) else {
             return nil
         }
         return String(cString: cStr)
@@ -325,7 +476,8 @@ final class ZTLPTunnelConnection {
 
     /// The peer address from the crypto context.
     var peerAddress: String? {
-        guard let cStr = ztlp_crypto_context_peer_addr(cryptoContext) else {
+        guard let cryptoContext,
+              let cStr = ztlp_crypto_context_peer_addr(cryptoContext) else {
             return nil
         }
         return String(cString: cStr)
@@ -336,8 +488,8 @@ final class ZTLPTunnelConnection {
     private func handleConnectionState(_ state: NWConnection.State) {
         switch state {
         case .ready:
-            // Connection is ready — start the receive loop
-            startReceiveLoop()
+            // Connection is ready — caller decides when to start the receive loop.
+            break
 
         case .failed(let error):
             isActive = false
@@ -359,7 +511,7 @@ final class ZTLPTunnelConnection {
 
     /// Start the recursive receive loop using NWConnection.receiveMessage().
     /// Each call to receiveMessage() delivers one complete UDP datagram.
-    private func startReceiveLoop() {
+    func startReceiveLoop() {
         guard isActive, let conn = connection else { return }
 
         conn.receiveMessage { [weak self] content, _, isComplete, error in
@@ -393,6 +545,8 @@ final class ZTLPTunnelConnection {
     ///   Mux:    [0x00 | stream_id(4 BE) | data_seq(8 BE) | mux_payload]
     ///   ACK:    [0x01 | cumulative_ack(8 BE) | ...]
     private func handleReceivedPacket(_ wireData: Data) {
+        guard let cryptoContext else { return }
+
         // Step 1: Decrypt the packet
         var decryptWritten: Int = 0
 
@@ -582,6 +736,13 @@ final class ZTLPTunnelConnection {
         guard parts.count == 2,
               let port = UInt16(parts[1]) else { return nil }
         return (String(parts[0]), port)
+    }
+
+    private func ztlpLastError() -> String {
+        if let err = ztlp_last_error() {
+            return String(cString: err)
+        }
+        return "unknown error"
     }
 
     /// Create an NSError for this domain.

@@ -251,19 +251,22 @@ final class ZTLPTunnelConnection {
         return true
     }
 
-    /// Queue an ACK for batched sending. Flushed periodically or when full.
+    /// Queue an ACK for sending.
+    ///
+    /// Response-path reliability matters more than micro-batching here: if ACKs are
+    /// delayed or dropped, the gateway stalls with its send window full. Flush on
+    /// every received data frame from the same queue that processes inbound packets.
     func queueAck(for sequence: UInt64) {
         pendingAcks.append(sequence)
-        if pendingAcks.count >= Self.maxPendingAcks {
-            flushPendingAcks()
-        }
+        flushPendingAcks()
     }
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
     func flushPendingAcks() {
         guard isActive, let conn = connection, !pendingAcks.isEmpty else { return }
         guard sendsInFlight < Self.maxSendsInFlight else {
-            pendingAcks.removeAll(keepingCapacity: true)
+            // Do NOT drop pending ACKs under backpressure — keep them queued and
+            // retry on the next flush. Dropping ACKs causes gateway-side stalls.
             return
         }
 

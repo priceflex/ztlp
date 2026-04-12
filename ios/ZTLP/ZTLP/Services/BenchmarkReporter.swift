@@ -28,6 +28,7 @@ struct BenchmarkUploadReport: Codable {
     let ios_version: String
     let ne_memory_mb: Int?
     let ne_virtual_mb: Int?
+    let replay_reject_count: Int?
     let ne_memory_pass: Bool
     let benchmarks_passed: Int
     let benchmarks_total: Int
@@ -166,6 +167,7 @@ class BenchmarkReporter {
         buildTag: String = "v5D-SYNC",
         neMemoryMB: Int?,
         neVirtualMB: Int?,
+        replayRejectCount: Int? = nil,
         passedCount: Int,
         totalCount: Int,
         individualResults: [BenchmarkUploadResult]? = nil,
@@ -187,6 +189,7 @@ class BenchmarkReporter {
             ios_version: UIDevice.current.systemVersion,
             ne_memory_mb: neMemoryMB,
             ne_virtual_mb: neVirtualMB,
+            replay_reject_count: replayRejectCount,
             ne_memory_pass: (neMemoryMB ?? 999) <= 15,
             benchmarks_passed: passedCount,
             benchmarks_total: totalCount,

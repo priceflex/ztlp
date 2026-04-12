@@ -45,6 +45,7 @@ protocol ZTLPTunnelConnectionDelegate: AnyObject {
 final class ZTLPTunnelConnection {
 
     private let logger = TunnelLogger.shared
+    private let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared")
 
     // MARK: - Properties
 
@@ -119,6 +120,9 @@ final class ZTLPTunnelConnection {
 
     /// Statistics: duplicate packets dropped.
     private(set) var duplicatesDropped: UInt64 = 0
+
+    /// Count of anti-replay rejections from duplicate gateway retransmits.
+    private(set) var replayRejectedCount: UInt64 = 0
 
     // MARK: - Initialization
 
@@ -565,7 +569,22 @@ final class ZTLPTunnelConnection {
         }
 
         guard decryptResult == 0, decryptWritten > 0 else {
-            logger.error("ZTLP decrypt failed rc=\(decryptResult) wire=\(wireData.count)", source: "Tunnel")
+            if decryptResult == Int32(ZTLP_REPLAY_REJECTED) {
+                replayRejectedCount += 1
+                sharedDefaults?.set(Int(replayRejectedCount), forKey: SharedKey.replayRejectCount)
+
+                if replayRejectedCount == 1 || replayRejectedCount % 10 == 0 {
+                    logger.debug(
+                        "ZTLP replay rejected count=\(replayRejectedCount) wire=\(wireData.count)",
+                        source: "Tunnel"
+                    )
+                }
+            } else {
+                logger.error(
+                    "ZTLP decrypt failed rc=\(decryptResult) wire=\(wireData.count) detail=\(ztlpLastError())",
+                    source: "Tunnel"
+                )
+            }
             return
         }
 

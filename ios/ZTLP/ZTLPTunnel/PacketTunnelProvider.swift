@@ -37,6 +37,7 @@ private enum SharedKey {
     static let selectedRelay = "ztlp_selected_relay"
     static let neMemoryMB = "ztlp_ne_memory_mb"
     static let neVirtualMB = "ztlp_ne_virtual_mb"
+    static let replayRejectCount = "ztlp_replay_reject_count"
 }
 
 /// Messages the main app can send to the extension.

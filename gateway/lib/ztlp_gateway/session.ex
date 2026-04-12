@@ -429,6 +429,8 @@ defmodule ZtlpGateway.Session do
   # The adaptive EWMA (RFC 6298) converges to actual RTT within 3-4 packets.
   @initial_rto_ms 300
   @min_rto_ms 100
+  @mobile_initial_rto_ms 1_500
+  @mobile_min_rto_ms 500
   # Max per-packet RTO after exponential backoff. MUST be well below
   # @stall_timeout_ms — if max_rto >= stall_timeout, high-retransmit-count
   # packets never get re-sent before the stall detector kills the session.
@@ -648,7 +650,9 @@ defmodule ZtlpGateway.Session do
         # Client-type detection: parsed from msg3 CBOR payload
         client_profile: nil,
         # Per-session congestion control profile (selected from client_profile)
-        cc_profile: nil
+        cc_profile: nil,
+        initial_rto_ms: @initial_rto_ms,
+        min_rto_ms: @min_rto_ms
       }
       |> Map.merge(rekey_state)
 
@@ -1288,7 +1292,8 @@ defmodule ZtlpGateway.Session do
               "iface=#{client_profile.interface_type} radio=#{inspect(client_profile.radio_tech)} " <>
               "→ CC: cwnd=#{cc_profile.initial_cwnd} max=#{cc_profile.max_cwnd} " <>
               "ssthresh=#{cc_profile.ssthresh} pacing=#{cc_profile.pacing_interval_ms}ms " <>
-              "burst=#{cc_profile.burst_size} beta=#{cc_profile.loss_beta}"
+              "burst=#{cc_profile.burst_size} beta=#{cc_profile.loss_beta} " <>
+              "rto=#{cc_profile.initial_rto_ms}/min=#{cc_profile.min_rto_ms}"
             )
 
             # Derive transport keys
@@ -1334,7 +1339,10 @@ defmodule ZtlpGateway.Session do
                             cc_profile: cc_profile,
                             cwnd: cc_profile.initial_cwnd,
                             ssthresh: cc_profile.ssthresh,
-                            recovery_cwnd: cc_profile.initial_cwnd
+                            recovery_cwnd: cc_profile.initial_cwnd,
+                            rto_ms: cc_profile.initial_rto_ms,
+                            initial_rto_ms: cc_profile.initial_rto_ms,
+                            min_rto_ms: cc_profile.min_rto_ms
                         }
 
                       # Process any packets that arrived during handshake
@@ -1709,6 +1717,7 @@ defmodule ZtlpGateway.Session do
 
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
     Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    state = log_ack_latency(state, acked_data_seq)
     # Cumulative ACK with SACK blocks from client
     state = process_cumulative_ack(acked_data_seq, state)
 
@@ -1735,6 +1744,7 @@ defmodule ZtlpGateway.Session do
   # Legacy ACK without SACK blocks (backward compatible)
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64>>, state) do
     Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} (no sack) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    state = log_ack_latency(state, acked_data_seq)
     state = process_cumulative_ack(acked_data_seq, state)
 
     state = flush_send_queue(state)
@@ -2674,7 +2684,7 @@ defmodule ZtlpGateway.Session do
         srtt = rtt
         rttvar = div(rtt, 2)
         rto = srtt + max(100, 4 * rttvar)
-        rto = clamp_rto(rto)
+        rto = clamp_rto(state, rto)
         %{state | srtt_ms: srtt, rttvar_ms: rttvar, rto_ms: rto}
 
       srtt ->
@@ -2682,15 +2692,15 @@ defmodule ZtlpGateway.Session do
         rttvar = div(3 * state.rttvar_ms, 4) + div(abs(rtt - srtt), 4)
         new_srtt = div(7 * srtt, 8) + div(rtt, 8)
         rto = new_srtt + max(100, 4 * rttvar)
-        rto = clamp_rto(rto)
+        rto = clamp_rto(state, rto)
         %{state | srtt_ms: new_srtt, rttvar_ms: rttvar, rto_ms: rto}
     end
   end
 
   defp update_rtt(state, _rtt), do: state
 
-  defp clamp_rto(rto) do
-    rto |> max(@min_rto_ms) |> min(@max_rto_ms)
+  defp clamp_rto(state, rto) do
+    rto |> max(cc_min_rto_ms(state)) |> min(@max_rto_ms)
   end
 
   # Parse NACK payload: N x 8-byte big-endian data_seqs
@@ -2796,7 +2806,9 @@ defmodule ZtlpGateway.Session do
       ssthresh: 32,
       pacing_interval_ms: 6,
       burst_size: 2,
-      loss_beta: 0.7
+      loss_beta: 0.7,
+      initial_rto_ms: @mobile_initial_rto_ms,
+      min_rto_ms: @mobile_min_rto_ms
     }
   end
 
@@ -2816,7 +2828,9 @@ defmodule ZtlpGateway.Session do
       ssthresh: 128,
       pacing_interval_ms: 1,
       burst_size: 8,
-      loss_beta: 0.7
+      loss_beta: 0.7,
+      initial_rto_ms: @initial_rto_ms,
+      min_rto_ms: @min_rto_ms
     }
   end
 
@@ -2827,7 +2841,9 @@ defmodule ZtlpGateway.Session do
       ssthresh: 256,
       pacing_interval_ms: 1,
       burst_size: 16,
-      loss_beta: 0.7
+      loss_beta: 0.7,
+      initial_rto_ms: @initial_rto_ms,
+      min_rto_ms: @min_rto_ms
     }
   end
 
@@ -2843,7 +2859,9 @@ defmodule ZtlpGateway.Session do
       ssthresh: 64,
       pacing_interval_ms: 4,
       burst_size: 3,
-      loss_beta: 0.7
+      loss_beta: 0.7,
+      initial_rto_ms: @initial_rto_ms,
+      min_rto_ms: @min_rto_ms
     }
   end
 
@@ -2860,4 +2878,26 @@ defmodule ZtlpGateway.Session do
 
   defp cc_loss_beta(%{cc_profile: %{loss_beta: v}}), do: v
   defp cc_loss_beta(_state), do: @loss_beta
+
+  defp cc_min_rto_ms(%{cc_profile: %{min_rto_ms: v}}), do: v
+  defp cc_min_rto_ms(%{min_rto_ms: v}) when is_integer(v), do: v
+  defp cc_min_rto_ms(_state), do: @min_rto_ms
+
+  defp log_ack_latency(state, acked_data_seq) do
+    now = System.monotonic_time(:millisecond)
+
+    case Enum.find(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == acked_data_seq end) do
+      {seq, {_pkt, sent_at, retransmit_count, _ds}} ->
+        latency_ms = max(now - sent_at, 0)
+        Logger.info(
+          "[Session] ACK_LATENCY data_seq=#{acked_data_seq} pkt_seq=#{seq} latency_ms=#{latency_ms} " <>
+          "retransmits=#{retransmit_count} srtt=#{inspect(state.srtt_ms)} rto=#{state.rto_ms}"
+        )
+
+        state
+
+      nil ->
+        state
+    end
+  end
 end

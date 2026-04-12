@@ -276,12 +276,14 @@ struct BenchmarkView: View {
         let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared")
         let neMemoryMB = sharedDefaults?.object(forKey: "ztlp_ne_memory_mb") as? Int
         let neVirtualMB = sharedDefaults?.object(forKey: "ztlp_ne_virtual_mb") as? Int
+        let replayRejectCount = sharedDefaults?.object(forKey: "ztlp_replay_reject_count") as? Int
         let selectedRelay = sharedDefaults?.string(forKey: "ztlp_selected_relay")
         let peerAddress = sharedDefaults?.string(forKey: "ztlp_peer_address")
 
         BenchmarkReporter.shared.submit(
             neMemoryMB: neMemoryMB,
             neVirtualMB: neVirtualMB,
+            replayRejectCount: replayRejectCount,
             passedCount: passedCount,
             totalCount: totalCount,
             individualResults: reporterResults,

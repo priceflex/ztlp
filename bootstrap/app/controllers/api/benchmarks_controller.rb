@@ -20,6 +20,7 @@ module Api
         ios_version: params[:ios_version],
         ne_memory_mb: params[:ne_memory_mb],
         ne_virtual_mb: params[:ne_virtual_mb],
+        replay_reject_count: params[:replay_reject_count],
         ne_memory_pass: params[:ne_memory_pass],
         benchmarks_passed: params[:benchmarks_passed],
         benchmarks_total: params[:benchmarks_total],

@@ -19,4 +19,8 @@ class BenchmarkResult < ApplicationRecord
   def memory_ok?
     ne_memory_pass != false && ne_memory_mb.to_i <= 15
   end
+
+  def replay_rejects?
+    replay_reject_count.to_i > 0
+  end
 end

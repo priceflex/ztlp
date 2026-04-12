@@ -149,6 +149,7 @@ pub enum ZtlpResult {
     AlreadyConnected = -9,
     NotConnected = -10,
     Rejected = -11,
+    ReplayRejected = -12,
     InternalError = -99,
 }
 
@@ -4274,7 +4275,7 @@ pub extern "C" fn ztlp_decrypt_packet(
     // Anti-replay check
     if !ctx.recv_window.check_and_record(header.packet_seq) {
         set_last_error("replay detected");
-        return ZtlpResult::InternalError as i32;
+        return ZtlpResult::ReplayRejected as i32;
     }
 
     // Extract encrypted payload (after the data header)

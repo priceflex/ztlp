@@ -193,6 +193,8 @@ enum {
     ZTLP_NOT_CONNECTED     = -10,
     /** Access rejected by gateway policy. */
     ZTLP_REJECTED          = -11,
+    /** Packet rejected by anti-replay window (harmless duplicate/retransmit). */
+    ZTLP_REPLAY_REJECTED   = -12,
     /** Unspecified internal error. */
     ZTLP_INTERNAL_ERROR    = -99
 };

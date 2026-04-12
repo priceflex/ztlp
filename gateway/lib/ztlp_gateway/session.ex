@@ -1565,6 +1565,21 @@ defmodule ZtlpGateway.Session do
   #
   # IMPORTANT: Use `mux_mode` flag (set on first FRAME_OPEN) instead of
   # checking map_size(streams) > 0. There's a race between FRAME_CLOSE
+  defp mux_payload?(<<type, _rest::binary>>) when type in [@frame_open, @frame_close] do
+    true
+  end
+
+  defp mux_payload?(<<@frame_data, stream_id::big-32, _payload::binary>>) when stream_id > 0 do
+    true
+  end
+
+  defp mux_payload?(_), do: false
+
+  defp handle_inner_mux_payload(payload, state) do
+    state = %{state | mux_mode: true}
+    handle_tunnel_frame(payload, state)
+  end
+
   # removing the last stream and the next FRAME_OPEN arriving — during that
   # window, streams is empty but the client is still in mux mode. Without
   # this flag, the FRAME_DATA gets misinterpreted as legacy format.
@@ -1660,21 +1675,6 @@ defmodule ZtlpGateway.Session do
         {:noreply, state}
       end
     end
-  end
-
-  defp mux_payload?(<<type, _rest::binary>>) when type in [@frame_open, @frame_close] do
-    true
-  end
-
-  defp mux_payload?(<<@frame_data, stream_id::big-32, _payload::binary>>) when stream_id > 0 do
-    true
-  end
-
-  defp mux_payload?(_), do: false
-
-  defp handle_inner_mux_payload(payload, state) do
-    state = %{state | mux_mode: true}
-    handle_tunnel_frame(payload, state)
   end
 
   # Keepalive: exactly 1-byte 0x01 frame from iOS VPN extension.

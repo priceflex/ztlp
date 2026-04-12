@@ -573,10 +573,13 @@ defmodule ZtlpGateway.Session do
         # Sliding receive window for out-of-order packet acceptance.
         # Replaces strict recv_seq > check with a window that buffers and
         # reorders packets — critical for cellular where reordering is common.
-        # recv_window_base starts as :unset; the first accepted data packet
-        # anchors the window at that sequence number.
+        # Transport packet_seq always starts at 0 for a fresh client session,
+        # so initialize the base at 0. Anchoring to the first packet received
+        # is wrong under reordering: if seq=1 (e.g. mux CLOSE) arrives before
+        # seq=0 (e.g. mux OPEN), the later seq=0 gets dropped as BELOW_BASE and
+        # the stream never opens.
         recv_window: MapSet.new(),
-        recv_window_base: :unset,
+        recv_window_base: 0,
         recv_buffer: %{},
         # Timestamp when recv_window_base last advanced (for gap-skip detection)
         recv_window_base_last_advance: nil,
@@ -885,7 +888,7 @@ defmodule ZtlpGateway.Session do
   def handle_info(:recv_gap_check, state) do
     state = %{state | recv_gap_timer_ref: nil}
 
-    if state.phase != :established or state.recv_window_base == :unset do
+    if state.phase != :established do
       {:noreply, state}
     else
       now = System.monotonic_time(:millisecond)
@@ -1382,14 +1385,8 @@ defmodule ZtlpGateway.Session do
 
         # Sliding receive window: accept packets within
         # [recv_window_base, recv_window_base + @recv_window_size).
-        # On the first data packet, the window base is anchored to that seq.
-        state =
-          if state.recv_window_base == :unset do
-            %{state | recv_window_base: seq}
-          else
-            state
-          end
-
+        # recv_window_base is initialized to 0 for fresh sessions so packet 0
+        # remains admissible even if packet 1 arrives first.
         cond do
           # Already delivered (below window base) — re-ACK so the sender
           # can clear its send_buffer (the original ACK may have been lost)

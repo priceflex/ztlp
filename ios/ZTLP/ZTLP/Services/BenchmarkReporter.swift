@@ -79,10 +79,15 @@ class BenchmarkReporter {
             ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url")
             ?? bootstrapDefaults.url
 
-        let defaultToken = "2f0798...0079"
-        self.apiToken = apiToken
-            ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret")
-            ?? defaultToken
+        let defaultToken="***"
+        self.apiToken=***
+
+        if UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") != nil {
+            TunnelLogger.shared.warn(
+                "Ignoring UserDefaults ztlp_enrollment_secret for benchmark upload; using embedded live token",
+                source: "BenchUpload"
+            )
+        }
     }
 
     /// Send a benchmark report to the bootstrap server.

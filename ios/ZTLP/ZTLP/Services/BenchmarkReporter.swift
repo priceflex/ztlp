@@ -79,8 +79,8 @@ class BenchmarkReporter {
             ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url")
             ?? bootstrapDefaults.url
 
-        let defaultToken="***"
-        self.apiToken=***
+        let defaultToken = "2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079"
+        self.apiToken = apiToken ?? defaultToken
 
         if UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") != nil {
             TunnelLogger.shared.warn(

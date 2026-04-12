@@ -640,10 +640,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Format: [1B type][4B stream_id BE][2B data_len BE][data...]
     /// Type: 0=OpenStream, 1=SendData, 2=CloseStream
     ///
-    /// LEGACY MODE: Gateway does not support mux framing. Send raw data
-    /// directly without mux OPEN/DATA/CLOSE headers. Only the inner payload
-    /// from SendData actions is forwarded. OpenStream/CloseStream are logged
-    /// but not sent (gateway manages backend connections implicitly).
+    /// Router actions must be translated into mux payloads for the gateway:
+    ///   OPEN  = [0x06 | stream_id(4 BE) | service_name_len(1) | service_name]
+    ///   DATA  = [0x00 | stream_id(4 BE) | payload]
+    ///   CLOSE = [0x05 | stream_id(4 BE)]
+    ///
+    /// tunnelConnection.sendData() then wraps those mux payloads in the outer
+    /// encrypted FRAME_DATA transport envelope.
     private func processRouterActions(actionBuffer: [UInt8], actionLen: Int) {
         var offset = 0
         while offset < actionLen {
@@ -652,7 +655,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let actionType = actionBuffer[offset]
             offset += 1
 
-            // Skip stream_id (not used in legacy mode)
+            let streamId = UInt32(actionBuffer[offset]) << 24
+                | UInt32(actionBuffer[offset + 1]) << 16
+                | UInt32(actionBuffer[offset + 2]) << 8
+                | UInt32(actionBuffer[offset + 3])
             offset += 4
 
             let dataLen = Int(actionBuffer[offset]) << 8
@@ -665,18 +671,81 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             offset += dataLen
 
             switch actionType {
-            case 0: // OpenStream — skip in legacy mode (gateway opens backend on first data)
-                logger.debug("Router: OpenStream (legacy skip)", source: "Router")
-            case 1: // SendData — send raw payload (no mux framing)
-                if let payload = actionData {
-                    tunnelConnection?.sendData(payload)
+            case 0: // OpenStream
+                guard let serviceData = actionData, serviceData.count <= 255 else {
+                    logger.warn("Router: OpenStream missing/oversize service name for stream \(streamId)", source: "Router")
+                    continue
                 }
-            case 2: // CloseStream — skip in legacy mode
-                logger.debug("Router: CloseStream (legacy skip)", source: "Router")
+                var muxOpen = Data(capacity: 6 + serviceData.count)
+                muxOpen.append(Self.MUX_FRAME_OPEN)
+                muxOpen.append(contentsOf: beStreamIdBytes(streamId))
+                muxOpen.append(UInt8(serviceData.count))
+                muxOpen.append(serviceData)
+                logger.debug("Router: OpenStream stream=\(streamId) service=\(String(data: serviceData, encoding: .utf8) ?? "?")", source: "Router")
+                _ = tunnelConnection?.sendData(muxOpen)
+
+            case 1: // SendData
+                guard let payload = actionData else { continue }
+                var muxData = Data(capacity: 5 + payload.count)
+                muxData.append(Self.MUX_FRAME_DATA)
+                muxData.append(contentsOf: beStreamIdBytes(streamId))
+                muxData.append(payload)
+                logger.debug("Router: SendData stream=\(streamId) bytes=\(payload.count)", source: "Router")
+                _ = tunnelConnection?.sendData(muxData)
+
+            case 2: // CloseStream
+                var muxClose = Data(capacity: 5)
+                muxClose.append(Self.MUX_FRAME_CLOSE)
+                muxClose.append(contentsOf: beStreamIdBytes(streamId))
+                logger.debug("Router: CloseStream stream=\(streamId)", source: "Router")
+                _ = tunnelConnection?.sendData(muxClose)
+
             default:
                 logger.warn("Unknown router action type: \(actionType)", source: "Tunnel")
             }
         }
+    }
+
+    private func handleGatewayMuxPayload(_ data: Data) {
+        guard let router = packetRouter, !data.isEmpty else { return }
+
+        let frameType = data[0]
+        switch frameType {
+        case Self.MUX_FRAME_DATA:
+            guard data.count >= 5 else {
+                logger.warn("GW->NE mux DATA too short: \(data.count)", source: "Tunnel")
+                return
+            }
+            let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            let payload = data.dropFirst(5)
+            logger.debug("GW->NE mux DATA stream=\(streamId) bytes=\(payload.count)", source: "Tunnel")
+            payload.withUnsafeBytes { ptr in
+                guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                ztlp_router_gateway_data_sync(router, streamId, baseAddr, ptr.count)
+            }
+
+        case Self.MUX_FRAME_CLOSE:
+            guard data.count >= 5 else {
+                logger.warn("GW->NE mux CLOSE too short: \(data.count)", source: "Tunnel")
+                return
+            }
+            let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            logger.debug("GW->NE mux CLOSE stream=\(streamId)", source: "Tunnel")
+            ztlp_router_gateway_close_sync(router, streamId)
+
+        default:
+            logger.debug("GW->NE legacy payload bytes=\(data.count)", source: "Tunnel")
+            data.withUnsafeBytes { ptr in
+                guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                ztlp_router_gateway_data_sync(router, 0, baseAddr, ptr.count)
+            }
+        }
+
+        flushOutboundPackets()
+    }
+
+    private func beStreamIdBytes(_ streamId: UInt32) -> [UInt8] {
+        withUnsafeBytes(of: streamId.bigEndian) { Array($0) }
     }
 
     /// Write response packets from the router back to the utun interface.
@@ -1146,24 +1215,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
 
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveData data: Data, sequence: UInt64) {
-        guard isTunnelActive, let router = packetRouter else { return }
+        guard isTunnelActive else { return }
 
         markDataActivity()
-
-        // LEGACY MODE: Gateway sends raw data (no mux framing).
-        // Feed all received data directly to the router as stream 0.
-        // The router reconstructs TCP segments and writes them to utun.
-        data.withUnsafeBytes { ptr in
-            guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            let len = ptr.count
-            if len > 0 {
-                logger.debug("GW->NE: \(len) bytes (legacy)", source: "Tunnel")
-                ztlp_router_gateway_data_sync(router, 0, baseAddr, len)
-            }
-        }
-
-        // Immediately flush any generated packets
-        flushOutboundPackets()
+        handleGatewayMuxPayload(data)
     }
 
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didFailWithError error: Error) {

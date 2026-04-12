@@ -2816,6 +2816,19 @@ defmodule ZtlpGateway.Session do
     mobile_wifi_profile()
   end
 
+  defp select_cc_profile(%{client_class: :mobile, interface_type: :unknown}) do
+    %{
+      initial_cwnd: 5.0,
+      max_cwnd: 16,
+      ssthresh: 32,
+      pacing_interval_ms: 6,
+      burst_size: 2,
+      loss_beta: 0.7,
+      initial_rto_ms: @mobile_initial_rto_ms,
+      min_rto_ms: @mobile_min_rto_ms
+    }
+  end
+
   defp select_cc_profile(%{client_class: :mobile}) do
     # mobile + other interface (unknown/wired) — same as wifi
     mobile_wifi_profile()

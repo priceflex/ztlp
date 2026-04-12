@@ -15,6 +15,7 @@
 // Memory: TEXT segment ~1.65 MB. NO NWListeners — ~10-13 MB total.
 
 import NetworkExtension
+import Network
 import Foundation
 
 /// App Group identifier shared between the main app and this extension.
@@ -243,8 +244,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
 
                 // Step 5: Set client profile for CC selection
-                ztlp_set_client_profile(0, 0, 0)  // mobile + unknown interface
-                self.logger.info("Client profile: mobile (lightweight)", source: "Tunnel")
+                let detectedInterface = self.detectClientInterfaceType()
+                ztlp_set_client_profile(detectedInterface, 0, 0)
+                self.logger.info("Client profile: mobile interface=\(self.interfaceTypeName(detectedInterface)) (\(detectedInterface))", source: "Tunnel")
 
                 // Step 6: Create tunnel connection first, then do handshake on the same NWConnection
                 let target = config.targetNodeId  // gateway identity
@@ -1235,6 +1237,45 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return "unknown error"
     }
 
+    private func detectClientInterfaceType() -> UInt8 {
+        let pathMonitor = NWPathMonitor()
+        let pathSemaphore = DispatchSemaphore(value: 0)
+        let monitorQueue = DispatchQueue(label: "com.ztlp.tunnel.path-monitor", qos: .utility)
+        var detectedInterface: UInt8 = 0
+
+        pathMonitor.pathUpdateHandler = { path in
+            if path.usesInterfaceType(.cellular) {
+                detectedInterface = 1
+            } else if path.usesInterfaceType(.wifi) {
+                detectedInterface = 2
+            } else if path.usesInterfaceType(.wiredEthernet) {
+                detectedInterface = 3
+            }
+
+            pathMonitor.cancel()
+            pathSemaphore.signal()
+        }
+
+        pathMonitor.start(queue: monitorQueue)
+        _ = pathSemaphore.wait(timeout: .now() + 0.5)
+        pathMonitor.cancel()
+
+        return detectedInterface
+    }
+
+    private func interfaceTypeName(_ interfaceType: UInt8) -> String {
+        switch interfaceType {
+        case 1:
+            return "cellular"
+        case 2:
+            return "wifi"
+        case 3:
+            return "wired"
+        default:
+            return "unknown"
+        }
+    }
+
     private func makeNSError(_ message: String) -> NSError {
         NSError(
             domain: "com.ztlp.tunnel",
@@ -1243,8 +1284,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         )
     }
 }
-
-// MARK: - ZTLPTunnelConnectionDelegate
 
 extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
 

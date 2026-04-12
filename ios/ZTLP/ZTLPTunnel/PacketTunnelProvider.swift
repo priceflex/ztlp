@@ -35,6 +35,8 @@ private enum SharedKey {
     static let peerAddress = "ztlp_peer_address"
     static let lastError = "ztlp_last_error"
     static let selectedRelay = "ztlp_selected_relay"
+    static let neMemoryMB = "ztlp_ne_memory_mb"
+    static let neVirtualMB = "ztlp_ne_virtual_mb"
 }
 
 /// Messages the main app can send to the extension.
@@ -465,6 +467,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.sharedDefaults?.removeObject(forKey: SharedKey.peerAddress)
             self.sharedDefaults?.removeObject(forKey: SharedKey.lastError)
             self.sharedDefaults?.removeObject(forKey: SharedKey.selectedRelay)
+            self.sharedDefaults?.removeObject(forKey: SharedKey.neMemoryMB)
+            self.sharedDefaults?.removeObject(forKey: SharedKey.neVirtualMB)
             self.logger.info("Tunnel stopped", source: "Tunnel")
 
             completionHandler()
@@ -1183,9 +1187,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
             }
         }
+
+        var reportedMemoryMB: Double?
         if result == KERN_SUCCESS {
             let residentMB = Double(info.resident_size) / 1_048_576.0
             let virtualMB = Double(info.virtual_size) / 1_048_576.0
+            reportedMemoryMB = residentMB
+            sharedDefaults?.set(Int(residentMB.rounded()), forKey: SharedKey.neMemoryMB)
+            sharedDefaults?.set(Int(virtualMB.rounded()), forKey: SharedKey.neVirtualMB)
+
             if residentMB > 10.0 {
                 logger.warn(
                     "v5B-SYNC | Memory HIGH — resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB (NE limit ~15MB)",
@@ -1208,6 +1218,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     source: "Tunnel"
                 )
             }
+        }
+
+        if let reportedMemoryMB {
+            logger.debug("v5D-SYNC | Shared NE memory snapshot stored: \(Int(reportedMemoryMB.rounded()))MB", source: "Tunnel")
         }
     }
 

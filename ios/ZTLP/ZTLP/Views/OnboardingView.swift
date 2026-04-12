@@ -112,7 +112,7 @@ struct OnboardingView: View {
                 Text("ZTLP")
                     .font(.largeTitle.weight(.bold))
 
-                Text("Zero Trust Lattice Protocol")
+                Text("Zero Trust Layer Protocol")
                     .font(.title3)
                     .foregroundStyle(.secondary)
 

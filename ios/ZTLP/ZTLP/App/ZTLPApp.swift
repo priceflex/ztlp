@@ -75,7 +75,7 @@ struct RootView: View {
                             .font(.title.weight(.bold))
                             .tracking(2)
 
-                        Text("Zero Trust Lattice Protocol")
+                        Text("Zero Trust Layer Protocol")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .tracking(0.5)

@@ -395,8 +395,8 @@ struct BenchmarkView: View {
             ))
         }
 
-        // Test 3: HTTP GET to vault (if reachable)
-        let (httpOk, httpMs, httpCode) = await httpGet(url: "http://10.122.0.4/alive", timeoutSec: 10)
+        // Test 3: HTTP GET to vault (if reachable) — retry up to 3x for tunnel restart races
+        let (httpOk, httpMs, httpCode) = await httpGetWithRetry(url: "http://10.122.0.4/alive", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Vault HTTP Response",
             value: httpOk ? "\(httpMs)" : "FAIL",
@@ -406,8 +406,8 @@ struct BenchmarkView: View {
             openURL: httpOk ? "http://vault.ztlp" : nil
         ))
 
-        // Test 4: HTTP GET through primary service
-        let (primaryOk, primaryMs, primaryCode) = await httpGet(url: "http://10.122.0.2/", timeoutSec: 10)
+        // Test 4: HTTP GET through primary service — retry up to 3x for tunnel restart races
+        let (primaryOk, primaryMs, primaryCode) = await httpGetWithRetry(url: "http://10.122.0.2/", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Primary HTTP Response",
             value: primaryOk ? "\(primaryMs)" : "FAIL",
@@ -588,6 +588,21 @@ struct BenchmarkView: View {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             return (false, ms, 0)
         }
+    }
+
+    /// HTTP GET with retry — retries up to maxAttempts with delaySec between attempts.
+    /// Designed for response-content checks that may fail transiently after tunnel restart.
+    private func httpGetWithRetry(url urlString: String, timeoutSec: Int, maxAttempts: Int = 3, delaySec: UInt64 = 1) async -> (Bool, Int, Int) {
+        for attempt in 1...maxAttempts {
+            let (ok, ms, code) = await httpGet(url: urlString, timeoutSec: timeoutSec)
+            if ok || code > 0 {
+                return (ok, ms, code)
+            }
+            if attempt < maxAttempts {
+                try? await Task.sleep(nanoseconds: delaySec * 1_000_000_000)
+            }
+        }
+        return await httpGet(url: urlString, timeoutSec: timeoutSec)
     }
 
     /// HTTP throughput test — returns (requests/sec, completedCount)

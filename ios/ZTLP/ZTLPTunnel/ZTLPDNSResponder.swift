@@ -137,17 +137,44 @@ final class ZTLPDNSResponder {
             TunnelLogger.shared.debug("DNS: qname=\(fqdn) qtype=\(qtype) qclass=\(qclass)", source: "DNS")
             #endif
 
-            // Must end in .ztlp — pass through non-.ztlp queries to real DNS
+            // Must end in .ztlp — for non-.ztlp queries, return NXDOMAIN for
+            // known meta-queries (like _dns.resolver.arpa) that hit our DNS server
+            // so the caller doesn't log "no response generated" warnings.
+            // Other non-.ztlp queries pass through to real DNS.
             guard fqdn.hasSuffix(".ztlp") else {
                 #if DEBUG
-                TunnelLogger.shared.debug("DNS: pass-through — not .ztlp suffix", source: "DNS")
+                TunnelLogger.shared.debug("DNS: not .ztlp suffix — qname=\(fqdn)", source: "DNS")
                 #endif
+                // Return NXDOMAIN for _dns.resolver.arpa and similar meta-queries
+                // that Safari sends to our tunnel DNS address
+                if fqdn.hasSuffix(".arpa") {
+                    return buildNXDomainResponse(
+                        originalPacket: packet,
+                        ihl: ihl,
+                        txnID: txnID,
+                        questionEnd: nameOffset + 4
+                    )
+                }
                 return nil
             }
 
-            // For AAAA (type 28) queries on .ztlp domains, return NXDOMAIN
-            // immediately so iOS doesn't wait/retry for IPv6 addresses
+            // Handle non-A query types for .ztlp domains:
+            // - SVCB/HTTPS (type 65): Return NOERROR with empty answer so Safari
+            //   doesn't think the domain is nonexistent (avoids 1-2s delay).
+            // - AAAA (type 28) and others: Return NXDOMAIN immediately so iOS
+            //   doesn't wait/retry for IPv6 addresses.
             guard qtype == 1 && qclass == 1 else {
+                if qtype == 65 {
+                    #if DEBUG
+                    TunnelLogger.shared.debug("DNS: NOERROR (empty) for SVCB/HTTPS query — \(fqdn)", source: "DNS")
+                    #endif
+                    return buildEmptyResponse(
+                        originalPacket: packet,
+                        ihl: ihl,
+                        txnID: txnID,
+                        questionEnd: nameOffset + 4
+                    )
+                }
                 #if DEBUG
                 TunnelLogger.shared.debug("DNS: NXDOMAIN for non-A query type=\(qtype)", source: "DNS")
                 #endif
@@ -277,6 +304,42 @@ final class ZTLPDNSResponder {
             // Flags: QR=1, AA=1, RCODE=3 (NXDOMAIN) = 0x8583
             dns.append(0x85)
             dns.append(0x83)
+            dns.append(0x00); dns.append(0x01)  // QDCOUNT
+            dns.append(0x00); dns.append(0x00)  // ANCOUNT
+            dns.append(0x00); dns.append(0x00)  // NSCOUNT
+            dns.append(0x00); dns.append(0x00)  // ARCOUNT
+            dns.append(questionSection)
+
+            return buildIPv4UDPPacket(
+                originalPacket: originalPacket,
+                ihl: ihl,
+                dnsPayload: dns
+            )
+        }
+    }
+
+    /// Build a NOERROR response with empty answer section.
+    /// Used for SVCB/HTTPS queries where NXDOMAIN would signal the domain
+    /// doesn't exist, causing Safari to delay before trying A records.
+    private func buildEmptyResponse(
+        originalPacket: Data,
+        ihl: Int,
+        txnID: UInt16,
+        questionEnd: Int
+    ) -> Data {
+        return originalPacket.withUnsafeBytes { ptr -> Data in
+            let bytes = ptr.bindMemory(to: UInt8.self)
+            let dnsOffset = ihl + 8
+
+            let questionSection = Data(bytes: UnsafeRawPointer(bytes.baseAddress! + dnsOffset + 12),
+                                       count: questionEnd - (dnsOffset + 12))
+
+            var dns = Data(capacity: 32)
+            dns.append(UInt8(txnID >> 8))
+            dns.append(UInt8(txnID & 0xFF))
+            // Flags: QR=1, AA=1, RD=1, RA=1, RCODE=0 (NOERROR) = 0x8580
+            dns.append(0x85)
+            dns.append(0x80)
             dns.append(0x00); dns.append(0x01)  // QDCOUNT
             dns.append(0x00); dns.append(0x00)  // ANCOUNT
             dns.append(0x00); dns.append(0x00)  // NSCOUNT

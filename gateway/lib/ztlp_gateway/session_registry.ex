@@ -80,13 +80,25 @@ defmodule ZtlpGateway.SessionRegistry do
 
   @doc """
   Unregister a session (called during clean shutdown).
+
+  This deletes the addr mapping only if it still points at the same pid/session pair,
+  which prevents late cleanup from an old session from erasing a newer replacement
+  session that already claimed the same client_addr.
   """
-  @spec unregister(binary()) :: :ok
-  def unregister(session_id) when byte_size(session_id) == 12 do
+  @spec unregister(binary(), pid() | nil) :: :ok
+  def unregister(session_id, pid \\ nil) when byte_size(session_id) == 12 do
     :ets.delete(@table, session_id)
-    # Also clean up any addr mapping pointing to this session_id
-    # (scan addr table — small table, infrequent operation)
-    :ets.match_delete(@addr_table, {:_, session_id, :_})
+
+    if pid do
+      case :ets.match_object(@addr_table, {:_, session_id, pid}) do
+        [{addr, ^session_id, ^pid}] -> :ets.delete(@addr_table, addr)
+        _ -> :ok
+      end
+    else
+      # Fallback for legacy callers when we do not know the owner pid.
+      :ets.match_delete(@addr_table, {:_, session_id, :_})
+    end
+
     :ok
   end
 
@@ -125,15 +137,13 @@ defmodule ZtlpGateway.SessionRegistry do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     case Map.pop(state.monitors, ref) do
       {nil, monitors} ->
         {:noreply, %{state | monitors: monitors}}
 
       {session_id, monitors} ->
-        :ets.delete(@table, session_id)
-        # Clean up addr mapping for this session_id
-        :ets.match_delete(@addr_table, {:_, session_id, :_})
+        unregister(session_id, pid)
         {:noreply, %{state | monitors: monitors}}
     end
   end

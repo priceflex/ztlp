@@ -1216,7 +1216,7 @@ defmodule ZtlpGateway.Session do
   @impl true
   def terminate(_reason, state) do
     # Clean up: unregister, close backend, log
-    SessionRegistry.unregister(state.session_id)
+    SessionRegistry.unregister(state.session_id, self())
     Stats.session_closed()
 
     if state.backend_pid && Process.alive?(state.backend_pid) do

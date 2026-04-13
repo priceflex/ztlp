@@ -148,6 +148,9 @@ defmodule ZtlpGateway.Listener do
       case SessionRegistry.lookup_by_addr(client_addr) do
         {:ok, {old_sid, old_pid}} ->
           Logger.info("[Listener] Replacing session #{Base.encode16(old_sid)} from #{inspect(client_addr)} — new HELLO received")
+          # Unregister first so stale routing/cleanup from the old session cannot poison
+          # the replacement session that is about to claim the same client_addr.
+          SessionRegistry.unregister(old_sid, old_pid)
           # Use DynamicSupervisor.terminate_child for clean shutdown under supervision tree
           DynamicSupervisor.terminate_child(ZtlpGateway.SessionSupervisor, old_pid)
 

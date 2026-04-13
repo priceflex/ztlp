@@ -9,6 +9,7 @@ import SwiftUI
 struct ServicesView: View {
     @ObservedObject var viewModel: ServicesViewModel
     @ObservedObject var tunnelViewModel: TunnelViewModel
+    @State private var browserURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -20,6 +21,7 @@ struct ServicesView: View {
                 }
             }
             .navigationTitle("Services")
+            .safariSheet(url: $browserURL)
             .searchable(text: $viewModel.searchText, prompt: "Search services")
             .refreshable {
                 await viewModel.refresh()
@@ -51,7 +53,9 @@ struct ServicesView: View {
         List {
             Section {
                 ForEach(viewModel.filteredServices) { service in
-                    ServiceRow(service: service)
+                    ServiceRow(service: service) { url in
+                        browserURL = url
+                    }
                         .swipeActions(edge: .trailing) {
                             Button {
                                 viewModel.copyHostname(service)
@@ -131,6 +135,7 @@ struct ServicesView: View {
 
 private struct ServiceRow: View {
     let service: ZTLPService
+    let openURL: (URL) -> Void
 
     /// Whether this service can be opened in a browser
     private var isBrowsable: Bool {
@@ -148,7 +153,7 @@ private struct ServiceRow: View {
     var body: some View {
         Button {
             if let url = browseURL {
-                UIApplication.shared.open(url)
+                openURL(url)
             }
         } label: {
             HStack(spacing: 12) {

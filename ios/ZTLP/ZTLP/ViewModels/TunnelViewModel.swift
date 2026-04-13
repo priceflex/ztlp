@@ -8,9 +8,8 @@
 // The main app controls the extension (start/stop) and observes its status
 // via NEVPNStatusDidChange notifications and shared UserDefaults.
 //
-// Safari accesses the VIP proxy at http://127.0.0.1:8080 — because the
-// tunnel runs in the extension process, it stays alive when the user
-// switches to Safari.
+// The tunnel runs in the extension process, so app-launched service access
+// stays available while the main app is backgrounded.
 
 import Foundation
 import NetworkExtension
@@ -44,7 +43,7 @@ final class TunnelViewModel: ObservableObject {
     /// VIP proxy status (nil when not active).
     @Published private(set) var vipStatus: String?
 
-    /// The service URL users can open in Safari (nil when not connected).
+    /// The service URL users can open from the app UI (nil when not connected).
     @Published private(set) var serviceURL: String?
 
     /// Pretty service name for display (e.g., "vault.techrockstars.ztlp").
@@ -92,7 +91,7 @@ final class TunnelViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    /// Open the service URL in Safari.
+    /// Open the service URL using the system browser.
     func openServiceInSafari() {
         #if canImport(UIKit)
         guard let urlStr = serviceURL, let url = URL(string: urlStr) else { return }

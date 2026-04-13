@@ -21,6 +21,7 @@
 		7105614BAC2BE48DC291A8B0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89C24BDC82DF690F24190B2D /* HomeView.swift */; };
 		76B1BFA372D65AFC479EBACB /* ConnectionStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5AF8045644C273E351706D4 /* ConnectionStatus.swift */; };
 		7BBA2C7800B66A538E2D1C6E /* Color+ZTLP.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9B8795185D5093D8F95631 /* Color+ZTLP.swift */; };
+		7BCDEF1234567890ABCDEF12 /* SafariHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BCDEF1234567890ABCDEF11 /* SafariHelper.swift */; };
 		7FF8C9A0ED7F0E695EAFD39C /* TunnelViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2999C81580662F16AC6B03E /* TunnelViewModel.swift */; };
 		85AD116F993661084DAE78B2 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
@@ -44,6 +45,7 @@
 		DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */; };
 		DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */; };
 		DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660003 /* CertificateService.swift */; };
+		DD33EE44FF55AA66BB770004 /* LogExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC22DD33EE44FF55AA660004 /* LogExportService.swift */; };
 		EE44FF55AA66BB77CC880001 /* BenchmarkReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */; };
 		DDC1C5EB291E61F7B1E73F8A /* ZTLPTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 10C2CD7B7A6A52F505808697 /* ZTLPTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		E0DA0743CED83D9419B89819 /* ConnectionStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EFF838E964E33540E20C97A /* ConnectionStatusTests.swift */; };
@@ -104,6 +106,7 @@
 		7A6088FAAE6467A12BF10B72 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		7EFF838E964E33540E20C97A /* ConnectionStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusTests.swift; sourceTree = "<group>"; };
+		7BCDEF1234567890ABCDEF11 /* SafariHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariHelper.swift; sourceTree = "<group>"; };
 		80A0F034228B1159E45AAACD /* ZTLPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPBridgeTests.swift; sourceTree = "<group>"; };
 		89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		89C24BDC82DF690F24190B2D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -135,6 +138,7 @@
 		CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkBenchmark.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPBenchmark.swift; sourceTree = "<group>"; };
 		CC22DD33EE44FF55AA660003 /* CertificateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateService.swift; sourceTree = "<group>"; };
+		CC22DD33EE44FF55AA660004 /* LogExportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogExportService.swift; sourceTree = "<group>"; };
 		EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkReporter.swift; sourceTree = "<group>"; };
 		D5AF8045644C273E351706D4 /* ConnectionStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatus.swift; sourceTree = "<group>"; };
 		DDB9E741DCE93E4761DE08F4 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -151,6 +155,7 @@
 			isa = PBXGroup;
 			children = (
 				AA9B8795185D5093D8F95631 /* Color+ZTLP.swift */,
+				7BCDEF1234567890ABCDEF11 /* SafariHelper.swift */,
 			);
 			path = Extensions;
 			sourceTree = "<group>";
@@ -255,6 +260,7 @@
 				CC22DD33EE44FF55AA660001 /* NetworkBenchmark.swift */,
 				CC22DD33EE44FF55AA660002 /* HTTPBenchmark.swift */,
 				CC22DD33EE44FF55AA660003 /* CertificateService.swift */,
+				CC22DD33EE44FF55AA660004 /* LogExportService.swift */,
 				EE44FF55AA66BB77CC880002 /* BenchmarkReporter.swift */,
 			);
 			path = Services;
@@ -441,6 +447,7 @@
 			files = (
 				F5CCC50CD77A9E58AC5F75E2 /* AppDelegate.swift in Sources */,
 				7BBA2C7800B66A538E2D1C6E /* Color+ZTLP.swift in Sources */,
+				7BCDEF1234567890ABCDEF12 /* SafariHelper.swift in Sources */,
 				76B1BFA372D65AFC479EBACB /* ConnectionStatus.swift in Sources */,
 				C32215CA5BE8C82AA3BEFAE9 /* ContentView.swift in Sources */,
 				AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */,
@@ -469,6 +476,7 @@
 				DD33EE44FF55AA66BB770001 /* NetworkBenchmark.swift in Sources */,
 				DD33EE44FF55AA66BB770002 /* HTTPBenchmark.swift in Sources */,
 				DD33EE44FF55AA66BB770003 /* CertificateService.swift in Sources */,
+				DD33EE44FF55AA66BB770004 /* LogExportService.swift in Sources */,
 				EE44FF55AA66BB77CC880001 /* BenchmarkReporter.swift in Sources */,
 				BB11CC22DD33EE44FF550002 /* BenchmarkView.swift in Sources */,
 			);

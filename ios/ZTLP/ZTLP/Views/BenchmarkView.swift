@@ -12,6 +12,7 @@ struct BenchmarkView: View {
     @State private var results: [BenchmarkResult] = []
     @State private var manualSendStatus: String?
     @State private var isSendingLogs = false
+    @State private var browserURL: URL?
 
     enum BenchmarkCategory: String, CaseIterable {
         case connectivity = "Tunnel"
@@ -45,7 +46,7 @@ struct BenchmarkView: View {
         let unit: String
         let status: Status
         let detail: String?
-        /// Optional URL to open in browser (for service tests)
+        /// Optional URL to present in the in-app browser (for service tests)
         let openURL: String?
 
         init(name: String, value: String, unit: String, status: Status,
@@ -96,6 +97,7 @@ struct BenchmarkView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Benchmarks")
+            .safariSheet(url: $browserURL)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if isRunning {
@@ -267,7 +269,7 @@ struct BenchmarkView: View {
             if let urlString = result.openURL {
                 Button {
                     if let url = URL(string: urlString) {
-                        UIApplication.shared.open(url)
+                        browserURL = url
                     }
                 } label: {
                     Image(systemName: "arrow.up.right.square")

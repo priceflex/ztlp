@@ -14,6 +14,7 @@ struct HomeView: View {
     @State private var ringRotation: Double = 0
     @State private var pulseScale: CGFloat = 1.0
     @State private var showVaultSheet = false
+    @State private var browserURL: URL?
 
     /// Zone-qualified domain suffix (e.g., "techrockstars.ztlp")
     private var zoneSuffix: String {
@@ -51,6 +52,7 @@ struct HomeView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("ZTLP")
+            .safariSheet(url: $browserURL)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     connectionBadge
@@ -173,10 +175,16 @@ struct HomeView: View {
                 subtitle: "vault.\(zoneSuffix)",
                 color: .ztlpBlue
             ) {
-                showVaultSheet = true
+                if let url = URL(string: "http://vault.\(zoneSuffix)") {
+                    browserURL = url
+                } else {
+                    showVaultSheet = true
+                }
             }
             .sheet(isPresented: $showVaultSheet) {
-                VaultAccessSheet(zoneSuffix: zoneSuffix)
+                VaultAccessSheet(zoneSuffix: zoneSuffix, openURL: { url in
+                    browserURL = url
+                })
             }
 
             QuickActionButton(
@@ -207,7 +215,8 @@ struct HomeView: View {
                     vip: "10.122.0.4",
                     port: 443,
                     proto: "https",
-                    isActive: true
+                    isActive: true,
+                    openURL: { url in browserURL = url }
                 )
 
                 ActiveServiceCard(
@@ -217,7 +226,8 @@ struct HomeView: View {
                     vip: "10.122.0.2",
                     port: 80,
                     proto: "http",
-                    isActive: true
+                    isActive: true,
+                    openURL: { url in browserURL = url }
                 )
 
                 ActiveServiceCard(
@@ -227,7 +237,8 @@ struct HomeView: View {
                     vip: "10.122.0.2",
                     port: 443,
                     proto: "https",
-                    isActive: true
+                    isActive: true,
+                    openURL: { url in browserURL = url }
                 )
 
                 ActiveServiceCard(
@@ -237,7 +248,8 @@ struct HomeView: View {
                     vip: "10.122.0.3",
                     port: 80,
                     proto: "http",
-                    isActive: true
+                    isActive: true,
+                    openURL: { url in browserURL = url }
                 )
             }
         }
@@ -365,7 +377,7 @@ private struct QuickActionButton: View {
     }
 }
 
-// MARK: - Active Service Card (tappable — opens browser)
+// MARK: - Active Service Card (tappable — opens in-app browser)
 
 private struct ActiveServiceCard: View {
     let icon: String
@@ -375,8 +387,9 @@ private struct ActiveServiceCard: View {
     let port: UInt16
     let proto: String  // "http" or "https"
     let isActive: Bool
+    let openURL: (URL) -> Void
 
-    /// Build the URL to open in browser — use hostname for DNS resolution
+    /// Build the URL to present in the in-app browser using DNS-resolved hostnames.
     private var serviceURL: String {
         if port == 80 || port == 443 {
             return "\(proto)://\(hostname)"
@@ -387,7 +400,7 @@ private struct ActiveServiceCard: View {
     var body: some View {
         Button {
             if let url = URL(string: serviceURL) {
-                UIApplication.shared.open(url)
+                openURL(url)
             }
         } label: {
             HStack(spacing: 12) {
@@ -458,6 +471,7 @@ private struct StatCard: View {
 
 private struct VaultAccessSheet: View {
     let zoneSuffix: String
+    let openURL: (URL) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var showCertInfo = false
 
@@ -492,21 +506,24 @@ private struct VaultAccessSheet: View {
                         title: "Web Vault",
                         url: "https://vault.\(zoneSuffix)",
                         icon: "lock.fill",
-                        note: "vault.\(zoneSuffix)"
+                        note: "vault.\(zoneSuffix)",
+                        openURL: openURL
                     )
 
                     VaultLinkRow(
                         title: "Web Vault (HTTP)",
                         url: "http://vault.\(zoneSuffix)",
                         icon: "globe",
-                        note: "No certificate required"
+                        note: "No certificate required",
+                        openURL: openURL
                     )
 
                     VaultLinkRow(
                         title: "Bitwarden Sync URL",
                         url: "http://vault.\(zoneSuffix)",
                         icon: "arrow.triangle.2.circlepath",
-                        note: "Set this in Bitwarden app settings"
+                        note: "Set this in Bitwarden app settings",
+                        openURL: openURL
                     )
                 }
                 .padding(.horizontal)
@@ -539,11 +556,12 @@ private struct VaultLinkRow: View {
     let url: String
     let icon: String
     let note: String
+    let openURL: (URL) -> Void
 
     var body: some View {
         Button {
             if let url = URL(string: url) {
-                UIApplication.shared.open(url)
+                openURL(url)
             }
         } label: {
             HStack(spacing: 12) {

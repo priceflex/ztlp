@@ -48,6 +48,11 @@
     </array>
     <key>NSCameraUsageDescription</key>
     <string>ZTLP uses the camera to scan enrollment QR codes.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>UIBackgroundModes</key>
     <array>
         <string>network-authentication</string>

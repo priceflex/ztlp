@@ -133,19 +133,24 @@ final class ZTLPDNSResponder {
             // Build the FQDN first (need it for .ztlp check)
             let fqdn = nameParts.joined(separator: ".")
 
-            // Log the query details
+            #if DEBUG
             TunnelLogger.shared.debug("DNS: qname=\(fqdn) qtype=\(qtype) qclass=\(qclass)", source: "DNS")
+            #endif
 
             // Must end in .ztlp — pass through non-.ztlp queries to real DNS
             guard fqdn.hasSuffix(".ztlp") else {
+                #if DEBUG
                 TunnelLogger.shared.debug("DNS: pass-through — not .ztlp suffix", source: "DNS")
+                #endif
                 return nil
             }
 
             // For AAAA (type 28) queries on .ztlp domains, return NXDOMAIN
             // immediately so iOS doesn't wait/retry for IPv6 addresses
             guard qtype == 1 && qclass == 1 else {
+                #if DEBUG
                 TunnelLogger.shared.debug("DNS: NXDOMAIN for non-A query type=\(qtype)", source: "DNS")
+                #endif
                 return buildNXDomainResponse(
                     originalPacket: packet,
                     ihl: ihl,
@@ -156,7 +161,9 @@ final class ZTLPDNSResponder {
 
             // Look up the VIP for A record queries
             guard let vip = serviceMap[fqdn] else {
-                TunnelLogger.shared.debug("DNS: NXDOMAIN for \(fqdn) (not in map: \(Array(serviceMap.keys)))", source: "DNS")
+                #if DEBUG
+                TunnelLogger.shared.debug("DNS: NXDOMAIN for \(fqdn)", source: "DNS")
+                #endif
                 // Unknown .ztlp name — return NXDOMAIN
                 return buildNXDomainResponse(
                     originalPacket: packet,

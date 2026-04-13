@@ -64,11 +64,53 @@ fn ios_log(msg: &str) {
 }
 
 /// Log to iOS console (NSLog) or stderr on other platforms
+#[cfg(feature = "diag")]
 macro_rules! diag_log {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
         ios_log(&msg);
     }};
+}
+
+#[cfg(not(feature = "diag"))]
+macro_rules! diag_log {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(feature = "diag")]
+macro_rules! trace_debug {
+    ($($arg:tt)*) => {
+        tracing::debug!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "diag"))]
+macro_rules! trace_debug {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(feature = "diag")]
+macro_rules! trace_info {
+    ($($arg:tt)*) => {
+        tracing::info!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "diag"))]
+macro_rules! trace_info {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(feature = "diag")]
+macro_rules! trace_warn {
+    ($($arg:tt)*) => {
+        tracing::warn!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "diag"))]
+macro_rules! trace_warn {
+    ($($arg:tt)*) => {};
 }
 
 // ── Security constants ──────────────────────────────────────────────────
@@ -1147,8 +1189,11 @@ async fn recv_loop(
     const DIAG_REPORT_PACKET_INTERVAL: u64 = 200; // or every 200 packets
 
     // Reassembly buffer cap — prevent unbounded memory growth in iOS
-    // Network Extension (15MB process limit). 512 entries × ~1200 bytes
-    // = ~600KB max reassembly memory.
+    // Network Extension (15MB process limit). Keep a smaller reassembly bound for
+    // ios-sync builds while preserving a larger desktop/server default.
+    #[cfg(feature = "ios-sync")]
+    const REASSEMBLY_MAX_ENTRIES: usize = 64;
+    #[cfg(not(feature = "ios-sync"))]
     const REASSEMBLY_MAX_ENTRIES: usize = 256;
 
     // Cap for received_ahead BTreeSet (out-of-order tracking).
@@ -1431,7 +1476,7 @@ async fn recv_loop(
                 // Maximum UDP payload is 65535 bytes; anything larger indicates a
                 // bug or attack. Drop silently and continue.
                 if plaintext.len() > MAX_RECV_PACKET_SIZE {
-                    tracing::warn!(
+                    trace_warn!(
                         "recv_loop: dropping oversized packet ({} bytes, max {})",
                         plaintext.len(),
                         MAX_RECV_PACKET_SIZE,
@@ -1443,7 +1488,7 @@ async fn recv_loop(
 
                 // Log short packets for debugging
                 if plaintext.len() <= 9 {
-                    tracing::debug!(
+                    trace_debug!(
                         "recv_loop: short packet len={} first_byte=0x{:02x}",
                         plaintext.len(),
                         plaintext.first().copied().unwrap_or(0)
@@ -1467,7 +1512,7 @@ async fn recv_loop(
                     let acked_seq =
                         u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
                     diag_log!("[ZTLP-RX] FRAME_ACK (upload) acked_seq={} len={}", acked_seq, plaintext.len());
-                    tracing::debug!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);
+                    trace_debug!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);
                     log_write(
                         &mut debug_log,
                         &mut log_bytes_written,
@@ -1603,7 +1648,7 @@ async fn recv_loop(
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
                             send_ack_frame!(ack_frame);
                             diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
-                            tracing::info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
+                            trace_info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
                             last_acked_data_seq = next_expected_seq;
                             last_data_recv_time = None;
                             last_reack_time = Some(std::time::Instant::now());
@@ -1616,8 +1661,7 @@ async fn recv_loop(
                     // For mux: dispatch to per-stream channel.
                     // For legacy: dispatch to stream_id=0.
                     if stream_id == 0 && data_seq == 0 && vip_next_deliver_seq > 0 {
-                        tracing::info!(
-                            "recv_loop: detected stream reset (data_seq=0, expected={})",
+                        trace_info!("recv_loop: detected stream reset (data_seq=0, expected={})",
                             vip_next_deliver_seq
                         );
                         reassembly_buf.clear();
@@ -1627,7 +1671,7 @@ async fn recv_loop(
                     if data_seq >= vip_next_deliver_seq {
                         // Cap reassembly buffer to prevent OOM in iOS NE
                         if reassembly_buf.len() >= REASSEMBLY_MAX_ENTRIES {
-                            tracing::warn!(
+                            trace_warn!(
                                 "recv_loop: reassembly buffer full ({} entries), dropping data_seq={}",
                                 reassembly_buf.len(), data_seq
                             );
@@ -1680,7 +1724,7 @@ async fn recv_loop(
                                 // Channel full — put it back and stop flushing.
                                 // Next recv iteration retries after consumer drains.
                                 reassembly_buf.insert(vip_next_deliver_seq, (sid, data));
-                                tracing::debug!(
+                                trace_debug!(
                                     "recv_loop: dispatch backpressure at data_seq={}, will retry",
                                     vip_next_deliver_seq
                                 );
@@ -1717,7 +1761,7 @@ async fn recv_loop(
 
                         send_ack_frame!(ack_frame);
                         diag_log!("[ZTLP-TX] ACK ack_seq={} via callback", ack_seq);
-                        tracing::info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
+                        trace_info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
                             ack_seq, has_gap, is_coalesce_point, is_first);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None; // ACK sent, reset timer
@@ -1739,7 +1783,7 @@ async fn recv_loop(
                             next_expected_seq, reassembly_buf.len(), REASSEMBLY_MAX_ENTRIES,
                             diag_ooo_peak, diag_lock_contention_us, pps
                         );
-                        tracing::info!(
+                        trace_info!(
                             "recv_diag: pkts={} acks={} next_seq={} reasm_buf={} ooo_peak={} pps={}",
                             diag_packets_received, diag_acks_sent, next_expected_seq,
                             reassembly_buf.len(), diag_ooo_peak, pps
@@ -1889,7 +1933,7 @@ async fn recv_loop(
                         ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
 
                         send_ack_frame!(ack_frame);
-                        tracing::info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
+                        trace_info!("recv_loop: delayed ACK flush data_seq={} direct", ack_seq);
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None;
                     }
@@ -1931,7 +1975,7 @@ async fn recv_loop(
 
                             send_ack_frame!(nack_frame);
 
-                            tracing::info!(
+                            trace_info!(
                                 "recv_loop: NACK sent for {} missing seqs (expected={}, max_buffered={}, first_missing={})",
                                 missing.len(), next_expected_seq, max_buffered, missing[0]
                             );
@@ -1942,7 +1986,7 @@ async fn recv_loop(
 
                 // Check keepalive watchdog
                 if last_recv_time.elapsed() > KEEPALIVE_TIMEOUT {
-                    tracing::warn!(
+                    trace_warn!(
                         "recv_loop: keepalive timeout ({}s without data)",
                         KEEPALIVE_TIMEOUT.as_secs()
                     );

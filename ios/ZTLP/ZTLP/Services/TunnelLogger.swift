@@ -56,8 +56,9 @@ final class TunnelLogger {
 
     // MARK: - Constants
 
-    /// Maximum number of lines to keep in the log file.
-    private static let maxLines = 5000
+    /// Maximum file size to keep in the shared log before trimming.
+    /// Approximate replacement for the old max-lines policy to avoid full-file reads.
+    private static let maxFileSize: UInt64 = 512 * 1024
     /// Only trim the file periodically so hot-path logging stays append-only.
     private static let rotationCheckInterval: TimeInterval = 60
 
@@ -221,15 +222,38 @@ final class TunnelLogger {
         }
         lastRotationCheck = now
 
-        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber else {
             return
         }
 
-        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
-        guard lines.count > Self.maxLines else { return }
+        let fileSize = size.uint64Value
+        guard fileSize > Self.maxFileSize else { return }
 
-        let trimmed = lines.suffix(Self.maxLines).joined(separator: "\n") + "\n"
-        try? trimmed.write(to: url, atomically: false, encoding: .utf8)
+        let keepBytes = max(Self.maxFileSize / 2, 64 * 1024)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+
+        do {
+            if fileSize > keepBytes {
+                try handle.seek(toOffset: fileSize - keepBytes)
+            } else {
+                try handle.seek(toOffset: 0)
+            }
+
+            var tail = try handle.readToEnd() ?? Data()
+
+            if fileSize > keepBytes,
+               let newlineIndex = tail.firstIndex(of: 0x0A),
+               newlineIndex < tail.endIndex {
+                tail.removeSubrange(tail.startIndex...newlineIndex)
+            }
+
+            guard !tail.isEmpty else { return }
+            try tail.write(to: url, options: .atomic)
+        } catch {
+            return
+        }
     }
 
     /// Parse a log line into a LogEntry.

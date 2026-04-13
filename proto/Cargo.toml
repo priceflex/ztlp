@@ -26,6 +26,7 @@ tokio-runtime = [
     "dep:qr2term",
     "dep:dirs",
 ]
+diag = []
 ios-sync = []  # Builds without tokio — for iOS Network Extension
 
 [dependencies]

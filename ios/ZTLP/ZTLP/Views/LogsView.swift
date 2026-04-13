@@ -10,6 +10,8 @@ struct LogsView: View {
     @StateObject private var viewModel = LogsViewModel()
     @State private var autoScroll = true
     @State private var showExportSheet = false
+    @State private var exportItems: [Any] = []
+    @State private var exportSummary: String?
 
     var body: some View {
         NavigationStack {
@@ -39,9 +41,15 @@ struct LogsView: View {
 
                     Menu {
                         Button {
-                            showExportSheet = true
+                            prepareExport(reason: "manual_logs_export")
                         } label: {
                             Label("Export Logs", systemImage: "square.and.arrow.up")
+                        }
+
+                        Button {
+                            prepareExport(reason: "manual_send_debug_logs")
+                        } label: {
+                            Label("Send Debug Logs Now", systemImage: "paperplane")
                         }
 
                         Button(role: .destructive) {
@@ -56,15 +64,21 @@ struct LogsView: View {
             }
             .searchable(text: $viewModel.searchText, prompt: "Search logs")
             .sheet(isPresented: $showExportSheet) {
-                let data = viewModel.exportData()
-                    if let tmpURL = exportToTmpFile(data) {
-                        ShareSheet(items: [tmpURL])
-                    }
+                ShareSheet(items: exportItems)
             }
         }
     }
 
     // MARK: - Phone Log Status
+
+    private func prepareExport(reason: String) {
+        if let payload = LogExportService.createExportPayload(reason: reason) {
+            exportItems = [payload.fileURL]
+            exportSummary = payload.summary
+            showExportSheet = true
+            viewModel.refresh()
+        }
+    }
 
     private var phoneLogStatusSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -75,6 +89,13 @@ struct LogsView: View {
                 Text("\(viewModel.uploadEntries.count) events")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let exportSummary {
+                Text(exportSummary)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
 
             if let latest = viewModel.uploadEntries.last {

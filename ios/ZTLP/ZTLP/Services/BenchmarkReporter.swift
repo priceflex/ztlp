@@ -217,6 +217,60 @@ class BenchmarkReporter {
         }
     }
 
+    /// Manual emergency log send. Uses the same POST /api/benchmarks path as automatic
+    /// uploads, but does not require the benchmark suite to finish first.
+    func submitManualLogDump(
+        reason: String,
+        passedCount: Int = 0,
+        totalCount: Int = 0,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        logger.info("Submitting manual log dump: \(reason)", source: "BenchUpload")
+        TunnelLogger.shared.flush()
+
+        let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared")
+        let neMemoryMB = sharedDefaults?.object(forKey: "ztlp_ne_memory_mb") as? Int
+        let neVirtualMB = sharedDefaults?.object(forKey: "ztlp_ne_virtual_mb") as? Int
+        let replayRejectCount = sharedDefaults?.object(forKey: "ztlp_replay_reject_count") as? Int
+        let selectedRelay = sharedDefaults?.string(forKey: "ztlp_selected_relay")
+        let peerAddress = sharedDefaults?.string(forKey: "ztlp_peer_address")
+
+        let report = BenchmarkUploadReport(
+            device_id: nil,
+            node_id: nil,
+            app_version: ProcessInfo.processInfo.operatingSystemVersionString,
+            build_tag: "v5D-SYNC",
+            device_model: UIDevice.current.model,
+            ios_version: UIDevice.current.systemVersion,
+            ne_memory_mb: neMemoryMB,
+            ne_virtual_mb: neVirtualMB,
+            replay_reject_count: replayRejectCount,
+            ne_memory_pass: (neMemoryMB ?? 999) <= 15,
+            benchmarks_passed: passedCount,
+            benchmarks_total: totalCount,
+            individual_results: nil,
+            relay_address: selectedRelay,
+            gateway_address: peerAddress,
+            ns_address: nil,
+            latency_ms: nil,
+            throughput_kbps: nil,
+            p99_latency_ms: nil,
+            packet_loss_pct: nil,
+            errors: "manual_log_dump: \(reason)",
+            device_logs: readDeviceLogs()
+        )
+
+        submit(report) { result in
+            switch result {
+            case .success:
+                self.logger.info("Manual log dump stored on bootstrap server", source: "BenchUpload")
+            case .failure(let error):
+                self.logger.error("Manual log dump failed: \(error.localizedDescription)", source: "BenchUpload")
+            }
+            completion(result)
+        }
+    }
+
     enum ReporterError: Error, LocalizedError {
         case noAuthToken
         case invalidURL

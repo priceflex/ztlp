@@ -27,6 +27,7 @@ import Combine
 final class HTTPBenchmark: ObservableObject {
 
     static let shared = HTTPBenchmark()
+    private static let benchmarkTimeoutSeconds: UInt64 = 45
 
     // MARK: Published State
 
@@ -62,6 +63,40 @@ final class HTTPBenchmark: ObservableObject {
     }()
 
     private init() {}
+
+    private func checkpointLog(_ message: String) {
+        logger.info(message, source: "HTTPBench")
+        logger.flush()
+    }
+
+    private func runWithTimeout<T>(name: String, seconds: UInt64, operation: @escaping @Sendable () async -> T?) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask {
+                await operation()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                return nil
+            }
+
+            let first = await group.next() ?? nil
+            group.cancelAll()
+
+            if first == nil {
+                self.checkpointLog("\(name): TIMEOUT after \(seconds)s")
+                self.logger.flush()
+                BenchmarkReporter.shared.submit(
+                    neMemoryMB: UserDefaults(suiteName: "group.com.ztlp.shared")?.object(forKey: "ztlp_ne_memory_mb") as? Int,
+                    neVirtualMB: UserDefaults(suiteName: "group.com.ztlp.shared")?.object(forKey: "ztlp_ne_virtual_mb") as? Int,
+                    replayRejectCount: UserDefaults(suiteName: "group.com.ztlp.shared")?.object(forKey: "ztlp_replay_reject_count") as? Int,
+                    passedCount: self.results.count,
+                    totalCount: self.results.count + 1,
+                    errors: "\(name) timed out after \(seconds)s"
+                )
+            }
+            return first
+        }
+    }
 
     // MARK: - Server Configuration
 
@@ -139,12 +174,13 @@ final class HTTPBenchmark: ObservableObject {
             progress = Double(index) / total
             connectionStatus = "Running: \(name)"
             logger.info("--- \(name) ---", source: "HTTPBench")
+            checkpointLog("START \(name)")
 
-            if let result = await bench() {
+            if let result = await runWithTimeout(name: name, seconds: Self.benchmarkTimeoutSeconds, operation: bench) {
                 results.append(result)
-                logger.info(result.summary, source: "HTTPBench")
+                checkpointLog(result.summary)
             } else {
-                logger.warn("\(name): SKIPPED or FAILED", source: "HTTPBench")
+                checkpointLog("\(name): FAILED — timed out after \(Self.benchmarkTimeoutSeconds)s")
             }
 
             // Brief pause between benchmarks

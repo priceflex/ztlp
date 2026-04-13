@@ -10,7 +10,8 @@ struct BenchmarkView: View {
     @State private var selectedCategory: BenchmarkCategory = .connectivity
     @State private var isRunning = false
     @State private var results: [BenchmarkResult] = []
-    @State private var showExport = false
+    @State private var manualSendStatus: String?
+    @State private var isSendingLogs = false
 
     enum BenchmarkCategory: String, CaseIterable {
         case connectivity = "Tunnel"
@@ -85,6 +86,8 @@ struct BenchmarkView: View {
                 .padding(.horizontal)
                 .padding(.bottom, 8)
 
+                benchmarkActionsBar
+
                 if results.isEmpty && !isRunning {
                     emptyState
                 } else {
@@ -111,6 +114,63 @@ struct BenchmarkView: View {
     }
 
     // MARK: - Empty State
+
+    private var benchmarkActionsBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                Button {
+                    if !isRunning {
+                        runBenchmarks()
+                    }
+                } label: {
+                    Label(isRunning ? "Running…" : "Run Test", systemImage: isRunning ? "hourglass" : "play.fill")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.ztlpBlue)
+                .disabled(isRunning)
+
+                Button {
+                    let logger = TunnelLogger.shared
+                    logger.info("Manual benchmark-page log send requested", source: "LogExport")
+                    logger.flush()
+                    isSendingLogs = true
+                    manualSendStatus = "Sending logs to bootstrap…"
+                    BenchmarkReporter.shared.submitManualLogDump(
+                        reason: "benchmark_page_send_logs",
+                        passedCount: results.filter { $0.status != .error }.count,
+                        totalCount: results.count
+                    ) { result in
+                        DispatchQueue.main.async {
+                            isSendingLogs = false
+                            switch result {
+                            case .success:
+                                manualSendStatus = "Logs sent to bootstrap successfully"
+                            case .failure(let error):
+                                manualSendStatus = "Log send failed: \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                } label: {
+                    Label(isSendingLogs ? "Sending…" : "Send Logs", systemImage: isSendingLogs ? "icloud.and.arrow.up" : "paperplane")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSendingLogs)
+            }
+
+            if let manualSendStatus {
+                Text(manualSendStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
 
     private var emptyState: some View {
         VStack(spacing: 20) {

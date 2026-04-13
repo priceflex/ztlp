@@ -58,6 +58,8 @@ final class TunnelLogger {
 
     /// Maximum number of lines to keep in the log file.
     private static let maxLines = 5000
+    /// Only trim the file periodically so hot-path logging stays append-only.
+    private static let rotationCheckInterval: TimeInterval = 60
 
     // MARK: - Properties
 
@@ -66,6 +68,9 @@ final class TunnelLogger {
 
     /// Path to the shared log file.
     private let logFileURL: URL?
+
+    /// Last time we ran an on-disk rotation pass.
+    private var lastRotationCheck = Date.distantPast
 
     /// ISO 8601 formatter for timestamps.
     private let dateFormatter: ISO8601DateFormatter = {
@@ -165,6 +170,7 @@ final class TunnelLogger {
 
     /// Export the full log as UTF-8 data (for sharing).
     func exportData() -> Data {
+        flush()
         var data = Data()
         queue.sync {
             guard let url = logFileURL,
@@ -176,34 +182,54 @@ final class TunnelLogger {
         return data
     }
 
+    /// Block until all queued log writes have been persisted.
+    func flush() {
+        queue.sync { }
+    }
+
     // MARK: - Private
 
-    /// Append a line to the log file, rotating if needed.
+    /// Append a line to the log file using append-only I/O.
     private func appendLine(_ line: String) {
         guard let url = logFileURL else { return }
 
-        // Ensure the file exists
+        let data = Data((line + "\n").utf8)
+
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
 
-        // Read existing lines
-        var lines: [String] = []
-        if let existing = try? String(contentsOf: url, encoding: .utf8) {
-            lines = existing.components(separatedBy: "\n").filter { !$0.isEmpty }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            do {
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {
+                try? handle.close()
+                try? data.write(to: url, options: .atomic)
+            }
+        } else {
+            try? data.write(to: url, options: .atomic)
         }
 
-        // Append new line
-        lines.append(line)
+        rotateLogIfNeeded(now: Date(), url: url)
+    }
 
-        // Rotate: keep only the last maxLines
-        if lines.count > Self.maxLines {
-            lines = Array(lines.suffix(Self.maxLines))
+    private func rotateLogIfNeeded(now: Date, url: URL) {
+        guard now.timeIntervalSince(lastRotationCheck) >= Self.rotationCheckInterval else {
+            return
+        }
+        lastRotationCheck = now
+
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            return
         }
 
-        // Write back
-        let output = lines.joined(separator: "\n") + "\n"
-        try? output.write(to: url, atomically: true, encoding: .utf8)
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        guard lines.count > Self.maxLines else { return }
+
+        let trimmed = lines.suffix(Self.maxLines).joined(separator: "\n") + "\n"
+        try? trimmed.write(to: url, atomically: false, encoding: .utf8)
     }
 
     /// Parse a log line into a LogEntry.

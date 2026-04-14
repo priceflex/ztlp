@@ -3785,41 +3785,6 @@ pub extern "C" fn ztlp_router_gateway_close_sync(
     }
 }
 
-/// Clean up stale (timed-out) TCP flows and return the count.
-/// Each cleanup removes the flow AND its send_buf, reclaiming memory.
-/// Should be called periodically from the Swift packet loop (every ~10s).
-/// Returns the number of flows removed (negative on error).
-#[no_mangle]
-pub extern "C" fn ztlp_router_cleanup_stale_flows(
-    router: *mut ZtlpPacketRouter,
-) -> i32 {
-    if router.is_null() {
-        set_last_error("null argument");
-        return -1;
-    }
-    let router = unsafe { &*router };
-    match router.inner.lock() {
-        Ok(mut r) => {
-            let stale = r.cleanup_stale_flows();
-            let count = stale.len() as i32;
-            if count > 0 {
-                // Also clean up closed flows to reclaim their send_buf memory
-                r.cleanup_closed_flows();
-            }
-            count
-        }
-        Err(_) => { set_last_error("lock poisoned"); -1 }
-    }
-}
-
-/// Free a string allocated by ztlp_router_stats.
-#[no_mangle]
-pub extern "C" fn ztlp_free_string(s: *mut std::ffi::c_char) {
-    if !s.is_null() {
-        unsafe { libc::free(s as *mut std::ffi::c_void); }
-    }
-}
-
 /// Clean up stale (timed-out) TCP flows.
 /// Returns number of flows cleaned up (negative on error).
 /// Call periodically from Swift to reclaim timed-out flow memory.
@@ -3844,6 +3809,14 @@ pub extern "C" fn ztlp_router_cleanup_stale_flows(router: *mut ZtlpPacketRouter)
     }
 }
 
+/// Free a string allocated by ztlp_router_stats.
+#[no_mangle]
+pub extern "C" fn ztlp_free_string(s: *mut std::ffi::c_char) {
+    if !s.is_null() {
+        unsafe { libc::free(s as *mut std::ffi::c_void); }
+    }
+}
+
 /// Get flow and queue diagnostics for memory profiling.
 /// Returns a human-readable stats string, caller must free with ztlp_free_string.
 #[no_mangle]
@@ -3854,13 +3827,7 @@ pub extern "C" fn ztlp_router_stats(router: *mut ZtlpPacketRouter) -> *mut std::
     let router = unsafe { &*router };
     match router.inner.lock() {
         Ok(r) => {
-            let stats = format!(
-                "flows={} outbound={} stream_to_flow={} next_stream_id={}",
-                r.flows.len(),
-                r.outbound.len(),
-                r.stream_to_flow.len(),
-                r.next_stream_id
-            );
+            let stats = r.router_stats();
             let bytes = stats.as_bytes();
             let c_str = unsafe {
                 let ptr = libc::malloc(bytes.len() + 1) as *mut std::ffi::c_char;

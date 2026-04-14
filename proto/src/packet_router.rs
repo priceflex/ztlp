@@ -1009,7 +1009,7 @@ impl PacketRouter {
     }
 
     /// Clean up flows in the Closed state and timed-out flows.
-    fn cleanup_closed_flows(&mut self) {
+    pub(crate) fn cleanup_closed_flows(&mut self) {
         let now = Instant::now();
         let to_remove: Vec<FlowKey> = self
             .flows
@@ -1026,6 +1026,17 @@ impl PacketRouter {
                 self.stream_to_flow.remove(&flow.stream_id);
             }
         }
+    }
+
+    /// Return diagnostic stats for memory profiling (called by FFI).
+    pub(crate) fn router_stats(&self) -> String {
+        format!(
+            "flows={} outbound={} stream_to_flow={} next_stream_id={}",
+            self.flows.len(),
+            self.outbound.len(),
+            self.stream_to_flow.len(),
+            self.next_stream_id
+        )
     }
 
     /// Explicitly clean up timed-out flows.

@@ -1246,6 +1246,21 @@ int32_t ztlp_router_gateway_close_sync(
  */
 void ztlp_router_stop_sync(ZtlpPacketRouter *router);
 
+/**
+ * Clean up stale (timed-out) TCP flows. Returns count of cleaned flows.
+ */
+int32_t ztlp_router_cleanup_stale_flows(ZtlpPacketRouter *router);
+
+/**
+ * Free a string returned by ztlp_router_stats.
+ */
+void ztlp_free_string(char *s);
+
+/**
+ * Get router diagnostics as a human-readable string. Caller must free with ztlp_free_string.
+ */
+char *ztlp_router_stats(ZtlpPacketRouter *router);
+
 // ── Sync NS Resolution (no tokio, ios-safe) ─────────────────────────────
 
 /**

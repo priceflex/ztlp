@@ -442,9 +442,28 @@ Safari on AAAA lookups. This gets deployed in Phase 2 with the rest.
 
 ---
 
+## DEPLOYMENT LOG (Phase 1)
+
+### 2026-04-14 ~20:37 UTC — NS rebuilt
+  - Fixed typo: techrockstories -> techrockstars
+  - Added ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false
+  - Image: ztlp-ns:signed-relay, relay seeded correctly
+  - Container running on 34.217.62.46
+
+### 2026-04-14 ~20:39 UTC — Gateway rebuilt
+  - @queue_high: 256 -> 2048
+  - @queue_low: 64 -> 512
+  - Built: ztlp-gateway:queue-fix (commit 7493f09)
+  - Shipped via docker save | docker load pipe
+  - Container running on 44.246.33.34 with all original env vars preserved
+
+---
+
 ## QUICK WINS WE CAN DO RIGHT NOW (Before Phase 1)
 
-1. Fix NS typo — 5 minute fix, eliminates 2s latency per session
+(These are now done as part of Phase 1 deployment)
+
+1. DONE: Fix NS typo — eliminated 2s latency per session
 2. Verify vault backend is actually running on gateway (curl localhost:8080)
 3. Check if gateway send_queue limit is configurable via env var already
 4. Pull the EXACT file dates of .a libraries on Steve's Mac to confirm

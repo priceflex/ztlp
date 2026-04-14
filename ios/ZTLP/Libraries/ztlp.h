@@ -1246,6 +1246,36 @@ int32_t ztlp_router_gateway_close_sync(
  */
 void ztlp_router_stop_sync(ZtlpPacketRouter *router);
 
+/**
+ * @brief Clean up stale (timed-out) TCP flows in the router.
+ *
+ * Removes flows that have been inactive longer than the flow timeout.
+ * Call periodically from Swift to reclaim flow memory and keep the
+ * Network Extension under the iOS memory limit (~15 MB).
+ *
+ * @param router  Router handle from ztlp_router_new_sync().
+ * @return Number of flows removed, or negative on error.
+ */
+int32_t ztlp_router_cleanup_stale_flows(ZtlpPacketRouter *router);
+
+/**
+ * @brief Get a human-readable stats string for the router.
+ *
+ * Returns flow count, outbound queue size, and stream info for
+ * memory debugging. Caller must free with ztlp_free_string().
+ *
+ * @param router  Router handle from ztlp_router_new_sync().
+ * @return Heap-allocated string, or NULL on error.
+ */
+char *ztlp_router_stats(ZtlpPacketRouter *router);
+
+/**
+ * @brief Free a string allocated by the library.
+ *
+ * @param s  String to free, or NULL (safe no-op).
+ */
+void ztlp_free_string(char *s);
+
 // ── Sync NS Resolution (no tokio, ios-safe) ─────────────────────────────
 
 /**

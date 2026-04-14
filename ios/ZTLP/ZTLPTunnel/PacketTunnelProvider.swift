@@ -122,11 +122,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Periodic timer to flush outbound packets from the router.
     private var writePacketTimer: DispatchSourceTimer?
 
+    /// Periodic cleanup timer for stale TCP flows (reclaims memory).
+    private static let cleanupInterval: TimeInterval = 10.0
+    private var cleanupTimer: DispatchSourceTimer?
+
     /// ACK flush timer (10ms for low-latency ACKs).
     private var ackFlushTimer: DispatchSourceTimer?
 
-    /// Action buffer for router write results (reusable, 256KB for large uploads).
-    private var actionBuffer = [UInt8](repeating: 0, count: 262144)
+    /// Action buffer for router write results (reusable, 64KB).
+    /// Previous value 256KB was excessive — max mux payload is 1135 bytes
+    /// per action with 64 actions/cycle = ~73KB theoretical max, so 64KB
+    /// covers the common case and overflows gracefully at the action count limit.
+    private var actionBuffer = [UInt8](repeating: 0, count: 65536)
 
     // MARK: - Mux Frame Constants
     private static let MUX_FRAME_DATA: UInt8 = 0x00
@@ -390,6 +397,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.startKeepaliveTimer()
                 self.startWritePacketTimer()
                 self.startAckFlushTimer()
+                self.startCleanupTimer()
 
                 // Update shared state
                 self.updateConnectionState(.connected)
@@ -439,6 +447,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.stopWritePacketTimer()
             self.ackFlushTimer?.cancel()
             self.ackFlushTimer = nil
+            self.cleanupTimer?.cancel()
+            self.cleanupTimer = nil
 
             // Stop DNS responder
             self.dnsResponder = nil
@@ -856,6 +866,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         timer.resume()
         ackFlushTimer = timer
+    }
+
+    /// Every 10 seconds, clean up stale TCP flows (120s timeout) to reclaim
+    /// flow memory. Each flow has a 48-byte VecDeque struct + send_buf overhead.
+    /// Also logs NE memory for diagnostics.
+    private func startCleanupTimer() {
+        cleanupTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
+        timer.schedule(deadline: .now() + .seconds(10), repeating: .seconds(10))
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.isTunnelActive else { return }
+            if let router = self.packetRouter {
+                let cleaned = ztlp_router_cleanup_stale_flows(router)
+                if cleaned > 0 {
+                    self.logger.info("Cleaned up \\(cleaned) stale TCP flows", source: "Tunnel")
+                }
+                // Log router stats for memory debugging
+                if let statsPtr = ztlp_router_stats(router) {
+                    let stats = String(cString: statsPtr)
+                    ztlp_free_string(statsPtr)
+                    self.logger.debug("Router stats: \\(stats)", source: "Tunnel")
+                }
+            }
+            self.logMemoryDiagnostics()
+        }
+        timer.resume()
+        cleanupTimer = timer
     }
 
     // MARK: - Relay Discovery and Selection (sync NS + RelayPool FFI)

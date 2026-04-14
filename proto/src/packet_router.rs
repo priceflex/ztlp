@@ -45,6 +45,10 @@ const TCP_MSS: u16 = 1360;
 /// Flow inactivity timeout in seconds.
 const FLOW_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum bytes in a single flow's send buffer. Bounds per-flow memory at
+/// ~64 KB — beyond this the buffer is drained from the front before pushing.
+const FLOW_MAX_SEND_BUF: usize = 65536;
+
 /// Maximum packets in outbound queue. Bounds memory for iOS NE (15MB limit).
 /// 256 packets × ~1400 bytes = ~350KB.
 /// iOS NE: 128 to bound memory (15MB limit). Desktop: 512 for throughput.
@@ -883,6 +887,10 @@ impl PacketRouter {
 
         flow.last_activity = Instant::now();
 
+        // Cap outbound queue to prevent unbounded memory growth in iOS NE
+        if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
+            self.outbound.pop_front();
+        }
         // Send data in MSS-sized chunks
         let mut offset = 0;
         while offset < data.len() {
@@ -909,10 +917,6 @@ impl PacketRouter {
             );
 
             flow.server_seq = flow.server_seq.wrapping_add(chunk.len() as u32);
-            // Cap outbound queue to prevent unbounded memory growth in iOS NE
-            if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
-                self.outbound.pop_front();
-            }
             self.outbound.push_back(pkt);
             offset = chunk_end;
         }
@@ -951,7 +955,51 @@ impl PacketRouter {
     ///
     /// Returns all queued IPv4 packets to inject back into the utun interface.
     pub fn drain_outbound(&mut self) -> Vec<Vec<u8>> {
+        // Also drain any flow send_bufs that have data waiting
+        self.drain_flow_send_buffers();
         self.outbound.drain(..).collect()
+    }
+
+    /// Drain pending data from flow send_bufs into the outbound queue.
+    /// This is called when the Swift side is ready to process outbound packets.
+    fn drain_flow_send_buffers(&mut self) {
+        let keys: Vec<FlowKey> = self.flows.keys().copied().collect();
+        for flow_key in keys {
+            let flow = match self.flows.get_mut(&flow_key) {
+                Some(f) => f,
+                None => continue,
+            };
+            if flow.send_buf.is_empty() {
+                continue;
+            }
+            if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
+                break;
+            }
+            // Build packets from send_buf data in MSS chunks
+            while !flow.send_buf.is_empty() && self.outbound.len() < OUTBOUND_MAX_PACKETS {
+                let chunk_size = std::cmp::min(TCP_MSS as usize, flow.send_buf.len());
+                let chunk: Vec<u8> = flow.send_buf.drain(..chunk_size).collect();
+                if flow.state == TcpState::Established || flow.state == TcpState::CloseWait {
+                    let flags = TCP_PSH | TCP_ACK;
+                    let pkt = build_ipv4_tcp(
+                        flow.flow_key.dst_ip,
+                        flow.flow_key.src_ip,
+                        flow.flow_key.dst_port,
+                        flow.flow_key.src_port,
+                        flow.server_seq,
+                        flow.client_seq,
+                        flags,
+                        TCP_WINDOW_SIZE,
+                        &chunk,
+                        false,
+                    );
+                    flow.server_seq = flow.server_seq.wrapping_add(chunk.len() as u32);
+                    self.outbound.push_back(pkt);
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Pop a single outbound packet (FIFO). Returns None if empty.

@@ -49,11 +49,13 @@ const FLOW_TIMEOUT_SECS: u64 = 120;
 /// ~64 KB — beyond this the buffer is drained from the front before pushing.
 const FLOW_MAX_SEND_BUF: usize = 65536;
 
-/// Maximum packets in outbound queue. Bounds memory for iOS NE (15MB limit).
-/// 256 packets × ~1400 bytes = ~350KB.
-/// iOS NE: 128 to bound memory (15MB limit). Desktop: 512 for throughput.
+/// Maximum packets in outbound queue. Bounds memory for iOS NE (50MB kill limit).
+/// 256 packets × ~1400 bytes = ~350KB — well under any memory constraint.
+/// Increased from 128 to 256: Safari opens 6+ concurrent streams per page;
+/// 128 was too small and caused stalls before drain could catch up.
+/// Desktop: 512 for throughput.
 #[cfg(target_os = "ios")]
-const OUTBOUND_MAX_PACKETS: usize = 128;
+const OUTBOUND_MAX_PACKETS: usize = 256;
 #[cfg(not(target_os = "ios"))]
 const OUTBOUND_MAX_PACKETS: usize = 512;
 
@@ -887,18 +889,29 @@ impl PacketRouter {
 
         flow.last_activity = Instant::now();
 
-        // Cap outbound queue to prevent unbounded memory growth in iOS NE
-        if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
-            self.outbound.pop_front();
-        }
-        // Send data in MSS-sized chunks
+        // Send data in MSS-sized chunks. If the global outbound queue is full,
+        // spill remaining data into the flow's per-TCP send_buf instead of
+        // dropping it. The send_buf (capped at 64 KB) is drained by
+        // drain_flow_send_buffers() when the queue has room, so no packets
+        // are lost under burst load.
         let mut offset = 0;
         while offset < data.len() {
             let chunk_end = std::cmp::min(offset + TCP_MSS as usize, data.len());
             let chunk = &data[offset..chunk_end];
 
-            let flags = if chunk_end == data.len() {
-                TCP_PSH | TCP_ACK // Push on last segment
+            if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
+                // Queue full — buffer remaining data per-flow (bounded at 64 KB).
+                let remaining = &data[offset..];
+                let available = FLOW_MAX_SEND_BUF.saturating_sub(flow.send_buf.len());
+                if available > 0 {
+                    let take = remaining.len().min(available);
+                    flow.send_buf.extend(remaining[..take].iter().copied());
+                }
+                return;
+            }
+
+            let flags = if chunk_end == data.len() && flow.send_buf.is_empty() {
+                TCP_PSH | TCP_ACK
             } else {
                 TCP_ACK
             };
@@ -975,12 +988,14 @@ impl PacketRouter {
             if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
                 break;
             }
-            // Build packets from send_buf data in MSS chunks
+            // Build packets from send_buf data in MSS chunks.
+            // PSH on the last chunk only so Safari delivers data promptly.
             while !flow.send_buf.is_empty() && self.outbound.len() < OUTBOUND_MAX_PACKETS {
                 let chunk_size = std::cmp::min(TCP_MSS as usize, flow.send_buf.len());
+                let is_last = chunk_size >= flow.send_buf.len();
+                let flags = if is_last { TCP_PSH | TCP_ACK } else { TCP_ACK };
                 let chunk: Vec<u8> = flow.send_buf.drain(..chunk_size).collect();
                 if flow.state == TcpState::Established || flow.state == TcpState::CloseWait {
-                    let flags = TCP_PSH | TCP_ACK;
                     let pkt = build_ipv4_tcp(
                         flow.flow_key.dst_ip,
                         flow.flow_key.src_ip,

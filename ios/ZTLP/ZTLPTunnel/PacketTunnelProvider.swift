@@ -828,10 +828,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             packets.append(Data(readPacketBuffer[0..<Int(bytesRead)]))
             protocols.append(NSNumber(value: AF_INET))
             drained += 1
-
-            if shouldThrottleRouterWork() {
-                break
-            }
         }
 
         if !packets.isEmpty {

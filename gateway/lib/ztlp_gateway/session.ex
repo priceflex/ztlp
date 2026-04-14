@@ -466,8 +466,11 @@ defmodule ZtlpGateway.Session do
   # we stop reading from the backend (don't call resume_read). When it drops below
   # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
   # when the backend dumps a large response faster than the tunnel can deliver.
-  @queue_high 256
-  @queue_low 64
+  @queue_high 2048
+  @queue_low 512
+  # Increased from 256/64 to 2048/512 to prevent mux stream rejections
+  # under Safari-style burst loads (6+ concurrent streams). Previous 256
+  # was hit routinely, causing immediate stream rejection and reconnection storms.
   # Hard safety limits for mux fan-out during browser-style workloads.
   # @max_mux_streams bounds the total concurrent connected + connecting streams.
   # @max_connecting_buffer_bytes bounds early data accepted before a backend finishes connecting.

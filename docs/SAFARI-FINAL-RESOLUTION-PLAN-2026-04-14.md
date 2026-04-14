@@ -393,6 +393,55 @@ Phase 4 (framing fix):
 
 ---
 
+## THE RECONNECTION STORM (Bug 1 + 4 + 5 Interaction)
+
+This is the part I missed in the initial plan. The numbers don't make
+sense as independent bugs — they form a cascade:
+
+The reconnect trigger chain:
+  Keepalive timer fires every 25 seconds.
+  If keepalive SEND fails (sendData returns false) 3 times in a row,
+  AND no data received for 60 seconds → scheduleReconnect().
+  Also: tunnelConnection didFailWithError → immediate scheduleReconnect().
+
+  Reconnect does: exponential backoff (1s base, 60s cap, 10 max attempts)
+    → stop old tunnelConnection
+    → create new NWConnection to relay
+    → new ZTLP HELLO to gateway
+
+The storm happens because:
+  1. Gateway queue fills (1800+ packets) → rejects mux streams
+  2. Safari gets no responses → keeps retrying → more streams
+  3. Eventually keepalive send also fails (NWConnection overwhelmed)
+     OR tunnelConnection reports error
+  4. NE reconnects → new HELLO → gateway replaces session
+  5. Old in-flight packets still arriving → 330K unknown_session rejects
+  6. New session starts with queue already backed up
+  7. Goto 1
+
+The 856 session replacements in 24 hours = roughly one every 100 seconds.
+That means the tunnel is reconnecting constantly. Each reconnect creates
+a fresh session, but the underlying queue problem persists, so it just
+cycles.
+
+CRITICAL IMPLICATION: Even if the iOS packet-drop fix is deployed, if the
+gateway queue still hits 256 and rejects streams, the NE will still enter
+the reconnect storm. The gateway fix in Phase 1 is mandatory.
+
+---
+
+## THE AAAA/NXDOMAIN FIX STATUS
+
+Verified: The DNS fix IS in the source code. ZTLPDNSResponder.swift at
+line 164 returns NXDOMAIN for AAAA (type 28) and other non-A queries.
+This was the fix from the April 13 session.
+
+However: like everything else, this fix is only in source. If the phone
+is running stale libraries, it still has the old DNS behavior that hangs
+Safari on AAAA lookups. This gets deployed in Phase 2 with the rest.
+
+---
+
 ## QUICK WINS WE CAN DO RIGHT NOW (Before Phase 1)
 
 1. Fix NS typo — 5 minute fix, eliminates 2s latency per session

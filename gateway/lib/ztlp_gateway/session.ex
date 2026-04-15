@@ -1059,7 +1059,8 @@ defmodule ZtlpGateway.Session do
           new_ssthresh = max(trunc(acc.cwnd * cc_loss_beta(acc)), @min_ssthresh)
           new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
           Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: acc.send_data_seq, recovery_cwnd: new_cwnd}, true}
+          recovery_target = max(acc.send_data_seq - 1, acc.last_acked_data_seq)
+          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: recovery_target, recovery_cwnd: new_cwnd}, true}
         else
           {acc, loss_reduced}
         end
@@ -1808,7 +1809,8 @@ defmodule ZtlpGateway.Session do
     # random packet drops, not congestion. Only RTO should reduce cwnd.
     state = if not state.in_recovery do
       Logger.info("[Session] NACK loss: entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)")
-      %{state | in_recovery: true, recovery_data_seq: state.send_data_seq, recovery_cwnd: state.cwnd}
+      recovery_target = max(state.send_data_seq - 1, state.last_acked_data_seq)
+      %{state | in_recovery: true, recovery_data_seq: recovery_target, recovery_cwnd: state.cwnd}
     else
       Logger.debug("[Session] NACK during recovery — skipping")
       state
@@ -2621,9 +2623,9 @@ defmodule ZtlpGateway.Session do
     # Exit recovery mode when ACK advances past recovery_data_seq.
     # Restore cwnd to recovery_cwnd (the value at entry), stripping any
     # dup-ACK inflation that accumulated during recovery.
-    state = if state.in_recovery and newly_acked > 0 and acked_data_seq > state.recovery_data_seq do
+    state = if state.in_recovery and newly_acked > 0 and acked_data_seq >= state.recovery_data_seq do
       restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), cc_max_cwnd(state) * 1.0)
-      Logger.info("[Session] Exiting recovery (acked=#{acked_data_seq} > recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}")
+      Logger.info("[Session] Exiting recovery (acked=#{acked_data_seq} >= recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}")
       %{state | in_recovery: false, recovery_data_seq: 0, recovery_cwnd: 0, cwnd: restored_cwnd}
     else
       state

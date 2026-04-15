@@ -221,15 +221,77 @@ Look specifically for why:
 
 ---
 
+## Open questions this doc does NOT yet answer
+
+### Q1: Why do ACKs stop advancing?
+Phone log shows `ZTLP ACK sent seq=1609 inflight=0` — the phone IS sending ACKs.
+Possibilities:
+- ACK UDP packets lost on the return path (phone → relay → gateway)
+- ACKs arrive but gateway doesn't process them during recovery state
+- Seq number accounting bug: `last_acked=1610` vs `recv_base=1363` is a 247 gap — suspicious
+
+### Q2: Why doesn't recovery exit?
+`dup_ack=0` at stall time is weird. Recovery is normally triggered by triple dup-ack.
+If `dup_ack=0` and `recovery=true`, recovery may have been triggered by timeout and
+the exit condition is never met. Need to know what triggered recovery and what would exit it.
+
+### Q3: Why is inflight > cwnd?
+`inflight=32` but `cwnd=22` — 10 packets over the window. Are retransmits not counted
+against cwnd? If so, the send window can never reopen because inflight never drops below cwnd.
+
+### Q4: Is the queue static or growing during the 30s stall?
+We only see the final snapshot (queue=2528). Was it 2528 for the whole 30s? Or did it
+grow from 500→2528? This changes whether the fix is "stop filling" vs "start draining."
+
+### Q5: The feedback loop
+Prior analysis (2026-04-14) showed this is actually a cascade:
+- Queue fills → gateway rejects new mux streams → Safari retries → more queue pressure
+- → keepalive failures → NE reconnects → gateway replaces session
+- → old session inflight packets → "unknown_session" rejections
+- → new session inherits same backlog → loop repeats
+Production evidence: 41 mux rejections, 856 session replacements,
+330K unknown_session rejections, 858 STALL teardowns in 24h.
+
+---
+
 ## Suggested immediate plan for next session
 
-1. Inspect recovery / pacing code paths in `session.ex`
-2. Add queue high-water / drain-rate instrumentation if needed
-3. Patch to clamp recovery / inflight under mobile load
-4. Patch to prevent queue ballooning once `backends_paused=true`
-5. Redeploy gateway
-6. Re-run iPhone Safari test
-7. Re-check bootstrap + gateway logs
+### Phase 1: Instrument (answer the open questions BEFORE tuning)
+
+1. Read `session.ex` — map the recovery/pacing/ACK-processing code paths
+2. Add **ACK receipt logging** on gateway:
+   - Log every ACK packet received from client (seq number, timestamp)
+   - Log when an ACK does NOT advance recv_base, and why (stale? out-of-order? wrong session?)
+3. Add **recovery state transition logging**:
+   - Log entry into recovery: what triggered it (timeout vs triple dup-ack)
+   - Log exit from recovery (or lack thereof)
+   - Log inflight vs cwnd on every pacing_tick while in recovery
+4. Add **queue growth tracking**:
+   - Log queue size every 5s during recovery (not just at teardown)
+   - Log when `backends_paused` is set and at what queue depth
+   - Log queue drain rate (packets dequeued per tick) vs growth rate
+5. Add **inflight/cwnd accounting audit**:
+   - Log when inflight exceeds cwnd and what prevents drain
+   - Log whether retransmits are counted against cwnd or bypass it
+6. Deploy gateway with new instrumentation
+7. Run iPhone Safari test (structured: force-quit app, relaunch, connect, wait 10s, open Safari to vault)
+8. Collect logs and answer Q1–Q5
+
+### Phase 2: Fix (informed by Phase 1 answers)
+
+9. If ACKs are lost on return path → add redundant ACK sending or ACK bundling on iOS side
+10. If ACKs arrive but aren't processed → fix recovery ACK handling in session.ex
+11. If inflight > cwnd is the deadlock → clamp inflight to cwnd during recovery, drain excess
+12. If queue grows because backends_paused doesn't actually stop enqueuing → fix backpressure path
+13. If recovery never exits due to wrong trigger/exit condition → fix recovery state machine
+14. Redeploy gateway with fixes
+
+### Phase 3: Validate
+
+15. Re-run iPhone Safari test
+16. Confirm: queue stays bounded, recovery exits, ACKs advance, page loads fully
+17. Run full benchmark suite (all 8 tests)
+18. Check 10-minute soak — no session replacements, no STALL teardowns
 
 ---
 

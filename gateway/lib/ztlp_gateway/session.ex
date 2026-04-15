@@ -1085,7 +1085,14 @@ defmodule ZtlpGateway.Session do
     # @stall_timeout_ms, the session is a zombie. Log and tear it down.
     stall_age = now - state.last_ack_advance_at
     if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
-      Logger.warning("[Session] STALL: no ACK advance for #{div(stall_age, 1000)}s inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} recv_base=#{state.recv_window_base} dup_ack=#{state.dup_ack_count} recovery=#{state.in_recovery} — tearing down")
+      stream_dump =
+        state.streams
+        |> Enum.map(fn {sid, s} ->
+          "#{sid}:#{Map.get(s, :service, "?")}:#{Map.get(s, :state, :unknown)}:buf=#{Map.get(s, :connect_buffer_bytes, 0)}:chunks=#{length(Map.get(s, :buffer, []))}"
+        end)
+        |> Enum.join(",")
+
+      Logger.warning("[Session] STALL: no ACK advance for #{div(stall_age, 1000)}s inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} recv_base=#{state.recv_window_base} dup_ack=#{state.dup_ack_count} recovery=#{state.in_recovery} queue=#{:queue.len(state.send_queue)} backends_paused=#{state.backends_paused} streams=[#{stream_dump}] — tearing down")
       {:stop, {:shutdown, :stall_timeout}, state}
     else
       # Reschedule if buffer is non-empty
@@ -1159,7 +1166,7 @@ defmodule ZtlpGateway.Session do
         # Stream was already closed/removed (e.g. client sent FRAME_CLOSE during connect).
         # Close the backend we just connected since nobody needs it.
         if Process.alive?(pid), do: BackendPool.close(pid)
-        Logger.info("[Session] Stream #{stream_id} connect result arrived but stream already gone, closing backend")
+        Logger.warning("[Session] Stream #{stream_id} connect result arrived but stream already gone, closing backend reason=client_close_before_connect queue=#{:queue.len(state.send_queue)} total_streams=#{map_size(state.streams)}")
         {:noreply, state}
     end
   end
@@ -1921,20 +1928,28 @@ defmodule ZtlpGateway.Session do
 
   # FRAME_CLOSE: client is closing a stream
   defp handle_tunnel_frame(<<@frame_close, stream_id::big-32>>, state) do
-    Logger.info("[Session] FRAME_CLOSE stream_id=#{stream_id}")
-    case Map.get(state.streams, stream_id) do
-      %{state: :connecting, connect_timeout_ref: tref} ->
-        # Cancel connect timeout; the spawned connect will send a result
-        # message that we'll ignore since the stream is already removed.
-        if tref, do: Process.cancel_timer(tref)
+    close_reason =
+      case Map.get(state.streams, stream_id) do
+        %{state: :connecting, connect_timeout_ref: tref} = stream ->
+          # Cancel connect timeout; the spawned connect will send a result
+          # message that we'll ignore since the stream is already removed.
+          if tref, do: Process.cancel_timer(tref)
+          "client_close_before_connect service=#{Map.get(stream, :service, "?")} buffered_bytes=#{Map.get(stream, :connect_buffer_bytes, 0)} buffered_chunks=#{length(Map.get(stream, :buffer, []))}"
 
-      %{backend_pid: pid} when pid != nil ->
-        # Return pooled connection for reuse instead of closing it
-        if Process.alive?(pid), do: BackendPool.checkin(pid)
+        %{backend_pid: pid, service: service, state: stream_state} when pid != nil ->
+          # Return pooled connection for reuse instead of closing it
+          if Process.alive?(pid), do: BackendPool.checkin(pid)
+          "client_close_after_connect service=#{service} stream_state=#{stream_state}"
 
-      _ ->
-        :ok
-    end
+        %{service: service, state: stream_state} ->
+          "client_close_stream service=#{service} stream_state=#{stream_state}"
+
+        nil ->
+          "client_close_unknown_stream"
+      end
+
+    Logger.warning("[Session] FRAME_CLOSE stream_id=#{stream_id} reason=#{close_reason} queue=#{:queue.len(state.send_queue)} total_streams=#{map_size(state.streams)}")
+
     # Audit: stream closed
     AuditCollector.log_event(%{
       event: "stream.closed",
@@ -1942,7 +1957,8 @@ defmodule ZtlpGateway.Session do
       level: "info",
       details: %{
         session_id: Base.encode16(state.session_id),
-        stream_id: stream_id
+        stream_id: stream_id,
+        reason: close_reason
       }
     })
 

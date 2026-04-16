@@ -55,6 +55,12 @@ Informational/Experimental specification. It does not propose changes to
 IP addressing or BGP routing. It defines a protocol layer that can be
 deployed today over the existing Internet.
 
+## Trademark
+
+ZTLP is a trademark of Tech Rockstar Academy.
+
+Use of the ZTLP name and brand is subject to our trademark guidelines.
+
 ## Documentation
 
 View the full documentation — including quick start guides, architecture deep dive, component guides, deployment instructions, and API reference — by opening `docs/index.html` in your browser, or visit [docs.ztlp.org](https://docs.ztlp.org) (coming soon).

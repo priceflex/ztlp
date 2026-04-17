@@ -953,37 +953,33 @@ select option { background: var(--surface2); }
   }
   .how-it-works-grid {
     grid-template-columns: 1fr;
-    gap: 14px;
+    gap: 18px;
   }
   .how-step {
-    display: grid;
-    grid-template-columns: 44px minmax(0, 1fr);
-    column-gap: 14px;
-    align-items: start;
-    padding: 18px;
-    border-radius: 18px;
+    display: block;
+    padding: 22px 20px;
+    border-radius: 20px;
+    background: rgba(255,255,255,.9);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
   }
   .how-step-number {
-    width: 44px;
-    height: 44px;
-    margin-bottom: 0;
-    font-size: 1rem;
-    box-shadow: 0 10px 20px rgba(14, 165, 233, 0.22);
+    width: auto;
+    height: auto;
+    margin-bottom: 14px;
+    padding: 6px 12px;
+    font-size: .86rem;
+    line-height: 1;
+    box-shadow: none;
+    border-radius: 999px;
   }
   .how-step h3 {
-    margin: 2px 0 8px;
-    font-size: 1rem;
+    margin: 0 0 10px;
+    font-size: 1.08rem;
+    line-height: 1.35;
   }
   .how-step p {
     margin: 0;
-    font-size: .95rem;
-    line-height: 1.6;
-  }
-  .how-step h3,
-  .how-step p {
-    grid-column: 2;
-  }
-  .how-step-number {
-    grid-row: 1 / span 2;
+    font-size: 1rem;
+    line-height: 1.72;
   }
 }

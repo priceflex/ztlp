@@ -923,6 +923,7 @@ select option { background: var(--surface2); }
   .lifecycle-steps { flex-direction: column; }
   .lifecycle-arrow { display: none; }
   .connect-inner { flex-direction: column; text-align: center; }
+  .how-it-works-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
@@ -943,4 +944,46 @@ select option { background: var(--surface2); }
   .stats-grid { grid-template-columns: 1fr 1fr; }
   .form-row { grid-template-columns: 1fr; }
   .hero-title { font-size: 2rem; }
+
+  .how-it-works {
+    padding: 56px 0;
+  }
+  .how-it-works-header {
+    margin-bottom: 28px;
+  }
+  .how-it-works-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .how-step {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    column-gap: 14px;
+    align-items: start;
+    padding: 18px;
+    border-radius: 18px;
+  }
+  .how-step-number {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 0;
+    font-size: 1rem;
+    box-shadow: 0 10px 20px rgba(14, 165, 233, 0.22);
+  }
+  .how-step h3 {
+    margin: 2px 0 8px;
+    font-size: 1rem;
+  }
+  .how-step p {
+    margin: 0;
+    font-size: .95rem;
+    line-height: 1.6;
+  }
+  .how-step h3,
+  .how-step p {
+    grid-column: 2;
+  }
+  .how-step-number {
+    grid-row: 1 / span 2;
+  }
 }

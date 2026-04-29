@@ -71,6 +71,9 @@ final class ZTLPTunnelConnection {
     /// Whether the connection is active and receiving.
     private var isActive = false
 
+    /// Ensures one underlying NWConnection failure produces one delegate callback.
+    private var didReportFailure = false
+
     /// Monotonically increasing data sequence for outbound frames.
     private var sendSequence: UInt64 = 0
 
@@ -294,6 +297,7 @@ final class ZTLPTunnelConnection {
     /// Start the UDP connection and begin receiving.
     func start() {
         guard !isActive else { return }
+        didReportFailure = false
 
         // Parse host:port from gateway address
         guard let (host, port) = parseHostPort(gatewayAddress) else {
@@ -446,7 +450,11 @@ final class ZTLPTunnelConnection {
         pendingAcks.removeAll(keepingCapacity: true)
 
         var ackWritten: Int = 0
-        let ackResult = ztlp_build_ack(maxSeq, &frameBuffer, frameBuffer.count, &ackWritten)
+        // Advertise conservative receive capacity so the gateway can pace to
+        // the NE's current send/ACK pressure instead of flooding until queues
+        // fill. Keep at least 16 packets to avoid a zero-window deadlock.
+        let availableWindow = max(16, min(512, Self.maxSendsInFlight - sendsInFlight))
+        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, UInt16(availableWindow), &frameBuffer, frameBuffer.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }
 
         var encryptWritten: Int = 0
@@ -513,7 +521,7 @@ final class ZTLPTunnelConnection {
 
         case .failed(let error):
             isActive = false
-            delegate?.tunnelConnection(self, didFailWithError: error)
+            reportFailureOnce(error, source: "state.failed")
 
         case .cancelled:
             isActive = false
@@ -525,6 +533,16 @@ final class ZTLPTunnelConnection {
         default:
             break
         }
+    }
+
+    private func reportFailureOnce(_ error: Error, source: String) {
+        if didReportFailure {
+            logger.debug("Ignoring duplicate tunnel failure from \(source): \(error.localizedDescription)", source: "Tunnel")
+            return
+        }
+        didReportFailure = true
+        logger.error("Tunnel connection failure source=\(source): \(error.localizedDescription)", source: "Tunnel")
+        delegate?.tunnelConnection(self, didFailWithError: error)
     }
 
     // MARK: - Receive Loop
@@ -542,7 +560,7 @@ final class ZTLPTunnelConnection {
                 if case NWError.posix(let code) = error, code == .ECANCELED {
                     return
                 }
-                self.delegate?.tunnelConnection(self, didFailWithError: error)
+                self.reportFailureOnce(error, source: "receiveMessage")
                 return
             }
 

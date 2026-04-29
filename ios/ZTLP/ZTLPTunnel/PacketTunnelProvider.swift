@@ -84,6 +84,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Current reconnect attempt counter.
     private var reconnectAttempt = 0
 
+    /// Reconnect scheduling state. NWConnection can report one socket failure
+    /// through both stateUpdateHandler and receiveMessage; keep reconnects
+    /// idempotent so a single failure cannot consume multiple attempts.
+    private var reconnectScheduled = false
+    private var reconnectInProgress = false
+    private var reconnectGeneration = 0
+
     /// Maximum reconnect attempts before giving up.
     private static let maxReconnectAttempts = 10
 
@@ -128,6 +135,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// ACK flush timer (10ms for low-latency ACKs).
     private var ackFlushTimer: DispatchSourceTimer?
+
+    /// Rate-limit diagnostic work and shared-defaults churn while idle.
+    private var lastMemoryDiagnosticsAt: Date = .distantPast
+    private var lastStoredResidentMemoryMB: Int?
+    private var lastStoredVirtualMemoryMB: Int?
+    private var lastAvailableMemoryWarningAt: Date = .distantPast
+    private static let memoryDiagnosticsInterval: TimeInterval = 60.0
 
     /// Action buffer for router write results (reusable, 64KB).
     /// Previous value 256KB was excessive — max mux payload is 1135 bytes
@@ -395,9 +409,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.consecutiveKeepaliveFailures = 0
                 self.lastDataActivity = Date()
                 self.startKeepaliveTimer()
-                self.startWritePacketTimer()
-                self.startAckFlushTimer()
                 self.startCleanupTimer()
+                self.logger.info("Idle quiesce: packet/ACK timers disabled; using demand-driven flush", source: "Tunnel")
 
                 // Update shared state
                 self.updateConnectionState(.connected)
@@ -837,14 +850,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func startWritePacketTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(5))
-        timer.setEventHandler { [weak self] in
-            guard let self = self, self.isTunnelActive else { return }
-            self.flushOutboundPackets()
-        }
-        timer.resume()
-        writePacketTimer = timer
+        writePacketTimer?.cancel()
+        writePacketTimer = nil
     }
 
     private func stopWritePacketTimer() {
@@ -855,13 +862,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Flush batched ACKs every 10ms for low latency without per-packet overhead.
     private func startAckFlushTimer() {
         ackFlushTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
-        timer.schedule(deadline: .now() + .milliseconds(10), repeating: .milliseconds(10))
-        timer.setEventHandler { [weak self] in
-            self?.tunnelConnection?.flushPendingAcks()
-        }
-        timer.resume()
-        ackFlushTimer = timer
+        ackFlushTimer = nil
     }
 
     /// Every 10 seconds, clean up stale TCP flows (120s timeout) to reclaim
@@ -876,13 +877,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if let router = self.packetRouter {
                 let cleaned = ztlp_router_cleanup_stale_flows(router)
                 if cleaned > 0 {
-                    self.logger.info("Cleaned up \\(cleaned) stale TCP flows", source: "Tunnel")
-                }
-                // Log router stats for memory debugging
-                if let statsPtr = ztlp_router_stats(router) {
+                    self.logger.info("Cleaned up \(cleaned) stale TCP flows", source: "Tunnel")
+                    if let statsPtr = ztlp_router_stats(router) {
+                        let stats = String(cString: statsPtr)
+                        ztlp_free_string(statsPtr)
+                        self.logger.debug("Router stats: \(stats)", source: "Tunnel")
+                    }
+                } else if self.isDataActive, let statsPtr = ztlp_router_stats(router) {
                     let stats = String(cString: statsPtr)
                     ztlp_free_string(statsPtr)
-                    self.logger.debug("Router stats: \\(stats)", source: "Tunnel")
+                    self.logger.debug("Router stats: \(stats)", source: "Tunnel")
                 }
             }
             self.logMemoryDiagnostics()
@@ -1002,8 +1006,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func scheduleReconnect() {
         guard isTunnelActive else { return }
+        guard !reconnectScheduled && !reconnectInProgress else {
+            logger.debug("Reconnect already scheduled/in progress; ignoring duplicate trigger", source: "Tunnel")
+            return
+        }
 
         reconnectAttempt += 1
+        reconnectGeneration += 1
+        let generation = reconnectGeneration
 
         if reconnectAttempt > Self.maxReconnectAttempts {
             logger.error("Failed to reconnect after \(Self.maxReconnectAttempts) attempts", source: "Tunnel")
@@ -1020,16 +1030,27 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let jitter = delay * Double.random(in: -0.2...0.2)
         let finalDelay = max(0.5, delay + jitter)
 
-        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) in \(String(format: "%.1f", finalDelay))s", source: "Tunnel")
+        reconnectScheduled = true
+        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s", source: "Tunnel")
         updateConnectionState(.reconnecting)
 
         tunnelQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
             guard let self = self, self.isTunnelActive else { return }
-            self.attemptReconnect()
+            guard self.reconnectScheduled && self.reconnectGeneration == generation else { return }
+            self.reconnectScheduled = false
+            self.attemptReconnect(generation: generation)
         }
     }
 
-    private func attemptReconnect() {
+    private func attemptReconnect(generation: Int) {
+        guard !reconnectInProgress else {
+            logger.debug("Reconnect gen=\(generation) ignored; reconnect already in progress", source: "Tunnel")
+            return
+        }
+        reconnectInProgress = true
+        defer { reconnectInProgress = false }
+        logger.info("Reconnect gen=\(generation) starting", source: "Tunnel")
+
         guard let identityPtr = identity else {
             logger.error("Identity lost during reconnect", source: "Tunnel")
             cancelTunnelWithError(makeNSError("Identity lost during reconnect"))
@@ -1055,11 +1076,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             logger.info("Reported relay failure for \(failedRelay)", source: "Relay")
         }
 
-        // Re-query NS for fresh relay list if pool needs refresh
-        // Check if we need NS refresh before selecting
+        // Do NOT perform a blocking plain-UDP NS refresh while the packet tunnel
+        // is active. On iOS NE this can route through the tunnel itself and fail
+        // with ENETUNREACH, then destroy useful relay state mid-reconnect. Use
+        // cached relays/fallback during reconnect; refresh NS on fresh tunnel start.
         if let pool = relayPool, ztlp_relay_pool_needs_refresh(pool) {
-            logger.info("Relay pool stale, re-querying NS for refresh", source: "Relay")
-            discoverRelays(config: config)
+            logger.info("Relay pool stale during reconnect; skipping active-tunnel NS refresh and using cached/fallback relay", source: "Relay")
         }
 
         // Select next best relay from pool
@@ -1070,7 +1092,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        logger.info("Reconnecting via relay \(relayAddr)...", source: "Relay")
+        logger.info("Reconnect gen=\(generation) via relay \(relayAddr)...", source: "Relay")
         currentRelayAddress = relayAddr
 
         // Build config for reconnect through new relay
@@ -1106,7 +1128,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             handshakeSemaphore.signal()
         }
-        handshakeSemaphore.wait()
+        let waitResult = handshakeSemaphore.wait(timeout: .now() + 20.0)
+        if waitResult == .timedOut {
+            conn.stop()
+            logger.warn("Reconnect gen=\(generation) handshake wait timed out for relay \(relayAddr), will retry", source: "Tunnel")
+            scheduleReconnect()
+            return
+        }
 
         if let handshakeError = handshakeError {
             conn.stop()
@@ -1114,7 +1142,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if let pool = relayPool {
                 relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
             }
-            logger.warn("Reconnect to \(relayAddr) failed: \(handshakeError.localizedDescription), will retry", source: "Tunnel")
+            logger.warn("Reconnect gen=\(generation) to \(relayAddr) failed: \(handshakeError.localizedDescription), will retry", source: "Tunnel")
             scheduleReconnect()
             return
         }
@@ -1133,7 +1161,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
-        logger.info("Reconnected successfully via relay \(relayAddr)", source: "Tunnel")
+        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
             Date().timeIntervalSince1970,
@@ -1254,7 +1282,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Memory Diagnostics
 
-    private func logMemoryDiagnostics() {
+    private func logMemoryDiagnostics(force: Bool = false) {
+        let now = Date()
+        if !force && now.timeIntervalSince(lastMemoryDiagnosticsAt) < Self.memoryDiagnosticsInterval {
+            return
+        }
+        lastMemoryDiagnosticsAt = now
+
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
         let result = withUnsafeMutablePointer(to: &info) {
@@ -1268,26 +1302,31 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let residentMB = Double(info.resident_size) / 1_048_576.0
             let virtualMB = Double(info.virtual_size) / 1_048_576.0
             reportedMemoryMB = residentMB
-            sharedDefaults?.set(Int(residentMB.rounded()), forKey: SharedKey.neMemoryMB)
-            sharedDefaults?.set(Int(virtualMB.rounded()), forKey: SharedKey.neVirtualMB)
+            let residentRounded = Int(residentMB.rounded())
+            let virtualRounded = Int(virtualMB.rounded())
 
-            if residentMB > 18.0 {
-                logger.warn(
-                    "v5D-SYNC | Memory HIGH — resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB",
-                    source: "Tunnel"
-                )
-            } else {
-                logger.debug(
-                    "v5D-SYNC | Memory resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB",
-                    source: "Tunnel"
-                )
+            if lastStoredResidentMemoryMB != residentRounded {
+                sharedDefaults?.set(residentRounded, forKey: SharedKey.neMemoryMB)
+                lastStoredResidentMemoryMB = residentRounded
             }
+            if lastStoredVirtualMemoryMB != virtualRounded {
+                sharedDefaults?.set(virtualRounded, forKey: SharedKey.neVirtualMB)
+                lastStoredVirtualMemoryMB = virtualRounded
+            }
+
+            // The NE is stable around ~18-20MB on current builds; avoid noisy
+            // warning spam that wakes the process and obscures real failures.
+            logger.debug(
+                "v5D-SYNC | Memory resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB",
+                source: "Tunnel"
+            )
         }
 
         if #available(iOS 13.0, *) {
             let available = os_proc_available_memory()
             let availableMB = Double(available) / 1_048_576.0
-            if availableMB < 50.0 {
+            if availableMB < 20.0 && now.timeIntervalSince(lastAvailableMemoryWarningAt) >= Self.memoryDiagnosticsInterval {
+                lastAvailableMemoryWarningAt = now
                 logger.warn(
                     "v5B-SYNC | Low available memory: \(String(format: "%.1f", availableMB))MB",
                     source: "Tunnel"

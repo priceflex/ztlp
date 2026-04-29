@@ -4874,19 +4874,42 @@ pub extern "C" fn ztlp_build_ack(
     out_buf_len: usize,
     out_written: *mut usize,
 ) -> i32 {
+    ztlp_build_ack_with_rwnd(ack_seq, 0, out_buf, out_buf_len, out_written)
+}
+
+/// Build an ACK frame with receiver window:
+/// [FRAME_ACK(0x01) | ack_seq(8 bytes BE) | rwnd(2 bytes BE)].
+///
+/// `rwnd` is the receiver-advertised packet window. A value of 0 is reserved
+/// for legacy callers and emits a legacy 9-byte ACK for backward compatibility.
+#[no_mangle]
+pub extern "C" fn ztlp_build_ack_with_rwnd(
+    ack_seq: u64,
+    rwnd: u16,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> i32 {
     if out_buf.is_null() || out_written.is_null() {
         set_last_error("null argument");
         return ZtlpResult::InvalidArgument as i32;
     }
-    if out_buf_len < 9 {
-        set_last_error(&format!("output buffer too small: need 9 got {}", out_buf_len));
+
+    let need = if rwnd == 0 { 9 } else { 11 };
+    if out_buf_len < need {
+        set_last_error(&format!("output buffer too small: need {} got {}", need, out_buf_len));
         return ZtlpResult::InvalidArgument as i32;
     }
 
     let buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
     buf[0] = FRAME_ACK;
     buf[1..9].copy_from_slice(&ack_seq.to_be_bytes());
-    unsafe { *out_written = 9 };
+    if rwnd == 0 {
+        unsafe { *out_written = 9 };
+    } else {
+        buf[9..11].copy_from_slice(&rwnd.to_be_bytes());
+        unsafe { *out_written = 11 };
+    }
     0
 }
 

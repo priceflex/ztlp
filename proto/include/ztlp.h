@@ -1153,7 +1153,7 @@ int32_t ztlp_parse_frame(
 );
 
 /**
- * @brief Build an ACK frame: [0x01 | ack_seq(8 bytes BE)].
+ * @brief Build a legacy ACK frame: [0x01 | ack_seq(8 bytes BE)].
  *
  * @param ack_seq     Acknowledged data sequence number.
  * @param out_buf     Output buffer (needs at least 9 bytes).
@@ -1163,6 +1163,23 @@ int32_t ztlp_parse_frame(
  */
 int32_t ztlp_build_ack(
     uint64_t ack_seq,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
+/**
+ * @brief Build an ACK frame with receiver window: [0x01 | ack_seq(8 bytes BE) | rwnd(2 bytes BE)].
+ *
+ * Pass rwnd=0 to emit the legacy 9-byte ACK frame.
+ * @param ack_seq     Acknowledged data sequence number.
+ * @param rwnd        Receiver-advertised window in packets.
+ * @param out_buf     Output buffer (needs at least 11 bytes when rwnd > 0).
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives 11 on success when rwnd > 0, else 9.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_build_ack_with_rwnd(
+    uint64_t ack_seq, uint16_t rwnd,
     uint8_t *out_buf, size_t out_buf_len,
     size_t *out_written
 );

@@ -499,6 +499,11 @@ defmodule ZtlpGateway.Session do
   # LTE handles 3-packet bursts well. Previous 2 was too conservative.
   @burst_size 3
 
+  # Receiver-window default when the client sends legacy ACK frames without an
+  # explicit rwnd. This preserves backward compatibility while allowing newer
+  # iOS clients to throttle gateway egress by advertising smaller windows.
+  @default_peer_rwnd 512
+
   # Maximum plaintext payload per ZTLP data packet.
   # Max plaintext payload per ZTLP packet.
   # Wire size = header(46) + payload + AEAD(16) + UDP(8) + IP(20) = payload + 90
@@ -660,7 +665,10 @@ defmodule ZtlpGateway.Session do
         # Per-session congestion control profile (selected from client_profile)
         cc_profile: nil,
         initial_rto_ms: @initial_rto_ms,
-        min_rto_ms: @min_rto_ms
+        min_rto_ms: @min_rto_ms,
+        # Client-advertised receive window in packets. New iOS ACK frames carry
+        # this as a u16 after ack_seq; legacy clients use @default_peer_rwnd.
+        peer_rwnd: @default_peer_rwnd
       }
       |> Map.merge(rekey_state)
 
@@ -956,7 +964,7 @@ defmodule ZtlpGateway.Session do
     queue_len = :queue.len(state.send_queue)
     buf_len = map_size(state.send_buffer)
     if queue_len > 0 do
-      effective_window = min(trunc(state.cwnd), cc_max_cwnd(state))
+      effective_window = min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
       window_open = buf_len < effective_window
       Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len}/#{effective_window} inflight/cwnd, ssthresh=#{trunc(state.ssthresh)} open=#{window_open}")
     end
@@ -1750,8 +1758,29 @@ defmodule ZtlpGateway.Session do
     {:noreply, reset_timeout(state)}
   end
 
+  # ACK with receiver window but no SACK blocks:
+  # [FRAME_ACK | ack_seq(8) | rwnd(2)] = 11 bytes.
+  # This clause MUST come before the SACK clause because otherwise rwnd's first
+  # byte would be misread as sack_count.
+  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, rwnd::big-16>>, state) do
+    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} rwnd=#{rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    state = %{state | peer_rwnd: max(1, rwnd)}
+    state = log_ack_latency(state, acked_data_seq)
+    state = process_cumulative_ack(acked_data_seq, state)
+
+    state = flush_send_queue(state)
+    state = maybe_resume_backends(state)
+
+    if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
+      Logger.info("[Session] All data ACKed during drain, terminating cleanly")
+      terminate_session(state, :drain_complete)
+    else
+      {:noreply, state}
+    end
+  end
+
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
-    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} rwnd=#{state.peer_rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     state = log_ack_latency(state, acked_data_seq)
     # Cumulative ACK with SACK blocks from client
     state = process_cumulative_ack(acked_data_seq, state)
@@ -2188,7 +2217,7 @@ defmodule ZtlpGateway.Session do
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window = min(trunc(state.cwnd), cc_max_cwnd(state))
+    effective_window = min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
     window_full = inflight >= effective_window
     cond do
       :queue.is_empty(state.send_queue) ->

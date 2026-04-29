@@ -111,14 +111,8 @@ final class ZTLPTunnelConnection {
     /// Max ZTLP packet is ~1500 bytes; 4KB is generous.
     private static let bufferSize = 4096
 
-    /// Reusable encrypt output buffer.
-    private var encryptBuffer = [UInt8](repeating: 0, count: bufferSize)
-
-    /// Reusable decrypt output buffer.
+    /// Reusable decrypt output buffer. Only touched by the NW receive callback queue.
     private var decryptBuffer = [UInt8](repeating: 0, count: bufferSize)
-
-    /// Reusable frame build buffer.
-    private var frameBuffer = [UInt8](repeating: 0, count: bufferSize)
 
     /// Statistics: total bytes sent over the wire.
     private(set) var bytesSent: UInt64 = 0
@@ -380,8 +374,12 @@ final class ZTLPTunnelConnection {
             return false
         }
 
-        // Step 1: Frame the payload as FRAME_DATA
+        // Build and encrypt from LOCAL buffers. sendData can be called from
+        // PacketTunnelProvider's tunnelQueue while ACK/PONG paths run on the
+        // NWConnection callback queue; shared frameBuffer/encryptBuffer races
+        // corrupt packets under browser fan-out bursts.
         let seq = nextSendSequence()
+        var localFrame = [UInt8](repeating: 0, count: Self.bufferSize)
         var frameWritten: Int = 0
 
         let frameResult = payload.withUnsafeBytes { payloadPtr -> Int32 in
@@ -391,8 +389,8 @@ final class ZTLPTunnelConnection {
             return ztlp_frame_data(
                 baseAddr,
                 payloadPtr.count,
-                &frameBuffer,
-                frameBuffer.count,
+                &localFrame,
+                localFrame.count,
                 &frameWritten,
                 seq
             )
@@ -402,7 +400,8 @@ final class ZTLPTunnelConnection {
             return false
         }
 
-        return sendFramedPayload(frameLength: frameWritten, cryptoContext: cryptoContext, conn: conn)
+        let plaintext = Array(localFrame.prefix(frameWritten))
+        return sendEncryptedFrame(plaintext: plaintext, cryptoContext: cryptoContext, conn: conn)
     }
 
     @discardableResult
@@ -414,8 +413,8 @@ final class ZTLPTunnelConnection {
             return false
         }
 
-        // Build PING frame in a LOCAL buffer (do not touch shared frameBuffer,
-        // which is written from multiple queues by data/ACK paths).
+        // Build PING frame in a LOCAL buffer. All send paths use caller-owned
+        // frame/encrypt storage so they are safe across tunnelQueue/nwQueue.
         var pingFrame = [UInt8](repeating: 0, count: 9)
         pingFrame[0] = ZTLPFrameType.ping.rawValue
         let nonceBE = nonce.bigEndian
@@ -460,35 +459,6 @@ final class ZTLPTunnelConnection {
         return true
     }
 
-    @discardableResult
-    private func sendFramedPayload(frameLength: Int, cryptoContext: OpaquePointer, conn: NWConnection) -> Bool {
-        var encryptWritten: Int = 0
-        let encryptResult = ztlp_encrypt_packet(
-            cryptoContext,
-            &frameBuffer,
-            frameLength,
-            &encryptBuffer,
-            encryptBuffer.count,
-            &encryptWritten
-        )
-
-        guard encryptResult == 0, encryptWritten > 0 else {
-            return false
-        }
-
-        let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
-        sendsInFlight += 1
-        conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
-            guard let self = self else { return }
-            self.sendsInFlight -= 1
-            if error == nil {
-                self.bytesSent += UInt64(encryptWritten)
-                self.packetsSent += 1
-            }
-        })
-
-        return true
-    }
 
     /// Queue an ACK for sending.
     ///
@@ -530,31 +500,21 @@ final class ZTLPTunnelConnection {
         guard let maxSeq = pendingAcks.max() else { return }
         pendingAcks.removeAll(keepingCapacity: true)
 
+        var ackFrame = [UInt8](repeating: 0, count: Self.bufferSize)
         var ackWritten: Int = 0
         // Advertise a receive window from the actual NE/router pressure, not
         // just NWConnection ACK-send pressure. Under Vaultwarden page loads the
         // ACK path stays empty while packetFlow/router delivery saturates.
         let sendWindow = UInt16(max(4, min(16, Self.maxSendsInFlight - sendsInFlight)))
         let availableWindow = min(advertisedReceiveWindow, sendWindow)
-        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &frameBuffer, frameBuffer.count, &ackWritten)
+        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &ackFrame, ackFrame.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }
 
-        var encryptWritten: Int = 0
-        let encryptResult = ztlp_encrypt_packet(
-            cryptoContext, &frameBuffer, ackWritten,
-            &encryptBuffer, encryptBuffer.count, &encryptWritten
-        )
-        guard encryptResult == 0, encryptWritten > 0 else { return }
-
-        let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
-        sendsInFlight += 1
-        conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
-            guard let self = self else { return }
-            self.sendsInFlight -= 1
-            if let error = error {
-                self.logger.error("ZTLP ACK send failed: \(error)", source: "Tunnel")
-            }
-        })
+        let plaintext = Array(ackFrame.prefix(ackWritten))
+        guard sendEncryptedFrame(plaintext: plaintext, cryptoContext: cryptoContext, conn: conn) else {
+            logger.error("ZTLP ACK send failed before queueing", source: "Tunnel")
+            return
+        }
     }
 
     /// Send a raw pre-encrypted packet (e.g., keepalive already built by caller).
@@ -725,9 +685,8 @@ final class ZTLPTunnelConnection {
                 nonce = (nonce << 8) | UInt64(decryptBuffer[i])
             }
 
-            // Build PONG in a LOCAL buffer — this path runs on nwQueue while
-            // sendData/sendProbe can run on tunnelQueue. Writing to shared
-            // frameBuffer here races with those callers.
+            // Build PONG in a LOCAL buffer. All send paths use caller-owned
+            // frame/encrypt storage so they are safe across tunnelQueue/nwQueue.
             var pongFrame = [UInt8](repeating: 0, count: 9)
             pongFrame[0] = ZTLPFrameType.pong.rawValue
             let nonceBE = nonce.bigEndian

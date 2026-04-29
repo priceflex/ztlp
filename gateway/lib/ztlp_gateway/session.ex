@@ -421,6 +421,8 @@ defmodule ZtlpGateway.Session do
   @frame_reset 0x04
   @frame_close 0x05
   @frame_open 0x06
+  @frame_ping 0x07
+  @frame_pong 0x08
   @frame_rekey 0x0A
 
   # ARQ constants (KCP-inspired, tuned for relay paths)
@@ -1487,9 +1489,10 @@ defmodule ZtlpGateway.Session do
           # a gap in the recv_window.
           first_byte = if byte_size(plaintext) > 0, do: :binary.at(plaintext, 0), else: nil
           is_ack_frame = first_byte == @frame_ack and byte_size(plaintext) >= 9
+          is_probe_frame = first_byte in [@frame_ping, @frame_pong] and byte_size(plaintext) >= 9
 
-          if is_ack_frame do
-            # Process ACK immediately — don't buffer it.
+          if is_ack_frame or is_probe_frame do
+            # Process ACK/probe control frames immediately — don't buffer them.
             # Mark the seq as received (so it's not accepted again) but
             # don't add to recv_buffer (no data to deliver in order).
             state = %{state |
@@ -1498,7 +1501,7 @@ defmodule ZtlpGateway.Session do
             }
             # Also try to advance the recv_window base if this was the head
             state = advance_recv_window_base(state)
-            # Now handle the ACK frame directly — bypasses in-order delivery
+            # Now handle the control frame directly — bypasses in-order delivery
             handle_tunnel_frame(plaintext, state)
           else
             # Normal path: buffer for in-order delivery
@@ -1752,6 +1755,16 @@ defmodule ZtlpGateway.Session do
   # that occurs when vaultwarden closes idle TCP connections.
   defp handle_tunnel_frame(<<0x01>>, state) do
     Logger.debug("[Session] Keepalive received, resetting idle timer")
+    {:noreply, reset_timeout(state)}
+  end
+
+  defp handle_tunnel_frame(<<@frame_ping, nonce::big-64>>, state) do
+    Logger.info("[Session] SESSION_PING nonce=#{nonce}")
+    {:noreply, send_probe_pong(nonce, reset_timeout(state))}
+  end
+
+  defp handle_tunnel_frame(<<@frame_pong, nonce::big-64>>, state) do
+    Logger.info("[Session] SESSION_PONG nonce=#{nonce}")
     {:noreply, reset_timeout(state)}
   end
 
@@ -2151,6 +2164,10 @@ defmodule ZtlpGateway.Session do
     %{state | send_seq: seq}
   end
 
+  defp send_probe_pong(nonce, state) do
+    encrypt_and_send_probe(<<@frame_pong, nonce::big-64>>, state)
+  end
+
   # ---------------------------------------------------------------------------
   # Encrypt and send response to client
   # ---------------------------------------------------------------------------
@@ -2408,37 +2425,7 @@ defmodule ZtlpGateway.Session do
 
   # Encrypt and send a control frame (FIN/CLOSE per stream — no retransmit needed).
   defp encrypt_and_send_control(control_frame, state) do
-    # Wrap control frames (FIN, CLOSE) inside a FRAME_DATA envelope with a
-    # data_seq so they participate in the reliable delivery stream.
-    #
-    # The client's recv_loop processes FRAME_DATA by data_seq ordering and
-    # sends cumulative ACKs. By wrapping FIN/CLOSE as data payloads, they
-    # get the same retransmission protection as response data.
-    #
-    # Format: [FRAME_DATA(0x00) | stream_id=0(4 BE) | data_seq(8 BE) | control_frame]
-    # The client dispatches stream_id=0 data to the legacy handler, but we
-    # use a special prefix byte (the original control frame type) so the
-    # client can distinguish control-in-data from actual data.
-    #
-    # Actually, simpler: just send the control frame through the same
-    # encrypt_and_send_stream path with stream_id=0. The client already
-    # handles stream_id=0 and the payload starts with the control frame
-    # type byte (FRAME_FIN=0x02, FRAME_CLOSE=0x05) which the client can
-    # detect.
-    #
-    # Wait — encrypt_and_send_stream wraps the control_frame in a mux header
-    # [FRAME_DATA | stream_id | data_seq | payload], so the client will
-    # receive it as a mux data packet and try to deliver it to stream 0.
-    # This won't trigger the FIN/CLOSE handler on the client side.
-    #
-    # The correct approach: send the control frame as a separate, tracked
-    # packet. Use send_seq for the send_buffer key and assign it a data_seq
-    # so the client's cumulative ACK covers it. The client processes FIN/CLOSE
-    # from the decrypted plaintext (before mux dispatch), so it doesn't need
-    # to be in a FRAME_DATA envelope — it just needs to advance next_expected_seq.
-
-    # For now, keep the original fire-and-forget approach but also re-send
-    # control frames on a timer until we get an ACK past their data_seq.
+    # Control frames are small and fire-and-forget today.
     seq = state.send_seq + 1
     nonce = <<0::32, seq::little-64>>
 
@@ -2458,6 +2445,28 @@ defmodule ZtlpGateway.Session do
       send_seq: seq,
       bytes_out: state.bytes_out + byte_size(packet)
     }}
+  end
+
+  defp encrypt_and_send_probe(probe_frame, state) do
+    seq = state.send_seq + 1
+    nonce = <<0::32, seq::little-64>>
+
+    {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, probe_frame, <<>>)
+    encrypted = ct <> tag
+
+    pkt = Packet.build_data(state.session_id, seq,
+      payload: encrypted,
+      payload_len: byte_size(encrypted)
+    )
+    packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
+
+    send_udp(state, packet)
+    Stats.bytes_sent(byte_size(packet))
+
+    %{state |
+      send_seq: seq,
+      bytes_out: state.bytes_out + byte_size(packet)
+    }
   end
 
   # ---------------------------------------------------------------------------

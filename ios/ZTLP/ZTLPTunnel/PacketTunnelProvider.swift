@@ -160,9 +160,41 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Dynamic advertised receive window. Lower values slow gateway egress when
     /// packetFlow/router work is backed up during multi-stream browser loads.
-    private var advertisedRwnd: UInt16 = 16
+    private var advertisedRwnd: UInt16 = 12
     private var consecutiveFullFlushes = 0
     private var lastRwndLogAt: Date = .distantPast
+
+    /// Cached service map so the packet router can be rebuilt/reset during health recovery.
+    private var configuredServices: [(vip: String, name: String)] = []
+
+    /// Session-health tracking for browser-burst recovery.
+    private static let healthCheckInterval: TimeInterval = 3.0
+    private static let healthSuspectThreshold: TimeInterval = 8.0
+    private static let probeTimeoutThreshold: TimeInterval = 8.0
+    private var healthTimer: DispatchSourceTimer?
+    private var lastUsefulRxAt: Date = .distantPast
+    private var lastOutboundDemandAt: Date = .distantPast
+    private var lastHealthCheckAt: Date = .distantPast
+    private var sessionSuspectSince: Date?
+    private var probeOutstandingSince: Date?
+    private var lastProbeResponseAt: Date = .distantPast
+    private var consecutiveNoProgressChecks = 0
+    private var lastHighSeqSeen: UInt64 = 0
+    private var lastReplayRejectCount = 0
+    private var lastRouterFlows = 0
+    private var lastRouterOutbound = 0
+    private var lastRouterStreamMappings = 0
+    private var healthProbeNonce: UInt64 = 0
+    private var pendingReconnectReason: String?
+
+    /// Aggregate mux/router hot-path diagnostics instead of logging per packet.
+    private var muxSummaryLastLogAt: Date = .distantPast
+    private var muxSummaryDataFrames = 0
+    private var muxSummaryDataBytes = 0
+    private var muxSummaryOpen = 0
+    private var muxSummaryClose = 0
+    private var muxSummarySendData = 0
+    private var muxSummarySendBytes = 0
 
     /// Packet read buffer (reusable, MTU-sized).
     private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
@@ -177,6 +209,138 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func markDataActivity() {
         lastDataActivity = Date()
         consecutiveKeepaliveFailures = 0
+    }
+
+    private func markOutboundDemand() {
+        lastOutboundDemandAt = Date()
+    }
+
+    private func markUsefulRx(sequence: UInt64, payloadLength: Int) {
+        guard payloadLength > 0 else { return }
+        if sequence > lastHighSeqSeen {
+            lastHighSeqSeen = sequence
+            lastUsefulRxAt = Date()
+        }
+    }
+
+    private func refreshReplayRejectBaseline() {
+        let replayRejectCount = sharedDefaults?.integer(forKey: "ztlp_replay_reject_count") ?? 0
+        lastReplayRejectCount = replayRejectCount
+    }
+
+    private func clearSessionHealthState() {
+        sessionSuspectSince = nil
+        probeOutstandingSince = nil
+        consecutiveNoProgressChecks = 0
+    }
+
+    private func parseRouterStats() -> (flows: Int, outbound: Int, streamToFlow: Int, stats: String)? {
+        guard let router = packetRouter, let statsPtr = ztlp_router_stats(router) else { return nil }
+        let stats = String(cString: statsPtr)
+        ztlp_free_string(statsPtr)
+
+        var values: [String: Int] = [:]
+        for token in stats.split(separator: " ") {
+            let parts = token.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2, let value = Int(parts[1]) else { continue }
+            values[String(parts[0])] = value
+        }
+
+        return (
+            flows: values["flows"] ?? 0,
+            outbound: values["outbound"] ?? 0,
+            streamToFlow: values["stream_to_flow"] ?? 0,
+            stats: stats
+        )
+    }
+
+    private func startHealthTimer() {
+        healthTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
+        timer.schedule(deadline: .now() + Self.healthCheckInterval, repeating: Self.healthCheckInterval)
+        timer.setEventHandler { [weak self] in
+            self?.evaluateSessionHealth()
+        }
+        timer.resume()
+        healthTimer = timer
+    }
+
+    private func sendSessionProbe() {
+        let nonce = UInt64(Date().timeIntervalSince1970 * 1000)
+        healthProbeNonce = nonce
+        guard tunnelConnection?.sendProbe(nonce: nonce) == true else {
+            logger.warn("Session health probe send failed nonce=\(nonce)", source: "Tunnel")
+            return
+        }
+        probeOutstandingSince = Date()
+        logger.warn("Session health suspect: activeFlows=\(lastRouterFlows) streamMaps=\(lastRouterStreamMappings) noUsefulRxFor=\(String(format: "%.1f", Date().timeIntervalSince(lastUsefulRxAt)))s sending probe nonce=\(nonce)", source: "Tunnel")
+    }
+
+    private func handleProbeSuccess(nonce: UInt64) {
+        lastProbeResponseAt = Date()
+        let statsTuple = parseRouterStats()
+        let statsString = statsTuple?.stats ?? "unknown"
+        if let router = packetRouter {
+            let removed = ztlp_router_cleanup_stale_flows(router)
+            logger.info("Session health probe ok nonce=\(nonce) cleanup_removed=\(removed) stats=\(statsString)", source: "Tunnel")
+            if removed <= 0 {
+                let reset = ztlp_router_reset_runtime_state(router)
+                logger.warn("Session health probe ok but flows still suspect; router reset removed=\(reset) stats=\(statsString)", source: "Tunnel")
+            }
+        }
+        clearSessionHealthState()
+        flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
+    }
+
+    private func resetPacketRouterRuntimeState(reason: String) {
+        guard let router = packetRouter else { return }
+        let removed = ztlp_router_reset_runtime_state(router)
+        logger.warn("Router reset runtime state removed=\(removed) reason=\(reason)", source: "Tunnel")
+        clearSessionHealthState()
+    }
+
+    private func evaluateSessionHealth() {
+        guard isTunnelActive else { return }
+        lastHealthCheckAt = Date()
+        guard let statsTuple = parseRouterStats() else { return }
+
+        lastRouterFlows = statsTuple.flows
+        lastRouterOutbound = statsTuple.outbound
+        lastRouterStreamMappings = statsTuple.streamToFlow
+
+        let now = Date()
+        let hasActiveFlows = statsTuple.flows > 0 || statsTuple.streamToFlow > 0
+        let outboundRecent = now.timeIntervalSince(lastOutboundDemandAt) < 15
+        let usefulRxAge = now.timeIntervalSince(lastUsefulRxAt)
+        let replayRejectCount = sharedDefaults?.integer(forKey: "ztlp_replay_reject_count") ?? 0
+        let replayDelta = replayRejectCount - lastReplayRejectCount
+        lastReplayRejectCount = replayRejectCount
+
+        guard hasActiveFlows || outboundRecent else {
+            clearSessionHealthState()
+            return
+        }
+
+        guard usefulRxAge >= Self.healthSuspectThreshold else {
+            clearSessionHealthState()
+            return
+        }
+
+        sessionSuspectSince = sessionSuspectSince ?? now
+        consecutiveNoProgressChecks += 1
+
+        if probeOutstandingSince == nil {
+            logger.warn("Session health candidate: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s replayDelta=\(replayDelta) stats=\(statsTuple.stats)", source: "Tunnel")
+            sendSessionProbe()
+            return
+        }
+
+        if let probeOutstandingSince, now.timeIntervalSince(probeOutstandingSince) > Self.probeTimeoutThreshold {
+            logger.warn("Session health dead: probe timeout flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s stats=\(statsTuple.stats)", source: "Tunnel")
+            resetPacketRouterRuntimeState(reason: "session_health_probe_timeout")
+            pendingReconnectReason = "session_health_probe_timeout"
+            scheduleReconnect()
+        }
     }
 
     private var isDataActive: Bool {
@@ -361,7 +525,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     ]
                 }
 
+                self.configuredServices = services
                 try self.startPacketRouter(services: services)
+                self.lastUsefulRxAt = Date()
+                self.lastOutboundDemandAt = Date.distantPast
+                self.lastProbeResponseAt = Date.distantPast
+                self.lastHighSeqSeen = 0
+                self.clearSessionHealthState()
+                self.refreshReplayRejectBaseline()
 
                 // Step 7b: Start DNS responder for *.ztlp queries
                 self.dnsResponder = ZTLPDNSResponder(
@@ -414,10 +585,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.reconnectAttempt = 0
                 self.consecutiveKeepaliveFailures = 0
                 self.lastDataActivity = Date()
-                self.advertisedRwnd = 16
-                conn.setAdvertisedReceiveWindow(16)
+                self.advertisedRwnd = 12
+                conn.setAdvertisedReceiveWindow(12)
                 self.startKeepaliveTimer()
                 self.startCleanupTimer()
+                self.startHealthTimer()
                 self.logger.info("Idle quiesce: packet/ACK timers disabled; using demand-driven flush", source: "Tunnel")
 
                 // Update shared state
@@ -470,6 +642,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.ackFlushTimer = nil
             self.cleanupTimer?.cancel()
             self.cleanupTimer = nil
+            self.healthTimer?.cancel()
+            self.healthTimer = nil
 
             // Stop DNS responder
             self.dnsResponder = nil
@@ -630,10 +804,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         packetFlow.readPackets { [weak self] packets, protocols in
             guard let self = self, self.isTunnelActive, let router = self.packetRouter else { return }
 
-            if !packets.isEmpty && packets.count > 1 {
-                self.logger.debug("readPacketLoop: received \(packets.count) packet(s)", source: "Tunnel")
-            }
-
             var packetsProcessed = 0
             let packetLimit = Self.maxPacketsPerReadCycle
             for (i, packet) in packets.enumerated() {
@@ -752,7 +922,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxOpen.append(contentsOf: beStreamIdBytes(streamId))
                 muxOpen.append(UInt8(serviceData.count))
                 muxOpen.append(serviceData)
-                logger.debug("Router: OpenStream stream=\(streamId) service=\(String(data: serviceData, encoding: .utf8) ?? "?")", source: "Router")
+                muxSummaryOpen += 1
+                maybeLogMuxSummary(force: false)
+                markOutboundDemand()
                 if tunnelConnection?.sendData(muxOpen) != true {
                     logger.warn("Router: OpenStream backpressured for stream \(streamId)", source: "Router")
                     return
@@ -764,7 +936,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxData.append(Self.MUX_FRAME_DATA)
                 muxData.append(contentsOf: beStreamIdBytes(streamId))
                 muxData.append(payload)
-                logger.debug("Router: SendData stream=\(streamId) bytes=\(payload.count)", source: "Router")
+                muxSummarySendData += 1
+                muxSummarySendBytes += payload.count
+                maybeLogMuxSummary(force: false)
+                markOutboundDemand()
                 if tunnelConnection?.sendData(muxData) != true {
                     logger.warn("Router: SendData backpressured for stream \(streamId) bytes=\(payload.count)", source: "Router")
                     return
@@ -774,7 +949,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 var muxClose = Data(capacity: 5)
                 muxClose.append(Self.MUX_FRAME_CLOSE)
                 muxClose.append(contentsOf: beStreamIdBytes(streamId))
-                logger.debug("Router: CloseStream stream=\(streamId)", source: "Router")
+                muxSummaryClose += 1
+                maybeLogMuxSummary(force: false)
+                markOutboundDemand()
                 if tunnelConnection?.sendData(muxClose) != true {
                     logger.warn("Router: CloseStream backpressured for stream \(streamId)", source: "Router")
                     return
@@ -798,7 +975,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
             let payload = data.dropFirst(5)
-            logger.debug("GW->NE mux DATA stream=\(streamId) bytes=\(payload.count)", source: "Tunnel")
+            muxSummaryDataFrames += 1
+            muxSummaryDataBytes += payload.count
+            maybeLogMuxSummary(force: false)
             payload.withUnsafeBytes { ptr in
                 guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
                 ztlp_router_gateway_data_sync(router, streamId, baseAddr, ptr.count)
@@ -810,11 +989,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            logger.debug("GW->NE mux CLOSE stream=\(streamId)", source: "Tunnel")
+            muxSummaryClose += 1
+            maybeLogMuxSummary(force: false)
             ztlp_router_gateway_close_sync(router, streamId)
 
         default:
-            logger.debug("GW->NE legacy payload bytes=\(data.count)", source: "Tunnel")
             data.withUnsafeBytes { ptr in
                 guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
                 ztlp_router_gateway_data_sync(router, 0, baseAddr, ptr.count)
@@ -822,6 +1001,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         flushOutboundPackets()
+    }
+
+    private func maybeLogMuxSummary(force: Bool) {
+        let now = Date()
+        guard force || now.timeIntervalSince(muxSummaryLastLogAt) >= 1.0 else { return }
+        let totalEvents = muxSummaryDataFrames + muxSummaryOpen + muxSummaryClose + muxSummarySendData
+        guard totalEvents > 0 else { return }
+        muxSummaryLastLogAt = now
+        logger.debug(
+            "Mux summary gwData=\(muxSummaryDataFrames)/\(muxSummaryDataBytes)B open=\(muxSummaryOpen) close=\(muxSummaryClose) send=\(muxSummarySendData)/\(muxSummarySendBytes)B",
+            source: "Tunnel"
+        )
+        muxSummaryDataFrames = 0
+        muxSummaryDataBytes = 0
+        muxSummaryOpen = 0
+        muxSummaryClose = 0
+        muxSummarySendData = 0
+        muxSummarySendBytes = 0
     }
 
     private func beStreamIdBytes(_ streamId: UInt32) -> [UInt8] {
@@ -856,14 +1053,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if consecutiveFullFlushes >= 2 {
                 updateAdvertisedRwnd(8, reason: "router flush saturated")
             } else {
-                updateAdvertisedRwnd(12, reason: "router flush full")
+                updateAdvertisedRwnd(10, reason: "router flush full")
             }
         } else if drained == 0 {
             consecutiveFullFlushes = 0
-            updateAdvertisedRwnd(16, reason: "router drained")
+            updateAdvertisedRwnd(12, reason: "router drained")
         } else {
             consecutiveFullFlushes = 0
-            updateAdvertisedRwnd(12, reason: "router partial drain")
+            updateAdvertisedRwnd(10, reason: "router partial drain")
         }
 
         if !packets.isEmpty {
@@ -873,7 +1070,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func updateAdvertisedRwnd(_ rwnd: UInt16, reason: String) {
-        let clamped = max(UInt16(4), min(UInt16(16), rwnd))
+        let clamped = max(UInt16(4), min(UInt16(12), rwnd))
         guard clamped != advertisedRwnd else { return }
         advertisedRwnd = clamped
         tunnelConnection?.setAdvertisedReceiveWindow(clamped)
@@ -1041,9 +1238,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Reconnect
 
     private func scheduleReconnect() {
+        scheduleReconnect(reason: pendingReconnectReason ?? "transport_failure")
+    }
+
+    private func scheduleReconnect(reason: String) {
         guard isTunnelActive else { return }
+        pendingReconnectReason = reason
         guard !reconnectScheduled && !reconnectInProgress else {
-            logger.debug("Reconnect already scheduled/in progress; ignoring duplicate trigger", source: "Tunnel")
+            logger.debug("Reconnect already scheduled/in progress; ignoring duplicate trigger reason=\(reason)", source: "Tunnel")
             return
         }
 
@@ -1067,7 +1269,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let finalDelay = max(0.5, delay + jitter)
 
         reconnectScheduled = true
-        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s", source: "Tunnel")
+        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s reason=\(reason)", source: "Tunnel")
         updateConnectionState(.reconnecting)
 
         tunnelQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
@@ -1084,8 +1286,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
         reconnectInProgress = true
-        defer { reconnectInProgress = false }
-        logger.info("Reconnect gen=\(generation) starting", source: "Tunnel")
+        let reconnectReason = pendingReconnectReason ?? "transport_failure"
+        defer {
+            reconnectInProgress = false
+            pendingReconnectReason = nil
+        }
+        logger.info("Reconnect gen=\(generation) starting reason=\(reconnectReason)", source: "Tunnel")
+
+        resetPacketRouterRuntimeState(reason: "reconnect_gen_\(generation)_\(reconnectReason)")
 
         guard let identityPtr = identity else {
             logger.error("Identity lost during reconnect", source: "Tunnel")
@@ -1197,8 +1405,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
-        advertisedRwnd = 16
-        conn.setAdvertisedReceiveWindow(16)
+        advertisedRwnd = 12
+        conn.setAdvertisedReceiveWindow(12)
         logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
@@ -1440,6 +1648,7 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
         guard isTunnelActive else { return }
 
         markDataActivity()
+        markUsefulRx(sequence: sequence, payloadLength: data.count)
         handleGatewayMuxPayload(data)
     }
 
@@ -1453,5 +1662,11 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveAck sequence: UInt64) {
         // ACK received from gateway — good, connection is alive
         markDataActivity()
+    }
+
+    func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveProbeResponse nonce: UInt64) {
+        guard isTunnelActive else { return }
+        logger.info("Session health probe response nonce=\(nonce)", source: "Tunnel")
+        handleProbeSuccess(nonce: nonce)
     }
 }

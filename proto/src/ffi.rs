@@ -3809,6 +3809,24 @@ pub extern "C" fn ztlp_router_cleanup_stale_flows(router: *mut ZtlpPacketRouter)
     }
 }
 
+/// Reset all router runtime state (flows, mappings, outbound queue) while
+/// preserving the configured service map.
+#[no_mangle]
+pub extern "C" fn ztlp_router_reset_runtime_state(router: *mut ZtlpPacketRouter) -> i32 {
+    if router.is_null() {
+        set_last_error("null argument");
+        return -1;
+    }
+    let router = unsafe { &*router };
+    match router.inner.lock() {
+        Ok(mut r) => r.reset_runtime_state() as i32,
+        Err(_) => {
+            set_last_error("lock poisoned");
+            -1
+        }
+    }
+}
+
 /// Free a string allocated by ztlp_router_stats.
 #[no_mangle]
 pub extern "C" fn ztlp_free_string(s: *mut std::ffi::c_char) {

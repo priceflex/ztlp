@@ -973,6 +973,24 @@ impl PacketRouter {
         self.outbound.drain(..).collect()
     }
 
+    /// Pop a single outbound packet (FIFO). Returns None if empty.
+    /// Used by the FFI layer to feed packets one at a time to Swift.
+    ///
+    /// Important: the earlier Safari/Vaultwarden stall fix spilled gateway
+    /// response bytes into per-flow send_bufs when the global outbound queue
+    /// filled, but this one-packet FFI path did not re-drain those send_bufs.
+    /// On iOS Swift calls ztlp_router_read_packet_sync(), which calls this
+    /// method, not drain_outbound(). If outbound hit zero while any flow still
+    /// had send_buf data, the stream permanently starved: browser/benchmark
+    /// stayed connected but hung. Refill opportunistically before returning
+    /// None, matching the batch drain path.
+    pub fn pop_outbound(&mut self) -> Option<Vec<u8>> {
+        if self.outbound.is_empty() {
+            self.drain_flow_send_buffers();
+        }
+        self.outbound.pop_front()
+    }
+
     /// Drain pending data from flow send_bufs into the outbound queue.
     /// This is called when the Swift side is ready to process outbound packets.
     fn drain_flow_send_buffers(&mut self) {
@@ -1017,11 +1035,6 @@ impl PacketRouter {
         }
     }
 
-    /// Pop a single outbound packet (FIFO). Returns None if empty.
-    /// Used by the FFI layer to feed packets one at a time to Swift.
-    pub fn pop_outbound(&mut self) -> Option<Vec<u8>> {
-        self.outbound.pop_front()
-    }
 
     /// Clean up flows in the Closed state and timed-out flows.
     pub(crate) fn cleanup_closed_flows(&mut self) {
@@ -1045,13 +1058,45 @@ impl PacketRouter {
 
     /// Return diagnostic stats for memory profiling (called by FFI).
     pub(crate) fn router_stats(&self) -> String {
+        let total_send_buf_bytes: usize = self.flows.values().map(|flow| flow.send_buf.len()).sum();
+        let flows_with_send_buf = self
+            .flows
+            .values()
+            .filter(|flow| !flow.send_buf.is_empty())
+            .count();
+        let oldest_flow_age_ms = self
+            .flows
+            .values()
+            .map(|flow| flow.last_activity.elapsed().as_millis() as u64)
+            .max()
+            .unwrap_or(0);
+        let stale_flow_candidates = self
+            .flows
+            .values()
+            .filter(|flow| flow.last_activity.elapsed().as_secs() > FLOW_TIMEOUT_SECS)
+            .count();
         format!(
-            "flows={} outbound={} stream_to_flow={} next_stream_id={}",
+            "flows={} outbound={} stream_to_flow={} next_stream_id={} send_buf_bytes={} send_buf_flows={} oldest_ms={} stale={}",
             self.flows.len(),
             self.outbound.len(),
             self.stream_to_flow.len(),
-            self.next_stream_id
+            self.next_stream_id,
+            total_send_buf_bytes,
+            flows_with_send_buf,
+            oldest_flow_age_ms,
+            stale_flow_candidates,
         )
+    }
+
+    /// Reset all active TCP flows and queued outbound packets while preserving
+    /// the configured service map and tunnel addressing.
+    pub fn reset_runtime_state(&mut self) -> usize {
+        let removed = self.flows.len();
+        self.flows.clear();
+        self.stream_to_flow.clear();
+        self.outbound.clear();
+        self.next_stream_id = 1;
+        removed
     }
 
     /// Explicitly clean up timed-out flows.
@@ -1836,6 +1881,43 @@ mod tests {
         let payload_offset = tcp_hdr.header_len();
         let payload = &tcp_data[payload_offset..];
         assert_eq!(payload, response);
+    }
+
+    #[test]
+    fn test_router_pop_outbound_refills_from_flow_send_buf() {
+        let mut router = make_router();
+        let client_ip = Ipv4Addr::new(10, 122, 0, 100);
+        let service_ip = Ipv4Addr::new(10, 122, 0, 2);
+
+        // Full handshake using the same one-packet pop path Swift uses through
+        // ztlp_router_read_packet_sync().
+        let syn = make_syn_packet(client_ip, service_ip, 54321, 80, 1000);
+        router.process_inbound(&syn);
+        let syn_ack = router.pop_outbound().expect("SYN-ACK");
+        let syn_ack_hdr = parse_tcp(&syn_ack[20..]).unwrap();
+        let server_isn = syn_ack_hdr.seq;
+
+        let ack = make_ack_packet(client_ip, service_ip, 54321, 80, 1001, server_isn + 1);
+        router.process_inbound(&ack);
+        while router.pop_outbound().is_some() {}
+
+        // Response large enough to fill outbound and spill remaining bytes into
+        // per-flow send_buf.
+        let response = vec![b'x'; (OUTBOUND_MAX_PACKETS + 4) * TCP_MSS as usize];
+        router.process_gateway_data(1, &response);
+
+        let mut drained = 0usize;
+        while router.pop_outbound().is_some() {
+            drained += 1;
+        }
+
+        // Old bug: pop_outbound returned None after only OUTBOUND_MAX_PACKETS,
+        // leaving send_buf permanently undrained and browser/benchmark hung.
+        assert!(
+            drained > OUTBOUND_MAX_PACKETS,
+            "pop_outbound should continue draining per-flow send_buf; drained={}",
+            drained
+        );
     }
 
     #[test]

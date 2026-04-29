@@ -1276,6 +1276,12 @@ void ztlp_router_stop_sync(ZtlpPacketRouter *router);
 int32_t ztlp_router_cleanup_stale_flows(ZtlpPacketRouter *router);
 
 /**
+ * @brief Reset all router runtime state (flows, stream mappings, outbound queue)
+ * while preserving the configured service map.
+ */
+int32_t ztlp_router_reset_runtime_state(ZtlpPacketRouter *router);
+
+/**
  * @brief Get a human-readable stats string for the router.
  *
  * Returns flow count, outbound queue size, and stream info for

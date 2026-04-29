@@ -21,6 +21,8 @@ import Network
 private enum ZTLPFrameType: UInt8 {
     case data = 0x00
     case ack  = 0x01
+    case ping = 0x07
+    case pong = 0x08
 }
 
 // MARK: - Delegate Protocol
@@ -36,6 +38,9 @@ protocol ZTLPTunnelConnectionDelegate: AnyObject {
 
     /// Called when an ACK is received for a previously sent data sequence.
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveAck sequence: UInt64)
+
+    /// Called when a session-health probe response is received.
+    func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveProbeResponse nonce: UInt64)
 }
 
 // MARK: - ZTLPTunnelConnection
@@ -132,6 +137,14 @@ final class ZTLPTunnelConnection {
 
     /// Count of anti-replay rejections from duplicate gateway retransmits.
     private(set) var replayRejectedCount: UInt64 = 0
+
+    /// Hot-path diagnostics are aggregated instead of logged per packet.
+    private var rxSummaryLastLogAt: Date = .distantPast
+    private var rxSummaryPackets: UInt64 = 0
+    private var rxSummaryPayloadBytes: UInt64 = 0
+    private var rxSummaryAckCount: UInt64 = 0
+    private var rxSummaryHighestSeq: UInt64 = 0
+    private var rxSummaryReplayCount: UInt64 = 0
 
     // MARK: - Initialization
 
@@ -389,12 +402,35 @@ final class ZTLPTunnelConnection {
             return false
         }
 
-        // Step 2: Encrypt the framed data
+        return sendFramedPayload(frameLength: frameWritten, cryptoContext: cryptoContext, conn: conn)
+    }
+
+    @discardableResult
+    func sendProbe(nonce: UInt64) -> Bool {
+        guard let cryptoContext else { return false }
+        guard isActive, let conn = connection else { return false }
+        guard sendsInFlight < Self.maxSendsInFlight else {
+            maybeLogOverload(context: "sendProbe")
+            return false
+        }
+        guard frameBuffer.count >= 9 else { return false }
+
+        frameBuffer[0] = ZTLPFrameType.ping.rawValue
+        let nonceBytes = nonce.bigEndian
+        withUnsafeBytes(of: nonceBytes) { ptr in
+            frameBuffer[1..<9].copyBytes(from: ptr)
+        }
+
+        return sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
+    }
+
+    @discardableResult
+    private func sendFramedPayload(frameLength: Int, cryptoContext: OpaquePointer, conn: NWConnection) -> Bool {
         var encryptWritten: Int = 0
         let encryptResult = ztlp_encrypt_packet(
             cryptoContext,
             &frameBuffer,
-            frameWritten,
+            frameLength,
             &encryptBuffer,
             encryptBuffer.count,
             &encryptWritten
@@ -404,7 +440,6 @@ final class ZTLPTunnelConnection {
             return false
         }
 
-        // Step 3: Send via NWConnection
         let wireData = Data(bytes: encryptBuffer, count: encryptWritten)
         sendsInFlight += 1
         conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
@@ -426,6 +461,7 @@ final class ZTLPTunnelConnection {
     /// every received data frame from the same queue that processes inbound packets.
     func queueAck(for sequence: UInt64) {
         pendingAcks.append(sequence)
+        rxSummaryAckCount += 1
         flushPendingAcks()
     }
 
@@ -481,8 +517,6 @@ final class ZTLPTunnelConnection {
             self.sendsInFlight -= 1
             if let error = error {
                 self.logger.error("ZTLP ACK send failed: \(error)", source: "Tunnel")
-            } else {
-                self.logger.debug("ZTLP ACK sent seq=\(maxSeq) bytes=\(encryptWritten) inflight=\(self.sendsInFlight)", source: "Tunnel")
             }
         })
     }
@@ -615,14 +649,9 @@ final class ZTLPTunnelConnection {
         guard decryptResult == 0, decryptWritten > 0 else {
             if decryptResult == Int32(ZTLP_REPLAY_REJECTED) {
                 replayRejectedCount += 1
+                rxSummaryReplayCount += 1
                 sharedDefaults?.set(Int(replayRejectedCount), forKey: "ztlp_replay_reject_count")
-
-                if replayRejectedCount == 1 || replayRejectedCount % 10 == 0 {
-                    logger.debug(
-                        "ZTLP replay rejected count=\(replayRejectedCount) wire=\(wireData.count)",
-                        source: "Tunnel"
-                    )
-                }
+                maybeLogRxSummary(force: false)
             } else {
                 logger.error(
                     "ZTLP decrypt failed rc=\(decryptResult) wire=\(wireData.count) detail=\(ztlpLastError())",
@@ -649,6 +678,32 @@ final class ZTLPTunnelConnection {
                 seq = (seq << 8) | UInt64(decryptBuffer[i])
             }
             delegate?.tunnelConnection(self, didReceiveAck: seq)
+            return
+        }
+
+        if frameType == ZTLPFrameType.ping.rawValue {
+            guard decryptWritten >= 9 else { return }
+            var nonce: UInt64 = 0
+            for i in 1...8 {
+                nonce = (nonce << 8) | UInt64(decryptBuffer[i])
+            }
+
+            frameBuffer[0] = ZTLPFrameType.pong.rawValue
+            let nonceBytes = nonce.bigEndian
+            withUnsafeBytes(of: nonceBytes) { ptr in
+                frameBuffer[1..<9].copyBytes(from: ptr)
+            }
+            _ = sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
+            return
+        }
+
+        if frameType == ZTLPFrameType.pong.rawValue {
+            guard decryptWritten >= 9 else { return }
+            var nonce: UInt64 = 0
+            for i in 1...8 {
+                nonce = (nonce << 8) | UInt64(decryptBuffer[i])
+            }
+            delegate?.tunnelConnection(self, didReceiveProbeResponse: nonce)
             return
         }
 
@@ -744,8 +799,11 @@ final class ZTLPTunnelConnection {
         // Track this sequence
         recordSequence(sequence)
 
-        // Send ACK immediately
-        logger.debug("ZTLP RX data seq=\(sequence) payload=\(payload?.count ?? 0)", source: "Tunnel")
+        // Send ACK immediately. Avoid per-packet disk logging in the NE hot path;
+        // aggregate once per second instead.
+        rxSummaryPackets += 1
+        rxSummaryPayloadBytes += UInt64(payload?.count ?? 0)
+        rxSummaryHighestSeq = max(rxSummaryHighestSeq, sequence)
         queueAck(for: sequence)
 
         // Deliver payload to delegate
@@ -776,6 +834,21 @@ final class ZTLPTunnelConnection {
         let seq = sendSequence
         sendSequence += 1
         return seq
+    }
+
+    private func maybeLogRxSummary(force: Bool) {
+        let now = Date()
+        guard force || now.timeIntervalSince(rxSummaryLastLogAt) >= 1.0 else { return }
+        guard rxSummaryPackets > 0 || rxSummaryAckCount > 0 || rxSummaryReplayCount > 0 else { return }
+        rxSummaryLastLogAt = now
+        logger.debug(
+            "ZTLP RX summary packets=\(rxSummaryPackets) payload=\(rxSummaryPayloadBytes)B acks=\(rxSummaryAckCount) replay=\(rxSummaryReplayCount) highSeq=\(rxSummaryHighestSeq) inflight=\(sendsInFlight)",
+            source: "Tunnel"
+        )
+        rxSummaryPackets = 0
+        rxSummaryPayloadBytes = 0
+        rxSummaryAckCount = 0
+        rxSummaryReplayCount = 0
     }
 
     // MARK: - Helpers

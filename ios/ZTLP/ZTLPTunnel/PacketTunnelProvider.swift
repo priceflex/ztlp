@@ -658,6 +658,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.lastDataActivity = Date()
                 self.advertisedRwnd = Self.rwndFloor
                 self.consecutiveRwndHealthyTicks = 0
+                self.lastUsefulRxAt = Date()
+                self.lastHighSeqSeen = 0
+                self.priorHighSeqSnapshot = 0
+                self.consecutiveStuckHighSeqTicks = 0
+                self.refreshReplayRejectBaseline()
                 conn.setAdvertisedReceiveWindow(Self.rwndFloor)
                 self.startKeepaliveTimer()
                 self.startCleanupTimer()
@@ -1518,8 +1523,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastDataActivity = Date()
         advertisedRwnd = Self.rwndFloor
         consecutiveRwndHealthyTicks = 0
+        lastUsefulRxAt = Date()
+        lastHighSeqSeen = 0
+        priorHighSeqSnapshot = 0
+        consecutiveStuckHighSeqTicks = 0
+        refreshReplayRejectBaseline()
         conn.setAdvertisedReceiveWindow(Self.rwndFloor)
-        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
+        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr); reset health/rwnd baselines", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
             Date().timeIntervalSince1970,

@@ -158,10 +158,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let maxPacketsPerReadCycle: Int = 32
     private static let maxOutboundPacketsPerFlush: Int = 64
 
-    /// Dynamic advertised receive window. Lower values slow gateway egress when
-    /// packetFlow/router work is backed up during multi-stream browser loads.
+    /// Adaptive advertised receive window. rwnd=4 is the proven Vaultwarden
+    /// recovery baseline; ramp above it only after sustained healthy progress.
+    private static let rwndFloor: UInt16 = 4
+    private static let rwndAdaptiveMax: UInt16 = 6
+    private static let rwndHealthyTicksToIncrease = 3
+    private static let rwndReplayDeltaBad = 8
+    private static let rwndRouterOutboundBad = 128
+    private static let rwndSendBufBytesBad = 16_384
+    private static let rwndOldestMsBad = 4_000
     private var advertisedRwnd: UInt16 = 4
     private var consecutiveFullFlushes = 0
+    private var consecutiveRwndHealthyTicks = 0
     private var lastRwndLogAt: Date = .distantPast
 
     /// Cached service map so the packet router can be rebuilt/reset during health recovery.
@@ -243,7 +251,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         consecutiveStuckHighSeqTicks = 0
     }
 
-    private func parseRouterStats() -> (flows: Int, outbound: Int, streamToFlow: Int, stats: String)? {
+    private struct RouterStatsSnapshot {
+        let flows: Int
+        let outbound: Int
+        let streamToFlow: Int
+        let sendBufBytes: Int
+        let sendBufFlows: Int
+        let oldestMs: Int
+        let stale: Int
+        let stats: String
+    }
+
+    private func parseRouterStats() -> RouterStatsSnapshot? {
         guard let router = packetRouter, let statsPtr = ztlp_router_stats(router) else { return nil }
         let stats = String(cString: statsPtr)
         ztlp_free_string(statsPtr)
@@ -255,10 +274,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             values[String(parts[0])] = value
         }
 
-        return (
+        return RouterStatsSnapshot(
             flows: values["flows"] ?? 0,
             outbound: values["outbound"] ?? 0,
             streamToFlow: values["stream_to_flow"] ?? 0,
+            sendBufBytes: values["send_buf_bytes"] ?? 0,
+            sendBufFlows: values["send_buf_flows"] ?? 0,
+            oldestMs: values["oldest_ms"] ?? 0,
+            stale: values["stale"] ?? 0,
             stats: stats
         )
     }
@@ -339,10 +362,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             consecutiveStuckHighSeqTicks = 0
         }
 
+        maybeRampAdvertisedRwnd(stats: statsTuple, replayDelta: replayDelta, highSeqAdvanced: highSeqAdvanced, hasActiveFlows: hasActiveFlows)
+
         // Emit a rate-limited heartbeat so we can always see what the detector sees.
         if now.timeIntervalSince(lastHealthHeartbeatAt) >= 4.0 {
             lastHealthHeartbeatAt = now
-            logger.debug("Health eval: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s outboundRecent=\(outboundRecent) replayDelta=\(replayDelta) probeOutstanding=\(probeOutstandingSince != nil)", source: "Tunnel")
+            logger.debug("Health eval: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) sendBuf=\(statsTuple.sendBufBytes) oldestMs=\(statsTuple.oldestMs) rwnd=\(advertisedRwnd) highSeq=\(currentHighSeqSnapshot) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s outboundRecent=\(outboundRecent) replayDelta=\(replayDelta) probeOutstanding=\(probeOutstandingSince != nil)", source: "Tunnel")
         }
 
         // Only suspect the session when there is ACTIVE DEMAND (flows open or recent outbound).
@@ -631,8 +656,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.reconnectAttempt = 0
                 self.consecutiveKeepaliveFailures = 0
                 self.lastDataActivity = Date()
-                self.advertisedRwnd = 4
-                conn.setAdvertisedReceiveWindow(4)
+                self.advertisedRwnd = Self.rwndFloor
+                self.consecutiveRwndHealthyTicks = 0
+                conn.setAdvertisedReceiveWindow(Self.rwndFloor)
                 self.startKeepaliveTimer()
                 self.startCleanupTimer()
                 self.startHealthTimer()
@@ -1097,16 +1123,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if drained >= maxPackets {
             consecutiveFullFlushes += 1
             if consecutiveFullFlushes >= 2 {
-                updateAdvertisedRwnd(4, reason: "router flush saturated")
+                reduceAdvertisedRwnd(reason: "router flush saturated")
             } else {
-                updateAdvertisedRwnd(4, reason: "router flush full")
+                reduceAdvertisedRwnd(reason: "router flush full")
             }
         } else if drained == 0 {
             consecutiveFullFlushes = 0
-            updateAdvertisedRwnd(4, reason: "router drained")
         } else {
             consecutiveFullFlushes = 0
-            updateAdvertisedRwnd(4, reason: "router partial drain")
         }
 
         if !packets.isEmpty {
@@ -1116,15 +1140,56 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func updateAdvertisedRwnd(_ rwnd: UInt16, reason: String) {
-        let clamped = UInt16(4)
-        guard clamped != advertisedRwnd else { return }
-        advertisedRwnd = clamped
-        tunnelConnection?.setAdvertisedReceiveWindow(clamped)
+        let clamped = min(max(rwnd, Self.rwndFloor), Self.rwndAdaptiveMax)
+        let changed = clamped != advertisedRwnd
+        if changed {
+            advertisedRwnd = clamped
+            tunnelConnection?.setAdvertisedReceiveWindow(clamped)
+        }
 
         let now = Date()
-        if now.timeIntervalSince(lastRwndLogAt) >= 1.0 {
+        if changed || now.timeIntervalSince(lastRwndLogAt) >= 2.0 {
             lastRwndLogAt = now
-            logger.debug("Advertised rwnd=\(clamped) reason=\(reason)", source: "Tunnel")
+            logger.debug("Advertised rwnd=\(clamped) reason=\(reason) healthyTicks=\(consecutiveRwndHealthyTicks)", source: "Tunnel")
+        }
+    }
+
+    private func reduceAdvertisedRwnd(reason: String) {
+        consecutiveRwndHealthyTicks = 0
+        updateAdvertisedRwnd(Self.rwndFloor, reason: reason)
+    }
+
+    private func maybeRampAdvertisedRwnd(stats: RouterStatsSnapshot, replayDelta: Int, highSeqAdvanced: Bool, hasActiveFlows: Bool) {
+        guard isTunnelActive else { return }
+
+        let pressure = stats.outbound >= Self.rwndRouterOutboundBad ||
+            stats.sendBufBytes >= Self.rwndSendBufBytesBad ||
+            stats.oldestMs >= Self.rwndOldestMsBad ||
+            consecutiveFullFlushes > 0 ||
+            replayDelta >= Self.rwndReplayDeltaBad ||
+            probeOutstandingSince != nil ||
+            sessionSuspectSince != nil
+
+        if pressure {
+            let reason = "pressure outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs) replayDelta=\(replayDelta) fullFlushes=\(consecutiveFullFlushes)"
+            reduceAdvertisedRwnd(reason: reason)
+            return
+        }
+
+        let activeOrRecentlyActive = hasActiveFlows || Date().timeIntervalSince(lastOutboundDemandAt) < 3.0
+        let makingProgress = highSeqAdvanced || stats.outbound == 0
+        guard activeOrRecentlyActive && makingProgress else {
+            consecutiveRwndHealthyTicks = 0
+            updateAdvertisedRwnd(Self.rwndFloor, reason: "not enough progress for ramp active=\(activeOrRecentlyActive) highSeqAdvanced=\(highSeqAdvanced) outbound=\(stats.outbound)")
+            return
+        }
+
+        consecutiveRwndHealthyTicks += 1
+        if consecutiveRwndHealthyTicks >= Self.rwndHealthyTicksToIncrease && advertisedRwnd < Self.rwndAdaptiveMax {
+            consecutiveRwndHealthyTicks = 0
+            updateAdvertisedRwnd(advertisedRwnd + 1, reason: "healthy ramp flows=\(stats.flows) outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs)")
+        } else {
+            updateAdvertisedRwnd(advertisedRwnd, reason: "healthy hold flows=\(stats.flows) outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs)")
         }
     }
 
@@ -1451,8 +1516,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
-        advertisedRwnd = 4
-        conn.setAdvertisedReceiveWindow(4)
+        advertisedRwnd = Self.rwndFloor
+        consecutiveRwndHealthyTicks = 0
+        conn.setAdvertisedReceiveWindow(Self.rwndFloor)
         logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(

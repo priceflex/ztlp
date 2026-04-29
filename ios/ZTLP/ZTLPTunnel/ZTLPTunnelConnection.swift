@@ -413,14 +413,51 @@ final class ZTLPTunnelConnection {
             maybeLogOverload(context: "sendProbe")
             return false
         }
-        guard frameBuffer.count >= 9 else { return false }
 
-        frameBuffer[0] = ZTLPFrameType.ping.rawValue
+        // Build PING frame in a LOCAL buffer (do not touch shared frameBuffer,
+        // which is written from multiple queues by data/ACK paths).
+        var pingFrame = [UInt8](repeating: 0, count: 9)
+        pingFrame[0] = ZTLPFrameType.ping.rawValue
         let nonceBE = nonce.bigEndian
-        let nonceBytes = withUnsafeBytes(of: nonceBE) { Array($0) }
-        for i in 0..<8 { frameBuffer[1 + i] = nonceBytes[i] }
+        withUnsafeBytes(of: nonceBE) { rawPtr in
+            for i in 0..<8 { pingFrame[1 + i] = rawPtr[i] }
+        }
 
-        return sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
+        return sendEncryptedFrame(plaintext: pingFrame, cryptoContext: cryptoContext, conn: conn)
+    }
+
+    /// Encrypt an arbitrary plaintext frame using a local buffer and send it.
+    /// Uses caller-owned local storage so this is safe to call from any queue.
+    @discardableResult
+    private func sendEncryptedFrame(plaintext: [UInt8], cryptoContext: OpaquePointer, conn: NWConnection) -> Bool {
+        var localEncrypt = [UInt8](repeating: 0, count: Self.bufferSize)
+        var encryptWritten: Int = 0
+        let rc = plaintext.withUnsafeBufferPointer { ptPtr -> Int32 in
+            guard let base = ptPtr.baseAddress else { return -1 }
+            return ztlp_encrypt_packet(
+                cryptoContext,
+                base,
+                plaintext.count,
+                &localEncrypt,
+                localEncrypt.count,
+                &encryptWritten
+            )
+        }
+        guard rc == 0, encryptWritten > 0 else {
+            return false
+        }
+
+        let wireData = Data(bytes: localEncrypt, count: encryptWritten)
+        sendsInFlight += 1
+        conn.send(content: wireData, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            self.sendsInFlight -= 1
+            if error == nil {
+                self.bytesSent += UInt64(encryptWritten)
+                self.packetsSent += 1
+            }
+        })
+        return true
     }
 
     @discardableResult
@@ -688,11 +725,16 @@ final class ZTLPTunnelConnection {
                 nonce = (nonce << 8) | UInt64(decryptBuffer[i])
             }
 
-            frameBuffer[0] = ZTLPFrameType.pong.rawValue
+            // Build PONG in a LOCAL buffer — this path runs on nwQueue while
+            // sendData/sendProbe can run on tunnelQueue. Writing to shared
+            // frameBuffer here races with those callers.
+            var pongFrame = [UInt8](repeating: 0, count: 9)
+            pongFrame[0] = ZTLPFrameType.pong.rawValue
             let nonceBE = nonce.bigEndian
-            let nonceBytes = withUnsafeBytes(of: nonceBE) { Array($0) }
-            for i in 0..<8 { frameBuffer[1 + i] = nonceBytes[i] }
-            _ = sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
+            withUnsafeBytes(of: nonceBE) { rawPtr in
+                for i in 0..<8 { pongFrame[1 + i] = rawPtr[i] }
+            }
+            _ = sendEncryptedFrame(plaintext: pongFrame, cryptoContext: cryptoContext, conn: conn)
             return
         }
 

@@ -345,19 +345,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             logger.debug("Health eval: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s outboundRecent=\(outboundRecent) replayDelta=\(replayDelta) probeOutstanding=\(probeOutstandingSince != nil)", source: "Tunnel")
         }
 
-        // Clear suspect state when we are genuinely idle (no flows, no recent outbound).
+        // Only suspect the session when there is ACTIVE DEMAND (flows open or recent outbound).
+        // If there are no active flows AND no recent outbound, there is nothing to worry about,
+        // regardless of how long ago we last received something.
         guard hasActiveFlows || outboundRecent else {
             clearSessionHealthState()
             return
         }
 
         // Two independent paths to "suspect":
-        //   1) No useful RX for healthSuspectThreshold (classic silent-tunnel case).
-        //   2) Active flows, highSeq not advancing for noProgressTicksBeforeSuspect
-        //      consecutive ticks, regardless of whether some RX (retransmits/replay) is
-        //      arriving. This catches the Vaultwarden "alive but stuck" pattern where
-        //      the gateway queue is jammed and no real progress is being made.
-        let silentTooLong = usefulRxAge >= Self.healthSuspectThreshold
+        //   1) Active flows AND no useful RX for healthSuspectThreshold — classic "silent
+        //      tunnel with pending work" case.
+        //   2) Active flows AND highSeq not advancing for noProgressTicksBeforeSuspect
+        //      consecutive ticks — "alive but stuck" pattern where RX (retransmits/replay)
+        //      is arriving but nothing is making progress.
+        //
+        // Important: we do NOT probe based solely on "outbound was recent". An idle tunnel
+        // with no flows shouldn't burn encrypt/crypto cycles on probes just because some
+        // bytes went out a few seconds ago.
+        let silentTooLong = hasActiveFlows && usefulRxAge >= Self.healthSuspectThreshold
         let stuckTooLong = hasActiveFlows && consecutiveStuckHighSeqTicks >= Self.noProgressTicksBeforeSuspect
         guard silentTooLong || stuckTooLong else {
             clearSessionHealthState()

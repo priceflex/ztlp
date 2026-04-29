@@ -1094,6 +1094,11 @@ impl PacketRouter {
         )
     }
 
+    /// Return true if a mux stream is still mapped to an active TCP flow.
+    pub(crate) fn has_stream(&self, stream_id: u32) -> bool {
+        self.stream_to_flow.contains_key(&stream_id)
+    }
+
     /// Reset all active TCP flows and queued outbound packets while preserving
     /// the configured service map and tunnel addressing.
     pub fn reset_runtime_state(&mut self) -> usize {

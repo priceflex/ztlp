@@ -7,6 +7,7 @@
 
 #![allow(unsafe_code)]
 
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::io;
 use std::os::fd::RawFd;
@@ -237,6 +238,7 @@ impl IosTunnelEngine {
             let mut bytes: u64 = 0;
             let mut actions_total: u64 = 0;
             let mut action_bytes_total: u64 = 0;
+            let mut closed_streams = HashSet::new();
             let mut utun_write_packets: u64 = 0;
             let mut utun_write_bytes: u64 = 0;
             let mut utun_write_errors: u64 = 0;
@@ -325,14 +327,19 @@ impl IosTunnelEngine {
                                 actions_total += action_count as u64;
                                 action_bytes_total += action_written as u64;
                                 if let Some(cb) = callback {
-                                    let summary =
-                                        dispatch_router_actions(&action_buf[..action_written], cb);
+                                    let summary = dispatch_router_actions(
+                                        router,
+                                        &action_buf[..action_written],
+                                        cb,
+                                        &mut closed_streams,
+                                    );
                                     if summary.total > 0 {
                                         crate::ffi::ios_log(&format!(
-                                            "Rust router action summary open={} send={} close={} unknown={} payload_bytes={} action_bytes={}",
+                                            "Rust router action summary open={} send={} close={} suppressed_close={} unknown={} payload_bytes={} action_bytes={}",
                                             summary.open,
                                             summary.send,
                                             summary.close,
+                                            summary.suppressed_close,
                                             summary.unknown,
                                             summary.payload_bytes,
                                             action_written
@@ -632,6 +639,7 @@ struct RouterActionSummary {
     open: u64,
     send: u64,
     close: u64,
+    suppressed_close: u64,
     unknown: u64,
     payload_bytes: u64,
 }
@@ -723,8 +731,10 @@ fn drain_router_outbound_to_utun(
 }
 
 fn dispatch_router_actions(
+    router: *mut crate::ffi::ZtlpPacketRouter,
     action_buf: &[u8],
     callback: RouterActionCallback,
+    closed_streams: &mut HashSet<u32>,
 ) -> RouterActionSummary {
     let mut offset = 0usize;
     let mut summary = RouterActionSummary::default();
@@ -753,6 +763,22 @@ fn dispatch_router_actions(
             break;
         }
 
+        if action_type == 2 {
+            // The Rust fd-owned path dispatches router actions asynchronously to
+            // Swift while the fd read loop keeps processing later TCP packets.
+            // A duplicated FIN/RST or replacement SYN can therefore produce a
+            // stale second CloseStream after the first close removed the stream
+            // mapping. Drop stale/duplicate close callbacks here; the Swift
+            // packetFlow path still processes each action batch synchronously.
+            let stream_mapped = crate::ffi::ztlp_router_has_stream_sync(router, stream_id) == 1;
+            if closed_streams.contains(&stream_id) || !stream_mapped {
+                summary.suppressed_close += 1;
+                offset += data_len;
+                continue;
+            }
+            closed_streams.insert(stream_id);
+        }
+
         let data_ptr = if data_len == 0 {
             std::ptr::null()
         } else {
@@ -769,13 +795,14 @@ fn dispatch_router_actions(
         }
         offset += data_len;
     }
-    if summary.total > 0 {
+    if summary.total > 0 || summary.suppressed_close > 0 {
         crate::ffi::ios_log(&format!(
-            "Rust router action callback dispatched actions={} open={} send={} close={} unknown={} payload_bytes={} action_bytes={}",
+            "Rust router action callback dispatched actions={} open={} send={} close={} suppressed_close={} unknown={} payload_bytes={} action_bytes={}",
             summary.total,
             summary.open,
             summary.send,
             summary.close,
+            summary.suppressed_close,
             summary.unknown,
             summary.payload_bytes,
             action_buf.len()

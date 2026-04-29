@@ -4033,6 +4033,24 @@ pub extern "C" fn ztlp_router_gateway_data_sync(
     }
 }
 
+/// Return 1 if the router currently maps stream_id to an active TCP flow,
+/// 0 if unmapped, and -1 on error.
+#[no_mangle]
+pub extern "C" fn ztlp_router_has_stream_sync(router: *mut ZtlpPacketRouter, stream_id: u32) -> i32 {
+    if router.is_null() {
+        set_last_error("null argument");
+        return -1;
+    }
+    let router = unsafe { &*router };
+    match router.inner.lock() {
+        Ok(r) => i32::from(r.has_stream(stream_id)),
+        Err(_) => {
+            set_last_error("lock poisoned");
+            -1
+        }
+    }
+}
+
 /// Notify the router that the gateway closed a stream (FIN).
 #[no_mangle]
 pub extern "C" fn ztlp_router_gateway_close_sync(

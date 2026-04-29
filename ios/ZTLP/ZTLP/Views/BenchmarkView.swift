@@ -295,20 +295,36 @@ struct BenchmarkView: View {
     // MARK: - Run Benchmarks
 
     private func runBenchmarks() {
+        guard !isRunning else { return }
         isRunning = true
         results.removeAll()
+        manualSendStatus = nil
+        TunnelLogger.shared.info("Benchmark run started category=\(selectedCategory.rawValue)", source: "Benchmark")
 
         Task {
-            switch selectedCategory {
-            case .connectivity:
-                await runConnectivityTests()
-            case .http:
-                await runHTTPTests()
-            case .network:
-                await runNetworkTests()
-            case .local:
-                await runLocalTests()
+            let category = selectedCategory
+            await withTimeout(seconds: 75) {
+                switch category {
+                case .connectivity:
+                    await runConnectivityTests()
+                case .http:
+                    await runHTTPTests()
+                case .network:
+                    await runNetworkTests()
+                case .local:
+                    await runLocalTests()
+                }
+            } onTimeout: {
+                await addResult(BenchmarkResult(
+                    name: "Benchmark Timeout",
+                    value: "FAIL",
+                    unit: "",
+                    status: .error,
+                    detail: "Run exceeded 75s; reset to allow another run"
+                ))
+                TunnelLogger.shared.warn("Benchmark run timed out after 75s category=\(category.rawValue)", source: "Benchmark")
             }
+
             await MainActor.run {
                 isRunning = false
                 submitResultsToBootstrap()
@@ -568,17 +584,33 @@ struct BenchmarkView: View {
 
     /// HTTP GET test — returns (isSuccess, latencyMs, statusCode)
     private func httpGet(url urlString: String, timeoutSec: Int) async -> (Bool, Int, Int) {
-        guard let url = URL(string: urlString) else { return (false, 0, 0) }
+        guard var components = URLComponents(string: urlString) else { return (false, 0, 0) }
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "_ztlp_bench", value: UUID().uuidString))
+        components.queryItems = queryItems
+        guard let url = components.url else { return (false, 0, 0) }
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = TimeInterval(timeoutSec)
         config.timeoutIntervalForResource = TimeInterval(timeoutSec)
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.httpShouldUsePipelining = false
+        config.httpMaximumConnectionsPerHost = 1
         let session = URLSession(configuration: config)
+        defer {
+            session.invalidateAndCancel()
+        }
+
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
         let start = CFAbsoluteTimeGetCurrent()
 
         do {
-            let (_, response) = try await session.data(from: url)
+            let (_, response) = try await session.data(for: request)
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             let httpResponse = response as? HTTPURLResponse
             let code = httpResponse?.statusCode ?? 0
@@ -586,6 +618,7 @@ struct BenchmarkView: View {
             return (ok, ms, code)
         } catch {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            TunnelLogger.shared.warn("HTTP benchmark GET failed url=\(urlString) ms=\(ms) error=\(error.localizedDescription)", source: "Benchmark")
             return (false, ms, 0)
         }
     }
@@ -603,6 +636,32 @@ struct BenchmarkView: View {
             }
         }
         return await httpGet(url: urlString, timeoutSec: timeoutSec)
+    }
+
+    /// Run an async operation with a wall-clock timeout. This keeps a wedged tunnel test
+    /// from leaving the Benchmark view permanently stuck in the Running state.
+    private func withTimeout(
+        seconds: UInt64,
+        operation: @escaping () async -> Void,
+        onTimeout: @escaping () async -> Void
+    ) async {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await operation()
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                return false
+            }
+
+            if let completed = await group.next(), completed == false {
+                group.cancelAll()
+                await onTimeout()
+            } else {
+                group.cancelAll()
+            }
+        }
     }
 
     /// HTTP throughput test — returns (requests/sec, completedCount)

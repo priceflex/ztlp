@@ -168,9 +168,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var configuredServices: [(vip: String, name: String)] = []
 
     /// Session-health tracking for browser-burst recovery.
-    private static let healthCheckInterval: TimeInterval = 3.0
-    private static let healthSuspectThreshold: TimeInterval = 8.0
-    private static let probeTimeoutThreshold: TimeInterval = 8.0
+    /// Detector needs to fire BEFORE the gateway stall-timeout (30s) tears the session down.
+    private static let healthCheckInterval: TimeInterval = 2.0
+    private static let healthSuspectThreshold: TimeInterval = 5.0
+    private static let probeTimeoutThreshold: TimeInterval = 5.0
+    /// Number of consecutive ticks with active flows and no highSeq progress before
+    /// we treat the session as suspect (independent of usefulRxAge), to catch the
+    /// "alive but stuck" replay-storm pattern where RX still arrives but nothing advances.
+    private static let noProgressTicksBeforeSuspect = 3
     private var healthTimer: DispatchSourceTimer?
     private var lastUsefulRxAt: Date = .distantPast
     private var lastOutboundDemandAt: Date = .distantPast
@@ -179,11 +184,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var probeOutstandingSince: Date?
     private var lastProbeResponseAt: Date = .distantPast
     private var consecutiveNoProgressChecks = 0
+    private var consecutiveStuckHighSeqTicks = 0
     private var lastHighSeqSeen: UInt64 = 0
+    private var priorHighSeqSnapshot: UInt64 = 0
     private var lastReplayRejectCount = 0
     private var lastRouterFlows = 0
     private var lastRouterOutbound = 0
     private var lastRouterStreamMappings = 0
+    private var lastHealthHeartbeatAt: Date = .distantPast
     private var healthProbeNonce: UInt64 = 0
     private var pendingReconnectReason: String?
 
@@ -232,6 +240,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         sessionSuspectSince = nil
         probeOutstandingSince = nil
         consecutiveNoProgressChecks = 0
+        consecutiveStuckHighSeqTicks = 0
     }
 
     private func parseRouterStats() -> (flows: Int, outbound: Int, streamToFlow: Int, stats: String)? {
@@ -263,17 +272,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         timer.resume()
         healthTimer = timer
+        logger.info("Session health manager enabled interval=\(Self.healthCheckInterval)s suspectRx=\(Self.healthSuspectThreshold)s probeTimeout=\(Self.probeTimeoutThreshold)s stuckTicks=\(Self.noProgressTicksBeforeSuspect)", source: "Tunnel")
     }
 
-    private func sendSessionProbe() {
+    private func sendSessionProbe(reason: String) {
         let nonce = UInt64(Date().timeIntervalSince1970 * 1000)
         healthProbeNonce = nonce
         guard tunnelConnection?.sendProbe(nonce: nonce) == true else {
-            logger.warn("Session health probe send failed nonce=\(nonce)", source: "Tunnel")
+            logger.warn("Session health probe send failed nonce=\(nonce) reason=\(reason)", source: "Tunnel")
             return
         }
         probeOutstandingSince = Date()
-        logger.warn("Session health suspect: activeFlows=\(lastRouterFlows) streamMaps=\(lastRouterStreamMappings) noUsefulRxFor=\(String(format: "%.1f", Date().timeIntervalSince(lastUsefulRxAt)))s sending probe nonce=\(nonce)", source: "Tunnel")
+        logger.warn("Session health suspect: reason=\(reason) activeFlows=\(lastRouterFlows) streamMaps=\(lastRouterStreamMappings) highSeq=\(lastHighSeqSeen) stuckTicks=\(consecutiveStuckHighSeqTicks) noUsefulRxFor=\(String(format: "%.1f", Date().timeIntervalSince(lastUsefulRxAt)))s sending probe nonce=\(nonce)", source: "Tunnel")
     }
 
     private func handleProbeSuccess(nonce: UInt64) {
@@ -283,7 +293,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if let router = packetRouter {
             let removed = ztlp_router_cleanup_stale_flows(router)
             logger.info("Session health probe ok nonce=\(nonce) cleanup_removed=\(removed) stats=\(statsString)", source: "Tunnel")
-            if removed <= 0 {
+            if removed <= 0 && (statsTuple?.flows ?? 0) > 0 {
                 let reset = ztlp_router_reset_runtime_state(router)
                 logger.warn("Session health probe ok but flows still suspect; router reset removed=\(reset) stats=\(statsString)", source: "Tunnel")
             }
@@ -316,12 +326,40 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let replayDelta = replayRejectCount - lastReplayRejectCount
         lastReplayRejectCount = replayRejectCount
 
+        // Track consecutive ticks where we have active demand but highSeq isn't advancing.
+        // We snapshot highSeq via markUsefulRx; it only updates when NEW payload arrives AND
+        // the sequence advances. Here we just observe whether it moved since the last tick.
+        let currentHighSeqSnapshot = lastHighSeqSeen
+        let highSeqAdvanced = currentHighSeqSnapshot > priorHighSeqSnapshot
+        priorHighSeqSnapshot = currentHighSeqSnapshot
+
+        if hasActiveFlows && !highSeqAdvanced {
+            consecutiveStuckHighSeqTicks += 1
+        } else {
+            consecutiveStuckHighSeqTicks = 0
+        }
+
+        // Emit a rate-limited heartbeat so we can always see what the detector sees.
+        if now.timeIntervalSince(lastHealthHeartbeatAt) >= 4.0 {
+            lastHealthHeartbeatAt = now
+            logger.debug("Health eval: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s outboundRecent=\(outboundRecent) replayDelta=\(replayDelta) probeOutstanding=\(probeOutstandingSince != nil)", source: "Tunnel")
+        }
+
+        // Clear suspect state when we are genuinely idle (no flows, no recent outbound).
         guard hasActiveFlows || outboundRecent else {
             clearSessionHealthState()
             return
         }
 
-        guard usefulRxAge >= Self.healthSuspectThreshold else {
+        // Two independent paths to "suspect":
+        //   1) No useful RX for healthSuspectThreshold (classic silent-tunnel case).
+        //   2) Active flows, highSeq not advancing for noProgressTicksBeforeSuspect
+        //      consecutive ticks, regardless of whether some RX (retransmits/replay) is
+        //      arriving. This catches the Vaultwarden "alive but stuck" pattern where
+        //      the gateway queue is jammed and no real progress is being made.
+        let silentTooLong = usefulRxAge >= Self.healthSuspectThreshold
+        let stuckTooLong = hasActiveFlows && consecutiveStuckHighSeqTicks >= Self.noProgressTicksBeforeSuspect
+        guard silentTooLong || stuckTooLong else {
             clearSessionHealthState()
             return
         }
@@ -330,13 +368,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         consecutiveNoProgressChecks += 1
 
         if probeOutstandingSince == nil {
-            logger.warn("Session health candidate: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s replayDelta=\(replayDelta) stats=\(statsTuple.stats)", source: "Tunnel")
-            sendSessionProbe()
+            let reason = silentTooLong ? "no_useful_rx_\(String(format: "%.1f", usefulRxAge))s" : "stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks"
+            logger.warn("Session health candidate: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s replayDelta=\(replayDelta) stats=\(statsTuple.stats)", source: "Tunnel")
+            sendSessionProbe(reason: reason)
             return
         }
 
         if let probeOutstandingSince, now.timeIntervalSince(probeOutstandingSince) > Self.probeTimeoutThreshold {
-            logger.warn("Session health dead: probe timeout flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s stats=\(statsTuple.stats)", source: "Tunnel")
+            logger.warn("Session health dead: probe timeout flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s stuckTicks=\(consecutiveStuckHighSeqTicks) stats=\(statsTuple.stats)", source: "Tunnel")
             resetPacketRouterRuntimeState(reason: "session_health_probe_timeout")
             pendingReconnectReason = "session_health_probe_timeout"
             scheduleReconnect()
@@ -531,6 +570,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.lastOutboundDemandAt = Date.distantPast
                 self.lastProbeResponseAt = Date.distantPast
                 self.lastHighSeqSeen = 0
+                self.priorHighSeqSnapshot = 0
                 self.clearSessionHealthState()
                 self.refreshReplayRejectBaseline()
 

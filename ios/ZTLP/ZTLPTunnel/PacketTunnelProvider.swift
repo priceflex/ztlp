@@ -157,6 +157,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let maxRouterActionsPerCycle: Int = 64
     private static let maxPacketsPerReadCycle: Int = 32
     private static let maxOutboundPacketsPerFlush: Int = 64
+    private static let browserModeMaxOutboundPacketsPerFlush: Int = 32
 
     /// Adaptive advertised receive window. rwnd=4 is the proven Vaultwarden
     /// recovery baseline; ramp above it only after sustained healthy progress.
@@ -189,10 +190,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// we treat the session as suspect (independent of usefulRxAge), to catch the
     /// "alive but stuck" replay-storm pattern where RX still arrives but nothing advances.
     private static let noProgressTicksBeforeSuspect = 3
+    private static let healthLateThreshold: TimeInterval = 4.0
+    private let healthQueue = DispatchQueue(label: "com.ztlp.tunnel.health", qos: .utility)
     private var healthTimer: DispatchSourceTimer?
     private var lastUsefulRxAt: Date = .distantPast
     private var lastOutboundDemandAt: Date = .distantPast
     private var lastHealthCheckAt: Date = .distantPast
+    private var lastHealthWatchdogFireAt: Date = .distantPast
     private var sessionSuspectSince: Date?
     private var probeOutstandingSince: Date?
     private var lastProbeResponseAt: Date = .distantPast
@@ -293,14 +297,34 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func startHealthTimer() {
         healthTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
+        lastHealthWatchdogFireAt = .distantPast
+        let timer = DispatchSource.makeTimerSource(queue: healthQueue)
         timer.schedule(deadline: .now() + Self.healthCheckInterval, repeating: Self.healthCheckInterval)
         timer.setEventHandler { [weak self] in
-            self?.evaluateSessionHealth()
+            self?.handleHealthWatchdogTick()
         }
         timer.resume()
         healthTimer = timer
-        logger.info("Session health manager enabled interval=\(Self.healthCheckInterval)s suspectRx=\(Self.healthSuspectThreshold)s probeTimeout=\(Self.probeTimeoutThreshold)s stuckTicks=\(Self.noProgressTicksBeforeSuspect)", source: "Tunnel")
+        logger.info("Session health manager enabled interval=\(Self.healthCheckInterval)s suspectRx=\(Self.healthSuspectThreshold)s probeTimeout=\(Self.probeTimeoutThreshold)s stuckTicks=\(Self.noProgressTicksBeforeSuspect) queue=healthQueue", source: "Tunnel")
+    }
+
+    private func handleHealthWatchdogTick() {
+        let now = Date()
+        let delay = now.timeIntervalSince(lastHealthWatchdogFireAt)
+        if lastHealthWatchdogFireAt != .distantPast && delay > Self.healthLateThreshold {
+            logger.warn("Health watchdog late delay=\(String(format: "%.1f", delay))s", source: "Tunnel")
+        }
+        lastHealthWatchdogFireAt = now
+
+        let scheduledAt = Date()
+        tunnelQueue.async { [weak self] in
+            guard let self = self else { return }
+            let queueDelay = Date().timeIntervalSince(scheduledAt)
+            if queueDelay > Self.healthLateThreshold {
+                self.logger.warn("Health eval delayed on tunnelQueue delay=\(String(format: "%.1f", queueDelay))s", source: "Tunnel")
+            }
+            self.evaluateSessionHealth()
+        }
     }
 
     private func sendSessionProbe(reason: String) {
@@ -327,7 +351,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
         clearSessionHealthState()
-        flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
+        flushOutboundPackets(maxPackets: currentOutboundFlushLimit())
     }
 
     private func resetPacketRouterRuntimeState(reason: String) {
@@ -956,7 +980,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             // Flush outbound response packets immediately, but in bounded batches.
-            self.flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
+            self.flushOutboundPackets(maxPackets: self.currentOutboundFlushLimit())
 
             self.readPacketLoop()
         }
@@ -1093,7 +1117,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
-        flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
+        flushOutboundPackets(maxPackets: currentOutboundFlushLimit())
     }
 
     private func maybeLogMuxSummary(force: Bool) {
@@ -1116,6 +1140,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func beStreamIdBytes(_ streamId: UInt32) -> [UInt8] {
         withUnsafeBytes(of: streamId.bigEndian) { Array($0) }
+    }
+
+
+    private func currentOutboundFlushLimit() -> Int {
+        let browserMode = lastRouterFlows >= Self.rwndBrowserBurstFlowThreshold ||
+            lastRouterStreamMappings >= Self.rwndBrowserBurstFlowThreshold
+        return browserMode ? Self.browserModeMaxOutboundPacketsPerFlush : Self.maxOutboundPacketsPerFlush
     }
 
     /// Write response packets from the router back to the utun interface.

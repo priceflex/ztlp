@@ -416,10 +416,9 @@ final class ZTLPTunnelConnection {
         guard frameBuffer.count >= 9 else { return false }
 
         frameBuffer[0] = ZTLPFrameType.ping.rawValue
-        let nonceBytes = nonce.bigEndian
-        withUnsafeBytes(of: nonceBytes) { ptr in
-            frameBuffer[1..<9].copyBytes(from: ptr)
-        }
+        let nonceBE = nonce.bigEndian
+        let nonceBytes = withUnsafeBytes(of: nonceBE) { Array($0) }
+        for i in 0..<8 { frameBuffer[1 + i] = nonceBytes[i] }
 
         return sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
     }
@@ -683,16 +682,16 @@ final class ZTLPTunnelConnection {
 
         if frameType == ZTLPFrameType.ping.rawValue {
             guard decryptWritten >= 9 else { return }
+            guard let conn = connection else { return }
             var nonce: UInt64 = 0
             for i in 1...8 {
                 nonce = (nonce << 8) | UInt64(decryptBuffer[i])
             }
 
             frameBuffer[0] = ZTLPFrameType.pong.rawValue
-            let nonceBytes = nonce.bigEndian
-            withUnsafeBytes(of: nonceBytes) { ptr in
-                frameBuffer[1..<9].copyBytes(from: ptr)
-            }
+            let nonceBE = nonce.bigEndian
+            let nonceBytes = withUnsafeBytes(of: nonceBE) { Array($0) }
+            for i in 0..<8 { frameBuffer[1 + i] = nonceBytes[i] }
             _ = sendFramedPayload(frameLength: 9, cryptoContext: cryptoContext, conn: conn)
             return
         }

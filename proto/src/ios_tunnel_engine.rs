@@ -340,35 +340,22 @@ impl IosTunnelEngine {
                                     }
                                 }
 
-                                let (drain_packets, drain_bytes, drain_errors) =
-                                    drain_router_outbound_to_utun(
-                                        router,
-                                        &utun,
-                                        &mut outbound_packet_buf,
-                                    );
-                                if drain_packets > 0 || drain_errors > 0 {
-                                    utun_write_packets += drain_packets;
-                                    utun_write_bytes += drain_bytes;
-                                    utun_write_errors += drain_errors;
-                                    crate::ffi::ios_log(&format!(
-                                        "Rust fd router outbound wrote packets={} bytes={} errors={} totals_packets={} totals_bytes={} totals_errors={}",
-                                        drain_packets,
-                                        drain_bytes,
-                                        drain_errors,
+                                let drain_summary = drain_router_outbound_to_utun(
+                                    router,
+                                    &utun,
+                                    &mut outbound_packet_buf,
+                                );
+                                if drain_summary.packets > 0 || drain_summary.errors > 0 {
+                                    utun_write_packets += drain_summary.packets;
+                                    utun_write_bytes += drain_summary.bytes;
+                                    utun_write_errors += drain_summary.errors;
+                                    let diag = drain_summary.app_log_diag(
                                         utun_write_packets,
                                         utun_write_bytes,
-                                        utun_write_errors
-                                    ));
+                                        utun_write_errors,
+                                    );
+                                    crate::ffi::ios_log(&format!("Rust fd router {}", diag));
                                     if let Some(cb) = callback {
-                                        let diag = format!(
-                                            "outbound_wrote packets={} bytes={} errors={} totals_packets={} totals_bytes={} totals_errors={}",
-                                            drain_packets,
-                                            drain_bytes,
-                                            drain_errors,
-                                            utun_write_packets,
-                                            utun_write_bytes,
-                                            utun_write_errors
-                                        );
                                         cb.dispatch(251, 0, diag.as_ptr(), diag.len());
                                     }
                                 }
@@ -649,16 +636,55 @@ struct RouterActionSummary {
     payload_bytes: u64,
 }
 
+#[derive(Default, Clone, Copy)]
+struct OutboundDrainSummary {
+    packets: u64,
+    bytes: u64,
+    errors: u64,
+    last_meta: Option<PacketMeta>,
+}
+
+impl OutboundDrainSummary {
+    fn app_log_diag(&self, total_packets: u64, total_bytes: u64, total_errors: u64) -> String {
+        if let Some(meta) = self.last_meta {
+            format!(
+                "outbound_wrote packets={} bytes={} errors={} last_proto={} last_flags={} last_tcp_payload={} last_src={}:{} last_dst={}:{} totals_packets={} totals_bytes={} totals_errors={}",
+                self.packets,
+                self.bytes,
+                self.errors,
+                meta.protocol,
+                meta.flags_string(),
+                meta.tcp_payload_len,
+                meta.src_addr,
+                meta.src_port,
+                meta.dst_addr,
+                meta.dst_port,
+                total_packets,
+                total_bytes,
+                total_errors
+            )
+        } else {
+            format!(
+                "outbound_wrote packets={} bytes={} errors={} last_proto=? last_flags=? last_tcp_payload=0 last_src=?:0 last_dst=?:0 totals_packets={} totals_bytes={} totals_errors={}",
+                self.packets,
+                self.bytes,
+                self.errors,
+                total_packets,
+                total_bytes,
+                total_errors
+            )
+        }
+    }
+}
+
 const MAX_ROUTER_OUTBOUND_DRAIN_PER_INGRESS: usize = 64;
 
 fn drain_router_outbound_to_utun(
     router: *mut crate::ffi::ZtlpPacketRouter,
     utun: &IosUtun,
     packet_buf: &mut [u8],
-) -> (u64, u64, u64) {
-    let mut packets = 0u64;
-    let mut bytes = 0u64;
-    let mut errors = 0u64;
+) -> OutboundDrainSummary {
+    let mut summary = OutboundDrainSummary::default();
 
     for _ in 0..MAX_ROUTER_OUTBOUND_DRAIN_PER_INGRESS {
         let n = crate::ffi::ztlp_router_read_packet_sync(
@@ -670,28 +696,30 @@ fn drain_router_outbound_to_utun(
             break;
         }
         if n < 0 {
-            errors += 1;
+            summary.errors += 1;
             break;
         }
 
         let n = n as usize;
+        let meta = PacketMeta::parse(&packet_buf[..n]);
         match utun.write_packet(&packet_buf[..n]) {
             Ok(written) => {
-                packets += 1;
-                bytes += written as u64;
+                summary.packets += 1;
+                summary.bytes += written as u64;
+                summary.last_meta = meta;
             }
             Err(e) => {
-                errors += 1;
+                summary.errors += 1;
                 crate::ffi::ios_log(&format!(
                     "Rust fd router outbound utun write error: {} packet_len={} errors={}",
-                    e, n, errors
+                    e, n, summary.errors
                 ));
                 break;
             }
         }
     }
 
-    (packets, bytes, errors)
+    summary
 }
 
 fn dispatch_router_actions(

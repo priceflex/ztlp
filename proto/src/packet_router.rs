@@ -724,10 +724,17 @@ impl PacketRouter {
                         flow.state = TcpState::CloseWait;
                         // ACK the FIN
                         queue_ack(flow, &mut self.outbound);
-                        // Close the ZTLP stream
+                        // Close the ZTLP stream once at the TCP state transition.
+                        // FIN retransmits or duplicate FIN/ACKs can arrive after this
+                        // point; LastAck/Closed handling below must not emit another
+                        // CloseStream for the same stream.
                         actions.push(RouterAction::CloseStream {
                             stream_id: flow.stream_id,
                         });
+                        // Remove the stream mapping immediately so health stats do not
+                        // treat a locally closed/drained flow as an active stream while
+                        // we wait for the client's final ACK to our FIN.
+                        self.stream_to_flow.remove(&flow.stream_id);
                         // Send our own FIN
                         queue_fin(flow, &mut self.outbound);
                         flow.state = TcpState::LastAck;
@@ -1955,6 +1962,48 @@ mod tests {
             tcp_hdr.is_fin()
         });
         assert!(has_fin, "should send FIN");
+    }
+
+    #[test]
+    fn test_router_fin_close_removes_stream_mapping_before_last_ack() {
+        let mut router = make_router();
+        let client_ip = Ipv4Addr::new(10, 122, 0, 100);
+        let service_ip = Ipv4Addr::new(10, 122, 0, 2);
+
+        let syn = make_syn_packet(client_ip, service_ip, 54321, 80, 1000);
+        router.process_inbound(&syn);
+        let outbound = router.drain_outbound();
+        let syn_ack_hdr = parse_tcp(&outbound[0][20..]).unwrap();
+        let server_isn = syn_ack_hdr.seq;
+
+        let ack = make_ack_packet(client_ip, service_ip, 54321, 80, 1001, server_isn + 1);
+        router.process_inbound(&ack);
+        router.drain_outbound();
+        assert_eq!(router.flow_count(), 1);
+        assert!(router.router_stats().contains("stream_to_flow=1"));
+
+        let fin = make_fin_packet(client_ip, service_ip, 54321, 80, 1001, server_isn + 1);
+        let actions = router.process_inbound(&fin);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, RouterAction::CloseStream { stream_id: 1 }))
+                .count(),
+            1,
+            "client FIN should emit exactly one CloseStream"
+        );
+
+        let stats = router.router_stats();
+        assert!(
+            stats.contains("stream_to_flow=0"),
+            "stream mapping should be removed as soon as CloseStream is emitted: {}",
+            stats
+        );
+        assert_eq!(
+            router.flow_count(),
+            1,
+            "flow remains only to finish TCP LastAck"
+        );
     }
 
     #[test]

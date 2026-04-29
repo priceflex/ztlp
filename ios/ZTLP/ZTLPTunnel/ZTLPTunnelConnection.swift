@@ -97,10 +97,9 @@ final class ZTLPTunnelConnection {
     private var pendingAcks: [UInt64] = []
     private static let maxPendingAcks = 64
 
-    /// Receive window advertised to the gateway. Keep this conservative for
-    /// iOS browser/page-load traffic: 64 crashed, 8 was stable but too slow.
-    /// 16 is the next stability/throughput test point.
-    private var advertisedReceiveWindow: UInt16 = 16
+    /// Receive window advertised to the gateway. Keep this extremely conservative
+    /// for iOS browser/page-load traffic until the NE survives Vaultwarden bursts.
+    private var advertisedReceiveWindow: UInt16 = 4
 
     /// Backpressure: track in-flight NWConnection sends.
     private var sendsInFlight: Int = 0
@@ -472,7 +471,7 @@ final class ZTLPTunnelConnection {
     }
 
     func setAdvertisedReceiveWindow(_ rwnd: UInt16) {
-        advertisedReceiveWindow = max(4, min(16, rwnd))
+        advertisedReceiveWindow = UInt16(4)
     }
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
@@ -505,7 +504,7 @@ final class ZTLPTunnelConnection {
         // Advertise a receive window from the actual NE/router pressure, not
         // just NWConnection ACK-send pressure. Under Vaultwarden page loads the
         // ACK path stays empty while packetFlow/router delivery saturates.
-        let sendWindow = UInt16(max(4, min(16, Self.maxSendsInFlight - sendsInFlight)))
+        let sendWindow = UInt16(4)
         let availableWindow = min(advertisedReceiveWindow, sendWindow)
         let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &ackFrame, ackFrame.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }

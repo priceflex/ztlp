@@ -466,11 +466,12 @@ defmodule ZtlpGateway.Session do
   # we stop reading from the backend (don't call resume_read). When it drops below
   # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
   # when the backend dumps a large response faster than the tunnel can deliver.
-  @queue_high 2048
-  @queue_low 512
-  # Increased from 256/64 to 2048/512 to prevent mux stream rejections
-  # under Safari-style burst loads (6+ concurrent streams). Previous 256
-  # was hit routinely, causing immediate stream rejection and reconnection storms.
+  @queue_high 512
+  @queue_low 128
+  # Mobile browser sessions must not let backend responses balloon into thousands
+  # of queued packets. The iOS NE is stable at rwnd=8, but once the gateway has
+  # queued 6K packets, the browser sees multi-second delays and churns streams.
+  # Keep gateway buffering shallow and rely on TCP/backend backpressure.
   # Hard safety limits for mux fan-out during browser-style workloads.
   # @max_mux_streams bounds the total concurrent connected + connecting streams.
   # @max_connecting_buffer_bytes bounds early data accepted before a backend finishes connecting.
@@ -782,6 +783,16 @@ defmodule ZtlpGateway.Session do
     terminate_session(state, :backend_error)
   end
 
+  defp enqueue_stream_chunks(send_queue, stream_id, chunks) do
+    Enum.reduce_while(chunks, send_queue, fn chunk, q ->
+      if :queue.len(q) >= @queue_high do
+        {:halt, q}
+      else
+        {:cont, :queue.in({:stream, stream_id, chunk}, q)}
+      end
+    end)
+  end
+
   # ── TLS terminator messages ──
 
   # Decrypted data from TLS bridge — forward to the backend
@@ -821,9 +832,7 @@ defmodule ZtlpGateway.Session do
       {stream_id, _stream} ->
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
         chunks = chunk_data(data, @max_payload_bytes - 13)
-        send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
-          :queue.in({:stream, stream_id, chunk}, q)
-        end)
+        send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
         state = %{state | send_queue: send_queue}
         state = flush_send_queue(state)
         # Backpressure on TLS bridge sockets: pause reading from this socket
@@ -865,9 +874,7 @@ defmodule ZtlpGateway.Session do
         # Plain stream: send directly
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
         chunks = chunk_data(data, @max_payload_bytes - 13)
-        send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
-          :queue.in({:stream, stream_id, chunk}, q)
-        end)
+        send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
         state = %{state | send_queue: send_queue}
         state = flush_send_queue(state)
         state = maybe_resume_backends(state)
@@ -2067,7 +2074,10 @@ defmodule ZtlpGateway.Session do
       total_streams >= @max_mux_streams ->
         reject_mux_stream(stream_id, "max mux streams reached (#{total_streams}/#{@max_mux_streams})", state)
 
-      queue_len >= @queue_high ->
+      false and queue_len >= @queue_high ->
+        # Do not reject browser mux streams just because an earlier response is
+        # backpressured. Admitting the stream and pausing backend reads avoids
+        # client-side close/retry churn; queue depth is controlled at enqueue time.
         reject_mux_stream(stream_id, "send_queue already overloaded (queue=#{queue_len}, high=#{@queue_high})", state)
 
       true ->

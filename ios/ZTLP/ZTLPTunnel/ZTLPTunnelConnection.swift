@@ -92,6 +92,11 @@ final class ZTLPTunnelConnection {
     private var pendingAcks: [UInt64] = []
     private static let maxPendingAcks = 64
 
+    /// Receive window advertised to the gateway. PacketTunnelProvider updates
+    /// this from router/utun pressure; ACKs include it so the gateway can pace
+    /// browser response bursts instead of flooding the NE.
+    private var advertisedReceiveWindow: UInt16 = 64
+
     /// Backpressure: track in-flight NWConnection sends.
     private var sendsInFlight: Int = 0
     private static let maxSendsInFlight = 512
@@ -424,6 +429,10 @@ final class ZTLPTunnelConnection {
         flushPendingAcks()
     }
 
+    func setAdvertisedReceiveWindow(_ rwnd: UInt16) {
+        advertisedReceiveWindow = max(4, min(64, rwnd))
+    }
+
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
     var isOverloaded: Bool {
         sendsInFlight >= (Self.maxSendsInFlight - 32)
@@ -450,13 +459,12 @@ final class ZTLPTunnelConnection {
         pendingAcks.removeAll(keepingCapacity: true)
 
         var ackWritten: Int = 0
-        // Advertise a conservative receive window for browser/page-load traffic.
-        // The old 512-packet rwnd let the gateway fill thousands of queued
-        // response packets during multi-stream Vaultwarden loads, which caused
-        // retransmit storms and NE teardown. Keep this deliberately low until
-        // PacketTunnelProvider can feed us full router/utun pressure metrics.
-        let availableWindow = max(16, min(64, Self.maxSendsInFlight - sendsInFlight))
-        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, UInt16(availableWindow), &frameBuffer, frameBuffer.count, &ackWritten)
+        // Advertise a receive window from the actual NE/router pressure, not
+        // just NWConnection ACK-send pressure. Under Vaultwarden page loads the
+        // ACK path stays empty while packetFlow/router delivery saturates.
+        let sendWindow = UInt16(max(4, min(64, Self.maxSendsInFlight - sendsInFlight)))
+        let availableWindow = min(advertisedReceiveWindow, sendWindow)
+        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &frameBuffer, frameBuffer.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }
 
         var encryptWritten: Int = 0

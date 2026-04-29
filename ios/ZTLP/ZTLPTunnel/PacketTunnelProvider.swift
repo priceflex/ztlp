@@ -158,6 +158,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let maxPacketsPerReadCycle: Int = 32
     private static let maxOutboundPacketsPerFlush: Int = 64
 
+    /// Dynamic advertised receive window. Lower values slow gateway egress when
+    /// packetFlow/router work is backed up during multi-stream browser loads.
+    private var advertisedRwnd: UInt16 = 64
+    private var consecutiveFullFlushes = 0
+    private var lastRwndLogAt: Date = .distantPast
+
     /// Packet read buffer (reusable, MTU-sized).
     private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
 
@@ -408,6 +414,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.reconnectAttempt = 0
                 self.consecutiveKeepaliveFailures = 0
                 self.lastDataActivity = Date()
+                self.advertisedRwnd = 64
+                conn.setAdvertisedReceiveWindow(64)
                 self.startKeepaliveTimer()
                 self.startCleanupTimer()
                 self.logger.info("Idle quiesce: packet/ACK timers disabled; using demand-driven flush", source: "Tunnel")
@@ -843,9 +851,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             drained += 1
         }
 
+        if drained >= maxPackets {
+            consecutiveFullFlushes += 1
+            if consecutiveFullFlushes >= 2 {
+                updateAdvertisedRwnd(8, reason: "router flush saturated")
+            } else {
+                updateAdvertisedRwnd(16, reason: "router flush full")
+            }
+        } else if drained == 0 {
+            consecutiveFullFlushes = 0
+            updateAdvertisedRwnd(64, reason: "router drained")
+        } else {
+            consecutiveFullFlushes = 0
+            updateAdvertisedRwnd(32, reason: "router partial drain")
+        }
+
         if !packets.isEmpty {
             markDataActivity()
             packetFlow.writePackets(packets, withProtocols: protocols)
+        }
+    }
+
+    private func updateAdvertisedRwnd(_ rwnd: UInt16, reason: String) {
+        let clamped = max(UInt16(4), min(UInt16(64), rwnd))
+        guard clamped != advertisedRwnd else { return }
+        advertisedRwnd = clamped
+        tunnelConnection?.setAdvertisedReceiveWindow(clamped)
+
+        let now = Date()
+        if now.timeIntervalSince(lastRwndLogAt) >= 1.0 {
+            lastRwndLogAt = now
+            logger.debug("Advertised rwnd=\(clamped) reason=\(reason)", source: "Tunnel")
         }
     }
 
@@ -1161,6 +1197,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
+        advertisedRwnd = 64
+        conn.setAdvertisedReceiveWindow(64)
         logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(

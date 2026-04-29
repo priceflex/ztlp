@@ -161,7 +161,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Adaptive advertised receive window. rwnd=4 is the proven Vaultwarden
     /// recovery baseline; ramp above it only after sustained healthy progress.
     private static let rwndFloor: UInt16 = 4
-    private static let rwndAdaptiveMax: UInt16 = 6
+    private static let rwndAdaptiveMax: UInt16 = 5
     private static let rwndHealthyTicksToIncrease = 3
     private static let rwndReplayDeltaBad = 8
     private static let rwndRouterOutboundBad = 128

@@ -122,7 +122,11 @@ async fn test_single_socket_ack_contention_under_load() {
         let mut count: u64 = 0;
         // Collect ACKs until we see a 500ms gap (transfer is done)
         loop {
-            match timeout(Duration::from_millis(500), ack_receiver_clone.recv_from(&mut buf)).await
+            match timeout(
+                Duration::from_millis(500),
+                ack_receiver_clone.recv_from(&mut buf),
+            )
+            .await
             {
                 Ok(Ok((len, _))) => {
                     // Skip the sentinel/unblock packet
@@ -195,10 +199,7 @@ async fn test_single_socket_ack_contention_under_load() {
         packets_received,
         total_packets
     );
-    assert!(
-        sent > 0,
-        "Should have attempted to send at least some ACKs"
-    );
+    assert!(sent > 0, "Should have attempted to send at least some ACKs");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -252,7 +253,12 @@ async fn test_separate_socket_no_contention() {
         let mut packets_received: u64 = 0;
 
         loop {
-            match timeout(Duration::from_secs(2), client_recv_clone.recv_from(&mut buf)).await {
+            match timeout(
+                Duration::from_secs(2),
+                client_recv_clone.recv_from(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok((_len, _from))) => {
                     packets_received += 1;
 
@@ -310,7 +316,11 @@ async fn test_separate_socket_no_contention() {
         let mut count: u64 = 0;
         let mut max_seq: u64 = 0;
         loop {
-            match timeout(Duration::from_millis(500), ack_receiver_clone.recv_from(&mut buf)).await
+            match timeout(
+                Duration::from_millis(500),
+                ack_receiver_clone.recv_from(&mut buf),
+            )
+            .await
             {
                 Ok(Ok((len, from_addr))) => {
                     // Skip sentinel
@@ -341,7 +351,10 @@ async fn test_separate_socket_no_contention() {
     let data_packet = vec![0xAAu8; PAYLOAD_SIZE];
     let start = Instant::now();
     for i in 0..total_packets {
-        gateway.send_to(&data_packet, client_recv_addr).await.unwrap();
+        gateway
+            .send_to(&data_packet, client_recv_addr)
+            .await
+            .unwrap();
         if i % 50 == 49 {
             tokio::task::yield_now().await;
         }
@@ -514,7 +527,9 @@ async fn test_gateway_accepts_acks_from_different_port() {
     assert_ne!(data_port, ack_port, "Ports must be different");
 
     // Simulated session_id (12 bytes)
-    let session_id: [u8; 12] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let session_id: [u8; 12] = [
+        0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    ];
 
     // Build a simulated data packet with session_id header
     let mut data_packet = Vec::new();
@@ -535,10 +550,7 @@ async fn test_gateway_accepts_acks_from_different_port() {
         .unwrap();
 
     // Send ACK from port Y (different port!)
-    client_ack
-        .send_to(&ack_packet, gateway_addr)
-        .await
-        .unwrap();
+    client_ack.send_to(&ack_packet, gateway_addr).await.unwrap();
 
     // Gateway receives both packets
     let mut buf = [0u8; 4096];
@@ -604,7 +616,9 @@ async fn test_relay_forwards_by_session_id_not_port() {
     let data_port = client_data.local_addr().unwrap().port();
     let ack_port = client_ack.local_addr().unwrap().port();
 
-    let session_id: [u8; 12] = [0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let session_id: [u8; 12] = [
+        0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    ];
 
     // Simulate relay state: session_id → {client: port X, gateway: gateway_addr}
     // (In the real relay, this is in SessionRegistry + GatewayForwarder)
@@ -657,20 +671,14 @@ async fn test_relay_forwards_by_session_id_not_port() {
 
         // Extract session_id from the packet
         let pkt_session = &buf[1..13];
-        assert_eq!(
-            pkt_session, &session_id,
-            "Session ID must match"
-        );
+        assert_eq!(pkt_session, &session_id, "Session ID must match");
 
         // Relay decision: sender is not the gateway, so forward to gateway
         let decision = relay_route(from.port(), &session_id);
         assert_eq!(decision, "forward to gateway");
 
         // Forward to gateway
-        relay
-            .send_to(&buf[..len], gateway_addr)
-            .await
-            .unwrap();
+        relay.send_to(&buf[..len], gateway_addr).await.unwrap();
     }
 
     // Gateway should receive both packets
@@ -729,7 +737,12 @@ async fn test_10mb_transfer_separate_ack_socket() {
             if stop_clone.load(Ordering::Relaxed) {
                 break;
             }
-            match timeout(Duration::from_millis(200), gateway_clone.recv_from(&mut buf)).await {
+            match timeout(
+                Duration::from_millis(200),
+                gateway_clone.recv_from(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok((len, _from))) => {
                     if len >= ACK_SIZE && buf[0] == 0x01 {
                         let seq = u64::from_be_bytes(buf[1..9].try_into().unwrap());
@@ -756,7 +769,12 @@ async fn test_10mb_transfer_separate_ack_socket() {
             if stop_clone2.load(Ordering::Relaxed) {
                 break;
             }
-            match timeout(Duration::from_millis(200), client_recv_clone.recv_from(&mut buf)).await {
+            match timeout(
+                Duration::from_millis(200),
+                client_recv_clone.recv_from(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {
                     count += 1;
                     data_recv_clone.fetch_add(1, Ordering::Relaxed);

@@ -17,6 +17,7 @@
 import NetworkExtension
 import Network
 import Foundation
+import Darwin
 
 /// App Group identifier shared between the main app and this extension.
 private let appGroupId = "group.com.ztlp.shared"
@@ -26,6 +27,36 @@ private let defaultRelayPort: UInt16 = 4433
 
 /// NS record type for RELAY records.
 private let NS_RECORD_TYPE_RELAY: UInt8 = 3
+
+private func rustRouterActionCallback(
+    userData: UnsafeMutableRawPointer?,
+    actionType: UInt8,
+    streamID: UInt32,
+    data: UnsafePointer<UInt8>?,
+    dataLen: Int
+) {
+    guard let userData else { return }
+    let provider = Unmanaged<PacketTunnelProvider>.fromOpaque(userData).takeUnretainedValue()
+    let payload: [UInt8]
+    if let data, dataLen > 0 {
+        payload = Array(UnsafeBufferPointer(start: data, count: dataLen))
+    } else {
+        payload = []
+    }
+    if actionType == 250 {
+        if let message = String(bytes: payload, encoding: .utf8) {
+            provider.handleRustFdIngressDiagnostic(message)
+        }
+        return
+    }
+    if actionType == 251 {
+        if let message = String(bytes: payload, encoding: .utf8) {
+            provider.handleRustFdOutboundDiagnostic(message)
+        }
+        return
+    }
+    provider.handleRustRouterAction(actionType: actionType, streamID: streamID, payload: payload)
+}
 
 /// UserDefaults keys for shared state.
 private enum SharedKey {
@@ -119,6 +150,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Standalone packet router handle (replaces ZtlpClient-based router).
     private var packetRouter: OpaquePointer?  // ZtlpPacketRouter*
+
+    /// Future Nebula-style Rust owner for the utun fd. In this Phase 2 smoke
+    /// test the Rust engine is lifecycle-only: it stores the fd but does not
+    /// read/write it, so Swift packetFlow remains the sole data-plane owner.
+    private var iosTunnelEngine: OpaquePointer?  // ZtlpIosTunnelEngine*
+    private static let enableRustIosTunnelEngineLifecycleSmokeTest = true
+    /// Phase 2 fd-owner smoke test. When true, Swift does NOT call packetFlow.readPackets;
+    /// Rust owns the utun fd and logs/drops packet metadata only.
+    private static let useRustFdDataPlane = true
 
     /// DNS responder for *.ztlp queries (answers directly on utun, no tokio).
     private var dnsResponder: ZTLPDNSResponder?
@@ -220,6 +260,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var muxSummaryClose = 0
     private var muxSummarySendData = 0
     private var muxSummarySendBytes = 0
+    private var rustActionCallbackOpen = 0
+    private var rustActionCallbackSend = 0
+    private var rustActionCallbackClose = 0
+    private var rustActionCallbackUnknown = 0
+    private var rustActionCallbackBytes = 0
+    private var rustActionCallbackLastLogAt = Date.distantPast
+    private var rustFdIngressDiagCount = 0
+    private var rustFdIngressDiagLastLogAt = Date.distantPast
+    private var rustFdOutboundDiagCount = 0
+    private var rustFdOutboundDiagLastLogAt = Date.distantPast
 
     /// Packet read buffer (reusable, MTU-sized).
     private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
@@ -689,6 +739,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
 
                 self.logger.info("Tunnel network settings applied", source: "Tunnel")
+                if let fd = self.tunnelFileDescriptor {
+                    self.logger.info("utun fd acquired fd=\(fd)", source: "Tunnel")
+                    self.startRustIosTunnelEngineLifecycleSmokeTest(fd: fd)
+                } else {
+                    self.logger.warn("utun fd not found after tunnel settings applied", source: "Tunnel")
+                }
 
                 // Step 10: Start timers and finalize
                 self.isTunnelActive = true
@@ -765,6 +821,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Stop DNS responder
             self.dnsResponder = nil
             self.logger.info("DNS responder stopped", source: "Tunnel")
+
+            // Stop future fd-backed Rust engine if Phase 2 starts it.
+            if let engine = self.iosTunnelEngine {
+                _ = ztlp_ios_tunnel_engine_stop(engine)
+                ztlp_ios_tunnel_engine_free(engine)
+                self.iosTunnelEngine = nil
+                self.logger.info("Rust iOS tunnel engine stopped", source: "Tunnel")
+            }
 
             // Stop packet router
             if let router = self.packetRouter {
@@ -907,13 +971,70 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
-        // Start the utun packet I/O loop
-        startPacketLoop()
+        // Start the utun packet I/O loop unless a later debug build explicitly
+        // switches ownership to Rust. For the current lifecycle-only smoke test,
+        // Rust stores the fd but does not read/write it, so Swift remains owner.
+        if Self.useRustFdDataPlane {
+            logger.info("Rust fd data plane requested; Swift packet I/O loop disabled", source: "Tunnel")
+        } else {
+            startPacketLoop()
+        }
     }
 
     private func startPacketLoop() {
         logger.info("Starting packet I/O loop", source: "Tunnel")
         readPacketLoop()
+    }
+
+    private func startRustIosTunnelEngineLifecycleSmokeTest(fd: Int32) {
+        guard Self.enableRustIosTunnelEngineLifecycleSmokeTest else {
+            logger.info("Rust iOS tunnel engine scaffold disabled mode=swift_packetFlow", source: "Tunnel")
+            return
+        }
+        guard iosTunnelEngine == nil else {
+            logger.warn("Rust iOS tunnel engine scaffold already started; ignoring duplicate fd=\(fd)", source: "Tunnel")
+            return
+        }
+
+        var engine: OpaquePointer?
+        let result = ztlp_ios_tunnel_engine_start(fd, &engine)
+        guard result == 0, let engine = engine else {
+            logger.error("Rust iOS tunnel engine scaffold start failed fd=\(fd): \(lastError())", source: "Tunnel")
+            return
+        }
+
+        iosTunnelEngine = engine
+        if Self.useRustFdDataPlane {
+            guard let router = packetRouter else {
+                logger.error("Rust iOS tunnel engine router ingress requested but packetRouter is nil", source: "Tunnel")
+                return
+            }
+            let userData = Unmanaged.passUnretained(self).toOpaque()
+            let callbackResult = ztlp_ios_tunnel_engine_set_router_action_callback(engine, rustRouterActionCallback, userData)
+            if callbackResult == 0 {
+                logger.info("Rust router action callback registered", source: "Tunnel")
+            } else {
+                logger.error("Rust router action callback registration failed fd=\(fd): \(lastError())", source: "Tunnel")
+            }
+
+            let readResult = ztlp_ios_tunnel_engine_start_router_ingress_loop(engine, router)
+            if readResult == 0 {
+                logger.info("Rust iOS tunnel engine scaffold started fd=\(fd) mode=router_ingress swift_packetFlow=disabled transport=swift_action_callback", source: "Tunnel")
+            } else {
+                logger.error("Rust iOS tunnel engine router ingress start failed fd=\(fd): \(lastError())", source: "Tunnel")
+            }
+        } else {
+            logger.info("Rust iOS tunnel engine scaffold started fd=\(fd) mode=lifecycle_only", source: "Tunnel")
+        }
+    }
+
+    /// Locate the utun file descriptor created by NEPacketTunnelProvider.
+    /// This follows Nebula's iOS pattern: Swift configures NE settings, then
+    /// hands the fd to a native data-plane owner. Phase 1 logs only; production
+    /// packet I/O still uses packetFlow until the Rust engine is validated.
+    private var tunnelFileDescriptor: Int32? {
+        let fd = ztlp_find_utun_fd()
+        return fd >= 0 ? fd : nil
     }
 
     /// Recursive readPackets loop: utun → standalone router → ZTLP
@@ -986,6 +1107,72 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+
+
+    fileprivate func handleRustFdIngressDiagnostic(_ message: String) {
+        tunnelQueue.async { [weak self] in
+            guard let self else { return }
+            self.rustFdIngressDiagCount += 1
+            let now = Date()
+            if self.rustFdIngressDiagCount <= 30 || message.contains("tcp_payload=0") == false || now.timeIntervalSince(self.rustFdIngressDiagLastLogAt) >= 1.0 {
+                self.logger.debug("Rust fd ingress diag count=\(self.rustFdIngressDiagCount) \(message)", source: "Tunnel")
+                self.rustFdIngressDiagLastLogAt = now
+            }
+        }
+    }
+
+    fileprivate func handleRustFdOutboundDiagnostic(_ message: String) {
+        tunnelQueue.async { [weak self] in
+            guard let self else { return }
+            self.rustFdOutboundDiagCount += 1
+            let now = Date()
+            if self.rustFdOutboundDiagCount <= 30 || now.timeIntervalSince(self.rustFdOutboundDiagLastLogAt) >= 1.0 {
+                self.logger.debug("Rust fd outbound diag count=\(self.rustFdOutboundDiagCount) \(message)", source: "Tunnel")
+                self.rustFdOutboundDiagLastLogAt = now
+            }
+        }
+    }
+
+    fileprivate func handleRustRouterAction(actionType: UInt8, streamID: UInt32, payload: [UInt8]) {
+        tunnelQueue.async { [weak self] in
+            guard let self else { return }
+            switch actionType {
+            case 0:
+                self.rustActionCallbackOpen += 1
+            case 1:
+                self.rustActionCallbackSend += 1
+                self.rustActionCallbackBytes += payload.count
+            case 2:
+                self.rustActionCallbackClose += 1
+            default:
+                self.rustActionCallbackUnknown += 1
+            }
+            let now = Date()
+            if actionType == 1 || now.timeIntervalSince(self.rustActionCallbackLastLogAt) >= 1.0 {
+                self.logger.debug("Rust action callback summary open=\(self.rustActionCallbackOpen) send=\(self.rustActionCallbackSend) close=\(self.rustActionCallbackClose) unknown=\(self.rustActionCallbackUnknown) bytes=\(self.rustActionCallbackBytes) lastType=\(actionType) lastStream=\(streamID) lastLen=\(payload.count)", source: "Tunnel")
+                self.rustActionCallbackLastLogAt = now
+                self.rustActionCallbackOpen = 0
+                self.rustActionCallbackSend = 0
+                self.rustActionCallbackClose = 0
+                self.rustActionCallbackUnknown = 0
+                self.rustActionCallbackBytes = 0
+            }
+            // Reuse the existing Swift RouterAction -> mux transport path.
+            // This keeps packetFlow bytes out of Swift while preserving current transport/session behavior.
+            var action = [UInt8]()
+            action.reserveCapacity(7 + payload.count)
+            action.append(actionType)
+            action.append(contentsOf: self.beStreamIdBytes(streamID))
+            let len = UInt16(min(payload.count, Int(UInt16.max)))
+            action.append(UInt8(len >> 8))
+            action.append(UInt8(len & 0xff))
+            if len > 0 {
+                action.append(contentsOf: payload.prefix(Int(len)))
+            }
+            self.processRouterActions(actionBuffer: action, actionLen: action.count, maxActions: 1)
+        }
+    }
+
     /// Parse and dispatch serialized RouterActions from the standalone router.
     /// Format: [1B type][4B stream_id BE][2B data_len BE][data...]
     /// Type: 0=OpenStream, 1=SendData, 2=CloseStream
@@ -1042,7 +1229,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxSummaryOpen += 1
                 maybeLogMuxSummary(force: false)
                 markOutboundDemand()
-                if tunnelConnection?.sendData(muxOpen) != true {
+                let sent = tunnelConnection?.sendData(muxOpen) == true
+                logger.debug("RouterAction send OpenStream stream=\(streamId) serviceBytes=\(serviceData.count) sent=\(sent)", source: "Router")
+                if !sent {
                     logger.warn("Router: OpenStream backpressured for stream \(streamId)", source: "Router")
                     return
                 }
@@ -1057,7 +1246,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxSummarySendBytes += payload.count
                 maybeLogMuxSummary(force: false)
                 markOutboundDemand()
-                if tunnelConnection?.sendData(muxData) != true {
+                let sent = tunnelConnection?.sendData(muxData) == true
+                logger.debug("RouterAction send SendData stream=\(streamId) bytes=\(payload.count) sent=\(sent)", source: "Router")
+                if !sent {
                     logger.warn("Router: SendData backpressured for stream \(streamId) bytes=\(payload.count)", source: "Router")
                     return
                 }
@@ -1069,7 +1260,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxSummaryClose += 1
                 maybeLogMuxSummary(force: false)
                 markOutboundDemand()
-                if tunnelConnection?.sendData(muxClose) != true {
+                let sent = tunnelConnection?.sendData(muxClose) == true
+                logger.debug("RouterAction send CloseStream stream=\(streamId) sent=\(sent)", source: "Router")
+                if !sent {
                     logger.warn("Router: CloseStream backpressured for stream \(streamId)", source: "Router")
                     return
                 }
@@ -1233,11 +1426,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        let activeOrRecentlyActive = hasActiveFlows || Date().timeIntervalSince(lastOutboundDemandAt) < 3.0
+        let outboundDemandAge = Date().timeIntervalSince(lastOutboundDemandAt)
+        let activeOrRecentlyActive = hasActiveFlows || outboundDemandAge < 3.0
         let makingProgress = highSeqAdvanced || stats.outbound == 0
         guard activeOrRecentlyActive && makingProgress else {
             consecutiveRwndHealthyTicks = 0
             updateAdvertisedRwnd(Self.rwndFloor, reason: "not enough progress for ramp active=\(activeOrRecentlyActive) highSeqAdvanced=\(highSeqAdvanced) outbound=\(stats.outbound)")
+            return
+        }
+
+        // The 07:21 crash reproduced after flows briefly cleared, rwnd ramped to 5,
+        // then another browser/benchmark burst arrived. Keep the proven rwnd=4
+        // baseline during the entire post-demand cooldown, not just while flows
+        // are visible in the router snapshot.
+        if outboundDemandAge < 15.0 {
+            consecutiveRwndHealthyTicks = 0
+            updateAdvertisedRwnd(Self.rwndFloor, reason: "recent outbound cooldown age=\(String(format: "%.1f", outboundDemandAge))s")
             return
         }
 

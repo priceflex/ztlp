@@ -855,7 +855,10 @@ async fn send_controller_background_task(
             drained += 1;
         }
         if drained > 0 {
-            tracing::info!("send_controller_bg: drained {} frames from recv_loop", drained);
+            tracing::info!(
+                "send_controller_bg: drained {} frames from recv_loop",
+                drained
+            );
         }
 
         // Process any pending ACKs from the recv_loop
@@ -1115,11 +1118,17 @@ async fn handle_mux_connection<R, W>(
                     // payloads matching the control frame type.
                     const FRAME_FIN_SENTINEL: u8 = 0x02;
                     const FRAME_CLOSE_SENTINEL: u8 = 0x05;
-                    if data.len() == 1 && (data[0] == FRAME_FIN_SENTINEL || data[0] == FRAME_CLOSE_SENTINEL) {
+                    if data.len() == 1
+                        && (data[0] == FRAME_FIN_SENTINEL || data[0] == FRAME_CLOSE_SENTINEL)
+                    {
                         tracing::info!(
                             "VIP: stream {} received in-band {} sentinel",
                             stream_id,
-                            if data[0] == FRAME_FIN_SENTINEL { "FIN" } else { "CLOSE" }
+                            if data[0] == FRAME_FIN_SENTINEL {
+                                "FIN"
+                            } else {
+                                "CLOSE"
+                            }
                         );
                         break;
                     }
@@ -1241,11 +1250,7 @@ async fn handle_mux_connection<R, W>(
             (stream_id >> 8) as u8,
             stream_id as u8,
         ];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            send_controller.lock(),
-        )
-        .await
+        match tokio::time::timeout(std::time::Duration::from_secs(2), send_controller.lock()).await
         {
             Ok(mut sc) => {
                 // Purge stale retransmit entries for this stream BEFORE enqueuing CLOSE.

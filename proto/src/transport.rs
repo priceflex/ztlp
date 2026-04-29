@@ -299,7 +299,8 @@ impl TransportNode {
                     if let Ok(header) = DataHeader::deserialize(&data) {
                         if let Some(session) = pipeline.get_session(&header.session_id) {
                             let recv_key = session.recv_key;
-                            let encrypted_payload = data[crate::packet::DATA_HEADER_SIZE..].to_vec();
+                            let encrypted_payload =
+                                data[crate::packet::DATA_HEADER_SIZE..].to_vec();
                             Some((header, recv_key, encrypted_payload))
                         } else {
                             println!("[ZTLP-PIPELINE] session not found for sid={} (data packet passed pipeline but no session)", header.session_id);
@@ -310,7 +311,11 @@ impl TransportNode {
                     }
                 }
                 AdmissionResult::Drop | AdmissionResult::RateLimit => {
-                    println!("[ZTLP-PIPELINE] DROPPED {} bytes from {} (pipeline reject)", data.len(), addr);
+                    println!(
+                        "[ZTLP-PIPELINE] DROPPED {} bytes from {} (pipeline reject)",
+                        data.len(),
+                        addr
+                    );
                     debug!("packet from {} dropped by pipeline", addr);
                     return Ok(None);
                 }
@@ -334,7 +339,10 @@ impl TransportNode {
                     return Ok(Some((plaintext, addr)));
                 }
                 Err(e) => {
-                    println!("[ZTLP-DECRYPT] FAILED seq={} session={} err={}", header.packet_seq, header.session_id, e);
+                    println!(
+                        "[ZTLP-DECRYPT] FAILED seq={} session={} err={}",
+                        header.packet_seq, header.session_id, e
+                    );
                     warn!("payload decryption failed: {}", e);
                     return Ok(None);
                 }

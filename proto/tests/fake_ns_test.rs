@@ -10,7 +10,7 @@
 //!
 //! All testable on Linux, no tokio, no Xcode needed.
 
-use std::ffi::{CString, CStr};
+use std::ffi::{CStr, CString};
 use std::io::ErrorKind;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,7 +125,9 @@ impl FakeNs {
     {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind fake NS");
         let addr = socket.local_addr().expect("get local addr");
-        socket.set_read_timeout(Some(Duration::from_millis(100))).ok();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .ok();
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -149,7 +151,9 @@ impl FakeNs {
                         let resp = responder(&name, record_type);
                         let _ = socket.send_to(&resp, src);
                     }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    Err(e)
+                        if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
+                    {
                         continue;
                     }
                     Err(_) => break,
@@ -157,7 +161,11 @@ impl FakeNs {
             }
         });
 
-        Self { addr, running, handle: Some(handle) }
+        Self {
+            addr,
+            running,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -177,9 +185,7 @@ fn test_ns_resolve_sync_with_fake_server() {
     let cbor = cbor_map(&[("address", "10.0.0.1:443")]);
     let response = ns_found_response("beta.techrockstars", 0x02, &cbor);
 
-    let server = FakeNs::start(move |_name, _rtype| {
-        response.clone()
-    });
+    let server = FakeNs::start(move |_name, _rtype| response.clone());
 
     let ns_addr = CString::new(server.addr.to_string()).unwrap();
     let name = CString::new("beta.techrockstars").unwrap();
@@ -217,9 +223,7 @@ fn test_ns_resolve_relays_sync_with_fake_server() {
     ]);
     let response = ns_found_response("techrockstars", 0x03, &cbor);
 
-    let server = FakeNs::start(move |_name, _rtype| {
-        response.clone()
-    });
+    let server = FakeNs::start(move |_name, _rtype| response.clone());
 
     let ns_addr = CString::new(server.addr.to_string()).unwrap();
     let name = CString::new("techrockstars").unwrap();
@@ -234,11 +238,15 @@ fn test_ns_resolve_relays_sync_with_fake_server() {
     // Check relay fields
     let addrs = unsafe { std::slice::from_raw_parts(r.addresses, r.count) };
     assert!(!addrs[0].is_null());
-    let addr_str = unsafe { CStr::from_ptr(addrs[0]) }.to_string_lossy().to_string();
+    let addr_str = unsafe { CStr::from_ptr(addrs[0]) }
+        .to_string_lossy()
+        .to_string();
     assert_eq!(addr_str, "34.219.64.205:443");
 
     let regions = unsafe { std::slice::from_raw_parts(r.regions, r.count) };
-    let region_str = unsafe { CStr::from_ptr(regions[0]) }.to_string_lossy().to_string();
+    let region_str = unsafe { CStr::from_ptr(regions[0]) }
+        .to_string_lossy()
+        .to_string();
     assert_eq!(region_str, "us-west-2");
 
     let latencies = unsafe { std::slice::from_raw_parts(r.latency_ms, r.count) };
@@ -269,9 +277,7 @@ fn test_full_ne_relay_pipeline() {
     ]);
     let response = ns_found_response("techrockstars", 0x03, &cbor);
 
-    let server = FakeNs::start(move |_name, _rtype| {
-        response.clone()
-    });
+    let server = FakeNs::start(move |_name, _rtype| response.clone());
 
     // Create relay pool with us-west-2 region preference
     let region = CString::new("us-west-2").unwrap();
@@ -286,7 +292,9 @@ fn test_full_ne_relay_pipeline() {
     assert!(!relay_list.is_null());
     let rl = unsafe { &*relay_list };
     let err_msg = if !rl.error.is_null() {
-        unsafe { CStr::from_ptr(rl.error) }.to_string_lossy().to_string()
+        unsafe { CStr::from_ptr(rl.error) }
+            .to_string_lossy()
+            .to_string()
     } else {
         "none".to_string()
     };
@@ -300,12 +308,20 @@ fn test_full_ne_relay_pipeline() {
     // Pool should have at least 1 relay
     let total = ztlp_relay_pool_total_count(pool);
     let healthy = ztlp_relay_pool_healthy_count(pool);
-    assert!(total >= 1, "pool should have relays after update (total={}, healthy={}, list_count={})", total, healthy, rl.count);
+    assert!(
+        total >= 1,
+        "pool should have relays after update (total={}, healthy={}, list_count={})",
+        total,
+        healthy,
+        rl.count
+    );
 
     // Select best
     let addr = ztlp_relay_pool_select(pool);
     assert!(!addr.is_null());
-    let addr_str = unsafe { CStr::from_ptr(addr) }.to_string_lossy().to_string();
+    let addr_str = unsafe { CStr::from_ptr(addr) }
+        .to_string_lossy()
+        .to_string();
     assert!(
         addr_str.contains("34.219.64.205"),
         "Expected us-west-2 relay, got: {}",
@@ -326,9 +342,7 @@ fn test_full_ne_relay_pipeline() {
 
 #[test]
 fn test_ns_resolve_sync_not_found() {
-    let server = FakeNs::start(move |_name, _rtype| {
-        ns_not_found_response()
-    });
+    let server = FakeNs::start(move |_name, _rtype| ns_not_found_response());
 
     let ns_addr = CString::new(server.addr.to_string()).unwrap();
     let name = CString::new("nonexistent").unwrap();
@@ -345,9 +359,7 @@ fn test_ns_resolve_sync_not_found() {
 
 #[test]
 fn test_ns_resolve_sync_revoked() {
-    let server = FakeNs::start(move |_name, _rtype| {
-        ns_revoked_response()
-    });
+    let server = FakeNs::start(move |_name, _rtype| ns_revoked_response());
 
     let ns_addr = CString::new(server.addr.to_string()).unwrap();
     let name = CString::new("revoked-key").unwrap();
@@ -375,9 +387,7 @@ fn test_relay_pool_failover_pipeline() {
     ]);
     let response = ns_found_response("test-zone", 0x03, &cbor);
 
-    let server = FakeNs::start(move |_name, _rtype| {
-        response.clone()
-    });
+    let server = FakeNs::start(move |_name, _rtype| response.clone());
 
     let region = CString::new("us-west-2").unwrap();
     let pool = ztlp_relay_pool_new(region.as_ptr());
@@ -392,7 +402,9 @@ fn test_relay_pool_failover_pipeline() {
     // Primary should be selected
     let addr = ztlp_relay_pool_select(pool);
     assert!(!addr.is_null());
-    let addr_str = unsafe { CStr::from_ptr(addr) }.to_string_lossy().to_string();
+    let addr_str = unsafe { CStr::from_ptr(addr) }
+        .to_string_lossy()
+        .to_string();
     assert!(addr_str.contains("10.0.0.1"));
     let _ = unsafe { CString::from_raw(addr as *mut i8) };
 

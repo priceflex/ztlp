@@ -40,8 +40,8 @@ pub mod admission;
 #[cfg(feature = "tokio-runtime")]
 pub mod agent;
 pub mod android;
-pub mod client_profile;
 pub mod anti_replay;
+pub mod client_profile;
 pub mod enrollment;
 pub mod error;
 pub mod fec;
@@ -49,6 +49,8 @@ pub mod fec;
 pub mod ffi;
 pub mod handshake;
 pub mod identity;
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+pub mod ios_tunnel_engine;
 pub mod metrics;
 pub mod ns_cbor;
 pub mod packet;

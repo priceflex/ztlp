@@ -2446,9 +2446,10 @@ async fn cmd_connect(
 
     // Message 3: final confirmation with ClientProfile (for CC selection)
     eprintln!("{}", c_dim("→ Sending final confirmation (message 3/3)..."));
-    let profile = ztlp_proto::client_profile::ClientProfile::desktop(
-        format!("ztlp/{}", env!("CARGO_PKG_VERSION")),
-    );
+    let profile = ztlp_proto::client_profile::ClientProfile::desktop(format!(
+        "ztlp/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
     let profile_cbor = profile.to_cbor();
     let msg3 = ctx.write_message(&profile_cbor)?;
     let mut final_hdr = HandshakeHeader::new(MsgType::Data);
@@ -8949,13 +8950,18 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
                 .output()
             {
                 Ok(o) if o.status.success() => {
-                    eprintln!("  {} Set net.inet.udp.recvspace = {}", c_green("✓"), format_bytes(target));
+                    eprintln!(
+                        "  {} Set net.inet.udp.recvspace = {}",
+                        c_green("✓"),
+                        format_bytes(target)
+                    );
                 }
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
                     eprintln!(
                         "  {} Failed to set recvspace: {} (run with sudo?)",
-                        c_red("✗"), err.trim()
+                        c_red("✗"),
+                        err.trim()
                     );
                     return Err("insufficient permissions — run with sudo".into());
                 }
@@ -8979,7 +8985,8 @@ fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>
                     let err = String::from_utf8_lossy(&o.stderr);
                     eprintln!(
                         "  {} Failed to set maxdgram: {} (run with sudo?)",
-                        c_red("✗"), err.trim()
+                        c_red("✗"),
+                        err.trim()
                     );
                     return Err("insufficient permissions — run with sudo".into());
                 }

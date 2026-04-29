@@ -165,8 +165,7 @@ pub async fn ns_resolve(
 
 /// Parse a SVC record response to extract the endpoint address.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    let record = parse_ns_record(data)
-        .ok_or("invalid NS response (parse failed)")?;
+    let record = parse_ns_record(data).ok_or("invalid NS response (parse failed)")?;
     if record.status != NsResponseStatus::Found {
         return Err("NS response: record not found or revoked".into());
     }
@@ -182,8 +181,7 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
 
 /// Parse a KEY record response to extract the NodeID.
 fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + Send + Sync>> {
-    let record = parse_ns_record(data)
-        .ok_or("invalid NS response (parse failed)")?;
+    let record = parse_ns_record(data).ok_or("invalid NS response (parse failed)")?;
     if record.status != NsResponseStatus::Found {
         return Err("NS response: record not found or revoked".into());
     }

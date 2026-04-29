@@ -157,7 +157,9 @@ impl SendController {
 
             tracing::info!(
                 "send_controller: priority frame sent seq={} len={} peer={}",
-                seq, framed.len(), self.peer_addr
+                seq,
+                framed.len(),
+                self.peer_addr
             );
 
             // Cap priority_buffer to prevent unbounded growth
@@ -390,8 +392,10 @@ impl SendController {
     ///
     /// All queues and the send buffer must be empty.
     pub fn is_complete(&self) -> bool {
-        self.pending_queue.is_empty() && self.priority_queue.is_empty()
-            && self.send_buffer.is_empty() && self.priority_buffer.is_empty()
+        self.pending_queue.is_empty()
+            && self.priority_queue.is_empty()
+            && self.send_buffer.is_empty()
+            && self.priority_buffer.is_empty()
     }
 
     /// Number of packets waiting in the pending queue (not yet sent).
@@ -421,9 +425,7 @@ impl SendController {
         let to_remove: Vec<u64> = self
             .send_buffer
             .iter()
-            .filter(|(_, entry)| {
-                entry.data.len() >= 5 && entry.data[1..5] == sid_bytes
-            })
+            .filter(|(_, entry)| entry.data.len() >= 5 && entry.data[1..5] == sid_bytes)
             .map(|(seq, _)| *seq)
             .collect();
 

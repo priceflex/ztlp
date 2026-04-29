@@ -1035,7 +1035,6 @@ impl PacketRouter {
         }
     }
 
-
     /// Clean up flows in the Closed state and timed-out flows.
     pub(crate) fn cleanup_closed_flows(&mut self) {
         let now = Instant::now();

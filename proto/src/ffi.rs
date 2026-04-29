@@ -40,15 +40,11 @@ extern "C" {
 }
 
 #[cfg(target_os = "ios")]
-fn ios_log(msg: &str) {
+pub(crate) fn ios_log(msg: &str) {
     if let Ok(c) = CString::new(msg) {
         unsafe {
             // kCFStringEncodingUTF8 = 0x08000100
-            let cfstr = CFStringCreateWithCString(
-                std::ptr::null(),
-                c.as_ptr(),
-                0x08000100,
-            );
+            let cfstr = CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), 0x08000100);
             if !cfstr.is_null() {
                 // NSLog(@"%@", cfstr) — but simpler: NSLog(cfstr) since it's the format
                 NSLog(cfstr);
@@ -59,7 +55,7 @@ fn ios_log(msg: &str) {
 }
 
 #[cfg(not(target_os = "ios"))]
-fn ios_log(msg: &str) {
+pub(crate) fn ios_log(msg: &str) {
     eprintln!("{}", msg);
 }
 
@@ -130,7 +126,11 @@ const MAX_RECV_PACKET_SIZE: usize = 65535;
 fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
     let bytes = name.as_bytes();
     if bytes.len() > 16 {
-        return Err(format!("service name '{}' too long ({} bytes, max 16)", name, bytes.len()));
+        return Err(format!(
+            "service name '{}' too long ({} bytes, max 16)",
+            name,
+            bytes.len()
+        ));
     }
     let mut buf = [0u8; 16];
     buf[..bytes.len()].copy_from_slice(bytes);
@@ -207,6 +207,11 @@ pub type ZtlpDisconnectCallback = extern "C" fn(*mut c_void, *mut ZtlpSession, i
 /// on its own dispatch queue, bypassing iOS kernel contention on the main socket.
 pub type ZtlpAckSendCallback = extern "C" fn(*mut c_void, *const u8, usize, *const c_char);
 
+/// Callback for iOS fd-engine RouterActions.
+/// The callback must synchronously consume/copy `data`; the pointer is only valid
+/// for the duration of the callback.
+pub type ZtlpIosRouterActionCallback = extern "C" fn(*mut c_void, u8, u32, *const u8, usize);
+
 /// Send-safe wrapper for raw pointers passed across thread boundaries.
 /// Safety: The caller guarantees the pointer remains valid for the task's lifetime.
 #[derive(Clone, Copy)]
@@ -214,6 +219,12 @@ struct SendPtr(*mut c_void);
 unsafe impl Send for SendPtr {}
 
 // ── Opaque handle types ─────────────────────────────────────────────────
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[repr(C)]
+pub struct ZtlpIosTunnelEngine {
+    _private: [u8; 0],
+}
 
 #[cfg(feature = "tokio-runtime")]
 pub struct ZtlpClient {
@@ -490,10 +501,7 @@ pub extern "C" fn ztlp_client_new(identity: *mut ZtlpIdentity) -> *mut ZtlpClien
         // Use system defaults: num_cpus workers, 2MB stacks.
         // Explicitly set only if we need to constrain.
     }
-    let runtime = match builder
-        .enable_all()
-        .build()
-    {
+    let runtime = match builder.enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
             set_last_error(&format!("failed to create tokio runtime: {e}"));
@@ -940,9 +948,10 @@ async fn do_connect(
         crate::client_profile::InterfaceType::Unknown,
     );
     #[cfg(not(target_os = "ios"))]
-    let profile = crate::client_profile::ClientProfile::desktop(
-        format!("ztlp/{}", env!("CARGO_PKG_VERSION")),
-    );
+    let profile = crate::client_profile::ClientProfile::desktop(format!(
+        "ztlp/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
     let profile_cbor = profile.to_cbor();
     let msg3 = ctx
         .write_message(&profile_cbor)
@@ -1265,7 +1274,9 @@ async fn recv_loop(
     // across await points. The raw fn ptr + raw void ptr are both Send-safe in practice
     // (the Swift side guarantees the user_data pointer lives for the session's lifetime).
     let ack_cb_fn: Option<ZtlpAckSendCallback> = ack_cb.map(|(cb, _)| cb);
-    let ack_cb_ud: SendPtr = ack_cb.map(|(_, ud)| ud).unwrap_or(SendPtr(std::ptr::null_mut()));
+    let ack_cb_ud: SendPtr = ack_cb
+        .map(|(_, ud)| ud)
+        .unwrap_or(SendPtr(std::ptr::null_mut()));
 
     // Pre-extract send_key and shared seq counter for LOCK-FREE ACK encryption.
     // This is critical: encrypt_data() takes the pipeline lock, which blocks recv_data().
@@ -1302,10 +1313,18 @@ async fn recv_loop(
                 //      later ACK packets from being delivered in-order.
                 let seq = ack_seq_counter.fetch_add(1, Ordering::Relaxed);
                 match crate::ack_socket::build_encrypted_packet(
-                    ack_session_id, &ack_send_key, seq, frame_ref,
+                    ack_session_id,
+                    &ack_send_key,
+                    seq,
+                    frame_ref,
                 ) {
                     Ok(wire_bytes) => {
-                        cb(ack_cb_ud.0, wire_bytes.as_ptr(), wire_bytes.len(), ack_peer_str.as_ptr());
+                        cb(
+                            ack_cb_ud.0,
+                            wire_bytes.as_ptr(),
+                            wire_bytes.len(),
+                            ack_peer_str.as_ptr(),
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("send_ack_frame: callback encrypt failed: {}", e);
@@ -1313,7 +1332,9 @@ async fn recv_loop(
                 }
             } else {
                 // No callback — fall back to main transport (desktop/CLI path).
-                let _ = ack_transport.send_data(ack_session_id, frame_ref, ack_peer_addr).await;
+                let _ = ack_transport
+                    .send_data(ack_session_id, frame_ref, ack_peer_addr)
+                    .await;
             }
         }};
     }
@@ -1455,9 +1476,11 @@ async fn recv_loop(
         match tokio::time::timeout(Duration::from_millis(50), transport.recv_data()).await {
             Ok(Ok(Some((plaintext, _from)))) => {
                 last_recv_time = std::time::Instant::now();
-                diag_log!("[ZTLP-RX] {} bytes, first_byte=0x{:02x}",
+                diag_log!(
+                    "[ZTLP-RX] {} bytes, first_byte=0x{:02x}",
                     plaintext.len(),
-                    plaintext.first().copied().unwrap_or(0));
+                    plaintext.first().copied().unwrap_or(0)
+                );
                 log_write(
                     &mut debug_log,
                     &mut log_bytes_written,
@@ -1511,7 +1534,11 @@ async fn recv_loop(
                 if plaintext.len() >= 9 && plaintext[0] == FRAME_ACK {
                     let acked_seq =
                         u64::from_be_bytes(plaintext[1..9].try_into().unwrap_or([0u8; 8]));
-                    diag_log!("[ZTLP-RX] FRAME_ACK (upload) acked_seq={} len={}", acked_seq, plaintext.len());
+                    diag_log!(
+                        "[ZTLP-RX] FRAME_ACK (upload) acked_seq={} len={}",
+                        acked_seq,
+                        plaintext.len()
+                    );
                     trace_debug!("recv_loop: FRAME_ACK (upload) acked_seq={}", acked_seq);
                     log_write(
                         &mut debug_log,
@@ -1569,8 +1596,13 @@ async fn recv_loop(
                         (0u32, ds, plaintext[9..].to_vec())
                     };
 
-                    diag_log!("[ZTLP-RX] FRAME_DATA stream={} data_seq={} payload={} expected={}",
-                        stream_id, data_seq, payload.len(), next_expected_seq);
+                    diag_log!(
+                        "[ZTLP-RX] FRAME_DATA stream={} data_seq={} payload={} expected={}",
+                        stream_id,
+                        data_seq,
+                        payload.len(),
+                        next_expected_seq
+                    );
                     // Per-frame trace logging (very verbose)
                     log_write(
                         &mut debug_log,
@@ -1637,7 +1669,11 @@ async fn recv_loop(
                     // but rate-limit to prevent retransmit storms: gateway fast-retransmits
                     // N packets → N duplicates → N re-ACKs → another fast retransmit → loop.
                     if is_duplicate && next_expected_seq > 0 {
-                        diag_log!("[ZTLP-RX] DUPLICATE data_seq={} (expected={})", data_seq, next_expected_seq);
+                        diag_log!(
+                            "[ZTLP-RX] DUPLICATE data_seq={} (expected={})",
+                            data_seq,
+                            next_expected_seq
+                        );
                         let should_reack = last_reack_time
                             .map(|t| t.elapsed().as_millis() >= REACK_MIN_INTERVAL_MS)
                             .unwrap_or(true);
@@ -1647,8 +1683,16 @@ async fn recv_loop(
                             ack_frame.push(FRAME_ACK);
                             ack_frame.extend_from_slice(&ack_seq.to_be_bytes());
                             send_ack_frame!(ack_frame);
-                            diag_log!("[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}", ack_seq, data_seq);
-                            trace_info!("recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}", data_seq, ack_seq);
+                            diag_log!(
+                                "[ZTLP-TX] re-ACK ack_seq={} for dup data_seq={}",
+                                ack_seq,
+                                data_seq
+                            );
+                            trace_info!(
+                                "recv_loop: re-ACK for duplicate data_seq={}, ack_seq={}",
+                                data_seq,
+                                ack_seq
+                            );
                             last_acked_data_seq = next_expected_seq;
                             last_data_recv_time = None;
                             last_reack_time = Some(std::time::Instant::now());
@@ -1661,7 +1705,8 @@ async fn recv_loop(
                     // For mux: dispatch to per-stream channel.
                     // For legacy: dispatch to stream_id=0.
                     if stream_id == 0 && data_seq == 0 && vip_next_deliver_seq > 0 {
-                        trace_info!("recv_loop: detected stream reset (data_seq=0, expected={})",
+                        trace_info!(
+                            "recv_loop: detected stream reset (data_seq=0, expected={})",
                             vip_next_deliver_seq
                         );
                         reassembly_buf.clear();
@@ -1675,7 +1720,11 @@ async fn recv_loop(
                                 "recv_loop: reassembly buffer full ({} entries), dropping data_seq={}",
                                 reassembly_buf.len(), data_seq
                             );
-                            diag_log!("[ZTLP-DIAG] reassembly_buf FULL len={} dropping seq={}", reassembly_buf.len(), data_seq);
+                            diag_log!(
+                                "[ZTLP-DIAG] reassembly_buf FULL len={} dropping seq={}",
+                                reassembly_buf.len(),
+                                data_seq
+                            );
                         } else {
                             reassembly_buf.insert(data_seq, (stream_id, payload));
                         }
@@ -1705,7 +1754,9 @@ async fn recv_loop(
                                 if let Some(ref proxy) = guard.vip_proxy {
                                     match proxy.dispatcher().dispatch(sid, data.clone()) {
                                         Ok(()) => dispatched = true,
-                                        Err(crate::vip::DispatchError::ChannelFull) => backpressure = true,
+                                        Err(crate::vip::DispatchError::ChannelFull) => {
+                                            backpressure = true
+                                        }
                                         Err(crate::vip::DispatchError::NoStream) => {
                                             // Stream closed/unregistered — skip, don't block
                                         }
@@ -1716,7 +1767,6 @@ async fn recv_loop(
                             if !dispatched && !backpressure && has_router {
                                 if let Some(ref mut router) = guard.packet_router {
                                     router.process_gateway_data(sid, &data);
-                                    
                                 }
                             }
 
@@ -1761,8 +1811,13 @@ async fn recv_loop(
 
                         send_ack_frame!(ack_frame);
                         diag_log!("[ZTLP-TX] ACK ack_seq={} via callback", ack_seq);
-                        trace_info!("recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
-                            ack_seq, has_gap, is_coalesce_point, is_first);
+                        trace_info!(
+                            "recv_loop: ACK data_seq={} direct (gap={}, coalesce={}, first={})",
+                            ack_seq,
+                            has_gap,
+                            is_coalesce_point,
+                            is_first
+                        );
                         last_acked_data_seq = next_expected_seq;
                         last_data_recv_time = None; // ACK sent, reset timer
                         diag_acks_sent += 1;
@@ -1773,10 +1828,15 @@ async fn recv_loop(
                     diag_packets_decrypted += 1;
                     let now_diag = std::time::Instant::now();
                     if diag_packets_received % DIAG_REPORT_PACKET_INTERVAL == 0
-                        || now_diag.duration_since(diag_last_report).as_millis() > DIAG_REPORT_INTERVAL_MS
+                        || now_diag.duration_since(diag_last_report).as_millis()
+                            > DIAG_REPORT_INTERVAL_MS
                     {
                         let elapsed_ms = now_diag.duration_since(diag_last_report).as_millis();
-                        let pps = if elapsed_ms > 0 { diag_packets_received as u128 * 1000 / elapsed_ms } else { 0 };
+                        let pps = if elapsed_ms > 0 {
+                            diag_packets_received as u128 * 1000 / elapsed_ms
+                        } else {
+                            0
+                        };
                         diag_log!(
                             "[ZTLP-DIAG] pkts={} decrypted={} acks_sent={} next_expected={} reassembly_buf={}/{} ooo_peak={} lock_us={} pps={}",
                             diag_packets_received, diag_packets_decrypted, diag_acks_sent,
@@ -1953,7 +2013,11 @@ async fn recv_loop(
                     if gap_old_enough && nack_allowed {
                         // Build list of missing data_seqs between next_expected and
                         // the highest buffered seq
-                        let max_buffered = received_ahead.iter().next_back().copied().unwrap_or(next_expected_seq);
+                        let max_buffered = received_ahead
+                            .iter()
+                            .next_back()
+                            .copied()
+                            .unwrap_or(next_expected_seq);
                         let mut missing: Vec<u64> = Vec::new();
                         let mut seq = next_expected_seq;
                         while seq <= max_buffered && missing.len() < MAX_NACK_SEQS {
@@ -3566,6 +3630,156 @@ pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
     })
 }
 
+// ── iOS fd-backed tunnel engine FFI scaffolding ─────────────────────────
+//
+// Phase 1/2 only: lets Swift prove it can acquire/pass the utun fd and lets
+// Rust compile/test the fd wrapper. Production packet I/O still uses the
+// existing Swift NEPacketTunnelFlow path until the engine owns transport too.
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_start(
+    utun_fd: i32,
+    out_engine: *mut *mut ZtlpIosTunnelEngine,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if out_engine.is_null() {
+            set_last_error("out_engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        match crate::ios_tunnel_engine::IosTunnelEngine::start(utun_fd) {
+            Ok(engine) => {
+                let boxed = Box::new(engine);
+                unsafe { *out_engine = Box::into_raw(boxed) as *mut ZtlpIosTunnelEngine };
+                ZtlpResult::Ok as i32
+            }
+            Err(e) => {
+                set_last_error(&format!("failed to start iOS tunnel engine: {}", e));
+                ZtlpResult::InvalidArgument as i32
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_start");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_stop(engine: *mut ZtlpIosTunnelEngine) -> i32 {
+    if engine.is_null() {
+        return ZtlpResult::Ok as i32;
+    }
+    let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+    engine.stop();
+    ZtlpResult::Ok as i32
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_start_read_metadata_loop(
+    engine: *mut ZtlpIosTunnelEngine,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        match engine.start_read_metadata_loop() {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!("failed to start iOS fd read metadata loop: {}", e));
+                ZtlpResult::InternalError as i32
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_start_read_metadata_loop");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_set_router_action_callback(
+    engine: *mut ZtlpIosTunnelEngine,
+    callback: Option<ZtlpIosRouterActionCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        match engine.set_router_action_callback(callback, user_data) {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!("failed to set iOS router action callback: {}", e));
+                ZtlpResult::InternalError as i32
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_set_router_action_callback");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_start_router_ingress_loop(
+    engine: *mut ZtlpIosTunnelEngine,
+    router: *mut ZtlpPacketRouter,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() || router.is_null() {
+            set_last_error("engine or router is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        match engine.start_router_ingress_loop(router) {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!(
+                    "failed to start iOS fd router ingress loop: {}",
+                    e
+                ));
+                ZtlpResult::InternalError as i32
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_start_router_ingress_loop");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_reconnect(
+    engine: *mut ZtlpIosTunnelEngine,
+    reason: *const c_char,
+) -> i32 {
+    let _ = reason;
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    ZtlpResult::Ok as i32
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) {
+    if engine.is_null() {
+        return;
+    }
+    let _ = unsafe { Box::from_raw(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+}
+
 // ── Standalone Packet Router FFI (ios-sync: no ZtlpClient wrapper) ─────
 //
 // These functions operate on a raw PacketRouter pointer, bypassing the
@@ -3574,7 +3788,7 @@ pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
 
 /// Opaque handle for a standalone PacketRouter (no ZtlpClient needed).
 pub struct ZtlpPacketRouter {
-    inner: std::sync::Mutex<crate::packet_router::PacketRouter>,
+    pub(crate) inner: std::sync::Mutex<crate::packet_router::PacketRouter>,
 }
 
 /// Create a standalone PacketRouter. Returns null on error.
@@ -3627,19 +3841,34 @@ pub extern "C" fn ztlp_router_add_service_sync(
     let svc_str = unsafe { CStr::from_ptr(service_name) };
     let vip_str = match vip_str.to_str() {
         Ok(s) => s,
-        Err(_) => { set_last_error("invalid UTF-8 in vip"); return ZtlpResult::InvalidArgument as i32; }
+        Err(_) => {
+            set_last_error("invalid UTF-8 in vip");
+            return ZtlpResult::InvalidArgument as i32;
+        }
     };
     let svc_str = match svc_str.to_str() {
         Ok(s) => s,
-        Err(_) => { set_last_error("invalid UTF-8 in service_name"); return ZtlpResult::InvalidArgument as i32; }
+        Err(_) => {
+            set_last_error("invalid UTF-8 in service_name");
+            return ZtlpResult::InvalidArgument as i32;
+        }
     };
     let ip: std::net::Ipv4Addr = match vip_str.parse() {
         Ok(ip) => ip,
-        Err(e) => { set_last_error(&format!("invalid IPv4: {}", e)); return ZtlpResult::InvalidArgument as i32; }
+        Err(e) => {
+            set_last_error(&format!("invalid IPv4: {}", e));
+            return ZtlpResult::InvalidArgument as i32;
+        }
     };
     match router.inner.lock() {
-        Ok(mut r) => { r.add_service(ip, svc_str.to_string()); ZtlpResult::Ok as i32 }
-        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+        Ok(mut r) => {
+            r.add_service(ip, svc_str.to_string());
+            ZtlpResult::Ok as i32
+        }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            ZtlpResult::InternalError as i32
+        }
     }
 }
 
@@ -3680,39 +3909,66 @@ pub extern "C" fn ztlp_router_write_packet_sync(
             let mut count: i32 = 0;
             for action in &actions {
                 match action {
-                    crate::packet_router::RouterAction::OpenStream { stream_id, service_name } => {
+                    crate::packet_router::RouterAction::OpenStream {
+                        stream_id,
+                        service_name,
+                    } => {
                         let svc_bytes = service_name.as_bytes();
                         let needed = 1 + 4 + 2 + svc_bytes.len();
-                        if offset + needed > action_buf_len { break; }
-                        out_buf[offset] = 0; offset += 1;
-                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
-                        out_buf[offset..offset+2].copy_from_slice(&(svc_bytes.len() as u16).to_be_bytes()); offset += 2;
-                        out_buf[offset..offset+svc_bytes.len()].copy_from_slice(svc_bytes); offset += svc_bytes.len();
+                        if offset + needed > action_buf_len {
+                            break;
+                        }
+                        out_buf[offset] = 0;
+                        offset += 1;
+                        out_buf[offset..offset + 4].copy_from_slice(&stream_id.to_be_bytes());
+                        offset += 4;
+                        out_buf[offset..offset + 2]
+                            .copy_from_slice(&(svc_bytes.len() as u16).to_be_bytes());
+                        offset += 2;
+                        out_buf[offset..offset + svc_bytes.len()].copy_from_slice(svc_bytes);
+                        offset += svc_bytes.len();
                         count += 1;
                     }
                     crate::packet_router::RouterAction::SendData { stream_id, data } => {
                         let needed = 1 + 4 + 2 + data.len();
-                        if offset + needed > action_buf_len { break; }
-                        out_buf[offset] = 1; offset += 1;
-                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
-                        out_buf[offset..offset+2].copy_from_slice(&(data.len() as u16).to_be_bytes()); offset += 2;
-                        out_buf[offset..offset+data.len()].copy_from_slice(data); offset += data.len();
+                        if offset + needed > action_buf_len {
+                            break;
+                        }
+                        out_buf[offset] = 1;
+                        offset += 1;
+                        out_buf[offset..offset + 4].copy_from_slice(&stream_id.to_be_bytes());
+                        offset += 4;
+                        out_buf[offset..offset + 2]
+                            .copy_from_slice(&(data.len() as u16).to_be_bytes());
+                        offset += 2;
+                        out_buf[offset..offset + data.len()].copy_from_slice(data);
+                        offset += data.len();
                         count += 1;
                     }
                     crate::packet_router::RouterAction::CloseStream { stream_id } => {
                         let needed = 1 + 4 + 2;
-                        if offset + needed > action_buf_len { break; }
-                        out_buf[offset] = 2; offset += 1;
-                        out_buf[offset..offset+4].copy_from_slice(&stream_id.to_be_bytes()); offset += 4;
-                        out_buf[offset..offset+2].copy_from_slice(&0u16.to_be_bytes()); offset += 2;
+                        if offset + needed > action_buf_len {
+                            break;
+                        }
+                        out_buf[offset] = 2;
+                        offset += 1;
+                        out_buf[offset..offset + 4].copy_from_slice(&stream_id.to_be_bytes());
+                        offset += 4;
+                        out_buf[offset..offset + 2].copy_from_slice(&0u16.to_be_bytes());
+                        offset += 2;
                         count += 1;
                     }
                 }
             }
-            unsafe { *action_written = offset; }
+            unsafe {
+                *action_written = offset;
+            }
             count
         }
-        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            ZtlpResult::InternalError as i32
+        }
     }
 }
 
@@ -3743,7 +3999,10 @@ pub extern "C" fn ztlp_router_read_packet_sync(
                 0
             }
         }
-        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            ZtlpResult::InternalError as i32
+        }
     }
 }
 
@@ -3763,8 +4022,14 @@ pub extern "C" fn ztlp_router_gateway_data_sync(
     let router = unsafe { &*router };
     let payload = unsafe { std::slice::from_raw_parts(data, len) };
     match router.inner.lock() {
-        Ok(mut r) => { r.process_gateway_data(stream_id, payload); ZtlpResult::Ok as i32 }
-        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+        Ok(mut r) => {
+            r.process_gateway_data(stream_id, payload);
+            ZtlpResult::Ok as i32
+        }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            ZtlpResult::InternalError as i32
+        }
     }
 }
 
@@ -3780,8 +4045,14 @@ pub extern "C" fn ztlp_router_gateway_close_sync(
     }
     let router = unsafe { &*router };
     match router.inner.lock() {
-        Ok(mut r) => { r.process_gateway_close(stream_id); ZtlpResult::Ok as i32 }
-        Err(_) => { set_last_error("lock poisoned"); ZtlpResult::InternalError as i32 }
+        Ok(mut r) => {
+            r.process_gateway_close(stream_id);
+            ZtlpResult::Ok as i32
+        }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            ZtlpResult::InternalError as i32
+        }
     }
 }
 
@@ -3805,7 +4076,10 @@ pub extern "C" fn ztlp_router_cleanup_stale_flows(router: *mut ZtlpPacketRouter)
             }
             count
         }
-        Err(_) => { set_last_error("lock poisoned"); -1 }
+        Err(_) => {
+            set_last_error("lock poisoned");
+            -1
+        }
     }
 }
 
@@ -3831,7 +4105,9 @@ pub extern "C" fn ztlp_router_reset_runtime_state(router: *mut ZtlpPacketRouter)
 #[no_mangle]
 pub extern "C" fn ztlp_free_string(s: *mut std::ffi::c_char) {
     if !s.is_null() {
-        unsafe { libc::free(s as *mut std::ffi::c_void); }
+        unsafe {
+            libc::free(s as *mut std::ffi::c_void);
+        }
     }
 }
 
@@ -3857,7 +4133,7 @@ pub extern "C" fn ztlp_router_stats(router: *mut ZtlpPacketRouter) -> *mut std::
             };
             c_str
         }
-        Err(_) => std::ptr::null_mut()
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -3865,18 +4141,20 @@ pub extern "C" fn ztlp_router_stats(router: *mut ZtlpPacketRouter) -> *mut std::
 #[no_mangle]
 pub extern "C" fn ztlp_router_stop_sync(router: *mut ZtlpPacketRouter) {
     if !router.is_null() {
-        unsafe { let _ = Box::from_raw(router); }
+        unsafe {
+            let _ = Box::from_raw(router);
+        }
     }
 }
 
 // ── Sync Crypto Context & FFI (Phase 1: Strip Tokio) ───────────────────
 
+use crate::pipeline::compute_header_auth_tag;
+use crate::session::ReplayWindow;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use crate::pipeline::compute_header_auth_tag;
-use crate::session::ReplayWindow;
 
 /// Holds extracted session keys for sync encrypt/decrypt without tokio.
 /// Created after handshake completes (or post-connect). No tokio dependency.
@@ -3906,12 +4184,21 @@ pub struct ZtlpHandshakeState {
     peer_node_id: Option<NodeId>,
 }
 
-fn write_bytes_to_out_buf(bytes: &[u8], out_buf: *mut u8, out_buf_len: usize, out_written: *mut usize) -> Result<(), String> {
+fn write_bytes_to_out_buf(
+    bytes: &[u8],
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> Result<(), String> {
     if out_buf.is_null() || out_written.is_null() {
         return Err("null output buffer".to_string());
     }
     if out_buf_len < bytes.len() {
-        return Err(format!("output buffer too small: need {} got {}", bytes.len(), out_buf_len));
+        return Err(format!(
+            "output buffer too small: need {} got {}",
+            bytes.len(),
+            out_buf_len
+        ));
     }
 
     unsafe {
@@ -3927,9 +4214,7 @@ fn build_sync_crypto_context(
     peer_addr: SocketAddr,
 ) -> ZtlpCryptoContext {
     let send_seq = Arc::new(AtomicU64::new(0));
-    let recv_window = crate::session::ReplayWindow::new(
-        crate::session::DEFAULT_REPLAY_WINDOW,
-    );
+    let recv_window = crate::session::ReplayWindow::new(crate::session::DEFAULT_REPLAY_WINDOW);
     let session_id_str = CString::new(session_id.to_string()).unwrap_or_default();
     let peer_addr_str = CString::new(peer_addr.to_string()).unwrap_or_default();
 
@@ -3987,8 +4272,10 @@ pub extern "C" fn ztlp_handshake_start(
         }
     };
 
-    let service_name: Option<&str> = unsafe { config.as_ref() }.and_then(|cfg| cfg.service_name.as_deref());
-    let relay_address: Option<&str> = unsafe { config.as_ref() }.and_then(|cfg| cfg.relay_address.as_deref());
+    let service_name: Option<&str> =
+        unsafe { config.as_ref() }.and_then(|cfg| cfg.service_name.as_deref());
+    let relay_address: Option<&str> =
+        unsafe { config.as_ref() }.and_then(|cfg| cfg.relay_address.as_deref());
     let send_addr: SocketAddr = if let Some(relay) = relay_address {
         match relay.parse() {
             Ok(addr) => addr,
@@ -4140,7 +4427,10 @@ pub extern "C" fn ztlp_handshake_finalize(
         let extra = unsafe { std::slice::from_raw_parts(extra_data, extra_len) };
         if crate::reject::RejectFrame::is_reject(extra) {
             if let Some(reject) = crate::reject::RejectFrame::decode(extra) {
-                set_last_error(&format!("access denied: {} ({})", reject.message, reject.reason));
+                set_last_error(&format!(
+                    "access denied: {} ({})",
+                    reject.message, reject.reason
+                ));
                 return std::ptr::null_mut();
             }
         }
@@ -4159,7 +4449,8 @@ pub extern "C" fn ztlp_handshake_finalize(
         }
     };
 
-    let (_transport_state, session_state) = match state.ctx.finalize(peer_node_id, state.session_id) {
+    let (_transport_state, session_state) = match state.ctx.finalize(peer_node_id, state.session_id)
+    {
         Ok(v) => v,
         Err(e) => {
             set_last_error(&format!("handshake finalize: {}", e));
@@ -4188,9 +4479,7 @@ pub extern "C" fn ztlp_handshake_free(state: *mut ZtlpHandshakeState) {
 /// Ownership: caller must free with ztlp_crypto_context_free().
 #[cfg(feature = "tokio-runtime")]
 #[no_mangle]
-pub extern "C" fn ztlp_crypto_context_extract(
-    client: *mut ZtlpClient,
-) -> *mut ZtlpCryptoContext {
+pub extern "C" fn ztlp_crypto_context_extract(client: *mut ZtlpClient) -> *mut ZtlpCryptoContext {
     if client.is_null() {
         set_last_error("client is null");
         return std::ptr::null_mut();
@@ -4217,7 +4506,9 @@ pub extern "C" fn ztlp_crypto_context_extract(
     let session_id = active_session.session_id;
     let session_keys = guard.runtime.block_on(async {
         let pipeline = transport.pipeline.lock().await;
-        pipeline.get_session(&session_id).map(|s| (s.send_key, s.recv_key))
+        pipeline
+            .get_session(&session_id)
+            .map(|s| (s.send_key, s.recv_key))
     });
 
     let (send_key, recv_key) = match session_keys {
@@ -4259,9 +4550,7 @@ pub extern "C" fn ztlp_crypto_context_free(ctx: *mut ZtlpCryptoContext) {
 }
 
 #[no_mangle]
-pub extern "C" fn ztlp_crypto_context_session_id(
-    ctx: *const ZtlpCryptoContext,
-) -> *const c_char {
+pub extern "C" fn ztlp_crypto_context_session_id(ctx: *const ZtlpCryptoContext) -> *const c_char {
     if ctx.is_null() {
         return std::ptr::null();
     }
@@ -4270,9 +4559,7 @@ pub extern "C" fn ztlp_crypto_context_session_id(
 }
 
 #[no_mangle]
-pub extern "C" fn ztlp_crypto_context_peer_addr(
-    ctx: *const ZtlpCryptoContext,
-) -> *const c_char {
+pub extern "C" fn ztlp_crypto_context_peer_addr(ctx: *const ZtlpCryptoContext) -> *const c_char {
     if ctx.is_null() {
         return std::ptr::null();
     }
@@ -4570,11 +4857,7 @@ static SYNC_CLIENT_PROFILE: std::sync::Mutex<Option<crate::client_profile::Clien
 /// radio_tech: 0=None, 1=2G, 2=3G, 3=LTE, 4=5G-NSA, 5=5G-SA
 /// is_constrained: 0=false, 1=true
 #[no_mangle]
-pub extern "C" fn ztlp_set_client_profile(
-    interface_type: u8,
-    radio_tech: u8,
-    is_constrained: u8,
-) {
+pub extern "C" fn ztlp_set_client_profile(interface_type: u8, radio_tech: u8, is_constrained: u8) {
     use crate::client_profile::*;
 
     let iface = match interface_type {
@@ -4668,7 +4951,13 @@ pub extern "C" fn ztlp_connect_sync(
         }
     };
 
-    match do_connect_sync(node_identity, target_str, service_name, timeout_ms, relay_address) {
+    match do_connect_sync(
+        node_identity,
+        target_str,
+        service_name,
+        timeout_ms,
+        relay_address,
+    ) {
         Ok(ctx) => Box::into_raw(Box::new(ctx)),
         Err(e) => {
             set_last_error(&e);
@@ -4700,8 +4989,8 @@ fn do_connect_sync(
     };
 
     // Bind a standard UDP socket (non-blocking for timeout control)
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("failed to bind UDP socket: {}", e))?;
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("failed to bind UDP socket: {}", e))?;
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|e| format!("set_read_timeout: {}", e))?;
@@ -4715,8 +5004,8 @@ fn do_connect_sync(
     );
 
     // Create Noise_XX initiator
-    let mut ctx = HandshakeContext::new_initiator(identity)
-        .map_err(|e| format!("handshake init: {}", e))?;
+    let mut ctx =
+        HandshakeContext::new_initiator(identity).map_err(|e| format!("handshake init: {}", e))?;
     let session_id = SessionId::generate();
 
     // ── Message 1: HELLO ──
@@ -4779,9 +5068,7 @@ fn do_connect_sync(
                     // Timeout — retransmit HELLO
                     retries += 1;
                     if retries > MAX_HANDSHAKE_RETRIES {
-                        return Err(
-                            "handshake failed: no HELLO_ACK after retransmits".to_string()
-                        );
+                        return Err("handshake failed: no HELLO_ACK after retransmits".to_string());
                     }
                     socket
                         .send_to(&pkt1, send_addr)
@@ -4812,8 +5099,7 @@ fn do_connect_sync(
         .write_message(&profile_cbor)
         .map_err(|e| format!("handshake msg3: {}", e))?;
 
-    let mut final_hdr =
-        crate::packet::HandshakeHeader::new(crate::packet::MsgType::Data);
+    let mut final_hdr = crate::packet::HandshakeHeader::new(crate::packet::MsgType::Data);
     final_hdr.session_id = session_id;
     final_hdr.src_node_id = *identity.node_id.as_bytes();
     final_hdr.payload_len = msg3.len() as u16;
@@ -4830,8 +5116,7 @@ fn do_connect_sync(
         return Err("handshake did not complete after 3 messages".to_string());
     }
 
-    let peer_node_id =
-        crate::identity::NodeId::from_bytes(recv2_header.src_node_id);
+    let peer_node_id = crate::identity::NodeId::from_bytes(recv2_header.src_node_id);
     let (_transport_state, session_state) = ctx
         .finalize(peer_node_id, session_id)
         .map_err(|e| format!("handshake finalize: {}", e))?;
@@ -4843,14 +5128,14 @@ fn do_connect_sync(
         if Instant::now() > deadline {
             break;
         }
-        socket.set_read_timeout(Some(Duration::from_millis(50))).ok();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .ok();
         let mut buf = [0u8; 8192];
         match socket.recv_from(&mut buf) {
             Ok((len, _)) => {
                 if crate::reject::RejectFrame::is_reject(&buf[..len]) {
-                    if let Some(reject) =
-                        crate::reject::RejectFrame::decode(&buf[..len])
-                    {
+                    if let Some(reject) = crate::reject::RejectFrame::decode(&buf[..len]) {
                         return Err(format!(
                             "access denied: {} ({})",
                             reject.message, reject.reason
@@ -4878,7 +5163,11 @@ fn do_connect_sync(
     );
 
     // Build the crypto context
-    Ok(build_sync_crypto_context(session_state, session_id, send_addr))
+    Ok(build_sync_crypto_context(
+        session_state,
+        session_id,
+        send_addr,
+    ))
 }
 
 /// Build an ACK frame: [FRAME_ACK(0x01) | ack_seq(8 bytes BE)].
@@ -4915,7 +5204,10 @@ pub extern "C" fn ztlp_build_ack_with_rwnd(
 
     let need = if rwnd == 0 { 9 } else { 11 };
     if out_buf_len < need {
-        set_last_error(&format!("output buffer too small: need {} got {}", need, out_buf_len));
+        set_last_error(&format!(
+            "output buffer too small: need {} got {}",
+            need, out_buf_len
+        ));
         return ZtlpResult::InvalidArgument as i32;
     }
 
@@ -5107,13 +5399,8 @@ fn do_ns_resolve_sync(
         }
 
         // Set remaining time as read timeout
-        let timeout_remaining = std::cmp::max(
-            Duration::from_millis(50),
-            remaining,
-        );
-        socket
-            .set_read_timeout(Some(timeout_remaining))
-            .ok();
+        let timeout_remaining = std::cmp::max(Duration::from_millis(50), remaining);
+        socket.set_read_timeout(Some(timeout_remaining)).ok();
 
         match socket.recv_from(&mut buf) {
             Ok((len, _addr)) => {
@@ -5181,7 +5468,8 @@ fn make_ns_result_records(records: Vec<crate::ns_cbor::NsRecordPayload>) -> *mut
     for rec in &records {
         record_types.push(rec.record_type);
 
-        let name_cstr = CString::new(rec.name.as_str()).unwrap_or_else(|_| CString::new("").unwrap());
+        let name_cstr =
+            CString::new(rec.name.as_str()).unwrap_or_else(|_| CString::new("").unwrap());
         record_names.push(name_cstr.into_raw());
 
         let mut data = rec.data.clone();
@@ -5405,9 +5693,7 @@ pub extern "C" fn ztlp_ns_resolve_relays_sync(
                     .and_then(|s| s.parse::<u64>().ok())
             })
             .unwrap_or(0) as u32;
-        let health_byte = match crate::ns_cbor::cbor_extract_string(data, "health")
-            .as_deref()
-        {
+        let health_byte = match crate::ns_cbor::cbor_extract_string(data, "health").as_deref() {
             Some("healthy") => 0u8,
             Some("degraded") => 1u8,
             Some("dead") => 2u8,
@@ -5417,7 +5703,8 @@ pub extern "C" fn ztlp_ns_resolve_relays_sync(
 
         let addr_cstr = CString::new(addr_str).unwrap_or_else(|_| CString::new("").unwrap());
         addresses.push(addr_cstr.into_raw());
-        let region_cstr = CString::new(region_str).unwrap_or_else(|_| CString::new("unknown").unwrap());
+        let region_cstr =
+            CString::new(region_str).unwrap_or_else(|_| CString::new("unknown").unwrap());
         regions.push(region_cstr.into_raw());
         latency_ms.push(lat);
         load_pct.push(load);
@@ -5594,9 +5881,7 @@ pub extern "C" fn ztlp_relay_pool_update_from_ns(
         return -1;
     }
 
-    let pool_ref = unsafe {
-        &mut *(pool as *mut crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &mut *(pool as *mut crate::relay_pool::RelayPool) };
 
     if relay_list.is_null() {
         return 0; // no-op, not an error
@@ -5671,7 +5956,11 @@ pub extern "C" fn ztlp_relay_pool_update_from_ns(
             "unknown".to_string()
         };
 
-        let latency = if i < latencies.len() { latencies[i] } else { 999 };
+        let latency = if i < latencies.len() {
+            latencies[i]
+        } else {
+            999
+        };
         let load = if i < loads.len() { loads[i] } else { 0 };
         let active_conns = if i < conns.len() { conns[i] } else { 0 };
 
@@ -5722,9 +6011,7 @@ pub extern "C" fn ztlp_relay_pool_select(pool: *mut ZtlpRelayPool) -> *mut c_cha
         return std::ptr::null_mut();
     }
 
-    let pool_ref = unsafe {
-        &*(pool as *const crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &*(pool as *const crate::relay_pool::RelayPool) };
 
     match pool_ref.select_best(&pool_ref.config().gateway_region) {
         Some(addr) => {
@@ -5745,9 +6032,7 @@ pub extern "C" fn ztlp_relay_pool_healthy_count(pool: *const ZtlpRelayPool) -> u
     if pool.is_null() {
         return 0;
     }
-    let pool_ref = unsafe {
-        &*(pool as *const crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &*(pool as *const crate::relay_pool::RelayPool) };
     pool_ref.healthy_count()
 }
 
@@ -5757,9 +6042,7 @@ pub extern "C" fn ztlp_relay_pool_total_count(pool: *const ZtlpRelayPool) -> usi
     if pool.is_null() {
         return 0;
     }
-    let pool_ref = unsafe {
-        &*(pool as *const crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &*(pool as *const crate::relay_pool::RelayPool) };
     pool_ref.total_count()
 }
 
@@ -5782,9 +6065,7 @@ pub extern "C" fn ztlp_relay_pool_report_success(
         return;
     }
 
-    let pool_ref = unsafe {
-        &mut *(pool as *mut crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &mut *(pool as *mut crate::relay_pool::RelayPool) };
 
     let addr_str = match unsafe { CStr::from_ptr(addr) }.to_str() {
         Ok(s) => s,
@@ -5808,17 +6089,12 @@ pub extern "C" fn ztlp_relay_pool_report_success(
 /// - `pool`: Pointer returned by `ztlp_relay_pool_new`. Must not be null.
 /// - `addr`: Relay address string (e.g., "34.219.64.205:443").
 #[no_mangle]
-pub extern "C" fn ztlp_relay_pool_report_failure(
-    pool: *mut ZtlpRelayPool,
-    addr: *const c_char,
-) {
+pub extern "C" fn ztlp_relay_pool_report_failure(pool: *mut ZtlpRelayPool, addr: *const c_char) {
     if pool.is_null() || addr.is_null() {
         return;
     }
 
-    let pool_ref = unsafe {
-        &mut *(pool as *mut crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &mut *(pool as *mut crate::relay_pool::RelayPool) };
 
     let addr_str = match unsafe { CStr::from_ptr(addr) }.to_str() {
         Ok(s) => s,
@@ -5842,9 +6118,7 @@ pub extern "C" fn ztlp_relay_pool_needs_refresh(pool: *const ZtlpRelayPool) -> b
     if pool.is_null() {
         return false;
     }
-    let pool_ref = unsafe {
-        &*(pool as *const crate::relay_pool::RelayPool)
-    };
+    let pool_ref = unsafe { &*(pool as *const crate::relay_pool::RelayPool) };
     pool_ref.needs_ns_refresh()
 }
 
@@ -6929,18 +7203,29 @@ mod tests {
         let mut frame_buf = [0u8; 9 + 64];
         let mut written: usize = 0;
         let rc = ztlp_frame_data(
-            payload.as_ptr(), payload.len(),
-            frame_buf.as_mut_ptr(), frame_buf.len(),
-            &mut written, data_seq,
+            payload.as_ptr(),
+            payload.len(),
+            frame_buf.as_mut_ptr(),
+            frame_buf.len(),
+            &mut written,
+            data_seq,
         );
         assert_eq!(rc, 0, "frame_data should succeed");
-        assert_eq!(written, 1 + 8 + payload.len(), "frame length should be 1+8+payload");
+        assert_eq!(
+            written,
+            1 + 8 + payload.len(),
+            "frame length should be 1+8+payload"
+        );
 
         // Verify structure: [0x00 | data_seq(8 BE) | payload]
         assert_eq!(frame_buf[0], 0x00, "first byte should be FRAME_DATA");
         let parsed_seq = u64::from_be_bytes(frame_buf[1..9].try_into().unwrap());
         assert_eq!(parsed_seq, data_seq, "data_seq should match");
-        assert_eq!(&frame_buf[9..9 + payload.len()], payload, "payload should match");
+        assert_eq!(
+            &frame_buf[9..9 + payload.len()],
+            payload,
+            "payload should match"
+        );
 
         // Now parse it back
         let mut frame_type: u8 = 0;
@@ -6948,9 +7233,12 @@ mod tests {
         let mut payload_ptr: *const u8 = std::ptr::null();
         let mut payload_len: usize = 0;
         let rc = ztlp_parse_frame(
-            frame_buf.as_ptr(), written,
-            &mut frame_type, &mut seq,
-            &mut payload_ptr, &mut payload_len,
+            frame_buf.as_ptr(),
+            written,
+            &mut frame_type,
+            &mut seq,
+            &mut payload_ptr,
+            &mut payload_len,
         );
         assert_eq!(rc, 0, "parse_frame should succeed");
         assert_eq!(frame_type, 0x00, "frame type should be FRAME_DATA");
@@ -6958,7 +7246,10 @@ mod tests {
         assert_eq!(payload_len, payload.len(), "payload length should match");
 
         let parsed_payload = unsafe { std::slice::from_raw_parts(payload_ptr, payload_len) };
-        assert_eq!(parsed_payload, payload, "parsed payload should match original");
+        assert_eq!(
+            parsed_payload, payload,
+            "parsed payload should match original"
+        );
     }
 
     /// TEST: ztlp_build_ack creates correct 9-byte ACK frame.
@@ -6966,11 +7257,7 @@ mod tests {
     fn test_sync_build_ack() {
         let mut buf = [0u8; 9];
         let mut written: usize = 0;
-        let rc = ztlp_build_ack(
-            12345u64,
-            buf.as_mut_ptr(), buf.len(),
-            &mut written,
-        );
+        let rc = ztlp_build_ack(12345u64, buf.as_mut_ptr(), buf.len(), &mut written);
         assert_eq!(rc, 0);
         assert_eq!(written, 9);
         assert_eq!(buf[0], 0x01, "first byte should be FRAME_ACK");
@@ -6983,9 +7270,12 @@ mod tests {
         let mut payload_ptr: *const u8 = std::ptr::null();
         let mut payload_len: usize = 0;
         let rc = ztlp_parse_frame(
-            buf.as_ptr(), 9,
-            &mut frame_type, &mut seq,
-            &mut payload_ptr, &mut payload_len,
+            buf.as_ptr(),
+            9,
+            &mut frame_type,
+            &mut seq,
+            &mut payload_ptr,
+            &mut payload_len,
         );
         assert_eq!(rc, 0);
         assert_eq!(frame_type, 0x01, "should be FRAME_ACK");
@@ -7026,24 +7316,35 @@ mod tests {
         let mut pkt_written: usize = 0;
         let rc_enc = ztlp_encrypt_packet(
             &mut client_ctx,
-            plaintext.as_ptr(), plaintext.len(),
-            pkt_buf.as_mut_ptr(), pkt_buf.len(),
+            plaintext.as_ptr(),
+            plaintext.len(),
+            pkt_buf.as_mut_ptr(),
+            pkt_buf.len(),
             &mut pkt_written,
         );
         assert_eq!(rc_enc, 0, "encrypt should succeed");
-        assert!(pkt_written > plaintext.len(), "encrypted packet should be larger than plaintext (header + auth tag)");
+        assert!(
+            pkt_written > plaintext.len(),
+            "encrypted packet should be larger than plaintext (header + auth tag)"
+        );
 
         // Decrypt
         let mut out_buf = [0u8; 65536];
         let mut out_written: usize = 0;
         let rc_dec = ztlp_decrypt_packet(
             &mut server_ctx,
-            pkt_buf.as_ptr(), pkt_written,
-            out_buf.as_mut_ptr(), out_buf.len(),
+            pkt_buf.as_ptr(),
+            pkt_written,
+            out_buf.as_mut_ptr(),
+            out_buf.len(),
             &mut out_written,
         );
         assert_eq!(rc_dec, 0, "decrypt should succeed");
-        assert_eq!(out_written, plaintext.len(), "decrypted length should match original");
+        assert_eq!(
+            out_written,
+            plaintext.len(),
+            "decrypted length should match original"
+        );
 
         let decrypted = &out_buf[..out_written];
         assert_eq!(decrypted, plaintext, "decrypted text should match original");
@@ -7057,11 +7358,31 @@ mod tests {
 
         let mut pkt1 = [0u8; 65536];
         let mut w1: usize = 0;
-        assert_eq!(ztlp_encrypt_packet(&mut ctx, payload.as_ptr(), payload.len(), pkt1.as_mut_ptr(), pkt1.len(), &mut w1), 0);
+        assert_eq!(
+            ztlp_encrypt_packet(
+                &mut ctx,
+                payload.as_ptr(),
+                payload.len(),
+                pkt1.as_mut_ptr(),
+                pkt1.len(),
+                &mut w1
+            ),
+            0
+        );
 
         let mut pkt2 = [0u8; 65536];
         let mut w2: usize = 0;
-        assert_eq!(ztlp_encrypt_packet(&mut ctx, payload.as_ptr(), payload.len(), pkt2.as_mut_ptr(), pkt2.len(), &mut w2), 0);
+        assert_eq!(
+            ztlp_encrypt_packet(
+                &mut ctx,
+                payload.as_ptr(),
+                payload.len(),
+                pkt2.as_mut_ptr(),
+                pkt2.len(),
+                &mut w2
+            ),
+            0
+        );
 
         // Both packets should have different seq numbers in the header
         // Parse the packet sequence from the data header
@@ -7089,8 +7410,10 @@ mod tests {
         let mut pkt_written: usize = 0;
         let rc = ztlp_encrypt_packet(
             &mut client_ctx,
-            payload.as_ptr(), payload.len(),
-            pkt.as_mut_ptr(), pkt.len(),
+            payload.as_ptr(),
+            payload.len(),
+            pkt.as_mut_ptr(),
+            pkt.len(),
             &mut pkt_written,
         );
         assert_eq!(rc, 0);
@@ -7100,8 +7423,10 @@ mod tests {
         let mut w1: usize = 0;
         let rc1 = ztlp_decrypt_packet(
             &mut server_ctx,
-            pkt.as_ptr(), pkt_written,
-            out1.as_mut_ptr(), out1.len(),
+            pkt.as_ptr(),
+            pkt_written,
+            out1.as_mut_ptr(),
+            out1.len(),
             &mut w1,
         );
         assert_eq!(rc1, 0, "first decrypt should succeed");
@@ -7112,8 +7437,10 @@ mod tests {
         let mut w2: usize = 0;
         let rc2 = ztlp_decrypt_packet(
             &mut server_ctx,
-            pkt.as_ptr(), pkt_written,
-            out2.as_mut_ptr(), out2.len(),
+            pkt.as_ptr(),
+            pkt_written,
+            out2.as_mut_ptr(),
+            out2.len(),
             &mut w2,
         );
         assert_ne!(rc2, 0, "second decrypt should fail (replay detected)");
@@ -7137,8 +7464,10 @@ mod tests {
             let mut w: usize = 0;
             let rc = ztlp_encrypt_packet(
                 &mut client_ctx,
-                payload.as_ptr(), payload.len(),
-                pkt.as_mut_ptr(), pkt.len(),
+                payload.as_ptr(),
+                payload.len(),
+                pkt.as_mut_ptr(),
+                pkt.len(),
                 &mut w,
             );
             assert_eq!(rc, 0);
@@ -7153,13 +7482,20 @@ mod tests {
             let mut w: usize = 0;
             let rc = ztlp_decrypt_packet(
                 &mut server_ctx,
-                pkt.as_ptr(), *pkt_len,
-                out.as_mut_ptr(), out.len(),
+                pkt.as_ptr(),
+                *pkt_len,
+                out.as_mut_ptr(),
+                out.len(),
                 &mut w,
             );
             assert_eq!(rc, 0, "decrypt of packet {} should succeed", idx);
             let expected = format!("packet {}", idx);
-            assert_eq!(&out[..w], expected.as_bytes(), "packet {} content should match", idx);
+            assert_eq!(
+                &out[..w],
+                expected.as_bytes(),
+                "packet {} content should match",
+                idx
+            );
         }
     }
 
@@ -7167,28 +7503,39 @@ mod tests {
     #[test]
     fn test_sync_null_args() {
         // ztlp_frame_data — null payload
-        assert_ne!(ztlp_frame_data(
-            std::ptr::null(), 10,
-            std::ptr::null_mut(), 100,
-            &mut 0, 0
-        ), 0);
+        assert_ne!(
+            ztlp_frame_data(std::ptr::null(), 10, std::ptr::null_mut(), 100, &mut 0, 0),
+            0
+        );
 
         // ztlp_frame_data — null out_written
         let payload = [0u8; 5];
         let mut out = [0u8; 20];
-        assert_ne!(ztlp_frame_data(
-            payload.as_ptr(), payload.len(),
-            out.as_mut_ptr(), out.len(),
-            std::ptr::null_mut(), 0
-        ), 0);
+        assert_ne!(
+            ztlp_frame_data(
+                payload.as_ptr(),
+                payload.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                std::ptr::null_mut(),
+                0
+            ),
+            0
+        );
 
         // ztlp_frame_data — valid call should succeed
         let mut w: usize = 0;
-        assert_eq!(ztlp_frame_data(
-            payload.as_ptr(), payload.len(),
-            out.as_mut_ptr(), out.len(),
-            &mut w, 42
-        ), 0);
+        assert_eq!(
+            ztlp_frame_data(
+                payload.as_ptr(),
+                payload.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                &mut w,
+                42
+            ),
+            0
+        );
         assert_eq!(w, 1 + 8 + payload.len(), "frame should have correct length");
 
         // ztlp_build_ack — null out_buf
@@ -7196,7 +7543,10 @@ mod tests {
 
         // ztlp_build_ack — null out_written
         let mut buf = [0u8; 9];
-        assert_ne!(ztlp_build_ack(1, buf.as_mut_ptr(), buf.len(), std::ptr::null_mut()), 0);
+        assert_ne!(
+            ztlp_build_ack(1, buf.as_mut_ptr(), buf.len(), std::ptr::null_mut()),
+            0
+        );
     }
 
     /// TEST: ztlp_encrypt_packet rejects output buffer too small.
@@ -7208,8 +7558,10 @@ mod tests {
         let mut written: usize = 0;
         let rc = ztlp_encrypt_packet(
             &mut ctx,
-            payload.as_ptr(), payload.len(),
-            tiny_buf.as_mut_ptr(), tiny_buf.len(),
+            payload.as_ptr(),
+            payload.len(),
+            tiny_buf.as_mut_ptr(),
+            tiny_buf.len(),
             &mut written,
         );
         assert_ne!(rc, 0, "encrypt should fail with tiny buffer");
@@ -7226,8 +7578,10 @@ mod tests {
         let short_pkt = [0x37u8, 0x5A, 0x01, 0x00, 0x00];
         let rc = ztlp_decrypt_packet(
             &mut ctx,
-            short_pkt.as_ptr(), short_pkt.len(),
-            out.as_mut_ptr(), out.len(),
+            short_pkt.as_ptr(),
+            short_pkt.len(),
+            out.as_mut_ptr(),
+            out.len(),
             &mut written,
         );
         assert_ne!(rc, 0, "decrypt should fail with too-short packet");
@@ -7249,9 +7603,12 @@ mod tests {
         let mut frame_buf = [0u8; 2048];
         let mut frame_len: usize = 0;
         let rc = ztlp_frame_data(
-            payload.as_ptr(), payload.len(),
-            frame_buf.as_mut_ptr(), frame_buf.len(),
-            &mut frame_len, data_seq,
+            payload.as_ptr(),
+            payload.len(),
+            frame_buf.as_mut_ptr(),
+            frame_buf.len(),
+            &mut frame_len,
+            data_seq,
         );
         assert_eq!(rc, 0);
         assert_eq!(frame_len, 1 + 8 + payload.len());
@@ -7261,8 +7618,10 @@ mod tests {
         let mut pkt_len: usize = 0;
         let rc = ztlp_encrypt_packet(
             &mut client_ctx,
-            frame_buf.as_ptr(), frame_len,
-            pkt_buf.as_mut_ptr(), pkt_buf.len(),
+            frame_buf.as_ptr(),
+            frame_len,
+            pkt_buf.as_mut_ptr(),
+            pkt_buf.len(),
             &mut pkt_len,
         );
         assert_eq!(rc, 0);
@@ -7273,8 +7632,10 @@ mod tests {
         let mut out_len: usize = 0;
         let rc = ztlp_decrypt_packet(
             &mut server_ctx,
-            pkt_buf.as_ptr(), pkt_len,
-            out_buf.as_mut_ptr(), out_buf.len(),
+            pkt_buf.as_ptr(),
+            pkt_len,
+            out_buf.as_mut_ptr(),
+            out_buf.len(),
             &mut out_len,
         );
         assert_eq!(rc, 0);
@@ -7286,9 +7647,12 @@ mod tests {
         let mut payload_ptr: *const u8 = std::ptr::null();
         let mut payload_len: usize = 0;
         let rc = ztlp_parse_frame(
-            out_buf.as_ptr(), out_len,
-            &mut frame_type, &mut seq,
-            &mut payload_ptr, &mut payload_len,
+            out_buf.as_ptr(),
+            out_len,
+            &mut frame_type,
+            &mut seq,
+            &mut payload_ptr,
+            &mut payload_len,
         );
         assert_eq!(rc, 0);
         assert_eq!(frame_type, 0x00, "should be FRAME_DATA");
@@ -7315,7 +7679,10 @@ mod tests {
         );
 
         // Should return NULL (not a valid address format)
-        assert!(ctx.is_null(), "connect with invalid target should return NULL");
+        assert!(
+            ctx.is_null(),
+            "connect with invalid target should return NULL"
+        );
         let err = ztlp_last_error();
         assert!(!err.is_null(), "should have error message");
 
@@ -7343,7 +7710,10 @@ mod tests {
         );
         let elapsed = start.elapsed();
 
-        assert!(ctx.is_null(), "connect to unreachable target should return NULL");
+        assert!(
+            ctx.is_null(),
+            "connect to unreachable target should return NULL"
+        );
         assert!(
             elapsed.as_millis() < 5000,
             "should timeout quickly, took {}ms",
@@ -7362,7 +7732,10 @@ mod tests {
         // identity ownership transferred to client — do NOT free it separately
 
         let ctx = ztlp_crypto_context_extract(client);
-        assert!(ctx.is_null(), "extract should return NULL with no active session");
+        assert!(
+            ctx.is_null(),
+            "extract should return NULL with no active session"
+        );
 
         ztlp_client_free(client);
     }
@@ -7382,8 +7755,10 @@ mod tests {
         let mut w: usize = 0;
         let rc = ztlp_encrypt_packet(
             std::ptr::null_mut(),
-            payload.as_ptr(), payload.len(),
-            out.as_mut_ptr(), out.len(),
+            payload.as_ptr(),
+            payload.len(),
+            out.as_mut_ptr(),
+            out.len(),
             &mut w,
         );
         assert_ne!(rc, 0);
@@ -7397,8 +7772,10 @@ mod tests {
         let mut w: usize = 0;
         let rc = ztlp_decrypt_packet(
             std::ptr::null_mut(),
-            pkt.as_ptr(), pkt.len(),
-            out.as_mut_ptr(), out.len(),
+            pkt.as_ptr(),
+            pkt.len(),
+            out.as_mut_ptr(),
+            out.len(),
             &mut w,
         );
         assert_ne!(rc, 0);
@@ -7530,7 +7907,10 @@ mod tests {
     #[test]
     fn test_relay_pool_update_from_ns_null_args() {
         let pool = ztlp_relay_pool_new(std::ptr::null());
-        assert_eq!(ztlp_relay_pool_update_from_ns(std::ptr::null_mut(), std::ptr::null()), -1);
+        assert_eq!(
+            ztlp_relay_pool_update_from_ns(std::ptr::null_mut(), std::ptr::null()),
+            -1
+        );
         assert_eq!(ztlp_relay_pool_update_from_ns(pool, std::ptr::null()), 0);
         ztlp_relay_pool_free(pool);
     }

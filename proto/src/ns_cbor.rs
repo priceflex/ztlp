@@ -227,7 +227,9 @@ pub fn parse_ns_record(data: &[u8]) -> Option<NsRecordPayload> {
     }
 
     let offset = 3 + rname_len;
-    let name = std::str::from_utf8(&record[3..3 + rname_len]).ok()?.to_string();
+    let name = std::str::from_utf8(&record[3..3 + rname_len])
+        .ok()?
+        .to_string();
     let data_len = u32::from_be_bytes([
         record[offset],
         record[offset + 1],
@@ -325,10 +327,7 @@ mod tests {
         assert_eq!(cbor_read_uint(23, &[], 0), Some((23, 0)));
         assert_eq!(cbor_read_uint(24, &[42], 0), Some((42, 1)));
         assert_eq!(cbor_read_uint(25, &[0, 100], 0), Some((100, 2)));
-        assert_eq!(
-            cbor_read_uint(26, &[0, 0, 1, 0], 0),
-            Some((256, 4))
-        );
+        assert_eq!(cbor_read_uint(26, &[0, 0, 1, 0], 0), Some((256, 4)));
     }
 
     #[test]

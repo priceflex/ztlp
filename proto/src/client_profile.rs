@@ -56,15 +56,15 @@ pub enum InterfaceType {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum RadioTech {
     #[serde(rename = "2")]
-    Gen2,       // 2G (GPRS/EDGE)
+    Gen2, // 2G (GPRS/EDGE)
     #[serde(rename = "3")]
-    Gen3,       // 3G (WCDMA/HSPA)
+    Gen3, // 3G (WCDMA/HSPA)
     #[serde(rename = "4")]
-    LTE,        // 4G LTE
+    LTE, // 4G LTE
     #[serde(rename = "5n")]
-    NrNsa,      // 5G Non-Standalone
+    NrNsa, // 5G Non-Standalone
     #[serde(rename = "5s")]
-    NrSa,       // 5G Standalone
+    NrSa, // 5G Standalone
 }
 
 impl ClientProfile {
@@ -137,7 +137,11 @@ mod tests {
         profile.radio_tech = Some(RadioTech::LTE);
         profile.is_constrained = true;
         let cbor = profile.to_cbor();
-        assert!(cbor.len() < 80, "CBOR should be compact, got {} bytes", cbor.len());
+        assert!(
+            cbor.len() < 80,
+            "CBOR should be compact, got {} bytes",
+            cbor.len()
+        );
         let decoded = ClientProfile::from_cbor(&cbor).unwrap();
         assert_eq!(decoded.client_class, ClientClass::Mobile);
         assert_eq!(decoded.interface_type, InterfaceType::Cellular);

@@ -122,7 +122,10 @@ fn raw_sendto(fd: i32, data: &[u8], dest: &SocketAddr) -> Result<usize, std::io:
 
 #[cfg(not(unix))]
 fn raw_sendto(_fd: i32, _data: &[u8], _dest: &SocketAddr) -> Result<usize, std::io::Error> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "raw_sendto not available on this platform"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "raw_sendto not available on this platform",
+    ))
 }
 
 /// Serializes and encrypts a ZTLP data packet synchronously.
@@ -181,9 +184,7 @@ pub struct AckSenderConfig {
 /// - Full ZTLP packet serialization + ChaCha20 encryption
 /// - Seq allocation from shared AtomicU64 (within anti-replay window)
 /// - Blocking send_to() on the dup'd socket (OS-scheduled, not tokio)
-pub fn spawn_ack_sender(
-    config: AckSenderConfig,
-) -> std::sync::mpsc::Sender<Vec<u8>> {
+pub fn spawn_ack_sender(config: AckSenderConfig) -> std::sync::mpsc::Sender<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
     std::thread::Builder::new()

@@ -295,7 +295,9 @@ pub fn detect_system(
                     "UDP recv buffer capped at {}KB by kernel (requested {}KB). \
                      This limits in-flight packets to ~{} before kernel drops begin. \
                      Run `sudo ztlp tune --apply` to fix.",
-                    recv / 1024, target_kb, recv / 1200
+                    recv / 1024,
+                    target_kb,
+                    recv / 1200
                 );
             } else {
                 warn!(
@@ -310,7 +312,8 @@ pub fn detect_system(
         if send < TARGET_BUFFER_SIZE / 2 {
             warn!(
                 "UDP send buffer is {}KB (target: {}KB). ACK sending may be delayed.",
-                send / 1024, target_kb
+                send / 1024,
+                target_kb
             );
         }
     }

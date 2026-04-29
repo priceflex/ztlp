@@ -322,7 +322,11 @@ impl RelayEntry {
     ///
     /// Returns `Ordering::Less` if `self` is preferred over `other`.
     /// Tiebreak order: score → same-region bonus → fewer active connections.
-    pub fn cmp_for_selection(&self, other: &RelayEntry, gateway_region: &str) -> std::cmp::Ordering {
+    pub fn cmp_for_selection(
+        &self,
+        other: &RelayEntry,
+        gateway_region: &str,
+    ) -> std::cmp::Ordering {
         // Primary: score (lower is better)
         let score_cmp = self.score().cmp(&other.score());
         if score_cmp != std::cmp::Ordering::Equal {
@@ -606,11 +610,8 @@ impl RelayPool {
     /// Unlike `best_available_relay()`, this uses `cmp_for_selection()` which
     /// considers region tiebreak and active connections in addition to score.
     pub fn select_best(&self, gateway_region: &str) -> Option<SocketAddr> {
-        let available: Vec<&RelayEntry> = self
-            .relays
-            .values()
-            .filter(|e| e.is_available())
-            .collect();
+        let available: Vec<&RelayEntry> =
+            self.relays.values().filter(|e| e.is_available()).collect();
 
         available
             .into_iter()
@@ -1846,8 +1847,12 @@ mod tests {
         high_load.latency = Some(Duration::from_millis(15));
         high_load.load_pct = 80;
 
-        assert!(low_load.score() < high_load.score(),
-            "low load relay should score better: {} vs {}", low_load.score(), high_load.score());
+        assert!(
+            low_load.score() < high_load.score(),
+            "low load relay should score better: {} vs {}",
+            low_load.score(),
+            high_load.score()
+        );
     }
 
     #[test]
@@ -2027,9 +2032,14 @@ mod tests {
         pool.record_probe_success(relay_addr(1), Duration::from_millis(15));
 
         // NS reports updated load
-        let infos = vec![
-            make_relay_info(1, "us-west-2", 12, 90, 200, RelayHealth::Healthy),
-        ];
+        let infos = vec![make_relay_info(
+            1,
+            "us-west-2",
+            12,
+            90,
+            200,
+            RelayHealth::Healthy,
+        )];
         pool.update_from_ns_rich(infos);
 
         let entry = pool.get_relay(&relay_addr(1)).unwrap();
@@ -2047,9 +2057,14 @@ mod tests {
         pool.record_probe_success(relay_addr(1), Duration::from_millis(15));
 
         // NS reports relay as degraded — trust NS as early warning
-        let infos = vec![
-            make_relay_info(1, "us-west-2", 12, 95, 300, RelayHealth::Degraded),
-        ];
+        let infos = vec![make_relay_info(
+            1,
+            "us-west-2",
+            12,
+            95,
+            300,
+            RelayHealth::Degraded,
+        )];
         pool.update_from_ns_rich(infos);
 
         let entry = pool.get_relay(&relay_addr(1)).unwrap();
@@ -2065,9 +2080,14 @@ mod tests {
         pool.record_probe_failure(relay_addr(1));
 
         // NS still reports as healthy — don't override our local Dead state
-        let infos = vec![
-            make_relay_info(1, "us-west-2", 12, 35, 42, RelayHealth::Healthy),
-        ];
+        let infos = vec![make_relay_info(
+            1,
+            "us-west-2",
+            12,
+            35,
+            42,
+            RelayHealth::Healthy,
+        )];
         pool.update_from_ns_rich(infos);
 
         let entry = pool.get_relay(&relay_addr(1)).unwrap();
@@ -2151,9 +2171,14 @@ mod tests {
         pool.record_probe_failure(relay_addr(1));
 
         // NS returns only relay 2 (not relay 1)
-        let infos = vec![
-            make_relay_info2(2, "us-west-2", 20, 30, 10, RelayHealth::Healthy),
-        ];
+        let infos = vec![make_relay_info2(
+            2,
+            "us-west-2",
+            20,
+            30,
+            10,
+            RelayHealth::Healthy,
+        )];
         pool.update_from_ns_rich(infos);
 
         // Dead relay 1 not in NS list → pruned

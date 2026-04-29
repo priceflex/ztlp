@@ -226,7 +226,7 @@ impl IosTunnelEngine {
             })?
             .clone();
         let close_suppression_marker = format!(
-            "Rust fd startup marker close_suppression_enabled=1 version={} git={} marker=close_suppression_v2",
+            "Rust fd startup marker close_suppression_enabled=1 version={} git={} marker=close_suppression_v3",
             env!("CARGO_PKG_VERSION"),
             option_env!("ZTLP_GIT_COMMIT").unwrap_or("unknown")
         );
@@ -238,12 +238,16 @@ impl IosTunnelEngine {
             } else {
                 "read_drop_log"
             };
-            crate::ffi::ios_log(&format!(
-                "Rust fd read loop startup mode={} close_suppression_enabled=1 version={} git={} marker=close_suppression_v2",
+            let startup_diag = format!(
+                "Rust fd read loop startup mode={} close_suppression_enabled=1 version={} git={} marker=close_suppression_v3",
                 mode,
                 env!("CARGO_PKG_VERSION"),
                 option_env!("ZTLP_GIT_COMMIT").unwrap_or("unknown")
-            ));
+            );
+            crate::ffi::ios_log(&startup_diag);
+            if let Some(cb) = callback {
+                cb.dispatch(250, 0, startup_diag.as_ptr(), startup_diag.len());
+            }
             let mut packet = vec![0u8; 4096];
             let mut action_buf = vec![0u8; 65536];
             let mut outbound_packet_buf = vec![0u8; 4096];
@@ -340,19 +344,23 @@ impl IosTunnelEngine {
                                 actions_total += action_count as u64;
                                 action_bytes_total += action_written as u64;
                                 if let Some(cb) = callback {
-                                    crate::ffi::ios_log(&format!(
-                                        "Rust fd dispatch pre action_count={} action_written={} close_suppression_enabled=1 marker=close_suppression_v2",
+                                    let pre_diag = format!(
+                                        "Rust fd dispatch pre action_count={} action_written={} close_suppression_enabled=1 marker=close_suppression_v3",
                                         action_count,
                                         action_written
-                                    ));
+                                    );
+                                    if action_written > 0 {
+                                        crate::ffi::ios_log(&pre_diag);
+                                        cb.dispatch(250, 0, pre_diag.as_ptr(), pre_diag.len());
+                                    }
                                     let summary = dispatch_router_actions(
                                         router,
                                         &action_buf[..action_written],
                                         cb,
                                         &mut closed_streams,
                                     );
-                                    crate::ffi::ios_log(&format!(
-                                        "Rust fd dispatch post actions={} open={} send={} close={} suppressed_close={} unknown={} payload_bytes={} action_bytes={} close_suppression_enabled=1 marker=close_suppression_v2",
+                                    let post_diag = format!(
+                                        "Rust fd dispatch post actions={} open={} send={} close={} suppressed_close={} unknown={} payload_bytes={} action_bytes={} close_suppression_enabled=1 marker=close_suppression_v3",
                                         summary.total,
                                         summary.open,
                                         summary.send,
@@ -361,7 +369,11 @@ impl IosTunnelEngine {
                                         summary.unknown,
                                         summary.payload_bytes,
                                         action_written
-                                    ));
+                                    );
+                                    if action_written > 0 || summary.suppressed_close > 0 {
+                                        crate::ffi::ios_log(&post_diag);
+                                        cb.dispatch(250, 0, post_diag.as_ptr(), post_diag.len());
+                                    }
                                     if summary.total > 0 {
                                         crate::ffi::ios_log(&format!(
                                             "Rust router action summary open={} send={} close={} suppressed_close={} unknown={} payload_bytes={} action_bytes={}",

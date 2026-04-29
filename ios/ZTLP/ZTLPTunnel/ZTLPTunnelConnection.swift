@@ -450,10 +450,12 @@ final class ZTLPTunnelConnection {
         pendingAcks.removeAll(keepingCapacity: true)
 
         var ackWritten: Int = 0
-        // Advertise conservative receive capacity so the gateway can pace to
-        // the NE's current send/ACK pressure instead of flooding until queues
-        // fill. Keep at least 16 packets to avoid a zero-window deadlock.
-        let availableWindow = max(16, min(512, Self.maxSendsInFlight - sendsInFlight))
+        // Advertise a conservative receive window for browser/page-load traffic.
+        // The old 512-packet rwnd let the gateway fill thousands of queued
+        // response packets during multi-stream Vaultwarden loads, which caused
+        // retransmit storms and NE teardown. Keep this deliberately low until
+        // PacketTunnelProvider can feed us full router/utun pressure metrics.
+        let availableWindow = max(16, min(64, Self.maxSendsInFlight - sendsInFlight))
         let ackResult = ztlp_build_ack_with_rwnd(maxSeq, UInt16(availableWindow), &frameBuffer, frameBuffer.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }
 

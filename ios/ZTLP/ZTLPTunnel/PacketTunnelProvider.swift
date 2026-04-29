@@ -167,6 +167,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let rwndRouterOutboundBad = 128
     private static let rwndSendBufBytesBad = 16_384
     private static let rwndOldestMsBad = 4_000
+    /// Browser/WKWebView bursts fan out multiple streams; keep those on the
+    /// proven rwnd=4 floor instead of letting the adaptive ramp hit 5 mid-burst.
+    private static let rwndBrowserBurstFlowThreshold = 2
     private var advertisedRwnd: UInt16 = 4
     private var consecutiveFullFlushes = 0
     private var consecutiveRwndHealthyTicks = 0
@@ -180,6 +183,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let healthCheckInterval: TimeInterval = 2.0
     private static let healthSuspectThreshold: TimeInterval = 5.0
     private static let probeTimeoutThreshold: TimeInterval = 5.0
+    private static let fastStuckOldestMsThreshold = 3_000
+    private static let fastStuckTicksBeforeSuspect = 2
     /// Number of consecutive ticks with active flows and no highSeq progress before
     /// we treat the session as suspect (independent of usefulRxAge), to catch the
     /// "alive but stuck" replay-storm pattern where RX still arrives but nothing advances.
@@ -390,7 +395,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // bytes went out a few seconds ago.
         let silentTooLong = hasActiveFlows && usefulRxAge >= Self.healthSuspectThreshold
         let stuckTooLong = hasActiveFlows && consecutiveStuckHighSeqTicks >= Self.noProgressTicksBeforeSuspect
-        guard silentTooLong || stuckTooLong else {
+        let fastStuckTooLong = hasActiveFlows &&
+            statsTuple.oldestMs >= Self.fastStuckOldestMsThreshold &&
+            consecutiveStuckHighSeqTicks >= Self.fastStuckTicksBeforeSuspect
+        guard silentTooLong || stuckTooLong || fastStuckTooLong else {
             clearSessionHealthState()
             return
         }
@@ -399,13 +407,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         consecutiveNoProgressChecks += 1
 
         if probeOutstandingSince == nil {
-            let reason = silentTooLong ? "no_useful_rx_\(String(format: "%.1f", usefulRxAge))s" : "stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks"
+            let reason: String
+            if silentTooLong {
+                reason = "no_useful_rx_\(String(format: "%.1f", usefulRxAge))s"
+            } else if fastStuckTooLong {
+                reason = "fast_stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks_oldest_\(statsTuple.oldestMs)ms"
+            } else {
+                reason = "stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks"
+            }
             logger.warn("Session health candidate: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s replayDelta=\(replayDelta) stats=\(statsTuple.stats)", source: "Tunnel")
             sendSessionProbe(reason: reason)
             return
         }
 
-        if let probeOutstandingSince, now.timeIntervalSince(probeOutstandingSince) > Self.probeTimeoutThreshold {
+        let activeProbeTimeout = fastStuckTooLong ? min(Self.probeTimeoutThreshold, 3.0) : Self.probeTimeoutThreshold
+        if let probeOutstandingSince, now.timeIntervalSince(probeOutstandingSince) > activeProbeTimeout {
             logger.warn("Session health dead: probe timeout flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s stuckTicks=\(consecutiveStuckHighSeqTicks) stats=\(statsTuple.stats)", source: "Tunnel")
             resetPacketRouterRuntimeState(reason: "session_health_probe_timeout")
             pendingReconnectReason = "session_health_probe_timeout"
@@ -1178,6 +1194,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if pressure {
             let reason = "pressure outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs) replayDelta=\(replayDelta) fullFlushes=\(consecutiveFullFlushes)"
             reduceAdvertisedRwnd(reason: reason)
+            return
+        }
+
+        if stats.flows >= Self.rwndBrowserBurstFlowThreshold || stats.streamToFlow >= Self.rwndBrowserBurstFlowThreshold {
+            reduceAdvertisedRwnd(reason: "browser burst flows=\(stats.flows) streamMaps=\(stats.streamToFlow)")
             return
         }
 

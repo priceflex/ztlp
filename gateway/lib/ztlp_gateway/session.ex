@@ -783,16 +783,6 @@ defmodule ZtlpGateway.Session do
     terminate_session(state, :backend_error)
   end
 
-  defp enqueue_stream_chunks(send_queue, stream_id, chunks) do
-    Enum.reduce_while(chunks, send_queue, fn chunk, q ->
-      if :queue.len(q) >= @queue_high do
-        {:halt, q}
-      else
-        {:cont, :queue.in({:stream, stream_id, chunk}, q)}
-      end
-    end)
-  end
-
   # ── TLS terminator messages ──
 
   # Decrypted data from TLS bridge — forward to the backend
@@ -2055,6 +2045,16 @@ defmodule ZtlpGateway.Session do
   defp connecting_buffer_bytes(stream) do
     stream.buffer
     |> Enum.reduce(0, fn chunk, acc -> acc + byte_size(chunk) end)
+  end
+
+  defp enqueue_stream_chunks(send_queue, stream_id, chunks) do
+    Enum.reduce_while(chunks, send_queue, fn chunk, q ->
+      if :queue.len(q) >= @queue_high do
+        {:halt, q}
+      else
+        {:cont, :queue.in({:stream, stream_id, chunk}, q)}
+      end
+    end)
   end
 
   defp open_mux_stream(stream_id, service_name, state) do

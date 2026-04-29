@@ -1046,7 +1046,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
-        flushOutboundPackets()
+        flushOutboundPackets(maxPackets: Self.maxOutboundPacketsPerFlush)
     }
 
     private func maybeLogMuxSummary(force: Bool) {

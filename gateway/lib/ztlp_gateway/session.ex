@@ -468,8 +468,15 @@ defmodule ZtlpGateway.Session do
   # we stop reading from the backend (don't call resume_read). When it drops below
   # @queue_low, we resume. This prevents the queue from ballooning to 50K+ packets
   # when the backend dumps a large response faster than the tunnel can deliver.
-  @queue_high 512
-  @queue_low 128
+  #
+  # 2026-05-02: Vaultwarden/WKWebView still wedges late in the page load on iOS even
+  # with rwnd pinned at 4. Live logs showed the gateway still holding a long tail
+  # backlog (~339 queued packets) while the phone had stopped making useful progress
+  # and eventually hit session-health reconnect. Make the queue shallower again so
+  # backend TCP backpressure engages sooner and the gateway does not build such a
+  # large browser-response tail behind a 4-packet peer window.
+  @queue_high 256
+  @queue_low 64
   # Mobile browser sessions must not let backend responses balloon into thousands
   # of queued packets. The iOS NE is stable at rwnd=8, but once the gateway has
   # queued 6K packets, the browser sees multi-second delays and churns streams.

@@ -506,6 +506,10 @@ pub struct TcpFlow {
     pub recv_window: u16,
     /// Data from gateway waiting to be sent as TCP packets.
     pub send_buf: VecDeque<u8>,
+    /// Gateway sent CLOSE while response bytes were still queued. Emit TCP FIN
+    /// only after buffered response data drains so browser TCP sees EOF after
+    /// the complete body, not in front of the tail.
+    pub close_pending: bool,
     /// Last activity timestamp for timeout detection.
     pub last_activity: Instant,
     /// The flow key for constructing response packets.
@@ -844,6 +848,7 @@ impl PacketRouter {
             stream_id,
             recv_window: TCP_WINDOW_SIZE,
             send_buf: VecDeque::new(),
+            close_pending: false,
             last_activity: Instant::now(),
             flow_key: *flow_key,
         };
@@ -957,13 +962,17 @@ impl PacketRouter {
         };
 
         match flow.state {
-            TcpState::Established => {
-                queue_fin(flow, &mut self.outbound);
-                flow.state = TcpState::FinWait1;
-            }
-            TcpState::CloseWait => {
-                queue_fin(flow, &mut self.outbound);
-                flow.state = TcpState::LastAck;
+            TcpState::Established | TcpState::CloseWait => {
+                if flow.send_buf.is_empty() && self.outbound.len() < OUTBOUND_MAX_PACKETS {
+                    queue_fin(flow, &mut self.outbound);
+                    flow.state = if flow.state == TcpState::Established {
+                        TcpState::FinWait1
+                    } else {
+                        TcpState::LastAck
+                    };
+                } else {
+                    flow.close_pending = true;
+                }
             }
             _ => {
                 // Already closing or closed
@@ -1007,12 +1016,11 @@ impl PacketRouter {
                 Some(f) => f,
                 None => continue,
             };
-            if flow.send_buf.is_empty() {
-                continue;
-            }
+
             if self.outbound.len() >= OUTBOUND_MAX_PACKETS {
                 break;
             }
+
             // Build packets from send_buf data in MSS chunks.
             // PSH on the last chunk only so Safari delivers data promptly.
             while !flow.send_buf.is_empty() && self.outbound.len() < OUTBOUND_MAX_PACKETS {
@@ -1038,6 +1046,20 @@ impl PacketRouter {
                 } else {
                     break;
                 }
+            }
+
+            if flow.close_pending
+                && flow.send_buf.is_empty()
+                && self.outbound.len() < OUTBOUND_MAX_PACKETS
+                && (flow.state == TcpState::Established || flow.state == TcpState::CloseWait)
+            {
+                flow.close_pending = false;
+                queue_fin(flow, &mut self.outbound);
+                flow.state = if flow.state == TcpState::Established {
+                    TcpState::FinWait1
+                } else {
+                    TcpState::LastAck
+                };
             }
         }
     }
@@ -2064,6 +2086,49 @@ mod tests {
         assert!(!outbound.is_empty());
         let tcp_hdr = parse_tcp(&outbound[0][20..]).unwrap();
         assert!(tcp_hdr.is_fin());
+    }
+
+    #[test]
+    fn test_router_gateway_close_waits_for_spilled_response_tail() {
+        let mut router = make_router();
+        let client_ip = Ipv4Addr::new(10, 122, 0, 100);
+        let service_ip = Ipv4Addr::new(10, 122, 0, 2);
+
+        // Full handshake using the same one-packet pop path Swift uses through
+        // ztlp_router_read_packet_sync().
+        let syn = make_syn_packet(client_ip, service_ip, 54321, 80, 1000);
+        router.process_inbound(&syn);
+        let syn_ack = router.pop_outbound().expect("SYN-ACK");
+        let syn_ack_hdr = parse_tcp(&syn_ack[20..]).unwrap();
+        let server_isn = syn_ack_hdr.seq;
+
+        let ack = make_ack_packet(client_ip, service_ip, 54321, 80, 1001, server_isn + 1);
+        router.process_inbound(&ack);
+        while router.pop_outbound().is_some() {}
+
+        // Fill outbound and spill the response tail into the per-flow send_buf,
+        // then close the gateway stream before Swift drains all response packets.
+        let response = vec![b'x'; (OUTBOUND_MAX_PACKETS + 4) * TCP_MSS as usize];
+        router.process_gateway_data(1, &response);
+        router.process_gateway_close(1);
+
+        let mut saw_fin = false;
+        let mut packets_before_fin = 0usize;
+        while let Some(pkt) = router.pop_outbound() {
+            let tcp_hdr = parse_tcp(&pkt[20..]).unwrap();
+            if tcp_hdr.is_fin() {
+                saw_fin = true;
+                break;
+            }
+            packets_before_fin += 1;
+        }
+
+        assert!(saw_fin, "gateway close should eventually emit a TCP FIN");
+        assert!(
+            packets_before_fin > OUTBOUND_MAX_PACKETS,
+            "FIN must be deferred until the spilled response tail drains; packets_before_fin={}",
+            packets_before_fin
+        );
     }
 
     #[test]

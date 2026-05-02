@@ -199,17 +199,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let maxOutboundPacketsPerFlush: Int = 64
     private static let browserModeMaxOutboundPacketsPerFlush: Int = 32
 
-    /// Adaptive advertised receive window. rwnd=4 is the proven Vaultwarden
-    /// recovery baseline; ramp above it only after sustained healthy progress.
+    /// Adaptive advertised receive window. rwnd=4 remains the recovery floor,
+    /// but the Rust-fd path can safely test a larger browser burst window.
     private static let rwndFloor: UInt16 = 4
-    private static let rwndAdaptiveMax: UInt16 = 5
+    private static let rwndAdaptiveMax: UInt16 = 8
+    private static let rwndBrowserBurstTarget: UInt16 = 8
     private static let rwndHealthyTicksToIncrease = 3
     private static let rwndReplayDeltaBad = 8
     private static let rwndRouterOutboundBad = 128
     private static let rwndSendBufBytesBad = 16_384
     private static let rwndOldestMsBad = 4_000
-    /// Browser/WKWebView bursts fan out multiple streams; keep those on the
-    /// proven rwnd=4 floor instead of letting the adaptive ramp hit 5 mid-burst.
+    /// Browser/WKWebView bursts fan out multiple streams. With Rust-fd enabled,
+    /// hold browser bursts at rwnd=8 unless pressure forces the floor, instead
+    /// of pinning them to rwnd=4 and building a huge gateway-side response tail.
     private static let rwndBrowserBurstFlowThreshold = 2
     private var advertisedRwnd: UInt16 = 4
     private var consecutiveFullFlushes = 0
@@ -1422,7 +1424,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         if stats.flows >= Self.rwndBrowserBurstFlowThreshold || stats.streamToFlow >= Self.rwndBrowserBurstFlowThreshold {
-            reduceAdvertisedRwnd(reason: "browser burst flows=\(stats.flows) streamMaps=\(stats.streamToFlow)")
+            consecutiveRwndHealthyTicks = 0
+            updateAdvertisedRwnd(
+                Self.rwndBrowserBurstTarget,
+                reason: "browser burst target flows=\(stats.flows) streamMaps=\(stats.streamToFlow)"
+            )
             return
         }
 

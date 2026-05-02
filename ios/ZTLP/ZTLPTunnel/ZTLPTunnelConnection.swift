@@ -471,7 +471,7 @@ final class ZTLPTunnelConnection {
     }
 
     func setAdvertisedReceiveWindow(_ rwnd: UInt16) {
-        advertisedReceiveWindow = min(max(rwnd, 4), 5)
+        advertisedReceiveWindow = min(max(rwnd, 4), 8)
     }
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
@@ -504,7 +504,7 @@ final class ZTLPTunnelConnection {
         // Advertise a receive window from the actual NE/router pressure, not
         // just NWConnection ACK-send pressure. Under Vaultwarden page loads the
         // ACK path stays empty while packetFlow/router delivery saturates.
-        let sendWindow = UInt16(max(4, min(Self.maxSendsInFlight - sendsInFlight, 5)))
+        let sendWindow = UInt16(max(4, min(Self.maxSendsInFlight - sendsInFlight, 8)))
         let availableWindow = min(advertisedReceiveWindow, sendWindow)
         let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &ackFrame, ackFrame.count, &ackWritten)
         guard ackResult == 0, ackWritten > 0 else { return }

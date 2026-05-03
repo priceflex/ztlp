@@ -62,7 +62,7 @@
 
 #![deny(clippy::unwrap_used)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,12 +71,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
-use crate::stats::{RxBatchStats, TunnelStats, TxBatchStats};
+use crate::stats::TunnelStats;
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

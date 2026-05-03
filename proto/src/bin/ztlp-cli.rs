@@ -8731,7 +8731,8 @@ fn resolve_ns_server(
 
 #[allow(unused_variables)]
 fn cmd_tune(apply: bool, persist: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use ztlp_proto::pacing::TARGET_BUFFER_SIZE;
+    // Nebula-pivot R4: `ztlp_proto::pacing` deleted; inline literal (was 7 MiB).
+    const TARGET_BUFFER_SIZE: usize = 7 * 1024 * 1024;
 
     let target = TARGET_BUFFER_SIZE;
     let target_mb = target / (1024 * 1024);

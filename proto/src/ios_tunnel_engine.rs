@@ -1175,7 +1175,7 @@ fn drain_router_outbound_to_utun(
 }
 
 fn dispatch_router_actions(
-    router: *mut crate::ffi::ZtlpPacketRouter,
+    _router: *mut crate::ffi::ZtlpPacketRouter,
     action_buf: &[u8],
     callback: RouterActionCallback,
     closed_streams: &mut HashSet<u32>,

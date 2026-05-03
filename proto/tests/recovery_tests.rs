@@ -10,7 +10,6 @@ use ztlp_proto::packet::*;
 use ztlp_proto::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
 use ztlp_proto::session::SessionState;
 use ztlp_proto::transport::TransportNode;
-use ztlp_proto::tunnel::ReassemblyBuffer;
 
 /// Helper: create a Pipeline with a registered session for testing.
 fn make_pipeline(sid_bytes: [u8; 12], key: &[u8; 32]) -> Pipeline {
@@ -158,36 +157,7 @@ async fn test_maximum_length_payload() {
 
 // ─── Test 7: Reassembly buffer limits ────────────────────────────
 
-#[tokio::test]
-async fn test_reassembly_buffer_limits() {
-    let mut reasm = ReassemblyBuffer::new(0, 16);
-
-    for i in (0..100u64).rev() {
-        let _ = reasm.insert(i, vec![i as u8; 64]);
-    }
-
-    assert!(
-        reasm.buffered_count() <= 16,
-        "Reassembly buffer should respect max limit, got {}",
-        reasm.buffered_count()
-    );
-}
-
 // ─── Test 8: Duplicate sequence numbers in reassembly ────────────
-
-#[tokio::test]
-async fn test_reassembly_duplicate_sequences() {
-    let mut reasm = ReassemblyBuffer::new(0, 64);
-
-    let result1 = reasm.insert(0, vec![0xAA; 32]);
-    assert!(result1.is_some(), "First in-order packet should deliver");
-
-    let result2 = reasm.insert(0, vec![0xBB; 32]);
-    assert!(result2.is_none(), "Duplicate seq should not deliver again");
-
-    let result3 = reasm.insert(1, vec![0xCC; 32]);
-    assert!(result3.is_some(), "Next in-order packet should deliver");
-}
 
 // ─── Test 9: Pipeline with all-zero packet ───────────────────────
 
@@ -272,51 +242,7 @@ async fn test_transport_send_unreachable() {
 
 // ─── Test 13: NACK decode with malformed input ───────────────────
 
-#[tokio::test]
-async fn test_nack_decode_malformed() {
-    use ztlp_proto::tunnel::decode_nack_payload;
-
-    assert!(decode_nack_payload(&[]).is_none());
-    assert!(decode_nack_payload(&[0x01]).is_none());
-
-    let short = vec![0x00, 0x01]; // claims 1 entry, no data
-    assert!(decode_nack_payload(&short).is_none());
-
-    let mut truncated = vec![0x00, 0x64]; // claims 100 entries
-    truncated.extend_from_slice(&[0u8; 8]); // only 1 entry
-    assert!(decode_nack_payload(&truncated).is_none());
-
-    let zero_count = vec![0x00, 0x00];
-    let result = decode_nack_payload(&zero_count);
-    assert!(result.is_some());
-    assert!(result.unwrap().is_empty());
-}
-
 // ─── Test 14: Reassembly out-of-order delivery ───────────────────
-
-#[tokio::test]
-async fn test_reassembly_out_of_order() {
-    let mut reasm = ReassemblyBuffer::new(0, 64);
-
-    // Insert seq 2 first (out of order) — buffered, returns empty deliverable
-    let result = reasm.insert(2, vec![0x02; 32]);
-    assert!(result.is_some(), "Out-of-order returns Some(empty)");
-    assert!(result.unwrap().is_empty(), "Nothing deliverable yet");
-
-    // Insert seq 1 (still out of order) — buffered
-    let result = reasm.insert(1, vec![0x01; 32]);
-    assert!(result.is_some(), "Out-of-order returns Some(empty)");
-    assert!(result.unwrap().is_empty(), "Still waiting for seq 0");
-
-    // Insert seq 0 — should trigger delivery of 0, 1, 2
-    let result = reasm.insert(0, vec![0x00; 32]);
-    assert!(result.is_some(), "seq 0 should trigger cascade delivery");
-    let delivered = result.unwrap();
-    assert_eq!(delivered.len(), 3, "Should deliver 3 packets in order");
-    assert_eq!(delivered[0].0, 0);
-    assert_eq!(delivered[1].0, 1);
-    assert_eq!(delivered[2].0, 2);
-}
 
 // ─── Test 15: Handshake header parse with garbage ────────────────
 

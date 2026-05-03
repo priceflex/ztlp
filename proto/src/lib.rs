@@ -64,9 +64,6 @@ pub mod reject;
 pub mod rekey;
 pub mod relay_pool;
 pub mod roaming;
-// Nebula-pivot R1: real module deleted; `session_health.rs` is a tiny stub shim for ffi.rs.
-#[cfg(feature = "ios-sync")]
-pub mod session_health;
 pub mod security;
 pub mod session;
 pub mod stats;
@@ -78,10 +75,6 @@ pub mod updater;
 pub mod ack_socket;
 #[cfg(feature = "tokio-runtime")]
 pub mod batch;
-// Nebula-pivot R1: real module deleted; `congestion.rs` is a tiny stub shim kept
-// only so the 120+ call sites in tunnel.rs continue to type-check until R3 deletes them.
-#[cfg(feature = "tokio-runtime")]
-pub mod congestion;
 #[cfg(feature = "tokio-runtime")]
 pub mod dns;
 #[cfg(feature = "tokio-runtime")]
@@ -92,9 +85,6 @@ pub mod gso;
 pub mod mobile;
 #[cfg(feature = "tokio-runtime")]
 pub mod nat;
-// Nebula-pivot R1: real module deleted; `pacing.rs` is a tiny stub shim.
-#[cfg(feature = "tokio-runtime")]
-pub mod pacing;
 #[cfg(feature = "tokio-runtime")]
 pub mod policy;
 #[cfg(feature = "tokio-runtime")]

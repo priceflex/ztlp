@@ -77,7 +77,11 @@ defmodule ZtlpGateway.Bbr do
       |> set_pacing_rate()
       |> set_cwnd()
 
-    if new_state.round_start or new_state.state != state.state or new_state.cwnd != state.cwnd do
+    # BBR is dead telemetry as of commit 4906aef — session.ex gates sends on
+    # AIMD state.cwnd, not state.bbr.cwnd. These [BBR] lines misled operators
+    # during past debugging sessions, so they're opt-in via env flag now.
+    if System.get_env("ZTLP_GATEWAY_BBR_LOG") == "true" and
+         (new_state.round_start or new_state.state != state.state or new_state.cwnd != state.cwnd) do
       require Logger
       Logger.debug("[BBR] state=#{new_state.state} cwnd=#{Float.round(new_state.cwnd, 1)} " <>
         "btl_bw=#{trunc(new_state.btl_bw)} rt_prop=#{inspect(new_state.rt_prop)} " <>

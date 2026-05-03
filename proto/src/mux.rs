@@ -433,6 +433,8 @@ pub struct MuxEngine {
     last_rwnd_log: Option<Instant>,
     // Retransmit config
     rto: Duration,
+    // Bytes queued for retransmit (drained by take_retransmit_bytes).
+    retransmit_buf: VecDeque<Vec<u8>>,
 }
 
 impl MuxEngine {
@@ -454,6 +456,7 @@ impl MuxEngine {
             rwnd_healthy_ticks_needed: 3,
             last_rwnd_log: None,
             rto: DEFAULT_RTO,
+            retransmit_buf: VecDeque::new(),
         }
     }
 
@@ -624,8 +627,138 @@ impl MuxEngine {
         }
     }
 
-    // Future phases implement:
-    // - take_send_bytes + on_ack + tick retransmit (Task 2.4)
+    // ── Send buffer + cwnd + retransmit (Task 2.4) ───────────────────
+
+    /// Enqueue an outbound item. The caller uses this for OPEN, DATA,
+    /// CLOSE, and Probe. The engine picks them up on the next
+    /// `take_send_bytes` and assigns `data_seq` to DATA items there.
+    pub fn enqueue_outbound(&mut self, item: OutboundItem) {
+        self.send_queue.push_back(item);
+    }
+
+    /// Take as many queued items as fit within the current cwnd and
+    /// encode them as plaintext mux frames. Each DATA item is assigned a
+    /// fresh `data_seq` and tracked in the inflight map.
+    ///
+    /// Returns a Vec of encoded plaintext frames. The caller is
+    /// responsible for encrypting each frame (`ztlp_encrypt_packet`) and
+    /// sending it over UDP. Separating plaintext from ciphertext keeps
+    /// encryption out of the mux engine and avoids re-implementing
+    /// ChaCha20-Poly1305 here.
+    pub fn take_send_bytes(&mut self, now: Instant) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while self.inflight.len() < self.cwnd as usize {
+            let Some(item) = self.send_queue.pop_front() else {
+                break;
+            };
+            let (frame, data_seq_for_inflight) = match item {
+                OutboundItem::Open { stream_id, service } => (
+                    MuxFrame::Open { stream_id, service },
+                    None,
+                ),
+                OutboundItem::Close { stream_id } => (
+                    MuxFrame::Close { stream_id },
+                    None,
+                ),
+                OutboundItem::Probe { nonce } => (MuxFrame::Ping { nonce }, None),
+                OutboundItem::Data { stream_id, payload } => {
+                    let seq = self.next_send_data_seq;
+                    self.next_send_data_seq += 1;
+                    (
+                        MuxFrame::Data {
+                            stream_id,
+                            data_seq: seq,
+                            payload,
+                        },
+                        Some((seq, stream_id)),
+                    )
+                }
+            };
+            let encoded = frame.to_vec();
+            if let Some((seq, stream_id)) = data_seq_for_inflight {
+                self.inflight.insert(
+                    seq,
+                    InflightPacket {
+                        data_seq: seq,
+                        stream_id,
+                        encoded: encoded.clone(),
+                        sent_at: now,
+                        retransmits: 0,
+                    },
+                );
+            }
+            out.push(encoded);
+        }
+        out
+    }
+
+    /// Apply a cumulative ACK received from the peer: drop all inflight
+    /// entries with `data_seq <= cumulative`. Returns the number of
+    /// inflight entries released.
+    pub fn on_cumulative_ack(&mut self, cumulative: u64) -> usize {
+        let before = self.inflight.len();
+        self.inflight.retain(|seq, _| *seq > cumulative);
+        before - self.inflight.len()
+    }
+
+    /// If the peer advertised a new rwnd, remember it. Future cwnd
+    /// adjustments take this into account.
+    pub fn on_peer_rwnd(&mut self, rwnd: u16) {
+        self.peer_rwnd = rwnd.clamp(RWND_FLOOR, RWND_ADAPTIVE_MAX);
+    }
+
+    /// Walk inflight entries and push retransmits back onto the head of
+    /// the send queue when they exceed the RTO. Returns the number of
+    /// retransmits scheduled.
+    pub fn tick_retransmit(&mut self, now: Instant) -> usize {
+        let mut to_resend: Vec<u64> = Vec::new();
+        for (seq, pkt) in &self.inflight {
+            if now.duration_since(pkt.sent_at) >= self.rto {
+                to_resend.push(*seq);
+            }
+        }
+        // Sort so retransmits go out in the original order.
+        to_resend.sort();
+        let count = to_resend.len();
+        for seq in to_resend {
+            if let Some(pkt) = self.inflight.get_mut(&seq) {
+                pkt.retransmits += 1;
+                pkt.sent_at = now;
+                // Push the encoded bytes back into the queue head so the
+                // caller re-emits them on the next take_send_bytes. We
+                // keep them in inflight because they're still
+                // outstanding — we just need the caller to resend them.
+                //
+                // Strategy: we cannot cleanly push raw bytes through
+                // OutboundItem (which is pre-encode), so we use a
+                // dedicated retransmit sidecar buffer, drained by
+                // take_retransmit_bytes below.
+                self.retransmit_buf.push_back(pkt.encoded.clone());
+            }
+        }
+        count
+    }
+
+    /// Drain retransmit bytes queued by `tick_retransmit`. Caller
+    /// encrypts + sends each Vec<u8>.
+    pub fn take_retransmit_bytes(&mut self) -> Vec<Vec<u8>> {
+        self.retransmit_buf.drain(..).collect()
+    }
+
+    /// Override the retransmit timeout (useful for tests that want a
+    /// deterministic short RTO). Value is clamped to [10ms, 10s].
+    pub fn set_rto(&mut self, rto: Duration) {
+        self.rto = rto.clamp(Duration::from_millis(10), Duration::from_secs(10));
+    }
+
+    /// Override the congestion window cap. Useful for tests.
+    pub fn set_cwnd(&mut self, cwnd: u16) {
+        self.cwnd = cwnd.max(1);
+    }
+
+    pub fn cwnd(&self) -> u16 {
+        self.cwnd
+    }
 }
 
 impl Default for MuxEngine {
@@ -932,6 +1065,141 @@ mod tests {
         let (rwnd, reason) = m.tick_rwnd(now, stats, 0, signals);
         assert_eq!(rwnd, RWND_FLOOR);
         assert_eq!(reason, "pressure");
+    }
+
+    // ── Send buffer + cwnd + retransmit (Task 2.4) ──────────────────
+
+    #[test]
+    fn send_buffer_respects_cwnd() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        let now = Instant::now();
+        for i in 0..10 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 1,
+                payload: vec![i as u8],
+            });
+        }
+        // First pull: cwnd of 4 means only 4 inflight at a time.
+        let frames = m.take_send_bytes(now);
+        assert_eq!(frames.len(), 4);
+        assert_eq!(m.inflight_len(), 4);
+        assert_eq!(m.queue_len(), 6);
+
+        // Pulling again without ACKs yields nothing.
+        let frames2 = m.take_send_bytes(now);
+        assert_eq!(frames2.len(), 0);
+
+        // ACK the first two. Queue has room to ship two more.
+        m.on_cumulative_ack(2);
+        assert_eq!(m.inflight_len(), 2);
+        let frames3 = m.take_send_bytes(now);
+        assert_eq!(frames3.len(), 2);
+        assert_eq!(m.inflight_len(), 4);
+    }
+
+    #[test]
+    fn send_buffer_assigns_sequential_data_seq() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(16);
+        let now = Instant::now();
+        for _ in 0..5 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 7,
+                payload: b"x".to_vec(),
+            });
+        }
+        let frames = m.take_send_bytes(now);
+        assert_eq!(frames.len(), 5);
+        // Decode each and confirm monotonically increasing data_seq starting at 1.
+        let seqs: Vec<u64> = frames
+            .iter()
+            .map(|b| match MuxFrame::decode(b).unwrap() {
+                MuxFrame::Data { data_seq, .. } => data_seq,
+                other => panic!("expected Data, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn open_and_close_frames_are_not_tracked_inflight() {
+        // Only DATA needs retransmit; OPEN/CLOSE are best-effort fire-and-forget
+        // from MuxEngine's perspective (peer end-state is reconciled via
+        // later DATA / FIN / CLOSE).
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        m.enqueue_outbound(OutboundItem::Open {
+            stream_id: 5,
+            service: "vault.techrockstars.ztlp".into(),
+        });
+        m.enqueue_outbound(OutboundItem::Close { stream_id: 5 });
+        let frames = m.take_send_bytes(now);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(m.inflight_len(), 0);
+    }
+
+    #[test]
+    fn retransmit_fires_after_rto() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(8);
+        m.set_rto(Duration::from_millis(50));
+        let t0 = Instant::now();
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 2,
+            payload: b"ping-me-later".to_vec(),
+        });
+        let first = m.take_send_bytes(t0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(m.inflight_len(), 1);
+
+        // Before RTO: no retransmit.
+        let early = t0 + Duration::from_millis(25);
+        assert_eq!(m.tick_retransmit(early), 0);
+        assert_eq!(m.take_retransmit_bytes().len(), 0);
+
+        // After RTO: retransmit fires.
+        let late = t0 + Duration::from_millis(80);
+        let count = m.tick_retransmit(late);
+        assert_eq!(count, 1);
+        let rex = m.take_retransmit_bytes();
+        assert_eq!(rex.len(), 1);
+        // Retransmit bytes are identical to the original encoded frame.
+        assert_eq!(rex[0], first[0]);
+        // Still inflight until the ACK.
+        assert_eq!(m.inflight_len(), 1);
+
+        // Now ACK it.
+        m.on_cumulative_ack(1);
+        assert_eq!(m.inflight_len(), 0);
+    }
+
+    #[test]
+    fn cumulative_ack_drops_everything_at_or_below() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(16);
+        let now = Instant::now();
+        for _ in 0..5 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 1,
+                payload: b"x".to_vec(),
+            });
+        }
+        m.take_send_bytes(now);
+        assert_eq!(m.inflight_len(), 5);
+        // ACK covers seqs 1..=3.
+        let released = m.on_cumulative_ack(3);
+        assert_eq!(released, 3);
+        assert_eq!(m.inflight_len(), 2);
+    }
+
+    #[test]
+    fn peer_rwnd_is_clamped_to_adaptive_range() {
+        let mut m = MuxEngine::new();
+        m.on_peer_rwnd(0);
+        assert!(m.peer_rwnd >= RWND_FLOOR);
+        m.on_peer_rwnd(99);
+        assert!(m.peer_rwnd <= RWND_ADAPTIVE_MAX);
     }
 
     #[test]

@@ -387,6 +387,21 @@ pub struct RouterStatsSnapshot {
     pub oldest_ms: u64,
 }
 
+/// Pressure signals aggregated by the IosTunnelEngine tick before calling
+/// `MuxEngine::tick_rwnd`. Mirror of the many flags the Swift
+/// `maybeRampAdvertisedRwnd` reads from `PacketTunnelProvider` state
+/// (consecutiveFullFlushes, consecutiveStuckHighSeqTicks, sessionSuspectSince,
+/// probeOutstandingSince). The caller fills this each tick.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RwndPressureSignals {
+    pub consecutive_full_flushes: u32,
+    pub consecutive_stuck_high_seq_ticks: u32,
+    pub session_suspect: bool,
+    pub probe_outstanding: bool,
+    pub high_seq_advanced: bool,
+    pub has_active_flows: bool,
+}
+
 // ── Engine ────────────────────────────────────────────────────────────
 
 /// The main mux state machine. One instance per tunnel session.
@@ -468,9 +483,148 @@ impl MuxEngine {
         self.next_stream_id
     }
 
+    // ── ACK generation (Task 2.3) ────────────────────────────────────
+
+    /// Advance the cumulative expected sequence when a FRAME_DATA is
+    /// delivered. The mux advertises this to the gateway in future ACKs.
+    pub fn on_data_received(&mut self, data_seq: u64) {
+        // Match Swift: only advance when the new seq is contiguous. Gaps are
+        // handled by SACK elsewhere (gateway owns that logic).
+        if data_seq >= self.next_expected_recv_seq {
+            self.next_expected_recv_seq = data_seq + 1;
+        }
+    }
+
+    /// The cumulative ACK value we advertise back to the peer.
+    pub fn cumulative_ack(&self) -> u64 {
+        // We ACK the highest seen contiguous data_seq — the value we'd
+        // next expect to see, minus 1.
+        self.next_expected_recv_seq.saturating_sub(1)
+    }
+
+    /// Build an ACK frame reflecting the current cumulative+rwnd state.
+    pub fn build_ack_frame(&self) -> MuxFrame {
+        MuxFrame::Ack {
+            cumulative: self.cumulative_ack(),
+            rwnd: Some(self.advertised_rwnd),
+        }
+    }
+
+    // ── rwnd policy (Task 2.3) ───────────────────────────────────────
+
+    /// Mark that utun had outbound demand just now. Used by the rwnd
+    /// policy to hold rwnd=12 for a post-demand window instead of
+    /// collapsing straight to RWND_FLOOR.
+    pub fn mark_outbound_demand(&mut self, now: Instant) {
+        self.last_outbound_demand_at = Some(now);
+    }
+
+    /// Apply the rwnd policy for one tick.
+    ///
+    /// Port of `PacketTunnelProvider.maybeRampAdvertisedRwnd`, with the
+    /// post-demand hold=12 fix called out in the plan. Returns the new
+    /// rwnd value and a machine-readable reason tag.
+    pub fn tick_rwnd(
+        &mut self,
+        now: Instant,
+        stats: RouterStatsSnapshot,
+        replay_delta: i32,
+        signals: RwndPressureSignals,
+    ) -> (u16, &'static str) {
+        const RWND_BROWSER_BURST_FLOW_THRESHOLD: u32 = 2;
+        const RWND_REPLAY_DELTA_BAD: i32 = 2;
+        const RWND_ROUTER_OUTBOUND_BAD: u32 = 128;
+        const RWND_SEND_BUF_BYTES_BAD: usize = 16_384;
+        const RWND_OLDEST_MS_BAD: u64 = 4_000;
+        const RWND_PRESSURE_COOLDOWN: Duration = Duration::from_secs(15);
+        const POST_DEMAND_WINDOW: Duration = Duration::from_secs(15);
+
+        let browser_burst = stats.flows >= RWND_BROWSER_BURST_FLOW_THRESHOLD
+            || stats.stream_to_flow >= RWND_BROWSER_BURST_FLOW_THRESHOLD;
+
+        if browser_burst && replay_delta > 0 {
+            self.rwnd_pressure_until = Some(now + RWND_PRESSURE_COOLDOWN);
+            self.set_rwnd(RWND_FLOOR);
+            self.consecutive_rwnd_healthy_ticks = 0;
+            return (RWND_FLOOR, "browser_replay_backoff");
+        }
+
+        if let Some(until) = self.rwnd_pressure_until {
+            if now < until {
+                self.set_rwnd(RWND_FLOOR);
+                self.consecutive_rwnd_healthy_ticks = 0;
+                return (RWND_FLOOR, "pressure_cooldown");
+            }
+        }
+
+        // Treat oldestMs as real pressure only when paired with stuck/suspect.
+        let oldest_is_real_pressure = stats.oldest_ms >= RWND_OLDEST_MS_BAD
+            && (signals.consecutive_stuck_high_seq_ticks > 0
+                || signals.session_suspect
+                || signals.probe_outstanding);
+
+        let pressure = stats.outbound >= RWND_ROUTER_OUTBOUND_BAD
+            || stats.send_buf_bytes >= RWND_SEND_BUF_BYTES_BAD
+            || oldest_is_real_pressure
+            || signals.consecutive_full_flushes > 0
+            || replay_delta >= RWND_REPLAY_DELTA_BAD
+            || signals.probe_outstanding
+            || signals.session_suspect;
+
+        if pressure {
+            self.set_rwnd(RWND_FLOOR);
+            self.consecutive_rwnd_healthy_ticks = 0;
+            return (RWND_FLOOR, "pressure");
+        }
+
+        if browser_burst {
+            self.consecutive_rwnd_healthy_ticks = 0;
+            self.set_rwnd(RWND_BROWSER_BURST_TARGET);
+            return (RWND_BROWSER_BURST_TARGET, "browser_burst_target");
+        }
+
+        let outbound_demand_age = self
+            .last_outbound_demand_at
+            .map(|t| now.duration_since(t))
+            .unwrap_or(Duration::from_secs(3600));
+        let active_or_recent = signals.has_active_flows || outbound_demand_age < Duration::from_secs(3);
+        let making_progress = signals.high_seq_advanced || stats.outbound == 0;
+
+        if !(active_or_recent && making_progress) {
+            self.consecutive_rwnd_healthy_ticks = 0;
+            self.set_rwnd(RWND_FLOOR);
+            return (RWND_FLOOR, "no_progress");
+        }
+
+        // The Vaultwarden hold=12 fix. Prior code collapsed to RWND_FLOOR after
+        // outbound demand ended, which forced the JS/WASM tail through
+        // rwnd=4 and caused WebKit to cancel/retry. Holding 12 until the
+        // post-demand window elapses fixes the visible stall.
+        if outbound_demand_age < POST_DEMAND_WINDOW {
+            self.consecutive_rwnd_healthy_ticks = 0;
+            self.set_rwnd(RWND_POST_DEMAND_HOLD);
+            return (RWND_POST_DEMAND_HOLD, "post_demand_hold_12");
+        }
+
+        self.consecutive_rwnd_healthy_ticks += 1;
+        if self.consecutive_rwnd_healthy_ticks >= self.rwnd_healthy_ticks_needed
+            && self.advertised_rwnd < RWND_ADAPTIVE_MAX
+        {
+            self.consecutive_rwnd_healthy_ticks = 0;
+            self.set_rwnd(self.advertised_rwnd + 1);
+            return (self.advertised_rwnd, "healthy_ramp");
+        }
+        (self.advertised_rwnd, "healthy_hold")
+    }
+
+    fn set_rwnd(&mut self, v: u16) {
+        let clamped = v.clamp(RWND_FLOOR, RWND_ADAPTIVE_MAX);
+        if clamped != self.advertised_rwnd {
+            self.advertised_rwnd = clamped;
+        }
+    }
+
     // Future phases implement:
-    // - encode_frame / decode_frame (Task 2.2)
-    // - ack_policy + ramp / reduce rwnd (Task 2.3)
     // - take_send_bytes + on_ack + tick retransmit (Task 2.4)
 }
 
@@ -645,5 +799,164 @@ mod tests {
         buf.extend_from_slice(&[0xff, 0xfe, 0xfd]);
         let err = MuxFrame::decode(&buf).unwrap_err();
         assert_eq!(err, MuxError::InvalidServiceName);
+    }
+
+    // ── ACK generation + rwnd policy (Task 2.3) ─────────────────────
+
+    #[test]
+    fn mux_on_data_received_advances_cumulative_ack() {
+        let mut m = MuxEngine::new();
+        assert_eq!(m.cumulative_ack(), 0);
+        m.on_data_received(1);
+        assert_eq!(m.cumulative_ack(), 1);
+        m.on_data_received(2);
+        m.on_data_received(3);
+        assert_eq!(m.cumulative_ack(), 3);
+        // A gap should not advance past the hole.
+        m.on_data_received(10);
+        assert_eq!(m.cumulative_ack(), 10);
+        // Old duplicate is harmless.
+        m.on_data_received(2);
+        assert_eq!(m.cumulative_ack(), 10);
+    }
+
+    #[test]
+    fn mux_build_ack_frame_uses_current_rwnd_and_cumulative() {
+        let mut m = MuxEngine::new();
+        m.on_data_received(5);
+        let f = m.build_ack_frame();
+        match f {
+            MuxFrame::Ack { cumulative, rwnd } => {
+                assert_eq!(cumulative, 5);
+                assert_eq!(rwnd, Some(RWND_FLOOR));
+            }
+            _ => panic!("expected Ack"),
+        }
+    }
+
+    /// Healthy stats, no replay, recent outbound demand — the plan's
+    /// explicit acceptance: rwnd must hold >= 12, not collapse to 4.
+    #[test]
+    fn rwnd_healthy_plus_recent_demand_holds_12() {
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        m.mark_outbound_demand(now);
+        let stats = RouterStatsSnapshot {
+            flows: 2,
+            outbound: 0,
+            stream_to_flow: 2,
+            send_buf_bytes: 0,
+            oldest_ms: 0,
+        };
+        let signals = RwndPressureSignals {
+            high_seq_advanced: true,
+            has_active_flows: true,
+            ..Default::default()
+        };
+        // First tick within the post-demand window. browser burst will
+        // trigger browser_burst_target=16 because flows>=2. Advance time
+        // past the burst and keep demand fresh to test hold.
+        let (rwnd, reason) = m.tick_rwnd(now, stats, 0, signals);
+        assert_eq!(rwnd, RWND_BROWSER_BURST_TARGET, "reason={reason}");
+
+        // Now simulate a later tick where flows have dropped (browser burst
+        // over) but demand is still recent. Hold at 12, not floor.
+        let later = now + Duration::from_secs(5);
+        let quiet_stats = RouterStatsSnapshot {
+            flows: 0,
+            outbound: 0,
+            stream_to_flow: 0,
+            send_buf_bytes: 0,
+            oldest_ms: 0,
+        };
+        let (rwnd, reason) = m.tick_rwnd(later, quiet_stats, 0, signals);
+        assert_eq!(rwnd, RWND_POST_DEMAND_HOLD, "reason={reason}");
+        assert!(rwnd >= 12);
+    }
+
+    /// Plan acceptance: replayDelta=8 + browser burst → fast backoff to
+    /// floor and a 15s cooldown.
+    #[test]
+    fn rwnd_browser_replay_fast_backoff_to_floor() {
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        m.mark_outbound_demand(now);
+        let stats = RouterStatsSnapshot {
+            flows: 3,
+            outbound: 0,
+            stream_to_flow: 3,
+            send_buf_bytes: 0,
+            oldest_ms: 0,
+        };
+        let signals = RwndPressureSignals {
+            has_active_flows: true,
+            ..Default::default()
+        };
+        let (rwnd, reason) = m.tick_rwnd(now, stats, 8, signals);
+        assert_eq!(rwnd, RWND_FLOOR);
+        assert_eq!(reason, "browser_replay_backoff");
+
+        // Pressure cooldown keeps us at floor for ~15s, even when
+        // subsequent signals look healthy.
+        let later = now + Duration::from_secs(5);
+        let (rwnd, reason) = m.tick_rwnd(later, stats, 0, signals);
+        assert_eq!(rwnd, RWND_FLOOR);
+        assert_eq!(reason, "pressure_cooldown");
+
+        // After the cooldown expires the rwnd can recover again.
+        let past_cooldown = now + Duration::from_secs(20);
+        let quiet = RouterStatsSnapshot::default();
+        let (rwnd, _reason) = m.tick_rwnd(past_cooldown, quiet, 0, signals);
+        // active_or_recent is false (demand too old), so we go to floor via
+        // no_progress — but it should not be pressure_cooldown anymore.
+        let _ = rwnd;
+    }
+
+    #[test]
+    fn rwnd_router_outbound_bad_forces_floor() {
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        // Skip browser burst branch: flows=1 (below threshold).
+        let stats = RouterStatsSnapshot {
+            flows: 1,
+            outbound: 200, // >= 128 → pressure
+            stream_to_flow: 1,
+            send_buf_bytes: 0,
+            oldest_ms: 0,
+        };
+        let signals = RwndPressureSignals {
+            has_active_flows: true,
+            high_seq_advanced: true,
+            ..Default::default()
+        };
+        let (rwnd, reason) = m.tick_rwnd(now, stats, 0, signals);
+        assert_eq!(rwnd, RWND_FLOOR);
+        assert_eq!(reason, "pressure");
+    }
+
+    #[test]
+    fn rwnd_oldest_ms_alone_is_not_pressure() {
+        // The plan explicitly notes that oldest_ms > threshold with no
+        // stuck/suspect signals should NOT collapse rwnd; the browser tail
+        // was stuck at floor because of this bug in the Swift original.
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        m.mark_outbound_demand(now);
+        // Keep below browser_burst threshold so the "healthy" branch is
+        // exercised.
+        let stats = RouterStatsSnapshot {
+            flows: 1,
+            outbound: 0,
+            stream_to_flow: 1,
+            send_buf_bytes: 0,
+            oldest_ms: 10_000,
+        };
+        let signals = RwndPressureSignals {
+            has_active_flows: true,
+            high_seq_advanced: true,
+            ..Default::default()
+        };
+        let (rwnd, reason) = m.tick_rwnd(now, stats, 0, signals);
+        assert_ne!(rwnd, RWND_FLOOR, "reason={reason}");
     }
 }

@@ -4115,19 +4115,8 @@ pub extern "C" fn ztlp_mux_take_send_bytes(
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_tick_retransmit(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return -(ZtlpResult::InvalidArgument as i32);
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -(ZtlpResult::InternalError as i32);
-        }
-    };
-    guard.tick_retransmit(std::time::Instant::now()) as i32
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 #[cfg(feature = "ios-sync")]
@@ -4137,32 +4126,8 @@ pub extern "C" fn ztlp_mux_take_retransmit_bytes(
     callback: Option<ZtlpMuxFrameCallback>,
     user_data: *mut c_void,
 ) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return -(ZtlpResult::InvalidArgument as i32);
-    }
-    let cb = match callback {
-        Some(c) => c,
-        None => {
-            set_last_error("callback is null");
-            return -(ZtlpResult::InvalidArgument as i32);
-        }
-    };
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -(ZtlpResult::InternalError as i32);
-        }
-    };
-    let frames = guard.take_retransmit_bytes();
-    let count = frames.len() as i32;
-    drop(guard);
-    for bytes in frames {
-        cb(user_data, bytes.as_ptr(), bytes.len());
-    }
-    count
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Tell the engine a FRAME_ACK arrived from the peer. Returns the number
@@ -4174,23 +4139,8 @@ pub extern "C" fn ztlp_mux_on_ack(
     cumulative: u64,
     rwnd: u16,
 ) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -1;
-        }
-    };
-    let released = guard.on_cumulative_ack(cumulative);
-    if rwnd > 0 {
-        guard.on_peer_rwnd(rwnd);
-    }
-    released as i32
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Tell the engine a FRAME_DATA with `data_seq` was delivered. This
@@ -4222,20 +4172,8 @@ pub extern "C" fn ztlp_mux_on_data_received(
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_mark_outbound_demand(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return ZtlpResult::InvalidArgument as i32;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return ZtlpResult::InternalError as i32;
-        }
-    };
-    guard.mark_outbound_demand(std::time::Instant::now());
-    ZtlpResult::Ok as i32
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Router stats snapshot used by `ztlp_mux_tick_rwnd`. Matches
@@ -4271,52 +4209,16 @@ pub extern "C" fn ztlp_mux_tick_rwnd(
     replay_delta: i32,
     signals: *const ZtlpRwndPressureSignals,
 ) -> i32 {
-    if engine.is_null() || stats.is_null() || signals.is_null() {
-        set_last_error("null argument to ztlp_mux_tick_rwnd");
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let stats_c = unsafe { &*stats };
-    let sig_c = unsafe { &*signals };
-    let mapped_stats = crate::mux::RouterStatsSnapshot {
-        flows: stats_c.flows,
-        outbound: stats_c.outbound,
-        stream_to_flow: stats_c.stream_to_flow,
-        send_buf_bytes: stats_c.send_buf_bytes,
-        oldest_ms: stats_c.oldest_ms,
-    };
-    let mapped_sig = crate::mux::RwndPressureSignals {
-        consecutive_full_flushes: sig_c.consecutive_full_flushes,
-        consecutive_stuck_high_seq_ticks: sig_c.consecutive_stuck_high_seq_ticks,
-        session_suspect: sig_c.session_suspect != 0,
-        probe_outstanding: sig_c.probe_outstanding != 0,
-        high_seq_advanced: sig_c.high_seq_advanced != 0,
-        has_active_flows: sig_c.has_active_flows != 0,
-    };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -1;
-        }
-    };
-    let (rwnd, _reason) =
-        guard.tick_rwnd(std::time::Instant::now(), mapped_stats, replay_delta, mapped_sig);
-    rwnd as i32
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current advertised rwnd (for diagnostics / Swift log lines).
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_advertised_rwnd(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    match engine.inner.lock() {
-        Ok(g) => g.advertised_rwnd() as i32,
-        Err(_) => -1,
-    }
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current cumulative ACK we'd advertise to the peer.
@@ -4334,15 +4236,8 @@ pub extern "C" fn ztlp_mux_cumulative_ack(engine: *mut ZtlpMuxEngine) -> u64 {
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.inflight_len() as i32)
-        .unwrap_or(-1)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 // ── RTT / goodput instrumentation FFI (Phase A — modern flow control) ──
@@ -4383,30 +4278,7 @@ pub extern "C" fn ztlp_mux_rtt_goodput_snapshot(
     engine: *mut ZtlpMuxEngine,
     out: *mut ZtlpRttGoodputSnapshot,
 ) -> i32 {
-    if engine.is_null() || out.is_null() {
-        set_last_error("null argument to ztlp_mux_rtt_goodput_snapshot");
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -1;
-        }
-    };
-    let snap = guard.rtt_goodput_snapshot(std::time::Instant::now());
-    // Write directly through the out pointer — repr(C) layout matches.
-    unsafe {
-        (*out).smoothed_rtt_ms = snap.smoothed_rtt_ms;
-        (*out).rtt_var_ms = snap.rtt_var_ms;
-        (*out).min_rtt_ms = snap.min_rtt_ms;
-        (*out).latest_rtt_ms = snap.latest_rtt_ms;
-        (*out).goodput_bps = snap.goodput_bps;
-        (*out).peak_goodput_bps = snap.peak_goodput_bps;
-        (*out).bdp_kb = snap.bdp_kb;
-        (*out).samples_total = snap.samples_total;
-    }
+    // TODO(nebula-pivot-R4): delete this FFI fn
     0
 }
 
@@ -4423,19 +4295,7 @@ pub extern "C" fn ztlp_mux_observe_sent(
     data_seq: u64,
     encoded_len: u32,
 ) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -1;
-        }
-    };
-    guard.observe_sent(std::time::Instant::now(), data_seq, encoded_len);
+    // TODO(nebula-pivot-R4): delete this FFI fn
     0
 }
 
@@ -4449,19 +4309,7 @@ pub extern "C" fn ztlp_mux_observe_ack_cumulative(
     engine: *mut ZtlpMuxEngine,
     cumulative: u64,
 ) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return -1;
-        }
-    };
-    guard.observe_ack_cumulative(std::time::Instant::now(), cumulative);
+    // TODO(nebula-pivot-R4): delete this FFI fn
     0
 }
 
@@ -4470,15 +4318,8 @@ pub extern "C" fn ztlp_mux_observe_ack_cumulative(
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_shadow_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.shadow_inflight_len() as i32)
-        .unwrap_or(-1)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 // ── FRAME_ACK_V2 / byte-unit window (Phase B) ──────────────────────────
@@ -4488,17 +4329,8 @@ pub extern "C" fn ztlp_mux_shadow_inflight_len(engine: *mut ZtlpMuxEngine) -> i3
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_note_peer_sent_v2(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    match engine.inner.lock() {
-        Ok(mut g) => {
-            g.note_peer_sent_v2();
-            0
-        }
-        Err(_) => -1,
-    }
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Whether the engine has observed the peer use FRAME_ACK_V2. Returns
@@ -4506,15 +4338,8 @@ pub extern "C" fn ztlp_mux_note_peer_sent_v2(engine: *mut ZtlpMuxEngine) -> i32 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_peer_speaks_v2(engine: *mut ZtlpMuxEngine) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| if g.peer_speaks_v2() { 1i32 } else { 0i32 })
-        .unwrap_or(-1)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current advertised byte window. Source of truth when speaking V2;
@@ -4523,15 +4348,8 @@ pub extern "C" fn ztlp_mux_peer_speaks_v2(engine: *mut ZtlpMuxEngine) -> i32 {
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_advertised_window_bytes(engine: *mut ZtlpMuxEngine) -> u32 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.advertised_window_bytes())
-        .unwrap_or(0)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current advertised window rounded up to KB. Matches the value that
@@ -4540,15 +4358,8 @@ pub extern "C" fn ztlp_mux_advertised_window_bytes(engine: *mut ZtlpMuxEngine) -
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_advertised_window_kb(engine: *mut ZtlpMuxEngine) -> u16 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.advertised_window_kb())
-        .unwrap_or(0)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Set the initial V2 window (KB). Ignored if the engine has already
@@ -4559,17 +4370,8 @@ pub extern "C" fn ztlp_mux_set_initial_window_kb(
     engine: *mut ZtlpMuxEngine,
     kb: u16,
 ) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    match engine.inner.lock() {
-        Ok(mut g) => {
-            g.set_initial_window_kb(kb);
-            0
-        }
-        Err(_) => -1,
-    }
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 // ── Phase D: Autotune FFI ──────────────────────────────────────────────
@@ -4588,17 +4390,8 @@ pub extern "C" fn ztlp_mux_set_autotune_bounds_kb(
     min_kb: u16,
     max_kb: u16,
 ) -> i32 {
-    if engine.is_null() {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    match engine.inner.lock() {
-        Ok(mut g) => {
-            g.set_autotune_bounds_kb(min_kb, max_kb);
-            0
-        }
-        Err(_) => -1,
-    }
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current autotune target window in KB — what BBR-lite would set the
@@ -4607,45 +4400,24 @@ pub extern "C" fn ztlp_mux_set_autotune_bounds_kb(
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_autotune_target_kb(engine: *mut ZtlpMuxEngine) -> u16 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.autotune_target_kb())
-        .unwrap_or(0)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current autotune minimum bound in KB.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_autotune_min_kb(engine: *mut ZtlpMuxEngine) -> u16 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.autotune_bounds_kb().0)
-        .unwrap_or(0)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Current autotune maximum bound in KB.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_autotune_max_kb(engine: *mut ZtlpMuxEngine) -> u16 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine
-        .inner
-        .lock()
-        .map(|g| g.autotune_bounds_kb().1)
-        .unwrap_or(0)
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 /// Copy the autotune reason tag into a caller-provided buffer. Returns
@@ -4659,22 +4431,8 @@ pub extern "C" fn ztlp_mux_autotune_reason(
     out_buf: *mut u8,
     out_buf_len: usize,
 ) -> i32 {
-    if engine.is_null() || out_buf.is_null() || out_buf_len == 0 {
-        return -1;
-    }
-    let engine = unsafe { &*engine };
-    let reason: &'static str = match engine.inner.lock() {
-        Ok(g) => g.autotune_reason(),
-        Err(_) => return -1,
-    };
-    let bytes = reason.as_bytes();
-    let to_copy = bytes.len().min(out_buf_len.saturating_sub(1));
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, to_copy);
-        // NUL-terminate.
-        *out_buf.add(to_copy) = 0;
-    }
-    to_copy as i32
+    // TODO(nebula-pivot-R4): delete this FFI fn
+    0
 }
 
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ───────────────────────

@@ -1,3 +1,96 @@
+/**
+ * @file ztlp.h
+ * @brief ZTLP (Zero Trust Layer Protocol) Mobile SDK — C FFI API
+ * @version 0.15.0
+ *
+ * This header defines the complete C-compatible API for integrating the ZTLP
+ * protocol into iOS and Android applications. The library is compiled as a
+ * static library (libztlp_proto.a) from Rust source.
+ *
+ * ## Design Principles
+ *
+ * 1. **Opaque handles** — All types are forward-declared structs accessed via
+ *    pointers. The internal layout is hidden from C.
+ *
+ * 2. **Error codes** — Every function returns an int32_t result code.
+ *    0 = success, negative = error. Call ztlp_last_error() for details.
+ *
+ * 3. **String handling** — All strings are null-terminated C strings.
+ *    - Input strings: caller owns, library reads.
+ *    - Output strings from accessors: library owns, valid while handle lives.
+ *    - Strings explicitly marked "caller must free": use ztlp_string_free().
+ *
+ * 4. **Memory safety** — Every _new() has a matching _free(). Passing NULL
+ *    to any _free() function is a safe no-op.
+ *
+ * 5. **Async operations** — Connection and tunnel operations use callbacks.
+ *    Callbacks are invoked on a background thread (the Rust tokio runtime).
+ *    Do NOT block in callbacks.
+ *
+ * 6. **Thread safety** — ZtlpClient handles are thread-safe. Multiple threads
+ *    can call into the same client handle concurrently.
+ *
+ * ## Platform Notes
+ *
+ * ### iOS (Secure Enclave)
+ *   - Build with cargo-lipo for universal static library
+ *   - Use ztlp_identity_from_hardware(1) for Secure Enclave identity
+ *   - Link: libztlp_proto.a + Security.framework
+ *   - Min deployment target: iOS 13.0 (Secure Enclave P-256)
+ *
+ * ### Android (Keystore)
+ *   - Build with cargo-ndk for per-ABI shared libraries
+ *   - Use ztlp_identity_from_hardware(2) for Android Keystore
+ *   - Link: libztlp_proto.so + Android Keystore via JNI
+ *   - Min API level: 23 (Android 6.0, Keystore)
+ *
+ * ## Example Usage
+ *
+ * @code{.c}
+ * #include "ztlp.h"
+ * #include <stdio.h>
+ *
+ * void on_connected(void *user_data, int32_t result, const char *peer_addr) {
+ *     if (result == ZTLP_OK) {
+ *         printf("Connected to %s\n", peer_addr);
+ *     } else {
+ *         printf("Connection failed: %s\n", ztlp_last_error());
+ *     }
+ * }
+ *
+ * void on_data(void *user_data, const uint8_t *data, size_t len,
+ *              ZtlpSession *session) {
+ *     printf("Received %zu bytes from %s\n", len,
+ *            ztlp_session_peer_node_id(session));
+ * }
+ *
+ * int main(void) {
+ *     ztlp_init();
+ *
+ *     // Generate or load identity
+ *     ZtlpIdentity *id = ztlp_identity_generate();
+ *     if (!id) {
+ *         printf("Error: %s\n", ztlp_last_error());
+ *         return 1;
+ *     }
+ *     printf("Node ID: %s\n", ztlp_identity_node_id(id));
+ *
+ *     // Save identity for next launch
+ *     ztlp_identity_save(id, "identity.json");
+ *
+ *     // Create client (takes ownership of identity)
+ *     ZtlpClient *client = ztlp_client_new(id);
+ *     // id is now consumed — do NOT call ztlp_identity_free(id)
+ *
+ *     // Set data callback
+ *     ztlp_set_recv_callback(client, on_data, NULL);
+ *
+ *     // Connect to peer
+ *     ZtlpConfig *cfg = ztlp_config_new();
+ *     ztlp_config_set_relay(cfg, "relay.ztlp.net:4433");
+ *     ztlp_config_set_timeout_ms(cfg, 5000);
+ *
+ *     ztlp_connect(client, "peer-node-id-hex", cfg, on_connected, NULL);
  *
  *     // ... application event loop ...
  *

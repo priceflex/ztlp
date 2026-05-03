@@ -365,11 +365,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     svcName.withCString { ztlp_config_set_service(cfgPtr2, $0) }
                 }
 
-                // Step 5: Set client profile for CC selection
-                let detectedInterface = self.detectClientInterfaceType()
-                ztlp_set_client_profile(detectedInterface, 0, 0)
-                self.logger.info("Client profile: mobile interface=\(self.interfaceTypeName(detectedInterface)) (\(detectedInterface))", source: "Tunnel")
-
                 // Step 6: Create tunnel connection first, then do handshake on the same NWConnection
                 let target = config.targetNodeId  // gateway identity
                 self.logger.info("Connecting to \(target) via relay \(relayAddr) using NWConnection handshake...", source: "Tunnel")

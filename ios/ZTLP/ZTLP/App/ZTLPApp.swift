@@ -88,13 +88,9 @@ struct RootView: View {
                 }
             }
             .task {
-                // Initialize
-                do {
-                    try ZTLPBridge.shared.initialize()
-                } catch {
-                    print("[ZTLP] Library initialization failed: \(error)")
-                }
-                // Brief delay for polish
+                // Nebula pivot (S1.5): no in-process ZTLP library to
+                // initialize — the Network Extension owns the tunnel.
+                // Keep the brief splash delay for polish.
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 withAnimation(.easeOut(duration: 0.3)) {
                     isReady = true

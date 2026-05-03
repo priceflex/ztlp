@@ -2,7 +2,8 @@
 // ZTLP
 //
 // Swift model wrapping ZTLP identity information.
-// This is a pure data model — actual FFI operations go through ZTLPBridge.
+// This is a pure data model — actual FFI operations live in the
+// Network Extension post Nebula pivot.
 
 import Foundation
 
@@ -51,16 +52,8 @@ struct ZTLPIdentityInfo: Identifiable, Equatable, Codable {
 }
 
 extension ZTLPIdentityInfo {
-    /// Create from a ZTLPIdentityHandle (populated by the FFI bridge).
-    static func from(handle: ZTLPIdentityHandle, providerType: String = "software") -> ZTLPIdentityInfo? {
-        guard let nodeId = handle.nodeId, let publicKey = handle.publicKey else {
-            return nil
-        }
-        return ZTLPIdentityInfo(
-            nodeId: nodeId,
-            publicKey: publicKey,
-            providerType: providerType,
-            createdAt: Date()
-        )
-    }
+    // Note: the previous `from(handle: ZTLPIdentityHandle)` factory
+    // was removed in the Nebula pivot (S1.5) together with ZTLPBridge.
+    // Identity objects are now produced inside the Network Extension
+    // and surfaced to the main app through shared storage or IPC.
 }

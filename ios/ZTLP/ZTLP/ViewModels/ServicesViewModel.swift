@@ -45,7 +45,6 @@ final class ServicesViewModel: ObservableObject {
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
-    private let bridge = ZTLPBridge.shared
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init

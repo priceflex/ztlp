@@ -32,7 +32,6 @@ final class SettingsViewModel: ObservableObject {
     // MARK: - Dependencies
 
     let configuration: ZTLPConfiguration
-    private let bridge = ZTLPBridge.shared
     private let secureEnclave = SecureEnclaveService.shared
 
     // MARK: - Init
@@ -47,58 +46,21 @@ final class SettingsViewModel: ObservableObject {
 
     /// Load current state from the bridge and keychain.
     func loadState() {
-        libraryVersion = bridge.version
+        // Nebula pivot (S1.5): ZTLPBridge was deleted. Library version
+        // and in-process identity loading are no-ops in the main app —
+        // the Network Extension owns the ZTLP library surface now.
+        libraryVersion = "n/a (NE-owned)"
         secureEnclaveAvailable = secureEnclave.isAvailable
-
-        // Try to load identity info
-        loadIdentity()
-    }
-
-    /// Load the current identity from the bridge.
-    private func loadIdentity() {
-        do {
-            try bridge.initialize()
-            let handle = try bridge.generateIdentity() // or loadIdentity
-            identity = ZTLPIdentityInfo.from(
-                handle: handle,
-                providerType: configuration.useSecureEnclave ? "secure_enclave" : "software"
-            )
-        } catch {
-            // Identity not available — that's OK on first launch
-            identity = nil
-        }
+        identity = nil
     }
 
     /// Regenerate the identity (destructive — new node ID).
     func regenerateIdentity() async {
-        do {
-            try bridge.initialize()
-
-            let handle: ZTLPIdentityHandle
-            if configuration.useSecureEnclave && secureEnclave.isAvailable {
-                try secureEnclave.generateKey()
-                handle = try bridge.createHardwareIdentity(provider: 1)
-            } else {
-                handle = try bridge.generateIdentity()
-            }
-
-            identity = ZTLPIdentityInfo.from(
-                handle: handle,
-                providerType: configuration.useSecureEnclave ? "secure_enclave" : "software"
-            )
-
-            // Save to shared container
-            if let path = defaultIdentityPath() {
-                try handle.save(to: path)
-            }
-
-            statusMessage = "New identity generated"
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-
-        } catch {
-            statusMessage = "Failed: \(error.localizedDescription)"
-            UINotificationFeedbackGenerator().notificationOccurred(.error)
-        }
+        // Nebula pivot (S1.5): identity regeneration in the main app is
+        // currently a no-op — it needs to run inside the Network
+        // Extension. Surfaced as a feedback message for now.
+        statusMessage = "Identity regeneration moved to the tunnel extension"
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
 
         // Clear status after 3 seconds
         Task {

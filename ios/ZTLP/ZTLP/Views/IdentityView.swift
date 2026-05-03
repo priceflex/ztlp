@@ -249,20 +249,11 @@ struct IdentityView: View {
 
     /// Load identity from the ZTLP bridge.
     private func loadIdentity() {
-        isLoading = true
-        Task {
-            do {
-                try ZTLPBridge.shared.initialize()
-                let handle = try ZTLPBridge.shared.generateIdentity()
-                identity = ZTLPIdentityInfo.from(
-                    handle: handle,
-                    providerType: configuration.useSecureEnclave ? "secure_enclave" : "software"
-                )
-            } catch {
-                identity = nil
-            }
-            isLoading = false
-        }
+        // Nebula pivot (S1.5): ZTLPBridge was deleted. Identity loading
+        // in the main-app target has no backing FFI at the moment —
+        // rewire through the Network Extension in a follow-up.
+        isLoading = false
+        identity = nil
     }
 
     /// Copy text to the clipboard with haptic and visual feedback.

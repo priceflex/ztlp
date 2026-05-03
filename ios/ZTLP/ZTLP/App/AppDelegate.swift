@@ -13,19 +13,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // Initialize the ZTLP library early
-        do {
-            try ZTLPBridge.shared.initialize()
-        } catch {
-            print("[ZTLP] Failed to initialize library: \(error)")
-        }
+        // Nebula pivot (S1.5): the main app no longer initializes a ZTLP
+        // library in-process. All tunnel I/O runs inside the Network
+        // Extension. Nothing to do here on launch.
         return true
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
-        // Shut down the ZTLP library cleanly.
-        // Note: The Network Extension continues running independently.
-        ZTLPBridge.shared.shutdown()
+        // Nebula pivot (S1.5): no in-process ZTLP library to shut down.
+        // The Network Extension continues running independently.
     }
 
     func application(

@@ -86,7 +86,6 @@ final class EnrollmentViewModel: ObservableObject {
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
-    private let bridge = ZTLPBridge.shared
     private let logger = TunnelLogger.shared
 
     // MARK: - Init
@@ -159,44 +158,14 @@ final class EnrollmentViewModel: ObservableObject {
 
         Task {
             do {
-                // Step 1: Initialize the ZTLP bridge if needed
-                logger.info("Initializing ZTLP bridge...", source: "Enrollment")
-                try bridge.initialize()
+                // Nebula pivot (S1.5): in-process identity generation via
+                // ZTLPBridge is gone. Enrollment currently only persists
+                // the token-side config (zone / NS / relay / gateway) and
+                // fetches the CA root. Identity provisioning now happens
+                // on first NE tunnel start. Rewire end-to-end in a
+                // follow-up.
 
-                // Step 2: Generate or load identity
-                var identity: ZTLPIdentityHandle
-                var isHardwareKey = false
-
-                if configuration.useSecureEnclave && SecureEnclaveService.shared.isAvailable {
-                    do {
-                        identity = try bridge.createHardwareIdentity(provider: 1)
-                        isHardwareKey = true
-                        logger.info("Created Secure Enclave identity", source: "Enrollment")
-                    } catch {
-                        identity = try bridge.generateIdentity()
-                        logger.info("Secure Enclave failed, generated software identity", source: "Enrollment")
-                    }
-                } else {
-                    identity = try bridge.generateIdentity()
-                    logger.info("Generated software identity", source: "Enrollment")
-                }
-
-                guard let nodeId = identity.nodeId else {
-                    errorMessage = "Failed to get node ID from identity"
-                    state = .error
-                    logger.error("Identity has no node ID", source: "Enrollment")
-                    return
-                }
-
-                logger.info("Identity created: nodeId=\(nodeId), hardware=\(isHardwareKey)", source: "Enrollment")
-
-                // Step 3: Save identity to file
-                if !isHardwareKey, let path = defaultIdentityPath() {
-                    try identity.save(to: path)
-                    logger.info("Identity saved to \(path)", source: "Enrollment")
-                }
-
-                // Step 4: Update configuration with enrollment info
+                // Step 1: Update configuration with enrollment info
                 configuration.zoneName = tokenInfo.zone
                 configuration.nsServer = tokenInfo.nsAddress
                 configuration.targetNodeId = tokenInfo.gatewayAddress ?? tokenInfo.nsAddress
@@ -215,10 +184,10 @@ final class EnrollmentViewModel: ObservableObject {
                     source: "Enrollment"
                 )
 
-                // Step 5: NS registration stub
+                // Step 2: NS registration stub
                 logger.warn("Enrollment stub: NS registration not yet implemented. Config saved locally only.", source: "Enrollment")
 
-                // Step 6: Fetch and store the ZTLP CA root certificate
+                // Step 3: Fetch and store the ZTLP CA root certificate
                 logger.info("Fetching ZTLP CA root certificate from NS...", source: "Enrollment")
                 let certService = CertificateService.shared
                 let certFetched = await certService.fetchCARootCert(

@@ -48,7 +48,7 @@ defmodule ZtlpGateway.BbrTest do
     assert state.state == :startup
     assert state.btl_bw == 0.0
     assert state.rt_prop == :infinity
-    assert state.cwnd == 256.0
+    assert state.cwnd == 16.0
     assert state.inflight == 0
     assert state.delivered == 0
     assert state.pacing_rate == 0.0
@@ -194,7 +194,7 @@ defmodule ZtlpGateway.BbrTest do
   # ────────────────────────────────────────────
   test "cwnd/1 returns current window in packets" do
     state = Bbr.new(0)
-    assert Bbr.cwnd(state) == 256.0
+    assert Bbr.cwnd(state) == 16.0
   end
 
   # ────────────────────────────────────────────

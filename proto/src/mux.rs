@@ -118,6 +118,201 @@ impl std::fmt::Display for MuxError {
 
 impl std::error::Error for MuxError {}
 
+// ── Frame codec ───────────────────────────────────────────────────────
+
+impl MuxFrame {
+    /// Byte length this frame encodes to.
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            // [0x00 | stream_id(4) | data_seq(8) | payload]
+            MuxFrame::Data { payload, .. } => 1 + 4 + 8 + payload.len(),
+            // [0x01 | cumulative(8) | rwnd(2)?]
+            MuxFrame::Ack { rwnd, .. } => 1 + 8 + if rwnd.is_some() { 2 } else { 0 },
+            // [0x02 | stream_id(4)]
+            MuxFrame::Fin { .. } => 1 + 4,
+            // [0x05 | stream_id(4)]
+            MuxFrame::Close { .. } => 1 + 4,
+            // [0x06 | stream_id(4) | service_utf8]
+            MuxFrame::Open { service, .. } => 1 + 4 + service.as_bytes().len(),
+            // [0x07 | nonce(8)]
+            MuxFrame::Ping { .. } => 1 + 8,
+            // [0x08 | nonce(8)]
+            MuxFrame::Pong { .. } => 1 + 8,
+        }
+    }
+
+    /// Encode the frame into `out`, returning bytes written. Fails if `out`
+    /// is smaller than `encoded_len`.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, MuxError> {
+        let need = self.encoded_len();
+        if out.len() < need {
+            return Err(MuxError::OutputTooSmall {
+                need,
+                got: out.len(),
+            });
+        }
+        match self {
+            MuxFrame::Data {
+                stream_id,
+                data_seq,
+                payload,
+            } => {
+                out[0] = FRAME_DATA;
+                out[1..5].copy_from_slice(&stream_id.to_be_bytes());
+                out[5..13].copy_from_slice(&data_seq.to_be_bytes());
+                out[13..13 + payload.len()].copy_from_slice(payload);
+            }
+            MuxFrame::Ack { cumulative, rwnd } => {
+                out[0] = FRAME_ACK;
+                out[1..9].copy_from_slice(&cumulative.to_be_bytes());
+                if let Some(r) = rwnd {
+                    out[9..11].copy_from_slice(&r.to_be_bytes());
+                }
+            }
+            MuxFrame::Fin { stream_id } => {
+                out[0] = FRAME_FIN;
+                out[1..5].copy_from_slice(&stream_id.to_be_bytes());
+            }
+            MuxFrame::Close { stream_id } => {
+                out[0] = FRAME_CLOSE;
+                out[1..5].copy_from_slice(&stream_id.to_be_bytes());
+            }
+            MuxFrame::Open { stream_id, service } => {
+                out[0] = FRAME_OPEN;
+                out[1..5].copy_from_slice(&stream_id.to_be_bytes());
+                out[5..5 + service.as_bytes().len()].copy_from_slice(service.as_bytes());
+            }
+            MuxFrame::Ping { nonce } => {
+                out[0] = FRAME_PING;
+                out[1..9].copy_from_slice(&nonce.to_be_bytes());
+            }
+            MuxFrame::Pong { nonce } => {
+                out[0] = FRAME_PONG;
+                out[1..9].copy_from_slice(&nonce.to_be_bytes());
+            }
+        }
+        Ok(need)
+    }
+
+    /// Convenience: allocate and return the encoded bytes.
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut v = vec![0u8; self.encoded_len()];
+        // encode() can only fail for output-too-small, which can't happen here.
+        self.encode(&mut v).expect("encode into exact-size buf");
+        v
+    }
+
+    /// Decode a plaintext mux frame (after decryption).
+    ///
+    /// Accepts both the current mux form (FRAME_DATA with 4-byte stream_id
+    /// prefix) AND the legacy single-stream form (FRAME_DATA with only an
+    /// 8-byte data_seq). Legacy decode returns `stream_id=0`.
+    ///
+    /// FRAME_ACK accepts both 9-byte (no rwnd) and 11-byte (with rwnd).
+    ///
+    /// FRAME_FIN accepts 1-byte (legacy) and 5-byte (per-stream).
+    pub fn decode(buf: &[u8]) -> Result<MuxFrame, MuxError> {
+        if buf.is_empty() {
+            return Err(MuxError::ShortFrame);
+        }
+        let t = buf[0];
+        match t {
+            FRAME_DATA => {
+                // Try mux form first: [0x00 | stream_id(4) | data_seq(8) | payload]
+                // Disambiguation matches Swift's decoder: if we have >=13 bytes
+                // and bytes 1..5 parse to a non-zero stream_id, treat as mux.
+                // Otherwise treat as legacy (9+ bytes, data_seq in 1..9).
+                if buf.len() < 9 {
+                    return Err(MuxError::ShortFrame);
+                }
+                if buf.len() >= 13 {
+                    let stream_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                    if stream_id != 0 {
+                        let data_seq = u64::from_be_bytes([
+                            buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12],
+                        ]);
+                        let payload = buf[13..].to_vec();
+                        return Ok(MuxFrame::Data {
+                            stream_id,
+                            data_seq,
+                            payload,
+                        });
+                    }
+                }
+                // Legacy form: [0x00 | data_seq(8) | payload]
+                let data_seq = u64::from_be_bytes([
+                    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+                ]);
+                let payload = buf[9..].to_vec();
+                Ok(MuxFrame::Data {
+                    stream_id: 0,
+                    data_seq,
+                    payload,
+                })
+            }
+            FRAME_ACK => {
+                if buf.len() < 9 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let cumulative = u64::from_be_bytes([
+                    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+                ]);
+                let rwnd = if buf.len() >= 11 {
+                    Some(u16::from_be_bytes([buf[9], buf[10]]))
+                } else {
+                    None
+                };
+                Ok(MuxFrame::Ack { cumulative, rwnd })
+            }
+            FRAME_FIN => {
+                // Legacy 1-byte OR 5-byte per-stream.
+                if buf.len() >= 5 {
+                    let stream_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                    Ok(MuxFrame::Fin { stream_id })
+                } else {
+                    Ok(MuxFrame::Fin { stream_id: 0 })
+                }
+            }
+            FRAME_CLOSE => {
+                if buf.len() < 5 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let stream_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                Ok(MuxFrame::Close { stream_id })
+            }
+            FRAME_OPEN => {
+                if buf.len() < 5 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let stream_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                let service = std::str::from_utf8(&buf[5..])
+                    .map_err(|_| MuxError::InvalidServiceName)?
+                    .to_string();
+                Ok(MuxFrame::Open { stream_id, service })
+            }
+            FRAME_PING => {
+                if buf.len() < 9 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let nonce = u64::from_be_bytes([
+                    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+                ]);
+                Ok(MuxFrame::Ping { nonce })
+            }
+            FRAME_PONG => {
+                if buf.len() < 9 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let nonce = u64::from_be_bytes([
+                    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+                ]);
+                Ok(MuxFrame::Pong { nonce })
+            }
+            other => Err(MuxError::UnknownFrameType(other)),
+        }
+    }
+}
+
 // ── Per-stream state ──────────────────────────────────────────────────
 
 /// Per-stream lifecycle state tracked by the mux.
@@ -324,5 +519,131 @@ mod tests {
             MuxError::OutputTooSmall { need: 11, got: 9 }.to_string(),
             "output buffer too small: need 11 got 9"
         );
+    }
+
+    // ── Codec round-trips ────────────────────────────────────────────
+
+    fn roundtrip(frame: MuxFrame) -> MuxFrame {
+        let bytes = frame.to_vec();
+        MuxFrame::decode(&bytes).expect("decode")
+    }
+
+    #[test]
+    fn codec_data_mux_form_roundtrip() {
+        let f = MuxFrame::Data {
+            stream_id: 7,
+            data_seq: 42,
+            payload: b"hello world".to_vec(),
+        };
+        assert_eq!(roundtrip(f.clone()), f);
+    }
+
+    #[test]
+    fn codec_ack_with_rwnd_roundtrip() {
+        let f = MuxFrame::Ack {
+            cumulative: 1234,
+            rwnd: Some(12),
+        };
+        let bytes = f.to_vec();
+        assert_eq!(bytes.len(), 11);
+        assert_eq!(bytes[0], FRAME_ACK);
+        assert_eq!(MuxFrame::decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn codec_ack_legacy_9_byte_decodes() {
+        // Legacy 9-byte ACK without rwnd: [0x01 | seq(8)].
+        let f = MuxFrame::Ack {
+            cumulative: 99,
+            rwnd: None,
+        };
+        let bytes = f.to_vec();
+        assert_eq!(bytes.len(), 9);
+        let decoded = MuxFrame::decode(&bytes).unwrap();
+        assert_eq!(
+            decoded,
+            MuxFrame::Ack {
+                cumulative: 99,
+                rwnd: None
+            }
+        );
+    }
+
+    #[test]
+    fn codec_open_roundtrip() {
+        let f = MuxFrame::Open {
+            stream_id: 5,
+            service: "vault.techrockstars.ztlp".to_string(),
+        };
+        assert_eq!(roundtrip(f.clone()), f);
+    }
+
+    #[test]
+    fn codec_close_and_fin_and_ping_pong_roundtrip() {
+        for f in [
+            MuxFrame::Close { stream_id: 12 },
+            MuxFrame::Fin { stream_id: 13 },
+            MuxFrame::Ping { nonce: 0xDEAD_BEEF_CAFE_BABE },
+            MuxFrame::Pong { nonce: 1 },
+        ] {
+            assert_eq!(roundtrip(f.clone()), f);
+        }
+    }
+
+    #[test]
+    fn codec_decode_legacy_data_form_returns_stream_zero() {
+        // Construct legacy FRAME_DATA: [0x00 | data_seq(8) | payload], exactly
+        // 9 + payload bytes and the first four "stream id" bytes map to the
+        // high bytes of data_seq — we treat that as legacy.
+        let mut buf = vec![FRAME_DATA];
+        buf.extend_from_slice(&42u64.to_be_bytes());
+        buf.extend_from_slice(b"abc");
+        let decoded = MuxFrame::decode(&buf).unwrap();
+        assert_eq!(
+            decoded,
+            MuxFrame::Data {
+                stream_id: 0,
+                data_seq: 42,
+                payload: b"abc".to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn codec_encode_rejects_undersized_output() {
+        let f = MuxFrame::Ack {
+            cumulative: 1,
+            rwnd: Some(4),
+        };
+        let mut small = [0u8; 5];
+        let err = f.encode(&mut small).unwrap_err();
+        assert_eq!(err, MuxError::OutputTooSmall { need: 11, got: 5 });
+    }
+
+    #[test]
+    fn codec_decode_short_frame_errors() {
+        assert_eq!(MuxFrame::decode(&[]).unwrap_err(), MuxError::ShortFrame);
+        assert_eq!(
+            MuxFrame::decode(&[FRAME_ACK, 0, 0]).unwrap_err(),
+            MuxError::ShortFrame
+        );
+        assert_eq!(
+            MuxFrame::decode(&[FRAME_CLOSE, 0, 0]).unwrap_err(),
+            MuxError::ShortFrame
+        );
+    }
+
+    #[test]
+    fn codec_decode_unknown_frame_errors() {
+        let err = MuxFrame::decode(&[0x99, 0, 0, 0, 0]).unwrap_err();
+        assert_eq!(err, MuxError::UnknownFrameType(0x99));
+    }
+
+    #[test]
+    fn codec_decode_open_bad_utf8_errors() {
+        let mut buf = vec![FRAME_OPEN, 0, 0, 0, 1];
+        buf.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        let err = MuxFrame::decode(&buf).unwrap_err();
+        assert_eq!(err, MuxError::InvalidServiceName);
     }
 }

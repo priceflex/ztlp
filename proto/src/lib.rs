@@ -64,6 +64,8 @@ pub mod reject;
 pub mod rekey;
 pub mod relay_pool;
 pub mod roaming;
+#[cfg(feature = "ios-sync")]
+pub mod session_health;
 pub mod security;
 pub mod session;
 pub mod stats;

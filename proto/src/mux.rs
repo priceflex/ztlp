@@ -44,6 +44,24 @@ pub const FRAME_OPEN: u8 = 0x06;
 pub const FRAME_PING: u8 = 0x07;
 pub const FRAME_PONG: u8 = 0x08;
 
+/// ACK frame v2 — byte-unit (KB) receive window (Phase B: modern flow control).
+///
+/// Wire layout: `[0x10 | cumulative_ack(8 BE) | window_kb(2 BE)]` = 11 bytes.
+/// Unit of `window_kb` is 1024 bytes. Max advertised window 65_535 KB = 64 MB.
+///
+/// Upgrade semantics: once a peer sends any FRAME_ACK_V2 we remember that and
+/// reply in V2 for the rest of the session. Peers that never send V2 keep
+/// receiving V1 — wire-level backward compatible.
+///
+/// Gateway→client ACKs stay on FRAME_ACK(0x01)+SACK format; only the
+/// client→gateway rwnd advertisement uses V2. The gateway converts
+/// `window_kb` → packet-equivalent via `packets = (window_kb * 1024) / 1140`
+/// before feeding it into its existing packet-count cwnd math.
+pub const FRAME_ACK_V2: u8 = 0x10;
+
+/// Window unit for FRAME_ACK_V2 (in bytes).
+pub const ACK_V2_WINDOW_UNIT_BYTES: u32 = 1024;
+
 /// Receive-window floor. The gateway defers send past cwnd based on this.
 pub const RWND_FLOOR: u16 = 4;
 /// Maximum adaptive rwnd we advertise to the gateway.
@@ -77,6 +95,18 @@ pub const RTT_SRTT_ALPHA_DEN: u32 = 8;
 pub const RTT_RTTVAR_BETA_NUM: u32 = 1;
 pub const RTT_RTTVAR_BETA_DEN: u32 = 4;
 
+/// Heuristic "typical DATA frame size" used to convert the V1 frame-count
+/// window into a byte-equivalent for diagnostics and for the V2 ceiling
+/// when we're still speaking V1. Matches `@max_payload_bytes` on the
+/// gateway side (1140 bytes).
+pub const RWND_V1_FRAME_SIZE_HINT: u32 = 1140;
+
+/// Default initial byte window we advertise when we start sending V2.
+/// 16 KB — roughly a TCP initial cwnd, sized so a first page load fits
+/// without immediately stalling on the rwnd. Configurable via
+/// `MuxEngine::set_initial_window_kb` before the first V2 emit.
+pub const DEFAULT_INITIAL_WINDOW_KB: u16 = 16;
+
 /// Maximum shadow-sent entries we remember for RTT observation. A
 /// Vaultwarden page load with a stuck peer could otherwise bloat the
 /// map; we'd rather drop the oldest sample than leak.
@@ -93,8 +123,13 @@ pub enum MuxFrame {
         data_seq: u64,
         payload: Vec<u8>,
     },
-    /// Cumulative ACK with optional rwnd.
+    /// Cumulative ACK with optional rwnd (v1 — frame-count).
     Ack { cumulative: u64, rwnd: Option<u16> },
+    /// Cumulative ACK with byte-unit receive window advertisement
+    /// (v2 — Phase B). `window_kb` is in units of 1024 bytes; the
+    /// on-wire field is `u16`, giving a 64 MB max advertised window.
+    /// Emitted when the engine's peer is known to speak v2.
+    AckV2 { cumulative: u64, window_kb: u16 },
     /// Stream FIN (peer finished sending on this stream).
     Fin { stream_id: u32 },
     /// Stream CLOSE (explicit close).
@@ -149,6 +184,8 @@ impl MuxFrame {
             MuxFrame::Data { payload, .. } => 1 + 4 + 8 + payload.len(),
             // [0x01 | cumulative(8) | rwnd(2)?]
             MuxFrame::Ack { rwnd, .. } => 1 + 8 + if rwnd.is_some() { 2 } else { 0 },
+            // [0x10 | cumulative(8) | window_kb(2)]
+            MuxFrame::AckV2 { .. } => 1 + 8 + 2,
             // [0x02 | stream_id(4)]
             MuxFrame::Fin { .. } => 1 + 4,
             // [0x05 | stream_id(4)]
@@ -189,6 +226,14 @@ impl MuxFrame {
                 if let Some(r) = rwnd {
                     out[9..11].copy_from_slice(&r.to_be_bytes());
                 }
+            }
+            MuxFrame::AckV2 {
+                cumulative,
+                window_kb,
+            } => {
+                out[0] = FRAME_ACK_V2;
+                out[1..9].copy_from_slice(&cumulative.to_be_bytes());
+                out[9..11].copy_from_slice(&window_kb.to_be_bytes());
             }
             MuxFrame::Fin { stream_id } => {
                 out[0] = FRAME_FIN;
@@ -284,6 +329,20 @@ impl MuxFrame {
                     None
                 };
                 Ok(MuxFrame::Ack { cumulative, rwnd })
+            }
+            FRAME_ACK_V2 => {
+                // Strict: window_kb is mandatory, so 11 bytes exactly.
+                if buf.len() < 11 {
+                    return Err(MuxError::ShortFrame);
+                }
+                let cumulative = u64::from_be_bytes([
+                    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+                ]);
+                let window_kb = u16::from_be_bytes([buf[9], buf[10]]);
+                Ok(MuxFrame::AckV2 {
+                    cumulative,
+                    window_kb,
+                })
             }
             FRAME_FIN => {
                 // Legacy 1-byte OR 5-byte per-stream.
@@ -515,6 +574,17 @@ pub struct MuxEngine {
     /// (Instant, retransmits) tuple stays small. Both maps are pruned
     /// together in `observe_ack_cumulative`.
     shadow_encoded_len: HashMap<u64, u32>,
+    // ── Phase B: byte-unit window / FRAME_ACK_V2 state ────────────
+    /// `true` once we've observed the peer send any FRAME_ACK_V2.
+    /// Drives `build_ack_frame` to emit V2 as well. Sticky for the
+    /// session — peers don't downgrade.
+    peer_speaks_v2: bool,
+    /// Byte-oriented advertised receive window. When the engine is
+    /// producing V2 frames this is the source of truth. When it's
+    /// producing V1 frames, `advertised_rwnd` (frame count) is the
+    /// source of truth and this field is set from `advertised_rwnd
+    /// * RWND_V1_FRAME_SIZE_HINT` for parity in diagnostics.
+    advertised_window_bytes: u32,
 }
 
 impl MuxEngine {
@@ -547,6 +617,11 @@ impl MuxEngine {
             peak_goodput_bps: 0,
             shadow_sent_at: HashMap::new(),
             shadow_encoded_len: HashMap::new(),
+            peer_speaks_v2: false,
+            // Until we've seen peer V2 we have no byte-oriented signal.
+            // Initialize from the V1 rwnd floor so diagnostics read a
+            // plausible non-zero number.
+            advertised_window_bytes: RWND_FLOOR as u32 * RWND_V1_FRAME_SIZE_HINT,
         }
     }
 
@@ -596,10 +671,68 @@ impl MuxEngine {
     }
 
     /// Build an ACK frame reflecting the current cumulative+rwnd state.
+    ///
+    /// Emits `FRAME_ACK_V2` when the peer has been observed to speak
+    /// v2 (`peer_speaks_v2 == true`), otherwise legacy `FRAME_ACK` with
+    /// the frame-count rwnd. The cumulative ACK field is identical in
+    /// both variants.
     pub fn build_ack_frame(&self) -> MuxFrame {
-        MuxFrame::Ack {
-            cumulative: self.cumulative_ack(),
-            rwnd: Some(self.advertised_rwnd),
+        if self.peer_speaks_v2 {
+            // Round up to nearest KB so a small byte-window still
+            // advertises at least 1 KB instead of zero.
+            let kb = ((self.advertised_window_bytes + 1023) / 1024).min(u16::MAX as u32) as u16;
+            MuxFrame::AckV2 {
+                cumulative: self.cumulative_ack(),
+                window_kb: kb,
+            }
+        } else {
+            MuxFrame::Ack {
+                cumulative: self.cumulative_ack(),
+                rwnd: Some(self.advertised_rwnd),
+            }
+        }
+    }
+
+    /// Note that the peer has sent us a FRAME_ACK_V2. Sticky: once set,
+    /// this MuxEngine replies in V2 for the rest of the session. Peers
+    /// only ever upgrade; they don't downgrade.
+    pub fn note_peer_sent_v2(&mut self) {
+        if !self.peer_speaks_v2 {
+            self.peer_speaks_v2 = true;
+            // Bump the initial byte window from "V1 floor × hint" to the
+            // configured default. The first V2 reply we send should
+            // advertise a real number, not the slow-start floor.
+            let init_bytes = DEFAULT_INITIAL_WINDOW_KB as u32 * ACK_V2_WINDOW_UNIT_BYTES;
+            if init_bytes > self.advertised_window_bytes {
+                self.advertised_window_bytes = init_bytes;
+            }
+        }
+    }
+
+    /// Whether we've observed the peer use FRAME_ACK_V2.
+    pub fn peer_speaks_v2(&self) -> bool {
+        self.peer_speaks_v2
+    }
+
+    /// Currently-advertised byte window (source of truth when speaking V2;
+    /// a hint computed from V1 rwnd × RWND_V1_FRAME_SIZE_HINT otherwise).
+    pub fn advertised_window_bytes(&self) -> u32 {
+        self.advertised_window_bytes
+    }
+
+    /// Convenience: `(advertised_window_bytes + 1023) / 1024`. Returned
+    /// as the KB field we'd put on the wire next.
+    pub fn advertised_window_kb(&self) -> u16 {
+        ((self.advertised_window_bytes + 1023) / 1024).min(u16::MAX as u32) as u16
+    }
+
+    /// Override the initial V2 window (in KB). Ignored if the engine has
+    /// already advertised V2 at least once — call before the first
+    /// `note_peer_sent_v2`.
+    pub fn set_initial_window_kb(&mut self, kb: u16) {
+        if !self.peer_speaks_v2 {
+            let bytes = (kb as u32) * ACK_V2_WINDOW_UNIT_BYTES;
+            self.advertised_window_bytes = bytes;
         }
     }
 
@@ -714,6 +847,12 @@ impl MuxEngine {
         let clamped = v.clamp(RWND_FLOOR, RWND_ADAPTIVE_MAX);
         if clamped != self.advertised_rwnd {
             self.advertised_rwnd = clamped;
+        }
+        // Keep the byte window synced with the V1 ladder while we're
+        // still speaking V1. Once we move to V2, autotune owns
+        // `advertised_window_bytes` directly.
+        if !self.peer_speaks_v2 {
+            self.advertised_window_bytes = clamped as u32 * RWND_V1_FRAME_SIZE_HINT;
         }
     }
 
@@ -1955,5 +2094,160 @@ mod tests {
             "shadow map grew past cap: {}",
             m.shadow_inflight_len()
         );
+    }
+
+    // ── FRAME_ACK_V2 / byte-unit window (Phase B) ───────────────────
+
+    #[test]
+    fn codec_ack_v2_roundtrip() {
+        let f = MuxFrame::AckV2 {
+            cumulative: 0xDEAD_BEEF_CAFE_BABE,
+            window_kb: 64,
+        };
+        let bytes = f.to_vec();
+        assert_eq!(bytes.len(), 11);
+        assert_eq!(bytes[0], FRAME_ACK_V2);
+        assert_eq!(MuxFrame::decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn codec_ack_v2_short_frame_errors() {
+        // 10 bytes (missing 1 byte of window_kb) must be rejected.
+        let mut buf = vec![FRAME_ACK_V2];
+        buf.extend_from_slice(&42u64.to_be_bytes());
+        buf.push(0); // 10 total
+        assert_eq!(MuxFrame::decode(&buf).unwrap_err(), MuxError::ShortFrame);
+    }
+
+    #[test]
+    fn codec_v1_and_v2_are_distinguishable_by_type() {
+        let v1 = MuxFrame::Ack {
+            cumulative: 99,
+            rwnd: Some(16),
+        };
+        let v2 = MuxFrame::AckV2 {
+            cumulative: 99,
+            window_kb: 16,
+        };
+        assert_ne!(v1.to_vec()[0], v2.to_vec()[0]);
+        // Both are 11 bytes — type byte is the only differentiator.
+        assert_eq!(v1.to_vec().len(), v2.to_vec().len());
+    }
+
+    #[test]
+    fn build_ack_frame_emits_v1_until_peer_speaks_v2() {
+        let mut m = MuxEngine::new();
+        match m.build_ack_frame() {
+            MuxFrame::Ack { .. } => {}
+            other => panic!("expected V1 before peer speaks V2, got {other:?}"),
+        }
+        m.note_peer_sent_v2();
+        match m.build_ack_frame() {
+            MuxFrame::AckV2 { .. } => {}
+            other => panic!("expected V2 after peer speaks V2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn note_peer_sent_v2_is_sticky_and_upgrades_initial_window() {
+        let mut m = MuxEngine::new();
+        assert!(!m.peer_speaks_v2());
+        // Before V2: byte window tracks V1 floor × hint (4 × 1140 = 4560).
+        assert_eq!(m.advertised_window_bytes(), 4 * RWND_V1_FRAME_SIZE_HINT);
+        m.note_peer_sent_v2();
+        assert!(m.peer_speaks_v2());
+        // After first V2: window bumps to DEFAULT_INITIAL_WINDOW_KB × 1024.
+        assert_eq!(
+            m.advertised_window_bytes(),
+            DEFAULT_INITIAL_WINDOW_KB as u32 * ACK_V2_WINDOW_UNIT_BYTES
+        );
+        // Second call doesn't downgrade.
+        m.note_peer_sent_v2();
+        assert_eq!(
+            m.advertised_window_bytes(),
+            DEFAULT_INITIAL_WINDOW_KB as u32 * ACK_V2_WINDOW_UNIT_BYTES
+        );
+    }
+
+    #[test]
+    fn set_initial_window_kb_affects_first_v2_reply() {
+        let mut m = MuxEngine::new();
+        m.set_initial_window_kb(32);
+        m.note_peer_sent_v2();
+        // note_peer_sent_v2 bumps only if DEFAULT > current — we set 32
+        // KB explicitly (> 16 KB default), so the explicit setting wins.
+        assert_eq!(
+            m.advertised_window_bytes(),
+            32 * ACK_V2_WINDOW_UNIT_BYTES
+        );
+    }
+
+    #[test]
+    fn set_initial_window_kb_is_ignored_after_peer_speaks_v2() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let before = m.advertised_window_bytes();
+        m.set_initial_window_kb(128);
+        // Unchanged — set_initial_window_kb gates on !peer_speaks_v2.
+        assert_eq!(m.advertised_window_bytes(), before);
+    }
+
+    #[test]
+    fn advertised_window_kb_rounds_up() {
+        let mut m = MuxEngine::new();
+        // Directly nudge the byte window to a non-KB boundary via
+        // set_initial_window_kb (which multiplies by 1024 exactly, so
+        // we rely on the V1 fallback path for a fractional value).
+        // Easiest: use the V1 ladder which sets bytes = rwnd × 1140.
+        // 4 × 1140 = 4560 bytes = 4.45 KB → rounds up to 5.
+        assert_eq!(m.advertised_window_bytes(), 4560);
+        assert_eq!(m.advertised_window_kb(), 5);
+    }
+
+    #[test]
+    fn v1_ladder_keeps_byte_window_in_sync_until_v2() {
+        let mut m = MuxEngine::new();
+        let now = Instant::now();
+        m.mark_outbound_demand(now);
+        let stats = RouterStatsSnapshot {
+            flows: 2,
+            stream_to_flow: 2,
+            ..Default::default()
+        };
+        let signals = RwndPressureSignals {
+            high_seq_advanced: true,
+            has_active_flows: true,
+            ..Default::default()
+        };
+        // Drive the V1 ladder to browser burst target (16).
+        let (rwnd, _) = m.tick_rwnd(now, stats, 0, signals);
+        assert_eq!(rwnd, 16);
+        assert_eq!(m.advertised_window_bytes(), 16 * RWND_V1_FRAME_SIZE_HINT);
+        // Switching to V2 freezes the byte window at the current value
+        // unless the default is larger.
+        m.note_peer_sent_v2();
+        assert_eq!(
+            m.advertised_window_bytes(),
+            16 * RWND_V1_FRAME_SIZE_HINT,
+            "V1 × hint (18240) > V2 default (16 KB = 16384), so V1 value wins"
+        );
+    }
+
+    #[test]
+    fn build_ack_frame_v2_advertises_correct_kb() {
+        let mut m = MuxEngine::new();
+        m.set_initial_window_kb(42);
+        m.note_peer_sent_v2();
+        m.on_data_received(100);
+        match m.build_ack_frame() {
+            MuxFrame::AckV2 {
+                cumulative,
+                window_kb,
+            } => {
+                assert_eq!(cumulative, 100);
+                assert_eq!(window_kb, 42);
+            }
+            other => panic!("expected AckV2, got {other:?}"),
+        }
     }
 }

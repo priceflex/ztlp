@@ -1208,6 +1208,29 @@ int32_t ztlp_build_ack_with_rwnd(
     size_t *out_written
 );
 
+/**
+ * @brief Build a FRAME_ACK_V2 frame: byte-unit (KB) receive window.
+ *
+ * Wire: [0x10 | ack_seq(8 bytes BE) | window_kb(2 bytes BE)] = 11 bytes.
+ * Phase B of "modern flow control". window_kb is in units of 1024 bytes;
+ * max 65_535 KB = 64 MB. Gateway decodes FRAME_ACK_V2 in session.ex and
+ * replies with ordinary FRAME_ACK(0x01)+SACK (gateway→client direction
+ * stays on V1 for now; V2 is client→gateway only).
+ *
+ * @param ack_seq     Cumulative ACK value.
+ * @param window_kb   Receiver window in KB (must be >= 1 for meaningful
+ *                    flow control; 0 is legal but advertises zero window).
+ * @param out_buf     Output buffer (needs at least 11 bytes).
+ * @param out_buf_len Size of out_buf.
+ * @param out_written Receives 11 on success.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t ztlp_build_ack_v2(
+    uint64_t ack_seq, uint16_t window_kb,
+    uint8_t *out_buf, size_t out_buf_len,
+    size_t *out_written
+);
+
 // ── iOS fd-backed tunnel engine scaffolding ────────────────────────────
 
 /**
@@ -1466,6 +1489,44 @@ int32_t ztlp_mux_observe_ack_cumulative(
 
 /** @brief Diagnostic: current shadow-inflight map size. */
 int32_t ztlp_mux_shadow_inflight_len(ZtlpMuxEngine *engine);
+
+// ── FRAME_ACK_V2 / byte-unit window (Phase B — modern flow control) ──
+
+/**
+ * @brief Tell the engine the peer has sent at least one FRAME_ACK_V2.
+ *        After this the engine emits V2 ACKs for the rest of the
+ *        session. Idempotent.
+ * @return 0 on success, -1 on error.
+ */
+int32_t ztlp_mux_note_peer_sent_v2(ZtlpMuxEngine *engine);
+
+/**
+ * @brief Whether the engine has observed the peer use FRAME_ACK_V2.
+ * @return 1 for true, 0 for false, -1 on error.
+ */
+int32_t ztlp_mux_peer_speaks_v2(ZtlpMuxEngine *engine);
+
+/**
+ * @brief Current advertised byte window. Source of truth when speaking
+ *        V2; a hint computed from the V1 frame-count ladder × 1140
+ *        otherwise.
+ * @return Byte value, or 0 on error.
+ */
+uint32_t ztlp_mux_advertised_window_bytes(ZtlpMuxEngine *engine);
+
+/**
+ * @brief Current advertised window rounded up to KB. Matches the value
+ *        that would be placed on the wire in the next FRAME_ACK_V2.
+ * @return KB value, or 0 on error.
+ */
+uint16_t ztlp_mux_advertised_window_kb(ZtlpMuxEngine *engine);
+
+/**
+ * @brief Set the initial V2 window (KB). Ignored if the engine has
+ *        already observed peer V2.
+ * @return 0 on success, -1 on error.
+ */
+int32_t ztlp_mux_set_initial_window_kb(ZtlpMuxEngine *engine, uint16_t kb);
 
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ─────────────────────
 

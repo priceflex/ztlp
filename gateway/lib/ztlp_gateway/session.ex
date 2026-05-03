@@ -413,7 +413,7 @@ defmodule ZtlpGateway.Session do
   # accepted and buffered; delivered to the backend in sequence order.
   @recv_window_size 256
 
-  # Tunnel frame types (must match Rust tunnel.rs constants)
+  # Tunnel frame types (must match Rust tunnel.rs / mux.rs constants)
   @frame_data 0x00
   @frame_ack 0x01
   @frame_fin 0x02
@@ -424,6 +424,11 @@ defmodule ZtlpGateway.Session do
   @frame_ping 0x07
   @frame_pong 0x08
   @frame_rekey 0x0A
+  # FRAME_ACK_V2 — byte-unit (KB) receive-window advertisement.
+  # Wire: [0x10 | cumulative_ack(8 BE) | window_kb(2 BE)] = 11 bytes.
+  # Client → gateway direction only (gateway ACKs stay on 0x01/SACK).
+  # See proto/src/mux.rs::FRAME_ACK_V2.
+  @frame_ack_v2 0x10
 
   # ARQ constants (KCP-inspired, tuned for relay paths)
   # Default initial RTO accommodates full relay round-trip:
@@ -684,7 +689,14 @@ defmodule ZtlpGateway.Session do
         min_rto_ms: @min_rto_ms,
         # Client-advertised receive window in packets. New iOS ACK frames carry
         # this as a u16 after ack_seq; legacy clients use @default_peer_rwnd.
-        peer_rwnd: @default_peer_rwnd
+        peer_rwnd: @default_peer_rwnd,
+        # Phase B: byte-oriented peer window (only meaningful once the
+        # client has sent a FRAME_ACK_V2). Kept alongside peer_rwnd for
+        # diagnostics; effective_window still uses packet-count math.
+        peer_rwnd_bytes: @default_peer_rwnd * @max_payload_bytes,
+        # Sticky flag: set true on the first FRAME_ACK_V2 received. Once
+        # true, a session never downgrades back to V1.
+        peer_uses_v2: false
       }
       |> Map.merge(rekey_state)
 
@@ -1498,8 +1510,14 @@ defmodule ZtlpGateway.Session do
           # 30-second stalls: the phone re-ACKs duplicates but the re-ACK
           # shares the upload seq space and gets head-of-line blocked behind
           # a gap in the recv_window.
+          #
+          # Phase B: FRAME_ACK_V2 (0x10) is also an ACK frame and must take
+          # the same fast-path. Its length is exactly 11 bytes
+          # ([0x10 | ack_seq(8) | window_kb(2)]).
           first_byte = if byte_size(plaintext) > 0, do: :binary.at(plaintext, 0), else: nil
-          is_ack_frame = first_byte == @frame_ack and byte_size(plaintext) >= 9
+          is_ack_frame =
+            (first_byte == @frame_ack and byte_size(plaintext) >= 9) or
+              (first_byte == @frame_ack_v2 and byte_size(plaintext) == 11)
           is_probe_frame = first_byte in [@frame_ping, @frame_pong] and byte_size(plaintext) >= 9
 
           if is_ack_frame or is_probe_frame do
@@ -1789,6 +1807,40 @@ defmodule ZtlpGateway.Session do
     state = log_ack_latency(state, acked_data_seq)
     state = process_cumulative_ack(acked_data_seq, state)
 
+    state = flush_send_queue(state)
+    state = maybe_resume_backends(state)
+
+    if state.draining and map_size(state.send_buffer) == 0 and :queue.is_empty(state.send_queue) do
+      Logger.info("[Session] All data ACKed during drain, terminating cleanly")
+      terminate_session(state, :drain_complete)
+    else
+      {:noreply, state}
+    end
+  end
+
+  # FRAME_ACK_V2: byte-unit window. [0x10 | ack_seq(8) | window_kb(2)] = 11 bytes.
+  #
+  # Convert window_kb → packet-equivalent via div(window_bytes, @max_payload_bytes)
+  # so the existing packet-count cwnd math in effective_window keeps working. We
+  # keep the raw byte value in `peer_rwnd_bytes` for diagnostics and future
+  # byte-native flow control.
+  #
+  # A client that upgrades to V2 doesn't downgrade — set `peer_uses_v2 = true`
+  # (sticky) so future logging and tuning can rely on it.
+  defp handle_tunnel_frame(<<@frame_ack_v2, acked_data_seq::big-64, window_kb::big-16>>, state) do
+    window_bytes = window_kb * 1024
+    # At least one packet of headroom even if the client advertises zero —
+    # otherwise effective_window collapses to 0 and the session stalls.
+    rwnd_packets = max(1, div(window_bytes, @max_payload_bytes))
+    Logger.info("[Session] CLIENT_ACK_V2 data_seq=#{acked_data_seq} window_kb=#{window_kb} (=#{rwnd_packets} packets) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    state =
+      state
+      |> Map.put(:peer_rwnd, rwnd_packets)
+      |> Map.put(:peer_rwnd_bytes, window_bytes)
+      |> Map.put(:peer_uses_v2, true)
+
+    state = log_ack_latency(state, acked_data_seq)
+    state = process_cumulative_ack(acked_data_seq, state)
     state = flush_send_queue(state)
     state = maybe_resume_backends(state)
 

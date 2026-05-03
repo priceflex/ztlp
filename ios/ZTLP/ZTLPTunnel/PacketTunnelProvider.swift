@@ -184,6 +184,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let useRttInstrumentation = true
     /// Last time we logged an RTT/BDP snapshot. Throttled to ~2s.
     private var lastRttLogAt: Date = .distantPast
+
+    /// Phase B of "modern flow control" — FRAME_ACK_V2 (byte-unit KB
+    /// receive window). When true, `ZTLPTunnelConnection` emits 0x10
+    /// FRAME_ACK_V2 frames instead of 0x01 FRAME_ACK. Requires the
+    /// matching gateway deploy (session.ex handles @frame_ack_v2).
+    /// Default true — we cut over both sides together.
+    private static let useByteRwnd = true
     private var rustMux: OpaquePointer?      // ZtlpMuxEngine*
     private var rustHealth: OpaquePointer?   // ZtlpSessionHealth*
     /// Scratch buffer for ztlp_health_tick's out_reason. 32 bytes is what
@@ -517,6 +524,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 } else if now.timeIntervalSince(lastRwndLogAt) >= 2.0 {
                     lastRwndLogAt = now
                     logger.debug("ztlp_mux_tick_rwnd hold rwnd=\(clamped) flows=\(statsTuple.flows) replayDelta=\(replayDelta)", source: "Tunnel")
+                }
+                // Phase B: keep the connection's byte-window synced with
+                // the Rust engine's view. The set_rwnd path inside the
+                // engine updates advertised_window_bytes whenever the V1
+                // ladder moves (V1 × 1140 hint) OR when autotune updates
+                // it directly in Phase D.
+                if Self.useByteRwnd {
+                    let kb = ztlp_mux_advertised_window_kb(mux)
+                    if kb > 0 {
+                        tunnelConnection?.setAdvertisedWindowKb(kb)
+                    }
                 }
             } else {
                 logger.warn("ztlp_mux_tick_rwnd returned \(rustRwnd); falling back to legacy ramp for this tick", source: "Tunnel")
@@ -2270,7 +2288,27 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
     /// Safe to call multiple times — installing a new closure replaces
     /// any prior one. The closure captures `self` weakly so a stale
     /// hook after tunnel teardown can't keep the provider alive.
+    ///
+    /// Also flips `useByteRwnd` on the connection (Phase B), and seeds
+    /// the byte-window to the current Rust advertised value so the
+    /// first V2 ACK out the door matches what the engine would emit
+    /// via `build_ack_frame`.
     private func wireRttInstrumentationHook(on conn: ZTLPTunnelConnection) {
+        // Phase B: tell the connection which ACK wire format to emit.
+        conn.useByteRwnd = Self.useByteRwnd
+        if Self.useByteRwnd, let mux = rustMux {
+            // Mark that we're about to speak V2 so the Rust-side
+            // advertised_window_bytes moves past the V1 floor for
+            // logging. The gateway notes peer_uses_v2 when it
+            // receives the first 0x10; this just keeps our local
+            // diagnostic consistent.
+            _ = ztlp_mux_note_peer_sent_v2(mux)
+            let kb = ztlp_mux_advertised_window_kb(mux)
+            if kb > 0 {
+                conn.setAdvertisedWindowKb(kb)
+            }
+        }
+
         guard Self.useRttInstrumentation else {
             conn.onDataFrameSent = nil
             return
@@ -2305,8 +2343,10 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
         // the log during pre-first-ACK startup.
         if snap.samples_total == 0 && snap.goodput_bps == 0 { return }
         let shadowDepth = ztlp_mux_shadow_inflight_len(mux)
+        let peerV2 = ztlp_mux_peer_speaks_v2(mux) == 1 ? "yes" : "no"
+        let advKb = ztlp_mux_advertised_window_kb(mux)
         logger.info(
-            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth)",
+            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth) v2=\(peerV2) adv_kb=\(advKb)",
             source: "Tunnel"
         )
     }

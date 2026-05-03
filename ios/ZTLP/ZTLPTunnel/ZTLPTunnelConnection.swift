@@ -19,10 +19,13 @@ import Network
 
 /// ZTLP frame types (matches wire protocol).
 private enum ZTLPFrameType: UInt8 {
-    case data = 0x00
-    case ack  = 0x01
-    case ping = 0x07
-    case pong = 0x08
+    case data  = 0x00
+    case ack   = 0x01
+    case ping  = 0x07
+    case pong  = 0x08
+    /// Phase B: byte-unit (KB) receive-window ACK.
+    /// `[0x10 | cumulative_ack(8 BE) | window_kb(2 BE)]` — 11 bytes.
+    case ackV2 = 0x10
 }
 
 // MARK: - Delegate Protocol
@@ -108,6 +111,18 @@ final class ZTLPTunnelConnection {
     /// Receive window advertised to the gateway. Keep this extremely conservative
     /// for iOS browser/page-load traffic until the NE survives Vaultwarden bursts.
     private var advertisedReceiveWindow: UInt16 = 4
+
+    /// Phase B: when true, `flushPendingAcks` emits FRAME_ACK_V2 (byte-unit
+    /// KB window) instead of FRAME_ACK (frame-count). Settable by
+    /// PacketTunnelProvider during tunnel setup. Starts false so an old
+    /// client build can't regress wire compatibility.
+    var useByteRwnd: Bool = false
+
+    /// Byte-unit window to advertise in V2 ACKs (KB). Read by
+    /// `flushPendingAcks` when `useByteRwnd == true`. Settable via
+    /// `setAdvertisedWindowKb`. Default 16 KB matches the Rust
+    /// `DEFAULT_INITIAL_WINDOW_KB`.
+    private var advertisedWindowKb: UInt16 = 16
 
     /// Backpressure: track in-flight NWConnection sends.
     private var sendsInFlight: Int = 0
@@ -489,6 +504,12 @@ final class ZTLPTunnelConnection {
         advertisedReceiveWindow = min(max(rwnd, 4), 16)
     }
 
+    /// Set the byte-unit window (KB) advertised in FRAME_ACK_V2 frames.
+    /// Only used when `useByteRwnd == true`. Clamped to [1, 65535].
+    func setAdvertisedWindowKb(_ kb: UInt16) {
+        advertisedWindowKb = max(1, kb)
+    }
+
     /// Flush pending ACKs as a single cumulative ACK (highest seq).
     var isOverloaded: Bool {
         sendsInFlight >= (Self.maxSendsInFlight - 32)
@@ -516,12 +537,23 @@ final class ZTLPTunnelConnection {
 
         var ackFrame = [UInt8](repeating: 0, count: Self.bufferSize)
         var ackWritten: Int = 0
-        // Advertise a receive window from the actual NE/router pressure, not
-        // just NWConnection ACK-send pressure. Under Vaultwarden page loads the
-        // ACK path stays empty while packetFlow/router delivery saturates.
-        let sendWindow = UInt16(max(4, min(Self.maxSendsInFlight - sendsInFlight, 8)))
-        let availableWindow = min(advertisedReceiveWindow, sendWindow)
-        let ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &ackFrame, ackFrame.count, &ackWritten)
+
+        let ackResult: Int32
+        if useByteRwnd {
+            // Phase B: emit FRAME_ACK_V2 with byte-unit (KB) window.
+            // The gateway decodes 0x10 and converts back to packets via
+            // `div(window_bytes, @max_payload_bytes)`. Setting this to
+            // the iOS-side advertised byte-window (tracked in Rust
+            // MuxEngine) matches the value the Rust engine would emit
+            // via `build_ack_frame` once we do the full mux cutover.
+            ackResult = ztlp_build_ack_v2(maxSeq, advertisedWindowKb, &ackFrame, ackFrame.count, &ackWritten)
+        } else {
+            // Legacy V1: packet-count window. Advertise a receive window
+            // derived from actual NE/router pressure.
+            let sendWindow = UInt16(max(4, min(Self.maxSendsInFlight - sendsInFlight, 8)))
+            let availableWindow = min(advertisedReceiveWindow, sendWindow)
+            ackResult = ztlp_build_ack_with_rwnd(maxSeq, availableWindow, &ackFrame, ackFrame.count, &ackWritten)
+        }
         guard ackResult == 0, ackWritten > 0 else { return }
 
         let plaintext = Array(ackFrame.prefix(ackWritten))
@@ -687,6 +719,23 @@ final class ZTLPTunnelConnection {
             for i in 1...8 {
                 seq = (seq << 8) | UInt64(decryptBuffer[i])
             }
+            delegate?.tunnelConnection(self, didReceiveAck: seq)
+            return
+        }
+
+        if frameType == ZTLPFrameType.ackV2.rawValue {
+            // Phase B: FRAME_ACK_V2 [0x10 | cumulative_ack(8 BE) | window_kb(2 BE)].
+            // The gateway does not currently emit V2 (gateway→client ACKs
+            // stay on 0x01/SACK), but we decode it defensively so a future
+            // symmetric upgrade doesn't need a coordinated client change.
+            guard decryptWritten >= 11 else { return }
+            var seq: UInt64 = 0
+            for i in 1...8 {
+                seq = (seq << 8) | UInt64(decryptBuffer[i])
+            }
+            // window_kb is informational for now — the rwnd ladder on the
+            // iOS side is still packet-count driven. Future phases may
+            // use it in the send-side congestion math.
             delegate?.tunnelConnection(self, didReceiveAck: seq)
             return
         }

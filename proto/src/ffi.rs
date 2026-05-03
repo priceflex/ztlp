@@ -4481,6 +4481,97 @@ pub extern "C" fn ztlp_mux_shadow_inflight_len(engine: *mut ZtlpMuxEngine) -> i3
         .unwrap_or(-1)
 }
 
+// ── FRAME_ACK_V2 / byte-unit window (Phase B) ──────────────────────────
+
+/// Tell the engine the peer has sent at least one FRAME_ACK_V2. After
+/// this the engine emits V2 ACKs for the rest of the session. Idempotent.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_note_peer_sent_v2(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    match engine.inner.lock() {
+        Ok(mut g) => {
+            g.note_peer_sent_v2();
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Whether the engine has observed the peer use FRAME_ACK_V2. Returns
+/// 1 for true, 0 for false, -1 on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_peer_speaks_v2(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| if g.peer_speaks_v2() { 1i32 } else { 0i32 })
+        .unwrap_or(-1)
+}
+
+/// Current advertised byte window. Source of truth when speaking V2;
+/// a hint computed from the V1 frame-count ladder × 1140 otherwise.
+/// Returns 0 on error (caller can treat 0 as "not yet known").
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_advertised_window_bytes(engine: *mut ZtlpMuxEngine) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.advertised_window_bytes())
+        .unwrap_or(0)
+}
+
+/// Current advertised window rounded up to KB. Matches the value that
+/// would be placed on the wire in the next FRAME_ACK_V2. Returns 0 on
+/// error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_advertised_window_kb(engine: *mut ZtlpMuxEngine) -> u16 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.advertised_window_kb())
+        .unwrap_or(0)
+}
+
+/// Set the initial V2 window (KB). Ignored if the engine has already
+/// observed peer V2. Returns 0 on success, negative on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_set_initial_window_kb(
+    engine: *mut ZtlpMuxEngine,
+    kb: u16,
+) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    match engine.inner.lock() {
+        Ok(mut g) => {
+            g.set_initial_window_kb(kb);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ───────────────────────
 //
 // SessionHealth is a small state machine. Call `ztlp_health_new` once per
@@ -6105,6 +6196,43 @@ pub extern "C" fn ztlp_build_ack_with_rwnd(
         buf[9..11].copy_from_slice(&rwnd.to_be_bytes());
         unsafe { *out_written = 11 };
     }
+    0
+}
+
+/// Build a FRAME_ACK_V2 frame: byte-unit receive window (Phase B).
+/// Wire: `[0x10 | ack_seq(8 bytes BE) | window_kb(2 bytes BE)]` = 11 bytes.
+///
+/// `window_kb` is the receiver-advertised window in units of 1024 bytes.
+/// Max 65_535 KB = 64 MB. Unlike `ztlp_build_ack_with_rwnd`, the window
+/// field is mandatory here — a V2 frame without a window doesn't exist.
+/// `window_kb = 0` produces a legal but useless frame; callers should
+/// normally pass at least 1.
+#[no_mangle]
+pub extern "C" fn ztlp_build_ack_v2(
+    ack_seq: u64,
+    window_kb: u16,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_written.is_null() {
+        set_last_error("null argument");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    const FRAME_ACK_V2_TYPE: u8 = 0x10;
+    const NEED: usize = 11;
+    if out_buf_len < NEED {
+        set_last_error(&format!(
+            "output buffer too small: need {} got {}",
+            NEED, out_buf_len
+        ));
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let buf = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+    buf[0] = FRAME_ACK_V2_TYPE;
+    buf[1..9].copy_from_slice(&ack_seq.to_be_bytes());
+    buf[9..11].copy_from_slice(&window_kb.to_be_bytes());
+    unsafe { *out_written = NEED };
     0
 }
 

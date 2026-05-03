@@ -80,8 +80,55 @@ wrong — the `onDataFrameSent` closure may not be installed, or
    `libztlp_proto.a` ~56MB, `libztlp_proto_ne.a` ~27MB.
 3. On Steve's Mac: `xcodebuild … clean build CODE_SIGN_IDENTITY=""` →
    **CLEAN SUCCEEDED + BUILD SUCCEEDED**.
-4. **Pending**: Steve on device — Xcode → Clean Build Folder (⌘⇧K),
-   run → benchmark → pull log → Vaultwarden ×3 → pull log.
+4. **Device test 2026-05-03 04:25-04:26 UTC**: Benchmark 8/8 (id=275)
+   uploaded HTTP 201, no reconnects, no errors. Instrumentation
+   verified working.
+
+## Measured numbers (first run)
+
+| time (Z)    | srtt | rttvar | min | latest | goodput | peak  | bdp | samples | shadow |
+|-------------|------|--------|-----|--------|---------|-------|-----|---------|--------|
+| 04:25:41    | 39   | 0      | 38  | 39     | 796 bps | 796   | 0   | 15      | 0      |
+| 04:25:45    | 39   | 0      | 37  | 37     | 3.9k    | 3.9k  | 0   | 20      | 0      |
+| 04:25:49    | 39   | 1      | 37  | 37     | 5.5k    | 5.5k  | 0   | 22      | 0      |
+| 04:25:53    | 38   | 0      | 37  | 38     | 8.6k    | 8.6k  | 0   | 30      | 0      |
+| 04:25:57    | 38   | 0      | 37  | 38     | 13.8k   | 13.8k | 0   | 45      | 0      |
+| 04:25:59    | 39   | 2      | 37  | 37     | 17.7k   | 17.7k | 0   | 53      | 0      |
+| 04:26:03    | 40   | 2      | 37  | 37     | 18.1k   | 22.4k | 0   | 67      | 0      |
+| 04:26:05-19 | 40   | 2      | 37  | 37     | decay→0 | 22.4k | 0   | 67      | 0      |
+
+Findings:
+- **RTT healthy**: 37-40 ms srtt, 0-2 ms rttvar. Classic wifi path to
+  AWS us-west. RTT samples admitted cleanly by Karn's algo.
+- **Peak goodput: 22.4 kbps** (2.8 KB/s). Very low.
+- **BDP ≈ 112 bytes** at peak = `0 KB` by our KB rounding. The
+  18 KB rwnd=16 ceiling is **nowhere near** a constraint here.
+- **Shadow map stays at 0**: observe_sent / observe_ack balanced;
+  no leak.
+- **rwnd oscillates 4/12/16**: Nebula-collapse fix working, no
+  stuck-at-4.
+- Idle-tail after 04:26:13 triggers normal probe cadence; no
+  reconnect, no regression.
+
+### What this says about Phase B+
+
+The plan's premise — "18 KB window caps throughput" — is **not** the
+dominant factor on this path. The 22 kbps ceiling points at a
+different bottleneck: gateway send pacing, relay egress, or iOS
+utun batching. Phase B (byte-unit windows) is still valuable for the
+semantic correctness + parallel-stream story, but it is unlikely to
+move the single-stream throughput number measured here.
+
+Suggested Phase B+ shape:
+- Keep Phase B (byte-unit FRAME_ACK_V2) for its architectural win.
+- **Also** measure where the 22 kbps is coming from. Hypotheses:
+  (a) gateway `@recv_window_size 256` packet-semantic interaction
+  with the adaptive rwnd=4/12/16 cycle;
+  (b) iOS `maxSendsInFlight` static cap pacing sends;
+  (c) relay-side TCP termination head-of-line to Vaultwarden.
+- Phase D (autotune) will need a wider measurement range to be
+  meaningful — the current path doesn't exercise any of the rwnd
+  dynamic range.
 
 ## Gotchas discovered while implementing
 

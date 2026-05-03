@@ -174,6 +174,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // reconnects drive reset_after_reconnect.
     private static let useRustMux = true
     private static let useRustHealth = true
+
+    /// Phase A of "modern flow control" — purely passive instrumentation.
+    /// When true, the NE feeds the Rust MuxEngine's shadow RTT/goodput
+    /// observation path (`ztlp_mux_observe_sent` /
+    /// `ztlp_mux_observe_ack_cumulative`) and logs the resulting
+    /// smoothed_rtt_ms / goodput_bps / bdp_kb every health tick. No wire
+    /// change, no behaviour change — just numbers to drive Phase B+.
+    private static let useRttInstrumentation = true
+    /// Last time we logged an RTT/BDP snapshot. Throttled to ~2s.
+    private var lastRttLogAt: Date = .distantPast
     private var rustMux: OpaquePointer?      // ZtlpMuxEngine*
     private var rustHealth: OpaquePointer?   // ZtlpSessionHealth*
     /// Scratch buffer for ztlp_health_tick's out_reason. 32 bytes is what
@@ -516,6 +526,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             maybeRampAdvertisedRwnd(stats: statsTuple, replayDelta: replayDelta, highSeqAdvanced: highSeqAdvanced, hasActiveFlows: hasActiveFlows)
         }
 
+        // Phase A: periodic RTT / goodput / BDP snapshot log.
+        maybeLogRttSnapshot()
+
         // Emit a rate-limited heartbeat so we can always see what the detector sees.
         if now.timeIntervalSince(lastHealthHeartbeatAt) >= 4.0 {
             lastHealthHeartbeatAt = now
@@ -824,6 +837,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // VIP traffic goes: packetFlow -> router -> send to tunnelConnection -> relay
                 self.logger.info("Tunnel connection ready on relay \(relayAddr) with shared handshake/data socket", source: "Tunnel")
                 self.tunnelConnection = conn
+                self.wireRttInstrumentationHook(on: conn)
 
                 // VIP traffic is now routed through packetFlow -> encrypted tunnel -> relay
                 // (relay-side TCP termination replaces in-extension NWListeners)
@@ -1959,6 +1973,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         tunnelConnection = conn
+        wireRttInstrumentationHook(on: conn)
 
         // Update active relay tracking
         activeRelayAddress = relayAddr
@@ -2235,6 +2250,65 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveAck sequence: UInt64) {
         // ACK received from gateway — good, connection is alive
         markDataActivity()
+
+        // Phase A: shadow RTT / goodput observation. Feed the Rust
+        // MuxEngine the cumulative ACK so it can release its shadow
+        // inflight entries and sample RTT. Gated so non-instrumented
+        // builds pay zero cost.
+        if Self.useRttInstrumentation, let mux = rustMux {
+            _ = ztlp_mux_observe_ack_cumulative(mux, sequence)
+        }
+    }
+
+    // ── Phase A: RTT instrumentation helpers ───────────────────────────
+
+    /// Install the shadow observe-sent hook on a freshly-assigned
+    /// ZTLPTunnelConnection so every outbound DATA frame pipes its
+    /// (data_seq, encoded_len) through the Rust MuxEngine. Called from
+    /// both startTunnel and reconnect paths.
+    ///
+    /// Safe to call multiple times — installing a new closure replaces
+    /// any prior one. The closure captures `self` weakly so a stale
+    /// hook after tunnel teardown can't keep the provider alive.
+    private func wireRttInstrumentationHook(on conn: ZTLPTunnelConnection) {
+        guard Self.useRttInstrumentation else {
+            conn.onDataFrameSent = nil
+            return
+        }
+        conn.onDataFrameSent = { [weak self] seq, encodedLen in
+            guard let self = self, let mux = self.rustMux else { return }
+            // encoded_len fits easily in u32 (frame size is ~1200 B max).
+            _ = ztlp_mux_observe_sent(mux, seq, UInt32(min(encodedLen, Int(UInt32.max))))
+        }
+    }
+
+    /// Log the current RTT/goodput/BDP snapshot at most once every
+    /// `rttLogIntervalSeconds` seconds. Called from the 2s health tick.
+    private func maybeLogRttSnapshot() {
+        guard Self.useRttInstrumentation, let mux = rustMux else { return }
+        let now = Date()
+        if now.timeIntervalSince(lastRttLogAt) < 2.0 { return }
+        var snap = ZtlpRttGoodputSnapshot(
+            smoothed_rtt_ms: 0,
+            rtt_var_ms: 0,
+            min_rtt_ms: 0,
+            latest_rtt_ms: 0,
+            goodput_bps: 0,
+            peak_goodput_bps: 0,
+            bdp_kb: 0,
+            samples_total: 0
+        )
+        let rc = ztlp_mux_rtt_goodput_snapshot(mux, &snap)
+        if rc != 0 { return }
+        lastRttLogAt = now
+        // Only log when there's something interesting — avoids flooding
+        // the log during pre-first-ACK startup.
+        if snap.samples_total == 0 && snap.goodput_bps == 0 { return }
+        let shadowDepth = ztlp_mux_shadow_inflight_len(mux)
+        logger.info(
+            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth)",
+            source: "Tunnel"
+        )
     }
 
     func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveProbeResponse nonce: UInt64) {

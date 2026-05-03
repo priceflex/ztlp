@@ -1406,6 +1406,67 @@ int32_t ztlp_mux_advertised_rwnd(ZtlpMuxEngine *engine);
 uint64_t ztlp_mux_cumulative_ack(ZtlpMuxEngine *engine);
 int32_t ztlp_mux_inflight_len(ZtlpMuxEngine *engine);
 
+// ── RTT / goodput instrumentation (Phase A — modern flow control) ────
+
+/**
+ * @brief RTT / goodput / BDP snapshot.
+ *
+ * Units:
+ *   - smoothed_rtt_ms, rtt_var_ms, min_rtt_ms, latest_rtt_ms: milliseconds
+ *   - goodput_bps, peak_goodput_bps: bits per second
+ *   - bdp_kb: kilobytes
+ *   - samples_total: Karn-admitted RTT samples since engine start
+ *
+ * All fields are 0 until the first non-retransmitted FRAME_ACK lands.
+ */
+typedef struct {
+    uint32_t smoothed_rtt_ms;
+    uint32_t rtt_var_ms;
+    uint32_t min_rtt_ms;
+    uint32_t latest_rtt_ms;
+    uint64_t goodput_bps;
+    uint64_t peak_goodput_bps;
+    uint32_t bdp_kb;
+    uint64_t samples_total;
+} ZtlpRttGoodputSnapshot;
+
+/**
+ * @brief Read the current RTT/goodput/BDP snapshot. Passive — no wire
+ *        change, no behaviour change. Safe to call from the health tick.
+ * @return 0 on success, negative on error (check ztlp_last_error()).
+ */
+int32_t ztlp_mux_rtt_goodput_snapshot(
+    ZtlpMuxEngine *engine,
+    ZtlpRttGoodputSnapshot *out
+);
+
+/**
+ * @brief Shadow observe: notify the engine that a DATA frame with the
+ *        given data_seq and encoded_len was just put on the wire. Used
+ *        while the Swift data-path still owns inflight tracking.
+ *        Calling with the same data_seq again (retransmit) correctly
+ *        marks the sample as excluded from RTT under Karn's algorithm.
+ */
+int32_t ztlp_mux_observe_sent(
+    ZtlpMuxEngine *engine,
+    uint64_t data_seq,
+    uint32_t encoded_len
+);
+
+/**
+ * @brief Shadow observe: notify the engine that a cumulative ACK
+ *        arrived. Samples RTT (Karn-filtered) and goodput for every
+ *        shadow-tracked data_seq <= cumulative, then drops those
+ *        entries from the shadow map.
+ */
+int32_t ztlp_mux_observe_ack_cumulative(
+    ZtlpMuxEngine *engine,
+    uint64_t cumulative
+);
+
+/** @brief Diagnostic: current shadow-inflight map size. */
+int32_t ztlp_mux_shadow_inflight_len(ZtlpMuxEngine *engine);
+
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ─────────────────────
 
 typedef struct ZtlpSessionHealth ZtlpSessionHealth;

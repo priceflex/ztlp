@@ -61,6 +61,27 @@ pub const DEFAULT_CWND: u16 = 16;
 /// Retransmit timeout before we resend an inflight packet.
 pub const DEFAULT_RTO: Duration = Duration::from_millis(500);
 
+// ── RTT / goodput sampling (Phase A instrumentation) ──────────────────
+//
+// These constants drive the RFC-6298-style smoothed RTT estimator and the
+// 8-second sliding-window goodput sampler. They are passive — nothing in
+// the rwnd policy reads them yet. Phase D wires them into the autotuner.
+
+/// Number of 1-second buckets in the goodput sliding window.
+pub const GOODPUT_WINDOW_BUCKETS: usize = 8;
+/// RFC 6298 smoothing for SRTT: srtt = (1 - alpha) * srtt + alpha * sample.
+/// Stored as an integer pair to avoid floats in FFI.
+pub const RTT_SRTT_ALPHA_NUM: u32 = 1;
+pub const RTT_SRTT_ALPHA_DEN: u32 = 8;
+/// RFC 6298 smoothing for RTTVAR: rttvar = (1 - beta) * rttvar + beta * |srtt - sample|.
+pub const RTT_RTTVAR_BETA_NUM: u32 = 1;
+pub const RTT_RTTVAR_BETA_DEN: u32 = 4;
+
+/// Maximum shadow-sent entries we remember for RTT observation. A
+/// Vaultwarden page load with a stuck peer could otherwise bloat the
+/// map; we'd rather drop the oldest sample than leak.
+pub const SHADOW_MAX_ENTRIES: usize = 4096;
+
 // ── Frame model ────────────────────────────────────────────────────────
 
 /// Parsed mux frame — Rust-side representation of an on-wire frame.
@@ -402,6 +423,38 @@ pub struct RwndPressureSignals {
     pub has_active_flows: bool,
 }
 
+/// Point-in-time snapshot of the RTT / goodput / BDP instrumentation.
+/// Returned by `MuxEngine::rtt_goodput_snapshot` and bridged through FFI
+/// so the Swift side can log "modern flow-control" numbers alongside the
+/// existing rwnd ladder. All fields are `0` until the first ACK carrying
+/// a non-retransmitted DATA sample is observed.
+///
+/// Units:
+/// - `smoothed_rtt_ms`, `rtt_var_ms`, `min_rtt_ms`, `latest_rtt_ms` — ms
+/// - `goodput_bps`, `peak_goodput_bps` — bits/sec
+/// - `bdp_kb` — kilobytes (rounded down)
+/// - `samples_total` — number of RTT samples admitted by Karn's algo
+///   (retransmits skipped)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RttGoodputSnapshot {
+    pub smoothed_rtt_ms: u32,
+    pub rtt_var_ms: u32,
+    pub min_rtt_ms: u32,
+    pub latest_rtt_ms: u32,
+    pub goodput_bps: u64,
+    pub peak_goodput_bps: u64,
+    pub bdp_kb: u32,
+    pub samples_total: u64,
+}
+
+/// Internal goodput bucket — one second of bytes acked.
+#[derive(Debug, Clone, Copy, Default)]
+struct GoodputBucket {
+    /// Second-boundary (Instant) this bucket started.
+    started_at: Option<Instant>,
+    bytes: u64,
+}
+
 // ── Engine ────────────────────────────────────────────────────────────
 
 /// The main mux state machine. One instance per tunnel session.
@@ -435,6 +488,33 @@ pub struct MuxEngine {
     rto: Duration,
     // Bytes queued for retransmit (drained by take_retransmit_bytes).
     retransmit_buf: VecDeque<Vec<u8>>,
+    // ── RTT / goodput sampling (Phase A — instrumentation only) ────
+    /// Smoothed RTT (RFC 6298). `None` until the first sample lands.
+    srtt: Option<Duration>,
+    /// RTT variance (RFC 6298). Meaningful once `srtt` is `Some`.
+    rttvar: Option<Duration>,
+    /// Minimum RTT observed. `None` until the first sample lands.
+    min_rtt: Option<Duration>,
+    /// Most recent RTT sample.
+    latest_rtt: Option<Duration>,
+    /// Number of RTT samples admitted (Karn's algo skips retransmits).
+    rtt_samples_total: u64,
+    /// 8-slot ring of per-second goodput buckets.
+    goodput_buckets: [GoodputBucket; GOODPUT_WINDOW_BUCKETS],
+    /// Index of the "current" bucket (rotates as seconds advance).
+    goodput_current_idx: usize,
+    /// Peak goodput observed (bits/sec).
+    peak_goodput_bps: u64,
+    /// Shadow sent-at map used when the Swift data-path owns inflight
+    /// tracking. The Swift side calls `observe_sent` / `observe_ack` so
+    /// we can measure RTT without moving the send buffer into Rust yet.
+    /// Bounded to `SHADOW_MAX_ENTRIES` so it can't grow unbounded if the
+    /// peer stops ACKing.
+    shadow_sent_at: HashMap<u64, (Instant, u32)>,
+    /// Parallel map: seq → encoded byte length. Kept separate so the
+    /// (Instant, retransmits) tuple stays small. Both maps are pruned
+    /// together in `observe_ack_cumulative`.
+    shadow_encoded_len: HashMap<u64, u32>,
 }
 
 impl MuxEngine {
@@ -457,6 +537,16 @@ impl MuxEngine {
             last_rwnd_log: None,
             rto: DEFAULT_RTO,
             retransmit_buf: VecDeque::new(),
+            srtt: None,
+            rttvar: None,
+            min_rtt: None,
+            latest_rtt: None,
+            rtt_samples_total: 0,
+            goodput_buckets: [GoodputBucket::default(); GOODPUT_WINDOW_BUCKETS],
+            goodput_current_idx: 0,
+            peak_goodput_bps: 0,
+            shadow_sent_at: HashMap::new(),
+            shadow_encoded_len: HashMap::new(),
         }
     }
 
@@ -695,10 +785,313 @@ impl MuxEngine {
     /// Apply a cumulative ACK received from the peer: drop all inflight
     /// entries with `data_seq <= cumulative`. Returns the number of
     /// inflight entries released.
+    ///
+    /// Prefer `on_cumulative_ack_at` in production — it captures RTT and
+    /// goodput samples. This convenience wrapper uses `Instant::now()`
+    /// internally and exists so legacy callers / tests keep compiling.
     pub fn on_cumulative_ack(&mut self, cumulative: u64) -> usize {
+        self.on_cumulative_ack_at(Instant::now(), cumulative)
+    }
+
+    /// Apply a cumulative ACK at a specific `now`, capturing RTT and
+    /// goodput samples for the released packets (Phase A instrumentation).
+    ///
+    /// RTT samples follow Karn's algorithm: retransmitted packets are
+    /// excluded because their `sent_at` no longer reflects the original
+    /// transmission time. Goodput accounting is NOT subject to Karn —
+    /// every released byte counts as "data the peer admitted" regardless
+    /// of how many times we had to send it.
+    pub fn on_cumulative_ack_at(&mut self, now: Instant, cumulative: u64) -> usize {
         let before = self.inflight.len();
+        // Walk inflight once, separating the "release" set. We capture
+        // RTT / goodput from each released packet before the retain()
+        // call throws them away.
+        let mut released_bytes: u64 = 0;
+        let mut newest_rtt_sample: Option<Duration> = None;
+        for (seq, pkt) in self.inflight.iter() {
+            if *seq <= cumulative {
+                released_bytes = released_bytes.saturating_add(pkt.encoded.len() as u64);
+                if pkt.retransmits == 0 {
+                    // Karn: only admit samples where the packet wasn't
+                    // retransmitted. Keep the newest one; older
+                    // released-in-the-same-ACK samples are usually close.
+                    let sample = now.saturating_duration_since(pkt.sent_at);
+                    match newest_rtt_sample {
+                        Some(prev) if prev > sample => {}
+                        _ => newest_rtt_sample = Some(sample),
+                    }
+                }
+            }
+        }
         self.inflight.retain(|seq, _| *seq > cumulative);
+        if let Some(sample) = newest_rtt_sample {
+            self.record_rtt_sample(sample);
+        }
+        if released_bytes > 0 {
+            self.record_goodput_bytes(now, released_bytes);
+        }
         before - self.inflight.len()
+    }
+
+    // ── Shadow RTT / goodput observation (Phase A) ───────────────────
+    //
+    // The Swift data-path still owns inflight tracking on iOS. These
+    // methods give us RTT/goodput numbers without touching that — Swift
+    // calls `observe_sent` when it emits a DATA frame and
+    // `observe_ack_cumulative` when a FRAME_ACK arrives. The Rust side
+    // records timestamps, applies Karn's algorithm, and feeds the same
+    // smoother as the native `on_cumulative_ack_at` path.
+    //
+    // When the full mux cutover happens later, these become no-ops and
+    // the native path drives everything.
+
+    /// Record that a DATA frame with `data_seq` and `encoded_len` bytes
+    /// was just transmitted. Safe to call repeatedly with the same seq
+    /// — retransmits call this again, which marks the entry as "no
+    /// longer a valid RTT sample" (Karn's algorithm).
+    pub fn observe_sent(&mut self, now: Instant, data_seq: u64, encoded_len: u32) {
+        // Bound the map. On overflow, drop the oldest half (by sent_at).
+        // This only happens when the peer stops ACKing entirely — in
+        // healthy operation the ACK path trims the map continuously.
+        if self.shadow_sent_at.len() >= SHADOW_MAX_ENTRIES {
+            let mut entries: Vec<(u64, Instant)> = self
+                .shadow_sent_at
+                .iter()
+                .map(|(k, (t, _))| (*k, *t))
+                .collect();
+            entries.sort_by_key(|(_, t)| *t);
+            let drop_count = entries.len() / 2;
+            for (seq, _) in entries.into_iter().take(drop_count) {
+                self.shadow_sent_at.remove(&seq);
+            }
+        }
+        // Use the std HashMap's entry API to mark retransmits. A fresh
+        // sample starts with retransmits=0 (valid for RTT); an existing
+        // entry being re-sent bumps the counter (Karn excludes it).
+        self.shadow_sent_at
+            .entry(data_seq)
+            .and_modify(|(t, r)| {
+                *t = now;
+                *r = r.saturating_add(1);
+            })
+            .or_insert((now, 0));
+        // Encoded length is used when the ACK lands — we remember it by
+        // piggybacking onto the tuple via the second slot. Since we
+        // already use the second slot for the retransmit counter we
+        // stash encoded_len in an auxiliary structure below.
+        self.shadow_encoded_len.insert(data_seq, encoded_len);
+    }
+
+    /// Record that a cumulative ACK of `cumulative` arrived at `now`.
+    /// Walks the shadow sent-at map, samples RTT for entries with
+    /// retransmits=0, adds encoded-length to goodput for every released
+    /// entry, and removes released entries from the shadow map.
+    pub fn observe_ack_cumulative(&mut self, now: Instant, cumulative: u64) {
+        let mut released_bytes: u64 = 0;
+        let mut newest_rtt_sample: Option<Duration> = None;
+        // Collect released seqs first (can't mutate while iterating).
+        let released_seqs: Vec<u64> = self
+            .shadow_sent_at
+            .iter()
+            .filter_map(|(seq, _)| if *seq <= cumulative { Some(*seq) } else { None })
+            .collect();
+        for seq in released_seqs {
+            if let Some((sent_at, retransmits)) = self.shadow_sent_at.remove(&seq) {
+                if retransmits == 0 {
+                    let sample = now.saturating_duration_since(sent_at);
+                    match newest_rtt_sample {
+                        Some(prev) if prev > sample => {}
+                        _ => newest_rtt_sample = Some(sample),
+                    }
+                }
+            }
+            if let Some(encoded_len) = self.shadow_encoded_len.remove(&seq) {
+                released_bytes = released_bytes.saturating_add(encoded_len as u64);
+            }
+        }
+        if let Some(sample) = newest_rtt_sample {
+            self.record_rtt_sample(sample);
+        }
+        if released_bytes > 0 {
+            self.record_goodput_bytes(now, released_bytes);
+        }
+    }
+
+    /// Diagnostic: current shadow map size. Useful for sanity-checking
+    /// that Swift's observe_sent/observe_ack calls are balanced.
+    pub fn shadow_inflight_len(&self) -> usize {
+        self.shadow_sent_at.len()
+    }
+
+    /// Record one RTT sample via RFC 6298 smoothing. First sample
+    /// bootstraps `srtt` = sample and `rttvar` = sample/2.
+    fn record_rtt_sample(&mut self, sample: Duration) {
+        self.latest_rtt = Some(sample);
+        self.rtt_samples_total = self.rtt_samples_total.saturating_add(1);
+        self.min_rtt = Some(match self.min_rtt {
+            Some(m) if m <= sample => m,
+            _ => sample,
+        });
+        match (self.srtt, self.rttvar) {
+            (Some(srtt), Some(rttvar)) => {
+                // srtt = (1 - alpha) * srtt + alpha * sample
+                let srtt_ns = srtt.as_nanos() as u128;
+                let sample_ns = sample.as_nanos() as u128;
+                let alpha_num = RTT_SRTT_ALPHA_NUM as u128;
+                let alpha_den = RTT_SRTT_ALPHA_DEN as u128;
+                let new_srtt_ns =
+                    (srtt_ns * (alpha_den - alpha_num) + sample_ns * alpha_num) / alpha_den;
+
+                // rttvar = (1 - beta) * rttvar + beta * |srtt - sample|
+                let diff_ns = if srtt_ns > sample_ns {
+                    srtt_ns - sample_ns
+                } else {
+                    sample_ns - srtt_ns
+                };
+                let rttvar_ns = rttvar.as_nanos() as u128;
+                let beta_num = RTT_RTTVAR_BETA_NUM as u128;
+                let beta_den = RTT_RTTVAR_BETA_DEN as u128;
+                let new_rttvar_ns =
+                    (rttvar_ns * (beta_den - beta_num) + diff_ns * beta_num) / beta_den;
+
+                self.srtt = Some(Duration::from_nanos(new_srtt_ns as u64));
+                self.rttvar = Some(Duration::from_nanos(new_rttvar_ns as u64));
+            }
+            _ => {
+                // RFC 6298 §2.2: first sample → srtt = R, rttvar = R/2.
+                self.srtt = Some(sample);
+                self.rttvar = Some(sample / 2);
+            }
+        }
+    }
+
+    /// Record goodput bytes into the 8-second sliding window. Rotates
+    /// buckets based on `now` so idle periods correctly age out.
+    fn record_goodput_bytes(&mut self, now: Instant, bytes: u64) {
+        self.rotate_goodput_buckets(now);
+        let bucket = &mut self.goodput_buckets[self.goodput_current_idx];
+        if bucket.started_at.is_none() {
+            bucket.started_at = Some(now);
+        }
+        bucket.bytes = bucket.bytes.saturating_add(bytes);
+        // Update peak after the insert.
+        let bps = self.current_goodput_bps_inner();
+        if bps > self.peak_goodput_bps {
+            self.peak_goodput_bps = bps;
+        }
+    }
+
+    /// Advance the per-second bucket ring so `goodput_current_idx`
+    /// corresponds to the second containing `now`. Stale buckets are
+    /// zeroed as they roll off the back of the 8-second window.
+    fn rotate_goodput_buckets(&mut self, now: Instant) {
+        let cur = &self.goodput_buckets[self.goodput_current_idx];
+        let cur_started = match cur.started_at {
+            Some(t) => t,
+            None => {
+                // Fresh bucket — set its start and we're done.
+                self.goodput_buckets[self.goodput_current_idx].started_at = Some(now);
+                return;
+            }
+        };
+        let age = now.saturating_duration_since(cur_started);
+        let full_seconds = age.as_secs() as usize;
+        if full_seconds == 0 {
+            return;
+        }
+        // Advance up to GOODPUT_WINDOW_BUCKETS slots; after that every
+        // bucket is stale anyway — just reset them all.
+        let steps = full_seconds.min(GOODPUT_WINDOW_BUCKETS);
+        for _ in 0..steps {
+            self.goodput_current_idx = (self.goodput_current_idx + 1) % GOODPUT_WINDOW_BUCKETS;
+            self.goodput_buckets[self.goodput_current_idx] = GoodputBucket::default();
+        }
+        self.goodput_buckets[self.goodput_current_idx].started_at = Some(now);
+    }
+
+    /// Goodput across the current 8-second window, in bits/sec.
+    fn current_goodput_bps_inner(&self) -> u64 {
+        let total_bytes: u64 = self
+            .goodput_buckets
+            .iter()
+            .map(|b| b.bytes)
+            .fold(0u64, |a, b| a.saturating_add(b));
+        // 8 seconds × 8 bits/byte = 64, so bps = total_bytes × 8 / 8 = total_bytes.
+        // Keep the math explicit so future changes to GOODPUT_WINDOW_BUCKETS
+        // don't silently break the units.
+        total_bytes
+            .saturating_mul(8)
+            .checked_div(GOODPUT_WINDOW_BUCKETS as u64)
+            .unwrap_or(0)
+    }
+
+    /// Public accessor: current goodput in bits/sec across the sliding
+    /// 8-second window. Callers should age the window first by calling
+    /// `rtt_goodput_snapshot(now)`; this accessor returns whatever the
+    /// buckets currently hold.
+    pub fn goodput_bps(&self) -> u64 {
+        self.current_goodput_bps_inner()
+    }
+
+    /// Peak goodput observed since engine creation (bits/sec).
+    pub fn peak_goodput_bps(&self) -> u64 {
+        self.peak_goodput_bps
+    }
+
+    /// Smoothed RTT in milliseconds, or 0 before the first sample.
+    pub fn smoothed_rtt_ms(&self) -> u32 {
+        self.srtt.map(|d| d.as_millis() as u32).unwrap_or(0)
+    }
+
+    /// RTT variance in milliseconds, or 0 before the first sample.
+    pub fn rtt_var_ms(&self) -> u32 {
+        self.rttvar.map(|d| d.as_millis() as u32).unwrap_or(0)
+    }
+
+    /// Minimum RTT observed (ms), or 0 before the first sample.
+    pub fn min_rtt_ms(&self) -> u32 {
+        self.min_rtt.map(|d| d.as_millis() as u32).unwrap_or(0)
+    }
+
+    /// Latest RTT sample (ms), or 0 before the first sample.
+    pub fn latest_rtt_ms(&self) -> u32 {
+        self.latest_rtt.map(|d| d.as_millis() as u32).unwrap_or(0)
+    }
+
+    /// Number of RTT samples admitted by Karn's algorithm since engine start.
+    pub fn rtt_samples_total(&self) -> u64 {
+        self.rtt_samples_total
+    }
+
+    /// Full instrumentation snapshot for FFI / logging.
+    ///
+    /// `now` is used to age the goodput buckets before reading — pass
+    /// `Instant::now()` in production. Callers that read this every
+    /// health tick will naturally keep the window fresh.
+    pub fn rtt_goodput_snapshot(&mut self, now: Instant) -> RttGoodputSnapshot {
+        self.rotate_goodput_buckets(now);
+        let goodput_bps = self.current_goodput_bps_inner();
+        let smoothed_rtt_ms = self.smoothed_rtt_ms();
+        // BDP in KB: rtt_ms * bps / 8000 / 1000 = rtt_ms * bps / 8_000_000.
+        // bdp_bytes = rtt_ms * bps / 8000;  bdp_kb = bdp_bytes / 1024.
+        // Fold into one expression to minimise intermediate overflow.
+        let bdp_kb: u32 = if smoothed_rtt_ms == 0 || goodput_bps == 0 {
+            0
+        } else {
+            let bdp_bytes =
+                (smoothed_rtt_ms as u128).saturating_mul(goodput_bps as u128) / 8_000u128;
+            (bdp_bytes / 1024u128).min(u32::MAX as u128) as u32
+        };
+        RttGoodputSnapshot {
+            smoothed_rtt_ms,
+            rtt_var_ms: self.rtt_var_ms(),
+            min_rtt_ms: self.min_rtt_ms(),
+            latest_rtt_ms: self.latest_rtt_ms(),
+            goodput_bps,
+            peak_goodput_bps: self.peak_goodput_bps,
+            bdp_kb,
+            samples_total: self.rtt_samples_total,
+        }
     }
 
     /// If the peer advertised a new rwnd, remember it. Future cwnd
@@ -1226,5 +1619,341 @@ mod tests {
         };
         let (rwnd, reason) = m.tick_rwnd(now, stats, 0, signals);
         assert_ne!(rwnd, RWND_FLOOR, "reason={reason}");
+    }
+
+    // ── RTT / goodput sampling (Phase A) ─────────────────────────────
+
+    /// Helper: enqueue + flush + ack one DATA packet so a full RTT sample
+    /// lands. Returns the data_seq assigned.
+    fn send_and_ack_one(m: &mut MuxEngine, sent_at: Instant, ack_at: Instant) -> u64 {
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 1,
+            payload: b"x".to_vec(),
+        });
+        let frames = m.take_send_bytes(sent_at);
+        assert_eq!(frames.len(), 1);
+        // Newest data_seq we just assigned is next_send_data_seq - 1.
+        let seq = m.next_send_data_seq - 1;
+        m.on_cumulative_ack_at(ack_at, seq);
+        seq
+    }
+
+    #[test]
+    fn rtt_snapshot_is_zero_before_any_ack() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        let snap = m.rtt_goodput_snapshot(Instant::now());
+        assert_eq!(snap.smoothed_rtt_ms, 0);
+        assert_eq!(snap.rtt_var_ms, 0);
+        assert_eq!(snap.min_rtt_ms, 0);
+        assert_eq!(snap.latest_rtt_ms, 0);
+        assert_eq!(snap.goodput_bps, 0);
+        assert_eq!(snap.peak_goodput_bps, 0);
+        assert_eq!(snap.bdp_kb, 0);
+        assert_eq!(snap.samples_total, 0);
+    }
+
+    #[test]
+    fn rtt_first_sample_bootstraps_srtt_and_rttvar() {
+        // RFC 6298 §2.2: first sample → srtt = R, rttvar = R/2.
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_millis(50);
+        send_and_ack_one(&mut m, t0, t1);
+        let snap = m.rtt_goodput_snapshot(t1);
+        assert_eq!(snap.smoothed_rtt_ms, 50);
+        assert_eq!(snap.rtt_var_ms, 25);
+        assert_eq!(snap.min_rtt_ms, 50);
+        assert_eq!(snap.latest_rtt_ms, 50);
+        assert_eq!(snap.samples_total, 1);
+    }
+
+    #[test]
+    fn rtt_second_sample_smooths_via_rfc6298() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        let t0 = Instant::now();
+        send_and_ack_one(&mut m, t0, t0 + Duration::from_millis(100));
+        // Next sample is 200ms. srtt should move toward 200 by 1/8 of the
+        // delta: new_srtt = 0.875*100 + 0.125*200 = 112.5ms.
+        let t1 = t0 + Duration::from_secs(1);
+        send_and_ack_one(&mut m, t1, t1 + Duration::from_millis(200));
+        let snap = m.rtt_goodput_snapshot(t1 + Duration::from_millis(200));
+        // Allow 1ms slack for integer division.
+        assert!(
+            (112..=113).contains(&snap.smoothed_rtt_ms),
+            "srtt_ms={} expected ~112",
+            snap.smoothed_rtt_ms
+        );
+        assert_eq!(snap.min_rtt_ms, 100);
+        assert_eq!(snap.latest_rtt_ms, 200);
+        assert_eq!(snap.samples_total, 2);
+    }
+
+    #[test]
+    fn rtt_retransmit_sample_is_excluded_by_karn() {
+        // Send one packet, let RTO fire (so it's marked retransmitted),
+        // then ACK it. Karn's algo must NOT admit this as an RTT sample.
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        m.set_rto(Duration::from_millis(10));
+        let t0 = Instant::now();
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 1,
+            payload: b"retrans-me".to_vec(),
+        });
+        m.take_send_bytes(t0);
+        let seq = m.next_send_data_seq - 1;
+
+        // RTO fires → inflight packet marked retransmitted.
+        let rto_time = t0 + Duration::from_millis(50);
+        assert_eq!(m.tick_retransmit(rto_time), 1);
+
+        // Then ACK arrives a bit later.
+        let ack_time = rto_time + Duration::from_millis(40);
+        m.on_cumulative_ack_at(ack_time, seq);
+
+        let snap = m.rtt_goodput_snapshot(ack_time);
+        assert_eq!(
+            snap.samples_total, 0,
+            "retransmitted packet must not produce an RTT sample (Karn)"
+        );
+        assert_eq!(snap.smoothed_rtt_ms, 0);
+        // But goodput still counts.
+        assert!(
+            snap.goodput_bps > 0,
+            "goodput counts every released byte regardless of retransmits"
+        );
+    }
+
+    #[test]
+    fn goodput_tracks_bytes_acked_in_sliding_8s_window() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(64);
+        let t0 = Instant::now();
+        // Enqueue 4 × 1024-byte payloads and ACK them all at once. Each
+        // encoded frame is 13 bytes of header + 1024 bytes payload = 1037.
+        for _ in 0..4 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 1,
+                payload: vec![0u8; 1024],
+            });
+        }
+        m.take_send_bytes(t0);
+        let last_seq = m.next_send_data_seq - 1;
+        let ack_time = t0 + Duration::from_millis(50);
+        m.on_cumulative_ack_at(ack_time, last_seq);
+
+        let snap = m.rtt_goodput_snapshot(ack_time);
+        // 4 × 1037 = 4148 bytes of acked data in the last 1 second →
+        // bps across 8s window = 4148 × 8 / 8 = 4148 bps.
+        assert_eq!(snap.goodput_bps, 4148);
+        assert_eq!(snap.peak_goodput_bps, 4148);
+    }
+
+    #[test]
+    fn goodput_ages_out_after_window_elapses() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(64);
+        let t0 = Instant::now();
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 1,
+            payload: vec![0u8; 100],
+        });
+        m.take_send_bytes(t0);
+        let seq = m.next_send_data_seq - 1;
+        m.on_cumulative_ack_at(t0 + Duration::from_millis(10), seq);
+
+        // Immediately after the ACK, goodput is non-zero.
+        let early = t0 + Duration::from_millis(50);
+        let snap_early = m.rtt_goodput_snapshot(early);
+        assert!(snap_early.goodput_bps > 0);
+
+        // 15s later — well past the 8s window — every bucket should have
+        // rolled to zero.
+        let late = t0 + Duration::from_secs(15);
+        let snap_late = m.rtt_goodput_snapshot(late);
+        assert_eq!(snap_late.goodput_bps, 0);
+        // Peak persists across the aging.
+        assert!(snap_late.peak_goodput_bps > 0);
+    }
+
+    #[test]
+    fn bdp_kb_is_zero_until_both_rtt_and_goodput_are_known() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(4);
+        assert_eq!(
+            m.rtt_goodput_snapshot(Instant::now()).bdp_kb,
+            0,
+            "bdp must be 0 before any samples land"
+        );
+    }
+
+    #[test]
+    fn bdp_kb_matches_rtt_times_goodput() {
+        // Sanity: 50ms RTT × 1 Mbps (1_000_000 bps) = 50_000 bits = 6250 bytes = ~6 KB.
+        // We'll simulate this by directly injecting a sample + goodput.
+        let mut m = MuxEngine::new();
+        m.set_cwnd(64);
+        let t0 = Instant::now();
+        // 1 second of 125_000 bytes acked = 1 Mbps goodput.
+        // Need encoded frames summing to ~125KB. Use 100 × 1250-byte payloads.
+        for _ in 0..100 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 1,
+                payload: vec![0u8; 1237],
+            });
+        }
+        m.take_send_bytes(t0);
+        let seq = m.next_send_data_seq - 1;
+        let ack_time = t0 + Duration::from_millis(50);
+        m.on_cumulative_ack_at(ack_time, seq);
+
+        let snap = m.rtt_goodput_snapshot(ack_time);
+        // RTT sample ~= 50ms. Goodput ~= 1 Mbps. BDP ~= 6 KB.
+        assert_eq!(snap.smoothed_rtt_ms, 50);
+        let expected_bdp_kb =
+            ((snap.smoothed_rtt_ms as u64) * snap.goodput_bps / 8_000 / 1024) as u32;
+        assert_eq!(snap.bdp_kb, expected_bdp_kb);
+    }
+
+    #[test]
+    fn samples_total_counts_only_karn_admitted_samples() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(16);
+        m.set_rto(Duration::from_millis(10));
+        let t0 = Instant::now();
+
+        // Three clean packets → 3 samples.
+        for i in 0..3 {
+            send_and_ack_one(
+                &mut m,
+                t0 + Duration::from_millis(100 * i),
+                t0 + Duration::from_millis(100 * i + 50),
+            );
+        }
+
+        // One packet that gets retransmitted → 0 additional samples.
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 1,
+            payload: b"rx".to_vec(),
+        });
+        m.take_send_bytes(t0 + Duration::from_secs(1));
+        let seq = m.next_send_data_seq - 1;
+        m.tick_retransmit(t0 + Duration::from_secs(2));
+        m.on_cumulative_ack_at(t0 + Duration::from_secs(3), seq);
+
+        assert_eq!(m.rtt_samples_total(), 3);
+    }
+
+    #[test]
+    fn peak_goodput_is_monotonic() {
+        let mut m = MuxEngine::new();
+        m.set_cwnd(32);
+        let t0 = Instant::now();
+        // Burst 1: 10 packets ack'd in sub-second.
+        for _ in 0..10 {
+            m.enqueue_outbound(OutboundItem::Data {
+                stream_id: 1,
+                payload: vec![0u8; 1024],
+            });
+        }
+        m.take_send_bytes(t0);
+        let seq = m.next_send_data_seq - 1;
+        m.on_cumulative_ack_at(t0 + Duration::from_millis(20), seq);
+        let peak1 = m.peak_goodput_bps();
+        assert!(peak1 > 0);
+
+        // Quiet 10 seconds.
+        let _ = m.rtt_goodput_snapshot(t0 + Duration::from_secs(10));
+
+        // Small burst: should NOT lower the peak.
+        m.enqueue_outbound(OutboundItem::Data {
+            stream_id: 1,
+            payload: vec![0u8; 32],
+        });
+        m.take_send_bytes(t0 + Duration::from_secs(10));
+        let seq = m.next_send_data_seq - 1;
+        m.on_cumulative_ack_at(t0 + Duration::from_secs(10) + Duration::from_millis(5), seq);
+        let peak2 = m.peak_goodput_bps();
+        assert!(peak2 >= peak1, "peak must not decrease: {peak1} → {peak2}");
+    }
+
+    // ── Shadow RTT / goodput observation tests ──────────────────────
+
+    #[test]
+    fn shadow_observe_sent_then_ack_records_one_rtt_sample() {
+        // Pure shadow path — no enqueue / take_send_bytes. Simulates
+        // Swift emitting a DATA frame itself and asking Rust to
+        // measure RTT from the outside.
+        let mut m = MuxEngine::new();
+        let t0 = Instant::now();
+        m.observe_sent(t0, 42, 1037);
+        assert_eq!(m.shadow_inflight_len(), 1);
+
+        let ack_time = t0 + Duration::from_millis(75);
+        m.observe_ack_cumulative(ack_time, 42);
+        assert_eq!(m.shadow_inflight_len(), 0);
+
+        let snap = m.rtt_goodput_snapshot(ack_time);
+        assert_eq!(snap.samples_total, 1);
+        assert_eq!(snap.smoothed_rtt_ms, 75);
+        assert_eq!(snap.goodput_bps, 1037);
+    }
+
+    #[test]
+    fn shadow_observe_cumulative_releases_all_below() {
+        let mut m = MuxEngine::new();
+        let t0 = Instant::now();
+        for seq in 1..=5u64 {
+            m.observe_sent(
+                t0 + Duration::from_millis(seq as u64),
+                seq,
+                500,
+            );
+        }
+        assert_eq!(m.shadow_inflight_len(), 5);
+        m.observe_ack_cumulative(t0 + Duration::from_millis(50), 3);
+        assert_eq!(
+            m.shadow_inflight_len(),
+            2,
+            "seqs 1..=3 released; 4,5 remain"
+        );
+    }
+
+    #[test]
+    fn shadow_observe_sent_twice_same_seq_excludes_sample_via_karn() {
+        // Retransmit path: Swift sends seq=7, RTO fires, Swift sends
+        // seq=7 again. The second observe_sent marks the entry as
+        // retransmitted — Karn must exclude this from RTT samples.
+        let mut m = MuxEngine::new();
+        let t0 = Instant::now();
+        m.observe_sent(t0, 7, 1000);
+        m.observe_sent(t0 + Duration::from_millis(100), 7, 1000);
+        m.observe_ack_cumulative(t0 + Duration::from_millis(150), 7);
+        let snap = m.rtt_goodput_snapshot(t0 + Duration::from_millis(150));
+        assert_eq!(
+            snap.samples_total, 0,
+            "retransmitted seq excluded by Karn"
+        );
+        assert!(snap.goodput_bps > 0, "goodput still counted");
+    }
+
+    #[test]
+    fn shadow_observe_caps_at_shadow_max_entries() {
+        // Verify the bounded-growth guard. Fire enough observe_sent
+        // without any ACKs to exceed the cap; the map must not exceed
+        // SHADOW_MAX_ENTRIES.
+        let mut m = MuxEngine::new();
+        let t0 = Instant::now();
+        for seq in 0..(SHADOW_MAX_ENTRIES as u64 + 100) {
+            m.observe_sent(t0 + Duration::from_millis(seq), seq, 100);
+        }
+        assert!(
+            m.shadow_inflight_len() <= SHADOW_MAX_ENTRIES,
+            "shadow map grew past cap: {}",
+            m.shadow_inflight_len()
+        );
     }
 }

@@ -73,6 +73,14 @@ final class ZTLPTunnelConnection {
     /// Delegate for delivering decrypted payloads.
     weak var delegate: ZTLPTunnelConnectionDelegate?
 
+    /// Optional hook fired once a DATA frame has been framed (encoded
+    /// plaintext, pre-encryption) and handed to the NWConnection send
+    /// path. Receives (data_seq, encoded_len). Used by
+    /// PacketTunnelProvider to feed the Rust MuxEngine's shadow RTT
+    /// observation path (`ztlp_mux_observe_sent`). Nil by default so
+    /// non-NE consumers don't pay any overhead.
+    var onDataFrameSent: ((UInt64, Int) -> Void)?
+
     /// Whether the connection is active and receiving.
     private var isActive = false
 
@@ -398,6 +406,13 @@ final class ZTLPTunnelConnection {
         guard frameResult == 0, frameWritten > 0 else {
             return false
         }
+
+        // Phase A (modern flow control): shadow RTT / goodput hook.
+        // Fires BEFORE encryption so the encoded_len we report matches
+        // what the Rust engine's own encoded_len would have been. The
+        // gateway's cumulative ACK is over data_seq, so this `seq` is
+        // what ztlp_mux_observe_ack_cumulative releases later.
+        onDataFrameSent?(seq, frameWritten)
 
         let plaintext = Array(localFrame.prefix(frameWritten))
         return sendEncryptedFrame(plaintext: plaintext, cryptoContext: cryptoContext, conn: conn)

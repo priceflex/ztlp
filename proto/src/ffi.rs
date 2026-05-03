@@ -4345,6 +4345,142 @@ pub extern "C" fn ztlp_mux_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
         .unwrap_or(-1)
 }
 
+// ── RTT / goodput instrumentation FFI (Phase A — modern flow control) ──
+//
+// Passive instrumentation: no wire change, no behaviour change. Swift
+// reads the snapshot each health tick and logs it. Phase D will consume
+// these same values in the autotuner, but today they just surface data.
+
+/// Mirror of `crate::mux::RttGoodputSnapshot`. Read via
+/// `ztlp_mux_rtt_goodput_snapshot`.
+///
+/// Units (documented here because C consumers don't see Rust rustdoc):
+/// - `smoothed_rtt_ms`, `rtt_var_ms`, `min_rtt_ms`, `latest_rtt_ms` — ms
+/// - `goodput_bps`, `peak_goodput_bps` — bits/sec
+/// - `bdp_kb` — kilobytes
+/// - `samples_total` — Karn-admitted RTT samples since engine start
+#[cfg(feature = "ios-sync")]
+#[repr(C)]
+pub struct ZtlpRttGoodputSnapshot {
+    pub smoothed_rtt_ms: u32,
+    pub rtt_var_ms: u32,
+    pub min_rtt_ms: u32,
+    pub latest_rtt_ms: u32,
+    pub goodput_bps: u64,
+    pub peak_goodput_bps: u64,
+    pub bdp_kb: u32,
+    pub samples_total: u64,
+}
+
+/// Read the current RTT/goodput/BDP snapshot. Returns 0 on success,
+/// negative on error. `out` must be non-null. The snapshot "ages"
+/// goodput buckets based on `Instant::now()` before reading — callers
+/// invoking this every ~2s on the health-tick cadence keep the sliding
+/// window fresh automatically.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_rtt_goodput_snapshot(
+    engine: *mut ZtlpMuxEngine,
+    out: *mut ZtlpRttGoodputSnapshot,
+) -> i32 {
+    if engine.is_null() || out.is_null() {
+        set_last_error("null argument to ztlp_mux_rtt_goodput_snapshot");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -1;
+        }
+    };
+    let snap = guard.rtt_goodput_snapshot(std::time::Instant::now());
+    // Write directly through the out pointer — repr(C) layout matches.
+    unsafe {
+        (*out).smoothed_rtt_ms = snap.smoothed_rtt_ms;
+        (*out).rtt_var_ms = snap.rtt_var_ms;
+        (*out).min_rtt_ms = snap.min_rtt_ms;
+        (*out).latest_rtt_ms = snap.latest_rtt_ms;
+        (*out).goodput_bps = snap.goodput_bps;
+        (*out).peak_goodput_bps = snap.peak_goodput_bps;
+        (*out).bdp_kb = snap.bdp_kb;
+        (*out).samples_total = snap.samples_total;
+    }
+    0
+}
+
+/// Shadow RTT observation: tell the engine that a DATA frame with the
+/// given `data_seq` and `encoded_len` bytes was just put on the wire.
+/// Used while the Swift data-path still owns inflight tracking. Calling
+/// this with the same `data_seq` again (e.g. on retransmit) correctly
+/// marks the sample as excluded from RTT under Karn's algorithm.
+/// Returns 0 on success, negative on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_observe_sent(
+    engine: *mut ZtlpMuxEngine,
+    data_seq: u64,
+    encoded_len: u32,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -1;
+        }
+    };
+    guard.observe_sent(std::time::Instant::now(), data_seq, encoded_len);
+    0
+}
+
+/// Shadow RTT observation: tell the engine a cumulative ACK arrived.
+/// Samples RTT (Karn-filtered) and goodput for every shadow-tracked
+/// `data_seq <= cumulative`, then drops those entries from the shadow
+/// map. Returns 0 on success, negative on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_observe_ack_cumulative(
+    engine: *mut ZtlpMuxEngine,
+    cumulative: u64,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -1;
+        }
+    };
+    guard.observe_ack_cumulative(std::time::Instant::now(), cumulative);
+    0
+}
+
+/// Diagnostic: shadow map depth. Balance test between observe_sent /
+/// observe_ack — in healthy operation this should stay under cwnd.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_shadow_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.shadow_inflight_len() as i32)
+        .unwrap_or(-1)
+}
+
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ───────────────────────
 //
 // SessionHealth is a small state machine. Call `ztlp_health_new` once per

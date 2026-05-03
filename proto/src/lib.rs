@@ -52,6 +52,8 @@ pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
 pub mod metrics;
+#[cfg(feature = "ios-sync")]
+pub mod mux;
 pub mod ns_cbor;
 pub mod packet;
 pub mod packet_router;

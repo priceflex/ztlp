@@ -112,6 +112,37 @@ pub const DEFAULT_INITIAL_WINDOW_KB: u16 = 16;
 /// map; we'd rather drop the oldest sample than leak.
 pub const SHADOW_MAX_ENTRIES: usize = 4096;
 
+// ── Phase D: Autotune (BBR-lite) ──────────────────────────────────────
+//
+// Target = smoothed_rtt × peak_goodput × safety_factor. Clamped to
+// [min_window_kb, max_window_kb]. Safety factor reflects confidence —
+// 2.0 on healthy ticks (widen aggressively past the current estimate),
+// 0.5 on pressure/replay/loss (clamp back toward min).
+//
+// The autotuner only drives the byte window; the V1 packet-count ladder
+// is left alone so V1-only peers (old gateway) keep working unchanged.
+
+/// Minimum autotune window. Fresh slow-start + anti-abuse floor. Same
+/// order of magnitude as the V1 floor (4 × 1140 ≈ 4.6 KB) so legacy
+/// behaviour is preserved when falling back.
+pub const AUTOTUNE_MIN_WINDOW_KB: u16 = 8;
+/// Maximum autotune window. 4 MB is QUIC-ish default — plenty of room
+/// for a high-BDP path (100 ms × 100 Mbps ≈ 1.25 MB) without letting
+/// the peer advertise something catastrophic like 64 MB.
+pub const AUTOTUNE_MAX_WINDOW_KB: u16 = 4096;
+/// Safety factor on a healthy tick (target = srtt × goodput × 2.0).
+/// Stored as rational to keep the arithmetic integer-only for FFI
+/// simplicity.
+pub const AUTOTUNE_HEALTHY_SAFETY_NUM: u32 = 2;
+pub const AUTOTUNE_HEALTHY_SAFETY_DEN: u32 = 1;
+/// Safety factor on a pressure/replay tick — drives the target back
+/// down toward the floor without slamming straight to it.
+pub const AUTOTUNE_PRESSURE_SAFETY_NUM: u32 = 1;
+pub const AUTOTUNE_PRESSURE_SAFETY_DEN: u32 = 2;
+/// How many healthy ticks in a row before autotune starts widening past
+/// the current target. Mirrors the V1 ladder's `rwnd_healthy_ticks_needed`.
+pub const AUTOTUNE_WIDEN_TICKS_NEEDED: u32 = 3;
+
 // ── Frame model ────────────────────────────────────────────────────────
 
 /// Parsed mux frame — Rust-side representation of an on-wire frame.
@@ -585,6 +616,24 @@ pub struct MuxEngine {
     /// source of truth and this field is set from `advertised_rwnd
     /// * RWND_V1_FRAME_SIZE_HINT` for parity in diagnostics.
     advertised_window_bytes: u32,
+    // ── Phase D: Autotune state ────────────────────────────────────
+    /// Minimum autotune window (KB). Configurable via
+    /// `set_autotune_bounds_kb`.
+    autotune_min_kb: u16,
+    /// Maximum autotune window (KB). Configurable via
+    /// `set_autotune_bounds_kb`.
+    autotune_max_kb: u16,
+    /// Consecutive healthy ticks since the last widen. Resets on
+    /// pressure or when we actually widen.
+    autotune_healthy_ticks: u32,
+    /// Most recent autotune target in KB (post-clamp, pre-gating).
+    /// Exposed via FFI for observability.
+    autotune_target_kb: u16,
+    /// Reason tag for the last autotune decision — matches the V1
+    /// ladder's reason tag style.
+    autotune_reason: &'static str,
+    /// When the last autotune tick ran. Used for age-based logging.
+    autotune_last_tick: Option<Instant>,
 }
 
 impl MuxEngine {
@@ -622,6 +671,13 @@ impl MuxEngine {
             // Initialize from the V1 rwnd floor so diagnostics read a
             // plausible non-zero number.
             advertised_window_bytes: RWND_FLOOR as u32 * RWND_V1_FRAME_SIZE_HINT,
+            // Phase D: autotune bounds + tracking.
+            autotune_min_kb: AUTOTUNE_MIN_WINDOW_KB,
+            autotune_max_kb: AUTOTUNE_MAX_WINDOW_KB,
+            autotune_healthy_ticks: 0,
+            autotune_target_kb: 0,
+            autotune_reason: "init",
+            autotune_last_tick: None,
         }
     }
 
@@ -736,6 +792,149 @@ impl MuxEngine {
         }
     }
 
+    // ── Phase D: Autotune config + accessors ─────────────────────────
+
+    /// Override the autotune [min, max] window in KB. Clamped to at least
+    /// `AUTOTUNE_MIN_WINDOW_KB` on the low end and `AUTOTUNE_MAX_WINDOW_KB`
+    /// on the high end. A `min_kb > max_kb` swap is silently corrected.
+    /// Takes effect on the next `tick_rwnd` call.
+    pub fn set_autotune_bounds_kb(&mut self, min_kb: u16, max_kb: u16) {
+        let (lo, hi) = if min_kb <= max_kb {
+            (min_kb, max_kb)
+        } else {
+            (max_kb, min_kb)
+        };
+        let lo = lo.max(AUTOTUNE_MIN_WINDOW_KB);
+        let hi = hi.min(AUTOTUNE_MAX_WINDOW_KB).max(lo);
+        self.autotune_min_kb = lo;
+        self.autotune_max_kb = hi;
+    }
+
+    /// Current autotune [min, max] window in KB.
+    pub fn autotune_bounds_kb(&self) -> (u16, u16) {
+        (self.autotune_min_kb, self.autotune_max_kb)
+    }
+
+    /// Most recent autotune target in KB — what the BBR-lite formula
+    /// produced on the last `tick_rwnd` where V2 was active. `0` means
+    /// autotune has never run (V1-only session, or peer hasn't upgraded
+    /// yet, or no RTT/goodput samples yet).
+    pub fn autotune_target_kb(&self) -> u16 {
+        self.autotune_target_kb
+    }
+
+    /// Reason tag from the last autotune decision. Machine-readable
+    /// string matching the V1 ladder style (e.g. "no_sample",
+    /// "widen_healthy", "pressure_clamp", "below_min", "above_max").
+    pub fn autotune_reason(&self) -> &'static str {
+        self.autotune_reason
+    }
+
+    /// Internal: compute the autotune target window in **bytes** given
+    /// the current smoothed RTT, peak goodput, and the pressure state
+    /// from the caller. Pure function over engine state; does not mutate.
+    ///
+    /// Returns `None` when there are no RTT samples yet (goodput can
+    /// still be zero — the caller falls back to the current window).
+    fn autotune_compute_target_bytes(&self, pressure: bool) -> Option<u32> {
+        // Require at least one RTT sample. Without it, BDP is meaningless.
+        let srtt = self.srtt?;
+        let srtt_ms = srtt.as_millis() as u64;
+        if srtt_ms == 0 {
+            return None;
+        }
+        let goodput_bps = self.peak_goodput_bps;
+        // BDP in bytes = (goodput_bits/sec × srtt_ms) / (1000 × 8)
+        // = goodput_bits × srtt_ms / 8000
+        let bdp_bytes = goodput_bps.saturating_mul(srtt_ms) / 8000;
+        // Apply safety factor (healthy = 2x, pressure = 0.5x).
+        let (num, den) = if pressure {
+            (
+                AUTOTUNE_PRESSURE_SAFETY_NUM as u64,
+                AUTOTUNE_PRESSURE_SAFETY_DEN as u64,
+            )
+        } else {
+            (
+                AUTOTUNE_HEALTHY_SAFETY_NUM as u64,
+                AUTOTUNE_HEALTHY_SAFETY_DEN as u64,
+            )
+        };
+        let target = bdp_bytes.saturating_mul(num) / den.max(1);
+        // Clamp to [min_kb, max_kb] × 1024.
+        let min_bytes = self.autotune_min_kb as u64 * ACK_V2_WINDOW_UNIT_BYTES as u64;
+        let max_bytes = self.autotune_max_kb as u64 * ACK_V2_WINDOW_UNIT_BYTES as u64;
+        let clamped = target.clamp(min_bytes, max_bytes);
+        Some(clamped.min(u32::MAX as u64) as u32)
+    }
+
+    /// Internal: drive one autotune tick, mutating `advertised_window_bytes`
+    /// when V2 is active. Returns `(new_bytes, reason)`. Called from
+    /// `tick_rwnd` after the V1 ladder has decided its reason. V1-only
+    /// sessions never enter this path.
+    fn autotune_tick(&mut self, pressure: bool, now: Instant) -> (u32, &'static str) {
+        // We only autotune when speaking V2. V1 stays on the packet ladder.
+        if !self.peer_speaks_v2 {
+            self.autotune_reason = "v1_legacy";
+            return (self.advertised_window_bytes, self.autotune_reason);
+        }
+
+        let target_bytes = match self.autotune_compute_target_bytes(pressure) {
+            Some(t) => t,
+            None => {
+                // No RTT sample yet — hold current window. Log the reason so
+                // the device log tells us why autotune is idle.
+                self.autotune_reason = "no_sample";
+                self.autotune_target_kb = 0;
+                return (self.advertised_window_bytes, self.autotune_reason);
+            }
+        };
+        self.autotune_target_kb =
+            ((target_bytes + 1023) / 1024).min(u16::MAX as u32) as u16;
+
+        let current = self.advertised_window_bytes;
+        let min_bytes = self.autotune_min_kb as u32 * ACK_V2_WINDOW_UNIT_BYTES;
+        let max_bytes = self.autotune_max_kb as u32 * ACK_V2_WINDOW_UNIT_BYTES;
+
+        if pressure {
+            // Pressure: clamp toward target (already at 0.5x safety).
+            // Monotonically shrink — never grow on pressure.
+            let new_bytes = target_bytes.min(current).max(min_bytes);
+            self.advertised_window_bytes = new_bytes;
+            self.autotune_healthy_ticks = 0;
+            self.autotune_reason = "pressure_clamp";
+            (new_bytes, self.autotune_reason)
+        } else {
+            // Healthy: require N consecutive healthy ticks before widening.
+            self.autotune_healthy_ticks = self.autotune_healthy_ticks.saturating_add(1);
+            let may_widen =
+                self.autotune_healthy_ticks >= AUTOTUNE_WIDEN_TICKS_NEEDED;
+            let new_bytes = if target_bytes > current {
+                // Want to grow. Gate on healthy-tick count.
+                if may_widen {
+                    self.autotune_healthy_ticks = 0;
+                    self.autotune_reason = "widen_healthy";
+                    target_bytes
+                } else {
+                    self.autotune_reason = "hold_pre_widen";
+                    current
+                }
+            } else if target_bytes < current {
+                // Want to shrink (goodput fell but no pressure). Allow —
+                // mirrors TCP autotune backing off when the app stopped
+                // pushing.
+                self.autotune_reason = "shrink_to_target";
+                target_bytes
+            } else {
+                self.autotune_reason = "hold_at_target";
+                current
+            };
+            let clamped = new_bytes.clamp(min_bytes, max_bytes);
+            self.advertised_window_bytes = clamped;
+            self.autotune_last_tick = Some(now);
+            (clamped, self.autotune_reason)
+        }
+    }
+
     // ── rwnd policy (Task 2.3) ───────────────────────────────────────
 
     /// Mark that utun had outbound demand just now. Used by the rwnd
@@ -750,7 +949,42 @@ impl MuxEngine {
     /// Port of `PacketTunnelProvider.maybeRampAdvertisedRwnd`, with the
     /// post-demand hold=12 fix called out in the plan. Returns the new
     /// rwnd value and a machine-readable reason tag.
+    ///
+    /// **Phase D**: after the V1 packet-count ladder decides its outcome,
+    /// the autotuner runs on top — mutating `advertised_window_bytes`
+    /// directly when V2 is active. The returned `(u16, &str)` pair is
+    /// still the V1 ladder result (frame count + V1 reason) so existing
+    /// callers don't change. Use `autotune_target_kb()` / `autotune_reason()`
+    /// for the new byte-window state.
     pub fn tick_rwnd(
+        &mut self,
+        now: Instant,
+        stats: RouterStatsSnapshot,
+        replay_delta: i32,
+        signals: RwndPressureSignals,
+    ) -> (u16, &'static str) {
+        let (v1_rwnd, v1_reason) = self.tick_rwnd_v1_ladder(now, stats, replay_delta, signals);
+        // Pressure-ish reasons force autotune into clamp-down mode too.
+        let pressure = matches!(
+            v1_reason,
+            "pressure"
+                | "pressure_cooldown"
+                | "browser_replay_backoff"
+                | "no_progress"
+        );
+        // Autotune mutates `advertised_window_bytes` when V2 is active.
+        // In V1-only sessions it's a no-op ("v1_legacy" reason) — the
+        // V1 ladder's set_rwnd call already synced the byte hint.
+        let _ = self.autotune_tick(pressure, now);
+        (v1_rwnd, v1_reason)
+    }
+
+    /// Pre-Phase-D implementation — the V1 packet-count ladder.
+    /// Separated so `tick_rwnd` can overlay the autotuner cleanly.
+    /// Every path still calls `set_rwnd()` as before, so the V1 side
+    /// effect (updating `advertised_rwnd` and, for V1-only sessions,
+    /// the byte hint) is identical to the pre-Phase-D behaviour.
+    fn tick_rwnd_v1_ladder(
         &mut self,
         now: Instant,
         stats: RouterStatsSnapshot,
@@ -2249,5 +2483,256 @@ mod tests {
             }
             other => panic!("expected AckV2, got {other:?}"),
         }
+    }
+
+    // ── Phase D: autotune tests ──────────────────────────────────
+
+    /// Helper: build a healthy pressure-signal bag (no replays, flows=1
+    /// so `browser_burst` is false, recent outbound demand so
+    /// `active_or_recent=true`).
+    fn healthy_inputs() -> (RouterStatsSnapshot, i32, RwndPressureSignals) {
+        let stats = RouterStatsSnapshot {
+            flows: 1,
+            outbound: 0,
+            stream_to_flow: 0,
+            send_buf_bytes: 0,
+            oldest_ms: 0,
+        };
+        let signals = RwndPressureSignals {
+            consecutive_full_flushes: 0,
+            consecutive_stuck_high_seq_ticks: 0,
+            session_suspect: false,
+            probe_outstanding: false,
+            high_seq_advanced: true,
+            has_active_flows: true,
+        };
+        (stats, 0, signals)
+    }
+
+    /// Inject an srtt sample + a peak goodput so `autotune_compute_target_bytes`
+    /// can produce a non-trivial target. Uses `observe_sent` +
+    /// `observe_ack_cumulative` to drive the real code path.
+    ///
+    /// Every ACK creates an RTT sample (RFC 6298 smoothing), so we keep
+    /// the observe_sent → observe_ack gap at exactly `rtt_ms` for every
+    /// seq — otherwise the smoothed RTT collapses to the most-recent
+    /// (usually tiny) latency gap.
+    fn seed_rtt_goodput(m: &mut MuxEngine, now: Instant, rtt_ms: u64, bytes_per_sec: u64) {
+        // Push acked bytes into the current 1-second bucket. Each pair
+        // of (observe_sent, observe_ack) has a gap of exactly `rtt_ms`
+        // so the RFC 6298 smoother holds srtt at `rtt_ms`.
+        let chunk = 1000u64;
+        let chunks = (bytes_per_sec / chunk).max(1);
+        for i in 0..chunks {
+            let seq = 1 + i;
+            // Stagger sends inside the first 900 ms so all acks land in
+            // the same 1-sec goodput bucket and peak sees the full rate.
+            let sent_at = now + Duration::from_millis((i * 900) / chunks.max(1));
+            let ack_at = sent_at + Duration::from_millis(rtt_ms);
+            m.observe_sent(sent_at, seq, chunk as u32);
+            m.observe_ack_cumulative(ack_at, seq);
+        }
+    }
+
+    #[test]
+    fn autotune_defaults_to_min_max_constants() {
+        let m = MuxEngine::new();
+        assert_eq!(
+            m.autotune_bounds_kb(),
+            (AUTOTUNE_MIN_WINDOW_KB, AUTOTUNE_MAX_WINDOW_KB)
+        );
+        assert_eq!(m.autotune_target_kb(), 0);
+        assert_eq!(m.autotune_reason(), "init");
+    }
+
+    #[test]
+    fn autotune_bounds_are_clamped_and_swapped() {
+        let mut m = MuxEngine::new();
+        // Swap min > max.
+        m.set_autotune_bounds_kb(2048, 16);
+        let (lo, hi) = m.autotune_bounds_kb();
+        assert!(lo <= hi);
+        // Lo clamped to AUTOTUNE_MIN_WINDOW_KB floor.
+        assert!(lo >= AUTOTUNE_MIN_WINDOW_KB);
+        // Hi clamped to AUTOTUNE_MAX_WINDOW_KB.
+        assert!(hi <= AUTOTUNE_MAX_WINDOW_KB);
+    }
+
+    #[test]
+    fn autotune_is_v1_legacy_noop_when_peer_has_not_upgraded() {
+        let mut m = MuxEngine::new();
+        let (stats, replay, signals) = healthy_inputs();
+        let t0 = Instant::now();
+        m.mark_outbound_demand(t0);
+        for _ in 0..5 {
+            let (_v1, _r) = m.tick_rwnd(t0, stats, replay, signals);
+        }
+        assert!(!m.peer_speaks_v2());
+        assert_eq!(m.autotune_reason(), "v1_legacy");
+        // V1 ladder should still have done its thing — byte hint follows rwnd.
+        assert_eq!(
+            m.advertised_window_bytes(),
+            m.advertised_rwnd() as u32 * RWND_V1_FRAME_SIZE_HINT
+        );
+    }
+
+    #[test]
+    fn autotune_no_sample_when_v2_active_but_no_rtt_yet() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let (stats, replay, signals) = healthy_inputs();
+        let t0 = Instant::now();
+        m.mark_outbound_demand(t0);
+        let _ = m.tick_rwnd(t0, stats, replay, signals);
+        assert_eq!(m.autotune_reason(), "no_sample");
+        assert_eq!(m.autotune_target_kb(), 0);
+        // Window held at the V2 default (16 KB).
+        assert_eq!(
+            m.advertised_window_bytes(),
+            DEFAULT_INITIAL_WINDOW_KB as u32 * ACK_V2_WINDOW_UNIT_BYTES
+        );
+    }
+
+    #[test]
+    fn autotune_widens_past_v1_ceiling_on_healthy_fast_path() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let t0 = Instant::now();
+        // 50 ms RTT, 10 Mbps goodput. Goodput is computed as
+        // `total_bytes × 8 / GOODPUT_WINDOW_BUCKETS(=8) = total_bytes bits/sec`
+        // so to represent 10 Mbps we need 10_000_000 bytes in the window.
+        // BDP @ 10 Mbps × 50 ms = 62,500 bytes; safety 2× = 125 KB.
+        seed_rtt_goodput(&mut m, t0, 50, 10_000_000);
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+
+        // Drive AUTOTUNE_WIDEN_TICKS_NEEDED healthy ticks.
+        let mut last_bytes = m.advertised_window_bytes();
+        for i in 0..(AUTOTUNE_WIDEN_TICKS_NEEDED + 1) {
+            let now = t0 + Duration::from_millis(1500 + i as u64 * 1000);
+            let _ = m.tick_rwnd(now, stats, replay, signals);
+            last_bytes = m.advertised_window_bytes();
+        }
+        assert!(
+            last_bytes > 18 * 1024,
+            "autotune should widen past the V1 ceiling (18 KB), got {last_bytes} bytes ({} KB)",
+            last_bytes / 1024
+        );
+        // Final reason should be a widen or hold-at-target.
+        let reason = m.autotune_reason();
+        assert!(
+            matches!(
+                reason,
+                "widen_healthy" | "hold_at_target" | "hold_pre_widen"
+            ),
+            "unexpected autotune reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn autotune_clamps_to_max_window() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        // Set max to something small so we can verify the clamp.
+        m.set_autotune_bounds_kb(AUTOTUNE_MIN_WINDOW_KB, 64);
+        let t0 = Instant::now();
+        // 200 ms RTT, 100 Mbps → BDP ≈ 2.5 MB, safety 2× → 5 MB wanted,
+        // clamped to 64 KB.
+        seed_rtt_goodput(&mut m, t0, 200, 100_000_000);
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+        for i in 0..(AUTOTUNE_WIDEN_TICKS_NEEDED + 2) {
+            let now = t0 + Duration::from_millis(1500 + i as u64 * 1000);
+            let _ = m.tick_rwnd(now, stats, replay, signals);
+        }
+        assert!(
+            m.advertised_window_bytes() <= 64 * 1024,
+            "window should be clamped at 64 KB, got {} bytes",
+            m.advertised_window_bytes()
+        );
+    }
+
+    #[test]
+    fn autotune_clamps_down_on_pressure() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let t0 = Instant::now();
+        seed_rtt_goodput(&mut m, t0, 50, 10_000_000);
+        // Widen first.
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+        for i in 0..(AUTOTUNE_WIDEN_TICKS_NEEDED + 1) {
+            let now = t0 + Duration::from_millis(1500 + i as u64 * 1000);
+            let _ = m.tick_rwnd(now, stats, replay, signals);
+        }
+        let widened = m.advertised_window_bytes();
+        assert!(widened > DEFAULT_INITIAL_WINDOW_KB as u32 * 1024);
+        // Now introduce pressure — probe_outstanding triggers V1 "pressure"
+        // reason, which the pressure-matcher passes to autotune_tick.
+        let mut bad = signals;
+        bad.probe_outstanding = true;
+        let now = t0 + Duration::from_millis(10_000);
+        let _ = m.tick_rwnd(now, stats, replay, bad);
+        assert_eq!(m.autotune_reason(), "pressure_clamp");
+        assert!(
+            m.advertised_window_bytes() < widened,
+            "pressure should shrink window: was {widened}, now {}",
+            m.advertised_window_bytes()
+        );
+        assert!(
+            m.advertised_window_bytes() >= AUTOTUNE_MIN_WINDOW_KB as u32 * 1024,
+            "pressure should not shrink below min_kb"
+        );
+    }
+
+    #[test]
+    fn autotune_healthy_ticks_gate_widening() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let t0 = Instant::now();
+        seed_rtt_goodput(&mut m, t0, 50, 10_000_000);
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+
+        // First healthy tick: target much larger than current, but
+        // we shouldn't widen yet (need AUTOTUNE_WIDEN_TICKS_NEEDED in a row).
+        let before = m.advertised_window_bytes();
+        let now = t0 + Duration::from_millis(1500);
+        let _ = m.tick_rwnd(now, stats, replay, signals);
+        assert_eq!(m.autotune_reason(), "hold_pre_widen");
+        assert_eq!(m.advertised_window_bytes(), before);
+
+        // Subsequent ticks increment the healthy counter. On tick
+        // AUTOTUNE_WIDEN_TICKS_NEEDED the widen fires. We already did
+        // 1 tick above, so do (NEEDED - 1) more and check.
+        for i in 1..AUTOTUNE_WIDEN_TICKS_NEEDED {
+            let now = t0 + Duration::from_millis(1500 + i as u64 * 1000);
+            let (_v1, _r) = m.tick_rwnd(now, stats, replay, signals);
+            if i < AUTOTUNE_WIDEN_TICKS_NEEDED - 1 {
+                assert_eq!(m.autotune_reason(), "hold_pre_widen", "tick {i}");
+                assert_eq!(m.advertised_window_bytes(), before);
+            } else {
+                // The NEEDED-th call performs the widen.
+                assert_eq!(m.autotune_reason(), "widen_healthy", "tick {i}");
+                assert!(m.advertised_window_bytes() > before);
+            }
+        }
+    }
+
+    #[test]
+    fn autotune_target_kb_is_exposed_and_nonzero_when_v2_active() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let t0 = Instant::now();
+        seed_rtt_goodput(&mut m, t0, 100, 5_000_000); // 100 ms × 5 Mbps
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+        let now = t0 + Duration::from_millis(1500);
+        let _ = m.tick_rwnd(now, stats, replay, signals);
+        assert!(
+            m.autotune_target_kb() > 0,
+            "target_kb should be non-zero once autotune has computed a value"
+        );
+        assert!(m.autotune_target_kb() >= AUTOTUNE_MIN_WINDOW_KB);
     }
 }

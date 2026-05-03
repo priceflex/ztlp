@@ -2345,8 +2345,19 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
         let shadowDepth = ztlp_mux_shadow_inflight_len(mux)
         let peerV2 = ztlp_mux_peer_speaks_v2(mux) == 1 ? "yes" : "no"
         let advKb = ztlp_mux_advertised_window_kb(mux)
+        // Phase D: autotune target + reason (null on V1-only sessions).
+        let autoTargetKb = ztlp_mux_autotune_target_kb(mux)
+        var reasonBuf = [UInt8](repeating: 0, count: 32)
+        let reasonLen = reasonBuf.withUnsafeMutableBufferPointer { buf -> Int32 in
+            ztlp_mux_autotune_reason(mux, buf.baseAddress, buf.count)
+        }
+        let autoReason: String = {
+            guard reasonLen > 0 else { return "-" }
+            let slice = reasonBuf.prefix(Int(reasonLen))
+            return String(decoding: slice, as: UTF8.self)
+        }()
         logger.info(
-            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth) v2=\(peerV2) adv_kb=\(advKb)",
+            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth) v2=\(peerV2) adv_kb=\(advKb) auto_target_kb=\(autoTargetKb) auto_reason=\(autoReason)",
             source: "Tunnel"
         )
     }

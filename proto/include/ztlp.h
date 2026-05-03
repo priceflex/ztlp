@@ -1528,6 +1528,46 @@ uint16_t ztlp_mux_advertised_window_kb(ZtlpMuxEngine *engine);
  */
 int32_t ztlp_mux_set_initial_window_kb(ZtlpMuxEngine *engine, uint16_t kb);
 
+// ── Phase D: Autotune (BBR-lite receive-window sizer) ────────────────
+//
+// The autotuner lives inside MuxEngine and runs on every tick_rwnd call.
+// It mutates the advertised byte window directly when the peer speaks
+// V2. These FFI entry points let Swift read/configure the tuner without
+// reaching into MuxEngine state directly.
+
+/**
+ * @brief Configure the autotune [min_kb, max_kb] window bounds. Values
+ *        are clamped to [AUTOTUNE_MIN_WINDOW_KB, AUTOTUNE_MAX_WINDOW_KB];
+ *        min > max is silently swapped.
+ * @return 0 on success, -1 on error.
+ */
+int32_t ztlp_mux_set_autotune_bounds_kb(ZtlpMuxEngine *engine,
+                                        uint16_t min_kb,
+                                        uint16_t max_kb);
+
+/**
+ * @brief Current autotune target window in KB — what BBR-lite would set
+ *        the advertised window to next tick. 0 if autotune hasn't run
+ *        yet or the peer hasn't upgraded to V2.
+ */
+uint16_t ztlp_mux_autotune_target_kb(ZtlpMuxEngine *engine);
+
+/** @brief Autotune minimum bound (KB). */
+uint16_t ztlp_mux_autotune_min_kb(ZtlpMuxEngine *engine);
+
+/** @brief Autotune maximum bound (KB). */
+uint16_t ztlp_mux_autotune_max_kb(ZtlpMuxEngine *engine);
+
+/**
+ * @brief Copy the autotune reason tag (e.g. "widen_healthy",
+ *        "pressure_clamp", "no_sample", "v1_legacy") into a caller
+ *        buffer. NUL-terminates. Returns bytes written (excluding NUL),
+ *        or -1 on error.
+ */
+int32_t ztlp_mux_autotune_reason(ZtlpMuxEngine *engine,
+                                 uint8_t *out_buf,
+                                 size_t out_buf_len);
+
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ─────────────────────
 
 typedef struct ZtlpSessionHealth ZtlpSessionHealth;

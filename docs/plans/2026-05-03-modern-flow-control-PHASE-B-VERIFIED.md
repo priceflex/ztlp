@@ -1,6 +1,11 @@
 # ZTLP Modern Flow Control — Phase B Landed
 
-Status: **deployed, awaiting on-device verification**
+Status: **VERIFIED on-device 2026-05-03 05:17–05:19 UTC**
+- Phone log: `v2=yes adv_kb=16` sticky from 05:17:55 onward
+- Gateway log: 607 `CLIENT_ACK_V2` lines vs 84 V1 in the 20-minute window
+- `window_kb=18 (=16 packets)` confirms byte→packet math `kb*1024/1140` matches the V1 ladder floor
+- `window_kb=16 (=14 packets)` on a new session confirms `DEFAULT_INITIAL_WINDOW_KB = 16`
+- Original status (preserved): deployed, awaiting on-device verification
 Date: 2026-05-03
 Predecessor: `2026-05-03-modern-flow-control-PHASE-A-LANDED.md`
 Rollback tag: `v-before-byte-rwnd` → `v-after-byte-rwnd`

@@ -4572,6 +4572,111 @@ pub extern "C" fn ztlp_mux_set_initial_window_kb(
     }
 }
 
+// ── Phase D: Autotune FFI ──────────────────────────────────────────────
+//
+// The autotuner lives inside MuxEngine and runs whenever `tick_rwnd` is
+// called. These entry points let Swift configure the min/max bounds and
+// read the current target for the `[rtt-bdp]` log line.
+
+/// Configure the autotune window bounds in KB. Both values are clamped to
+/// [AUTOTUNE_MIN_WINDOW_KB .. AUTOTUNE_MAX_WINDOW_KB]; if `min_kb > max_kb`
+/// the values are silently swapped. Returns 0 on success, -1 on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_set_autotune_bounds_kb(
+    engine: *mut ZtlpMuxEngine,
+    min_kb: u16,
+    max_kb: u16,
+) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    match engine.inner.lock() {
+        Ok(mut g) => {
+            g.set_autotune_bounds_kb(min_kb, max_kb);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Current autotune target window in KB — what BBR-lite would set the
+/// advertised window to next tick (post-gating). Returns 0 when autotune
+/// hasn't run yet or the peer hasn't upgraded to V2.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_autotune_target_kb(engine: *mut ZtlpMuxEngine) -> u16 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.autotune_target_kb())
+        .unwrap_or(0)
+}
+
+/// Current autotune minimum bound in KB.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_autotune_min_kb(engine: *mut ZtlpMuxEngine) -> u16 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.autotune_bounds_kb().0)
+        .unwrap_or(0)
+}
+
+/// Current autotune maximum bound in KB.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_autotune_max_kb(engine: *mut ZtlpMuxEngine) -> u16 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.autotune_bounds_kb().1)
+        .unwrap_or(0)
+}
+
+/// Copy the autotune reason tag into a caller-provided buffer. Returns
+/// the number of bytes written (excluding NUL terminator), or a negative
+/// number on error. The reason is always a short ASCII string like
+/// `"widen_healthy"` or `"pressure_clamp"`.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_autotune_reason(
+    engine: *mut ZtlpMuxEngine,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> i32 {
+    if engine.is_null() || out_buf.is_null() || out_buf_len == 0 {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let reason: &'static str = match engine.inner.lock() {
+        Ok(g) => g.autotune_reason(),
+        Err(_) => return -1,
+    };
+    let bytes = reason.as_bytes();
+    let to_copy = bytes.len().min(out_buf_len.saturating_sub(1));
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, to_copy);
+        // NUL-terminate.
+        *out_buf.add(to_copy) = 0;
+    }
+    to_copy as i32
+}
+
 // ── SessionHealth FFI (Phase 3: Nebula collapse) ───────────────────────
 //
 // SessionHealth is a small state machine. Call `ztlp_health_new` once per

@@ -1406,6 +1406,49 @@ int32_t ztlp_mux_advertised_rwnd(ZtlpMuxEngine *engine);
 uint64_t ztlp_mux_cumulative_ack(ZtlpMuxEngine *engine);
 int32_t ztlp_mux_inflight_len(ZtlpMuxEngine *engine);
 
+// ── SessionHealth FFI (Phase 3: Nebula collapse) ─────────────────────
+
+typedef struct ZtlpSessionHealth ZtlpSessionHealth;
+
+/** Action codes returned by ztlp_health_tick. */
+#define ZTLP_HEALTH_ACTION_NONE       0
+#define ZTLP_HEALTH_ACTION_SEND_PROBE 1
+#define ZTLP_HEALTH_ACTION_RECONNECT  2
+
+/** State codes returned by ztlp_health_state. */
+#define ZTLP_HEALTH_STATE_HEALTHY 0
+#define ZTLP_HEALTH_STATE_SUSPECT 1
+#define ZTLP_HEALTH_STATE_DEAD    2
+
+typedef struct {
+    uint8_t  has_active_flows;
+    uint64_t useful_rx_age_ms;
+    uint64_t oldest_outbound_ms;
+    uint32_t consecutive_stuck_high_seq_ticks;
+} ZtlpHealthTickInputs;
+
+ZtlpSessionHealth *ztlp_health_new(void);
+void ztlp_health_free(ZtlpSessionHealth *h);
+
+/**
+ * @brief One health tick. Returns an action code.
+ * @param out_nonce If non-null and action is SEND_PROBE, receives the probe nonce.
+ * @param out_reason If non-null and action is RECONNECT, receives a short
+ *                   nul-terminated ASCII reason (copied into the buffer).
+ * @param out_reason_len Size of out_reason buffer (at least 32 recommended).
+ */
+int32_t ztlp_health_tick(
+    ZtlpSessionHealth *h,
+    const ZtlpHealthTickInputs *inputs,
+    uint64_t *out_nonce,
+    char *out_reason,
+    size_t out_reason_len
+);
+
+int32_t ztlp_health_on_pong(ZtlpSessionHealth *h, uint64_t nonce);
+int32_t ztlp_health_reset_after_reconnect(ZtlpSessionHealth *h);
+int32_t ztlp_health_state(ZtlpSessionHealth *h);
+
 // ── Standalone Packet Router (ios-sync: no ZtlpClient needed) ──────────
 
 /**

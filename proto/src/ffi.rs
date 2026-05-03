@@ -4345,6 +4345,172 @@ pub extern "C" fn ztlp_mux_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
         .unwrap_or(-1)
 }
 
+// ── SessionHealth FFI (Phase 3: Nebula collapse) ───────────────────────
+//
+// SessionHealth is a small state machine. Call `ztlp_health_new` once per
+// tunnel session, then `ztlp_health_tick` every ~2s with current tunnel
+// stats. When the action is SendProbe, send a FRAME_PING with the given
+// nonce; when it's Reconnect, call `ztlp_ios_tunnel_engine_reconnect`.
+// When a FRAME_PONG arrives, call `ztlp_health_on_pong`.
+
+#[cfg(feature = "ios-sync")]
+pub struct ZtlpSessionHealth {
+    pub(crate) inner: std::sync::Mutex<crate::session_health::SessionHealth>,
+}
+
+/// Action codes returned by `ztlp_health_tick`:
+/// 0 = None (nothing to do)
+/// 1 = SendProbe (use `ztlp_health_last_probe_nonce` to retrieve nonce)
+/// 2 = Reconnect (caller should reconnect)
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_ACTION_NONE: i32 = 0;
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_ACTION_SEND_PROBE: i32 = 1;
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_ACTION_RECONNECT: i32 = 2;
+
+/// State codes:
+/// 0 = Healthy, 1 = Suspect, 2 = Dead.
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_STATE_HEALTHY: i32 = 0;
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_STATE_SUSPECT: i32 = 1;
+#[cfg(feature = "ios-sync")]
+pub const ZTLP_HEALTH_STATE_DEAD: i32 = 2;
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_new() -> *mut ZtlpSessionHealth {
+    Box::into_raw(Box::new(ZtlpSessionHealth {
+        inner: std::sync::Mutex::new(crate::session_health::SessionHealth::new()),
+    }))
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_free(h: *mut ZtlpSessionHealth) {
+    if h.is_null() {
+        return;
+    }
+    let _ = unsafe { Box::from_raw(h) };
+}
+
+#[cfg(feature = "ios-sync")]
+#[repr(C)]
+pub struct ZtlpHealthTickInputs {
+    pub has_active_flows: u8,
+    pub useful_rx_age_ms: u64,
+    pub oldest_outbound_ms: u64,
+    pub consecutive_stuck_high_seq_ticks: u32,
+}
+
+/// One tick of the session health state machine. Writes the probe nonce
+/// into `out_nonce` when the action is SendProbe; writes a short ASCII
+/// reason string into `out_reason` (at most 32 bytes incl. nul) when the
+/// action is Reconnect.
+///
+/// Return value is the action code (see `ZTLP_HEALTH_ACTION_*`).
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_tick(
+    h: *mut ZtlpSessionHealth,
+    inputs: *const ZtlpHealthTickInputs,
+    out_nonce: *mut u64,
+    out_reason: *mut c_char,
+    out_reason_len: usize,
+) -> i32 {
+    if h.is_null() || inputs.is_null() {
+        set_last_error("null argument to ztlp_health_tick");
+        return -1;
+    }
+    let h = unsafe { &*h };
+    let in_c = unsafe { &*inputs };
+    let mapped = crate::session_health::HealthTickInputs {
+        has_active_flows: in_c.has_active_flows != 0,
+        useful_rx_age: std::time::Duration::from_millis(in_c.useful_rx_age_ms),
+        oldest_outbound_ms: in_c.oldest_outbound_ms,
+        consecutive_stuck_high_seq_ticks: in_c.consecutive_stuck_high_seq_ticks,
+    };
+    let mut guard = match h.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("session health poisoned");
+            return -1;
+        }
+    };
+    let action = guard.tick(std::time::Instant::now(), mapped);
+    match action {
+        crate::session_health::HealthAction::None => ZTLP_HEALTH_ACTION_NONE,
+        crate::session_health::HealthAction::SendProbe { nonce } => {
+            if !out_nonce.is_null() {
+                unsafe { *out_nonce = nonce };
+            }
+            ZTLP_HEALTH_ACTION_SEND_PROBE
+        }
+        crate::session_health::HealthAction::Reconnect { reason } => {
+            if !out_reason.is_null() && out_reason_len > 0 {
+                let bytes = reason.as_bytes();
+                let copy = bytes.len().min(out_reason_len - 1);
+                let dst = unsafe { std::slice::from_raw_parts_mut(out_reason as *mut u8, out_reason_len) };
+                dst[..copy].copy_from_slice(&bytes[..copy]);
+                dst[copy] = 0;
+            }
+            ZTLP_HEALTH_ACTION_RECONNECT
+        }
+    }
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_on_pong(h: *mut ZtlpSessionHealth, nonce: u64) -> i32 {
+    if h.is_null() {
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let h = unsafe { &*h };
+    if let Ok(mut guard) = h.inner.lock() {
+        guard.on_pong(nonce, std::time::Instant::now());
+        ZtlpResult::Ok as i32
+    } else {
+        set_last_error("session health poisoned");
+        ZtlpResult::InternalError as i32
+    }
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_reset_after_reconnect(h: *mut ZtlpSessionHealth) -> i32 {
+    if h.is_null() {
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let h = unsafe { &*h };
+    if let Ok(mut guard) = h.inner.lock() {
+        guard.reset_after_reconnect();
+        ZtlpResult::Ok as i32
+    } else {
+        set_last_error("session health poisoned");
+        ZtlpResult::InternalError as i32
+    }
+}
+
+/// Return the current state (0=Healthy, 1=Suspect, 2=Dead).
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_health_state(h: *mut ZtlpSessionHealth) -> i32 {
+    if h.is_null() {
+        return -1;
+    }
+    let h = unsafe { &*h };
+    if let Ok(g) = h.inner.lock() {
+        match g.state() {
+            crate::session_health::HealthState::Healthy => ZTLP_HEALTH_STATE_HEALTHY,
+            crate::session_health::HealthState::Suspect => ZTLP_HEALTH_STATE_SUSPECT,
+            crate::session_health::HealthState::Dead => ZTLP_HEALTH_STATE_DEAD,
+        }
+    } else {
+        -1
+    }
+}
+
 // ── Standalone Packet Router FFI (ios-sync: no ZtlpClient wrapper) ─────
 //
 // These functions operate on a raw PacketRouter pointer, bypassing the

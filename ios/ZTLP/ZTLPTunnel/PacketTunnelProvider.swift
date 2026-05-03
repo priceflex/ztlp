@@ -925,6 +925,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     if let mux = ztlp_mux_new() {
                         self.rustMux = mux
                         self.logger.info("Rust MuxEngine ready (useRustMux=true)", source: "Tunnel")
+                        // Re-run the Rtt/Rwnd instrumentation hook now that
+                        // `rustMux` exists. The earlier call at step 8
+                        // (line ~858) runs before the MuxEngine is created
+                        // so its `ztlp_mux_note_peer_sent_v2(mux)` branch
+                        // is silently skipped — that's the Phase B "v2=no
+                        // stuck" bug surfaced by Phase D logs. Second call
+                        // is idempotent on the connection side and makes
+                        // the engine's peer_speaks_v2 flag true before the
+                        // first tick_rwnd, so autotune engages from tick 1.
+                        self.wireRttInstrumentationHook(on: conn)
                     } else {
                         self.logger.warn("ztlp_mux_new returned null; falling back to legacy rwnd ramp", source: "Tunnel")
                     }

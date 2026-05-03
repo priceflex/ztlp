@@ -3882,6 +3882,31 @@ pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(
 
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 #[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_start_udp_recv_loop(
+    engine: *mut ZtlpIosTunnelEngine,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        match engine.start_udp_recv_loop() {
+            Ok(()) => ZtlpResult::Ok as i32,
+            Err(e) => {
+                set_last_error(&format!("failed to start udp recv loop: {}", e));
+                ZtlpResult::InternalError as i32
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_start_udp_recv_loop");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
 pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) {
     if engine.is_null() {
         return;

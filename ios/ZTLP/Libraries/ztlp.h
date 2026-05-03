@@ -1308,6 +1308,19 @@ int32_t ztlp_ios_tunnel_engine_udp_send(
 int32_t ztlp_ios_tunnel_engine_udp_local_port(ZtlpIosTunnelEngine *engine);
 
 /**
+ * @brief Start a Rust-owned thread that drains the UDP socket and delivers
+ *        each datagram to the router action callback as action_type=252
+ *        (raw encrypted packet). In Phase 1 Swift is still responsible for
+ *        decrypting and driving the mux; Phase 2 will bypass Swift entirely.
+ *
+ * Safe to call multiple times; subsequent calls are no-ops while the loop
+ * is running.
+ *
+ * @return ZtlpResult::Ok on success, InternalError on failure.
+ */
+int32_t ztlp_ios_tunnel_engine_start_udp_recv_loop(ZtlpIosTunnelEngine *engine);
+
+/**
  * @brief Free an iOS tunnel engine handle.
  */
 void ztlp_ios_tunnel_engine_free(ZtlpIosTunnelEngine *engine);

@@ -305,6 +305,113 @@ impl IosTunnelEngine {
         sock.recv(buf).map(|n| n)
     }
 
+    /// Start a dedicated OS thread that drains the UDP socket and pushes
+    /// each datagram into the router action callback with
+    /// `action_type=252`. Safe to call at most once per engine; subsequent
+    /// calls are no-ops. The thread exits when the engine's stop flag is
+    /// set (e.g. on Drop or explicit `stop()`).
+    ///
+    /// This is the Phase 1 "Rust owns recv" step: Swift still decrypts and
+    /// drives mux, but it no longer owns the UDP read callback. Phase 2
+    /// will let MuxEngine consume these bytes directly in Rust and bypass
+    /// the Swift callback entirely.
+    pub fn start_udp_recv_loop(&self) -> io::Result<()> {
+        let mut guard = self
+            .udp_thread
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp thread state poisoned"))?;
+        if guard.is_some() {
+            return Ok(());
+        }
+
+        let sock = {
+            let sock_guard = self
+                .udp_socket
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp socket state poisoned"))?;
+            sock_guard
+                .as_ref()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotConnected, "udp socket not bound")
+                })?
+                .try_clone()?
+        };
+        // Make sure the cloned socket uses the same short read timeout so
+        // the thread can poll stop without blocking forever.
+        sock.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+        let stop = Arc::clone(&self.stop);
+        let callback = self
+            .router_action_callback
+            .lock()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    "router action callback state poisoned",
+                )
+            })?
+            .clone();
+
+        let startup = format!(
+            "Rust udp recv loop start version={} git={} marker=phase1_udp_recv",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("ZTLP_GIT_COMMIT").unwrap_or("unknown")
+        );
+        crate::ffi::ios_log(&startup);
+        if let Some(ref cb) = callback {
+            cb.dispatch(250, 0, startup.as_ptr(), startup.len());
+        }
+
+        *guard = Some(thread::spawn(move || {
+            let mut buf = vec![0u8; 65535];
+            let mut datagrams: u64 = 0;
+            let mut bytes_total: u64 = 0;
+            let mut errors: u64 = 0;
+            let mut last_log = Instant::now();
+            while !stop.load(Ordering::SeqCst) {
+                match sock.recv(&mut buf) {
+                    Ok(n) => {
+                        datagrams += 1;
+                        bytes_total += n as u64;
+                        if let Some(ref cb) = callback {
+                            cb.dispatch(252, 0, buf.as_ptr(), n);
+                        }
+                    }
+                    Err(e) => {
+                        let kind = e.kind();
+                        if kind == io::ErrorKind::WouldBlock || kind == io::ErrorKind::TimedOut {
+                            // normal idle poll; fall through to stop check
+                        } else if kind == io::ErrorKind::Interrupted {
+                            continue;
+                        } else {
+                            errors += 1;
+                        }
+                    }
+                }
+                if last_log.elapsed() >= Duration::from_secs(10) {
+                    let diag = format!(
+                        "Rust udp recv loop stats datagrams={} bytes={} errors={}",
+                        datagrams, bytes_total, errors
+                    );
+                    crate::ffi::ios_log(&diag);
+                    if let Some(ref cb) = callback {
+                        cb.dispatch(250, 0, diag.as_ptr(), diag.len());
+                    }
+                    last_log = Instant::now();
+                }
+            }
+            let shutdown = format!(
+                "Rust udp recv loop exit datagrams={} bytes={} errors={}",
+                datagrams, bytes_total, errors
+            );
+            crate::ffi::ios_log(&shutdown);
+            if let Some(ref cb) = callback {
+                cb.dispatch(250, 0, shutdown.as_ptr(), shutdown.len());
+            }
+        }));
+        Ok(())
+    }
+
     fn start_read_loop(&self, router_ptr: Option<usize>) -> io::Result<()> {
         let mut guard = self
             .read_thread
@@ -1344,5 +1451,73 @@ mod tests {
         let addr: std::net::SocketAddr = "10.1.2.3:1234".parse().unwrap();
         engine.set_peer(addr).unwrap();
         assert_eq!(engine.peer(), Some(addr));
+    }
+
+    #[test]
+    fn engine_udp_recv_loop_delivers_to_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Record every (action_type, len) the callback receives.
+        static DELIVERED: AtomicUsize = AtomicUsize::new(0);
+        static BYTES_DELIVERED: AtomicUsize = AtomicUsize::new(0);
+        static LAST_ACTION: AtomicUsize = AtomicUsize::new(0);
+        DELIVERED.store(0, Ordering::SeqCst);
+        BYTES_DELIVERED.store(0, Ordering::SeqCst);
+        LAST_ACTION.store(0, Ordering::SeqCst);
+
+        extern "C" fn trampoline(
+            _user: *mut c_void,
+            action_type: u8,
+            _stream_id: u32,
+            _data: *const u8,
+            data_len: usize,
+        ) {
+            // Count only action_type=252 (raw UDP datagram deliveries); the
+            // recv loop also emits diag markers (250) we don't care about.
+            if action_type == 252 {
+                DELIVERED.fetch_add(1, Ordering::SeqCst);
+                BYTES_DELIVERED.fetch_add(data_len, Ordering::SeqCst);
+                LAST_ACTION.store(action_type as usize, Ordering::SeqCst);
+            }
+        }
+
+        // Peer socket that simulates the gateway.
+        let peer_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer_addr = peer_sock.local_addr().unwrap();
+
+        let engine = IosTunnelEngine::new_for_tests();
+        engine.bind_udp_any().unwrap();
+        engine.set_peer(peer_addr).unwrap();
+        engine
+            .set_router_action_callback(Some(trampoline), std::ptr::null_mut())
+            .unwrap();
+        engine.start_udp_recv_loop().unwrap();
+
+        // Calling again must be a no-op, not an error.
+        engine.start_udp_recv_loop().unwrap();
+
+        // Send three datagrams from the peer to the engine's local port.
+        let engine_port = engine.local_udp_port().unwrap();
+        let engine_addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", engine_port).parse().unwrap();
+        for _ in 0..3 {
+            peer_sock.send_to(b"GATEWAY_PKT", engine_addr).unwrap();
+        }
+
+        // Wait up to 3s for the recv loop to deliver all three.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while DELIVERED.load(Ordering::SeqCst) < 3 {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), 3);
+        assert_eq!(BYTES_DELIVERED.load(Ordering::SeqCst), 3 * b"GATEWAY_PKT".len());
+        assert_eq!(LAST_ACTION.load(Ordering::SeqCst), 252);
+
+        // Drop the engine: the stop flag must cleanly exit the recv thread.
+        drop(engine);
     }
 }

@@ -1067,29 +1067,10 @@ where
     // ── Configure socket buffers and detect system capabilities ───────
     // Set SO_RCVBUF and SO_SNDBUF to 7MB (matching WireGuard-Go), then
     // detect the actual buffer sizes to adapt sub-batch sizing.
-    // No HZ detection, no pacing — just big buffers + yield.
-    let system_profile = {
-        #[cfg(unix)]
-        #[allow(unsafe_code)]
-        let profile = {
-            use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
-            let fd = udp_socket.as_raw_fd();
-            // SAFETY: fd is a valid open socket, and we immediately convert
-            // back via into_raw_fd to prevent the std UdpSocket from closing it.
-            let std_sock = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
-            let p =
-                crate::pacing::detect_system(peer_addr, Some(&std_sock), Duration::from_micros(10));
-            let _ = std_sock.into_raw_fd();
-            p
-        };
-        #[cfg(not(unix))]
-        let profile = crate::pacing::detect_system(peer_addr, None, Duration::from_micros(10));
-        profile
-    };
-
-    let pacing_strategy = system_profile.pacing;
-    let adaptive_sub_batch = system_profile.max_sub_batch;
-
+    // TODO(nebula-pivot-R3): pacing module removed in R1. Fire-and-forget has no
+    // pacing — leave placeholders so the rest of the pump compiles until R3 rewrites this pump.
+    let _pacing_strategy: () = ();
+    let adaptive_sub_batch: usize = MAX_SUB_BATCH;
     // ── Send RESET frame if this is a subsequent TCP connection ──────
     // The RESET frame tells the remote side to reset its reassembly state
     // and open a new backend TCP connection. The first TCP connection on a
@@ -1860,7 +1841,7 @@ where
                 // there's no need for sleep or spin-yield pacing —
                 // the buffer absorbs the burst.
                 if chunk_idx < num_chunks && send_count > 0 {
-                    crate::pacing::pace(&pacing_strategy);
+                    crate::pacing::pace(&_pacing_strategy);
                 }
             }
 

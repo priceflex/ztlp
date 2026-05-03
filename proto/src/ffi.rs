@@ -4762,6 +4762,7 @@ pub extern "C" fn ztlp_health_tick(
         useful_rx_age: std::time::Duration::from_millis(in_c.useful_rx_age_ms),
         oldest_outbound_ms: in_c.oldest_outbound_ms,
         consecutive_stuck_high_seq_ticks: in_c.consecutive_stuck_high_seq_ticks,
+        ..Default::default()
     };
     let mut guard = match h.inner.lock() {
         Ok(g) => g,

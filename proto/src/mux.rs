@@ -921,14 +921,26 @@ impl MuxEngine {
             } else if target_bytes < current {
                 // Want to shrink (goodput fell but no pressure). Allow —
                 // mirrors TCP autotune backing off when the app stopped
-                // pushing.
+                // pushing. Floored at DEFAULT_INITIAL_WINDOW_KB below so
+                // the healthy path never drops the window below its
+                // opening bid (the pressure branch is still free to
+                // shrink down to `min_bytes`).
                 self.autotune_reason = "shrink_to_target";
                 target_bytes
             } else {
                 self.autotune_reason = "hold_at_target";
                 current
             };
-            let clamped = new_bytes.clamp(min_bytes, max_bytes);
+            // Healthy-path floor: never shrink below the V2 initial window.
+            // Cold-start bug fix — on tick 1 the BDP estimate is near zero
+            // (tiny goodput sample × tiny RTT), so without this floor the
+            // window collapses from 16 KB to 8 KB immediately and stays
+            // there, because the small window itself caps real throughput.
+            // Pressure path still uses `min_bytes` — real congestion may
+            // drive the window below the initial window.
+            let healthy_min =
+                (DEFAULT_INITIAL_WINDOW_KB as u32 * ACK_V2_WINDOW_UNIT_BYTES).max(min_bytes);
+            let clamped = new_bytes.clamp(healthy_min, max_bytes);
             self.advertised_window_bytes = clamped;
             self.autotune_last_tick = Some(now);
             (clamped, self.autotune_reason)
@@ -2734,5 +2746,70 @@ mod tests {
             "target_kb should be non-zero once autotune has computed a value"
         );
         assert!(m.autotune_target_kb() >= AUTOTUNE_MIN_WINDOW_KB);
+    }
+
+    /// Cold-start regression: on the very first autotune tick, a tiny
+    /// goodput sample (`peak_goodput_bps` just a few hundred bps) produces
+    /// a target below the initial window. The healthy path must NOT shrink
+    /// the advertised window below `DEFAULT_INITIAL_WINDOW_KB` — otherwise
+    /// the small window itself caps real throughput and autotune gets
+    /// stuck at the floor forever (observed on-device 2026-05-03).
+    #[test]
+    fn autotune_does_not_shrink_below_initial_window_on_cold_start() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let initial = m.advertised_window_bytes();
+        assert_eq!(initial, DEFAULT_INITIAL_WINDOW_KB as u32 * 1024);
+
+        let t0 = Instant::now();
+        // Tiny goodput sample — matches the 796 bps / 35 ms RTT we saw
+        // on-device (BDP ≈ 3.5 bytes, × 2 safety = 7 bytes, clamps to
+        // AUTOTUNE_MIN_WINDOW_KB = 8 KB, which is *below* initial 16 KB).
+        seed_rtt_goodput(&mut m, t0, 35, 796);
+        let (stats, replay, signals) = healthy_inputs();
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+        let now = t0 + Duration::from_millis(1500);
+        let _ = m.tick_rwnd(now, stats, replay, signals);
+
+        // Healthy path: reason may be "shrink_to_target" (target was
+        // below current) but the advertised window must not fall below
+        // the initial window.
+        assert!(
+            m.advertised_window_bytes() >= initial,
+            "healthy autotune shrank below initial ({initial} bytes): got {} bytes (reason={})",
+            m.advertised_window_bytes(),
+            m.autotune_reason()
+        );
+    }
+
+    /// Companion to the cold-start test: pressure SHOULD be allowed to
+    /// shrink below the initial window, because pressure means real
+    /// congestion and we want to back off hard. Only the healthy path
+    /// has the initial-window floor.
+    #[test]
+    fn autotune_pressure_may_shrink_below_initial_window() {
+        let mut m = MuxEngine::new();
+        m.note_peer_sent_v2();
+        let t0 = Instant::now();
+        // Tiny sample → target bytes ~= min_bytes, way below initial.
+        seed_rtt_goodput(&mut m, t0, 35, 796);
+        let (stats, replay, signals) = healthy_inputs();
+        // Pressure signal: probe_outstanding triggers V1 "pressure"
+        // reason, which autotune_tick interprets as pressure.
+        let mut bad = signals;
+        bad.probe_outstanding = true;
+        m.mark_outbound_demand(t0 + Duration::from_millis(1200));
+        let now = t0 + Duration::from_millis(1500);
+        let _ = m.tick_rwnd(now, stats, replay, bad);
+
+        assert_eq!(m.autotune_reason(), "pressure_clamp");
+        assert!(
+            m.advertised_window_bytes() >= AUTOTUNE_MIN_WINDOW_KB as u32 * 1024,
+            "pressure path must still respect absolute min_kb floor"
+        );
+        assert!(
+            m.advertised_window_bytes() < DEFAULT_INITIAL_WINDOW_KB as u32 * 1024,
+            "pressure path should be allowed to go below initial window"
+        );
     }
 }

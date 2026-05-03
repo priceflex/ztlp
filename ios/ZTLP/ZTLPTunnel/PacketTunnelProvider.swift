@@ -202,21 +202,24 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Adaptive advertised receive window. rwnd=4 remains the recovery floor,
     /// but the Rust-fd path can safely test a larger browser burst window.
     private static let rwndFloor: UInt16 = 4
-    private static let rwndAdaptiveMax: UInt16 = 8
-    private static let rwndBrowserBurstTarget: UInt16 = 8
+    private static let rwndAdaptiveMax: UInt16 = 16
+    private static let rwndBrowserBurstTarget: UInt16 = 16
     private static let rwndHealthyTicksToIncrease = 3
-    private static let rwndReplayDeltaBad = 8
+    private static let rwndReplayDeltaBad = 2
+    private static let rwndReplayDeltaReconnect = 8
+    private static let rwndPressureCooldown: TimeInterval = 15.0
     private static let rwndRouterOutboundBad = 128
     private static let rwndSendBufBytesBad = 16_384
     private static let rwndOldestMsBad = 4_000
     /// Browser/WKWebView bursts fan out multiple streams. With Rust-fd enabled,
-    /// hold browser bursts at rwnd=8 unless pressure forces the floor, instead
-    /// of pinning them to rwnd=4 and building a huge gateway-side response tail.
+    /// test a larger rwnd=16 burst now that DNS and CloseStream cleanup are in
+    /// Rust and gateway queues remain shallow.
     private static let rwndBrowserBurstFlowThreshold = 2
     private var advertisedRwnd: UInt16 = 4
     private var consecutiveFullFlushes = 0
     private var consecutiveRwndHealthyTicks = 0
     private var lastRwndLogAt: Date = .distantPast
+    private var rwndPressureUntil: Date = .distantPast
 
     /// Cached service map so the packet router can be rebuilt/reset during health recovery.
     private var configuredServices: [(vip: String, name: String)] = []
@@ -398,8 +401,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let removed = ztlp_router_cleanup_stale_flows(router)
             logger.info("Session health probe ok nonce=\(nonce) cleanup_removed=\(removed) stats=\(statsString)", source: "Tunnel")
             if removed <= 0 && (statsTuple?.flows ?? 0) > 0 {
-                let reset = ztlp_router_reset_runtime_state(router)
-                logger.warn("Session health probe ok but flows still suspect; router reset removed=\(reset) stats=\(statsString)", source: "Tunnel")
+                // Probe success proves the gateway session is alive. Do NOT reset the
+                // local router or reconnect here: resetting without a gateway session
+                // reset reuses stream IDs, and reconnect from this callback can block
+                // tunnelQueue long enough to wedge benchmarks/WKWebView. Leave the
+                // live session intact and let normal TCP/browser retry or the true
+                // probe-timeout path handle dead sessions.
+                reduceAdvertisedRwnd(reason: "probe ok suspect flows; hold session stats=\(statsString)")
+                logger.warn("Session health probe ok but flows still suspect; preserving live session stats=\(statsString) no_router_reset no_reconnect", source: "Tunnel")
+                clearSessionHealthState()
+                return
             }
         }
         clearSessionHealthState()
@@ -1409,9 +1420,39 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func maybeRampAdvertisedRwnd(stats: RouterStatsSnapshot, replayDelta: Int, highSeqAdvanced: Bool, hasActiveFlows: Bool) {
         guard isTunnelActive else { return }
 
+        let now = Date()
+        let browserBurst = stats.flows >= Self.rwndBrowserBurstFlowThreshold ||
+            stats.streamToFlow >= Self.rwndBrowserBurstFlowThreshold
+
+        if browserBurst && replayDelta > 0 {
+            rwndPressureUntil = now.addingTimeInterval(Self.rwndPressureCooldown)
+            if replayDelta >= Self.rwndReplayDeltaReconnect && hasActiveFlows {
+                reduceAdvertisedRwnd(reason: "browser replay fast reconnect replayDelta=\(replayDelta)")
+                resetPacketRouterRuntimeState(reason: "browser_replay_fast_reconnect_\(replayDelta)")
+                pendingReconnectReason = "browser_replay_fast_reconnect_\(replayDelta)"
+                scheduleReconnect()
+                return
+            }
+            reduceAdvertisedRwnd(reason: "browser replay backoff replayDelta=\(replayDelta) cooldown=\(Int(Self.rwndPressureCooldown))s")
+            return
+        }
+
+        if now < rwndPressureUntil {
+            let remaining = rwndPressureUntil.timeIntervalSince(now)
+            reduceAdvertisedRwnd(reason: "pressure cooldown remaining=\(String(format: "%.1f", remaining))s replayDelta=\(replayDelta)")
+            return
+        }
+
+        // Do not force rwnd down solely because oldestMs grows while browser
+        // data is still flowing. In Rust-fd Vaultwarden runs this caused rwnd=16
+        // to last only a couple seconds, then the page spent the whole asset tail
+        // at rwnd=4 even with replayDelta=0 and no router backlog. Treat oldestMs
+        // as pressure only when paired with actual no-progress/suspect state.
+        let oldestIsRealPressure = stats.oldestMs >= Self.rwndOldestMsBad &&
+            (consecutiveStuckHighSeqTicks > 0 || sessionSuspectSince != nil || probeOutstandingSince != nil)
         let pressure = stats.outbound >= Self.rwndRouterOutboundBad ||
             stats.sendBufBytes >= Self.rwndSendBufBytesBad ||
-            stats.oldestMs >= Self.rwndOldestMsBad ||
+            oldestIsRealPressure ||
             consecutiveFullFlushes > 0 ||
             replayDelta >= Self.rwndReplayDeltaBad ||
             probeOutstandingSince != nil ||
@@ -1423,7 +1464,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        if stats.flows >= Self.rwndBrowserBurstFlowThreshold || stats.streamToFlow >= Self.rwndBrowserBurstFlowThreshold {
+        if browserBurst {
             consecutiveRwndHealthyTicks = 0
             updateAdvertisedRwnd(
                 Self.rwndBrowserBurstTarget,
@@ -1441,13 +1482,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // The 07:21 crash reproduced after flows briefly cleared, rwnd ramped to 5,
-        // then another browser/benchmark burst arrived. Keep the proven rwnd=4
-        // baseline during the entire post-demand cooldown, not just while flows
-        // are visible in the router snapshot.
+        // After browser demand, hold a moderate window instead of collapsing to
+        // rwnd=4. Queue/backpressure fixes now keep the gateway shallow; a tiny
+        // post-demand window leaves long Vaultwarden JS/WASM tails that WebKit
+        // cancels/retries. Real pressure above still drops to the floor.
         if outboundDemandAge < 15.0 {
             consecutiveRwndHealthyTicks = 0
-            updateAdvertisedRwnd(Self.rwndFloor, reason: "recent outbound cooldown age=\(String(format: "%.1f", outboundDemandAge))s")
+            updateAdvertisedRwnd(min(UInt16(12), Self.rwndAdaptiveMax), reason: "recent outbound hold age=\(String(format: "%.1f", outboundDemandAge))s")
             return
         }
 
@@ -1650,11 +1691,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s reason=\(reason)", source: "Tunnel")
         updateConnectionState(.reconnecting)
 
-        tunnelQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
+        healthQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
             guard let self = self, self.isTunnelActive else { return }
-            guard self.reconnectScheduled && self.reconnectGeneration == generation else { return }
-            self.reconnectScheduled = false
-            self.attemptReconnect(generation: generation)
+            self.tunnelQueue.async { [weak self] in
+                guard let self = self, self.isTunnelActive else { return }
+                guard self.reconnectScheduled && self.reconnectGeneration == generation else { return }
+                self.reconnectScheduled = false
+                self.attemptReconnect(generation: generation)
+            }
         }
     }
 

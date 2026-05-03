@@ -324,6 +324,30 @@ impl IosTunnelEngine {
                                 cb.dispatch(250, 0, diag.as_ptr(), diag.len());
                             }
                         }
+                        if let Some(response) = build_ios_dns_response(&packet[..n]) {
+                            match utun.write_packet(&response) {
+                                Ok(written) => {
+                                    utun_write_packets += 1;
+                                    utun_write_bytes += written as u64;
+                                    if let Some(cb) = callback {
+                                        let diag = format!(
+                                            "Rust fd dns responder wrote response bytes={} packets={} totals_bytes={}",
+                                            written, utun_write_packets, utun_write_bytes
+                                        );
+                                        cb.dispatch(251, 0, diag.as_ptr(), diag.len());
+                                    }
+                                }
+                                Err(e) => {
+                                    utun_write_errors += 1;
+                                    crate::ffi::ios_log(&format!(
+                                        "Rust fd dns responder utun write error: {} errors={}",
+                                        e, utun_write_errors
+                                    ));
+                                }
+                            }
+                            continue;
+                        }
+
                         let mut action_count: i32 = 0;
                         let mut action_written: usize = 0;
                         if let Some(router_addr) = router_ptr {
@@ -674,6 +698,166 @@ fn text_to_fixed(s: &str) -> IpAddrText {
     IpAddrText(buf, len)
 }
 
+const IOS_DNS_ADDR: [u8; 4] = [10, 122, 0, 1];
+const DNS_TTL_SECONDS: u32 = 60;
+
+fn build_ios_dns_response(packet: &[u8]) -> Option<Vec<u8>> {
+    if packet.len() < 28 || packet[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = ((packet[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || packet.len() < ihl + 8 || packet[9] != 17 || packet[16..20] != IOS_DNS_ADDR {
+        return None;
+    }
+    let total_len = (u16::from_be_bytes([packet[2], packet[3]]) as usize).min(packet.len());
+    if total_len < ihl + 8 {
+        return None;
+    }
+    let udp = &packet[ihl..total_len];
+    let src_port = u16::from_be_bytes([udp[0], udp[1]]);
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    if dst_port != 53 {
+        return None;
+    }
+    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp_len < 8 || ihl + udp_len > total_len {
+        return None;
+    }
+    let dns = &packet[ihl + 8..ihl + udp_len];
+    let dns_resp = build_dns_payload_response(dns)?;
+
+    let udp_resp_len = 8 + dns_resp.len();
+    if udp_resp_len > u16::MAX as usize || ihl + udp_resp_len > u16::MAX as usize {
+        return None;
+    }
+    let mut out = Vec::with_capacity(ihl + udp_resp_len);
+    out.extend_from_slice(&packet[..ihl]);
+    out[1] = 0;
+    let total = (ihl + udp_resp_len) as u16;
+    out[2..4].copy_from_slice(&total.to_be_bytes());
+    out[6] = 0;
+    out[7] = 0;
+    out[8] = 64;
+    out[9] = 17;
+    out[10] = 0;
+    out[11] = 0;
+    out[12..16].copy_from_slice(&packet[16..20]);
+    out[16..20].copy_from_slice(&packet[12..16]);
+    let ip_sum = ipv4_checksum(&out[..ihl]);
+    out[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+
+    out.extend_from_slice(&dst_port.to_be_bytes());
+    out.extend_from_slice(&src_port.to_be_bytes());
+    out.extend_from_slice(&(udp_resp_len as u16).to_be_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&dns_resp);
+    let udp_sum = udp_ipv4_checksum(&out[12..16], &out[16..20], &out[ihl..]);
+    out[ihl + 6..ihl + 8].copy_from_slice(&udp_sum.to_be_bytes());
+    Some(out)
+}
+
+fn build_dns_payload_response(dns: &[u8]) -> Option<Vec<u8>> {
+    if dns.len() < 12 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([dns[2], dns[3]]);
+    if flags & 0x8000 != 0 || u16::from_be_bytes([dns[4], dns[5]]) != 1 {
+        return None;
+    }
+    let mut off = 12usize;
+    let qname_start = off;
+    let mut labels: Vec<String> = Vec::new();
+    loop {
+        let len = *dns.get(off)? as usize;
+        off += 1;
+        if len == 0 {
+            break;
+        }
+        if len & 0xc0 != 0 || len > 63 || off + len > dns.len() {
+            return None;
+        }
+        labels.push(
+            std::str::from_utf8(&dns[off..off + len])
+                .ok()?
+                .to_ascii_lowercase(),
+        );
+        off += len;
+    }
+    if off + 4 > dns.len() {
+        return None;
+    }
+    let question_end = off + 4;
+    let qtype = u16::from_be_bytes([dns[off], dns[off + 1]]);
+    let qclass = u16::from_be_bytes([dns[off + 2], dns[off + 3]]);
+    let answer_ip = resolve_ztlp_name(&labels);
+    let is_a_in = qtype == 1 && qclass == 1;
+    let rcode = if answer_ip.is_some() && is_a_in { 0 } else { 3 };
+    let ancount = if rcode == 0 { 1u16 } else { 0u16 };
+
+    let mut out = Vec::with_capacity(question_end + 16);
+    out.extend_from_slice(&dns[0..2]);
+    out.extend_from_slice(&(0x8000u16 | 0x0400u16 | 0x0080u16 | rcode).to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&ancount.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&dns[qname_start..question_end]);
+    if let Some(ip) = answer_ip.filter(|_| is_a_in) {
+        out.extend_from_slice(&0xc00cu16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&DNS_TTL_SECONDS.to_be_bytes());
+        out.extend_from_slice(&4u16.to_be_bytes());
+        out.extend_from_slice(&ip);
+    }
+    Some(out)
+}
+
+fn resolve_ztlp_name(labels: &[String]) -> Option<[u8; 4]> {
+    if labels.last().map(String::as_str) != Some("ztlp") || labels.len() < 2 {
+        return None;
+    }
+    match labels.first().map(String::as_str) {
+        Some("vault") => Some([10, 122, 0, 4]),
+        Some("http") | Some("proxy") => Some([10, 122, 0, 3]),
+        Some(_) => Some([10, 122, 0, 2]),
+        None => None,
+    }
+}
+
+fn ipv4_checksum(header: &[u8]) -> u16 {
+    finalize_checksum(sum_words(header))
+}
+
+fn udp_ipv4_checksum(src: &[u8], dst: &[u8], udp: &[u8]) -> u16 {
+    let sum = sum_words(src) + sum_words(dst) + 17 + udp.len() as u32 + sum_words(udp);
+    let c = finalize_checksum(sum);
+    if c == 0 {
+        0xffff
+    } else {
+        c
+    }
+}
+
+fn sum_words(bytes: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    let mut chunks = bytes.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    }
+    if let Some(&b) = chunks.remainder().first() {
+        sum += (b as u32) << 8;
+    }
+    sum
+}
+
+fn finalize_checksum(mut sum: u32) -> u16 {
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 #[derive(Default)]
 struct RouterActionSummary {
     total: u64,
@@ -804,15 +988,18 @@ fn dispatch_router_actions(
             break;
         }
 
+        if action_type == 0 {
+            // A new stream id is live again; any prior close marker is stale.
+            closed_streams.remove(&stream_id);
+        }
+
         if action_type == 2 {
-            // The Rust fd-owned path dispatches router actions asynchronously to
-            // Swift while the fd read loop keeps processing later TCP packets.
-            // A duplicated FIN/RST or replacement SYN can therefore produce a
-            // stale second CloseStream after the first close removed the stream
-            // mapping. Drop stale/duplicate close callbacks here; the Swift
-            // packetFlow path still processes each action batch synchronously.
-            let stream_mapped = crate::ffi::ztlp_router_has_stream_sync(router, stream_id) == 1;
-            if closed_streams.contains(&stream_id) || !stream_mapped {
+            // Only suppress exact duplicate CloseStream callbacks. Do not consult
+            // router_has_stream here: process_gateway_close can legitimately
+            // remove the local mapping before emitting the close action. Dropping
+            // that first close leaks gateway streams and causes browser loads to
+            // churn/stall with many active flows.
+            if closed_streams.contains(&stream_id) {
                 summary.suppressed_close += 1;
                 offset += data_len;
                 continue;
@@ -879,6 +1066,73 @@ mod tests {
         let utun = IosUtun::new(-1);
         let err = utun.build_write_frame(&[0x10]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn dns_query_packet(name: &str) -> Vec<u8> {
+        let mut dns = Vec::new();
+        dns.extend_from_slice(&0x1234u16.to_be_bytes());
+        dns.extend_from_slice(&0x0100u16.to_be_bytes());
+        dns.extend_from_slice(&1u16.to_be_bytes());
+        dns.extend_from_slice(&0u16.to_be_bytes());
+        dns.extend_from_slice(&0u16.to_be_bytes());
+        dns.extend_from_slice(&0u16.to_be_bytes());
+        for label in name.split('.') {
+            dns.push(label.len() as u8);
+            dns.extend_from_slice(label.as_bytes());
+        }
+        dns.push(0);
+        dns.extend_from_slice(&1u16.to_be_bytes());
+        dns.extend_from_slice(&1u16.to_be_bytes());
+
+        let udp_len = 8 + dns.len();
+        let total_len = 20 + udp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 122, 0, 9]);
+        packet[16..20].copy_from_slice(&IOS_DNS_ADDR);
+        let ip_sum = ipv4_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+        packet[20..22].copy_from_slice(&55555u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&53u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(&dns);
+        let udp_sum = udp_ipv4_checksum(&packet[12..16], &packet[16..20], &packet[20..]);
+        packet[26..28].copy_from_slice(&udp_sum.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn dns_response_maps_vault_ztlp_to_vault_vip() {
+        let response =
+            build_ios_dns_response(&dns_query_packet("vault.techrockstars.ztlp")).unwrap();
+        assert_eq!(&response[12..16], &IOS_DNS_ADDR);
+        assert_eq!(&response[16..20], &[10, 122, 0, 9]);
+        assert_eq!(u16::from_be_bytes([response[20], response[21]]), 53);
+        assert_eq!(u16::from_be_bytes([response[22], response[23]]), 55555);
+        let dns = &response[28..];
+        assert_eq!(&dns[0..2], &0x1234u16.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([dns[2], dns[3]]) & 0x000f, 0);
+        assert_eq!(u16::from_be_bytes([dns[6], dns[7]]), 1);
+        assert_eq!(&dns[dns.len() - 4..], &[10, 122, 0, 4]);
+    }
+
+    #[test]
+    fn dns_response_maps_http_and_default_ztlp() {
+        let http = build_ios_dns_response(&dns_query_packet("http.ztlp")).unwrap();
+        assert_eq!(&http[http.len() - 4..], &[10, 122, 0, 3]);
+        let other = build_ios_dns_response(&dns_query_packet("app.ztlp")).unwrap();
+        assert_eq!(&other[other.len() - 4..], &[10, 122, 0, 2]);
+    }
+
+    #[test]
+    fn dns_response_returns_nxdomain_for_non_ztlp() {
+        let response = build_ios_dns_response(&dns_query_packet("example.com")).unwrap();
+        let dns = &response[28..];
+        assert_eq!(u16::from_be_bytes([dns[2], dns[3]]) & 0x000f, 3);
+        assert_eq!(u16::from_be_bytes([dns[6], dns[7]]), 0);
     }
 
     #[test]

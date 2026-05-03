@@ -471,7 +471,7 @@ final class ZTLPTunnelConnection {
     }
 
     func setAdvertisedReceiveWindow(_ rwnd: UInt16) {
-        advertisedReceiveWindow = min(max(rwnd, 4), 8)
+        advertisedReceiveWindow = min(max(rwnd, 4), 16)
     }
 
     /// Flush pending ACKs as a single cumulative ACK (highest seq).

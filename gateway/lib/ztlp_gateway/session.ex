@@ -475,8 +475,8 @@ defmodule ZtlpGateway.Session do
   # and eventually hit session-health reconnect. Make the queue shallower again so
   # backend TCP backpressure engages sooner and the gateway does not build such a
   # large browser-response tail behind a 4-packet peer window.
-  @queue_high 256
-  @queue_low 64
+  @queue_high 128
+  @queue_low 32
   # Mobile browser sessions must not let backend responses balloon into thousands
   # of queued packets. The iOS NE is stable at rwnd=8, but once the gateway has
   # queued 6K packets, the browser sees multi-second delays and churns streams.
@@ -497,6 +497,7 @@ defmodule ZtlpGateway.Session do
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
   @max_rto_retransmit_per_tick 8
+  @mobile_rto_retransmit_per_tick 2
 
   # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
   @use_bbr true
@@ -636,6 +637,11 @@ defmodule ZtlpGateway.Session do
         # Paced send queue: list of plaintext chunks waiting to be sent
         # Each entry is a raw plaintext (not yet framed/encrypted)
         send_queue: :queue.new(),
+        # Per-stream queued response byte accounting for Vaultwarden/WKWebView
+        # close-tail diagnostics. Counts bytes sitting in send_queue, not bytes
+        # already in send_buffer/in flight.
+        stream_queue_bytes: %{},
+        stream_queue_chunks: %{},
         # Backend address for legacy reconnection on idle-close
         backend_addr: nil,
         # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
@@ -831,8 +837,7 @@ defmodule ZtlpGateway.Session do
       {stream_id, _stream} ->
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
         chunks = chunk_data(data, @max_payload_bytes - 13)
-        send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
-        state = %{state | send_queue: send_queue}
+        state = enqueue_stream_chunks_with_accounting(state, stream_id, chunks)
         state = flush_send_queue(state)
         # Backpressure on TLS bridge sockets: pause reading from this socket
         # when queue is high. Without this, the TLS bridge keeps delivering
@@ -873,8 +878,7 @@ defmodule ZtlpGateway.Session do
         # Plain stream: send directly
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
         chunks = chunk_data(data, @max_payload_bytes - 13)
-        send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
-        state = %{state | send_queue: send_queue}
+        state = enqueue_stream_chunks_with_accounting(state, stream_id, chunks)
         state = flush_send_queue(state)
         state = maybe_resume_backends(state)
         {:noreply, state}
@@ -1037,7 +1041,7 @@ defmodule ZtlpGateway.Session do
       state.send_buffer
       |> Enum.filter(fn {_seq, {_pkt, sent_at, rc, _ds}} ->
         elapsed = now - sent_at
-        elapsed > per_packet_rto(state.rto_ms, rc)
+        elapsed > per_packet_rto(state, rc)
       end)
       |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
 
@@ -1049,7 +1053,7 @@ defmodule ZtlpGateway.Session do
     {priority, rest} = Enum.split_with(all_expired, fn {_seq, {_pkt, _ts, _rc, ds}} ->
       is_integer(ds) and ds == first_missing_ds
     end)
-    expired_entries = (priority ++ rest) |> Enum.take(@max_rto_retransmit_per_tick)
+    expired_entries = (priority ++ rest) |> Enum.take(effective_rto_retransmit_limit(state))
 
     # Retransmit selected packets; halve cwnd ONCE for the entire batch
     {state, retransmit_count, _loss_reduced} =
@@ -1063,7 +1067,7 @@ defmodule ZtlpGateway.Session do
         )
         new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-        Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc.rto_ms, retransmit_count)}ms attempt=#{retransmit_count + 1}")
+        Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc, retransmit_count)}ms attempt=#{retransmit_count + 1}")
         send_udp(acc, new_packet)
 
         # Multiplicative decrease ONCE per loss event, and NEVER during recovery.
@@ -1996,7 +2000,10 @@ defmodule ZtlpGateway.Session do
           "client_close_unknown_stream"
       end
 
-    Logger.warning("[Session] FRAME_CLOSE stream_id=#{stream_id} reason=#{close_reason} queue=#{:queue.len(state.send_queue)} total_streams=#{map_size(state.streams)}")
+    queued_bytes = Map.get(state.stream_queue_bytes || %{}, stream_id, 0)
+    queued_chunks = Map.get(state.stream_queue_chunks || %{}, stream_id, 0)
+    {send_queue, dropped_chunks, dropped_bytes} = drop_queued_stream_items(state.send_queue, stream_id)
+    Logger.warning("[Session] FRAME_CLOSE stream_id=#{stream_id} reason=#{close_reason} queue=#{:queue.len(state.send_queue)} stream_queue_chunks=#{queued_chunks} stream_queue_bytes=#{queued_bytes} dropped_chunks=#{dropped_chunks} dropped_bytes=#{dropped_bytes} total_streams=#{map_size(state.streams)}")
 
     # Audit: stream closed
     AuditCollector.log_event(%{
@@ -2011,7 +2018,9 @@ defmodule ZtlpGateway.Session do
     })
 
     streams = Map.delete(state.streams, stream_id)
-    {:noreply, %{state | streams: streams}}
+    stream_queue_bytes = Map.delete(state.stream_queue_bytes || %{}, stream_id)
+    stream_queue_chunks = Map.delete(state.stream_queue_chunks || %{}, stream_id)
+    {:noreply, %{state | streams: streams, send_queue: send_queue, stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}}
   end
 
   # FRAME_REKEY: client's ACK with their key material for key rotation
@@ -2075,6 +2084,41 @@ defmodule ZtlpGateway.Session do
         {:cont, :queue.in({:stream, stream_id, chunk}, q)}
       end
     end)
+  end
+
+  defp enqueue_stream_chunks_with_accounting(state, stream_id, chunks) do
+    before_len = :queue.len(state.send_queue)
+    send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
+    after_len = :queue.len(send_queue)
+    enqueued_chunks = max(after_len - before_len, 0)
+    enqueued_bytes = chunks |> Enum.take(enqueued_chunks) |> Enum.reduce(0, fn chunk, acc -> acc + byte_size(chunk) end)
+
+    if enqueued_chunks < length(chunks) do
+      Logger.debug("[Session] Stream #{stream_id} enqueue capped enqueued_chunks=#{enqueued_chunks} requested_chunks=#{length(chunks)} queue=#{after_len} high=#{@queue_high}")
+    end
+
+    stream_queue_bytes = Map.update(state.stream_queue_bytes || %{}, stream_id, enqueued_bytes, &(&1 + enqueued_bytes))
+    stream_queue_chunks = Map.update(state.stream_queue_chunks || %{}, stream_id, enqueued_chunks, &(&1 + enqueued_chunks))
+    %{state | send_queue: send_queue, stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}
+  end
+
+  defp decrement_stream_queue_accounting(state, stream_id, bytes) do
+    stream_queue_bytes = Map.update(state.stream_queue_bytes || %{}, stream_id, 0, fn current -> max(current - bytes, 0) end)
+    stream_queue_chunks = Map.update(state.stream_queue_chunks || %{}, stream_id, 0, fn current -> max(current - 1, 0) end)
+    %{state | stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}
+  end
+
+  defp drop_queued_stream_items(send_queue, stream_id) do
+    {kept, dropped_chunks, dropped_bytes} =
+      :queue.to_list(send_queue)
+      |> Enum.reduce({[], 0, 0}, fn
+        {:stream, ^stream_id, chunk}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes + byte_size(chunk)}
+        {:stream_fin, ^stream_id}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes}
+        {:stream_close, ^stream_id}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes}
+        item, {acc, chunks, bytes} -> {[item | acc], chunks, bytes}
+      end)
+
+    {kept |> Enum.reverse() |> :queue.from_list(), dropped_chunks, dropped_bytes}
   end
 
   defp open_mux_stream(stream_id, service_name, state) do
@@ -2275,6 +2319,7 @@ defmodule ZtlpGateway.Session do
         result = case item do
           {:stream, stream_id, plaintext} ->
             # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+            state = decrement_stream_queue_accounting(state, stream_id, byte_size(plaintext))
             encrypt_and_send_stream(stream_id, plaintext, state)
 
           {:stream_fin, stream_id} ->
@@ -2851,10 +2896,18 @@ defmodule ZtlpGateway.Session do
   # Pure exponential (2x) is too aggressive for high-loss paths — the later
   # retransmits are spaced too far apart. 1.5x is the KCP default.
   # Capped at @max_rto_ms.
-  defp per_packet_rto(base_rto, retransmit_count) do
+  defp per_packet_rto(state, retransmit_count) do
+    base_rto = Map.get(state, :rto_ms, @initial_rto_ms)
     backed_off = base_rto * :math.pow(1.5, retransmit_count) |> round()
-    min(backed_off, @max_rto_ms)
+    backed_off |> max(cc_min_rto_ms(state)) |> min(@max_rto_ms)
   end
+
+  defp effective_rto_retransmit_limit(%{peer_rwnd: peer_rwnd})
+       when is_integer(peer_rwnd) and peer_rwnd <= 8 do
+    @mobile_rto_retransmit_per_tick
+  end
+
+  defp effective_rto_retransmit_limit(_state), do: @max_rto_retransmit_per_tick
 
   # Split binary data into chunks of at most `max_size` bytes.
   defp chunk_data(data, max_size) when byte_size(data) <= max_size, do: [data]

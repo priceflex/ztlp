@@ -39,33 +39,27 @@ enum ZTLPServiceVIP {
         return nil
     }
 
-    /// Convert a URL to use VIP IP if it's a .ztlp service.
-    /// Preserves the path but replaces the hostname with the VIP IP.
-    /// For HTTP: returns http://VIP_IP/path
-    /// For HTTPS: uses HTTP instead (to avoid cert hostname mismatch)
-    /// Other schemes: returns the original URL unchanged.
+    /// Normalize service hostnames for WKWebView.
+    /// Rust-fd now answers *.ztlp DNS inside the native utun engine, so keep the
+    /// hostname for normal browser origin/Host semantics. Force HTTP until iOS
+    /// has local TLS termination/certs for service VIPs.
     static func toVIPURL(_ originalURL: URL) -> URL {
         guard
             var components = URLComponents(url: originalURL, resolvingAgainstBaseURL: true),
             let host = components.host,
-            let vip = resolve(host)
+            host.lowercased().hasSuffix(".ztlp")
         else {
             return originalURL
         }
-
-        // Always use HTTP to avoid certificate hostname mismatch with VIP IPs
         components.scheme = "http"
-        components.host = vip
-        // Port is implicit (80 for http) - but if original was 443 HTTPS,
-        // the relay-side VIP handles the routing by destination IP
-
+        components.port = nil
         return components.url ?? originalURL
     }
 }
 
 /// In-app web browser using WKWebView.
-/// DNS for *.ztlp is resolved to VIP IPs before loading,
-/// so traffic routes through the tunnel via included routes.
+/// *.ztlp hostnames are loaded directly so WKWebView uses the NE DNS settings
+/// and keeps normal browser origin/Host semantics.
 struct InAppBrowserView: UIViewControllerRepresentable {
     let url: URL
 
@@ -79,6 +73,7 @@ struct InAppBrowserView: UIViewControllerRepresentable {
 
 class BrowserViewController: UIViewController, WKNavigationDelegate {
     private let url: URL
+    private let browserSessionID = "browser-" + String(UUID().uuidString.prefix(8))
     private var webView: WKWebView!
     private var progressView: UIProgressView!
     private var titleLabel: UILabel!
@@ -166,13 +161,18 @@ class BrowserViewController: UIViewController, WKNavigationDelegate {
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) create requested=\(url.absoluteString) actual=\(actualURL.absoluteString)", source: "Browser")
+
         // Load the URL
         if actualURL != url {
             #if DEBUG
             print("[Browser] Rewriting \(url.absoluteString) -> \(actualURL.absoluteString)")
             #endif
         }
-        webView.load(URLRequest(url: actualURL))
+        let request = URLRequest(url: actualURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) load url=\(actualURL.absoluteString)", source: "Browser")
+        webView.load(request)
+        scheduleBrowserDiagnostic(reason: "load_started")
         progressView.progress = 0
         progressView.alpha = 1
 
@@ -194,16 +194,30 @@ class BrowserViewController: UIViewController, WKNavigationDelegate {
     }
 
     deinit {
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) deinit url=\(webView?.url?.absoluteString ?? url.absoluteString)", source: "Browser")
         webView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) didStart url=\(webView.url?.absoluteString ?? url.absoluteString)", source: "Browser")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) didCommit url=\(webView.url?.absoluteString ?? url.absoluteString)", source: "Browser")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         progressView.alpha = 0
         titleLabel.text = webView.title ?? webView.url?.host ?? ""
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) didFinish url=\(webView.url?.absoluteString ?? url.absoluteString) title=\(webView.title ?? "") progress=\(String(format: "%.2f", webView.estimatedProgress))", source: "Browser")
+        logBrowserDiagnostic(reason: "didFinish")
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         progressView.alpha = 0
+        let nsError = error as NSError
+        TunnelLogger.shared.warn("WKWebView session=\(browserSessionID) navigation failed url=\(webView.url?.absoluteString ?? "nil") domain=\(nsError.domain) code=\(nsError.code) error=\(error.localizedDescription) progress=\(String(format: "%.2f", webView.estimatedProgress))", source: "Browser")
+        logBrowserDiagnostic(reason: "didFail")
         #if DEBUG
         print("[Browser] Failed: \(error.localizedDescription)")
         #endif
@@ -211,12 +225,37 @@ class BrowserViewController: UIViewController, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         progressView.alpha = 0
+        let nsError = error as NSError
+        TunnelLogger.shared.warn("WKWebView session=\(browserSessionID) provisional failed target=\(webView.url?.absoluteString ?? url.absoluteString) domain=\(nsError.domain) code=\(nsError.code) error=\(error.localizedDescription) progress=\(String(format: "%.2f", webView.estimatedProgress))", source: "Browser")
+        logBrowserDiagnostic(reason: "didFailProvisional")
         #if DEBUG
         print("[Browser] ProvFail: \(error.localizedDescription)")
         #endif
     }
 
+    private func scheduleBrowserDiagnostic(reason: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20.0) { [weak self] in
+            self?.logBrowserDiagnostic(reason: reason + "_20s")
+        }
+    }
+
+    private func logBrowserDiagnostic(reason: String) {
+        guard let webView = webView else { return }
+        let js = """
+        JSON.stringify({readyState: document.readyState, location: String(window.location), title: document.title, resources: performance.getEntriesByType('resource').slice(-25).map(r => ({name: r.name, type: r.initiatorType, dur: Math.round(r.duration), size: r.transferSize || 0}))})
+        """
+        webView.evaluateJavaScript(js) { result, error in
+            if let error = error {
+                TunnelLogger.shared.warn("WKWebView session=\(self.browserSessionID) diag reason=\(reason) js_error=\(error.localizedDescription)", source: "Browser")
+            } else {
+                let text = String(describing: result ?? "nil")
+                TunnelLogger.shared.info("WKWebView session=\(self.browserSessionID) diag reason=\(reason) url=\(webView.url?.absoluteString ?? "nil") progress=\(String(format: "%.2f", webView.estimatedProgress)) data=\(text.prefix(1800))", source: "Browser")
+            }
+        }
+    }
+
     @objc private func doneTapped() {
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) doneTapped url=\(webView.url?.absoluteString ?? url.absoluteString)", source: "Browser")
         // This controller is presented in a sheet, dismiss it
         dismiss(animated: true)
     }
@@ -230,7 +269,9 @@ class BrowserViewController: UIViewController, WKNavigationDelegate {
     }
 
     @objc private func reloadTapped() {
+        TunnelLogger.shared.info("WKWebView session=\(browserSessionID) reloadTapped url=\(webView.url?.absoluteString ?? url.absoluteString)", source: "Browser")
         webView.reload()
+        scheduleBrowserDiagnostic(reason: "reload")
     }
 }
 

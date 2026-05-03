@@ -157,7 +157,8 @@ defmodule ZtlpGateway.Backend do
 
   # Session tells us to pause reading (backpressure — send queue is full)
   @impl true
-  def handle_cast(:pause_read, state) do
+  def handle_cast(:pause_read, %{socket: socket} = state) do
+    :inet.setopts(socket, active: false)
     {:noreply, %{state | paused: true}}
   end
 
@@ -175,13 +176,13 @@ defmodule ZtlpGateway.Backend do
   @impl true
   def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: nil, paused: paused} = state) do
     send(owner, {:backend_data, data})
-    unless paused, do: :inet.setopts(socket, active: :once)
+    :inet.setopts(socket, active: if(paused, do: false, else: :once))
     {:noreply, state}
   end
 
   def handle_info({:tcp, socket, data}, %{owner: owner, stream_id: stream_id, paused: paused} = state) do
     send(owner, {:backend_data, stream_id, data})
-    unless paused, do: :inet.setopts(socket, active: :once)
+    :inet.setopts(socket, active: if(paused, do: false, else: :once))
     {:noreply, state}
   end
 

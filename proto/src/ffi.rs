@@ -3914,6 +3914,437 @@ pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) 
     let _ = unsafe { Box::from_raw(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
 }
 
+// ── MuxEngine FFI (Phase 2: Nebula collapse) ───────────────────────────
+//
+// MuxEngine owns the tunnel's sequence/ACK/rwnd/cwnd/retransmit state. It
+// is a pure state machine — no I/O, no crypto. iOS callers:
+//   1. Create an engine with `ztlp_mux_new`.
+//   2. As DATA/OPEN/CLOSE are generated, enqueue them via
+//      `ztlp_mux_enqueue_data` / `_open` / `_close`.
+//   3. Each tick: call `ztlp_mux_take_send_bytes` to pull encoded plaintext
+//      frames; encrypt each via `ztlp_encrypt_packet`; send.
+//   4. When a FRAME_ACK arrives after decrypt: call `ztlp_mux_on_ack`.
+//   5. When a FRAME_DATA arrives after decrypt: call
+//      `ztlp_mux_on_data_received` with the data_seq so the cumulative ACK
+//      we advertise stays accurate.
+//   6. Each tick: call `ztlp_mux_tick_rwnd` with the router snapshot to
+//      update the advertised receive window, and `ztlp_mux_tick_retransmit`
+//      to resend lost DATA.
+//   7. `ztlp_mux_take_retransmit_bytes` drains the retransmit sidecar.
+//   8. `ztlp_mux_free` when the tunnel ends.
+
+/// Opaque handle for a MuxEngine.
+#[cfg(feature = "ios-sync")]
+pub struct ZtlpMuxEngine {
+    pub(crate) inner: std::sync::Mutex<crate::mux::MuxEngine>,
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_new() -> *mut ZtlpMuxEngine {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let engine = ZtlpMuxEngine {
+            inner: std::sync::Mutex::new(crate::mux::MuxEngine::new()),
+        };
+        Box::into_raw(Box::new(engine))
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_mux_new");
+        std::ptr::null_mut()
+    })
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_free(engine: *mut ZtlpMuxEngine) {
+    if engine.is_null() {
+        return;
+    }
+    let _ = unsafe { Box::from_raw(engine) };
+}
+
+/// Enqueue a FRAME_DATA to stream `stream_id` with the given payload.
+/// MuxEngine assigns data_seq on take_send_bytes.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_enqueue_data(
+    engine: *mut ZtlpMuxEngine,
+    stream_id: u32,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() || data.is_null() || len == 0 {
+            set_last_error("invalid argument to ztlp_mux_enqueue_data");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let engine = unsafe { &*engine };
+        let payload = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+        let mut guard = match engine.inner.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                set_last_error("mux poisoned");
+                return ZtlpResult::InternalError as i32;
+            }
+        };
+        guard.enqueue_outbound(crate::mux::OutboundItem::Data { stream_id, payload });
+        ZtlpResult::Ok as i32
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_mux_enqueue_data");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_enqueue_open(
+    engine: *mut ZtlpMuxEngine,
+    stream_id: u32,
+    service: *const c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() || service.is_null() {
+            set_last_error("invalid argument to ztlp_mux_enqueue_open");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let service_str = match unsafe { CStr::from_ptr(service) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                set_last_error("service name is not valid utf-8");
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+        let engine = unsafe { &*engine };
+        let mut guard = match engine.inner.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                set_last_error("mux poisoned");
+                return ZtlpResult::InternalError as i32;
+            }
+        };
+        guard.enqueue_outbound(crate::mux::OutboundItem::Open {
+            stream_id,
+            service: service_str,
+        });
+        ZtlpResult::Ok as i32
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_mux_enqueue_open");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_enqueue_close(
+    engine: *mut ZtlpMuxEngine,
+    stream_id: u32,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.enqueue_outbound(crate::mux::OutboundItem::Close { stream_id });
+    ZtlpResult::Ok as i32
+}
+
+/// Delivery callback for `ztlp_mux_take_send_bytes` and `_retransmit_bytes`.
+/// `frame` / `len` describe a single encoded plaintext mux frame. The
+/// callback must NOT retain the pointer after returning — copy the bytes
+/// if needed.
+#[cfg(feature = "ios-sync")]
+pub type ZtlpMuxFrameCallback = extern "C" fn(
+    user_data: *mut c_void,
+    frame: *const u8,
+    len: usize,
+);
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_take_send_bytes(
+    engine: *mut ZtlpMuxEngine,
+    callback: Option<ZtlpMuxFrameCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return -(ZtlpResult::InvalidArgument as i32);
+        }
+        let cb = match callback {
+            Some(c) => c,
+            None => {
+                set_last_error("callback is null");
+                return -(ZtlpResult::InvalidArgument as i32);
+            }
+        };
+        let engine = unsafe { &*engine };
+        let mut guard = match engine.inner.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                set_last_error("mux poisoned");
+                return -(ZtlpResult::InternalError as i32);
+            }
+        };
+        let now = std::time::Instant::now();
+        let frames = guard.take_send_bytes(now);
+        let count = frames.len() as i32;
+        // Drop the lock before invoking user callbacks — the callback may
+        // call back into the mux.
+        drop(guard);
+        for bytes in frames {
+            cb(user_data, bytes.as_ptr(), bytes.len());
+        }
+        count
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_mux_take_send_bytes");
+        -(ZtlpResult::InternalError as i32)
+    })
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_tick_retransmit(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -(ZtlpResult::InvalidArgument as i32);
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -(ZtlpResult::InternalError as i32);
+        }
+    };
+    guard.tick_retransmit(std::time::Instant::now()) as i32
+}
+
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_take_retransmit_bytes(
+    engine: *mut ZtlpMuxEngine,
+    callback: Option<ZtlpMuxFrameCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -(ZtlpResult::InvalidArgument as i32);
+    }
+    let cb = match callback {
+        Some(c) => c,
+        None => {
+            set_last_error("callback is null");
+            return -(ZtlpResult::InvalidArgument as i32);
+        }
+    };
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -(ZtlpResult::InternalError as i32);
+        }
+    };
+    let frames = guard.take_retransmit_bytes();
+    let count = frames.len() as i32;
+    drop(guard);
+    for bytes in frames {
+        cb(user_data, bytes.as_ptr(), bytes.len());
+    }
+    count
+}
+
+/// Tell the engine a FRAME_ACK arrived from the peer. Returns the number
+/// of inflight packets released, or -1 on error.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_on_ack(
+    engine: *mut ZtlpMuxEngine,
+    cumulative: u64,
+    rwnd: u16,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -1;
+        }
+    };
+    let released = guard.on_cumulative_ack(cumulative);
+    if rwnd > 0 {
+        guard.on_peer_rwnd(rwnd);
+    }
+    released as i32
+}
+
+/// Tell the engine a FRAME_DATA with `data_seq` was delivered. This
+/// advances the cumulative ACK the engine advertises back to the peer.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_on_data_received(
+    engine: *mut ZtlpMuxEngine,
+    data_seq: u64,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.on_data_received(data_seq);
+    ZtlpResult::Ok as i32
+}
+
+/// Mark that utun saw outbound demand just now. Drives the post-demand
+/// rwnd=12 hold that fixes Vaultwarden.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_mark_outbound_demand(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+    let engine = unsafe { &*engine };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return ZtlpResult::InternalError as i32;
+        }
+    };
+    guard.mark_outbound_demand(std::time::Instant::now());
+    ZtlpResult::Ok as i32
+}
+
+/// Router stats snapshot used by `ztlp_mux_tick_rwnd`. Matches
+/// `crate::mux::RouterStatsSnapshot`.
+#[cfg(feature = "ios-sync")]
+#[repr(C)]
+pub struct ZtlpRouterStatsSnapshot {
+    pub flows: u32,
+    pub outbound: u32,
+    pub stream_to_flow: u32,
+    pub send_buf_bytes: usize,
+    pub oldest_ms: u64,
+}
+
+/// Pressure signals used by `ztlp_mux_tick_rwnd`.
+#[cfg(feature = "ios-sync")]
+#[repr(C)]
+pub struct ZtlpRwndPressureSignals {
+    pub consecutive_full_flushes: u32,
+    pub consecutive_stuck_high_seq_ticks: u32,
+    pub session_suspect: u8,
+    pub probe_outstanding: u8,
+    pub high_seq_advanced: u8,
+    pub has_active_flows: u8,
+}
+
+/// Run the rwnd policy for one tick. Returns the new advertised rwnd.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_tick_rwnd(
+    engine: *mut ZtlpMuxEngine,
+    stats: *const ZtlpRouterStatsSnapshot,
+    replay_delta: i32,
+    signals: *const ZtlpRwndPressureSignals,
+) -> i32 {
+    if engine.is_null() || stats.is_null() || signals.is_null() {
+        set_last_error("null argument to ztlp_mux_tick_rwnd");
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    let stats_c = unsafe { &*stats };
+    let sig_c = unsafe { &*signals };
+    let mapped_stats = crate::mux::RouterStatsSnapshot {
+        flows: stats_c.flows,
+        outbound: stats_c.outbound,
+        stream_to_flow: stats_c.stream_to_flow,
+        send_buf_bytes: stats_c.send_buf_bytes,
+        oldest_ms: stats_c.oldest_ms,
+    };
+    let mapped_sig = crate::mux::RwndPressureSignals {
+        consecutive_full_flushes: sig_c.consecutive_full_flushes,
+        consecutive_stuck_high_seq_ticks: sig_c.consecutive_stuck_high_seq_ticks,
+        session_suspect: sig_c.session_suspect != 0,
+        probe_outstanding: sig_c.probe_outstanding != 0,
+        high_seq_advanced: sig_c.high_seq_advanced != 0,
+        has_active_flows: sig_c.has_active_flows != 0,
+    };
+    let mut guard = match engine.inner.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            set_last_error("mux poisoned");
+            return -1;
+        }
+    };
+    let (rwnd, _reason) =
+        guard.tick_rwnd(std::time::Instant::now(), mapped_stats, replay_delta, mapped_sig);
+    rwnd as i32
+}
+
+/// Current advertised rwnd (for diagnostics / Swift log lines).
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_advertised_rwnd(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    match engine.inner.lock() {
+        Ok(g) => g.advertised_rwnd() as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Current cumulative ACK we'd advertise to the peer.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_cumulative_ack(engine: *mut ZtlpMuxEngine) -> u64 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &*engine };
+    engine.inner.lock().map(|g| g.cumulative_ack()).unwrap_or(0)
+}
+
+/// Inflight count — for diagnostics and the health snapshot.
+#[cfg(feature = "ios-sync")]
+#[no_mangle]
+pub extern "C" fn ztlp_mux_inflight_len(engine: *mut ZtlpMuxEngine) -> i32 {
+    if engine.is_null() {
+        return -1;
+    }
+    let engine = unsafe { &*engine };
+    engine
+        .inner
+        .lock()
+        .map(|g| g.inflight_len() as i32)
+        .unwrap_or(-1)
+}
+
 // ── Standalone Packet Router FFI (ios-sync: no ZtlpClient wrapper) ─────
 //
 // These functions operate on a raw PacketRouter pointer, bypassing the

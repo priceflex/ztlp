@@ -1325,6 +1325,87 @@ int32_t ztlp_ios_tunnel_engine_start_udp_recv_loop(ZtlpIosTunnelEngine *engine);
  */
 void ztlp_ios_tunnel_engine_free(ZtlpIosTunnelEngine *engine);
 
+// ── MuxEngine FFI (Phase 2: Nebula collapse) ─────────────────────────
+
+/**
+ * @brief Opaque handle for a MuxEngine — a pure state machine owning the
+ *        tunnel's sequence, ACK, rwnd, cwnd, and retransmit state.
+ */
+typedef struct ZtlpMuxEngine ZtlpMuxEngine;
+
+/**
+ * @brief Callback used by ztlp_mux_take_send_bytes and
+ *        ztlp_mux_take_retransmit_bytes. The pointer must NOT be retained
+ *        past the callback return — copy bytes if needed.
+ */
+typedef void (*ZtlpMuxFrameCallback)(
+    void *user_data,
+    const uint8_t *frame,
+    size_t len
+);
+
+/** @brief Router stats snapshot mirror of crate::mux::RouterStatsSnapshot. */
+typedef struct {
+    uint32_t flows;
+    uint32_t outbound;
+    uint32_t stream_to_flow;
+    size_t   send_buf_bytes;
+    uint64_t oldest_ms;
+} ZtlpRouterStatsSnapshot;
+
+/** @brief Pressure signals mirror of crate::mux::RwndPressureSignals. */
+typedef struct {
+    uint32_t consecutive_full_flushes;
+    uint32_t consecutive_stuck_high_seq_ticks;
+    uint8_t  session_suspect;
+    uint8_t  probe_outstanding;
+    uint8_t  high_seq_advanced;
+    uint8_t  has_active_flows;
+} ZtlpRwndPressureSignals;
+
+ZtlpMuxEngine *ztlp_mux_new(void);
+void ztlp_mux_free(ZtlpMuxEngine *engine);
+
+int32_t ztlp_mux_enqueue_data(
+    ZtlpMuxEngine *engine,
+    uint32_t stream_id,
+    const uint8_t *data,
+    size_t len
+);
+int32_t ztlp_mux_enqueue_open(
+    ZtlpMuxEngine *engine,
+    uint32_t stream_id,
+    const char *service
+);
+int32_t ztlp_mux_enqueue_close(ZtlpMuxEngine *engine, uint32_t stream_id);
+
+int32_t ztlp_mux_take_send_bytes(
+    ZtlpMuxEngine *engine,
+    ZtlpMuxFrameCallback callback,
+    void *user_data
+);
+int32_t ztlp_mux_tick_retransmit(ZtlpMuxEngine *engine);
+int32_t ztlp_mux_take_retransmit_bytes(
+    ZtlpMuxEngine *engine,
+    ZtlpMuxFrameCallback callback,
+    void *user_data
+);
+
+int32_t ztlp_mux_on_ack(ZtlpMuxEngine *engine, uint64_t cumulative, uint16_t rwnd);
+int32_t ztlp_mux_on_data_received(ZtlpMuxEngine *engine, uint64_t data_seq);
+int32_t ztlp_mux_mark_outbound_demand(ZtlpMuxEngine *engine);
+
+int32_t ztlp_mux_tick_rwnd(
+    ZtlpMuxEngine *engine,
+    const ZtlpRouterStatsSnapshot *stats,
+    int32_t replay_delta,
+    const ZtlpRwndPressureSignals *signals
+);
+
+int32_t ztlp_mux_advertised_rwnd(ZtlpMuxEngine *engine);
+uint64_t ztlp_mux_cumulative_ack(ZtlpMuxEngine *engine);
+int32_t ztlp_mux_inflight_len(ZtlpMuxEngine *engine);
+
 // ── Standalone Packet Router (ios-sync: no ZtlpClient needed) ──────────
 
 /**

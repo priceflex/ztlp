@@ -160,42 +160,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Rust owns the utun fd and logs/drops packet metadata only.
     private static let useRustFdDataPlane = true
 
-    // MARK: - Nebula collapse cutover (Phase 2.7 + 3.3)
-    //
-    // When useRustMux is true, the advertised-rwnd policy is computed by the
-    // Rust MuxEngine (proto::mux) instead of Swift's maybeRampAdvertisedRwnd.
-    // This gives the Vaultwarden hold=12 fix on device without swapping the
-    // full mux implementation — send buffer, retransmit, and codec remain in
-    // Swift for this cutover.
-    //
-    // When useRustHealth is true, the session-health state machine is the
-    // Rust SessionHealth (proto::session_health) instead of the Swift
-    // suspect/probe/dead logic. PONG deliveries drive on_pong; successful
-    // reconnects drive reset_after_reconnect.
-    private static let useRustMux = true
-    private static let useRustHealth = true
-
-    /// Phase A of "modern flow control" — purely passive instrumentation.
-    /// When true, the NE feeds the Rust MuxEngine's shadow RTT/goodput
-    /// observation path (`ztlp_mux_observe_sent` /
-    /// `ztlp_mux_observe_ack_cumulative`) and logs the resulting
-    /// smoothed_rtt_ms / goodput_bps / bdp_kb every health tick. No wire
-    /// change, no behaviour change — just numbers to drive Phase B+.
-    private static let useRttInstrumentation = true
-    /// Last time we logged an RTT/BDP snapshot. Throttled to ~2s.
-    private var lastRttLogAt: Date = .distantPast
-
-    /// Phase B of "modern flow control" — FRAME_ACK_V2 (byte-unit KB
-    /// receive window). When true, `ZTLPTunnelConnection` emits 0x10
-    /// FRAME_ACK_V2 frames instead of 0x01 FRAME_ACK. Requires the
-    /// matching gateway deploy (session.ex handles @frame_ack_v2).
-    /// Default true — we cut over both sides together.
-    private static let useByteRwnd = true
-    private var rustMux: OpaquePointer?      // ZtlpMuxEngine*
-    private var rustHealth: OpaquePointer?   // ZtlpSessionHealth*
-    /// Scratch buffer for ztlp_health_tick's out_reason. 32 bytes is what
-    /// the Rust side documents as the recommended minimum.
-    private var rustHealthReasonBuffer = [CChar](repeating: 0, count: 32)
+    // Nebula-pivot S1: the former Rust MuxEngine / SessionHealth / RTT
+    // instrumentation / byte-rwnd wiring has been removed. The Swift NE is
+    // now a dumb pipe — inner TCP terminated at the gateway VIP does all
+    // congestion control and reliability.
 
     /// DNS responder for *.ztlp queries (answers directly on utun, no tokio).
     private var dnsResponder: ZTLPDNSResponder?
@@ -209,9 +177,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Periodic cleanup timer for stale TCP flows (reclaims memory).
     private static let cleanupInterval: TimeInterval = 10.0
     private var cleanupTimer: DispatchSourceTimer?
-
-    /// ACK flush timer (10ms for low-latency ACKs).
-    private var ackFlushTimer: DispatchSourceTimer?
 
     /// Rate-limit diagnostic work and shared-defaults churn while idle.
     private var lastMemoryDiagnosticsAt: Date = .distantPast
@@ -236,63 +201,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private static let maxOutboundPacketsPerFlush: Int = 64
     private static let browserModeMaxOutboundPacketsPerFlush: Int = 32
 
-    /// Adaptive advertised receive window. rwnd=4 remains the recovery floor,
-    /// but the Rust-fd path can safely test a larger browser burst window.
-    private static let rwndFloor: UInt16 = 4
-    private static let rwndAdaptiveMax: UInt16 = 16
-    private static let rwndBrowserBurstTarget: UInt16 = 16
-    private static let rwndHealthyTicksToIncrease = 3
-    private static let rwndReplayDeltaBad = 2
-    private static let rwndReplayDeltaReconnect = 8
-    private static let rwndPressureCooldown: TimeInterval = 15.0
-    private static let rwndRouterOutboundBad = 128
-    private static let rwndSendBufBytesBad = 16_384
-    private static let rwndOldestMsBad = 4_000
-    /// Browser/WKWebView bursts fan out multiple streams. With Rust-fd enabled,
-    /// test a larger rwnd=16 burst now that DNS and CloseStream cleanup are in
-    /// Rust and gateway queues remain shallow.
+    /// Browser/WKWebView bursts fan out multiple streams. Only used by the
+    /// outbound-flush batch sizing (post-pivot there is no advertised rwnd).
     private static let rwndBrowserBurstFlowThreshold = 2
-    private var advertisedRwnd: UInt16 = 4
-    private var consecutiveFullFlushes = 0
-    private var consecutiveRwndHealthyTicks = 0
-    private var lastRwndLogAt: Date = .distantPast
-    private var rwndPressureUntil: Date = .distantPast
 
     /// Cached service map so the packet router can be rebuilt/reset during health recovery.
     private var configuredServices: [(vip: String, name: String)] = []
 
-    /// Session-health tracking for browser-burst recovery.
-    /// Detector needs to fire BEFORE the gateway stall-timeout (30s) tears the session down.
-    private static let healthCheckInterval: TimeInterval = 2.0
-    private static let healthSuspectThreshold: TimeInterval = 5.0
-    private static let probeTimeoutThreshold: TimeInterval = 5.0
-    private static let fastStuckOldestMsThreshold = 3_000
-    private static let fastStuckTicksBeforeSuspect = 2
-    /// Number of consecutive ticks with active flows and no highSeq progress before
-    /// we treat the session as suspect (independent of usefulRxAge), to catch the
-    /// "alive but stuck" replay-storm pattern where RX still arrives but nothing advances.
-    private static let noProgressTicksBeforeSuspect = 3
-    private static let healthLateThreshold: TimeInterval = 4.0
-    private let healthQueue = DispatchQueue(label: "com.ztlp.tunnel.health", qos: .utility)
-    private var healthTimer: DispatchSourceTimer?
-    private var lastUsefulRxAt: Date = .distantPast
-    private var lastOutboundDemandAt: Date = .distantPast
-    private var lastHealthCheckAt: Date = .distantPast
-    private var lastHealthWatchdogFireAt: Date = .distantPast
-    private var sessionSuspectSince: Date?
-    private var probeOutstandingSince: Date?
-    private var lastProbeResponseAt: Date = .distantPast
-    private var consecutiveNoProgressChecks = 0
-    private var consecutiveStuckHighSeqTicks = 0
-    private var lastHighSeqSeen: UInt64 = 0
-    private var priorHighSeqSnapshot: UInt64 = 0
-    private var lastReplayRejectCount = 0
+    /// Last observed router stats (populated by flushOutboundPackets / router
+    /// callbacks). Used only for adaptive outbound flush sizing and logging —
+    /// the session-health state machine they once fed has been removed.
     private var lastRouterFlows = 0
     private var lastRouterOutbound = 0
     private var lastRouterStreamMappings = 0
-    private var lastHealthHeartbeatAt: Date = .distantPast
-    private var healthProbeNonce: UInt64 = 0
-    private var pendingReconnectReason: String?
 
     /// Aggregate mux/router hot-path diagnostics instead of logging per packet.
     private var muxSummaryLastLogAt: Date = .distantPast
@@ -328,328 +249,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         consecutiveKeepaliveFailures = 0
     }
 
-    private func markOutboundDemand() {
-        lastOutboundDemandAt = Date()
-        if Self.useRustMux, let mux = rustMux {
-            _ = ztlp_mux_mark_outbound_demand(mux)
-        }
-    }
-
-    private func markUsefulRx(sequence: UInt64, payloadLength: Int) {
-        guard payloadLength > 0 else { return }
-        if sequence > lastHighSeqSeen {
-            lastHighSeqSeen = sequence
-            lastUsefulRxAt = Date()
-        }
-    }
-
-    private func refreshReplayRejectBaseline() {
-        let replayRejectCount = sharedDefaults?.integer(forKey: "ztlp_replay_reject_count") ?? 0
-        lastReplayRejectCount = replayRejectCount
-    }
-
-    private func clearSessionHealthState() {
-        sessionSuspectSince = nil
-        probeOutstandingSince = nil
-        consecutiveNoProgressChecks = 0
-        consecutiveStuckHighSeqTicks = 0
-    }
-
-    private struct RouterStatsSnapshot {
-        let flows: Int
-        let outbound: Int
-        let streamToFlow: Int
-        let sendBufBytes: Int
-        let sendBufFlows: Int
-        let oldestMs: Int
-        let stale: Int
-        let stats: String
-    }
-
-    private func parseRouterStats() -> RouterStatsSnapshot? {
-        guard let router = packetRouter, let statsPtr = ztlp_router_stats(router) else { return nil }
-        let stats = String(cString: statsPtr)
-        ztlp_free_string(statsPtr)
-
-        var values: [String: Int] = [:]
-        for token in stats.split(separator: " ") {
-            let parts = token.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2, let value = Int(parts[1]) else { continue }
-            values[String(parts[0])] = value
-        }
-
-        return RouterStatsSnapshot(
-            flows: values["flows"] ?? 0,
-            outbound: values["outbound"] ?? 0,
-            streamToFlow: values["stream_to_flow"] ?? 0,
-            sendBufBytes: values["send_buf_bytes"] ?? 0,
-            sendBufFlows: values["send_buf_flows"] ?? 0,
-            oldestMs: values["oldest_ms"] ?? 0,
-            stale: values["stale"] ?? 0,
-            stats: stats
-        )
-    }
-
-    private func startHealthTimer() {
-        healthTimer?.cancel()
-        lastHealthWatchdogFireAt = .distantPast
-        let timer = DispatchSource.makeTimerSource(queue: healthQueue)
-        timer.schedule(deadline: .now() + Self.healthCheckInterval, repeating: Self.healthCheckInterval)
-        timer.setEventHandler { [weak self] in
-            self?.handleHealthWatchdogTick()
-        }
-        timer.resume()
-        healthTimer = timer
-        logger.info("Session health manager enabled interval=\(Self.healthCheckInterval)s suspectRx=\(Self.healthSuspectThreshold)s probeTimeout=\(Self.probeTimeoutThreshold)s stuckTicks=\(Self.noProgressTicksBeforeSuspect) queue=healthQueue", source: "Tunnel")
-    }
-
-    private func handleHealthWatchdogTick() {
-        let now = Date()
-        let delay = now.timeIntervalSince(lastHealthWatchdogFireAt)
-        if lastHealthWatchdogFireAt != .distantPast && delay > Self.healthLateThreshold {
-            logger.warn("Health watchdog late delay=\(String(format: "%.1f", delay))s", source: "Tunnel")
-        }
-        lastHealthWatchdogFireAt = now
-
-        let scheduledAt = Date()
-        tunnelQueue.async { [weak self] in
-            guard let self = self else { return }
-            let queueDelay = Date().timeIntervalSince(scheduledAt)
-            if queueDelay > Self.healthLateThreshold {
-                self.logger.warn("Health eval delayed on tunnelQueue delay=\(String(format: "%.1f", queueDelay))s", source: "Tunnel")
-            }
-            self.evaluateSessionHealth()
-        }
-    }
-
-    private func sendSessionProbe(reason: String) {
-        let nonce = UInt64(Date().timeIntervalSince1970 * 1000)
-        healthProbeNonce = nonce
-        guard tunnelConnection?.sendProbe(nonce: nonce) == true else {
-            logger.warn("Session health probe send failed nonce=\(nonce) reason=\(reason)", source: "Tunnel")
-            return
-        }
-        probeOutstandingSince = Date()
-        logger.warn("Session health suspect: reason=\(reason) activeFlows=\(lastRouterFlows) streamMaps=\(lastRouterStreamMappings) highSeq=\(lastHighSeqSeen) stuckTicks=\(consecutiveStuckHighSeqTicks) noUsefulRxFor=\(String(format: "%.1f", Date().timeIntervalSince(lastUsefulRxAt)))s sending probe nonce=\(nonce)", source: "Tunnel")
-    }
-
-    private func handleProbeSuccess(nonce: UInt64) {
-        lastProbeResponseAt = Date()
-        let statsTuple = parseRouterStats()
-        let statsString = statsTuple?.stats ?? "unknown"
-        if let router = packetRouter {
-            let removed = ztlp_router_cleanup_stale_flows(router)
-            logger.info("Session health probe ok nonce=\(nonce) cleanup_removed=\(removed) stats=\(statsString)", source: "Tunnel")
-            if removed <= 0 && (statsTuple?.flows ?? 0) > 0 {
-                // Probe success proves the gateway session is alive. Do NOT reset the
-                // local router or reconnect here: resetting without a gateway session
-                // reset reuses stream IDs, and reconnect from this callback can block
-                // tunnelQueue long enough to wedge benchmarks/WKWebView. Leave the
-                // live session intact and let normal TCP/browser retry or the true
-                // probe-timeout path handle dead sessions.
-                reduceAdvertisedRwnd(reason: "probe ok suspect flows; hold session stats=\(statsString)")
-                logger.warn("Session health probe ok but flows still suspect; preserving live session stats=\(statsString) no_router_reset no_reconnect", source: "Tunnel")
-                clearSessionHealthState()
-                return
-            }
-        }
-        clearSessionHealthState()
-        flushOutboundPackets(maxPackets: currentOutboundFlushLimit())
-    }
-
-    private func resetPacketRouterRuntimeState(reason: String) {
-        guard let router = packetRouter else { return }
-        let removed = ztlp_router_reset_runtime_state(router)
-        logger.warn("Router reset runtime state removed=\(removed) reason=\(reason)", source: "Tunnel")
-        clearSessionHealthState()
-    }
-
-    private func evaluateSessionHealth() {
-        guard isTunnelActive else { return }
-        lastHealthCheckAt = Date()
-        guard let statsTuple = parseRouterStats() else { return }
-
-        lastRouterFlows = statsTuple.flows
-        lastRouterOutbound = statsTuple.outbound
-        lastRouterStreamMappings = statsTuple.streamToFlow
-
-        let now = Date()
-        let hasActiveFlows = statsTuple.flows > 0 || statsTuple.streamToFlow > 0
-        let outboundRecent = now.timeIntervalSince(lastOutboundDemandAt) < 15
-        let usefulRxAge = now.timeIntervalSince(lastUsefulRxAt)
-        let replayRejectCount = sharedDefaults?.integer(forKey: "ztlp_replay_reject_count") ?? 0
-        let replayDelta = replayRejectCount - lastReplayRejectCount
-        lastReplayRejectCount = replayRejectCount
-
-        // Track consecutive ticks where we have active demand but highSeq isn't advancing.
-        // We snapshot highSeq via markUsefulRx; it only updates when NEW payload arrives AND
-        // the sequence advances. Here we just observe whether it moved since the last tick.
-        let currentHighSeqSnapshot = lastHighSeqSeen
-        let highSeqAdvanced = currentHighSeqSnapshot > priorHighSeqSnapshot
-        priorHighSeqSnapshot = currentHighSeqSnapshot
-
-        if hasActiveFlows && !highSeqAdvanced {
-            consecutiveStuckHighSeqTicks += 1
-        } else {
-            consecutiveStuckHighSeqTicks = 0
-        }
-
-        // Phase 2.7: Rust MuxEngine rwnd policy (Vaultwarden hold=12 fix).
-        // Falls back to the legacy Swift ramp when useRustMux=false or the
-        // handle is somehow missing.
-        if Self.useRustMux, let mux = rustMux {
-            var rustStats = ZtlpRouterStatsSnapshot(
-                flows: UInt32(statsTuple.flows),
-                outbound: UInt32(statsTuple.outbound),
-                stream_to_flow: UInt32(statsTuple.streamToFlow),
-                send_buf_bytes: statsTuple.sendBufBytes,
-                oldest_ms: UInt64(statsTuple.oldestMs)
-            )
-            var signals = ZtlpRwndPressureSignals(
-                consecutive_full_flushes: UInt32(consecutiveFullFlushes),
-                consecutive_stuck_high_seq_ticks: UInt32(consecutiveStuckHighSeqTicks),
-                session_suspect: sessionSuspectSince != nil ? 1 : 0,
-                probe_outstanding: probeOutstandingSince != nil ? 1 : 0,
-                high_seq_advanced: highSeqAdvanced ? 1 : 0,
-                has_active_flows: hasActiveFlows ? 1 : 0
-            )
-            let rustRwnd = ztlp_mux_tick_rwnd(mux, &rustStats, Int32(replayDelta), &signals)
-            if rustRwnd > 0 {
-                let clamped = UInt16(min(Int(UInt16.max), max(0, Int(rustRwnd))))
-                if clamped != advertisedRwnd {
-                    advertisedRwnd = clamped
-                    tunnelConnection?.setAdvertisedReceiveWindow(clamped)
-                    lastRwndLogAt = now
-                    logger.debug("ztlp_mux_tick_rwnd applied rwnd=\(clamped) flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) oldestMs=\(statsTuple.oldestMs) replayDelta=\(replayDelta) suspect=\(signals.session_suspect) probe=\(signals.probe_outstanding)", source: "Tunnel")
-                } else if now.timeIntervalSince(lastRwndLogAt) >= 2.0 {
-                    lastRwndLogAt = now
-                    logger.debug("ztlp_mux_tick_rwnd hold rwnd=\(clamped) flows=\(statsTuple.flows) replayDelta=\(replayDelta)", source: "Tunnel")
-                }
-                // Phase B: keep the connection's byte-window synced with
-                // the Rust engine's view. The set_rwnd path inside the
-                // engine updates advertised_window_bytes whenever the V1
-                // ladder moves (V1 × 1140 hint) OR when autotune updates
-                // it directly in Phase D.
-                if Self.useByteRwnd {
-                    let kb = ztlp_mux_advertised_window_kb(mux)
-                    if kb > 0 {
-                        tunnelConnection?.setAdvertisedWindowKb(kb)
-                    }
-                }
-            } else {
-                logger.warn("ztlp_mux_tick_rwnd returned \(rustRwnd); falling back to legacy ramp for this tick", source: "Tunnel")
-                maybeRampAdvertisedRwnd(stats: statsTuple, replayDelta: replayDelta, highSeqAdvanced: highSeqAdvanced, hasActiveFlows: hasActiveFlows)
-            }
-        } else {
-            maybeRampAdvertisedRwnd(stats: statsTuple, replayDelta: replayDelta, highSeqAdvanced: highSeqAdvanced, hasActiveFlows: hasActiveFlows)
-        }
-
-        // Phase A: periodic RTT / goodput / BDP snapshot log.
-        maybeLogRttSnapshot()
-
-        // Emit a rate-limited heartbeat so we can always see what the detector sees.
-        if now.timeIntervalSince(lastHealthHeartbeatAt) >= 4.0 {
-            lastHealthHeartbeatAt = now
-            logger.debug("Health eval: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) sendBuf=\(statsTuple.sendBufBytes) oldestMs=\(statsTuple.oldestMs) rwnd=\(advertisedRwnd) highSeq=\(currentHighSeqSnapshot) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s outboundRecent=\(outboundRecent) replayDelta=\(replayDelta) probeOutstanding=\(probeOutstandingSince != nil)", source: "Tunnel")
-        }
-
-        // Phase 3.3: Rust SessionHealth state machine.
-        if Self.useRustHealth, let health = rustHealth {
-            var inputs = ZtlpHealthTickInputs(
-                has_active_flows: hasActiveFlows ? 1 : 0,
-                useful_rx_age_ms: UInt64(max(0.0, usefulRxAge) * 1000.0),
-                oldest_outbound_ms: UInt64(statsTuple.oldestMs),
-                consecutive_stuck_high_seq_ticks: UInt32(consecutiveStuckHighSeqTicks)
-            )
-            var nonce: UInt64 = 0
-            // Reset scratch buffer before each tick so a stale reason from a
-            // previous RECONNECT action can't leak into a later log line.
-            for i in 0..<rustHealthReasonBuffer.count { rustHealthReasonBuffer[i] = 0 }
-            let action = rustHealthReasonBuffer.withUnsafeMutableBufferPointer { reasonBuf -> Int32 in
-                guard let base = reasonBuf.baseAddress else { return 0 }
-                return ztlp_health_tick(health, &inputs, &nonce, base, reasonBuf.count)
-            }
-            switch action {
-            case ZTLP_HEALTH_ACTION_SEND_PROBE:
-                healthProbeNonce = nonce
-                sessionSuspectSince = sessionSuspectSince ?? now
-                consecutiveNoProgressChecks += 1
-                if tunnelConnection?.sendProbe(nonce: nonce) == true {
-                    probeOutstandingSince = Date()
-                    logger.warn("ztlp_health_tick SEND_PROBE nonce=\(nonce) activeFlows=\(lastRouterFlows) highSeq=\(lastHighSeqSeen) stuckTicks=\(consecutiveStuckHighSeqTicks) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s", source: "Tunnel")
-                } else {
-                    logger.warn("ztlp_health_tick SEND_PROBE failed nonce=\(nonce) (sendProbe returned false)", source: "Tunnel")
-                }
-            case ZTLP_HEALTH_ACTION_RECONNECT:
-                let reason = String(cString: rustHealthReasonBuffer)
-                let finalReason = reason.isEmpty ? "session_health_rust" : "session_health_\(reason)"
-                logger.warn("ztlp_health_tick RECONNECT reason=\(finalReason) flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) usefulRxAge=\(String(format: "%.1f", usefulRxAge))s stuckTicks=\(consecutiveStuckHighSeqTicks) stats=\(statsTuple.stats)", source: "Tunnel")
-                resetPacketRouterRuntimeState(reason: finalReason)
-                pendingReconnectReason = finalReason
-                scheduleReconnect()
-            default:
-                // No action: the detector considers the session healthy or
-                // still observing. Clear suspect markers when appropriate.
-                if !hasActiveFlows && !outboundRecent {
-                    clearSessionHealthState()
-                }
-            }
-            return
-        }
-
-        // Only suspect the session when there is ACTIVE DEMAND (flows open or recent outbound).
-        // If there are no active flows AND no recent outbound, there is nothing to worry about,
-        // regardless of how long ago we last received something.
-        guard hasActiveFlows || outboundRecent else {
-            clearSessionHealthState()
-            return
-        }
-
-        // Two independent paths to "suspect":
-        //   1) Active flows AND no useful RX for healthSuspectThreshold — classic "silent
-        //      tunnel with pending work" case.
-        //   2) Active flows AND highSeq not advancing for noProgressTicksBeforeSuspect
-        //      consecutive ticks — "alive but stuck" pattern where RX (retransmits/replay)
-        //      is arriving but nothing is making progress.
-        //
-        // Important: we do NOT probe based solely on "outbound was recent". An idle tunnel
-        // with no flows shouldn't burn encrypt/crypto cycles on probes just because some
-        // bytes went out a few seconds ago.
-        let silentTooLong = hasActiveFlows && usefulRxAge >= Self.healthSuspectThreshold
-        let stuckTooLong = hasActiveFlows && consecutiveStuckHighSeqTicks >= Self.noProgressTicksBeforeSuspect
-        let fastStuckTooLong = hasActiveFlows &&
-            statsTuple.oldestMs >= Self.fastStuckOldestMsThreshold &&
-            consecutiveStuckHighSeqTicks >= Self.fastStuckTicksBeforeSuspect
-        guard silentTooLong || stuckTooLong || fastStuckTooLong else {
-            clearSessionHealthState()
-            return
-        }
-
-        sessionSuspectSince = sessionSuspectSince ?? now
-        consecutiveNoProgressChecks += 1
-
-        if probeOutstandingSince == nil {
-            let reason: String
-            if silentTooLong {
-                reason = "no_useful_rx_\(String(format: "%.1f", usefulRxAge))s"
-            } else if fastStuckTooLong {
-                reason = "fast_stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks_oldest_\(statsTuple.oldestMs)ms"
-            } else {
-                reason = "stuck_highseq_\(consecutiveStuckHighSeqTicks)_ticks"
-            }
-            logger.warn("Session health candidate: flows=\(statsTuple.flows) outbound=\(statsTuple.outbound) streamMaps=\(statsTuple.streamToFlow) highSeq=\(currentHighSeqSnapshot) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s replayDelta=\(replayDelta) stats=\(statsTuple.stats)", source: "Tunnel")
-            sendSessionProbe(reason: reason)
-            return
-        }
-
-        let activeProbeTimeout = fastStuckTooLong ? min(Self.probeTimeoutThreshold, 3.0) : Self.probeTimeoutThreshold
-        if let probeOutstandingSince, now.timeIntervalSince(probeOutstandingSince) > activeProbeTimeout {
-            logger.warn("Session health dead: probe timeout flows=\(statsTuple.flows) streamMaps=\(statsTuple.streamToFlow) noUsefulRxFor=\(String(format: "%.1f", usefulRxAge))s stuckTicks=\(consecutiveStuckHighSeqTicks) stats=\(statsTuple.stats)", source: "Tunnel")
-            resetPacketRouterRuntimeState(reason: "session_health_probe_timeout")
-            pendingReconnectReason = "session_health_probe_timeout"
-            scheduleReconnect()
-        }
-    }
+    // Nebula-pivot S1 removed:
+    //   markOutboundDemand / markUsefulRx — fed the deleted session-health
+    //     state machine; callers now just rely on markDataActivity.
+    //   refreshReplayRejectBaseline / clearSessionHealthState — health state.
+    //   RouterStatsSnapshot / parseRouterStats — only the health path used them.
+    //   startHealthTimer / handleHealthWatchdogTick / sendSessionProbe /
+    //     handleProbeSuccess / resetPacketRouterRuntimeState /
+    //     evaluateSessionHealth — entire session-health watchdog.
+    //   updateAdvertisedRwnd / reduceAdvertisedRwnd / maybeRampAdvertisedRwnd —
+    //     V1 advertised-rwnd ladder + pressure signals.
+    //   wireRttInstrumentationHook / maybeLogRttSnapshot — Rust MuxEngine
+    //     RTT/BDP shadow observation (FFI deleted in R4).
 
     private var isDataActive: Bool {
         return Date().timeIntervalSince(lastDataActivity) < Self.activityGracePeriod
@@ -835,13 +446,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
                 self.configuredServices = services
                 try self.startPacketRouter(services: services)
-                self.lastUsefulRxAt = Date()
-                self.lastOutboundDemandAt = Date.distantPast
-                self.lastProbeResponseAt = Date.distantPast
-                self.lastHighSeqSeen = 0
-                self.priorHighSeqSnapshot = 0
-                self.clearSessionHealthState()
-                self.refreshReplayRejectBaseline()
 
                 // Step 7b: Start DNS responder for *.ztlp queries
                 self.dnsResponder = ZTLPDNSResponder(
@@ -855,7 +459,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 // VIP traffic goes: packetFlow -> router -> send to tunnelConnection -> relay
                 self.logger.info("Tunnel connection ready on relay \(relayAddr) with shared handshake/data socket", source: "Tunnel")
                 self.tunnelConnection = conn
-                self.wireRttInstrumentationHook(on: conn)
 
                 // VIP traffic is now routed through packetFlow -> encrypted tunnel -> relay
                 // (relay-side TCP termination replaces in-extension NWListeners)
@@ -901,56 +504,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.reconnectAttempt = 0
                 self.consecutiveKeepaliveFailures = 0
                 self.lastDataActivity = Date()
-                self.advertisedRwnd = Self.rwndFloor
-                self.consecutiveRwndHealthyTicks = 0
-                self.lastUsefulRxAt = Date()
-                self.lastHighSeqSeen = 0
-                self.priorHighSeqSnapshot = 0
-                self.consecutiveStuckHighSeqTicks = 0
-                self.refreshReplayRejectBaseline()
-                conn.setAdvertisedReceiveWindow(Self.rwndFloor)
 
-                // Phase 2.7 / 3.3: set up Rust MuxEngine + SessionHealth.
-                // Free any stragglers from a prior session (shouldn't happen,
-                // but be defensive — reconnect paths may reuse the provider).
-                if let stale = self.rustMux {
-                    ztlp_mux_free(stale)
-                    self.rustMux = nil
-                }
-                if let stale = self.rustHealth {
-                    ztlp_health_free(stale)
-                    self.rustHealth = nil
-                }
-                if Self.useRustMux {
-                    if let mux = ztlp_mux_new() {
-                        self.rustMux = mux
-                        self.logger.info("Rust MuxEngine ready (useRustMux=true)", source: "Tunnel")
-                        // Re-run the Rtt/Rwnd instrumentation hook now that
-                        // `rustMux` exists. The earlier call at step 8
-                        // (line ~858) runs before the MuxEngine is created
-                        // so its `ztlp_mux_note_peer_sent_v2(mux)` branch
-                        // is silently skipped — that's the Phase B "v2=no
-                        // stuck" bug surfaced by Phase D logs. Second call
-                        // is idempotent on the connection side and makes
-                        // the engine's peer_speaks_v2 flag true before the
-                        // first tick_rwnd, so autotune engages from tick 1.
-                        self.wireRttInstrumentationHook(on: conn)
-                    } else {
-                        self.logger.warn("ztlp_mux_new returned null; falling back to legacy rwnd ramp", source: "Tunnel")
-                    }
-                }
-                if Self.useRustHealth {
-                    if let health = ztlp_health_new() {
-                        self.rustHealth = health
-                        _ = ztlp_health_reset_after_reconnect(health)
-                        self.logger.info("Rust SessionHealth ready (useRustHealth=true)", source: "Tunnel")
-                    } else {
-                        self.logger.warn("ztlp_health_new returned null; falling back to legacy Swift health", source: "Tunnel")
-                    }
-                }
+                // Nebula-pivot S1: the former Rust MuxEngine / SessionHealth setup,
+                // advertised-rwnd priming, and health timer have been removed. The
+                // NE is now a dumb pipe — only keepalive + flow cleanup timers run.
                 self.startKeepaliveTimer()
                 self.startCleanupTimer()
-                self.startHealthTimer()
                 self.logger.info("Idle quiesce: packet/ACK timers disabled; using demand-driven flush", source: "Tunnel")
 
                 // Update shared state
@@ -999,24 +558,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.keepaliveTimer?.cancel()
             self.keepaliveTimer = nil
             self.stopWritePacketTimer()
-            self.ackFlushTimer?.cancel()
-            self.ackFlushTimer = nil
             self.cleanupTimer?.cancel()
             self.cleanupTimer = nil
-            self.healthTimer?.cancel()
-            self.healthTimer = nil
 
-            // Free Nebula-collapse Rust handles (Phase 2.7 / 3.3).
-            if let mux = self.rustMux {
-                ztlp_mux_free(mux)
-                self.rustMux = nil
-                self.logger.info("Rust MuxEngine freed", source: "Tunnel")
-            }
-            if let health = self.rustHealth {
-                ztlp_health_free(health)
-                self.rustHealth = nil
-                self.logger.info("Rust SessionHealth freed", source: "Tunnel")
-            }
+            // Nebula-pivot S1: ackFlushTimer / healthTimer / rustMux / rustHealth
+            // teardown removed along with the reliability layer they served.
 
             // Stop DNS responder
             self.dnsResponder = nil
@@ -1428,7 +974,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxOpen.append(serviceData)
                 muxSummaryOpen += 1
                 maybeLogMuxSummary(force: false)
-                markOutboundDemand()
                 let sent = tunnelConnection?.sendData(muxOpen) == true
                 logger.debug("RouterAction send OpenStream stream=\(streamId) serviceBytes=\(serviceData.count) sent=\(sent)", source: "Router")
                 if !sent {
@@ -1445,7 +990,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxSummarySendData += 1
                 muxSummarySendBytes += payload.count
                 maybeLogMuxSummary(force: false)
-                markOutboundDemand()
                 let sent = tunnelConnection?.sendData(muxData) == true
                 logger.debug("RouterAction send SendData stream=\(streamId) bytes=\(payload.count) sent=\(sent)", source: "Router")
                 if !sent {
@@ -1459,7 +1003,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 muxClose.append(contentsOf: beStreamIdBytes(streamId))
                 muxSummaryClose += 1
                 maybeLogMuxSummary(force: false)
-                markOutboundDemand()
                 let sent = tunnelConnection?.sendData(muxClose) == true
                 logger.debug("RouterAction send CloseStream stream=\(streamId) sent=\(sent)", source: "Router")
                 if !sent {
@@ -1565,18 +1108,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             drained += 1
         }
 
-        if drained >= maxPackets {
-            consecutiveFullFlushes += 1
-            if consecutiveFullFlushes >= 2 {
-                reduceAdvertisedRwnd(reason: "router flush saturated")
-            } else {
-                reduceAdvertisedRwnd(reason: "router flush full")
-            }
-        } else if drained == 0 {
-            consecutiveFullFlushes = 0
-        } else {
-            consecutiveFullFlushes = 0
-        }
+        // Nebula-pivot S1: saturation no longer feeds an advertised-rwnd
+        // ladder. Track the counter only for logging/diagnostics if useful.
+        _ = drained
 
         if !packets.isEmpty {
             markDataActivity()
@@ -1584,109 +1118,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func updateAdvertisedRwnd(_ rwnd: UInt16, reason: String) {
-        let clamped = min(max(rwnd, Self.rwndFloor), Self.rwndAdaptiveMax)
-        let changed = clamped != advertisedRwnd
-        if changed {
-            advertisedRwnd = clamped
-            tunnelConnection?.setAdvertisedReceiveWindow(clamped)
-        }
-
-        let now = Date()
-        if changed || now.timeIntervalSince(lastRwndLogAt) >= 2.0 {
-            lastRwndLogAt = now
-            logger.debug("Advertised rwnd=\(clamped) reason=\(reason) healthyTicks=\(consecutiveRwndHealthyTicks)", source: "Tunnel")
-        }
-    }
-
-    private func reduceAdvertisedRwnd(reason: String) {
-        consecutiveRwndHealthyTicks = 0
-        updateAdvertisedRwnd(Self.rwndFloor, reason: reason)
-    }
-
-    private func maybeRampAdvertisedRwnd(stats: RouterStatsSnapshot, replayDelta: Int, highSeqAdvanced: Bool, hasActiveFlows: Bool) {
-        guard isTunnelActive else { return }
-
-        let now = Date()
-        let browserBurst = stats.flows >= Self.rwndBrowserBurstFlowThreshold ||
-            stats.streamToFlow >= Self.rwndBrowserBurstFlowThreshold
-
-        if browserBurst && replayDelta > 0 {
-            rwndPressureUntil = now.addingTimeInterval(Self.rwndPressureCooldown)
-            if replayDelta >= Self.rwndReplayDeltaReconnect && hasActiveFlows {
-                reduceAdvertisedRwnd(reason: "browser replay fast reconnect replayDelta=\(replayDelta)")
-                resetPacketRouterRuntimeState(reason: "browser_replay_fast_reconnect_\(replayDelta)")
-                pendingReconnectReason = "browser_replay_fast_reconnect_\(replayDelta)"
-                scheduleReconnect()
-                return
-            }
-            reduceAdvertisedRwnd(reason: "browser replay backoff replayDelta=\(replayDelta) cooldown=\(Int(Self.rwndPressureCooldown))s")
-            return
-        }
-
-        if now < rwndPressureUntil {
-            let remaining = rwndPressureUntil.timeIntervalSince(now)
-            reduceAdvertisedRwnd(reason: "pressure cooldown remaining=\(String(format: "%.1f", remaining))s replayDelta=\(replayDelta)")
-            return
-        }
-
-        // Do not force rwnd down solely because oldestMs grows while browser
-        // data is still flowing. In Rust-fd Vaultwarden runs this caused rwnd=16
-        // to last only a couple seconds, then the page spent the whole asset tail
-        // at rwnd=4 even with replayDelta=0 and no router backlog. Treat oldestMs
-        // as pressure only when paired with actual no-progress/suspect state.
-        let oldestIsRealPressure = stats.oldestMs >= Self.rwndOldestMsBad &&
-            (consecutiveStuckHighSeqTicks > 0 || sessionSuspectSince != nil || probeOutstandingSince != nil)
-        let pressure = stats.outbound >= Self.rwndRouterOutboundBad ||
-            stats.sendBufBytes >= Self.rwndSendBufBytesBad ||
-            oldestIsRealPressure ||
-            consecutiveFullFlushes > 0 ||
-            replayDelta >= Self.rwndReplayDeltaBad ||
-            probeOutstandingSince != nil ||
-            sessionSuspectSince != nil
-
-        if pressure {
-            let reason = "pressure outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs) replayDelta=\(replayDelta) fullFlushes=\(consecutiveFullFlushes)"
-            reduceAdvertisedRwnd(reason: reason)
-            return
-        }
-
-        if browserBurst {
-            consecutiveRwndHealthyTicks = 0
-            updateAdvertisedRwnd(
-                Self.rwndBrowserBurstTarget,
-                reason: "browser burst target flows=\(stats.flows) streamMaps=\(stats.streamToFlow)"
-            )
-            return
-        }
-
-        let outboundDemandAge = Date().timeIntervalSince(lastOutboundDemandAt)
-        let activeOrRecentlyActive = hasActiveFlows || outboundDemandAge < 3.0
-        let makingProgress = highSeqAdvanced || stats.outbound == 0
-        guard activeOrRecentlyActive && makingProgress else {
-            consecutiveRwndHealthyTicks = 0
-            updateAdvertisedRwnd(Self.rwndFloor, reason: "not enough progress for ramp active=\(activeOrRecentlyActive) highSeqAdvanced=\(highSeqAdvanced) outbound=\(stats.outbound)")
-            return
-        }
-
-        // After browser demand, hold a moderate window instead of collapsing to
-        // rwnd=4. Queue/backpressure fixes now keep the gateway shallow; a tiny
-        // post-demand window leaves long Vaultwarden JS/WASM tails that WebKit
-        // cancels/retries. Real pressure above still drops to the floor.
-        if outboundDemandAge < 15.0 {
-            consecutiveRwndHealthyTicks = 0
-            updateAdvertisedRwnd(min(UInt16(12), Self.rwndAdaptiveMax), reason: "recent outbound hold age=\(String(format: "%.1f", outboundDemandAge))s")
-            return
-        }
-
-        consecutiveRwndHealthyTicks += 1
-        if consecutiveRwndHealthyTicks >= Self.rwndHealthyTicksToIncrease && advertisedRwnd < Self.rwndAdaptiveMax {
-            consecutiveRwndHealthyTicks = 0
-            updateAdvertisedRwnd(advertisedRwnd + 1, reason: "healthy ramp flows=\(stats.flows) outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs)")
-        } else {
-            updateAdvertisedRwnd(advertisedRwnd, reason: "healthy hold flows=\(stats.flows) outbound=\(stats.outbound) sendBuf=\(stats.sendBufBytes) oldestMs=\(stats.oldestMs)")
-        }
-    }
+    // Nebula-pivot S1 removed: updateAdvertisedRwnd / reduceAdvertisedRwnd /
+    // maybeRampAdvertisedRwnd — the V1 packet-count rwnd ladder and its
+    // browser-burst / replay-delta / pressure-cooldown policy went away with
+    // the reliability layer.
 
     private func startWritePacketTimer() {
         writePacketTimer?.cancel()
@@ -1696,12 +1131,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func stopWritePacketTimer() {
         writePacketTimer?.cancel()
         writePacketTimer = nil
-    }
-
-    /// Flush batched ACKs every 10ms for low latency without per-packet overhead.
-    private func startAckFlushTimer() {
-        ackFlushTimer?.cancel()
-        ackFlushTimer = nil
     }
 
     /// Every 10 seconds, clean up stale TCP flows (120s timeout) to reclaim
@@ -1843,13 +1272,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Reconnect
 
+    /// Dedicated queue for reconnect backoff sleeps, so they don't fight the
+    /// main tunnelQueue (which is already handling the send/receive loops).
+    private let reconnectQueue = DispatchQueue(label: "com.ztlp.tunnel.reconnect", qos: .utility)
+
     private func scheduleReconnect() {
-        scheduleReconnect(reason: pendingReconnectReason ?? "transport_failure")
+        scheduleReconnect(reason: "transport_failure")
     }
 
     private func scheduleReconnect(reason: String) {
         guard isTunnelActive else { return }
-        pendingReconnectReason = reason
         guard !reconnectScheduled && !reconnectInProgress else {
             logger.debug("Reconnect already scheduled/in progress; ignoring duplicate trigger reason=\(reason)", source: "Tunnel")
             return
@@ -1878,31 +1310,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s reason=\(reason)", source: "Tunnel")
         updateConnectionState(.reconnecting)
 
-        healthQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
+        reconnectQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
             guard let self = self, self.isTunnelActive else { return }
             self.tunnelQueue.async { [weak self] in
                 guard let self = self, self.isTunnelActive else { return }
                 guard self.reconnectScheduled && self.reconnectGeneration == generation else { return }
                 self.reconnectScheduled = false
-                self.attemptReconnect(generation: generation)
+                self.attemptReconnect(generation: generation, reason: reason)
             }
         }
     }
 
     private func attemptReconnect(generation: Int) {
+        attemptReconnect(generation: generation, reason: "transport_failure")
+    }
+
+    private func attemptReconnect(generation: Int, reason: String) {
         guard !reconnectInProgress else {
             logger.debug("Reconnect gen=\(generation) ignored; reconnect already in progress", source: "Tunnel")
             return
         }
         reconnectInProgress = true
-        let reconnectReason = pendingReconnectReason ?? "transport_failure"
         defer {
             reconnectInProgress = false
-            pendingReconnectReason = nil
         }
-        logger.info("Reconnect gen=\(generation) starting reason=\(reconnectReason)", source: "Tunnel")
+        logger.info("Reconnect gen=\(generation) starting reason=\(reason)", source: "Tunnel")
 
-        resetPacketRouterRuntimeState(reason: "reconnect_gen_\(generation)_\(reconnectReason)")
+        // Nebula-pivot S1: router runtime-state reset here was tied to the
+        // session-health state machine. Without that machine, the
+        // NWConnection-failure path is the only reconnect trigger and a
+        // handshake teardown/rebuild is sufficient.
 
         guard let identityPtr = identity else {
             logger.error("Identity lost during reconnect", source: "Tunnel")
@@ -2001,7 +1438,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         tunnelConnection = conn
-        wireRttInstrumentationHook(on: conn)
 
         // Update active relay tracking
         activeRelayAddress = relayAddr
@@ -2015,15 +1451,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectAttempt = 0
         consecutiveKeepaliveFailures = 0
         lastDataActivity = Date()
-        advertisedRwnd = Self.rwndFloor
-        consecutiveRwndHealthyTicks = 0
-        lastUsefulRxAt = Date()
-        lastHighSeqSeen = 0
-        priorHighSeqSnapshot = 0
-        consecutiveStuckHighSeqTicks = 0
-        refreshReplayRejectBaseline()
-        conn.setAdvertisedReceiveWindow(Self.rwndFloor)
-        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr); reset health/rwnd baselines", source: "Tunnel")
+        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
         updateConnectionState(.connected)
         sharedDefaults?.set(
             Date().timeIntervalSince1970,
@@ -2264,7 +1692,6 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
         guard isTunnelActive else { return }
 
         markDataActivity()
-        markUsefulRx(sequence: sequence, payloadLength: data.count)
         handleGatewayMuxPayload(data)
     }
 
@@ -2273,111 +1700,5 @@ extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
         if isTunnelActive {
             scheduleReconnect()
         }
-    }
-
-    func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveAck sequence: UInt64) {
-        // ACK received from gateway — good, connection is alive
-        markDataActivity()
-
-        // Phase A: shadow RTT / goodput observation. Feed the Rust
-        // MuxEngine the cumulative ACK so it can release its shadow
-        // inflight entries and sample RTT. Gated so non-instrumented
-        // builds pay zero cost.
-        if Self.useRttInstrumentation, let mux = rustMux {
-            _ = ztlp_mux_observe_ack_cumulative(mux, sequence)
-        }
-    }
-
-    // ── Phase A: RTT instrumentation helpers ───────────────────────────
-
-    /// Install the shadow observe-sent hook on a freshly-assigned
-    /// ZTLPTunnelConnection so every outbound DATA frame pipes its
-    /// (data_seq, encoded_len) through the Rust MuxEngine. Called from
-    /// both startTunnel and reconnect paths.
-    ///
-    /// Safe to call multiple times — installing a new closure replaces
-    /// any prior one. The closure captures `self` weakly so a stale
-    /// hook after tunnel teardown can't keep the provider alive.
-    ///
-    /// Also flips `useByteRwnd` on the connection (Phase B), and seeds
-    /// the byte-window to the current Rust advertised value so the
-    /// first V2 ACK out the door matches what the engine would emit
-    /// via `build_ack_frame`.
-    private func wireRttInstrumentationHook(on conn: ZTLPTunnelConnection) {
-        // Phase B: tell the connection which ACK wire format to emit.
-        conn.useByteRwnd = Self.useByteRwnd
-        if Self.useByteRwnd, let mux = rustMux {
-            // Mark that we're about to speak V2 so the Rust-side
-            // advertised_window_bytes moves past the V1 floor for
-            // logging. The gateway notes peer_uses_v2 when it
-            // receives the first 0x10; this just keeps our local
-            // diagnostic consistent.
-            _ = ztlp_mux_note_peer_sent_v2(mux)
-            let kb = ztlp_mux_advertised_window_kb(mux)
-            if kb > 0 {
-                conn.setAdvertisedWindowKb(kb)
-            }
-        }
-
-        guard Self.useRttInstrumentation else {
-            conn.onDataFrameSent = nil
-            return
-        }
-        conn.onDataFrameSent = { [weak self] seq, encodedLen in
-            guard let self = self, let mux = self.rustMux else { return }
-            // encoded_len fits easily in u32 (frame size is ~1200 B max).
-            _ = ztlp_mux_observe_sent(mux, seq, UInt32(min(encodedLen, Int(UInt32.max))))
-        }
-    }
-
-    /// Log the current RTT/goodput/BDP snapshot at most once every
-    /// `rttLogIntervalSeconds` seconds. Called from the 2s health tick.
-    private func maybeLogRttSnapshot() {
-        guard Self.useRttInstrumentation, let mux = rustMux else { return }
-        let now = Date()
-        if now.timeIntervalSince(lastRttLogAt) < 2.0 { return }
-        var snap = ZtlpRttGoodputSnapshot(
-            smoothed_rtt_ms: 0,
-            rtt_var_ms: 0,
-            min_rtt_ms: 0,
-            latest_rtt_ms: 0,
-            goodput_bps: 0,
-            peak_goodput_bps: 0,
-            bdp_kb: 0,
-            samples_total: 0
-        )
-        let rc = ztlp_mux_rtt_goodput_snapshot(mux, &snap)
-        if rc != 0 { return }
-        lastRttLogAt = now
-        // Only log when there's something interesting — avoids flooding
-        // the log during pre-first-ACK startup.
-        if snap.samples_total == 0 && snap.goodput_bps == 0 { return }
-        let shadowDepth = ztlp_mux_shadow_inflight_len(mux)
-        let peerV2 = ztlp_mux_peer_speaks_v2(mux) == 1 ? "yes" : "no"
-        let advKb = ztlp_mux_advertised_window_kb(mux)
-        // Phase D: autotune target + reason (null on V1-only sessions).
-        let autoTargetKb = ztlp_mux_autotune_target_kb(mux)
-        var reasonBuf = [UInt8](repeating: 0, count: 32)
-        let reasonLen = reasonBuf.withUnsafeMutableBufferPointer { buf -> Int32 in
-            ztlp_mux_autotune_reason(mux, buf.baseAddress, buf.count)
-        }
-        let autoReason: String = {
-            guard reasonLen > 0 else { return "-" }
-            let slice = reasonBuf.prefix(Int(reasonLen))
-            return String(decoding: slice, as: UTF8.self)
-        }()
-        logger.info(
-            "[rtt-bdp] srtt=\(snap.smoothed_rtt_ms)ms rttvar=\(snap.rtt_var_ms)ms min=\(snap.min_rtt_ms)ms latest=\(snap.latest_rtt_ms)ms goodput=\(snap.goodput_bps)bps peak=\(snap.peak_goodput_bps)bps bdp=\(snap.bdp_kb)KB samples=\(snap.samples_total) shadow_inflight=\(shadowDepth) v2=\(peerV2) adv_kb=\(advKb) auto_target_kb=\(autoTargetKb) auto_reason=\(autoReason)",
-            source: "Tunnel"
-        )
-    }
-
-    func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveProbeResponse nonce: UInt64) {
-        guard isTunnelActive else { return }
-        logger.info("Session health probe response nonce=\(nonce)", source: "Tunnel")
-        if Self.useRustHealth, let health = rustHealth {
-            _ = ztlp_health_on_pong(health, nonce)
-        }
-        handleProbeSuccess(nonce: nonce)
     }
 }

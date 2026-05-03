@@ -1271,6 +1271,43 @@ int32_t ztlp_ios_tunnel_engine_reconnect(
 );
 
 /**
+ * @brief Bind the engine's Rust-owned UDP socket to 0.0.0.0:0 and set the
+ *        peer (gateway or relay VIP). `peer` is a "host:port" literal such
+ *        as "34.217.62.46:23096" or "[::1]:23096".
+ *
+ * Part of the Nebula-style collapse (Phase 1): Rust now owns the UDP
+ * transport that was previously an NWConnection inside ZTLPTunnelConnection.
+ *
+ * @return ZtlpResult::Ok on success, InvalidArgument for bad inputs, or
+ *         InternalError if bind/set_peer fails. Sets last error on failure.
+ */
+int32_t ztlp_ios_tunnel_engine_udp_bind(
+    ZtlpIosTunnelEngine *engine,
+    const char *peer
+);
+
+/**
+ * @brief Send bytes to the configured UDP peer.
+ *
+ * Part of the Nebula-style collapse (Phase 1): Swift calls this in place of
+ * its old NWConnection.send for tunnel UDP.
+ *
+ * @return Number of bytes sent on success (>=0), or a negative ZtlpResult
+ *         code on failure. Sets last error on failure.
+ */
+int32_t ztlp_ios_tunnel_engine_udp_send(
+    ZtlpIosTunnelEngine *engine,
+    const uint8_t *data,
+    size_t len
+);
+
+/**
+ * @brief Return the local UDP port after `udp_bind`, or a negative error
+ *        code if the socket has not been bound.
+ */
+int32_t ztlp_ios_tunnel_engine_udp_local_port(ZtlpIosTunnelEngine *engine);
+
+/**
  * @brief Free an iOS tunnel engine handle.
  */
 void ztlp_ios_tunnel_engine_free(ZtlpIosTunnelEngine *engine);

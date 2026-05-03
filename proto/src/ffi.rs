@@ -3771,6 +3771,115 @@ pub extern "C" fn ztlp_ios_tunnel_engine_reconnect(
     ZtlpResult::Ok as i32
 }
 
+// ── Phase 1 (Nebula collapse): Rust-owned UDP transport FFI ─────────────
+//
+// Swift used to open an NWConnection for the encrypted ZTLP UDP path. The
+// engine now owns the socket. `bind` parses a "host:port" peer string and
+// binds the local socket; `send` forwards plaintext bytes to that peer
+// (encryption is still done in Swift for Phase 1; Phase 2 moves it into
+// Rust MuxEngine). There is no recv FFI — Rust drains recv in its own
+// thread and delivers bytes via the router action callback (Task 1.3).
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_udp_bind(
+    engine: *mut ZtlpIosTunnelEngine,
+    peer: *const c_char,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        if peer.is_null() {
+            set_last_error("peer is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let peer_str = match unsafe { CStr::from_ptr(peer) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(&format!("invalid UTF-8 in peer: {}", e));
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+        let addr: std::net::SocketAddr = match peer_str.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                set_last_error(&format!(
+                    "peer {:?} is not a valid socket address: {}",
+                    peer_str, e
+                ));
+                return ZtlpResult::InvalidArgument as i32;
+            }
+        };
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        if let Err(e) = engine.bind_udp_any() {
+            set_last_error(&format!("udp bind failed: {}", e));
+            return ZtlpResult::InternalError as i32;
+        }
+        if let Err(e) = engine.set_peer(addr) {
+            set_last_error(&format!("set_peer failed: {}", e));
+            return ZtlpResult::InternalError as i32;
+        }
+        ZtlpResult::Ok as i32
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_udp_bind");
+        ZtlpResult::InternalError as i32
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_udp_send(
+    engine: *mut ZtlpIosTunnelEngine,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            set_last_error("engine is null");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        if data.is_null() || len == 0 {
+            set_last_error("data is null or zero length");
+            return ZtlpResult::InvalidArgument as i32;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+        match engine.udp_send(bytes) {
+            Ok(n) => n as i32,
+            Err(e) => {
+                set_last_error(&format!("udp send failed: {}", e));
+                -(ZtlpResult::InternalError as i32)
+            }
+        }
+    }));
+    result.unwrap_or_else(|_| {
+        set_last_error("panic in ztlp_ios_tunnel_engine_udp_send");
+        -(ZtlpResult::InternalError as i32)
+    })
+}
+
+#[cfg(any(target_os = "ios", feature = "ios-sync"))]
+#[no_mangle]
+pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(
+    engine: *mut ZtlpIosTunnelEngine,
+) -> i32 {
+    if engine.is_null() {
+        set_last_error("engine is null");
+        return -(ZtlpResult::InvalidArgument as i32);
+    }
+    let engine = unsafe { &*(engine as *mut crate::ios_tunnel_engine::IosTunnelEngine) };
+    match engine.local_udp_port() {
+        Some(p) => p as i32,
+        None => {
+            set_last_error("udp not bound");
+            -(ZtlpResult::InvalidArgument as i32)
+        }
+    }
+}
+
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 #[no_mangle]
 pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) {

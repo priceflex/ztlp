@@ -1,96 +1,3 @@
-/**
- * @file ztlp.h
- * @brief ZTLP (Zero Trust Layer Protocol) Mobile SDK — C FFI API
- * @version 0.15.0
- *
- * This header defines the complete C-compatible API for integrating the ZTLP
- * protocol into iOS and Android applications. The library is compiled as a
- * static library (libztlp_proto.a) from Rust source.
- *
- * ## Design Principles
- *
- * 1. **Opaque handles** — All types are forward-declared structs accessed via
- *    pointers. The internal layout is hidden from C.
- *
- * 2. **Error codes** — Every function returns an int32_t result code.
- *    0 = success, negative = error. Call ztlp_last_error() for details.
- *
- * 3. **String handling** — All strings are null-terminated C strings.
- *    - Input strings: caller owns, library reads.
- *    - Output strings from accessors: library owns, valid while handle lives.
- *    - Strings explicitly marked "caller must free": use ztlp_string_free().
- *
- * 4. **Memory safety** — Every _new() has a matching _free(). Passing NULL
- *    to any _free() function is a safe no-op.
- *
- * 5. **Async operations** — Connection and tunnel operations use callbacks.
- *    Callbacks are invoked on a background thread (the Rust tokio runtime).
- *    Do NOT block in callbacks.
- *
- * 6. **Thread safety** — ZtlpClient handles are thread-safe. Multiple threads
- *    can call into the same client handle concurrently.
- *
- * ## Platform Notes
- *
- * ### iOS (Secure Enclave)
- *   - Build with cargo-lipo for universal static library
- *   - Use ztlp_identity_from_hardware(1) for Secure Enclave identity
- *   - Link: libztlp_proto.a + Security.framework
- *   - Min deployment target: iOS 13.0 (Secure Enclave P-256)
- *
- * ### Android (Keystore)
- *   - Build with cargo-ndk for per-ABI shared libraries
- *   - Use ztlp_identity_from_hardware(2) for Android Keystore
- *   - Link: libztlp_proto.so + Android Keystore via JNI
- *   - Min API level: 23 (Android 6.0, Keystore)
- *
- * ## Example Usage
- *
- * @code{.c}
- * #include "ztlp.h"
- * #include <stdio.h>
- *
- * void on_connected(void *user_data, int32_t result, const char *peer_addr) {
- *     if (result == ZTLP_OK) {
- *         printf("Connected to %s\n", peer_addr);
- *     } else {
- *         printf("Connection failed: %s\n", ztlp_last_error());
- *     }
- * }
- *
- * void on_data(void *user_data, const uint8_t *data, size_t len,
- *              ZtlpSession *session) {
- *     printf("Received %zu bytes from %s\n", len,
- *            ztlp_session_peer_node_id(session));
- * }
- *
- * int main(void) {
- *     ztlp_init();
- *
- *     // Generate or load identity
- *     ZtlpIdentity *id = ztlp_identity_generate();
- *     if (!id) {
- *         printf("Error: %s\n", ztlp_last_error());
- *         return 1;
- *     }
- *     printf("Node ID: %s\n", ztlp_identity_node_id(id));
- *
- *     // Save identity for next launch
- *     ztlp_identity_save(id, "identity.json");
- *
- *     // Create client (takes ownership of identity)
- *     ZtlpClient *client = ztlp_client_new(id);
- *     // id is now consumed — do NOT call ztlp_identity_free(id)
- *
- *     // Set data callback
- *     ztlp_set_recv_callback(client, on_data, NULL);
- *
- *     // Connect to peer
- *     ZtlpConfig *cfg = ztlp_config_new();
- *     ztlp_config_set_relay(cfg, "relay.ztlp.net:4433");
- *     ztlp_config_set_timeout_ms(cfg, 5000);
- *
- *     ztlp_connect(client, "peer-node-id-hex", cfg, on_connected, NULL);
  *
  *     // ... application event loop ...
  *
@@ -281,49 +188,6 @@ enum {
  */
 typedef void (*ZtlpConnectCallback)(void *user_data, int32_t result,
                                      const char *peer_addr);
-
-/**
- * @brief Data received callback.
- *
- * @param user_data  Opaque pointer passed to ztlp_set_recv_callback.
- * @param data       Pointer to received bytes. Valid only during callback.
- * @param len        Number of bytes received.
- * @param session    Session handle. Valid only during callback.
- *
- * @warning Invoked on the library's background thread. Do NOT block.
- */
-typedef void (*ZtlpRecvCallback)(void *user_data, const uint8_t *data,
-                                  size_t len, ZtlpSession *session);
-
-/**
- * @brief Disconnect callback.
- *
- * @param user_data  Opaque pointer passed to ztlp_set_disconnect_callback.
- * @param session    Session handle. Valid only during callback.
- * @param reason     Disconnect reason (maps to result codes).
- *
- * @warning Invoked on the library's background thread. Do NOT block.
- */
-typedef void (*ZtlpDisconnectCallback)(void *user_data, ZtlpSession *session,
-                                        int32_t reason);
-
-/**
- * Callback for sending pre-encrypted ACK packets via a platform-native socket.
- *
- * The library encrypts ACK frames into full ZTLP wire packets and invokes
- * this callback with the raw bytes and destination address. The platform
- * should send via a separate UDP socket/NWConnection to avoid kernel
- * contention with the library's internal recv socket.
- *
- * @param user_data  Opaque context passed during registration.
- * @param data       Pre-encrypted ZTLP packet bytes (ready to send as-is).
- * @param len        Length of the data in bytes.
- * @param dest_addr  Destination address as "IP:port" string (e.g., "34.219.64.205:23095").
- *
- * @warning Invoked on the library's background thread. Do NOT block.
- */
-typedef void (*ZtlpAckSendCallback)(void *user_data, const uint8_t *data,
-                                     size_t len, const char *dest_addr);
 
 /**
  * @brief Callback for iOS fd-engine RouterActions.
@@ -524,117 +388,17 @@ void ztlp_config_free(ZtlpConfig *config);
  * Connection
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * @brief Connect to a ZTLP peer (async).
- *
- * Initiates a connection. The callback fires when complete.
- *
- * @param client    Valid client handle.
- * @param target    Target address or Node ID.
- * @param config    Optional config (NULL for defaults). NOT consumed.
- * @param callback  Called on completion (background thread).
- * @param user_data Opaque pointer for callback.
- * @return ZTLP_OK if initiated, negative on immediate failure.
- */
-int32_t ztlp_connect(ZtlpClient *client, const char *target,
-                      const ZtlpConfig *config, ZtlpConnectCallback callback,
-                      void *user_data);
 
-/**
- * @brief Listen for incoming connections (async).
- *
- * @param client     Valid client handle.
- * @param bind_addr  Bind address (e.g. "0.0.0.0:4433").
- * @param config     Optional config (NULL for defaults). NOT consumed.
- * @param callback   Called for each incoming connection.
- * @param user_data  Opaque pointer for callback.
- * @return ZTLP_OK if listening started, negative on failure.
- */
-int32_t ztlp_listen(ZtlpClient *client, const char *bind_addr,
-                     const ZtlpConfig *config, ZtlpConnectCallback callback,
-                     void *user_data);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Data Transfer
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * @brief Send data through the active session.
- *
- * Data is copied internally — the caller's buffer can be reused immediately.
- *
- * @param client  Valid, connected client handle.
- * @param data    Pointer to data bytes.
- * @param len     Number of bytes to send.
- * @return ZTLP_OK on success, ZTLP_NOT_CONNECTED if no active session.
- */
-int32_t ztlp_send(ZtlpClient *client, const uint8_t *data, size_t len);
 
-/**
- * @brief Set the receive data callback.
- *
- * Only one callback at a time. Setting a new one replaces the previous.
- *
- * @param client    Valid client handle.
- * @param callback  Data receive callback.
- * @param user_data Opaque pointer for callback.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_set_recv_callback(ZtlpClient *client, ZtlpRecvCallback callback,
-                                void *user_data);
 
-/**
- * @brief Set the disconnect callback.
- *
- * @param client    Valid client handle.
- * @param callback  Disconnect callback.
- * @param user_data Opaque pointer for callback.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_set_disconnect_callback(ZtlpClient *client,
-                                      ZtlpDisconnectCallback callback,
-                                      void *user_data);
 
-/**
- * @brief Register a callback for ACK packet sending via platform-native I/O.
- *
- * When registered, the library will invoke this callback with pre-encrypted
- * ACK packets. The platform should send these bytes via a separate UDP
- * socket (e.g., NWConnection on iOS) to avoid kernel contention.
- *
- * @param client     The ZTLP client handle.
- * @param callback   Function pointer for ACK sending.
- * @param user_data  Opaque context passed to the callback.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_set_ack_send_callback(ZtlpClient *client,
-                                    ZtlpAckSendCallback callback,
-                                    void *user_data);
 
-/**
- * @brief Disconnect from the current session.
- *
- * Stops the background recv loop and releases the active session.
- *
- * @param client  Valid client handle.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_disconnect(ZtlpClient *client);
 
-/**
- * @brief Disconnect the tunnel transport only (keep VIP proxy listeners alive).
- *
- * Used for reconnect flows — stops the recv loop and clears the session,
- * but preserves VIP proxy TCP listeners and the runtime. After calling this,
- * call ztlp_connect() again and then ztlp_vip_start() to hot-swap the
- * tunnel session into the existing proxy listeners.
- *
- * Sets state to Reconnecting (not Disconnected).
- *
- * @param client  Valid client handle.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_disconnect_transport(ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Session Info
@@ -668,30 +432,7 @@ const char *ztlp_session_peer_addr(const ZtlpSession *session);
  * TCP Tunnel (Port Forwarding)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * @brief Start a TCP tunnel (local port forwarding over ZTLP).
- *
- * Listens on local_port and forwards to remote_host:remote_port via ZTLP.
- *
- * @param client       Valid, connected client handle.
- * @param local_port   Local TCP port to listen on.
- * @param remote_host  Hostname on the remote side.
- * @param remote_port  TCP port on the remote side.
- * @param callback     Called when tunnel is established or fails.
- * @param user_data    Opaque pointer for callback.
- * @return ZTLP_OK if initiated, negative on failure.
- */
-int32_t ztlp_tunnel_start(ZtlpClient *client, uint16_t local_port,
-                           const char *remote_host, uint16_t remote_port,
-                           ZtlpConnectCallback callback, void *user_data);
 
-/**
- * @brief Stop the active TCP tunnel.
- *
- * @param client  Valid client handle.
- * @return ZTLP_OK on success.
- */
-int32_t ztlp_tunnel_stop(ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * VIP Proxy (Virtual IP — Local TCP → Tunnel)
@@ -787,82 +528,10 @@ char *ztlp_ns_resolve(const char *service_name,
  * Packet Router (iOS utun / TUN interface)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * @brief Create a new packet router for the iOS utun interface.
- *
- * Initializes a userspace TCP/IP handler that processes raw IPv4 packets
- * from the tunnel interface. Maps destination IPs in 10.122.0.0/16 to
- * ZTLP service names and creates mux streams to the gateway.
- *
- * @param client       Valid client handle.
- * @param tunnel_addr  IPv4 address of the utun interface (e.g., "10.122.0.100").
- *                     Null-terminated C string.
- * @return 0 on success, negative on error.
- */
-int32_t ztlp_router_new(ZtlpClient *client, const char *tunnel_addr);
 
-/**
- * @brief Register a VIP service with the packet router.
- *
- * Maps a VIP address to a ZTLP service name. Traffic to this VIP on any
- * port will be routed through a ZTLP mux stream to the named service.
- *
- * Example: ztlp_router_add_service(client, "10.122.0.1", "vault")
- *
- * @param client        Valid client handle.
- * @param vip           VIP IPv4 address (e.g., "10.122.0.1"). Null-terminated.
- * @param service_name  ZTLP service name (e.g., "vault"). Null-terminated.
- * @return 0 on success, negative on error.
- */
-int32_t ztlp_router_add_service(ZtlpClient *client,
-                                 const char *vip,
-                                 const char *service_name);
 
-/**
- * @brief Write a raw IPv4 packet into the packet router.
- *
- * Called from Swift when NEPacketTunnelProvider.readPackets() delivers a
- * packet from the utun interface. The router parses IP/TCP, manages
- * connection state, and queues response packets.
- *
- * After calling this, call ztlp_router_read_packet() to retrieve any
- * outbound response packets (SYN-ACK, ACK, data, FIN).
- *
- * @param client  Valid client handle.
- * @param data    Raw IPv4 packet bytes.
- * @param len     Length of the packet in bytes.
- * @return 0 on success, negative on error.
- */
-int32_t ztlp_router_write_packet(ZtlpClient *client,
-                                  const uint8_t *data,
-                                  size_t len);
 
-/**
- * @brief Read the next outbound IPv4 packet from the router.
- *
- * Returns one complete IPv4 packet to inject back into the utun interface
- * via NEPacketTunnelProvider.writePackets(). Call in a loop until 0 is
- * returned to drain all queued packets.
- *
- * @param client   Valid client handle.
- * @param buf      Output buffer for the IPv4 packet.
- * @param buf_len  Size of the output buffer in bytes.
- * @return Positive: bytes written to buf. 0: no packets available. Negative: error.
- */
-int32_t ztlp_router_read_packet(ZtlpClient *client,
-                                 uint8_t *buf,
-                                 size_t buf_len);
 
-/**
- * @brief Stop and destroy the packet router.
- *
- * Cleans up all TCP flows and releases resources. Call when tearing down
- * the VPN tunnel.
- *
- * @param client  Valid client handle.
- * @return 0 on success, negative on error.
- */
-int32_t ztlp_router_stop(ZtlpClient *client);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Statistics
@@ -1022,18 +691,6 @@ typedef struct ZtlpHandshakeState ZtlpHandshakeState;
  * @return ZtlpCryptoContext* on success (caller must free with ztlp_crypto_context_free).
  *         NULL on failure (check ztlp_last_error).
  */
-/**
- * @brief Set the client profile for the next sync connection.
- *
- * Call BEFORE ztlp_connect_sync(). The profile is consumed on connect.
- * This tells the gateway what kind of client is connecting (mobile/desktop)
- * so it can select appropriate congestion control parameters.
- *
- * @param interface_type  0=Unknown, 1=Cellular, 2=WiFi, 3=Wired
- * @param radio_tech      0=None, 1=2G, 2=3G, 3=LTE, 4=5G-NSA, 5=5G-SA
- * @param is_constrained  0=false, 1=true (iOS Low Data Mode)
- */
-void ztlp_set_client_profile(uint8_t interface_type, uint8_t radio_tech, uint8_t is_constrained);
 
 ZtlpHandshakeState *ztlp_handshake_start(
     ZtlpIdentity *identity,
@@ -1176,60 +833,8 @@ int32_t ztlp_parse_frame(
     size_t *out_payload_len
 );
 
-/**
- * @brief Build a legacy ACK frame: [0x01 | ack_seq(8 bytes BE)].
- *
- * @param ack_seq     Acknowledged data sequence number.
- * @param out_buf     Output buffer (needs at least 9 bytes).
- * @param out_buf_len Size of out_buf.
- * @param out_written Receives 9 on success.
- * @return 0 on success, negative error code on failure.
- */
-int32_t ztlp_build_ack(
-    uint64_t ack_seq,
-    uint8_t *out_buf, size_t out_buf_len,
-    size_t *out_written
-);
 
-/**
- * @brief Build an ACK frame with receiver window: [0x01 | ack_seq(8 bytes BE) | rwnd(2 bytes BE)].
- *
- * Pass rwnd=0 to emit the legacy 9-byte ACK frame.
- * @param ack_seq     Acknowledged data sequence number.
- * @param rwnd        Receiver-advertised window in packets.
- * @param out_buf     Output buffer (needs at least 11 bytes when rwnd > 0).
- * @param out_buf_len Size of out_buf.
- * @param out_written Receives 11 on success when rwnd > 0, else 9.
- * @return 0 on success, negative error code on failure.
- */
-int32_t ztlp_build_ack_with_rwnd(
-    uint64_t ack_seq, uint16_t rwnd,
-    uint8_t *out_buf, size_t out_buf_len,
-    size_t *out_written
-);
 
-/**
- * @brief Build a FRAME_ACK_V2 frame: byte-unit (KB) receive window.
- *
- * Wire: [0x10 | ack_seq(8 bytes BE) | window_kb(2 bytes BE)] = 11 bytes.
- * Phase B of "modern flow control". window_kb is in units of 1024 bytes;
- * max 65_535 KB = 64 MB. Gateway decodes FRAME_ACK_V2 in session.ex and
- * replies with ordinary FRAME_ACK(0x01)+SACK (gateway→client direction
- * stays on V1 for now; V2 is client→gateway only).
- *
- * @param ack_seq     Cumulative ACK value.
- * @param window_kb   Receiver window in KB (must be >= 1 for meaningful
- *                    flow control; 0 is legal but advertises zero window).
- * @param out_buf     Output buffer (needs at least 11 bytes).
- * @param out_buf_len Size of out_buf.
- * @param out_written Receives 11 on success.
- * @return 0 on success, negative error code on failure.
- */
-int32_t ztlp_build_ack_v2(
-    uint64_t ack_seq, uint16_t window_kb,
-    uint8_t *out_buf, size_t out_buf_len,
-    size_t *out_written
-);
 
 // ── iOS fd-backed tunnel engine scaffolding ────────────────────────────
 
@@ -1367,25 +972,6 @@ typedef void (*ZtlpMuxFrameCallback)(
     size_t len
 );
 
-/** @brief Router stats snapshot mirror of crate::mux::RouterStatsSnapshot. */
-typedef struct {
-    uint32_t flows;
-    uint32_t outbound;
-    uint32_t stream_to_flow;
-    size_t   send_buf_bytes;
-    uint64_t oldest_ms;
-} ZtlpRouterStatsSnapshot;
-
-/** @brief Pressure signals mirror of crate::mux::RwndPressureSignals. */
-typedef struct {
-    uint32_t consecutive_full_flushes;
-    uint32_t consecutive_stuck_high_seq_ticks;
-    uint8_t  session_suspect;
-    uint8_t  probe_outstanding;
-    uint8_t  high_seq_advanced;
-    uint8_t  has_active_flows;
-} ZtlpRwndPressureSignals;
-
 ZtlpMuxEngine *ztlp_mux_new(void);
 void ztlp_mux_free(ZtlpMuxEngine *engine);
 
@@ -1407,126 +993,19 @@ int32_t ztlp_mux_take_send_bytes(
     ZtlpMuxFrameCallback callback,
     void *user_data
 );
-int32_t ztlp_mux_tick_retransmit(ZtlpMuxEngine *engine);
-int32_t ztlp_mux_take_retransmit_bytes(
-    ZtlpMuxEngine *engine,
-    ZtlpMuxFrameCallback callback,
-    void *user_data
-);
-
-int32_t ztlp_mux_on_ack(ZtlpMuxEngine *engine, uint64_t cumulative, uint16_t rwnd);
-int32_t ztlp_mux_on_data_received(ZtlpMuxEngine *engine, uint64_t data_seq);
-int32_t ztlp_mux_mark_outbound_demand(ZtlpMuxEngine *engine);
-
-int32_t ztlp_mux_tick_rwnd(
-    ZtlpMuxEngine *engine,
-    const ZtlpRouterStatsSnapshot *stats,
-    int32_t replay_delta,
-    const ZtlpRwndPressureSignals *signals
-);
-
-int32_t ztlp_mux_advertised_rwnd(ZtlpMuxEngine *engine);
-uint64_t ztlp_mux_cumulative_ack(ZtlpMuxEngine *engine);
-int32_t ztlp_mux_inflight_len(ZtlpMuxEngine *engine);
 
 // ── RTT / goodput instrumentation (Phase A — modern flow control) ────
 
-/**
- * @brief RTT / goodput / BDP snapshot.
- *
- * Units:
- *   - smoothed_rtt_ms, rtt_var_ms, min_rtt_ms, latest_rtt_ms: milliseconds
- *   - goodput_bps, peak_goodput_bps: bits per second
- *   - bdp_kb: kilobytes
- *   - samples_total: Karn-admitted RTT samples since engine start
- *
- * All fields are 0 until the first non-retransmitted FRAME_ACK lands.
- */
-typedef struct {
-    uint32_t smoothed_rtt_ms;
-    uint32_t rtt_var_ms;
-    uint32_t min_rtt_ms;
-    uint32_t latest_rtt_ms;
-    uint64_t goodput_bps;
-    uint64_t peak_goodput_bps;
-    uint32_t bdp_kb;
-    uint64_t samples_total;
-} ZtlpRttGoodputSnapshot;
 
-/**
- * @brief Read the current RTT/goodput/BDP snapshot. Passive — no wire
- *        change, no behaviour change. Safe to call from the health tick.
- * @return 0 on success, negative on error (check ztlp_last_error()).
- */
-int32_t ztlp_mux_rtt_goodput_snapshot(
-    ZtlpMuxEngine *engine,
-    ZtlpRttGoodputSnapshot *out
-);
 
-/**
- * @brief Shadow observe: notify the engine that a DATA frame with the
- *        given data_seq and encoded_len was just put on the wire. Used
- *        while the Swift data-path still owns inflight tracking.
- *        Calling with the same data_seq again (retransmit) correctly
- *        marks the sample as excluded from RTT under Karn's algorithm.
- */
-int32_t ztlp_mux_observe_sent(
-    ZtlpMuxEngine *engine,
-    uint64_t data_seq,
-    uint32_t encoded_len
-);
 
-/**
- * @brief Shadow observe: notify the engine that a cumulative ACK
- *        arrived. Samples RTT (Karn-filtered) and goodput for every
- *        shadow-tracked data_seq <= cumulative, then drops those
- *        entries from the shadow map.
- */
-int32_t ztlp_mux_observe_ack_cumulative(
-    ZtlpMuxEngine *engine,
-    uint64_t cumulative
-);
-
-/** @brief Diagnostic: current shadow-inflight map size. */
-int32_t ztlp_mux_shadow_inflight_len(ZtlpMuxEngine *engine);
 
 // ── FRAME_ACK_V2 / byte-unit window (Phase B — modern flow control) ──
 
-/**
- * @brief Tell the engine the peer has sent at least one FRAME_ACK_V2.
- *        After this the engine emits V2 ACKs for the rest of the
- *        session. Idempotent.
- * @return 0 on success, -1 on error.
- */
-int32_t ztlp_mux_note_peer_sent_v2(ZtlpMuxEngine *engine);
 
-/**
- * @brief Whether the engine has observed the peer use FRAME_ACK_V2.
- * @return 1 for true, 0 for false, -1 on error.
- */
-int32_t ztlp_mux_peer_speaks_v2(ZtlpMuxEngine *engine);
 
-/**
- * @brief Current advertised byte window. Source of truth when speaking
- *        V2; a hint computed from the V1 frame-count ladder × 1140
- *        otherwise.
- * @return Byte value, or 0 on error.
- */
-uint32_t ztlp_mux_advertised_window_bytes(ZtlpMuxEngine *engine);
 
-/**
- * @brief Current advertised window rounded up to KB. Matches the value
- *        that would be placed on the wire in the next FRAME_ACK_V2.
- * @return KB value, or 0 on error.
- */
-uint16_t ztlp_mux_advertised_window_kb(ZtlpMuxEngine *engine);
 
-/**
- * @brief Set the initial V2 window (KB). Ignored if the engine has
- *        already observed peer V2.
- * @return 0 on success, -1 on error.
- */
-int32_t ztlp_mux_set_initial_window_kb(ZtlpMuxEngine *engine, uint16_t kb);
 
 // ── Phase D: Autotune (BBR-lite receive-window sizer) ────────────────
 //
@@ -1535,81 +1014,11 @@ int32_t ztlp_mux_set_initial_window_kb(ZtlpMuxEngine *engine, uint16_t kb);
 // V2. These FFI entry points let Swift read/configure the tuner without
 // reaching into MuxEngine state directly.
 
-/**
- * @brief Configure the autotune [min_kb, max_kb] window bounds. Values
- *        are clamped to [AUTOTUNE_MIN_WINDOW_KB, AUTOTUNE_MAX_WINDOW_KB];
- *        min > max is silently swapped.
- * @return 0 on success, -1 on error.
- */
-int32_t ztlp_mux_set_autotune_bounds_kb(ZtlpMuxEngine *engine,
-                                        uint16_t min_kb,
-                                        uint16_t max_kb);
 
-/**
- * @brief Current autotune target window in KB — what BBR-lite would set
- *        the advertised window to next tick. 0 if autotune hasn't run
- *        yet or the peer hasn't upgraded to V2.
- */
-uint16_t ztlp_mux_autotune_target_kb(ZtlpMuxEngine *engine);
 
-/** @brief Autotune minimum bound (KB). */
-uint16_t ztlp_mux_autotune_min_kb(ZtlpMuxEngine *engine);
 
-/** @brief Autotune maximum bound (KB). */
-uint16_t ztlp_mux_autotune_max_kb(ZtlpMuxEngine *engine);
 
-/**
- * @brief Copy the autotune reason tag (e.g. "widen_healthy",
- *        "pressure_clamp", "no_sample", "v1_legacy") into a caller
- *        buffer. NUL-terminates. Returns bytes written (excluding NUL),
- *        or -1 on error.
- */
-int32_t ztlp_mux_autotune_reason(ZtlpMuxEngine *engine,
-                                 uint8_t *out_buf,
-                                 size_t out_buf_len);
 
-// ── SessionHealth FFI (Phase 3: Nebula collapse) ─────────────────────
-
-typedef struct ZtlpSessionHealth ZtlpSessionHealth;
-
-/** Action codes returned by ztlp_health_tick. */
-#define ZTLP_HEALTH_ACTION_NONE       0
-#define ZTLP_HEALTH_ACTION_SEND_PROBE 1
-#define ZTLP_HEALTH_ACTION_RECONNECT  2
-
-/** State codes returned by ztlp_health_state. */
-#define ZTLP_HEALTH_STATE_HEALTHY 0
-#define ZTLP_HEALTH_STATE_SUSPECT 1
-#define ZTLP_HEALTH_STATE_DEAD    2
-
-typedef struct {
-    uint8_t  has_active_flows;
-    uint64_t useful_rx_age_ms;
-    uint64_t oldest_outbound_ms;
-    uint32_t consecutive_stuck_high_seq_ticks;
-} ZtlpHealthTickInputs;
-
-ZtlpSessionHealth *ztlp_health_new(void);
-void ztlp_health_free(ZtlpSessionHealth *h);
-
-/**
- * @brief One health tick. Returns an action code.
- * @param out_nonce If non-null and action is SEND_PROBE, receives the probe nonce.
- * @param out_reason If non-null and action is RECONNECT, receives a short
- *                   nul-terminated ASCII reason (copied into the buffer).
- * @param out_reason_len Size of out_reason buffer (at least 32 recommended).
- */
-int32_t ztlp_health_tick(
-    ZtlpSessionHealth *h,
-    const ZtlpHealthTickInputs *inputs,
-    uint64_t *out_nonce,
-    char *out_reason,
-    size_t out_reason_len
-);
-
-int32_t ztlp_health_on_pong(ZtlpSessionHealth *h, uint64_t nonce);
-int32_t ztlp_health_reset_after_reconnect(ZtlpSessionHealth *h);
-int32_t ztlp_health_state(ZtlpSessionHealth *h);
 
 // ── Standalone Packet Router (ios-sync: no ZtlpClient needed) ──────────
 

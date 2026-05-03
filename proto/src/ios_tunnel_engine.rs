@@ -141,6 +141,13 @@ pub struct IosTunnelEngine {
     stop: Arc<AtomicBool>,
     read_thread: Mutex<Option<JoinHandle<()>>>,
     router_action_callback: Mutex<Option<RouterActionCallback>>,
+    // Phase 1 (Nebula collapse): Rust-owned UDP transport to the gateway/relay.
+    // Prior to this, Swift's `ZTLPTunnelConnection` owned the `NWConnection`
+    // that carried encrypted tunnel bytes. Moving it into Rust removes the
+    // main Swift/Rust seam on the hot path.
+    udp_socket: Mutex<Option<std::net::UdpSocket>>,
+    udp_peer: Mutex<Option<std::net::SocketAddr>>,
+    udp_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl IosTunnelEngine {
@@ -156,7 +163,26 @@ impl IosTunnelEngine {
             stop: Arc::new(AtomicBool::new(false)),
             read_thread: Mutex::new(None),
             router_action_callback: Mutex::new(None),
+            udp_socket: Mutex::new(None),
+            udp_peer: Mutex::new(None),
+            udp_thread: Mutex::new(None),
         })
+    }
+
+    /// Construct an engine without a real utun fd for Linux unit tests that
+    /// exercise only the UDP transport / MuxEngine paths. The returned engine
+    /// must NOT have its utun read loop started — `utun_fd` is -1.
+    #[cfg(any(test, feature = "ios-sync"))]
+    pub fn new_for_tests() -> Self {
+        Self {
+            utun: Arc::new(IosUtun::new(-1)),
+            stop: Arc::new(AtomicBool::new(false)),
+            read_thread: Mutex::new(None),
+            router_action_callback: Mutex::new(None),
+            udp_socket: Mutex::new(None),
+            udp_peer: Mutex::new(None),
+            udp_thread: Mutex::new(None),
+        }
     }
 
     pub fn utun_fd(&self) -> RawFd {
@@ -201,6 +227,82 @@ impl IosTunnelEngine {
             user_data: user_data as usize,
         });
         Ok(())
+    }
+
+    // ====================================================================
+    // Phase 1 (Nebula collapse): Rust-owned UDP transport.
+    // ====================================================================
+    //
+    // The engine binds a local UDP socket and sends/receives encrypted ZTLP
+    // tunnel packets to a peer (gateway or relay VIP). Callers configure the
+    // peer via `set_peer`. In Phase 1 the recv path is drained by a dedicated
+    // OS thread and delivered to Swift through the router action callback
+    // with `action_type=252` so the existing Swift decrypt/mux path stays
+    // intact. Phase 2 will move decrypt+mux into Rust and bypass Swift.
+
+    /// Bind the UDP socket to `0.0.0.0:0`. Uses a short read timeout so the
+    /// recv loop can poll the stop flag without blocking forever.
+    pub fn bind_udp_any(&self) -> io::Result<()> {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        sock.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let mut guard = self
+            .udp_socket
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp socket state poisoned"))?;
+        *guard = Some(sock);
+        Ok(())
+    }
+
+    /// Return the local UDP port after `bind_udp_any`.
+    pub fn local_udp_port(&self) -> Option<u16> {
+        let guard = self.udp_socket.lock().ok()?;
+        let sock = guard.as_ref()?;
+        sock.local_addr().ok().map(|a| a.port())
+    }
+
+    /// Set the peer address (gateway or relay VIP) used by `udp_send`.
+    pub fn set_peer(&self, addr: std::net::SocketAddr) -> io::Result<()> {
+        let mut guard = self
+            .udp_peer
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp peer state poisoned"))?;
+        *guard = Some(addr);
+        Ok(())
+    }
+
+    pub fn peer(&self) -> Option<std::net::SocketAddr> {
+        self.udp_peer.lock().ok().and_then(|g| *g)
+    }
+
+    /// Send encrypted bytes to the configured peer. Returns the number of
+    /// bytes written.
+    pub fn udp_send(&self, bytes: &[u8]) -> io::Result<usize> {
+        let peer = self
+            .udp_peer
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp peer state poisoned"))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp peer not set"))?;
+        let guard = self
+            .udp_socket
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp socket state poisoned"))?;
+        let sock = guard
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp socket not bound"))?;
+        sock.send_to(bytes, peer)
+    }
+
+    /// Blocking recv with the configured read timeout. Used by the recv
+    /// thread started via `start_udp_recv_loop` and directly by tests.
+    pub fn udp_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let guard = self
+            .udp_socket
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp socket state poisoned"))?;
+        let sock = guard
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp socket not bound"))?;
+        sock.recv(buf).map(|n| n)
     }
 
     fn start_read_loop(&self, router_ptr: Option<usize>) -> io::Result<()> {
@@ -539,6 +641,16 @@ impl Drop for IosTunnelEngine {
             if let Some(handle) = guard.take() {
                 let _ = handle.join();
             }
+        }
+        if let Ok(mut guard) = self.udp_thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+        // Drop the UDP socket so any blocked recv returns; the thread must
+        // already have exited via the stop flag.
+        if let Ok(mut guard) = self.udp_socket.lock() {
+            let _ = guard.take();
         }
     }
 }
@@ -1141,5 +1253,96 @@ mod tests {
             Ok(_) => panic!("negative fd should be rejected"),
             Err(err) => assert_eq!(err.kind(), io::ErrorKind::InvalidInput),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 1 (Nebula collapse): UDP transport ownership tests.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn engine_bind_udp_any_exposes_local_port() {
+        let engine = IosTunnelEngine::new_for_tests();
+        engine.bind_udp_any().expect("bind udp");
+        let port = engine.local_udp_port().expect("local port after bind");
+        assert!(port > 0, "expected ephemeral port, got {port}");
+    }
+
+    #[test]
+    fn engine_udp_send_requires_peer() {
+        let engine = IosTunnelEngine::new_for_tests();
+        engine.bind_udp_any().expect("bind udp");
+        let err = engine
+            .udp_send(b"hello")
+            .expect_err("send with no peer must error");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
+    #[test]
+    fn engine_udp_send_requires_socket() {
+        let engine = IosTunnelEngine::new_for_tests();
+        // no bind_udp_any called
+        let peer: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        engine.set_peer(peer).unwrap();
+        let err = engine
+            .udp_send(b"hello")
+            .expect_err("send without bind must error");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+    }
+
+    #[test]
+    fn engine_udp_send_and_recv_roundtrip() {
+        // Peer is a second UdpSocket bound to a loopback port. The engine
+        // sends to it and reads back a reply.
+        let peer_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer bind");
+        peer_sock
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let peer_addr = peer_sock.local_addr().unwrap();
+
+        let engine = IosTunnelEngine::new_for_tests();
+        engine.bind_udp_any().expect("bind udp");
+        engine.set_peer(peer_addr).expect("set peer");
+
+        let payload = b"ztlp-phase1";
+        let sent = engine.udp_send(payload).expect("send");
+        assert_eq!(sent, payload.len());
+
+        // Peer receives the payload and echoes it back to the engine.
+        let mut rx = [0u8; 64];
+        let (n, src) = peer_sock.recv_from(&mut rx).expect("peer recv");
+        assert_eq!(&rx[..n], payload);
+
+        peer_sock
+            .send_to(b"pong", src)
+            .expect("peer send back to engine");
+        let mut reply = [0u8; 64];
+        // Engine read timeout is 100ms; poll a few times so we don't flake.
+        let mut got = None;
+        for _ in 0..50 {
+            match engine.udp_recv(&mut reply) {
+                Ok(n) => {
+                    got = Some(n);
+                    break;
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(e) => panic!("unexpected recv err: {e:?}"),
+            }
+        }
+        let n = got.expect("engine received reply within 5s");
+        assert_eq!(&reply[..n], b"pong");
+    }
+
+    #[test]
+    fn engine_peer_getter_reflects_set_peer() {
+        let engine = IosTunnelEngine::new_for_tests();
+        assert!(engine.peer().is_none());
+        let addr: std::net::SocketAddr = "10.1.2.3:1234".parse().unwrap();
+        engine.set_peer(addr).unwrap();
+        assert_eq!(engine.peer(), Some(addr));
     }
 }

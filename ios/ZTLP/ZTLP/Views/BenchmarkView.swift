@@ -350,6 +350,35 @@ struct BenchmarkView: View {
 
         let passedCount = results.filter { $0.status != .error }.count
         let totalCount = results.count
+        let failedResults = results.filter { $0.status == .error }
+        let failedCount = failedResults.count
+        let timeoutCount = failedResults.filter {
+            let haystack = ($0.detail ?? "") + " " + $0.value
+            return haystack.localizedCaseInsensitiveContains("timeout")
+        }.count
+
+        // Build a compact, human-readable summary of which URLs failed and why.
+        // Stuffed into the existing `errors` free-text column so no Rails migration
+        // is required. Format:
+        //   "failed=3/9 timeouts=2 :: Vault HTTP Response[http://10.122.0.4/alive — timeout after 10012ms]; ..."
+        var summary = "failed=\(failedCount)/\(totalCount) timeouts=\(timeoutCount)"
+        if !failedResults.isEmpty {
+            let items = failedResults.prefix(10).map { r in
+                "\(r.name)[\(r.detail ?? r.value)]"
+            }.joined(separator: "; ")
+            summary += " :: " + items
+            if failedResults.count > 10 {
+                summary += "; (+\(failedResults.count - 10) more)"
+            }
+        }
+
+        TunnelLogger.shared.info(
+            "Benchmark run complete score=\(passedCount)/\(totalCount) failed=\(failedCount) timeouts=\(timeoutCount)",
+            source: "Benchmark"
+        )
+        if failedCount > 0 {
+            TunnelLogger.shared.warn("Benchmark failures: \(summary)", source: "Benchmark")
+        }
 
         let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared")
         let neMemoryMB = sharedDefaults?.object(forKey: "ztlp_ne_memory_mb") as? Int
@@ -366,7 +395,8 @@ struct BenchmarkView: View {
             totalCount: totalCount,
             individualResults: reporterResults,
             relayAddress: selectedRelay,
-            gatewayAddress: peerAddress
+            gatewayAddress: peerAddress,
+            errors: failedCount > 0 ? summary : nil
         )
     }
 
@@ -412,24 +442,28 @@ struct BenchmarkView: View {
         }
 
         // Test 3: HTTP GET to vault (if reachable) — retry up to 3x for tunnel restart races
-        let (httpOk, httpMs, httpCode) = await httpGetWithRetry(url: "http://10.122.0.4/alive", timeoutSec: 10)
+        let (httpOk, httpMs, httpCode, httpErr) = await httpGetWithRetry(url: "http://10.122.0.4/alive", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Vault HTTP Response",
-            value: httpOk ? "\(httpMs)" : "FAIL",
+            value: httpOk ? "\(httpMs)" : (httpErr == "timeout" ? "TIMEOUT" : "FAIL"),
             unit: httpOk ? "ms" : "",
             status: httpOk ? .good : .error,
-            detail: httpOk ? "HTTP \(httpCode)" : "No response",
+            detail: httpOk ? "HTTP \(httpCode)" : "http://10.122.0.4/alive — \(httpErr ?? "no response") after \(httpMs)ms",
             openURL: httpOk ? "http://vault.ztlp" : nil
         ))
 
         // Test 4: HTTP GET through primary service — retry up to 3x for tunnel restart races
-        let (primaryOk, primaryMs, primaryCode) = await httpGetWithRetry(url: "http://10.122.0.2/", timeoutSec: 10)
+        let (primaryOk, primaryMs, primaryCode, primaryErr) = await httpGetWithRetry(url: "http://10.122.0.2/", timeoutSec: 10)
         await addResult(BenchmarkResult(
             name: "Primary HTTP Response",
-            value: primaryOk ? "\(primaryMs)" : "FAIL",
-            unit: primaryOk ? "ms" : "",
+            value: primaryOk ? "\(primaryMs)" : (primaryErr == "timeout" ? "TIMEOUT" : (primaryCode > 0 ? "\(primaryMs)" : "FAIL")),
+            unit: (primaryOk || primaryCode > 0) ? "ms" : "",
             status: primaryOk ? .good : (primaryCode > 0 ? .warning : .error),
-            detail: primaryOk ? "HTTP \(primaryCode)" : (primaryCode > 0 ? "HTTP \(primaryCode)" : "No response"),
+            detail: primaryOk
+                ? "HTTP \(primaryCode)"
+                : (primaryCode > 0
+                    ? "HTTP \(primaryCode)"
+                    : "http://10.122.0.2/ — \(primaryErr ?? "no response") after \(primaryMs)ms"),
             openURL: primaryOk ? "http://vault.ztlp" : nil
         ))
     }
@@ -446,13 +480,16 @@ struct BenchmarkView: View {
         ]
 
         for ep in endpoints {
-            let (ok, ms, code) = await httpGet(url: ep.url, timeoutSec: 15)
+            let (ok, ms, code, errKind) = await httpGet(url: ep.url, timeoutSec: 15)
+            let isTimeout = errKind == "timeout"
             await addResult(BenchmarkResult(
                 name: ep.name,
-                value: ok ? "\(ms)" : (code > 0 ? "\(ms)" : "FAIL"),
+                value: ok ? "\(ms)" : (code > 0 ? "\(ms)" : (isTimeout ? "TIMEOUT" : "FAIL")),
                 unit: (ok || code > 0) ? "ms" : "",
                 status: ok ? .good : (code > 0 ? .warning : .error),
-                detail: code > 0 ? "HTTP \(code)" : "No response",
+                detail: code > 0
+                    ? "HTTP \(code)"
+                    : "\(ep.url) — \(errKind ?? "no response") after \(ms)ms",
                 openURL: (ok || code > 0) ? ep.openURL : nil
             ))
         }
@@ -548,21 +585,26 @@ struct BenchmarkView: View {
         return bindResult == 0
     }
 
-    /// TCP connect test — returns (success, latencyMs)
+    /// TCP connect test — returns (success, latencyMs).
+    /// Uses a non-blocking connect + poll so the timeout is actually enforced
+    /// (blocking connect() on Darwin ignores SO_SNDTIMEO and can hang indefinitely
+    /// when a VIP is unreachable through the tunnel).
     private func tcpConnect(host: String, port: UInt16, timeoutSec: Int) async -> (Bool, Int) {
         let start = CFAbsoluteTimeGetCurrent()
+        TunnelLogger.shared.debug("TCP bench connect start host=\(host) port=\(port) timeout=\(timeoutSec)s", source: "Benchmark")
 
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let sock = socket(AF_INET, SOCK_STREAM, 0)
                 guard sock >= 0 else {
+                    TunnelLogger.shared.warn("TCP bench socket() failed host=\(host) port=\(port) errno=\(errno)", source: "Benchmark")
                     continuation.resume(returning: (false, 0))
                     return
                 }
 
-                // Set send/recv timeout for blocking connect
-                var tv = timeval(tv_sec: timeoutSec, tv_usec: 0)
-                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                // Non-blocking connect so poll() enforces the timeout
+                let flags = fcntl(sock, F_GETFL, 0)
+                _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
 
                 var addr = sockaddr_in()
                 addr.sin_family = sa_family_t(AF_INET)
@@ -575,22 +617,54 @@ struct BenchmarkView: View {
                     }
                 }
 
+                var success = false
+                var timedOut = false
+
+                if connectResult == 0 {
+                    success = true
+                } else if errno == EINPROGRESS {
+                    var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+                    let rc = poll(&pfd, 1, Int32(timeoutSec * 1000))
+                    if rc > 0 && (pfd.revents & Int16(POLLOUT)) != 0 {
+                        var soErr: Int32 = 0
+                        var len = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &len)
+                        success = (soErr == 0)
+                    } else if rc == 0 {
+                        timedOut = true
+                    }
+                }
+
                 let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
                 close(sock)
-                continuation.resume(returning: (connectResult == 0, ms))
+                if success {
+                    TunnelLogger.shared.debug("TCP bench connect ok host=\(host) port=\(port) ms=\(ms)", source: "Benchmark")
+                } else if timedOut {
+                    TunnelLogger.shared.warn("TCP bench connect timeout host=\(host) port=\(port) ms=\(ms) timeout=\(timeoutSec)s", source: "Benchmark")
+                } else {
+                    TunnelLogger.shared.warn("TCP bench connect fail host=\(host) port=\(port) ms=\(ms) errno=\(errno)", source: "Benchmark")
+                }
+                continuation.resume(returning: (success, ms))
             }
         }
     }
 
-    /// HTTP GET test — returns (isSuccess, latencyMs, statusCode)
-    private func httpGet(url urlString: String, timeoutSec: Int) async -> (Bool, Int, Int) {
-        guard var components = URLComponents(string: urlString) else { return (false, 0, 0) }
+    /// HTTP GET test — returns (isSuccess, latencyMs, statusCode, errKind).
+    /// errKind: nil on success, "timeout" on per-request timeout, otherwise a
+    /// short failure description (e.g. "cannotConnectToHost"). Both the
+    /// per-request timeout (URLSession timeoutIntervalForRequest) and the
+    /// resource-level timeout are set to timeoutSec so a stuck tunnel cannot
+    /// wedge the benchmark indefinitely.
+    private func httpGet(url urlString: String, timeoutSec: Int) async -> (Bool, Int, Int, String?) {
+        guard var components = URLComponents(string: urlString) else { return (false, 0, 0, "invalid_url") }
         var queryItems = components.queryItems ?? []
         queryItems.append(URLQueryItem(name: "_ztlp_bench", value: UUID().uuidString))
         components.queryItems = queryItems
-        guard let url = components.url else { return (false, 0, 0) }
+        guard let url = components.url else { return (false, 0, 0, "invalid_url") }
 
         let config = URLSessionConfiguration.ephemeral
+        // Explicit per-request + resource timeout: URLSession will fail the
+        // task with URLError.timedOut if the server/tunnel does not respond.
         config.timeoutIntervalForRequest = TimeInterval(timeoutSec)
         config.timeoutIntervalForResource = TimeInterval(timeoutSec)
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -604,10 +678,12 @@ struct BenchmarkView: View {
 
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.timeoutInterval = TimeInterval(timeoutSec)
         request.setValue("close", forHTTPHeaderField: "Connection")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
         let start = CFAbsoluteTimeGetCurrent()
+        TunnelLogger.shared.debug("HTTP bench GET start url=\(urlString) timeout=\(timeoutSec)s", source: "Benchmark")
 
         do {
             let (_, response) = try await session.data(for: request)
@@ -615,27 +691,44 @@ struct BenchmarkView: View {
             let httpResponse = response as? HTTPURLResponse
             let code = httpResponse?.statusCode ?? 0
             let ok = code >= 200 && code < 400
-            return (ok, ms, code)
+            TunnelLogger.shared.info("HTTP bench GET done url=\(urlString) ms=\(ms) code=\(code) ok=\(ok)", source: "Benchmark")
+            return (ok, ms, code, nil)
         } catch {
             let ms = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
-            TunnelLogger.shared.warn("HTTP benchmark GET failed url=\(urlString) ms=\(ms) error=\(error.localizedDescription)", source: "Benchmark")
-            return (false, ms, 0)
+            let urlError = error as? URLError
+            let isTimeout = urlError?.code == .timedOut
+            let kind: String
+            if isTimeout {
+                kind = "timeout"
+            } else if let urlError {
+                kind = "urlerror_\(urlError.code.rawValue)"
+            } else {
+                kind = error.localizedDescription
+            }
+            TunnelLogger.shared.warn(
+                "HTTP bench GET \(isTimeout ? "timeout" : "fail") url=\(urlString) ms=\(ms) kind=\(kind) error=\(error.localizedDescription)",
+                source: "Benchmark"
+            )
+            return (false, ms, 0, kind)
         }
     }
 
     /// HTTP GET with retry — retries up to maxAttempts with delaySec between attempts.
     /// Designed for response-content checks that may fail transiently after tunnel restart.
-    private func httpGetWithRetry(url urlString: String, timeoutSec: Int, maxAttempts: Int = 3, delaySec: UInt64 = 1) async -> (Bool, Int, Int) {
+    private func httpGetWithRetry(url urlString: String, timeoutSec: Int, maxAttempts: Int = 3, delaySec: UInt64 = 1) async -> (Bool, Int, Int, String?) {
+        var last: (Bool, Int, Int, String?) = (false, 0, 0, "no_attempt")
         for attempt in 1...maxAttempts {
-            let (ok, ms, code) = await httpGet(url: urlString, timeoutSec: timeoutSec)
-            if ok || code > 0 {
-                return (ok, ms, code)
+            let result = await httpGet(url: urlString, timeoutSec: timeoutSec)
+            last = result
+            if result.0 || result.2 > 0 {
+                return result
             }
             if attempt < maxAttempts {
+                TunnelLogger.shared.info("HTTP bench retry url=\(urlString) attempt=\(attempt)/\(maxAttempts) last_err=\(result.3 ?? "?")", source: "Benchmark")
                 try? await Task.sleep(nanoseconds: delaySec * 1_000_000_000)
             }
         }
-        return await httpGet(url: urlString, timeoutSec: timeoutSec)
+        return last
     }
 
     /// Run an async operation with a wall-clock timeout. This keeps a wedged tunnel test
@@ -664,28 +757,43 @@ struct BenchmarkView: View {
         }
     }
 
-    /// HTTP throughput test — returns (requests/sec, completedCount)
+    /// HTTP throughput test — returns (requests/sec, completedCount).
+    /// Each request carries an explicit 10s timeout, so failures count toward
+    /// completed=0 rather than hanging the benchmark.
     private func httpThroughputTest(url urlString: String, iterations: Int) async -> (Double, Int) {
         guard let url = URL(string: urlString) else { return (0, 0) }
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 10
         let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
 
         let start = CFAbsoluteTimeGetCurrent()
         var completed = 0
+        var failed = 0
+        var timedOut = 0
 
-        for _ in 0..<iterations {
+        for i in 0..<iterations {
             do {
                 let _ = try await session.data(from: url)
                 completed += 1
             } catch {
-                // skip failures
+                failed += 1
+                if (error as? URLError)?.code == .timedOut { timedOut += 1 }
+                TunnelLogger.shared.warn(
+                    "HTTP bench throughput iter=\(i) url=\(urlString) error=\(error.localizedDescription)",
+                    source: "Benchmark"
+                )
             }
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
         let rps = elapsed > 0 ? Double(completed) / elapsed : 0
+        TunnelLogger.shared.info(
+            "HTTP bench throughput done url=\(urlString) completed=\(completed)/\(iterations) failed=\(failed) timeouts=\(timedOut) rps=\(String(format: "%.2f", rps))",
+            source: "Benchmark"
+        )
         return (rps, completed)
     }
 }

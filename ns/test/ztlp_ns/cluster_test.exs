@@ -5,6 +5,40 @@ defmodule ZtlpNs.ClusterTest do
 
   # Cluster tests run sequentially — they interact with global Mnesia state.
 
+  setup do
+    Application.stop(:ztlp_ns)
+    try do
+      :mnesia.stop()
+    rescue
+      _ -> :ok
+    end
+
+    mnesia_dir = Path.join(System.tmp_dir!(), "mnesia_cluster_test_#{:rand.uniform(1_000_000)}")
+    Application.put_env(:mnesia, :dir, to_charlist(mnesia_dir))
+
+    try do
+      :mnesia.create_schema([node()])
+    catch
+      :exit, _ -> :ok
+    end
+
+    Application.ensure_all_started(:mnesia) # Restart mnesia without the app
+    
+    test_dir = Path.join(System.tmp_dir!(), "ztlp_ca_test_#{:rand.uniform(1_000_000)}")
+    File.mkdir_p!(test_dir)
+
+    Application.put_env(:ztlp_ns, :ca_dir, test_dir)
+    Application.ensure_all_started(:ztlp_ns)
+
+    on_exit(fn ->
+      Application.stop(:ztlp_ns)
+      Application.stop(:mnesia)
+      File.rm_rf!(test_dir)
+      File.rm_rf!(mnesia_dir)
+    end)
+    :ok
+  end
+
   defp make_signed_key(name, opts \\ []) do
     {_pub, priv} = Crypto.generate_keypair()
     node_id = :crypto.strong_rand_bytes(16)

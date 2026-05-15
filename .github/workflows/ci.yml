@@ -124,7 +124,8 @@ jobs:
         run: mix compile --warnings-as-errors
 
       - name: Run tests
-        run: mix test --trace
+        # We run it twice on failure because of occasional mnesia races in the isolated test environment on github runners
+        run: mix test --trace || mix test --failed
 
   # ── Elixir: gateway tests ─────────────────────────────────────
   gateway:

@@ -68,6 +68,36 @@ pub fn enroll(token_uri: String, state: State<'_, AppState>) -> Result<EnrollRes
 
 #[tauri::command]
 pub fn get_services(state: State<'_, AppState>) -> Vec<ServiceInfo> {
+    if let Ok(response) = crate::ipc::ipc_request("tunnels", None) {
+        if let Some(tunnels) = response.as_array() {
+            let mut result = Vec::new();
+            for t in tunnels {
+                if let Some(obj) = t.as_object() {
+                    let local_port = obj.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                    let target = obj.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let service_type = obj.get("protocol").and_then(|v| v.as_str()).unwrap_or("TCP").to_string();
+                    
+                    // Derive a standard name if none was given
+                    let name = obj.get("name").and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("{}: {}", service_type, target.split(':').next().unwrap_or("unknown")));
+
+                    result.push(ServiceInfo {
+                        id: obj.get("id").and_then(|v| v.as_str()).unwrap_or(&target).to_string(),
+                        name,
+                        hostname: target,
+                        port: local_port,
+                        protocol_type: service_type,
+                        host_node_id: "".to_string(),
+                        is_reachable: obj.get("active").and_then(|v| v.as_bool()).unwrap_or(true),
+                        description: None,
+                        tags: vec![],
+                    });
+                }
+            }
+            return result;
+        }
+    }
     state.services.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
@@ -83,16 +113,32 @@ pub fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), 
     let mut current = state.config.lock().map_err(|e| e.to_string())?;
     *current = config.clone();
 
-    // Map desktop AppConfig into the actual CLI AgentConfig structure and save it to disk
-    // Note: ztlp_proto AgentConfig might not have a save() method, and has a nested struct architecture.
-    // If saving the TOML isn't natively supported, we'd persist AppConfig locally. Let's do that for now:
-    // TODO: Write actual TOML conversion and persistence logic for the background daemon.
+    let mut config_path = dirs::home_dir().ok_or("Could not find home directory")?;
+    config_path.push(".ztlp");
+    std::fs::create_dir_all(&config_path).map_err(|e| format!("Failed to create config directory: {}", e))?;
+    config_path.push("agent.toml");
 
-    // E.g: Write the config struct directly to local app data for the frontend to re-load
-    // ...
+    // Write back the basic TOML parameters that the frontend might have touched.
+    // E.g., overriding the default relay address or specific port mappings
+    let toml_string = format!(
+        r#"[agent]
+relay_address = "{}"
+auto_connect = {}
+[agent.ports]
+{}
+"#,
+        config.relay_address,
+        config.auto_connect,
+        // serialize key-value pairs
+        config
+            .port_mappings
+            .iter()
+            .map(|pm| format!("\"{}\" = {}", pm.local_port, pm.remote_port))
+            .collect::<Vec<String>>()
+            .join("\n")
+    );
 
-    // Ensure agent daemon gets port mappings right away if configured here:
-    // (Actual tunnel start/stop logic handles mapping loading elsewhere via tunnel::start_tunnel)
+    std::fs::write(&config_path, toml_string).map_err(|e| format!("Failed to save config file at {:?}: {}", config_path, e))?;
 
     Ok(())
 }

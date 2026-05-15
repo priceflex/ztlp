@@ -56,16 +56,23 @@ pub fn process_enrollment(token_uri: &str) -> Result<EnrollResult, String> {
         return Err("Invalid enrollment URI — must start with ztlp://enroll/".into());
     }
 
-    // Usually, we would parse the token URI properly from `ztlp://enroll/?zone=X&relay=Y`
-    // but the exact format isn't strictly important for the UI right now beyond giving success
-    // response. We'd persist this info to identity.json/config.toml.
+    let child = get_daemon_cmd()
+        .args(["setup", "--token", token_uri, "--yes"])
+        .output();
 
-    Ok(EnrollResult {
-        success: true,
-        zone_name: Some("techrockstars.ztlp".to_string()),
-        relay_address: Some("34.219.64.205:23095".into()),
-        message: "Enrollment successful".into(),
-    })
+    match child {
+        Ok(output) if output.status.success() => Ok(EnrollResult {
+            success: true,
+            zone_name: Some("Enrolled Zone".to_string()),
+            relay_address: None,
+            message: "Enrollment successful".into(),
+        }),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Enrollment failed: {}", stderr))
+        }
+        Err(e) => Err(format!("Failed to execute command: {}", e)),
+    }
 }
 
 /// Get current traffic statistics.

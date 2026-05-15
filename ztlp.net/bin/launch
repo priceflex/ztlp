@@ -2,21 +2,21 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTANCE_ROOT="${HATCHERY_INSTANCE_ROOT:-$ROOT/data/instances}"
-BOOTSTRAP_IMAGE="${HATCHERY_BOOTSTRAP_IMAGE:-priceflex/ztlp-bootstrap:latest}"
-BASE_PORT="${HATCHERY_INSTANCE_BASE_PORT:-39000}"
-DEFAULT_ZONE_SUFFIX="${HATCHERY_DEFAULT_ZONE_SUFFIX:-ztlp}"
+INSTANCE_ROOT="${LAUNCH_INSTANCE_ROOT:-$ROOT/data/instances}"
+BOOTSTRAP_IMAGE="${LAUNCH_BOOTSTRAP_IMAGE:-priceflex/ztlp-bootstrap:latest}"
+BASE_PORT="${LAUNCH_INSTANCE_BASE_PORT:-39000}"
+DEFAULT_ZONE_SUFFIX="${LAUNCH_DEFAULT_ZONE_SUFFIX:-ztlp}"
 
 usage() {
   cat <<'USAGE'
-ZTLP Hatchery — public-safe bootstrap instance launcher
+ZTLP Launch — public-safe bootstrap instance launcher
 
 Usage:
-  bin/hatchery create <slug> --org "Org Name" --email admin@example.com [--zone org.ztlp]
-  bin/hatchery list
-  bin/hatchery status <slug>
-  bin/hatchery stop <slug>
-  bin/hatchery destroy <slug>
+  bin/launch create <slug> --org "Org Name" --email admin@example.com [--zone org.ztlp]
+  bin/launch list
+  bin/launch status <slug>
+  bin/launch stop <slug>
+  bin/launch destroy <slug>
 
 Notes:
   - Generated bootstrap/admin instances are not published publicly.
@@ -162,7 +162,7 @@ cmd_list() {
     printf '%-24s %-32s %-36s %s\n' "$ZTLP_INSTANCE_SLUG" "$ZTLP_ZONE" "$ZTLP_ADMIN_EMAIL" "${ZTLP_CREATED_AT:-}"
   done
   if [[ "$any" -eq 0 ]]; then
-    echo "No Hatchery instances found."
+    echo "No Launch instances found."
   fi
 }
 

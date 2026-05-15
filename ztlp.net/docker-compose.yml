@@ -1,14 +1,14 @@
 services:
-  hatchery:
+  launch:
     image: nginx:alpine
-    container_name: ztlp-hatchery-placeholder
+    container_name: ztlp-launch-placeholder
     ports:
-      - "${HATCHERY_PORT:-8080}:80"
+      - "${LAUNCH_PORT:-8080}:80"
     volumes:
       - ./public:/usr/share/nginx/html:ro
     restart: unless-stopped
 
 # Bootstrap/admin instances are intentionally NOT exposed here.
-# Use bin/hatchery to create per-instance Docker Compose files under data/instances/.
+# Use bin/launch to create per-instance Docker Compose files under data/instances/.
 # Those generated instance files bind private Rails ports to 127.0.0.1 only until
 # ZTLP-native service access is wired.

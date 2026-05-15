@@ -59,7 +59,7 @@ Action taken in this reset:
 
 - Stopped and removed public ngrok/bootstrap containers.
 - Removed `bin/run-local-ngrok` and `.env.local.example`.
-- Replaced README/Compose with Hatchery launcher scaffold.
+- Replaced README/Compose with Launch launcher scaffold.
 - Kept local `.env.local` ignored; no secrets committed.
 
 ## Older Z2LS registration flow that matches the remembered onboarding
@@ -264,7 +264,7 @@ Public launcher should consume a signed release manifest instead of hardcoding d
 Recommended split:
 
 ```text
-Public ztlp.net / Hatchery
+Public ztlp.net / Launch
   - signup/onboarding form
   - completion token emails
   - download links
@@ -281,6 +281,6 @@ Private bootstrap instance
 
 ## Working name
 
-Use **ZTLP Hatchery** for now.
+Use **ZTLP Launch** for now.
 
-Reason: it is memorable and accurate: it hatches isolated bootstrap instances. It also avoids overloading “bootstrap” for both the private Rails app and the public provisioner.
+Reason: Steven chose Launch as the customer-facing name. It clearly describes the public action: launching private Bootstrap instances without exposing Bootstrap admin directly.

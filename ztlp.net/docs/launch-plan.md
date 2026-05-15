@@ -1,10 +1,10 @@
-# ZTLP Hatchery Implementation Plan
+# ZTLP Launch Implementation Plan
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** Build `ztlp.net` as the public ZTLP onboarding and bootstrap-instance launcher without exposing private bootstrap/admin UI to the public internet.
 
-**Architecture:** Public `ztlp.net` hosts Hatchery: a marketing/onboarding/provisioning app that creates isolated Docker-backed bootstrap instances and returns download/enrollment/claim instructions. Private bootstrap/admin Rails instances run separately, are not publicly routed, and become reachable through ZTLP-native service identity only.
+**Architecture:** Public `ztlp.net` hosts Launch: a marketing/onboarding/provisioning app that creates isolated Docker-backed bootstrap instances and returns download/enrollment/claim instructions. Private bootstrap/admin Rails instances run separately, are not publicly routed, and become reachable through ZTLP-native service identity only.
 
 **Tech Stack:** Docker Compose, Rails Bootstrap app reuse, small launcher app/service TBD, existing ZTLP Rust CLI/enrollment, existing NS enrollment protocol, release/download workflows.
 
@@ -25,11 +25,11 @@
 
 1. User visits `https://ztlp.net/start`.
 2. User enters organization name, admin name, admin email, and desired zone slug.
-3. Hatchery creates a short-lived completion/claim token.
-4. Hatchery emails a magic link to admin email.
+3. Launch creates a short-lived completion/claim token.
+4. Launch emails a magic link to admin email.
 5. Admin opens `/claim?token=...`.
-6. Hatchery launches or claims a Docker-backed private bootstrap instance.
-7. Hatchery shows:
+6. Launch launches or claims a Docker-backed private bootstrap instance.
+7. Launch shows:
    - ZTLP app/CLI download links.
    - Enrollment token/QR or instructions to fetch it through the private bootstrap.
    - ZTLP-native connection instructions for `bootstrap.<zone>`.
@@ -38,13 +38,13 @@
 
 ### Bootstrap instance launch
 
-1. Hatchery creates per-instance directory under `ztlp.net/data/instances/<slug>/`.
-2. Hatchery generates/records instance metadata.
-3. Hatchery launches private Rails bootstrap container with no public port.
-4. Hatchery generates or requests bootstrap service identity.
-5. Hatchery registers `bootstrap.<zone>` in NS.
-6. Hatchery starts a ZTLP listener/gateway to the private Rails port.
-7. Hatchery returns ZTLP service name, not public admin URL.
+1. Launch creates per-instance directory under `ztlp.net/data/instances/<slug>/`.
+2. Launch generates/records instance metadata.
+3. Launch launches private Rails bootstrap container with no public port.
+4. Launch generates or requests bootstrap service identity.
+5. Launch registers `bootstrap.<zone>` in NS.
+6. Launch starts a ZTLP listener/gateway to the private Rails port.
+7. Launch returns ZTLP service name, not public admin URL.
 
 ## Non-goals
 
@@ -58,17 +58,17 @@
 
 ## Task 1: Keep ztlp.net as public launcher scaffold
 
-**Objective:** Ensure the directory structure reflects Hatchery and does not contain old ngrok exposure.
+**Objective:** Ensure the directory structure reflects Launch and does not contain old ngrok exposure.
 
 **Files:**
 - Keep: `ztlp.net/README.md`
 - Keep: `ztlp.net/docker-compose.yml`
 - Keep: `ztlp.net/.env.example`
 - Keep: `ztlp.net/.gitignore`
-- Keep: `ztlp.net/bin/hatchery`
+- Keep: `ztlp.net/bin/launch`
 - Keep: `ztlp.net/public/index.html`
 - Keep: `ztlp.net/docs/onboarding-source-inventory.md`
-- Keep: `ztlp.net/docs/hatchery-plan.md`
+- Keep: `ztlp.net/docs/launch-plan.md`
 - Remove/avoid: `ztlp.net/bin/run-local-ngrok`
 - Remove/avoid: `ztlp.net/.env.local.example` if it describes ngrok
 
@@ -87,12 +87,12 @@ Expected: all checks pass.
 
 ---
 
-## Task 2: Replace shell scaffold with minimal Hatchery app
+## Task 2: Replace shell scaffold with minimal Launch app
 
-**Objective:** Add a tiny public app that can accept onboarding requests, create claim tokens, and call the Hatchery instance launcher.
+**Objective:** Add a tiny public app that can accept onboarding requests, create claim tokens, and call the Launch instance launcher.
 
 **Files:**
-- Create: `ztlp.net/app/` or `ztlp.net/hatchery/` once framework is selected.
+- Create: `ztlp.net/app/` or `ztlp.net/launch/` once framework is selected.
 - Modify: `ztlp.net/docker-compose.yml`.
 - Modify: `ztlp.net/README.md`.
 
@@ -176,11 +176,11 @@ BootstrapInstance
 
 ## Task 4: Wire Docker instance creation
 
-**Objective:** Turn `bin/hatchery create` into app-callable provisioning logic.
+**Objective:** Turn `bin/launch create` into app-callable provisioning logic.
 
 **Files:**
-- Modify/create Hatchery service object.
-- Keep or wrap: `ztlp.net/bin/hatchery`.
+- Modify/create Launch service object.
+- Keep or wrap: `ztlp.net/bin/launch`.
 - Generated runtime files under ignored `ztlp.net/data/instances/<slug>/`.
 
 **Rules:**
@@ -196,11 +196,11 @@ Run:
 
 ```bash
 cd /home/trs/projects/ztlp/ztlp.net
-bin/hatchery create acme-test --org "Acme Test" --email admin@example.com --zone acme-test.ztlp
-bin/hatchery status acme-test
+bin/launch create acme-test --org "Acme Test" --email admin@example.com --zone acme-test.ztlp
+bin/launch status acme-test
 grep -R "0.0.0.0" data/instances/acme-test && exit 1 || true
 grep -R "127.0.0.1" data/instances/acme-test/docker-compose.yml
-bin/hatchery destroy acme-test
+bin/launch destroy acme-test
 ```
 
 Expected: instance scaffold is created, host binding is local only, destroy cleans it up.
@@ -227,7 +227,7 @@ ns/lib/ztlp_ns/enrollment.ex
 2. Register KEY/SVC record for `bootstrap.<zone>`.
 3. Start listener/gateway forwarding ZTLP service traffic to private Rails port 3000.
 4. Store service identity metadata in instance runtime directory or Docker volume.
-5. Hatchery claim page shows:
+5. Launch claim page shows:
 
 ```text
 ztlp connect bootstrap.<zone>
@@ -319,13 +319,13 @@ desktop/README.md
 
 ## Task 8: Clean repository docs after implementation
 
-**Objective:** Prevent future confusion between private Bootstrap, public Hatchery, old ngrok local test, and older Z2LS registration code.
+**Objective:** Prevent future confusion between private Bootstrap, public Launch, old ngrok local test, and older Z2LS registration code.
 
 **Files:**
 - Update: root docs/plans as needed.
 - Update: `ztlp.net/README.md`.
 - Keep: `ztlp.net/docs/onboarding-source-inventory.md`.
-- Keep: `ztlp.net/docs/hatchery-plan.md`.
+- Keep: `ztlp.net/docs/launch-plan.md`.
 - Remove or archive stale handoffs after key facts are merged.
 
 **Verification:**
@@ -353,7 +353,7 @@ Expected:
 
 - `ztlp.net` is a clean public launcher/provisioning workspace.
 - Old public ngrok-to-bootstrap plumbing is gone.
-- Hatchery can create/list/status/stop/destroy bootstrap instance scaffolds.
+- Launch can create/list/status/stop/destroy bootstrap instance scaffolds.
 - Public pages never link directly to private bootstrap/admin URLs.
 - Plan clearly maps older Z2LS registration flow to new ZTLP onboarding.
 - Existing ZTLP enrollment pieces are identified with exact paths.

@@ -2,9 +2,9 @@
 
 Public product workspace for the ZTLP onboarding and bootstrap launcher.
 
-Working name: **ZTLP Hatchery**.
+Working name: **ZTLP Launch**.
 
-The Hatchery is the public-safe front door. It accepts onboarding/provisioning requests, launches Docker-backed ZTLP bootstrap instances, and returns ZTLP connection/download instructions. It must not expose the private bootstrap/admin Rails UI directly on the public internet.
+The Launch is the public-safe front door. It accepts onboarding/provisioning requests, launches Docker-backed ZTLP bootstrap instances, and returns ZTLP connection/download instructions. It must not expose the private bootstrap/admin Rails UI directly on the public internet.
 
 ## Security boundary
 
@@ -31,14 +31,14 @@ Private bootstrap/admin instances are Docker containers reachable only by local 
 ```text
 ztlp.net/
   README.md                         # this overview
-  docker-compose.yml                # local Hatchery + private bootstrap instance scaffold
+  docker-compose.yml                # local Launch + private bootstrap instance scaffold
   .env.example                      # safe environment template
   .gitignore                        # local secrets/runtime ignores
   bin/
-    hatchery                        # create/list/stop/status bootstrap instances
+    launch                        # create/list/stop/status bootstrap instances
   docs/
     onboarding-source-inventory.md  # what existing code/docs already support
-    hatchery-plan.md                # implementation plan for the public launcher
+    launch-plan.md                # implementation plan for the public launcher
   data/
     instances/.keep                 # local runtime registry; ignored except .keep
 ```
@@ -47,7 +47,7 @@ ztlp.net/
 
 The initial scaffold is intentionally boring and Docker-only:
 
-- One `hatchery` service for the public launcher placeholder.
+- One `launch` service for the public launcher placeholder.
 - Zero public bootstrap/admin port publishing.
 - Per-instance Docker Compose files generated under `ztlp.net/data/instances/<slug>/`.
 - Bootstrap instances bind Rails to `127.0.0.1:<private-port>` only for local/dev inspection until ZTLP service identity is wired.
@@ -59,25 +59,25 @@ Create a private bootstrap instance scaffold:
 
 ```bash
 cd /home/trs/projects/ztlp/ztlp.net
-bin/hatchery create acme --org "Acme Corp" --email admin@example.com --zone acme.ztlp
+bin/launch create acme --org "Acme Corp" --email admin@example.com --zone acme.ztlp
 ```
 
 List known instances:
 
 ```bash
-bin/hatchery list
+bin/launch list
 ```
 
 Show an instance:
 
 ```bash
-bin/hatchery status acme
+bin/launch status acme
 ```
 
 Stop an instance:
 
 ```bash
-bin/hatchery stop acme
+bin/launch stop acme
 ```
 
 ## Prior onboarding work worth reusing
@@ -104,4 +104,4 @@ The ZTLP repo already implements most of the lower-level enrollment stack:
 - NS `ENROLL` / `ENROLL_OK` handler.
 - Desktop/macOS onboarding shells.
 
-See `docs/onboarding-source-inventory.md` and `docs/hatchery-plan.md` for details.
+See `docs/onboarding-source-inventory.md` and `docs/launch-plan.md` for details.

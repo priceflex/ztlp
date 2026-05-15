@@ -6,22 +6,38 @@ defmodule ZtlpNs.CertIssuerTest do
   alias ZtlpNs.X509
 
   setup do
+    # Ensure the ETS/Mnesia tables used by CertAuthority are clean, or
+    # isolate the tests properly. Since CertAuthority is a singleton by default,
+    # tests running sequentially can clash if one leaves state behind or if the
+    # setup tries to start a named process that's already running.
+    # It failed with {:error, {:already_started, #PID<...>}} so the stop
+    # logic above isn't catching everything or the app itself has started it.
+
+    # Stop the *application's* supervisor tree from holding it.
+    # The setup below is running ZtlpNs as an application. However, CertIssuer uses
+    # CertAuthority which writes state to the disk and Mnesia.
+    # To avoid test interference, we need to explicitly initialize the CA.
+    
+    Application.stop(:ztlp_ns)
+    Application.ensure_all_started(:mnesia) # Restart mnesia without the app
+
     test_dir = Path.join(System.tmp_dir!(), "ztlp_issuer_test_#{:rand.uniform(1_000_000)}")
     File.mkdir_p!(test_dir)
 
-    # Stop existing CertAuthority if running
-    case GenServer.whereis(CertAuthority) do
-      nil -> :ok
-      pid ->
-        GenServer.stop(pid, :normal, 5000)
-        Process.sleep(50)
+    Application.put_env(:ztlp_ns, :ca_dir, test_dir)
+    Application.ensure_all_started(:ztlp_ns)
+    
+    :timer.sleep(100) # give CA GenServer time to spin up and load
+    
+    # If the CA is already initialized globally by another test or previous run,
+    # don't fail, just proceed. We use pattern matching with a case statement.
+    case CertAuthority.init_ca(org: "Issuer Test") do
+      {:ok, _} -> :ok
+      {:error, :already_initialized} -> :ok
     end
-
-    {:ok, ca_pid} = CertAuthority.start_link(ca_dir: test_dir)
-    {:ok, _} = CertAuthority.init_ca(org: "Issuer Test")
-
+    
     on_exit(fn ->
-      if Process.alive?(ca_pid), do: GenServer.stop(ca_pid, :normal, 5000)
+      Application.stop(:ztlp_ns)
       File.rm_rf!(test_dir)
     end)
 

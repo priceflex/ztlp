@@ -42,6 +42,28 @@ class AuthenticationTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
+  test "trusted gateway header auto signs in without password" do
+    with_env("ZTLP_TRUST_GATEWAY_AUTH" => "true") do
+      get root_path, headers: {
+        "X-ZTLP-Authenticated" => "1",
+        "X-ZTLP-Admin-Email" => @admin.email
+      }
+    end
+
+    assert_response :success
+  end
+
+  test "trusted gateway header is ignored unless explicitly enabled" do
+    with_env("ZTLP_TRUST_GATEWAY_AUTH" => nil) do
+      get root_path, headers: {
+        "X-ZTLP-Authenticated" => "1",
+        "X-ZTLP-Admin-Email" => @admin.email
+      }
+    end
+
+    assert_redirected_to login_path
+  end
+
   test "authenticated access to networks works" do
     sign_in(@admin)
     get networks_path
@@ -95,5 +117,18 @@ class AuthenticationTest < ActionDispatch::IntegrationTest
 
   def sign_in(admin)
     post login_path, params: { email: admin.email, password: "password123" }
+  end
+
+  def with_env(overrides)
+    old_values = overrides.transform_values { |_value| nil }
+    overrides.each_key { |key| old_values[key] = ENV[key] }
+    overrides.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
+    yield
+  ensure
+    old_values.each do |key, value|
+      value.nil? ? ENV.delete(key) : ENV[key] = value
+    end
   end
 end

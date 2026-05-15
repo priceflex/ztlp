@@ -1,0 +1,11 @@
+# Keep Docker preview build context small and free of local runtime state.
+.git
+.env.local
+.env.*.local
+data
+secrets
+*.sqlite3
+*.sqlite3-*
+__pycache__
+*.pyc
+.pytest_cache

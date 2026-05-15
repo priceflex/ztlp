@@ -146,15 +146,14 @@ use crate::handshake::{
     HandshakeContext, INITIAL_HANDSHAKE_RETRY_MS, MAX_HANDSHAKE_RETRIES, MAX_HANDSHAKE_RETRY_MS,
 };
 use crate::identity::{NodeId, NodeIdentity};
-use crate::mobile::{
-    HardwareIdentityProvider, IdentityProvider, PlatformIdentity,
-    SoftwareIdentityProvider,
-};
 #[cfg(feature = "tokio-runtime")]
 use crate::mobile::{ConnectionState, MobileConfig};
+use crate::mobile::{
+    HardwareIdentityProvider, IdentityProvider, PlatformIdentity, SoftwareIdentityProvider,
+};
+use crate::packet::SessionId;
 #[cfg(feature = "tokio-runtime")]
 use crate::packet::{HandshakeHeader, MsgType, HANDSHAKE_HEADER_SIZE};
-use crate::packet::SessionId;
 #[cfg(feature = "tokio-runtime")]
 use crate::reject::RejectFrame;
 // SessionState used for future session management features
@@ -3089,9 +3088,7 @@ pub extern "C" fn ztlp_ios_tunnel_engine_udp_send(
 
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 #[no_mangle]
-pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(
-    engine: *mut ZtlpIosTunnelEngine,
-) -> i32 {
+pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(engine: *mut ZtlpIosTunnelEngine) -> i32 {
     if engine.is_null() {
         set_last_error("engine is null");
         return -(ZtlpResult::InvalidArgument as i32);
@@ -3263,10 +3260,7 @@ pub extern "C" fn ztlp_mux_enqueue_open(
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_enqueue_close(
-    engine: *mut ZtlpMuxEngine,
-    stream_id: u32,
-) -> i32 {
+pub extern "C" fn ztlp_mux_enqueue_close(engine: *mut ZtlpMuxEngine, stream_id: u32) -> i32 {
     if engine.is_null() {
         set_last_error("engine is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -3288,11 +3282,7 @@ pub extern "C" fn ztlp_mux_enqueue_close(
 /// callback must NOT retain the pointer after returning — copy the bytes
 /// if needed.
 #[cfg(feature = "ios-sync")]
-pub type ZtlpMuxFrameCallback = extern "C" fn(
-    user_data: *mut c_void,
-    frame: *const u8,
-    len: usize,
-);
+pub type ZtlpMuxFrameCallback = extern "C" fn(user_data: *mut c_void, frame: *const u8, len: usize);
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
@@ -3653,7 +3643,10 @@ pub extern "C" fn ztlp_router_gateway_data_sync(
 /// Return 1 if the router currently maps stream_id to an active TCP flow,
 /// 0 if unmapped, and -1 on error.
 #[no_mangle]
-pub extern "C" fn ztlp_router_has_stream_sync(router: *mut ZtlpPacketRouter, stream_id: u32) -> i32 {
+pub extern "C" fn ztlp_router_has_stream_sync(
+    router: *mut ZtlpPacketRouter,
+    stream_id: u32,
+) -> i32 {
     if router.is_null() {
         set_last_error("null argument");
         return -1;
@@ -5990,10 +5983,6 @@ mod tests {
         assert_eq!(result, ZtlpResult::InvalidArgument as i32);
     }
 
-
-
-
-
     #[test]
     fn test_session_peer_node_id_null() {
         let ptr = ztlp_session_peer_node_id(std::ptr::null());
@@ -6038,9 +6027,6 @@ mod tests {
         assert_eq!(addr_str, "127.0.0.1:4433");
     }
 
-
-
-
     #[test]
     fn test_string_free_null_is_noop() {
         ztlp_string_free(std::ptr::null_mut());
@@ -6052,8 +6038,6 @@ mod tests {
         let ptr = s.into_raw();
         ztlp_string_free(ptr);
     }
-
-
 
     #[test]
     fn test_bytes_sent_no_session() {
@@ -6088,9 +6072,6 @@ mod tests {
     ) {
     }
 
-
-
-
     extern "C" fn dummy_recv_callback(
         _user_data: *mut c_void,
         _data: *const u8,
@@ -6105,10 +6086,6 @@ mod tests {
         _reason: i32,
     ) {
     }
-
-
-
-
 
     // ── VIP Proxy tests ────────────────────────────────────────────────
 

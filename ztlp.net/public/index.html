@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZTLP Launch</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at top left, #2142ff33, transparent 34%), #080b14; color: #eef3ff; }
+    main { width: min(920px, calc(100vw - 48px)); padding: 54px; border: 1px solid #24314d; border-radius: 28px; background: #101827cc; box-shadow: 0 24px 80px #0008; }
+    .eyebrow { color: #73e6ff; text-transform: uppercase; letter-spacing: .18em; font-size: 12px; font-weight: 700; }
+    h1 { font-size: clamp(42px, 8vw, 82px); line-height: .92; margin: 18px 0; }
+    p { color: #bdc9e7; font-size: 20px; line-height: 1.55; max-width: 760px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; margin-top: 34px; }
+    .card { padding: 20px; border-radius: 18px; background: #172238; border: 1px solid #2a3a5d; }
+    .card strong { display: block; color: #fff; margin-bottom: 8px; }
+    .card span { color: #9fb0d5; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">ztlp.net public launcher</div>
+    <h1>ZTLP Launch</h1>
+    <p>
+      Launch secure bootstrap instances without putting the bootstrap/admin UI on the public internet.
+      Public ztlp.net handles onboarding, downloads, and provisioning status; private admin access happens through ZTLP-native identity.
+    </p>
+    <section class="cards">
+      <div class="card"><strong>Public-safe</strong><span>Marketing, onboarding request, downloads, and claim status only.</span></div>
+      <div class="card"><strong>Docker-backed</strong><span>Each customer bootstrap runs as an isolated instance.</span></div>
+      <div class="card"><strong>ZTLP-only admin</strong><span>Bootstrap/admin is reached through service identity, not public HTTPS login.</span></div>
+    </section>
+  </main>
+</body>
+</html>

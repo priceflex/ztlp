@@ -545,9 +545,7 @@ async fn encrypt_and_send(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let packet_seq = {
         let mut pl = pipeline.lock().await;
-        let session = pl
-            .get_session_mut(&session_id)
-            .ok_or("session not found")?;
+        let session = pl.get_session_mut(&session_id).ok_or("session not found")?;
         session.next_send_seq()
     };
     let mut nonce_bytes = [0u8; 12];
@@ -857,7 +855,6 @@ where
     }
     Ok(())
 }
-
 
 // ─── Service registry ───────────────────────────────────────────────────────
 
@@ -1221,13 +1218,8 @@ mod tests {
         let send_key = [0x42u8; 32];
         let recv_key = [0x43u8; 32];
 
-        let server_session = SessionState::new(
-            session_id,
-            id_client.node_id,
-            recv_key,
-            send_key,
-            false,
-        );
+        let server_session =
+            SessionState::new(session_id, id_client.node_id, recv_key, send_key, false);
 
         let _ = recv_key;
 
@@ -1295,7 +1287,11 @@ mod tests {
 
         client_task.await.unwrap();
 
-        assert!(result.is_ok(), "should receive first data: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should receive first data: {:?}",
+            result.err()
+        );
         let packets = result.unwrap();
         assert!(!packets.is_empty());
     }

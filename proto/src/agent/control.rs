@@ -126,13 +126,9 @@ pub async fn run_control_socket(
     ipc_addr: &str,
     state: Arc<AgentState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
-        format!(
-            "failed to bind control socket {}: {}",
-            ipc_addr,
-            e
-        )
-    })?;
+    let listener = TcpListener::bind(ipc_addr)
+        .await
+        .map_err(|e| format!("failed to bind control socket {}: {}", ipc_addr, e))?;
 
     info!("control socket listening on {}", ipc_addr);
 
@@ -280,8 +276,7 @@ pub async fn send_command(
             format!(
                 "cannot connect to agent ({}): {}\n\
              Is the agent running? Start it with: ztlp agent start",
-                ipc_addr,
-                e
+                ipc_addr, e
             )
         })?;
 

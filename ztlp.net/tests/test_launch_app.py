@@ -65,7 +65,7 @@ class LaunchAppTest(unittest.TestCase):
         for path, expected in [
             ("/", "ZTLP Launch"),
             ("/start", "Request onboarding"),
-            ("/downloads", "Download manifest"),
+            ("/downloads", "Download ZTLP"),
         ]:
             with self.subTest(path=path):
                 status, _headers, body = self.request("GET", path)
@@ -130,7 +130,7 @@ class LaunchAppTest(unittest.TestCase):
         self.assertIn("Status: claimed", claim_body)
         self.assertIn("bootstrap.example.ztlp", claim_body)
         self.assertIn("ztlp connect bootstrap.example.ztlp", claim_body)
-        self.assertIn("Downloads", claim_body)
+        self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
         self.assertNotIn(token, claim_body)
@@ -225,6 +225,42 @@ class LaunchAppTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             LaunchApp(db_path=os.path.join(self.tmpdir.name, "prod.sqlite3"), token_secret="ztlp-launch-dev-secret-change-me", environment="production")
 
+
+
+    def test_download_page_links_to_release_assets_without_private_admin_exposure(self):
+        status, _headers, body = self.request("GET", "/downloads")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertIn("Windows ZIP", body)
+        self.assertIn("ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip", body)
+        self.assertIn("ztlp-v-before-nebula-collapse-x86_64-unknown-linux-gnu.tar.gz", body)
+        self.assertIn("ztlp-v-before-nebula-collapse-aarch64-apple-darwin.tar.gz", body)
+        self.assertIn("/downloads/manifest.json", body)
+        self.assertNotIn("http://127.0.0.1", body)
+        self.assertNotIn("/login", body)
+
+    def test_download_redirects_to_github_release_assets(self):
+        for key, expected in [
+            ("windows", "ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip"),
+            ("linux", "ztlp-v-before-nebula-collapse-x86_64-unknown-linux-gnu.tar.gz"),
+            ("macos-apple-silicon", "ztlp-v-before-nebula-collapse-aarch64-apple-darwin.tar.gz"),
+            ("macos-intel", "ztlp-v-before-nebula-collapse-x86_64-apple-darwin.tar.gz"),
+            ("checksums", "SHA256SUMS.txt"),
+        ]:
+            with self.subTest(key=key):
+                status, headers, body = self.request("GET", f"/downloads/{key}")
+                self.assertEqual(HTTPStatus.FOUND, status)
+                self.assertIn(expected, headers["Location"])
+                self.assertIn("github.com/priceflex/ztlp/releases/download/v-before-nebula-collapse", headers["Location"])
+                self.assertIn(expected, body)
+
+    def test_download_manifest_json_lists_launch_and_github_urls(self):
+        status, headers, body = self.request("GET", "/downloads/manifest.json")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        self.assertIn('"release": "v-before-nebula-collapse"', body)
+        self.assertIn('"key": "windows"', body)
+        self.assertIn('"launch_url": "http://testserver/downloads/windows"', body)
+        self.assertIn('"url": "https://github.com/priceflex/ztlp/releases/download/v-before-nebula-collapse/ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip"', body)
 
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="

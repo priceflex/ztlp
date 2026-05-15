@@ -53,10 +53,21 @@ It provides:
 - `POST /start` onboarding request creation with a one-time local/dev claim link display.
 - `GET /claim?token=...` claim verification/status/download instructions.
 - `POST /claim/launch` stub status transition to `launch_requested`.
-- `GET /downloads` public download manifest page.
+- `GET /downloads` public download page with Windows, Linux, and macOS CLI bundles.
+- `GET /downloads/<platform>` redirects to the matching GitHub release asset.
+- `GET /downloads/manifest.json` machine-readable release/download manifest.
 - `GET /health` health check.
 
 Claim tokens are stored as HMAC-SHA256 digests only. The app does not publish Bootstrap admin URLs, Rails login URLs, ngrok tunnels, or dashboard routes.
+
+
+Current default release: `v-before-nebula-collapse`. Override with `ZTLP_RELEASE_TAG` when a newer tagged release is ready. The CLI bundles currently used by Launch are:
+
+- `/downloads/windows` -> Windows x64 ZIP containing `ztlp.exe`.
+- `/downloads/linux` -> Linux x86_64 tarball containing `ztlp`.
+- `/downloads/macos-apple-silicon` -> macOS Apple Silicon tarball containing `ztlp`.
+- `/downloads/macos-intel` -> macOS Intel tarball containing `ztlp`.
+- `/downloads/checksums` -> release `SHA256SUMS.txt`.
 
 ## Local commands
 

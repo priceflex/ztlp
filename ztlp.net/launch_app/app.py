@@ -12,6 +12,7 @@ import datetime as dt
 import hmac
 import hashlib
 import html
+import json
 import os
 import re
 import secrets
@@ -31,6 +32,68 @@ TOKEN_TTL_DAYS = int(os.environ.get("LAUNCH_CLAIM_TOKEN_TTL_DAYS", "7"))
 DEFAULT_ENVIRONMENT = os.environ.get("LAUNCH_ENV", os.environ.get("APP_ENV", "development")).lower()
 DEV_TOKEN_SECRET = "ztlp-launch-dev-secret-change-me"
 MAX_FORM_BYTES = int(os.environ.get("LAUNCH_MAX_FORM_BYTES", "65536"))
+RELEASE_TAG = os.environ.get("ZTLP_RELEASE_TAG", "v-before-nebula-collapse")
+RELEASE_BASE_URL = os.environ.get("ZTLP_RELEASE_BASE_URL", f"https://github.com/priceflex/ztlp/releases/download/{RELEASE_TAG}")
+RELEASE_PAGE_URL = os.environ.get("ZTLP_RELEASE_PAGE_URL", f"https://github.com/priceflex/ztlp/releases/tag/{RELEASE_TAG}")
+
+DOWNLOAD_ASSETS = [
+    {
+        "key": "windows",
+        "label": "Windows CLI bundle",
+        "platform": "Windows x64",
+        "filename": f"ztlp-{RELEASE_TAG}-x86_64-pc-windows-msvc.zip",
+        "description": "ZIP containing ztlp.exe and related command-line tools.",
+        "install": "Download, unzip, then run ztlp.exe from PowerShell or add the folder to PATH.",
+        "primary": True,
+    },
+    {
+        "key": "linux",
+        "label": "Linux CLI bundle",
+        "platform": "Linux x86_64",
+        "filename": f"ztlp-{RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz",
+        "description": "Tarball containing ztlp and related command-line tools for standard 64-bit Linux.",
+        "install": "tar xzf the archive, then run ./ztlp or copy it into /usr/local/bin.",
+        "primary": True,
+    },
+    {
+        "key": "macos-apple-silicon",
+        "label": "macOS CLI bundle",
+        "platform": "macOS Apple Silicon",
+        "filename": f"ztlp-{RELEASE_TAG}-aarch64-apple-darwin.tar.gz",
+        "description": "Tarball containing ztlp for Apple Silicon Macs.",
+        "install": "tar xzf the archive, then run ./ztlp from Terminal.",
+        "primary": True,
+    },
+    {
+        "key": "macos-intel",
+        "label": "macOS CLI bundle",
+        "platform": "macOS Intel",
+        "filename": f"ztlp-{RELEASE_TAG}-x86_64-apple-darwin.tar.gz",
+        "description": "Tarball containing ztlp for Intel Macs.",
+        "install": "tar xzf the archive, then run ./ztlp from Terminal.",
+        "primary": False,
+    },
+    {
+        "key": "linux-arm64",
+        "label": "Linux CLI bundle",
+        "platform": "Linux ARM64",
+        "filename": f"ztlp-{RELEASE_TAG}-aarch64-unknown-linux-gnu.tar.gz",
+        "description": "Tarball containing ztlp for ARM64 Linux hosts.",
+        "install": "tar xzf the archive, then run ./ztlp or copy it into /usr/local/bin.",
+        "primary": False,
+    },
+    {
+        "key": "windows-installer",
+        "label": "Windows desktop installer",
+        "platform": "Windows x64",
+        "filename": "ZTLP_1.0.0_x64-setup.exe",
+        "description": "Experimental desktop installer from the current release assets.",
+        "install": "Use only for desktop-app testing; CLI ZIP is the safer first download path.",
+        "primary": False,
+    },
+]
+ASSET_BY_KEY = {asset["key"]: asset for asset in DOWNLOAD_ASSETS}
+CHECKSUM_ASSET = "SHA256SUMS.txt"
 ZONE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$")
 
 
@@ -79,7 +142,11 @@ class LaunchApp:
             elif method == "POST" and path == "/claim/launch":
                 response = self.handle_claim_launch(environ)
             elif method == "GET" and path == "/downloads":
-                response = self.render_downloads()
+                response = self.render_downloads(environ)
+            elif method == "GET" and path == "/downloads/manifest.json":
+                response = self.render_download_manifest(environ)
+            elif method == "GET" and path.startswith("/downloads/"):
+                response = self.handle_download_redirect(path)
             elif method == "GET" and path == "/health":
                 response = (HTTPStatus.OK, "text/plain; charset=utf-8", "ok\n")
             else:
@@ -96,16 +163,19 @@ class LaunchApp:
                 "text/html; charset=utf-8",
                 self.page("Launch error", "<p>ZTLP Launch could not complete that request.</p>"),
             )
-        status, content_type, body = response
+        if len(response) == 4:
+            status, content_type, body, extra_headers = response
+        else:
+            status, content_type, body = response
+            extra_headers = []
         body_bytes = body.encode("utf-8")
-        start_response(
-            f"{status.value} {status.phrase}",
-            [
-                ("Content-Type", content_type),
-                ("Content-Length", str(len(body_bytes))),
-                ("Cache-Control", "no-store" if path.startswith("/claim") or path == "/start" else "no-cache"),
-            ],
-        )
+        headers = [
+            ("Content-Type", content_type),
+            ("Content-Length", str(len(body_bytes))),
+            ("Cache-Control", "no-store" if path.startswith("/claim") or path == "/start" else "no-cache"),
+        ]
+        headers.extend(extra_headers)
+        start_response(f"{status.value} {status.phrase}", headers)
         return [body_bytes]
 
     def connect(self) -> sqlite3.Connection:
@@ -269,24 +339,83 @@ class LaunchApp:
           <dt>Connect command</dt><dd><code>ztlp connect {esc(service)}</code></dd>
         </dl>
         <p>Provisioning will expose the Bootstrap service through ZTLP-native identity only. No private admin URL is published here.</p>
-        <p><a href="/downloads">Downloads</a></p>
+        <p><a class="button" href="/downloads">Download ZTLP</a></p>
         """
         return self.page("Claim status", body)
 
-    def render_downloads(self) -> Tuple[HTTPStatus, str, str]:
-        manifest_url = os.environ.get("ZTLP_DOWNLOAD_MANIFEST_URL", "https://www.ztlp.net/downloads/manifest.json")
+    def render_downloads(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
+        cards = []
+        for asset in DOWNLOAD_ASSETS:
+            badge = "Primary" if asset["primary"] else "Optional"
+            cards.append(
+                f"""
+                <article>
+                  <strong>{esc(asset['label'])}</strong>
+                  <span>{esc(asset['platform'])} · {esc(badge)}</span>
+                  <p>{esc(asset['description'])}</p>
+                  <p class="small">{esc(asset['install'])}</p>
+                  <p><a class="button" href="/downloads/{esc(asset['key'])}">Download</a></p>
+                  <p class="small"><code>{esc(asset['filename'])}</code></p>
+                </article>
+                """
+            )
         body = f"""
         <p class="eyebrow">Downloads</p>
-        <h1>Download manifest</h1>
-        <p>Signed installer publishing is not wired yet. Public ztlp.net will serve CLI and desktop artifacts here when available.</p>
-        <ul>
-          <li>Manifest: <code>{esc(manifest_url)}</code></li>
-          <li>CLI: pending signed release artifact</li>
-          <li>Desktop: pending signed release artifact</li>
-        </ul>
+        <h1>Download ZTLP</h1>
+        <p>Start with the command-line binary bundles. They match the current public release assets and are enough for enrollment/setup testing while the full desktop installers mature.</p>
+        <div class="actions">
+          <a class="button" href="/downloads/windows">Windows ZIP</a>
+          <a class="button" href="/downloads/linux">Linux tar.gz</a>
+          <a class="button" href="/downloads/macos-apple-silicon">Mac Apple Silicon</a>
+          <a href="/downloads/manifest.json">Manifest JSON</a>
+        </div>
+        <section class="cards">{''.join(cards)}</section>
+        <h2>Verify downloads</h2>
+        <p>Release: <a href="{esc(RELEASE_PAGE_URL)}">{esc(RELEASE_TAG)}</a></p>
+        <p><a href="/downloads/checksums">SHA256 checksums</a></p>
+        <p class="small">Archives include <code>ztlp</code>/<code>ztlp.exe</code>, <code>ztlp-node</code>, <code>ztlp-inspect</code>, <code>ztlp-load</code>, <code>ztlp-fuzz</code>, and <code>ztlp-bench</code>. Desktop installers are present in GitHub releases, but the CLI bundles are the cleanest first path for Launch onboarding.</p>
         <p><a href="/start">Request onboarding</a></p>
         """
-        return (HTTPStatus.OK, "text/html; charset=utf-8", self.page("Download manifest", body))
+        return (HTTPStatus.OK, "text/html; charset=utf-8", self.page("Download ZTLP", body))
+
+    def render_download_manifest(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
+        payload = {
+            "release": RELEASE_TAG,
+            "release_url": RELEASE_PAGE_URL,
+            "checksums_url": self.download_url(CHECKSUM_ASSET),
+            "downloads": [
+                {
+                    "key": asset["key"],
+                    "label": asset["label"],
+                    "platform": asset["platform"],
+                    "filename": asset["filename"],
+                    "url": self.download_url(asset["filename"]),
+                    "launch_url": self.absolute_url(environ, f"/downloads/{asset['key']}"),
+                    "description": asset["description"],
+                    "install": asset["install"],
+                    "primary": asset["primary"],
+                }
+                for asset in DOWNLOAD_ASSETS
+            ],
+        }
+        return (HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(payload, indent=2) + "\n")
+
+    def handle_download_redirect(self, path: str) -> Tuple[HTTPStatus, str, str, list[tuple[str, str]]]:
+        key = path.rsplit("/", 1)[-1]
+        if key == "checksums":
+            return self.redirect(self.download_url(CHECKSUM_ASSET))
+        asset = ASSET_BY_KEY.get(key)
+        if not asset:
+            status, content_type, body = self.not_found("That ZTLP download was not found.")
+            return (status, content_type, body, [])
+        return self.redirect(self.download_url(asset["filename"]))
+
+    def redirect(self, url: str) -> Tuple[HTTPStatus, str, str, list[tuple[str, str]]]:
+        body = f"<p>Redirecting to <a href=\"{esc(url)}\">{esc(url)}</a>.</p>"
+        return (HTTPStatus.FOUND, "text/html; charset=utf-8", self.page("Download redirect", body), [("Location", url)])
+
+    def download_url(self, filename: str) -> str:
+        return f"{RELEASE_BASE_URL.rstrip('/')}/{filename}"
 
     def read_form(self, environ: dict) -> Dict[str, list[str]]:
         try:
@@ -359,6 +488,8 @@ class LaunchApp:
     article span {{ color: #9fb0d5; }}
     .error {{ border: 1px solid #ff9b9b; background: #35191f; border-radius: 16px; padding: 16px; }}
     .notice {{ border: 1px solid #73e6ff; border-radius: 16px; padding: 14px; background: #0d2530; }}
+    .small {{ font-size: 14px; color: #93a4c9; }}
+    h2 {{ margin-top: 32px; }}
   </style>
 </head>
 <body><main>{body}</main></body>

@@ -59,7 +59,10 @@ defmodule ZtlpNs.Replication do
   """
   @spec replicate_async(ZtlpNs.Record.t()) :: :ok
   def replicate_async(record) do
-    Task.start(fn -> replicate(record) end)
+    Task.start(fn ->
+      ensure_metrics_table() 
+      replicate(record) 
+    end)
     :ok
   end
 
@@ -102,9 +105,22 @@ defmodule ZtlpNs.Replication do
         try do
           :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
         rescue
-          ArgumentError -> :ok
+          ArgumentError ->
+            :timer.sleep(10) # Another process might be completing the creation
+            case :ets.whereis(@metrics_table) do
+              :undefined -> 
+                try do
+                  :ets.new(@metrics_table, [:set, :public, :named_table, write_concurrency: true])
+                rescue
+                    ArgumentError -> :ok
+                end
+              _ -> :ok
+            end
+        catch
+          # Handle Erlang error instead of Elixir Exception if :ets throws directly
+          :error, :badarg -> :ok
         end
-      _tid -> :ok
+      _ -> :ok
     end
   end
 

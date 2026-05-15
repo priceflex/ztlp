@@ -213,8 +213,6 @@ defmodule ZtlpRelay.IntegrationTest do
     end
 
     test "relay ignores packets from unknown peers" do
-      relay_port = UdpListener.get_port()
-
       {:ok, client_a} = :gen_udp.open(0, [:binary, {:active, true}])
       {:ok, client_b} = :gen_udp.open(0, [:binary, {:active, true}])
       {:ok, unknown} = :gen_udp.open(0, [:binary, {:active, true}])
@@ -232,17 +230,31 @@ defmodule ZtlpRelay.IntegrationTest do
       # but fail to find the other peer (sender is not peer_a or peer_b)
       pkt = Packet.build_data(session_id, 1)
       raw = Packet.serialize(pkt)
+      
+      # Clear the mailbox to avoid matching stray packets from other tests using port 58171
+      flush_mailbox(client_b)
+      flush_mailbox(client_a)
+      
+      relay_port = UdpListener.get_port()
       :gen_udp.send(unknown, {127, 0, 0, 1}, relay_port, raw)
 
       # Neither A nor B should receive anything
       Process.sleep(100)
-      refute_receive {:udp, ^client_a, _, _, _}
-      refute_receive {:udp, ^client_b, _, _, _}
+      refute_receive {:udp, ^client_a, _, _, _}, 10
+      refute_receive {:udp, ^client_b, _, _, _}, 10
 
       SessionRegistry.unregister_session(session_id)
       :gen_udp.close(client_a)
       :gen_udp.close(client_b)
       :gen_udp.close(unknown)
+    end
+
+    defp flush_mailbox(port) do
+      receive do
+        {:udp, ^port, _, _, _} -> flush_mailbox(port)
+      after
+        0 -> :ok
+      end
     end
   end
 end

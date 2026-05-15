@@ -551,6 +551,13 @@ defmodule ZtlpRelay.UdpListener do
       sender == peer_b ->
         send_forward(state.socket, peer_a, data, pid)
 
+      # Unrecognized sender - drop the packet
+      sender != peer_a and sender != peer_b and peer_b != nil ->
+        Stats.increment(:layer2_drops)
+        # We don't log this at info level to prevent log pollution from scanning
+        Logger.debug("Dropped data packet from unknown peer: #{inspect(sender)}")
+        :ok
+
       # Half-open session, new sender is peer_b
       peer_b == nil and sender != peer_a and is_pid(pid) ->
         case Session.set_peer_b(pid, sender) do

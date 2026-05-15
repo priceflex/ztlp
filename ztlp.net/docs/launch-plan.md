@@ -19,6 +19,104 @@
 - Existing NS already handles `ENROLL` / `ENROLL_OK`.
 - Existing desktop/macOS onboarding shells can become launcher clients later, but desktop Tauri enrollment backend is still mock/TODO.
 
+
+## Remote desktop validation findings — 2026-05-15
+
+Test target:
+
+```text
+Host: 10.170.3.111
+SSH user: trs
+Hostname: DESKTOP-LRC8DKH
+OS: Windows 10 Pro 10.0.19045
+User: DESKTOP-LRC8DKH\TRS
+Local admin: yes
+RDP: TermService running, listening on 3389
+```
+
+What worked:
+
+- Downloaded the Windows CLI ZIP from the current default release.
+- Extracted it under:
+
+```text
+C:\TRS_Tools\ZTLPLaunchTest\ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc
+```
+
+- Confirmed release archive includes:
+
+```text
+ztlp.exe
+ztlp-node.exe
+ztlp-inspect.exe
+ztlp-load.exe
+ztlp-fuzz.exe
+ztlp-bench.exe
+ztlp_proto.lib
+```
+
+- After installing Microsoft Visual C++ Redistributable x64, the CLI ran:
+
+```powershell
+.\ztlp.exe --help
+.\ztlp.exe setup --help
+.\ztlp.exe keygen --output "$env:USERPROFILE\.ztlp\identity.json"
+```
+
+- Persistent identity was created on the test desktop:
+
+```text
+C:\Users\TRS\.ztlp\identity.json
+NodeID: 3925f595d32456a5b3974ef37153edb2
+```
+
+What failed / must be fixed:
+
+- Clean Windows 10 did not have the VC++ runtime DLLs needed by the MSVC-built `ztlp.exe`:
+
+```text
+vcruntime140.dll
+vcruntime140_1.dll
+msvcp140.dll
+```
+
+- Before installing VC++ redistributable, `ztlp.exe` exited with:
+
+```text
+-1073741515
+```
+
+- `https://www.ztlp.net` failed normal certificate validation on the Windows test host because the current ngrok/reserved-domain certificate chain was not trusted there:
+
+```text
+curl: (60) schannel: SEC_E_UNTRUSTED_ROOT
+```
+
+- Bypassing TLS validation with `curl.exe -k` hit a Squid/ControlOne-style proxy `403 Forbidden`, but downloading directly from GitHub release assets worked.
+- The Launch claim page currently shows a claim/status URL and planned `bootstrap.<zone>` service name, but it does **not** generate a real `ztlp://enroll/...` token yet.
+- Trying to use the Launch claim URL as a CLI enrollment token failed as expected:
+
+```text
+ztlp setup --token "http://www.ztlp.net/claim?token=..." --name "DESKTOP-LRC8DKH" -y
+error: invalid enrollment token: missing zone parameter
+```
+
+- Trying to connect to the planned Bootstrap service failed because no Bootstrap instance/SVC record exists yet:
+
+```text
+ztlp connect bootstrap.trs-remote-test.ztlp
+Resolving bootstrap.trs-remote-test.ztlp via ZTLP-NS...
+  NS server: 127.0.0.1:23096
+error: could not resolve 'bootstrap.trs-remote-test.ztlp': no SVC record in ZTLP-NS and DNS lookup failed
+```
+
+Operational conclusion:
+
+- Windows download path works only after VC++ runtime is installed.
+- CLI binary works after runtime install.
+- Public Launch onboarding/claim/download pages work as a public-safe preview.
+- Bootstrap access is not yet possible from a downloaded endpoint until Launch provisions a private Bootstrap instance, generates a real enrollment token, provides the correct NS address, registers `bootstrap.<zone>` in NS, and starts a ZTLP listener/gateway for the private Bootstrap admin.
+
 ## Target user flow
 
 ### Public onboarding request
@@ -281,6 +379,8 @@ ztlp setup --token "FULL_TOKEN_URI"
 
 ## Task 7: Add download manifest support
 
+**Status:** Partially complete. `/downloads`, `/downloads/<platform>`, and `/downloads/manifest.json` now link to real GitHub release assets. Remaining work is to make the release artifacts customer-ready: clean release tag, single-binary assets, checksums displayed inline, and Windows runtime handling.
+
 **Objective:** Public ztlp.net should provide platform-specific signed download links.
 
 **Reference files:**
@@ -314,6 +414,291 @@ desktop/README.md
 - `/downloads` shows platform-specific links.
 - Checksums are displayed.
 - Claim page can include recommended download for detected OS.
+
+
+---
+
+## Task 7A: Make Windows CLI download run on clean Windows
+
+**Objective:** Ensure the Windows binary works on a clean Windows 10/11 endpoint without manual troubleshooting.
+
+**Problem from validation:** `ztlp.exe` from `ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip` failed on Windows 10 with exit code `-1073741515` until Microsoft Visual C++ Redistributable x64 was installed. Missing DLLs were `vcruntime140.dll`, `vcruntime140_1.dll`, and `msvcp140.dll`.
+
+**Options:**
+
+1. Preferred: add a Windows GNU/static build target or otherwise produce a self-contained Windows binary.
+2. Acceptable short-term: keep MSVC build but add a clear VC++ redistributable prerequisite/download link on `/downloads` and claim pages.
+3. Better installer path: package CLI + VC++ runtime bootstrapper in the Windows installer.
+
+**Files:**
+
+- Modify: `.github/workflows/release.yml`
+- Modify: `ztlp.net/launch_app/app.py`
+- Modify: `ztlp.net/tests/test_launch_app.py`
+- Modify: `ztlp.net/README.md`
+
+**Verification:**
+
+On a clean Windows endpoint:
+
+```powershell
+cd C:\TRS_Tools\ZTLPLaunchTest
+curl.exe -L -o ztlp-windows.zip "https://github.com/priceflex/ztlp/releases/download/<tag>/<windows-asset>.zip"
+Expand-Archive -Force ztlp-windows.zip -DestinationPath .
+.\ztlp.exe --help
+.\ztlp.exe setup --help
+```
+
+Expected: both commands print help without requiring manual VC++ redistributable installation, or the Launch download page explicitly instructs installing the redistributable first.
+
+---
+
+## Task 7B: Publish clean customer-facing release assets
+
+**Objective:** Replace the current default release `v-before-nebula-collapse` with a clean semver release and simpler first-run download names.
+
+**Current release facts:**
+
+- Current default used by Launch: `v-before-nebula-collapse`.
+- Release assets exist and work, but the tag name is not customer-friendly.
+- Desktop installer assets still use `ZTLP_1.0.0_*` naming even when the CLI release is not 1.0.0.
+- Current CLI archives include multiple binaries, which is useful but heavier than the first-run UX needs.
+
+**Recommended assets:**
+
+```text
+ztlp-windows-x64.exe            # direct single CLI binary, if runtime-safe
+ztlp-windows-x64.zip            # full CLI bundle
+ztlp-linux-x64                  # direct single CLI binary
+ztlp-linux-x64.tar.gz           # full CLI bundle
+ztlp-macos-arm64                # direct single CLI binary
+ztlp-macos-arm64.tar.gz         # full CLI bundle
+ztlp-macos-x64                  # direct single CLI binary
+ztlp-macos-x64.tar.gz           # full CLI bundle
+SHA256SUMS.txt
+```
+
+**Files:**
+
+- Modify: `.github/workflows/release.yml`
+- Modify: `ztlp.net/launch_app/app.py`
+- Modify: `ztlp.net/tests/test_launch_app.py`
+
+**Verification:**
+
+```bash
+python3 - <<'PY'
+import urllib.request, json
+url='https://api.github.com/repos/priceflex/ztlp/releases/latest'
+with urllib.request.urlopen(url) as r:
+    rel=json.load(r)
+print(rel['tag_name'])
+for asset in rel['assets']:
+    print(asset['name'], asset['browser_download_url'])
+PY
+```
+
+Expected:
+
+- Latest tag is semver/customer-safe, e.g. `v0.24.1`.
+- Assets include direct binary and archive options for Windows/Linux/macOS.
+- Launch `/downloads/manifest.json` points at the clean release.
+
+---
+
+## Task 7C: Add download/install instructions to Launch
+
+**Objective:** Make `/downloads` usable by a nontechnical admin testing from a fresh endpoint.
+
+**Required content:**
+
+- Windows:
+  - Download ZIP or EXE.
+  - If still required, install Microsoft Visual C++ Redistributable x64 first.
+  - Unzip and run `ztlp.exe --help`.
+- Linux:
+  - `curl -L ... | tar xz` or download tarball and run `./ztlp --help`.
+- macOS:
+  - Download Apple Silicon or Intel tarball.
+  - Note Gatekeeper/quarantine handling if binaries are unsigned.
+- Checksums:
+  - Link to `SHA256SUMS.txt`.
+  - Show a simple verification command per OS.
+
+**Files:**
+
+- Modify: `ztlp.net/launch_app/app.py`
+- Modify: `ztlp.net/tests/test_launch_app.py`
+- Modify: `ztlp.net/README.md`
+
+**Verification:**
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+python3 -m unittest discover -s tests -v
+docker compose up --build -d launch
+curl -fsS http://127.0.0.1:8080/downloads | grep -E 'Windows|Visual C\+\+|Linux|macOS|SHA256'
+```
+
+Expected: `/downloads` explains exactly how to get to `ztlp --help` on Windows/Linux/macOS.
+
+---
+
+## Task 7D: Fix TLS/proxy compatibility for the public Launch URL
+
+**Objective:** Make `https://www.ztlp.net` downloadable from the Windows test host without `-k` or certificate/proxy failures.
+
+**Problem from validation:** Windows `curl.exe` reported `SEC_E_UNTRUSTED_ROOT` against the current ngrok-backed `www.ztlp.net` preview. With `-k`, traffic hit a proxy `403 Forbidden`. Direct GitHub release download worked.
+
+**Likely root causes to verify:**
+
+- ngrok reserved-domain certificate chain not trusted by the Windows endpoint or intercepted by local security stack.
+- ControlOne/Squid/security proxy blocking bypassed TLS or ngrok traffic.
+- Public preview is still ngrok-based rather than normal production hosting with a stable certificate chain.
+
+**Files/areas:**
+
+- DNS/TLS/hosting for `www.ztlp.net`.
+- `ztlp.net/docker-compose.yml` only if changing local preview shape.
+- External reverse proxy / production hosting config once selected.
+
+**Verification on Windows host `10.170.3.111`:**
+
+```powershell
+curl.exe -I https://www.ztlp.net/health
+curl.exe -I https://www.ztlp.net/downloads/windows
+```
+
+Expected: no `-k`, no Schannel trust failure, no proxy 403, download redirect works.
+
+---
+
+## Task 9: Generate real enrollment token on claim page
+
+**Objective:** After claim, show a real `ztlp setup --token 'ztlp://enroll/...' --name '<hostname>' -y` command instead of only showing the Launch claim URL and planned Bootstrap service name.
+
+**Problem from validation:** Using the Launch claim URL as a setup token failed:
+
+```text
+error: invalid enrollment token: missing zone parameter
+```
+
+The CLI expects either a compact base64url enrollment token or a full `ztlp://enroll/...` URI. The Launch claim token is only a web claim token and must not be presented as a CLI enrollment token.
+
+**Files:**
+
+- Modify: `ztlp.net/launch_app/app.py`
+- Modify: `ztlp.net/tests/test_launch_app.py`
+- Reference: `bootstrap/app/services/token_generator.rb`
+- Reference: `proto/src/enrollment.rs`
+- Reference: `proto/src/bin/ztlp-cli.rs`
+
+**Implementation shape:**
+
+1. Add enrollment token fields to Launch persistence or a related table:
+
+```text
+enrollment_token_uri
+enrollment_expires_at
+enrollment_max_uses
+enrollment_status
+```
+
+2. For the preview path, generate a query-param style token URI compatible with current CLI parser:
+
+```text
+ztlp://enroll/?zone=<zone>&ns=<ns-host>:23096&token=<random-token>&expires=<unix-ts>
+```
+
+3. On claim page, show:
+
+```text
+ztlp setup --token 'ztlp://enroll/?zone=<zone>&ns=<real-ns>:23096&token=<token>&expires=<ts>' --name '<HOSTNAME>' -y
+```
+
+4. Make the NS address explicit. Do not rely on CLI default `127.0.0.1:23096` for remote endpoints.
+5. Keep web claim token and CLI enrollment token separate.
+
+**Verification:**
+
+On Windows test host:
+
+```powershell
+.\ztlp.exe setup --token '<token shown on claim page>' --name 'DESKTOP-LRC8DKH' -y
+```
+
+Expected:
+
+- CLI does not report `missing zone parameter`.
+- CLI attempts enrollment against the configured NS address.
+- Any remaining failure is a real NS/network/provisioning issue, not token format.
+
+---
+
+## Task 10: Provision Bootstrap instance and register SVC in NS
+
+**Objective:** Make `ztlp connect bootstrap.<zone>` resolve and reach the private Bootstrap admin path from an enrolled/trusted device.
+
+**Problem from validation:** After claiming `trs-remote-test.ztlp`, the Launch page showed:
+
+```text
+ztlp connect bootstrap.trs-remote-test.ztlp
+```
+
+But the Windows test host failed with:
+
+```text
+error: could not resolve 'bootstrap.trs-remote-test.ztlp': no SVC record in ZTLP-NS and DNS lookup failed
+```
+
+**Files:**
+
+- Modify/create: Launch provisioning service under `ztlp.net/launch_app/`.
+- Modify/wrap: `ztlp.net/bin/launch`.
+- Reference: `bootstrap/app/services/ns_registrar.rb`.
+- Reference: `bootstrap/app/services/ztlp_tunnel.rb`.
+- Reference: `ns/lib/ztlp_ns/enrollment.ex`.
+- Reference: `proto/src/bin/ztlp-cli.rs`.
+
+**Implementation shape:**
+
+1. `POST /claim/launch` creates a `BootstrapInstance` record.
+2. It calls or ports `bin/launch create <slug> --org ... --email ... --zone ...`.
+3. It starts the private Bootstrap container with no public admin route.
+4. It generates a Bootstrap service identity.
+5. It registers `bootstrap.<zone>` KEY/SVC in NS.
+6. It starts a ZTLP listener/gateway from `bootstrap.<zone>` to private Rails port 3000.
+7. Claim page only shows:
+
+```text
+ztlp connect bootstrap.<zone>
+```
+
+and never a public/localhost admin URL.
+
+**Verification:**
+
+On Launch host:
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+python3 -m unittest discover -s tests -v
+docker compose up --build -d launch
+```
+
+On Windows test host:
+
+```powershell
+.\ztlp.exe setup --token '<real enrollment token>' --name 'DESKTOP-LRC8DKH' -y
+.\ztlp.exe connect bootstrap.<zone> --ns-server '<real-ns>:23096'
+```
+
+Expected:
+
+- `ztlp setup` succeeds or reaches a real NS enrollment response.
+- `ztlp connect bootstrap.<zone>` resolves via NS.
+- Bootstrap admin traffic reaches the private Bootstrap instance through ZTLP-native identity only.
+- `https://www.ztlp.net/login` and public Bootstrap admin URLs remain unavailable.
 
 ---
 

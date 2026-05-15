@@ -54,7 +54,20 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build
+      - name: Build ZTLP core daemon
+        run: |
+          cd ../proto
+          cargo build --release --bin ztlp
+          cd ../desktop
+          mkdir -p src-tauri/binaries/
+          # Tauri expects external binaries to be postfixed with the target triple
+          if [ "${{ matrix.target }}" == "linux" ]; then
+            cp ../proto/target/release/ztlp src-tauri/binaries/ztlp-x86_64-unknown-linux-gnu
+          else
+            cp ../proto/target/release/ztlp.exe src-tauri/binaries/ztlp-x86_64-pc-windows-msvc.exe
+          fi
+
+      - name: Build Desktop (Tauri)
         run: cargo tauri build
 
       - name: Upload Linux artifacts

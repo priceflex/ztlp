@@ -220,7 +220,22 @@ jobs:
         working-directory: desktop
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build
+      - name: Build ZTLP core daemon
+        working-directory: proto
+        run: cargo build --release --bin ztlp
+
+      - name: Prep externalBin for Desktop (Tauri)
+        working-directory: desktop
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries/
+          if [ "${{ matrix.target }}" == "linux" ]; then
+            cp ../proto/target/release/ztlp src-tauri/binaries/ztlp-x86_64-unknown-linux-gnu
+          else
+            cp ../proto/target/release/ztlp.exe src-tauri/binaries/ztlp-x86_64-pc-windows-msvc.exe
+          fi
+
+      - name: Build Desktop (Tauri)
         working-directory: desktop
         run: cargo tauri build
 

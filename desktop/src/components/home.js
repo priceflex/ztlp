@@ -69,6 +69,7 @@ const HomeComponent = (() => {
       update(status, traffic);
     } catch (e) {
       console.error('Home load error:', e);
+      renderErrorState(e);
     }
   }
 
@@ -94,6 +95,8 @@ const HomeComponent = (() => {
       connected: { label: 'Connected', sub: `Secured via ${status.relay}`, btnText: 'Disconnect', btnClass: 'btn btn-danger', ring: 'connected' },
       reconnecting: { label: 'Reconnecting…', sub: 'Attempting to restore connection', btnText: 'Disconnect', btnClass: 'btn btn-danger', ring: 'reconnecting' },
       disconnecting: { label: 'Disconnecting…', sub: 'Tearing down tunnel', btnText: 'Disconnecting…', btnClass: 'btn btn-secondary', ring: 'disconnecting' },
+      failed: { label: 'Failed', sub: status.error || 'Connection failed', btnText: 'Retry', btnClass: 'btn btn-primary', ring: 'error' },
+      error: { label: 'Error', sub: status.error || 'System error', btnText: 'Retry', btnClass: 'btn btn-primary', ring: 'error' },
     };
 
     const s = stateMap[status.state] || stateMap.disconnected;
@@ -124,6 +127,22 @@ const HomeComponent = (() => {
     }
   }
 
+  function renderErrorState(err) {
+    const ring = document.getElementById('home-status-ring');
+    const label = document.getElementById('home-status-label');
+    const sublabel = document.getElementById('home-status-sublabel');
+    const btn = document.getElementById('home-toggle-btn');
+    
+    if (!ring) return; // Page not rendered yet
+
+    ring.className = 'status-ring error';
+    label.textContent = 'Error';
+    sublabel.textContent = err.toString();
+    btn.textContent = 'Retry';
+    btn.className = 'btn btn-primary';
+    btn.disabled = false;
+  }
+
   async function toggle() {
     try {
       if (currentStatus && currentStatus.state === 'connected') {
@@ -138,6 +157,7 @@ const HomeComponent = (() => {
       await pollState();
     } catch (e) {
       console.error('Toggle error:', e);
+      renderErrorState(e);
     }
   }
 

@@ -69,7 +69,7 @@ const SettingsComponent = (() => {
       </div>
 
       <div style="display: flex; gap: 8px; margin-top: 8px;">
-        <button class="btn btn-primary" onclick="SettingsComponent.save()">
+        <button id="settings-save-btn" class="btn btn-primary" onclick="SettingsComponent.save()">
           💾 Save Settings
         </button>
         <button class="btn btn-secondary" onclick="SettingsComponent.load()">

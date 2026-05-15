@@ -108,13 +108,12 @@ pub fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().map(|c| c.clone()).unwrap_or_default()
 }
 
-#[tauri::command]
-pub fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
-    let mut current = state.config.lock().map_err(|e| e.to_string())?;
+pub fn save_config_internal(
+    config: &AppConfig,
+    mut current: std::sync::MutexGuard<'_, AppConfig>,
+    mut config_path: std::path::PathBuf,
+) -> Result<(), String> {
     *current = config.clone();
-
-    let mut config_path = dirs::home_dir().ok_or("Could not find home directory")?;
-    config_path.push(".ztlp");
     std::fs::create_dir_all(&config_path).map_err(|e| format!("Failed to create config directory: {}", e))?;
     config_path.push("agent.toml");
 
@@ -139,8 +138,16 @@ auto_connect = {}
     );
 
     std::fs::write(&config_path, toml_string).map_err(|e| format!("Failed to save config file at {:?}: {}", config_path, e))?;
-
     Ok(())
+}
+
+#[tauri::command]
+pub fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
+    let current = state.config.lock().map_err(|e| e.to_string())?;
+
+    let mut config_path = dirs::home_dir().ok_or("Could not find home directory")?;
+    config_path.push(".ztlp");
+    save_config_internal(&config, current, config_path)
 }
 
 // ── Traffic ─────────────────────────────────────────────────────────────
@@ -157,5 +164,48 @@ pub fn get_traffic_stats(state: State<'_, AppState>) -> TrafficStats {
         stored.clone()
     } else {
         live
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use crate::state::PortMapping;
+
+    #[test]
+    fn test_save_config_internal() {
+        let temp_dir = env::temp_dir().join("ztlp_test_config_dir");
+        
+        let config = AppConfig {
+            relay_address: "relay.example.com".to_string(),
+            stun_server: "stun.example.com".to_string(),
+            tunnel_address: "10.0.0.2".to_string(),
+            dns_servers: vec![],
+            port_mappings: vec![
+                PortMapping { local_port: 8080, remote_host: "1.2.3.4".into(), remote_port: 80 },
+                PortMapping { local_port: 8443, remote_host: "5.6.7.8".into(), remote_port: 443 },
+            ],
+            mtu: 1420,
+            auto_connect: true,
+        };
+
+        let app_state = AppState::default();
+        let current = app_state.config.lock().unwrap();
+
+        let res = save_config_internal(&config, current, temp_dir.clone());
+        assert!(res.is_ok(), "save_config_internal failed");
+
+        let agent_file = temp_dir.join("agent.toml");
+        assert!(agent_file.exists(), "agent.toml was not created");
+
+        let content = std::fs::read_to_string(&agent_file).unwrap();
+        assert!(content.contains(r#"relay_address = "relay.example.com""#));
+        assert!(content.contains("auto_connect = true"));
+        assert!(content.contains("[agent.ports]"));
+        assert!(content.contains("\"8080\" = 80"));
+        assert!(content.contains("\"8443\" = 443"));
+
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 }

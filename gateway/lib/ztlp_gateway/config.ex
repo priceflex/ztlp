@@ -127,6 +127,9 @@ defmodule ZtlpGateway.Config do
   def get(:ns_query_timeout_ms),
     do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
 
+  def get(:trust_anchors),
+    do: Application.get_env(:ztlp_gateway, :trust_anchors, %{})
+
   # ── TLS Configuration ───────────────────────────────────────────
 
   def get(:tls_enabled) do

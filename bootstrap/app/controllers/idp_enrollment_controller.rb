@@ -167,6 +167,7 @@ class IdpEnrollmentController < ApplicationController
       expires_in: 1.hour,
       max_uses: 1,
       roles: user.role,
+      ztlp_user_id: user.id,
       notes: "Self-service enrollment for #{user.name} (#{user.email}) via #{@idp.name}"
     )
   end

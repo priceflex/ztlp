@@ -297,9 +297,8 @@ defmodule ZtlpGateway.NsIntegrationTest do
       assert {:ok, "node-b.ztlp"} == Identity.resolve(pub2)
     end
 
-    test "no trust anchors configured — accepts all signed records" do
+    test "no trust anchors configured — rejects all signed records" do
       root = ZoneAuthority.generate("ztlp")
-      TrustAnchor.add("test-root", root.public_key)
       # Deliberately DO NOT add trust anchor to NsClient
 
       {x25519_pub, _} = :crypto.generate_key(:ecdh, :x25519)
@@ -315,8 +314,8 @@ defmodule ZtlpGateway.NsIntegrationTest do
       {:ok, signed} = ZoneAuthority.sign_record(root, key_record)
       :ok = Store.insert(signed)
 
-      # With no trust anchors, NsClient accepts any signed record
-      assert {:ok, "permissive.ztlp"} == Identity.resolve(x25519_pub)
+      # With no trust anchors, NsClient rejects
+      assert :unknown == Identity.resolve(x25519_pub)
     end
   end
 

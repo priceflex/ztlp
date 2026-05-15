@@ -183,7 +183,14 @@ defmodule ZtlpGateway.HttpHeaderInjector do
 
         # Add identity headers
         identity_headers = build_headers(identity)
-        all_headers = filtered ++ identity_headers
+        
+        # When bridging to Rails/Bootstrap: Include X-Forwarded-* to bypass CSRF loops
+        forward_headers = [
+          {"X-Forwarded-Proto", "https"},
+          {"X-Forwarded-Ssl", "on"}
+        ]
+        
+        all_headers = filtered ++ identity_headers ++ forward_headers
 
         rebuild_http_request(request_line, all_headers, body)
       _ -> data

@@ -15,7 +15,7 @@ class TokenGenerator
   end
 
   # Generate a new enrollment token
-  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil)
+  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil, ztlp_user_id: nil)
     ns_machine = @network.ns_machines.first
     relay_machine = @network.relay_machines.first
 
@@ -59,6 +59,7 @@ class TokenGenerator
       qr_svg: qr_svg,
       max_uses: max_uses,
       expires_at: expires_at,
+      ztlp_user_id: ztlp_user_id,
       allowed_roles: Array(roles).join(","),
       notes: notes
     )

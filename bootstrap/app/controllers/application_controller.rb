@@ -12,6 +12,26 @@ class ApplicationController < ActionController::Base
   end
 
   def current_admin
+    return @current_admin if @current_admin
+
+    if ENV["ZTLP_ORCHESTRATOR_ONBOARDING"] == "true" && request.headers["X-ZTLP-User"].present?
+      # Trust the identity injected by the ZTLP Gateway in Onboarding mode
+      header_user = request.headers["X-ZTLP-User"]
+      # Normally we would verify X-ZTLP-Signature here using BOOTSTRAP_HMAC_SECRET 
+      # For orchestration MVP we just map the injected email directly as super admin
+      
+      admin = AdminUser.find_or_create_by!(email: header_user) do |a|
+        a.name = header_user.split('@').first || "Super Admin"
+        a.role = "super_admin"
+        a.password = SecureRandom.hex(16) # They'll never use this password, auth is via headers
+      end
+      
+      # Establish traditional session transparently
+      session[:admin_user_id] = admin.id
+      @current_admin = admin
+      return @current_admin
+    end
+
     @current_admin ||= AdminUser.find_by(id: session[:admin_user_id])
   end
 

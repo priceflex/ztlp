@@ -261,13 +261,16 @@ defmodule ZtlpGateway.NsClient do
           :ets.new(@revocation_cache, [:named_table, :set, :public, read_concurrency: true])
         end
 
-        {:ok, %{socket: socket, trust_anchors: %{}}}
+        trust_anchors = Config.get(:trust_anchors) || %{}
+        {:ok, %{socket: socket, trust_anchors: trust_anchors}}
 
       {:error, reason} ->
         # Don't crash the supervision tree — start without a socket
         require Logger
         Logger.warning("NsClient: failed to open UDP socket: #{inspect(reason)}")
-        {:ok, %{socket: nil, trust_anchors: %{}}}
+        
+        trust_anchors = Config.get(:trust_anchors) || %{}
+        {:ok, %{socket: nil, trust_anchors: trust_anchors}}
     end
   end
 
@@ -605,9 +608,10 @@ defmodule ZtlpGateway.NsClient do
 
   defp verify_trust(%{signer_public_key: _pub}, trust_anchors)
        when map_size(trust_anchors) == 0 do
-    # No trust anchors configured — accept all signed records
-    # (prototype convenience; production would require at least one anchor)
-    :ok
+    # No trust anchors configured — fall back to secure default
+    # A gateway in production MUST have at least one trust anchor configured.
+    # We reject all records to prevent spoofing if anchors are missing.
+    {:error, :no_trust_anchors_configured}
   end
 
   defp verify_trust(%{signer_public_key: pub}, trust_anchors) do

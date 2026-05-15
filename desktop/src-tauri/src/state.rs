@@ -12,7 +12,9 @@ use std::sync::Mutex;
 /// Mirror of the C library's ZTLP_STATE_* values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ConnectionState {
+    #[default]
     Disconnected,
     Connecting,
     Connected,
@@ -20,11 +22,6 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Disconnected
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionStatus {
@@ -137,13 +134,13 @@ pub struct AppState {
 }
 
 impl Default for AppState {
-    fn default() -> Self {
-        // Generate or load identity.
-        let default_path =
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-                .join(".ztlp")
-                .join("identity.json");
-        let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
+   fn default() -> Self {
+       // Generate or load identity.
+        let default_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".ztlp")
+            .join("identity.json");
+       let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
             Ok(id) => Some(IdentityInfo {
                 node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
                 public_key: id

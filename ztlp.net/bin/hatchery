@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTANCE_ROOT="${HATCHERY_INSTANCE_ROOT:-$ROOT/data/instances}"
+BOOTSTRAP_IMAGE="${HATCHERY_BOOTSTRAP_IMAGE:-priceflex/ztlp-bootstrap:latest}"
+BASE_PORT="${HATCHERY_INSTANCE_BASE_PORT:-39000}"
+DEFAULT_ZONE_SUFFIX="${HATCHERY_DEFAULT_ZONE_SUFFIX:-ztlp}"
+
+usage() {
+  cat <<'USAGE'
+ZTLP Hatchery — public-safe bootstrap instance launcher
+
+Usage:
+  bin/hatchery create <slug> --org "Org Name" --email admin@example.com [--zone org.ztlp]
+  bin/hatchery list
+  bin/hatchery status <slug>
+  bin/hatchery stop <slug>
+  bin/hatchery destroy <slug>
+
+Notes:
+  - Generated bootstrap/admin instances are not published publicly.
+  - Dev Rails ports bind to 127.0.0.1 only.
+  - Future production access must be via ZTLP-native service identity.
+USAGE
+}
+
+slugify() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
+}
+
+require_slug() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    echo "Missing instance slug" >&2
+    usage >&2
+    exit 2
+  fi
+  slugify "$raw"
+}
+
+port_for_slug() {
+  local slug="$1"
+  python3 - "$slug" "$BASE_PORT" <<'PY'
+import hashlib, sys
+slug=sys.argv[1]
+base=int(sys.argv[2])
+print(base + (int(hashlib.sha256(slug.encode()).hexdigest()[:6], 16) % 900))
+PY
+}
+
+write_instance() {
+  local slug="$1" org="$2" email="$3" zone="$4" port="$5" dir="$INSTANCE_ROOT/$slug"
+  mkdir -p "$dir"
+  {
+    printf 'ZTLP_INSTANCE_SLUG=%q\n' "$slug"
+    printf 'ZTLP_ORG_NAME=%q\n' "$org"
+    printf 'ZTLP_ADMIN_EMAIL=%q\n' "$email"
+    printf 'ZTLP_ZONE=%q\n' "$zone"
+    printf 'ZTLP_PRIVATE_PORT=%q\n' "$port"
+    printf 'ZTLP_CREATED_AT=%q\n' "$(date -Iseconds)"
+  } > "$dir/instance.env"
+  cat > "$dir/docker-compose.yml" <<EOF
+services:
+  bootstrap:
+    image: "${BOOTSTRAP_IMAGE}"
+    container_name: "ztlp-bootstrap-${slug}"
+    ports:
+      - "127.0.0.1:${port}:3000"
+    volumes:
+      - bootstrap_data:/data
+    environment:
+      RAILS_ENV: "production"
+      RAILS_LOG_TO_STDOUT: "1"
+      RAILS_SERVE_STATIC_FILES: "true"
+      DATABASE_PATH: "/data/production.sqlite3"
+      ZTLP_INSTANCE_SLUG: "${slug}"
+      ZTLP_ORG_NAME: "${org}"
+      ZTLP_ADMIN_EMAIL: "${email}"
+      ZTLP_ZONE: "${zone}"
+      # TODO: inject ZTLP service identity once bootstrap.<zone> registration is wired.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/up"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  bootstrap_data:
+    name: "ztlp_bootstrap_${slug}_data"
+EOF
+  cat > "$dir/README.md" <<EOF
+# ZTLP Bootstrap Instance: ${slug}
+
+Organization: ${org}
+Admin email: ${email}
+Zone: ${zone}
+Private dev URL: http://127.0.0.1:${port}
+
+Security boundary:
+- This URL is for local/dev inspection only.
+- Do not publish this port through ngrok, public HTTPS, or a reverse proxy.
+- Product admin access must be through ZTLP-native service identity.
+
+Next wiring:
+- Generate/bootstrap service identity.
+- Register bootstrap.${zone} in NS.
+- Start a ZTLP listener/gateway to private Rails port 3000.
+- Return onboarding/download/claim instructions, not a public admin URL.
+EOF
+}
+
+cmd_create() {
+  local slug org="" email="" zone=""
+  slug="$(require_slug "${1:-}")"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --org) org="${2:-}"; shift 2 ;;
+      --email) email="${2:-}"; shift 2 ;;
+      --zone) zone="${2:-}"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+  done
+  if [[ -z "$org" || -z "$email" ]]; then
+    echo "create requires --org and --email" >&2
+    usage >&2
+    exit 2
+  fi
+  if [[ -z "$zone" ]]; then
+    zone="${slug}.${DEFAULT_ZONE_SUFFIX}"
+  fi
+  local dir="$INSTANCE_ROOT/$slug"
+  if [[ -e "$dir" ]]; then
+    echo "Instance already exists: $slug ($dir)" >&2
+    exit 1
+  fi
+  local port
+  port="$(port_for_slug "$slug")"
+  write_instance "$slug" "$org" "$email" "$zone" "$port"
+  echo "Created ZTLP bootstrap instance scaffold: $slug"
+  echo "  org: $org"
+  echo "  admin: $email"
+  echo "  zone: $zone"
+  echo "  private dev URL: http://127.0.0.1:$port"
+  echo "  files: $dir"
+  echo
+  echo "Start locally with:"
+  echo "  cd '$dir' && docker compose up -d"
+}
+
+cmd_list() {
+  mkdir -p "$INSTANCE_ROOT"
+  shopt -s nullglob
+  local any=0
+  for env in "$INSTANCE_ROOT"/*/instance.env; do
+    any=1
+    # shellcheck disable=SC1090
+    source "$env"
+    printf '%-24s %-32s %-36s %s\n' "$ZTLP_INSTANCE_SLUG" "$ZTLP_ZONE" "$ZTLP_ADMIN_EMAIL" "${ZTLP_CREATED_AT:-}"
+  done
+  if [[ "$any" -eq 0 ]]; then
+    echo "No Hatchery instances found."
+  fi
+}
+
+cmd_status() {
+  local slug dir
+  slug="$(require_slug "${1:-}")"
+  dir="$INSTANCE_ROOT/$slug"
+  if [[ ! -f "$dir/instance.env" ]]; then
+    echo "No such instance: $slug" >&2
+    exit 1
+  fi
+  echo "Instance files: $dir"
+  sed 's/^/  /' "$dir/instance.env"
+  if command -v docker >/dev/null 2>&1; then
+    docker ps -a --filter "name=ztlp-bootstrap-${slug}" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+  fi
+}
+
+cmd_stop() {
+  local slug dir
+  slug="$(require_slug "${1:-}")"
+  dir="$INSTANCE_ROOT/$slug"
+  if [[ ! -f "$dir/docker-compose.yml" ]]; then
+    echo "No such instance: $slug" >&2
+    exit 1
+  fi
+  (cd "$dir" && docker compose down --remove-orphans)
+}
+
+cmd_destroy() {
+  local slug dir
+  slug="$(require_slug "${1:-}")"
+  dir="$INSTANCE_ROOT/$slug"
+  if [[ ! -d "$dir" ]]; then
+    echo "No such instance: $slug" >&2
+    exit 1
+  fi
+  if [[ -f "$dir/docker-compose.yml" ]]; then
+    (cd "$dir" && docker compose down --remove-orphans || true)
+  fi
+  rm -rf "$dir"
+  echo "Destroyed instance scaffold: $slug"
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  create) cmd_create "$@" ;;
+  list) cmd_list "$@" ;;
+  status) cmd_status "$@" ;;
+  stop) cmd_stop "$@" ;;
+  destroy) cmd_destroy "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "Unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac

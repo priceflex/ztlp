@@ -9,6 +9,14 @@ use std::path::{Path, PathBuf};
 
 use super::local_tls::TlsConfig;
 
+/// IPC configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct IpcConfig {
+    /// TCP bind address for IPC control.
+    pub listen: String,
+}
+
 /// Top-level agent configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -36,6 +44,9 @@ pub struct AgentConfig {
 
     /// Gateway pinning settings.
     pub gateway: GatewayPinConfig,
+
+    /// IPC settings.
+    pub ipc: IpcConfig,
 }
 
 /// Identity file location.
@@ -257,6 +268,14 @@ where
 }
 
 // ── Default implementations ─────────────────────────────────────────────────
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.100.255.1:4433".to_string(),
+        }
+    }
+}
 
 impl Default for IdentityConfig {
     fn default() -> Self {

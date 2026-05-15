@@ -133,9 +133,9 @@ pub async fn run_daemon(
     };
 
     // ── Spawn control socket ────────────────────────────────────────────
-    let socket_path = control::default_socket_path();
+    let ipc_addr = config.ipc.listen.clone();
     let ctrl_state = agent_state.clone();
-    let ctrl_path = socket_path.clone();
+    let ctrl_path = ipc_addr.clone();
     let ctrl_handle = tokio::spawn(async move {
         if let Err(e) = control::run_control_socket(&ctrl_path, ctrl_state).await {
             error!("control socket error: {}", e);
@@ -233,7 +233,7 @@ pub async fn run_daemon(
         if config.dns.enabled {
             eprintln!("  DNS:      {}", config.dns.listen);
         }
-        eprintln!("  Control:  {}", socket_path.display());
+        eprintln!("  Control:  {}", ipc_addr);
         eprintln!("  NS:       {}", config.ns_server());
         eprintln!("  VIP pool: {}", config.dns.vip_range);
         if config.tls.enabled {
@@ -263,9 +263,8 @@ pub async fn run_daemon(
     // ── Cleanup ─────────────────────────────────────────────────────────
     info!("cleaning up...");
 
-    // Remove PID file and socket
+    // Remove PID file
     control::remove_pid_file(&pid_path);
-    std::fs::remove_file(&socket_path).ok();
 
     // Abort spawned tasks
     if let Some(h) = dns_handle {

@@ -9099,14 +9099,15 @@ async fn cmd_agent_start(
 /// `ztlp agent stop` — Stop the running agent daemon.
 async fn cmd_agent_stop() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::control;
+    use ztlp_proto::agent::config::AgentConfig;
 
-    let socket_path = control::default_socket_path();
+    let ipc_addr = AgentConfig::load().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "shutdown".to_string(),
         name: None,
     };
 
-    match control::send_command(&socket_path, &cmd).await {
+    match control::send_command(&ipc_addr, &cmd).await {
         Ok(resp) => {
             if resp.ok {
                 eprintln!("{} Agent stopped", c_green("✓"));
@@ -9134,13 +9135,13 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("ZTLP Agent v{}", ZTLP_VERSION);
 
     // Try to query the running daemon first
-    let socket_path = control::default_socket_path();
+    let ipc_addr = AgentConfig::load().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "status".to_string(),
         name: None,
     };
 
-    match control::send_command(&socket_path, &cmd).await {
+    match control::send_command(&ipc_addr, &cmd).await {
         Ok(resp) if resp.ok => {
             if let Some(data) = resp.data {
                 eprintln!("  {} {}", c_green("●"), c_bold("running"));
@@ -9216,14 +9217,15 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
 /// `ztlp agent dns` — Show DNS cache entries.
 async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::control;
+    use ztlp_proto::agent::config::AgentConfig;
 
-    let socket_path = control::default_socket_path();
+    let ipc_addr = AgentConfig::load().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "dns_cache".to_string(),
         name: None,
     };
 
-    match control::send_command(&socket_path, &cmd).await {
+    match control::send_command(&ipc_addr, &cmd).await {
         Ok(resp) if resp.ok => {
             if let Some(data) = resp.data {
                 if let Some(entries) = data.get("entries").and_then(|v| v.as_array()) {
@@ -9284,14 +9286,15 @@ async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
 /// `ztlp agent flush-dns` — Flush the DNS cache.
 async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::control;
+    use ztlp_proto::agent::config::AgentConfig;
 
-    let socket_path = control::default_socket_path();
+    let ipc_addr = AgentConfig::load().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "flush_dns".to_string(),
         name: None,
     };
 
-    match control::send_command(&socket_path, &cmd).await {
+    match control::send_command(&ipc_addr, &cmd).await {
         Ok(resp) if resp.ok => {
             let freed = resp
                 .data
@@ -9318,14 +9321,15 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
 /// `ztlp agent tunnels` — Show active tunnels.
 async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::control;
+    use ztlp_proto::agent::config::AgentConfig;
 
-    let socket_path = control::default_socket_path();
+    let ipc_addr = AgentConfig::load().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "tunnels".to_string(),
         name: None,
     };
 
-    match control::send_command(&socket_path, &cmd).await {
+    match control::send_command(&ipc_addr, &cmd).await {
         Ok(resp) if resp.ok => {
             if let Some(data) = resp.data {
                 if let Some(tunnels) = data.get("tunnels").and_then(|v| v.as_array()) {

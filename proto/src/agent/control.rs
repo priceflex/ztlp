@@ -1,6 +1,6 @@
-//! Unix socket control interface for the ZTLP agent daemon.
+//! TCP Loopback IPC control interface for the ZTLP agent daemon.
 //!
-//! The agent exposes a Unix domain socket (default: `~/.ztlp/agent.sock`)
+//! The agent exposes a TCP loopback socket (default: `127.100.255.1:4433`)
 //! that the CLI uses to communicate with the running daemon. Commands and
 //! responses are JSON-encoded, one per line.
 //!
@@ -30,14 +30,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(unix)]
-use tokio::net::UnixListener;
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-#[cfg(not(unix))]
-use tracing::warn;
-#[cfg(unix)]
 use tracing::{debug, info, warn};
 
 use super::dns::DnsResolverState;
@@ -125,32 +120,21 @@ pub struct AgentState {
 
 /// Run the control socket server.
 ///
-/// Listens on the Unix socket and handles commands from the CLI.
+/// Listens on the TCP loopback socket and handles commands from the CLI.
 /// This is a long-running task that should be spawned as a tokio task.
-#[cfg(unix)]
 pub async fn run_control_socket(
-    socket_path: &Path,
+    ipc_addr: &str,
     state: Arc<AgentState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Remove stale socket file
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path).ok();
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let listener = UnixListener::bind(socket_path).map_err(|e| {
+    let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
         format!(
             "failed to bind control socket {}: {}",
-            socket_path.display(),
+            ipc_addr,
             e
         )
     })?;
 
-    info!("control socket listening on {}", socket_path.display());
+    info!("control socket listening on {}", ipc_addr);
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -191,7 +175,6 @@ pub async fn run_control_socket(
 }
 
 /// Handle a control command.
-#[cfg(unix)]
 async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlResponse {
     match cmd.cmd.as_str() {
         "status" => cmd_status(state).await,
@@ -203,7 +186,6 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
     }
 }
 
-#[cfg(unix)]
 async fn cmd_status(state: &AgentState) -> ControlResponse {
     let dns = state.dns_state.lock().await;
     let status = StatusInfo {
@@ -221,7 +203,6 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
 }
 
-#[cfg(unix)]
 async fn cmd_tunnels(state: &AgentState) -> ControlResponse {
     let pool = state.tunnel_pool.lock().await;
     let tunnels: Vec<serde_json::Value> = pool
@@ -254,7 +235,6 @@ async fn cmd_tunnels(state: &AgentState) -> ControlResponse {
     }))
 }
 
-#[cfg(unix)]
 async fn cmd_dns_cache(state: &AgentState) -> ControlResponse {
     let dns = state.dns_state.lock().await;
     let entries: Vec<DnsCacheEntry> = dns
@@ -273,7 +253,6 @@ async fn cmd_dns_cache(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::json!({ "entries": entries }))
 }
 
-#[cfg(unix)]
 async fn cmd_flush_dns(state: &AgentState) -> ControlResponse {
     let mut dns = state.dns_state.lock().await;
     let freed = dns.vip_pool.gc_expired();
@@ -282,7 +261,6 @@ async fn cmd_flush_dns(state: &AgentState) -> ControlResponse {
     ControlResponse::ok(serde_json::json!({ "freed": freed }))
 }
 
-#[cfg(unix)]
 async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     info!("shutdown requested via control socket");
     let _ = state.shutdown_tx.send(());
@@ -292,18 +270,17 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
 // ─── Client side (for CLI commands) ─────────────────────────────────────────
 
 /// Send a command to the running agent and return the response.
-#[cfg(unix)]
 pub async fn send_command(
-    socket_path: &Path,
+    ipc_addr: &str,
     command: &ControlCommand,
 ) -> Result<ControlResponse, Box<dyn std::error::Error + Send + Sync>> {
-    let stream = tokio::net::UnixStream::connect(socket_path)
+    let stream = tokio::net::TcpStream::connect(ipc_addr)
         .await
         .map_err(|e| {
             format!(
                 "cannot connect to agent ({}): {}\n\
              Is the agent running? Start it with: ztlp agent start",
-                socket_path.display(),
+                ipc_addr,
                 e
             )
         })?;
@@ -322,32 +299,8 @@ pub async fn send_command(
     Ok(response)
 }
 
-/// Stub: control socket not supported on non-Unix platforms.
-#[cfg(not(unix))]
-pub async fn run_control_socket(
-    _socket_path: &Path,
-    _state: Arc<AgentState>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    warn!("control socket not supported on this platform");
-    // Block forever (equivalent to no-op server)
-    std::future::pending::<()>().await;
-    Ok(())
-}
-
-/// Stub: control socket not supported on non-Unix platforms.
-#[cfg(not(unix))]
-pub async fn send_command(
-    _socket_path: &Path,
-    _command: &ControlCommand,
-) -> Result<ControlResponse, Box<dyn std::error::Error + Send + Sync>> {
-    Err("control socket not supported on this platform".into())
-}
-
-/// Get the default control socket path.
-pub fn default_socket_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.sock"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.sock"))
+pub fn default_ipc_address() -> String {
+    "127.100.255.1:4433".to_string()
 }
 
 /// Get the default PID file path.
@@ -440,9 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_socket_path() {
-        let path = default_socket_path();
-        assert!(path.to_string_lossy().contains("agent.sock"));
+    fn test_default_ipc_address() {
+        let addr = default_ipc_address();
+        assert_eq!(addr, "127.100.255.1:4433");
     }
 
     #[test]

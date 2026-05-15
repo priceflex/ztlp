@@ -19,6 +19,21 @@ defmodule ZtlpNs.CertIssuerTest do
     # To avoid test interference, we need to explicitly initialize the CA.
     
     Application.stop(:ztlp_ns)
+    try do
+      :mnesia.stop()
+    rescue
+      _ -> :ok
+    end
+
+    mnesia_dir = Path.join(System.tmp_dir!(), "mnesia_issuer_test_#{:rand.uniform(1_000_000)}")
+    Application.put_env(:mnesia, :dir, to_charlist(mnesia_dir))
+
+    try do
+      :mnesia.create_schema([node()])
+    catch
+      :exit, _ -> :ok
+    end
+
     Application.ensure_all_started(:mnesia) # Restart mnesia without the app
 
     test_dir = Path.join(System.tmp_dir!(), "ztlp_issuer_test_#{:rand.uniform(1_000_000)}")
@@ -38,7 +53,9 @@ defmodule ZtlpNs.CertIssuerTest do
     
     on_exit(fn ->
       Application.stop(:ztlp_ns)
+      Application.stop(:mnesia)
       File.rm_rf!(test_dir)
+      File.rm_rf!(mnesia_dir)
     end)
 
     {:ok, ca_dir: test_dir}

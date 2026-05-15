@@ -61,6 +61,18 @@ defmodule ZtlpNs.RegistrationAuth do
   end
 
   defp do_check_rate_limit(name) do
+    # Verify the ETS table actually exists before using it
+    case :ets.whereis(@rate_limit_table) do
+      :undefined -> 
+        # Create it dynamically if missing (helpful for tests that bypass app startup)
+        try do
+          init_rate_limit()
+        rescue
+          ArgumentError -> :ok
+        end
+      _ -> :ok
+    end
+
     now = System.system_time(:second)
 
     case :ets.lookup(@rate_limit_table, name) do
@@ -76,11 +88,6 @@ defmodule ZtlpNs.RegistrationAuth do
         :ets.insert(@rate_limit_table, {name, now})
         :ok
     end
-  rescue
-    # Table might not exist in tests
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   @doc """

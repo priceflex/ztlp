@@ -17,8 +17,27 @@ defmodule ZtlpNs.AdminTest do
   alias ZtlpNs.{Audit, Crypto, Record, Store, RegistrationAuth, TrustAnchor}
 
   setup do
+    # Stop existing instance cleanly if it exists before restarting DB
     Application.stop(:ztlp_ns)
+    try do
+      :mnesia.stop()
+    rescue
+      _ -> :ok
+    end
+
+    # Clean the dir so Mnesia doesn't conflict across test runs
+    mnesia_dir = Path.join(System.tmp_dir!(), "mnesia_admin_test_#{:rand.uniform(1_000_000)}")
+    Application.put_env(:mnesia, :dir, to_charlist(mnesia_dir))
+
+    # For parallel tests, try to start the DB but ignore if it's already there
+    try do
+      :mnesia.create_schema([node()])
+    catch
+      :exit, _ -> :ok
+    end
+
     Application.ensure_all_started(:mnesia) # Restart mnesia without the app
+
 
     test_dir = Path.join(System.tmp_dir!(), "ztlp_ca_test_#{:rand.uniform(1_000_000)}")
     File.mkdir_p!(test_dir)
@@ -34,7 +53,9 @@ defmodule ZtlpNs.AdminTest do
 
     on_exit(fn ->
       Application.stop(:ztlp_ns)
+      Application.stop(:mnesia)
       File.rm_rf!(test_dir)
+      File.rm_rf!(mnesia_dir)
     end)
 
     Store.clear()

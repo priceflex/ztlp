@@ -17,8 +17,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let status_item = MenuItem::with_id(app, "status", "○ Disconnected", false, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let connect_item = MenuItem::with_id(app, "connect", "Connect", true, None::<&str>)?;
-    let disconnect_item =
-        MenuItem::with_id(app, "disconnect", "Disconnect", false, None::<&str>)?;
+    let disconnect_item = MenuItem::with_id(app, "disconnect", "Disconnect", false, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let open_item = MenuItem::with_id(app, "open", "Open ZTLP", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -145,13 +144,17 @@ pub fn update_tray_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error
     // Tauri 2 tray menus are immutable once built; we rebuild the menu
     // each time the connection state changes.
     if let Some(tray) = app.tray_by_id("main") {
-        let status_item =
-            MenuItem::with_id(app, "status", &status_text, false, None::<&str>)?;
+        let status_item = MenuItem::with_id(app, "status", &status_text, false, None::<&str>)?;
         let sep1 = PredefinedMenuItem::separator(app)?;
         let connect_item =
             MenuItem::with_id(app, "connect", "Connect", connect_enabled, None::<&str>)?;
-        let disconnect_item =
-            MenuItem::with_id(app, "disconnect", "Disconnect", disconnect_enabled, None::<&str>)?;
+        let disconnect_item = MenuItem::with_id(
+            app,
+            "disconnect",
+            "Disconnect",
+            disconnect_enabled,
+            None::<&str>,
+        )?;
         let sep2 = PredefinedMenuItem::separator(app)?;
         let open_item = MenuItem::with_id(app, "open", "Open ZTLP", true, None::<&str>)?;
         let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;

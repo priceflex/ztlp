@@ -47,7 +47,7 @@ impl Default for ConnectionStatus {
 
 // ── Identity ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IdentityInfo {
     pub node_id: String,
     pub public_key: String,
@@ -99,8 +99,16 @@ pub struct AppConfig {
     pub stun_server: String,
     pub tunnel_address: String,
     pub dns_servers: Vec<String>,
+    pub port_mappings: Vec<PortMapping>,
     pub mtu: u32,
     pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PortMapping {
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
 }
 
 impl Default for AppConfig {
@@ -108,8 +116,9 @@ impl Default for AppConfig {
         Self {
             relay_address: String::new(),
             stun_server: "stun.l.google.com:19302".into(),
-            tunnel_address: "10.0.0.2".into(),
+            tunnel_address: "127.100.0.0/16".into(),
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            port_mappings: vec![],
             mtu: 1400,
             auto_connect: false,
         }
@@ -129,16 +138,24 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        // Generate a mock identity for demo purposes.
-        // TODO: Replace with real FFI call to ztlp_identity_generate() /
-        //       ztlp_identity_load().
-        let mock_identity = IdentityInfo {
-            node_id: "a1b2c3d4e5f60718".into(),
-            public_key: "d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7"
-                .into(),
-            provider_type: "software".into(),
-            zone_name: None,
-            enrolled: false,
+        // Generate or load identity.
+        let default_path =
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+                .join(".ztlp")
+                .join("identity.json");
+        let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
+            Ok(id) => Some(IdentityInfo {
+                node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
+                public_key: id
+                    .static_public_key
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
+                provider_type: "software".into(),
+                zone_name: None,
+                enrolled: false,
+            }),
+            Err(_) => Some(Default::default()), // Fallback structure instance
         };
 
         let mock_services = vec![
@@ -179,7 +196,7 @@ impl Default for AppState {
 
         Self {
             status: Mutex::new(ConnectionStatus::default()),
-            identity: Mutex::new(Some(mock_identity)),
+            identity: Mutex::new(identity_info),
             services: Mutex::new(mock_services),
             traffic: Mutex::new(TrafficStats::default()),
             config: Mutex::new(AppConfig::default()),

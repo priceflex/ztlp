@@ -30,6 +30,21 @@ bin/rails server
 
 Visit `http://localhost:3000`
 
+## Local ztlp.net test tunnel with ngrok
+
+Domain/deployment assets for `www.ztlp.net` live in the repo-level `ztlp.net/` folder, separate from this Rails app.
+
+For local product testing through ngrok:
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+cp .env.local.example .env.local
+# edit .env.local and set NGROK_AUTHTOKEN
+bin/run-local-ngrok
+```
+
+See `../ztlp.net/README.md` for details. Do not commit ngrok tokens or other secrets.
+
 ## Architecture
 
 ```

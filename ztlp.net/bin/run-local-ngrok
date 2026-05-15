@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [[ -f .env.local ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env.local
+  set +a
+fi
+
+: "${NGROK_AUTHTOKEN:?Set NGROK_AUTHTOKEN in ztlp.net/.env.local or export it in your shell}"
+
+export NGROK_DOMAIN="${NGROK_DOMAIN:-www.ztlp.net}"
+export BOOTSTRAP_URL="${BOOTSTRAP_URL:-https://${NGROK_DOMAIN}}"
+export ZTLP_BOOTSTRAP_UPSTREAM="${ZTLP_BOOTSTRAP_UPSTREAM:-3000}"
+
+exec docker compose up --build bootstrap ngrok

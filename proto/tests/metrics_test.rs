@@ -334,6 +334,6 @@ fn format_f64_formats_integers_without_decimals() {
 #[test]
 fn format_f64_formats_floats_correctly() {
     assert_eq!(format_f64(0.001), "0.001");
-    assert_eq!(format_f64(3.14), "3.14");
+    assert_eq!(format_f64(3.125), "3.125");
     assert_eq!(format_f64(0.025), "0.025");
 }

@@ -10,6 +10,74 @@
 
 ---
 
+
+## Progress audit — 2026-05-15
+
+Checked against the repo, local tests, live NS, and DESKTOP-LRC8DKH on 2026-05-15. Use this as the live task checklist.
+
+- [x] Task 1 — Public launcher scaffold is present and old public ngrok-to-bootstrap entrypoints are removed. Verified `bin/run-local-ngrok` and `.env.local.example` are absent. README/plan mention ngrok only as guardrails/history.
+- [~] Task 2 — Minimal Launch app exists with `/`, `/start`, `/claim`, `/claim/launch`, `/downloads`, `/downloads/manifest.json`, and `/health`. Claim tokens are HMAC digests only and public pages avoid private admin URLs. Remaining: real email delivery and app-callable container/process orchestration beyond metadata.
+- [~] Task 3 — Completion/claim-token pattern is ported in preview form: tokens expire, are digest-only at rest, and the claim page reveals no private admin endpoint. Remaining: real email magic-link delivery and final single-use/resume semantics.
+- [~] Task 4 — `bin/launch` can create/list/status/stop/destroy private bootstrap instance scaffolds under `data/instances/<slug>/` with 127.0.0.1-only dev port binding. Remaining: call this from the Launch app and start/manage real containers as part of provisioning.
+- [x] Task 5 — ZTLP-native bootstrap access was proven manually end-to-end. Private Rails Bootstrap on `127.0.0.1:39123`, NS KEY/SVC registration for `bootstrap.trs-remote-test.ztlp`, and `ztlp listen --forward http:127.0.0.1:39123` let Windows reach `/up` and `/login` through a local ZTLP forward. Remaining productization: Launch must own/start the listener and service identity lifecycle.
+- [~] Task 6 — Enrollment-token consistency is improved for Launch: claim page now generates a real `ztlp://enroll/<base64url>` setup token with explicit NS `10.69.95.14:23096`. Remaining: clean stale Bootstrap Rails examples (`idp_enrollment/show`) and final production token/callback semantics.
+- [~] Task 7 — Download manifest support is partially complete. `/downloads`, `/downloads/<platform>`, and `/downloads/manifest.json` point to real GitHub release assets and checksums. Remaining: clean release tag, single-binary assets, inline checksum UX, and runtime automation.
+- [~] Task 7A — Windows runtime handling is partially complete. Launch download copy now mentions Microsoft Visual C++ Redistributable x64. Remaining: self-contained/static Windows builds or bundled runtime.
+- [ ] Task 7B — Clean customer-facing release assets are not complete. Latest/default release remains `v-before-nebula-collapse`, and desktop assets still use `ZTLP_1.0.0_*`.
+- [~] Task 7C — Download/install instructions are started but incomplete. Basic per-platform links and VC++ guidance exist; remaining work is explicit `ztlp --help` steps, Gatekeeper/quarantine guidance, and checksum commands.
+- [ ] Task 7D — TLS/proxy compatibility is not complete. Public preview is still ngrok-backed; Windows no-`-k` verification remains open.
+- [x] Task 9 — Real CLI enrollment token on claim page is implemented for preview/dev. Claim page shows `ztlp setup --token '<ztlp://enroll/...>' --name '<HOSTNAME>' -y`, explicit NS, and keeps web claim token separate.
+- [~] Task 10 — Bootstrap provisioning + NS SVC metadata is partially implemented. `POST /claim/launch` records `bootstrap_service_name`, `ns_server`, and `bootstrap_listener_addr` public-safe metadata, but does not yet run `bin/launch`, `ztlp keygen`, `ztlp ns register`, or `ztlp listen` automatically.
+- [~] Task 8 — Docs cleanup is partially complete. README and inventory now document the corrected boundary. Remaining: remove/retire confusing stale handoffs after facts are consolidated and fix active docs/examples from Task 6/7.
+
+Verification run:
+
+```bash
+cd /home/trs/projects/ztlp/proto
+cargo test --bin ztlp -- --nocapture        # 5 CLI regression tests passing
+cargo build --release --bin ztlp            # release ztlp built
+./target/release/ztlp ns lookup bootstrap.trs-remote-test.ztlp --ns-server 10.69.95.14:23096
+./target/release/ztlp ns lookup bootstrap.trs-remote-test.ztlp --ns-server 10.69.95.14:23096 -t 2
+
+cd /home/trs/projects/ztlp/ztlp.net
+python3 -m py_compile launch_app/app.py tests/test_launch_app.py
+python3 -m unittest discover -s tests -v   # 13 tests passing
+```
+
+---
+
+## Confirmation — 2026-05-15 update after continuation
+
+New confirmed evidence:
+
+- Fixed Windows `config.toml` generation in `/home/trs/projects/ztlp/proto/src/bin/ztlp-cli.rs`: TOML strings are now escaped safely for Windows paths like `C:\Users\TRS\.ztlp\identity.json`.
+- Added CLI regression tests for TOML path escaping and `write_config_file` parsing back into `Config`.
+- Fixed `ztlp ns lookup` response parsing for found responses with an extra flag byte (`0x02, 0x01, record...`) while preserving the record type byte.
+- Hardened `print_ns_record` so truncated record data no longer panics at the old `rest[4 + data_len..]` slice.
+- Verified live NS lookups no longer panic:
+  - KEY lookup for `bootstrap.trs-remote-test.ztlp` returned `ZTLP_KEY`, TTL 86400s.
+  - SVC lookup for `bootstrap.trs-remote-test.ztlp -t 2` returned `ZTLP_SVC`, TTL 86400s.
+- Proved private Bootstrap Rails over ZTLP tunnel from Windows host `DESKTOP-LRC8DKH`:
+  - Hermes listener: `ztlp listen --bind 0.0.0.0:23095 --key /tmp/ztlp-e2e/server-identity.json --forward http:127.0.0.1:39123 --gateway -vv`
+  - Windows connect: `ztlp.exe connect bootstrap.trs-remote-test.ztlp --ns-server 10.69.95.14:23096 --service http -L 18080:127.0.0.1:3000 -vv`
+  - Windows `curl.exe -v -H "X-Forwarded-Proto: https" http://127.0.0.1:18080/up` returned `HTTP/1.1 200 OK` and Rails green `/up` page.
+  - Windows `curl.exe -v -H "X-Forwarded-Proto: https" http://127.0.0.1:18080/login` returned `HTTP/1.1 200 OK` and the Bootstrap login page.
+- Updated Launch app preview flow:
+  - DB schema now has `enrollment_token_uri`, `enrollment_expires_at`, `enrollment_status`, `bootstrap_service_name`, `ns_server`, and `bootstrap_listener_addr` with migration for existing SQLite DBs.
+  - Claiming a request generates a real base64url `ztlp://enroll/...` token with explicit NS `10.69.95.14:23096`.
+  - Claim page shows setup and connect commands, but still does not reveal a private admin URL or localhost port.
+  - `/claim/launch` records public-safe provisioning metadata (`bootstrap.<zone>`, NS, listener address) but does not yet start containers/processes.
+  - `/downloads` now mentions the Windows Microsoft Visual C++ Redistributable x64 prerequisite.
+
+Still not production-complete:
+
+- Launch does not yet send email claim links.
+- Launch does not yet invoke `bin/launch create`, start Docker Bootstrap containers, generate service identities, run `ztlp ns register`, or supervise `ztlp listen`.
+- Windows release remains MSVC-runtime-dependent and customer-facing release tag/assets are still ugly.
+- Public preview remains ngrok-backed; Windows trust/proxy compatibility is not solved.
+
+---
+
 ## Source facts to preserve
 
 - Existing `ztlp.net` ngrok-to-bootstrap exposure was wrong and has been removed.
@@ -736,10 +804,10 @@ Expected:
 
 ## Definition of done
 
-- `ztlp.net` is a clean public launcher/provisioning workspace.
-- Old public ngrok-to-bootstrap plumbing is gone.
-- Launch can create/list/status/stop/destroy bootstrap instance scaffolds.
-- Public pages never link directly to private bootstrap/admin URLs.
-- Plan clearly maps older Z2LS registration flow to new ZTLP onboarding.
-- Existing ZTLP enrollment pieces are identified with exact paths.
-- Next implementation can proceed without rediscovering the same history.
+- [x] `ztlp.net` is a clean public launcher/provisioning workspace.
+- [x] Old public ngrok-to-bootstrap plumbing is gone.
+- [x] Launch can create/list/status/stop/destroy bootstrap instance scaffolds.
+- [x] Public pages never link directly to private bootstrap/admin URLs.
+- [x] Plan clearly maps older Z2LS registration flow to new ZTLP onboarding.
+- [x] Existing ZTLP enrollment pieces are identified with exact paths.
+- [x] Next implementation can proceed without rediscovering the same history.

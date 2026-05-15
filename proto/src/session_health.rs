@@ -128,10 +128,9 @@ impl SessionHealth {
 
         // Evaluate silent / stuck conditions only when flows are active.
         // A quiet tunnel with nothing to send is healthy by definition.
-        let silent_too_long =
-            inputs.has_active_flows && inputs.useful_rx_age >= SUSPECT_THRESHOLD;
-        let stuck_too_long = inputs.has_active_flows
-            && inputs.consecutive_stuck_high_seq_ticks >= NO_PROGRESS_TICKS;
+        let silent_too_long = inputs.has_active_flows && inputs.useful_rx_age >= SUSPECT_THRESHOLD;
+        let stuck_too_long =
+            inputs.has_active_flows && inputs.consecutive_stuck_high_seq_ticks >= NO_PROGRESS_TICKS;
         let fast_stuck = inputs.has_active_flows
             && inputs.oldest_outbound_ms >= FAST_STUCK_OLDEST_MS
             && inputs.consecutive_stuck_high_seq_ticks > 0;
@@ -385,10 +384,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let later = h.tick(
-            t0 + Duration::from_secs(30),
-            HealthTickInputs::default(),
-        );
+        let later = h.tick(t0 + Duration::from_secs(30), HealthTickInputs::default());
         assert_eq!(later, HealthAction::None);
     }
 }

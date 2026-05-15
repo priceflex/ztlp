@@ -78,6 +78,7 @@ services:
       ZTLP_ORG_NAME: "${org}"
       ZTLP_ADMIN_EMAIL: "${email}"
       ZTLP_ZONE: "${zone}"
+      ZTLP_TRUST_GATEWAY_AUTH: "true"
       # TODO: inject ZTLP service identity once bootstrap.<zone> registration is wired.
     restart: unless-stopped
     healthcheck:

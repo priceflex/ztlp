@@ -35,6 +35,15 @@ MAX_FORM_BYTES = int(os.environ.get("LAUNCH_MAX_FORM_BYTES", "65536"))
 RELEASE_TAG = os.environ.get("ZTLP_RELEASE_TAG", "v-before-nebula-collapse")
 RELEASE_BASE_URL = os.environ.get("ZTLP_RELEASE_BASE_URL", f"https://github.com/priceflex/ztlp/releases/download/{RELEASE_TAG}")
 RELEASE_PAGE_URL = os.environ.get("ZTLP_RELEASE_PAGE_URL", f"https://github.com/priceflex/ztlp/releases/tag/{RELEASE_TAG}")
+LAUNCH_NS_SERVER = os.environ.get("ZTLP_NS_SERVER", "10.69.95.14:23096")
+LAUNCH_ENROLLMENT_SECRET_HEX = os.environ.get(
+    "ZTLP_ENROLLMENT_SECRET",
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+)
+LAUNCH_ENROLLMENT_TTL_SECONDS = int(os.environ.get("ZTLP_ENROLLMENT_TTL_SECONDS", "86400"))
+LAUNCH_RELAY_ADDR = os.environ.get("ZTLP_RELAY_ADDR", "")
+LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
+BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR", "10.69.95.14:23095")
 
 DOWNLOAD_ASSETS = [
     {
@@ -198,12 +207,29 @@ class LaunchApp:
                     claim_token_digest TEXT NOT NULL UNIQUE,
                     claim_expires_at TEXT NOT NULL,
                     claimed_at TEXT,
+                    enrollment_token_uri TEXT,
+                    enrollment_expires_at TEXT,
+                    enrollment_status TEXT,
+                    bootstrap_service_name TEXT,
+                    ns_server TEXT,
+                    bootstrap_listener_addr TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_onboarding_requests_zone ON onboarding_requests(zone)")
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(onboarding_requests)")}
+            for column, ddl in {
+                "enrollment_token_uri": "TEXT",
+                "enrollment_expires_at": "TEXT",
+                "enrollment_status": "TEXT",
+                "bootstrap_service_name": "TEXT",
+                "ns_server": "TEXT",
+                "bootstrap_listener_addr": "TEXT",
+            }.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE onboarding_requests ADD COLUMN {column} {ddl}")
 
     def render_landing(self) -> Tuple[HTTPStatus, str, str]:
         body = """
@@ -303,6 +329,7 @@ class LaunchApp:
                     ("claimed", now, now, row["id"]),
                 )
             row = self.find_by_token(token)
+        row = self.ensure_enrollment_metadata(row)
         return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row))
 
     def handle_claim_launch(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
@@ -315,17 +342,31 @@ class LaunchApp:
             return self.invalid_token("That claim token has expired or was revoked.")
         if not row["claimed_at"]:
             return (HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", self.page("Claim confirmation required", "<p>The claim token must be confirmed first.</p>"))
+        row = self.ensure_enrollment_metadata(row)
         now = self.now().replace(microsecond=0).isoformat()
+        service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         with self.connect() as conn:
             conn.execute(
-                "UPDATE onboarding_requests SET status = ?, claimed_at = COALESCE(claimed_at, ?), updated_at = ? WHERE id = ?",
-                ("launch_requested", now, now, row["id"]),
+                """
+                UPDATE onboarding_requests
+                SET status = ?, claimed_at = COALESCE(claimed_at, ?),
+                    bootstrap_service_name = COALESCE(bootstrap_service_name, ?),
+                    ns_server = COALESCE(ns_server, ?),
+                    bootstrap_listener_addr = COALESCE(bootstrap_listener_addr, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                ("launch_requested", now, service, LAUNCH_NS_SERVER, BOOTSTRAP_LISTENER_ADDR, now, row["id"]),
             )
         row = self.find_by_token(token)
-        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, note="Launch request recorded. Provisioning is stubbed for now."))
+        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, note="Launch request recorded. Bootstrap provisioning metadata is ready for the private ZTLP service path."))
 
     def render_claim_page(self, row: sqlite3.Row, note: str = "") -> str:
-        service = f"bootstrap.{row['zone']}"
+        service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
+        ns_server = row["ns_server"] or LAUNCH_NS_SERVER
+        enrollment_token = row["enrollment_token_uri"] or ""
+        enrollment_command = f"ztlp setup --token '{enrollment_token}' --name '<HOSTNAME>' -y" if enrollment_token else "Claim this request to generate enrollment instructions."
+        connect_command = f"ztlp connect {service} --ns-server {ns_server} --service http -L 18080:127.0.0.1:3000"
         note_html = f"<p class='notice'>{esc(note)}</p>" if note else ""
         body = f"""
         <p class="eyebrow">Claim status</p>
@@ -335,13 +376,63 @@ class LaunchApp:
           <dt>Status</dt><dd>Status: {esc(row['status'])}</dd>
           <dt>Admin</dt><dd>{esc(row['admin_name'])} &lt;{esc(row['admin_email'])}&gt;</dd>
           <dt>Zone</dt><dd>{esc(row['zone'])}</dd>
+          <dt>NS server</dt><dd><code>{esc(ns_server)}</code></dd>
+          <dt>Enrollment status</dt><dd>{esc(row['enrollment_status'] or 'pending')}</dd>
+          <dt>Enrollment expires</dt><dd>{esc(row['enrollment_expires_at'] or '')}</dd>
+          <dt>Setup command</dt><dd><code>{esc(enrollment_command)}</code></dd>
           <dt>ZTLP service</dt><dd><code>{esc(service)}</code></dd>
-          <dt>Connect command</dt><dd><code>ztlp connect {esc(service)}</code></dd>
+          <dt>Connect command</dt><dd><code>{esc(connect_command)}</code></dd>
         </dl>
-        <p>Provisioning will expose the Bootstrap service through ZTLP-native identity only. No private admin URL is published here.</p>
+        <form method="post" action="/claim/launch">
+          <input type="hidden" name="token" value="">
+          <p class="small">Use the original claim link to request private Bootstrap provisioning. The public page never exposes a Bootstrap admin URL.</p>
+        </form>
+        <p>Provisioning exposes the Bootstrap service through ZTLP-native identity only. No private admin URL is published here.</p>
         <p><a class="button" href="/downloads">Download ZTLP</a></p>
         """
         return self.page("Claim status", body)
+
+    def ensure_enrollment_metadata(self, row: sqlite3.Row) -> sqlite3.Row:
+        if row["enrollment_token_uri"] and row["bootstrap_service_name"] and row["ns_server"]:
+            return row
+        now = self.now().replace(microsecond=0)
+        expires = now + dt.timedelta(seconds=LAUNCH_ENROLLMENT_TTL_SECONDS)
+        service = f"bootstrap.{row['zone']}"
+        token_uri = generate_enrollment_token_uri(
+            zone=row["zone"],
+            ns_server=LAUNCH_NS_SERVER,
+            expires_at=expires,
+            secret_hex=LAUNCH_ENROLLMENT_SECRET_HEX,
+            relay_addr=LAUNCH_RELAY_ADDR,
+            gateway_addr=LAUNCH_GATEWAY_ADDR,
+            callback_url="",
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE onboarding_requests
+                SET enrollment_token_uri = COALESCE(enrollment_token_uri, ?),
+                    enrollment_expires_at = COALESCE(enrollment_expires_at, ?),
+                    enrollment_status = COALESCE(enrollment_status, ?),
+                    bootstrap_service_name = COALESCE(bootstrap_service_name, ?),
+                    ns_server = COALESCE(ns_server, ?),
+                    bootstrap_listener_addr = COALESCE(bootstrap_listener_addr, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    token_uri,
+                    expires.isoformat(),
+                    "ready",
+                    service,
+                    LAUNCH_NS_SERVER,
+                    BOOTSTRAP_LISTENER_ADDR,
+                    now.isoformat(),
+                    row["id"],
+                ),
+            )
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM onboarding_requests WHERE id = ?", (row["id"],)).fetchone()
 
     def render_downloads(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         cards = []
@@ -363,6 +454,7 @@ class LaunchApp:
         <p class="eyebrow">Downloads</p>
         <h1>Download ZTLP</h1>
         <p>Start with the command-line binary bundles. They match the current public release assets and are enough for enrollment/setup testing while the full desktop installers mature.</p>
+        <p class="notice">Windows prerequisite: install the Microsoft Visual C++ Redistributable x64 if <code>ztlp.exe</code> exits immediately with missing runtime DLL errors.</p>
         <div class="actions">
           <a class="button" href="/downloads/windows">Windows ZIP</a>
           <a class="button" href="/downloads/linux">Linux tar.gz</a>
@@ -521,6 +613,61 @@ def validate_start(values: dict) -> list[str]:
     if not zone or not ZONE_RE.match(zone) or ".." in zone:
         errors.append("Zone must be a DNS-like name such as acme.ztlp.")
     return errors
+
+
+def generate_enrollment_token_uri(
+    *,
+    zone: str,
+    ns_server: str,
+    expires_at: dt.datetime,
+    secret_hex: str,
+    relay_addr: str = "",
+    gateway_addr: str = "",
+    callback_url: str = "",
+) -> str:
+    import base64
+    import struct
+
+    secret = bytes.fromhex(secret_hex)
+    if len(secret) != 32:
+        raise ValueError("ZTLP_ENROLLMENT_SECRET must be 32 bytes of hex.")
+    nonce = secrets.token_bytes(16)
+    flags = 1 if callback_url else 0
+    max_uses = 1
+    issued_at = int(utcnow().timestamp())
+    expires_unix = int(expires_at.timestamp())
+
+    body = bytearray()
+    body.extend(b"ZTLPENR1")
+    body.append(flags)
+    body.extend(struct.pack(">Q", issued_at))
+    body.extend(struct.pack(">Q", expires_unix))
+    body.extend(struct.pack(">I", max_uses))
+    body.extend(nonce)
+    for text in (zone, ns_server):
+        data = text.encode("utf-8")
+        body.extend(struct.pack(">H", len(data)))
+        body.extend(data)
+    body.append(1 if relay_addr else 0)
+    if relay_addr:
+        data = relay_addr.encode("utf-8")
+        body.extend(struct.pack(">H", len(data)))
+        body.extend(data)
+    if gateway_addr:
+        body.append(1)
+        data = gateway_addr.encode("utf-8")
+        body.extend(struct.pack(">H", len(data)))
+        body.extend(data)
+    else:
+        body.append(0)
+    if callback_url:
+        data = callback_url.encode("utf-8")
+        body.extend(struct.pack(">H", len(data)))
+        body.extend(data)
+    sig = hmac.new(secret, bytes(body), hashlib.sha256).digest()
+    payload = bytes(body) + sig
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"ztlp://enroll/{encoded}"
 
 
 application = LaunchApp()

@@ -129,17 +129,24 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Status: claimed", claim_body)
         self.assertIn("bootstrap.example.ztlp", claim_body)
-        self.assertIn("ztlp connect bootstrap.example.ztlp", claim_body)
+        self.assertIn("ztlp://enroll/", claim_body)
+        self.assertIn("ztlp setup --token", claim_body)
+        self.assertIn("10.69.95.14:23096", claim_body)
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 10.69.95.14:23096", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
         self.assertNotIn(token, claim_body)
 
         conn = sqlite3.connect(self.db_path)
-        row = conn.execute("SELECT status, claimed_at FROM onboarding_requests").fetchone()
+        row = conn.execute("SELECT status, claimed_at, enrollment_token_uri, bootstrap_service_name, ns_server FROM onboarding_requests").fetchone()
         conn.close()
         self.assertEqual("claimed", row[0])
         self.assertEqual("2026-01-02T03:04:05+00:00", row[1])
+        self.assertTrue(row[2].startswith("ztlp://enroll/"))
+        self.assertNotEqual(token, row[2])
+        self.assertEqual("bootstrap.example.ztlp", row[3])
+        self.assertEqual("10.69.95.14:23096", row[4])
 
     def test_claim_launch_requires_claim_token_and_updates_status_without_exposing_admin_url(self):
         _status, _headers, body = self.post_form(
@@ -162,8 +169,18 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Status: launch_requested", launch_body)
         self.assertIn("bootstrap.launch.ztlp", launch_body)
+        self.assertIn("ztlp://enroll/", launch_body)
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 10.69.95.14:23096", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute("SELECT status, bootstrap_service_name, ns_server, bootstrap_listener_addr FROM onboarding_requests").fetchone()
+        conn.close()
+        self.assertEqual("launch_requested", row[0])
+        self.assertEqual("bootstrap.launch.ztlp", row[1])
+        self.assertEqual("10.69.95.14:23096", row[2])
+        self.assertEqual("10.69.95.14:23095", row[3])
 
     def test_invalid_or_missing_token_is_not_found(self):
         for method, path, data in [
@@ -231,6 +248,7 @@ class LaunchAppTest(unittest.TestCase):
         status, _headers, body = self.request("GET", "/downloads")
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Windows ZIP", body)
+        self.assertIn("Microsoft Visual C++ Redistributable x64", body)
         self.assertIn("ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip", body)
         self.assertIn("ztlp-v-before-nebula-collapse-x86_64-unknown-linux-gnu.tar.gz", body)
         self.assertIn("ztlp-v-before-nebula-collapse-aarch64-apple-darwin.tar.gz", body)

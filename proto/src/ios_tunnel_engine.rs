@@ -331,9 +331,7 @@ impl IosTunnelEngine {
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp socket state poisoned"))?;
             sock_guard
                 .as_ref()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotConnected, "udp socket not bound")
-                })?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "udp socket not bound"))?
                 .try_clone()?
         };
         // Make sure the cloned socket uses the same short read timeout so
@@ -1514,7 +1512,10 @@ mod tests {
         }
 
         assert_eq!(DELIVERED.load(Ordering::SeqCst), 3);
-        assert_eq!(BYTES_DELIVERED.load(Ordering::SeqCst), 3 * b"GATEWAY_PKT".len());
+        assert_eq!(
+            BYTES_DELIVERED.load(Ordering::SeqCst),
+            3 * b"GATEWAY_PKT".len()
+        );
         assert_eq!(LAST_ACTION.load(Ordering::SeqCst), 252);
 
         // Drop the engine: the stop flag must cleanly exit the recv thread.

@@ -1,14 +1,31 @@
 services:
   launch:
-    image: nginx:alpine
-    container_name: ztlp-launch-placeholder
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ztlp-launch
     ports:
-      - "${LAUNCH_PORT:-8080}:80"
+      - "${LAUNCH_PORT:-8080}:8080"
+    environment:
+      LAUNCH_BIND_HOST: 0.0.0.0
+      LAUNCH_BIND_PORT: 8080
+      LAUNCH_DB_PATH: /app/data/launch.sqlite3
+      LAUNCH_PUBLIC_HOST: ${LAUNCH_PUBLIC_HOST:-localhost:8080}
+      LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET:-ztlp-launch-dev-secret-change-me}
+      ZTLP_DOWNLOAD_MANIFEST_URL: ${ZTLP_DOWNLOAD_MANIFEST_URL:-https://www.ztlp.net/downloads/manifest.json}
     volumes:
-      - ./public:/usr/share/nginx/html:ro
+      - launch_data:/app/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
 # Bootstrap/admin instances are intentionally NOT exposed here.
 # Use bin/launch to create per-instance Docker Compose files under data/instances/.
 # Those generated instance files bind private Rails ports to 127.0.0.1 only until
 # ZTLP-native service access is wired.
+
+volumes:
+  launch_data:
+    name: ztlp_launch_data

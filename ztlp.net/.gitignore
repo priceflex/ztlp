@@ -7,3 +7,5 @@
 secrets/
 data/instances/*
 !data/instances/.keep
+data/*.sqlite3
+data/*.sqlite3-*

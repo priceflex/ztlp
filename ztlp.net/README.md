@@ -43,17 +43,48 @@ ztlp.net/
     instances/.keep                 # local runtime registry; ignored except .keep
 ```
 
-## Current scaffold
+## Minimal Launch app
 
-The initial scaffold is intentionally boring and Docker-only:
+The current public Launch app is a stdlib-only Python WSGI service in `launch_app/` with sqlite state under `data/launch.sqlite3` by default.
+It provides:
 
-- One `launch` service for the public launcher placeholder.
-- Zero public bootstrap/admin port publishing.
-- Per-instance Docker Compose files generated under `ztlp.net/data/instances/<slug>/`.
-- Bootstrap instances bind Rails to `127.0.0.1:<private-port>` only for local/dev inspection until ZTLP service identity is wired.
-- No ngrok service.
+- `GET /` landing page.
+- `GET /start` onboarding request form.
+- `POST /start` onboarding request creation with a one-time local/dev claim link display.
+- `GET /claim?token=...` claim verification/status/download instructions.
+- `POST /claim/launch` stub status transition to `launch_requested`.
+- `GET /downloads` public download manifest page.
+- `GET /health` health check.
+
+Claim tokens are stored as HMAC-SHA256 digests only. The app does not publish Bootstrap admin URLs, Rails login URLs, ngrok tunnels, or dashboard routes.
 
 ## Local commands
+
+Run the unit tests:
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+python3 -m unittest discover -s tests -v
+```
+
+Run the app without Docker:
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+LAUNCH_BIND_HOST=127.0.0.1 LAUNCH_BIND_PORT=8080 python3 -m launch_app.app
+curl -fsS http://127.0.0.1:8080/health
+```
+
+Run the Docker preview:
+
+```bash
+cd /home/trs/projects/ztlp/ztlp.net
+docker compose config
+docker compose up --build
+```
+
+The Docker preview binds `${LAUNCH_PORT:-8080}:8080` and uses the `ztlp_launch_data` Docker volume for the sqlite database. Bootstrap/admin instances are still not exposed by this compose file. For any non-development deployment, set a real `LAUNCH_TOKEN_SECRET` and `LAUNCH_ENV=production`; the app rejects the checked-in development secret outside development/test.
+
 
 Create a private bootstrap instance scaffold:
 

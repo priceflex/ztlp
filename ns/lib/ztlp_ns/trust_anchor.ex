@@ -80,7 +80,10 @@ defmodule ZtlpNs.TrustAnchor do
   @doc "Remove all trust anchors."
   @spec clear() :: :ok
   def clear do
-    :ets.delete_all_objects(@table)
+    case :ets.whereis(@table) do
+      :undefined -> :ok
+      _ -> :ets.delete_all_objects(@table)
+    end
     :ok
   end
 

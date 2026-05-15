@@ -17,6 +17,26 @@ defmodule ZtlpNs.AdminTest do
   alias ZtlpNs.{Audit, Crypto, Record, Store, RegistrationAuth, TrustAnchor}
 
   setup do
+    Application.stop(:ztlp_ns)
+    Application.ensure_all_started(:mnesia) # Restart mnesia without the app
+
+    test_dir = Path.join(System.tmp_dir!(), "ztlp_ca_test_#{:rand.uniform(1_000_000)}")
+    File.mkdir_p!(test_dir)
+
+    Application.put_env(:ztlp_ns, :ca_dir, test_dir)
+    Application.ensure_all_started(:ztlp_ns)
+
+    # Initialize CA otherwise certificates can't be issued in some tests
+    case ZtlpNs.CertAuthority.init_ca(org: "Test") do
+      {:ok, _} -> :ok
+      {:error, :already_initialized} -> :ok
+    end
+
+    on_exit(fn ->
+      Application.stop(:ztlp_ns)
+      File.rm_rf!(test_dir)
+    end)
+
     Store.clear()
     TrustAnchor.clear()
     Audit.clear()
@@ -524,11 +544,15 @@ defmodule ZtlpNs.AdminTest do
 
   describe "admin query via UDP (0x13)" do
     setup do
-      # Get the server's actual port (it uses port 0 in test config)
-      port = ZtlpNs.Server.port()
-      {:ok, socket} = :gen_udp.open(0, [:binary, active: false])
-      {:ok, %{socket: socket, port: port}}
-    end
+    # Get the server's actual port
+    port = ZtlpNs.Server.port()
+    
+    # We must ensure the server is fully ready to avoid test failures
+    Process.sleep(50)
+    
+    {:ok, socket} = :gen_udp.open(0, [:binary, active: false])
+    {:ok, %{socket: socket, port: port}}
+  end
 
     test "list all records via admin query", %{socket: socket, port: port} do
       device = make_signed_device("laptop.zone.ztlp")

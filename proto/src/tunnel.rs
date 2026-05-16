@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -75,7 +75,7 @@ use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
-use crate::stats::TunnelStats;
+use crate::stats::{RxBatchStats, TunnelStats, TxBatchStats};
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -532,6 +532,10 @@ where
     .await
 }
 
+pub fn bridge_instrumentation_enabled() -> bool {
+    crate::stats::debug_enabled()
+}
+
 /// Encrypt a plaintext frame and send as a ZTLP data packet.
 /// Fire-and-forget; returns the packet_seq used on success.
 async fn encrypt_and_send(
@@ -579,10 +583,11 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     info!(
-        "run_bridge (nebula dumb-pipe): starting for session {} peer={} local_udp={:?}",
+        "run_bridge (nebula dumb-pipe): starting for session {} peer={} local_udp={:?} recv_mode={}",
         session_id,
         peer_addr,
-        udp_socket.local_addr()
+        udp_socket.local_addr(),
+        if udp_recv_override.is_some() { "demuxed" } else { "shared" }
     );
 
     // Pre-extract AEAD keys once.
@@ -618,6 +623,7 @@ where
 
     let (mut tcp_reader, mut tcp_writer) = tokio::io::split(tcp_stream);
 
+    let use_demux_recv = udp_recv_override.is_some();
     let udp_send = udp_socket.clone();
     let udp_recv = udp_recv_override.unwrap_or_else(|| udp_socket.clone());
 
@@ -626,9 +632,20 @@ where
     // older tools that still parse it don't break.
     let mut data_seq: u64 = 0;
 
-    // Stats (dropped-to-stub for now; TODO(nebula-pivot-R5): wire real stats).
     let tunnel_stats = Arc::new(TunnelStats::new());
-    let _ = tunnel_stats;
+    if let Ok(mut strategy) = tunnel_stats.send_strategy.lock() {
+        *strategy = if use_demux_recv {
+            "sendto/demuxed-recv".to_string()
+        } else {
+            "sendto/shared-recv".to_string()
+        };
+    }
+    tunnel_stats
+        .gro_available
+        .store(use_demux_recv, std::sync::atomic::Ordering::Relaxed);
+
+    let mut tx_batch_num: u64 = 0;
+    let mut rx_batch_num: u64 = 0;
 
     // Flag set when a RESET frame arrives.
     let mut reset_received = false;
@@ -672,6 +689,7 @@ where
         tokio::select! {
             // ─── TCP → UDP: encrypt and fire-and-forget ──────────────
             read_result = tcp_reader.read(&mut tcp_buf), if !local_eof => {
+                let tcp_read_started = Instant::now();
                 match read_result {
                     Ok(0) => {
                         local_eof = true;
@@ -693,6 +711,10 @@ where
                         }
                     }
                     Ok(n) => {
+                        tx_batch_num = tx_batch_num.wrapping_add(1);
+                        let encrypt_started = Instant::now();
+                        let mut packet_count = 0usize;
+                        let mut udp_bytes = 0usize;
                         // Chunk into <= MAX_PLAINTEXT_PER_PACKET frames.
                         let mut off = 0;
                         while off < n {
@@ -703,6 +725,8 @@ where
                             frame.extend_from_slice(&data_seq.to_be_bytes());
                             frame.extend_from_slice(chunk);
                             data_seq = data_seq.wrapping_add(1);
+                            packet_count += 1;
+                            udp_bytes += DATA_HEADER_SIZE + frame.len() + 16;
                             if let Err(e) = encrypt_and_send(
                                 &pipeline, &send_key, &send_cipher,
                                 session_id, &udp_send, peer_addr, &frame,
@@ -711,6 +735,28 @@ where
                             }
                             off = chunk_end;
                         }
+                        let batch = TxBatchStats {
+                            batch_num: tx_batch_num,
+                            packet_count,
+                            tcp_bytes: n,
+                            udp_bytes,
+                            tcp_read_time: tcp_read_started.elapsed(),
+                            encrypt_time: encrypt_started.elapsed(),
+                            send_time: Duration::ZERO,
+                            window_wait_time: Duration::ZERO,
+                            send_strategy: if use_demux_recv {
+                                "sendto/demuxed-recv".to_string()
+                            } else {
+                                "sendto/shared-recv".to_string()
+                            },
+                            data_seq,
+                            cwnd: 0.0,
+                            effective_window: 0,
+                            window_stall: false,
+                        };
+                        batch.log();
+                        tunnel_stats.record_tx(&batch);
+                        let _ = tunnel_stats.maybe_report(0.0, 0.0, 0.0, 0.0);
                     }
                     Err(e) => {
                         debug!("tcp read error: {}", e);
@@ -721,12 +767,15 @@ where
 
             // ─── UDP → TCP: admission/replay → decrypt → write ──────
             udp_result = udp_recv.recv_from(&mut udp_buf) => {
+                let recv_started = Instant::now();
                 match udp_result {
                     Ok((len, from)) => {
-                        if from != peer_addr {
+                        if !use_demux_recv && from != peer_addr {
                             continue;
                         }
                         let pkt = &udp_buf[..len];
+                        rx_batch_num = rx_batch_num.wrapping_add(1);
+                        let decrypt_started = Instant::now();
                         if let Err(e) = handle_incoming_packet(
                             pkt,
                             &pipeline,
@@ -738,6 +787,26 @@ where
                         ).await {
                             debug!("incoming packet error: {}", e);
                         }
+                        let delivered_tcp_bytes = if len >= DATA_HEADER_SIZE + 9 { len - DATA_HEADER_SIZE - 9 } else { 0 };
+                        let batch = RxBatchStats {
+                            batch_num: rx_batch_num,
+                            gro_segments: 1,
+                            packets_processed: 1,
+                            packets_dropped: 0,
+                            udp_bytes: len,
+                            tcp_bytes: delivered_tcp_bytes,
+                            recv_time: recv_started.elapsed(),
+                            pipeline_time: Duration::ZERO,
+                            decrypt_time: decrypt_started.elapsed(),
+                            reassembly_time: Duration::ZERO,
+                            tcp_write_time: Duration::ZERO,
+                            delivered_count: usize::from(delivered_tcp_bytes > 0),
+                            buffered_count: 0,
+                            reasm_buffer_depth: 0,
+                        };
+                        batch.log();
+                        tunnel_stats.record_rx(&batch);
+                        let _ = tunnel_stats.maybe_report(0.0, 0.0, 0.0, 0.0);
                         if reset_received {
                             break;
                         }
@@ -771,6 +840,7 @@ where
     }
 
     let _ = tcp_writer.shutdown().await;
+    tunnel_stats.final_report(0.0, 0.0, 0.0, 0.0);
     info!("tunnel bridge terminated for session {}", session_id);
     if reset_received {
         Ok(BridgeOutcome::ResetReceived)

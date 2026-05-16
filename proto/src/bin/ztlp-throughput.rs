@@ -19,6 +19,12 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tracing::debug;
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BridgePath {
+    Shared,
+    Demux,
+}
+
 use ztlp_proto::gso::{self, GsoMode};
 use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
@@ -55,6 +61,10 @@ struct Args {
     /// from the tunnel internals (sets ZTLP_DEBUG=1)
     #[arg(long)]
     debug: bool,
+
+    /// Bridge receive path to benchmark
+    #[arg(long, value_enum, default_value = "shared")]
+    path: BridgePath,
 }
 
 // ─── Results ────────────────────────────────────────────────────────────────
@@ -116,6 +126,7 @@ async fn bench_ztlp_tunnel(
     size: u64,
     _gso_mode: GsoMode,
     mode_name: &str,
+    path: BridgePath,
 ) -> Result<BenchResult, Box<dyn std::error::Error>> {
     // Create two identities
     let server_identity = NodeIdentity::generate()?;
@@ -215,15 +226,71 @@ async fn bench_ztlp_tunnel(
 
     // ── Start the bridges ──
 
+    let use_demux = matches!(path, BridgePath::Demux);
+
     // Server bridge: UDP → TCP backend
     let server_tcp = TcpStream::connect(backend_addr).await?;
-    let server_bridge = tokio::spawn({
-        let udp = server_udp.clone();
-        let pipeline = server_pipeline.clone();
-        async move {
-            let _ = tunnel::run_bridge(server_tcp, udp, pipeline, session_id, client_addr).await;
-        }
-    });
+    let server_bridge = if use_demux {
+        tokio::spawn({
+            let udp_send = server_udp.clone();
+            let udp_wait = server_udp.clone();
+            let pipeline = server_pipeline.clone();
+            async move {
+                let recv_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let recv_addr = recv_socket.local_addr().unwrap();
+                let fwd_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let initial_packets = tunnel::wait_for_first_data(
+                    &udp_wait,
+                    &pipeline,
+                    session_id,
+                    client_addr,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+                for packet in &initial_packets {
+                    fwd_socket.send_to(packet, recv_addr).await.unwrap();
+                }
+
+                let forwarder = tokio::spawn({
+                    let udp_wait = udp_wait.clone();
+                    let fwd_socket = fwd_socket.clone();
+                    async move {
+                        let mut buf = vec![0u8; 65535];
+                        loop {
+                            match udp_wait.recv_from(&mut buf).await {
+                                Ok((len, from)) if from == client_addr => {
+                                    let _ = fwd_socket.send_to(&buf[..len], recv_addr).await;
+                                }
+                                Ok(_) => continue,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                });
+
+                let _ = tunnel::run_bridge_demuxed(
+                    server_tcp,
+                    udp_send,
+                    recv_socket,
+                    pipeline,
+                    session_id,
+                    client_addr,
+                    Vec::new(),
+                )
+                .await;
+                forwarder.abort();
+            }
+        })
+    } else {
+        tokio::spawn({
+            let udp = server_udp.clone();
+            let pipeline = server_pipeline.clone();
+            async move {
+                let _ = tunnel::run_bridge(server_tcp, udp, pipeline, session_id, client_addr).await;
+            }
+        })
+    };
 
     // Client bridge: TCP local → UDP
     // Accept client TCP connection and bridge to ZTLP
@@ -431,6 +498,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     println!("Iterations: {}", args.repeat);
+    println!("Bridge path: {:?}", args.path);
+    println!(
+        "Instrumentation: {}",
+        if tunnel::bridge_instrumentation_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     let modes: Vec<&str> = match args.mode.as_str() {
@@ -469,23 +545,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = match *mode {
                 "raw" => bench_raw_tcp(&args.bind, args.size).await?,
                 "ztlp" => {
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Auto, "ZTLP (auto)").await?
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Auto, "ZTLP (auto)", args.path).await?
                 }
                 "ztlp-gso" => {
                     if !gso_available {
                         eprintln!("Warning: GSO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO)").await?
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO)", args.path).await?
                 }
                 "ztlp-nogso" => {
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (no GSO)")
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (no GSO)", args.path)
                         .await?
                 }
                 "ztlp-gro" => {
                     if !gro_available {
                         eprintln!("Warning: GRO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (GRO only)")
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (GRO only)", args.path)
                         .await?
                 }
                 "ztlp-gso-gro" => {
@@ -495,7 +571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !gro_available {
                         eprintln!("Warning: GRO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO+GRO)")
+                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO+GRO)", args.path)
                         .await?
                 }
                 other => {

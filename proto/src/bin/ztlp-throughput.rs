@@ -235,10 +235,13 @@ async fn bench_ztlp_tunnel(
             let udp_send = server_udp.clone();
             let udp_wait = server_udp.clone();
             let pipeline = server_pipeline.clone();
+            let demux_bind_addr = server_udp.local_addr().unwrap();
             async move {
-                let recv_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let recv_socket =
+                    Arc::new(UdpSocket::bind((demux_bind_addr.ip(), 0)).await.unwrap());
                 let recv_addr = recv_socket.local_addr().unwrap();
-                let fwd_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                let fwd_socket =
+                    Arc::new(UdpSocket::bind((demux_bind_addr.ip(), 0)).await.unwrap());
                 let initial_packets = tunnel::wait_for_first_data(
                     &udp_wait,
                     &pipeline,
@@ -284,7 +287,8 @@ async fn bench_ztlp_tunnel(
             let udp = server_udp.clone();
             let pipeline = server_pipeline.clone();
             async move {
-                let _ = tunnel::run_bridge(server_tcp, udp, pipeline, session_id, client_addr).await;
+                let _ =
+                    tunnel::run_bridge(server_tcp, udp, pipeline, session_id, client_addr).await;
             }
         })
     };
@@ -447,6 +451,17 @@ fn format_packets(n: u64) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Enable debug mode before tracing initialization so the subscriber picks up
+    // the intended filter configuration.
+    if args.debug {
+        std::env::set_var("ZTLP_DEBUG", "1");
+        if std::env::var("RUST_LOG").is_err() {
+            std::env::set_var("RUST_LOG", "ztlp_proto::stats=debug");
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -454,24 +469,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let args = Args::parse();
-
-    // Enable debug mode — sets ZTLP_DEBUG so the tunnel emits per-batch stats
-    if args.debug {
-        std::env::set_var("ZTLP_DEBUG", "1");
-        // Reconfigure tracing if the user hasn't already set RUST_LOG
-        if std::env::var("RUST_LOG").is_err() {
-            eprintln!("[debug] Debug mode enabled — tunnel will emit per-batch timing stats");
-        }
+    if args.debug && std::env::var("RUST_LOG").is_ok() {
+        eprintln!("[debug] Debug mode enabled — tunnel will emit per-batch timing stats");
     }
 
     // Detect GSO and GRO capabilities
-    let probe_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let probe_socket = UdpSocket::bind(format!("{}:0", args.bind)).await?;
     let gso_cap = gso::detect_gso(&probe_socket);
     let gso_available = gso_cap.is_available();
     drop(probe_socket);
 
-    let gro_probe_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let gro_probe_socket = UdpSocket::bind(format!("{}:0", args.bind)).await?;
     let gro_cap = gso::detect_gro(&gro_probe_socket);
     let gro_available = gro_cap.is_available();
     drop(gro_probe_socket);
@@ -542,24 +550,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = match *mode {
                 "raw" => bench_raw_tcp(&args.bind, args.size).await?,
                 "ztlp" => {
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Auto, "ZTLP (auto)", args.path).await?
+                    bench_ztlp_tunnel(
+                        &args.bind,
+                        args.size,
+                        GsoMode::Auto,
+                        "ZTLP (auto)",
+                        args.path,
+                    )
+                    .await?
                 }
                 "ztlp-gso" => {
                     if !gso_available {
                         eprintln!("Warning: GSO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO)", args.path).await?
+                    bench_ztlp_tunnel(
+                        &args.bind,
+                        args.size,
+                        GsoMode::Enabled,
+                        "ZTLP (GSO)",
+                        args.path,
+                    )
+                    .await?
                 }
                 "ztlp-nogso" => {
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (no GSO)", args.path)
-                        .await?
+                    bench_ztlp_tunnel(
+                        &args.bind,
+                        args.size,
+                        GsoMode::Disabled,
+                        "ZTLP (no GSO)",
+                        args.path,
+                    )
+                    .await?
                 }
                 "ztlp-gro" => {
                     if !gro_available {
                         eprintln!("Warning: GRO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Disabled, "ZTLP (GRO only)", args.path)
-                        .await?
+                    bench_ztlp_tunnel(
+                        &args.bind,
+                        args.size,
+                        GsoMode::Disabled,
+                        "ZTLP (GRO only)",
+                        args.path,
+                    )
+                    .await?
                 }
                 "ztlp-gso-gro" => {
                     if !gso_available {
@@ -568,8 +602,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !gro_available {
                         eprintln!("Warning: GRO not available, falling back");
                     }
-                    bench_ztlp_tunnel(&args.bind, args.size, GsoMode::Enabled, "ZTLP (GSO+GRO)", args.path)
-                        .await?
+                    bench_ztlp_tunnel(
+                        &args.bind,
+                        args.size,
+                        GsoMode::Enabled,
+                        "ZTLP (GSO+GRO)",
+                        args.path,
+                    )
+                    .await?
                 }
                 other => {
                     return Err(format!(

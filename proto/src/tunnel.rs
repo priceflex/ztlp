@@ -517,7 +517,7 @@ where
 }
 
 pub fn bridge_instrumentation_enabled() -> bool {
-    crate::stats::debug_enabled()
+    TunnelStats::new().enabled
 }
 
 /// Encrypt a plaintext frame and send as a ZTLP data packet.

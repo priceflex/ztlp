@@ -122,7 +122,7 @@ const MAX_SUB_BATCH: usize = 64;
 /// Desktop: 1200B to match — this is an MTU constraint, not a memory one.
 /// NOTE: This value MUST match the gateway's @max_payload_bytes (1140 + framing).
 /// Increasing for desktop requires a corresponding gateway change.
-const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
+pub const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
 
 // ─── Frame types ────────────────────────────────────────────────────────────
 
@@ -277,7 +277,7 @@ pub async fn send_reject(
 /// the backend service. Implements "lazy connect" for the listener side.
 pub async fn wait_for_first_data(
     udp_socket: &tokio::net::UdpSocket,
-    _pipeline: &Mutex<Pipeline>,
+    pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
     peer_addr: SocketAddr,
     timeout_duration: Duration,
@@ -312,6 +312,12 @@ pub async fn wait_for_first_data(
                 if header.session_id != session_id {
                     continue;
                 }
+                {
+                    let pl = pipeline.lock().await;
+                    if !matches!(pl.process(&data), AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
 
                 buffered_packets.push(data);
 
@@ -325,9 +331,26 @@ pub async fn wait_for_first_data(
                         Err(_) => break,
                         Ok(Err(_)) => break,
                         Ok(Ok((glen, gaddr))) => {
-                            if gaddr == peer_addr && glen >= DATA_HEADER_SIZE {
-                                buffered_packets.push(buf[..glen].to_vec());
+                            if gaddr != peer_addr || glen < DATA_HEADER_SIZE {
+                                continue;
                             }
+
+                            let gdata = buf[..glen].to_vec();
+                            let header = match DataHeader::deserialize(&gdata) {
+                                Ok(h) => h,
+                                Err(_) => continue,
+                            };
+                            if header.session_id != session_id {
+                                continue;
+                            }
+                            {
+                                let pl = pipeline.lock().await;
+                                if !matches!(pl.process(&gdata), AdmissionResult::Pass) {
+                                    continue;
+                                }
+                            }
+
+                            buffered_packets.push(gdata);
                         }
                     }
                 }
@@ -342,7 +365,7 @@ pub async fn wait_for_first_data_channeled(
     rx: &mut tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
     recv_socket: &tokio::net::UdpSocket,
     recv_target: std::net::SocketAddr,
-    _pipeline: &Mutex<Pipeline>,
+    pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
     timeout_duration: Duration,
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -369,6 +392,12 @@ pub async fn wait_for_first_data_channeled(
                 if header.session_id != session_id {
                     continue;
                 }
+                {
+                    let pl = pipeline.lock().await;
+                    if !matches!(pl.process(&data), AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
 
                 let _ = recv_socket.send_to(&data, recv_target).await;
                 buffered_packets.push(data);
@@ -380,10 +409,25 @@ pub async fn wait_for_first_data_channeled(
                         Err(_) => break,
                         Ok(None) => break,
                         Ok(Some((gdata, _gaddr))) => {
-                            if gdata.len() >= DATA_HEADER_SIZE {
-                                let _ = recv_socket.send_to(&gdata, recv_target).await;
-                                buffered_packets.push(gdata);
+                            if gdata.len() < DATA_HEADER_SIZE {
+                                continue;
                             }
+                            let header = match DataHeader::deserialize(&gdata) {
+                                Ok(h) => h,
+                                Err(_) => continue,
+                            };
+                            if header.session_id != session_id {
+                                continue;
+                            }
+                            {
+                                let pl = pipeline.lock().await;
+                                if !matches!(pl.process(&gdata), AdmissionResult::Pass) {
+                                    continue;
+                                }
+                            }
+
+                            let _ = recv_socket.send_to(&gdata, recv_target).await;
+                            buffered_packets.push(gdata);
                         }
                     }
                 }
@@ -1382,6 +1426,38 @@ mod tests {
 
             tokio::time::sleep(Duration::from_millis(50)).await;
             let good_pkt = build_data_packet(session_id, &send_key, 0, 0, b"right");
+            client_sock.send_to(&good_pkt, server_addr).await.unwrap();
+        });
+
+        let result = wait_for_first_data(
+            &server_sock,
+            &pipeline,
+            session_id,
+            client_addr,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        client_task.await.unwrap();
+
+        assert!(result.is_ok());
+        let packets = result.unwrap();
+        assert_eq!(packets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_first_data_ignores_failed_admission() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        let client_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut bad_pkt = build_data_packet(session_id, &send_key, 0, 0, b"bad");
+            bad_pkt[0] ^= 0x01;
+            client_sock.send_to(&bad_pkt, server_addr).await.unwrap();
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let good_pkt = build_data_packet(session_id, &send_key, 1, 1, b"good");
             client_sock.send_to(&good_pkt, server_addr).await.unwrap();
         });
 

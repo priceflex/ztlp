@@ -30,7 +30,7 @@ use ztlp_proto::handshake::HandshakeContext;
 use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use ztlp_proto::pipeline::Pipeline;
-use ztlp_proto::tunnel;
+use ztlp_proto::tunnel::{self, MAX_PLAINTEXT_PER_PACKET};
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
@@ -372,9 +372,9 @@ async fn bench_ztlp_tunnel(
         0.0
     };
 
-    // Estimate packet count: data / (16KB - 9 byte frame overhead) = packets
-    let payload_per_packet = 16384 - 9;
-    let est_packets = (size as f64 / payload_per_packet as f64).ceil() as u64;
+    // Estimate packet count from the actual tunnel chunk size so RX instrumentation
+    // matches the bridge's current framing behavior.
+    let est_packets = (size as f64 / MAX_PLAINTEXT_PER_PACKET as f64).ceil() as u64;
 
     Ok(BenchResult {
         mode: mode_name.to_string(),

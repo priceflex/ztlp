@@ -261,9 +261,9 @@ pub async fn send_reject(
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
 
     let mut header = DataHeader::new(session_id, packet_seq);
+    header.payload_len = ciphertext.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
-    header.payload_len = ciphertext.len() as u16;
 
     let mut packet = header.serialize();
     packet.extend_from_slice(&ciphertext);
@@ -555,9 +555,9 @@ async fn encrypt_and_send(
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
     let mut header = DataHeader::new(session_id, packet_seq);
+    header.payload_len = encrypted.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
-    header.payload_len = encrypted.len() as u16;
     let mut packet = header.serialize();
     packet.extend_from_slice(&encrypted);
     udp.send_to(&packet, peer_addr).await?;

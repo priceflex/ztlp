@@ -138,6 +138,7 @@ impl TransportNode {
 
         // Build the data header
         let mut header = DataHeader::new(session_id, seq);
+        header.payload_len = encrypted.len() as u16;
 
         // Compute HeaderAuthTag over the header AAD
         let aad = header.aad_bytes();
@@ -186,6 +187,7 @@ impl TransportNode {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut header = DataHeader::new(session_id, seq);
+        header.payload_len = encrypted.len() as u16;
         let aad = header.aad_bytes();
         header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
 
@@ -230,6 +232,7 @@ impl TransportNode {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut header = DataHeader::new(session_id, seq);
+        header.payload_len = encrypted.len() as u16;
         let aad = header.aad_bytes();
         header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
 

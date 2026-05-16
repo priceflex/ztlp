@@ -148,6 +148,7 @@ pub fn build_encrypted_packet(
         .map_err(|e| format!("encryption failed: {}", e))?;
 
     let mut header = DataHeader::new(session_id, seq);
+    header.payload_len = encrypted.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
 

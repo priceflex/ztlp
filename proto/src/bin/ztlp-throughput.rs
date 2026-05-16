@@ -248,9 +248,6 @@ async fn bench_ztlp_tunnel(
                 )
                 .await
                 .unwrap();
-                for packet in &initial_packets {
-                    fwd_socket.send_to(packet, recv_addr).await.unwrap();
-                }
 
                 let forwarder = tokio::spawn({
                     let udp_wait = udp_wait.clone();
@@ -276,7 +273,7 @@ async fn bench_ztlp_tunnel(
                     pipeline,
                     session_id,
                     client_addr,
-                    Vec::new(),
+                    initial_packets,
                 )
                 .await;
                 forwarder.abort();

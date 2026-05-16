@@ -277,7 +277,7 @@ pub async fn send_reject(
 /// the backend service. Implements "lazy connect" for the listener side.
 pub async fn wait_for_first_data(
     udp_socket: &tokio::net::UdpSocket,
-    pipeline: &Mutex<Pipeline>,
+    _pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
     peer_addr: SocketAddr,
     timeout_duration: Duration,
@@ -301,14 +301,6 @@ pub async fn wait_for_first_data(
                 }
 
                 let data = buf[..len].to_vec();
-
-                {
-                    let pl = pipeline.lock().await;
-                    let result = pl.process(&data);
-                    if !matches!(result, AdmissionResult::Pass) {
-                        continue;
-                    }
-                }
 
                 if data.len() < DATA_HEADER_SIZE {
                     continue;
@@ -350,7 +342,7 @@ pub async fn wait_for_first_data_channeled(
     rx: &mut tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
     recv_socket: &tokio::net::UdpSocket,
     recv_target: std::net::SocketAddr,
-    pipeline: &Mutex<Pipeline>,
+    _pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
     timeout_duration: Duration,
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
@@ -367,14 +359,6 @@ pub async fn wait_for_first_data_channeled(
                 return Err("channel closed while waiting for first data".into());
             }
             Ok(Some((data, _addr))) => {
-                {
-                    let pl = pipeline.lock().await;
-                    let result = pl.process(&data);
-                    if !matches!(result, AdmissionResult::Pass) {
-                        continue;
-                    }
-                }
-
                 if data.len() < DATA_HEADER_SIZE {
                     continue;
                 }

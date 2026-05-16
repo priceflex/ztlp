@@ -4,8 +4,8 @@
 
 | Property | Value |
 |----------|-------|
-| Date | 2026-04-01 03:18 UTC |
-| Commit | 62ab2b7 |
+| Date | 2026-05-16 17:39 UTC |
+| Commit | c21073d |
 | OS | Linux 5.15.0-1044-kvm x86_64 |
 | CPU | AMD EPYC 4564P 16-Core Processor |
 | Cores | 2 |
@@ -26,13 +26,13 @@
 
 | Mode | Throughput | Time | Overhead vs Raw | Notes |
 |------|-----------|------|-----------------|-------|
-| Raw TCP | 7.82 GB/s | 1.2ms | baseline | baseline |
-| ZTLP (no opts) | 130 MB/s | 77.0ms | 98.4% | - |
-| ZTLP (GRO) | 21 MB/s | 478.3ms | 99.7% | - |
-| ZTLP (auto) | 36 MB/s | 275.7ms | 99.6% | auto-detected |
+| Raw TCP | 2.39 GB/s | 4.1ms | baseline | baseline |
+| ZTLP (no opts) | 224 MB/s | 42.7ms | 90.8% | - |
+| ZTLP (GRO) | 234 MB/s | 42.8ms | 90.4% | - |
+| ZTLP (auto) | 206 MB/s | 45.7ms | 91.6% | auto-detected |
 
 ## Analysis
 
-- GRO improvement: 0.2x over no-opts
-- ZTLP overhead vs raw: 98.4% (no opts)
+- GRO improvement: 1.0x over no-opts
+- ZTLP overhead vs raw: 90.8% (no opts)
 

@@ -1733,8 +1733,11 @@ defmodule ZtlpGateway.Session do
                 bytes_in: state.bytes_in + byte_size(packet_data)
             }
 
-            # Also try to advance the recv_window base if this was the head
             state = advance_recv_window_base(state)
+
+            # Ensure the gap timer is running if there are out-of-order packets waiting!
+            state = maybe_schedule_recv_gap_timer(state)
+
             # Now handle the control frame directly — bypasses in-order delivery
             handle_tunnel_frame(plaintext, state)
           else
@@ -1800,24 +1803,26 @@ defmodule ZtlpGateway.Session do
       {:ok, new_state, false} ->
         # No contiguous delivery possible (gap at base), packet is buffered.
         # Schedule gap-skip timer if not already set and there are buffered packets.
-        new_state =
-          if (map_size(new_state.recv_buffer) > 0 or MapSet.size(new_state.recv_window) > 0) and is_nil(new_state.recv_gap_timer_ref) do
-            now = System.monotonic_time(:millisecond)
-
-            new_state =
-              if is_nil(new_state.recv_window_base_last_advance) do
-                %{new_state | recv_window_base_last_advance: now}
-              else
-                new_state
-              end
-
-            ref = Process.send_after(self(), :recv_gap_check, 2000)
-            %{new_state | recv_gap_timer_ref: ref}
-          else
-            new_state
-          end
-
+        new_state = maybe_schedule_recv_gap_timer(new_state)
         {:noreply, new_state}
+    end
+  end
+
+  defp maybe_schedule_recv_gap_timer(state) do
+    if (map_size(state.recv_buffer) > 0 or MapSet.size(state.recv_window) > 0) and is_nil(state.recv_gap_timer_ref) do
+      now = System.monotonic_time(:millisecond)
+
+      state =
+        if is_nil(state.recv_window_base_last_advance) do
+          %{state | recv_window_base_last_advance: now}
+        else
+          state
+        end
+
+      ref = Process.send_after(self(), :recv_gap_check, 2000)
+      %{state | recv_gap_timer_ref: ref}
+    else
+      state
     end
   end
 

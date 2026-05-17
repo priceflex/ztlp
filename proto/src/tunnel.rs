@@ -649,6 +649,9 @@ where
     // Skip the immediate first tick.
     keepalive_tick.tick().await;
 
+    // Track the highest continuous data_seq received for reliability
+    let mut last_acked_data_seq: u64 = 0;
+    
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
@@ -660,6 +663,10 @@ where
                 &mut tcp_writer,
                 &mut reset_received,
                 &mut peer_fin,
+                &mut last_acked_data_seq,
+                &udp_send,
+                peer_addr,
+                &send_cipher,
             )
             .await
             {
@@ -737,6 +744,10 @@ where
                             &mut tcp_writer,
                             &mut reset_received,
                             &mut peer_fin,
+                            &mut last_acked_data_seq,
+                            &udp_send,
+                            peer_addr,
+                            &send_cipher,
                         ).await {
                             debug!("incoming packet error: {}", e);
                         }
@@ -790,9 +801,12 @@ async fn handle_incoming_packet<W>(
     recv_cipher: &ChaCha20Poly1305,
     session_id: SessionId,
     tcp_writer: &mut W,
-    recv_cipher: &mut Box<dyn SymmetricCipher + Send + Sync>,
-    recv_window: &mut crate::ReceiveWindow,
+    reset_received: &mut bool,
     peer_fin: &mut bool,
+    last_acked_data_seq: &mut u64,
+    udp_send: &UdpSocket,
+    peer_addr: SocketAddr,
+    send_cipher: &ChaCha20Poly1305,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -835,10 +849,31 @@ where
             seq_bytes.copy_from_slice(&plaintext[1..9]);
             let data_seq = u64::from_be_bytes(seq_bytes);
             let payload = &plaintext[9..];
+            tcp_writer.write_all(payload).await?;
             
-            let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
-            for p in ordered_payloads {
-                tcp_writer.write_all(&p).await?;
+            // Advance last_acked_data_seq for contiguous data
+            // (If we receive a duplicate or future packet, we just ACK our current expected seq)
+            if data_seq == *last_acked_data_seq {
+                *last_acked_data_seq = data_seq + 1;
+            }
+            
+            // Construct and send FRAME_ACK (throttle? For now, we send it per contiguous read block or gap detected,
+            // which helps slide window on sender). We will just emit an ACK here.
+            let mut ack_frame = Vec::with_capacity(9);
+            ack_frame.push(FRAME_ACK);
+            ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
+            
+            let pl_lock = pipeline.lock().await;
+            if let Some(session) = pl_lock.get_session(&session_id) {
+                let send_key = session.send_key;
+                drop(pl_lock);
+                
+                if let Err(e) = encrypt_and_send(
+                    pipeline, &send_key, send_cipher,
+                    session_id, udp_send, peer_addr, &ack_frame,
+                ).await {
+                    debug!("ack send error: {}", e);
+                }
             }
         }
         FRAME_FIN => {

@@ -1193,15 +1193,17 @@ defmodule ZtlpGateway.Session do
 
     # Retransmit selected packets; halve cwnd ONCE for the entire batch
     {state, retransmit_count, _loss_reduced} =
-      Enum.reduce(expired_entries, {state, 0, false}, fn {seq,
+      Enum.reduce(expired_entries, {state, 0, false}, fn {original_seq,
                                                           {packet, sent_at, retransmit_count, ds}},
                                                          {acc, rt_count, loss_reduced} ->
-        nonce = <<0::32, seq::little-64>>
+        new_seq = acc.send_seq + 1
+        acc = %{acc | send_seq: new_seq}
+        nonce = <<0::32, new_seq::little-64>>
         {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, packet, <<>>)
         encrypted = ct <> tag
 
         new_pkt =
-          Packet.build_data(acc.session_id, seq,
+          Packet.build_data(acc.session_id, new_seq,
             payload: encrypted,
             payload_len: byte_size(encrypted)
           )
@@ -1209,7 +1211,7 @@ defmodule ZtlpGateway.Session do
         new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
         Logger.debug(
-          "[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc, retransmit_count)}ms attempt=#{retransmit_count + 1}"
+          "[Session] RTO retransmit data_seq=#{ds} original_seq=#{original_seq} new_seq=#{new_seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc, retransmit_count)}ms attempt=#{retransmit_count + 1}"
         )
 
         send_udp(acc, new_packet)
@@ -1220,7 +1222,8 @@ defmodule ZtlpGateway.Session do
         {acc, loss_reduced} =
           if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
             new_ssthresh = max(trunc(acc.cwnd * cc_loss_beta(acc)), @min_ssthresh)
-            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+            new_cwnd = max(new_ssthresh, map_size(acc.send_buffer) / 2.0)
+            new_cwnd = max(new_cwnd, @min_cwnd) * 1.0
 
             Logger.info(
               "[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}"
@@ -1244,7 +1247,7 @@ defmodule ZtlpGateway.Session do
             {acc, loss_reduced}
           end
 
-        updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
+        updated_buffer = acc.send_buffer |> Map.delete(original_seq) |> Map.put(new_seq, {packet, now, retransmit_count + 1, ds})
         {%{acc | send_buffer: updated_buffer}, rt_count + 1, loss_reduced}
       end)
 
@@ -3333,22 +3336,10 @@ defmodule ZtlpGateway.Session do
           # acked, the path is overwhelmed. Halve cwnd and ssthresh to drain.
           # This catches the case where cwnd is too large for the path —
           # receiver has a hole it can't fill because we're flooding it.
-          state =
-            if new_count >= 20 and rem(new_count, 20) == 0 do
-              new_ssthresh = max(trunc(state.cwnd * cc_loss_beta(state)), @min_ssthresh)
-              new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-
-              Logger.info(
-                "[Session] Dup ACK plateau (#{new_count}): path overwhelmed, cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}"
-              )
-
-              %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, recovery_cwnd: new_cwnd}
-            else
-              inflight = map_size(send_buffer)
-              max_recovery_cwnd = min(state.ssthresh + inflight, cc_max_cwnd(state)) * 1.0
-              new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
-              %{state | cwnd: new_cwnd}
-            end
+          inflight = map_size(send_buffer)
+          max_recovery_cwnd = min(state.ssthresh + inflight, cc_max_cwnd(state)) * 1.0
+          new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
+          state = %{state | cwnd: new_cwnd}
 
           {new_count, send_buffer, state.fast_retransmit_sent, state}
         else
@@ -3367,34 +3358,37 @@ defmodule ZtlpGateway.Session do
                 |> Enum.take(4)
                 |> Enum.map(fn {seq, _} -> seq end)
 
-              retransmit_count =
-                Enum.reduce(oldest_seqs, 0, fn seq, count ->
-                  case Map.get(send_buffer, seq) do
+              {retransmit_count, updated_buffer, state} =
+                Enum.reduce(oldest_seqs, {0, send_buffer, state}, fn original_seq, {count, buf, acc_state} ->
+                  case Map.get(buf, original_seq) do
                     {packet, _sent_at, _rc, _ds} ->
-                      nonce = <<0::32, seq::little-64>>
-                      {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
+                      new_seq = acc_state.send_seq + 1
+                      acc_state = %{acc_state | send_seq: new_seq}
+                      
+                      nonce = <<0::32, new_seq::little-64>>
+                      {ct, tag} = Crypto.encrypt(acc_state.r2i_key, nonce, packet, <<>>)
                       encrypted = ct <> tag
 
                       new_pkt =
-                        Packet.build_data(state.session_id, seq,
+                        Packet.build_data(acc_state.session_id, new_seq,
                           payload: encrypted,
                           payload_len: byte_size(encrypted)
                         )
 
-                      new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
-                      send_udp(state, new_packet)
-                      count + 1
-
+                      new_packet = Packet.serialize_data_with_auth(new_pkt, acc_state.r2i_key)
+                      send_udp(acc_state, new_packet)
+                      
+                      case Map.get(buf, original_seq) do
+                        {packet, _sent_at, rc, ds} ->
+                           updated_buf = buf |> Map.delete(original_seq) |> Map.put(new_seq, {packet, now_ms, rc, ds})
+                           {count + 1, updated_buf, acc_state}
+                        _ -> 
+                           # Fallback if somehow it vanishes in transit
+                           {count + 1, buf, acc_state}
+                      end
+                      
                     _ ->
-                      count
-                  end
-                end)
-
-              updated_buffer =
-                Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
-                  case Map.get(buf, seq) do
-                    {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
-                    _ -> buf
+                      {count, buf, acc_state}
                   end
                 end)
 
@@ -3403,18 +3397,18 @@ defmodule ZtlpGateway.Session do
               # 3-dup-ACK event pins throughput to min_ssthresh. Only RTO (true timeout)
               # should reduce cwnd — that's the real congestion signal.
               highest_ds =
-                send_buffer
+                updated_buffer
                 |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} ->
                   if is_integer(ds), do: ds, else: 0
                 end)
                 |> Enum.max(fn -> 0 end)
 
               Logger.info(
-                "[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)"
+                "[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(updated_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)"
               )
 
               Logger.warning(
-                "[CC_ENTER_RECOVERY] reason=dup_ack cwnd_before=#{Float.round(state.cwnd * 1.0, 1)} cwnd_after=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} inflight=#{map_size(send_buffer)} last_acked=#{state.last_acked_data_seq} dup_ack=#{new_count}"
+                "[CC_ENTER_RECOVERY] reason=dup_ack cwnd_before=#{Float.round(state.cwnd * 1.0, 1)} cwnd_after=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} inflight=#{map_size(updated_buffer)} last_acked=#{state.last_acked_data_seq} dup_ack=#{new_count}"
               )
 
               state = %{

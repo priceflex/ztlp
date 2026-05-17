@@ -59,7 +59,7 @@ def start_conn(i, port):
     # runs can collide and the gateway logs "Replacing session ...", killing the
     # older local-forward before curl consumes it.
     sid=f'{int(time.time()*1000000)%0xffffffffffff:012x}{i:012x}'[-24:]
-    cmd=[str(BIN),'connect',GATEWAY,'--key',str(IDENT),'--relay',RELAY,'--service','echo','--session-id',sid,'--local-forward',f'{port}:127.0.0.1:7777']
+    cmd=[str(BIN),'connect',GATEWAY,'--key',str(IDENT),'--relay',RELAY,'--service','bench','--session-id',sid,'--local-forward',f'{port}:127.0.0.1:7777']
     p=subprocess.Popen(cmd,cwd=str(ROOT),stdout=f,stderr=subprocess.STDOUT,preexec_fn=os.setsid)
     return p,f,log,port
 

@@ -121,8 +121,8 @@ const MAX_SUB_BATCH: usize = 64;
 /// iOS: 1200B to fit in 1280-byte IPv6 min MTU (cellular-friendly).
 /// Desktop: 1200B to match — this is an MTU constraint, not a memory one.
 /// NOTE: This value MUST match the gateway's @max_payload_bytes (1140 + framing).
-/// Increasing for desktop requires a corresponding gateway change.
-const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
+/// Currently we cap generic tunnel data at 1200 bytes per packet.
+pub const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
 
 // ─── Frame types ────────────────────────────────────────────────────────────
 
@@ -783,13 +783,15 @@ where
 
 /// Decrypt an incoming UDP packet and write any resulting TCP bytes.
 /// Sets flags on RESET / FIN. Replay/admission is done by Pipeline::process.
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming_packet<W>(
     pkt: &[u8],
     pipeline: &Mutex<Pipeline>,
     recv_cipher: &ChaCha20Poly1305,
     session_id: SessionId,
     tcp_writer: &mut W,
-    reset_received: &mut bool,
+    recv_cipher: &mut Box<dyn SymmetricCipher + Send + Sync>,
+    recv_window: &mut crate::ReceiveWindow,
     peer_fin: &mut bool,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -829,9 +831,14 @@ where
             if plaintext.len() < 9 {
                 return Ok(());
             }
+            let mut seq_bytes = [0u8; 8];
+            seq_bytes.copy_from_slice(&plaintext[1..9]);
+            let data_seq = u64::from_be_bytes(seq_bytes);
             let payload = &plaintext[9..];
-            if !payload.is_empty() {
-                tcp_writer.write_all(payload).await?;
+            
+            let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
+            for p in ordered_payloads {
+                tcp_writer.write_all(&p).await?;
             }
         }
         FRAME_FIN => {
@@ -1031,11 +1038,17 @@ pub fn parse_local_forward(s: &str) -> Result<(u16, String), String> {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
+pub fn bridge_instrumentation_enabled() -> bool {
+    // Mock implementation for test binary
+    false
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
+    use std::sync::atomic::Ordering;
     // ── Service registry + forward parsing tests (kept) ─────────────────
 
     #[test]

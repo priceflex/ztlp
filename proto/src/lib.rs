@@ -108,3 +108,6 @@ pub mod transport;
 pub mod tunnel;
 #[cfg(feature = "tokio-runtime")]
 pub mod vip;
+
+pub mod recv_window;
+pub use recv_window::ReceiveWindow;

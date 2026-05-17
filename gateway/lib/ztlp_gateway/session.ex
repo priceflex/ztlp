@@ -56,6 +56,7 @@ defmodule ZtlpGateway.Sack do
       []
   """
   def chunk_contiguous([]), do: []
+
   def chunk_contiguous([first | rest]) do
     chunk_contiguous(rest, first, first, [])
   end
@@ -63,9 +64,11 @@ defmodule ZtlpGateway.Sack do
   defp chunk_contiguous([], start, stop, acc) do
     Enum.reverse([{start, stop} | acc])
   end
+
   defp chunk_contiguous([n | rest], start, stop, acc) when n == stop + 1 do
     chunk_contiguous(rest, start, n, acc)
   end
+
   defp chunk_contiguous([n | rest], start, stop, acc) do
     chunk_contiguous(rest, n, n, [{start, stop} | acc])
   end
@@ -78,9 +81,11 @@ defmodule ZtlpGateway.Sack do
   The caller prepends `<<@frame_ack>>` before encrypting.
   """
   def encode_sack_ack(cumulative_ack, sack_blocks) do
-    sack_data = Enum.reduce(sack_blocks, <<>>, fn {start, stop}, acc ->
-      acc <> <<start::big-64, stop::big-64>>
-    end)
+    sack_data =
+      Enum.reduce(sack_blocks, <<>>, fn {start, stop}, acc ->
+        acc <> <<start::big-64, stop::big-64>>
+      end)
+
     <<cumulative_ack::big-64, length(sack_blocks)::8, sack_data::binary>>
   end
 
@@ -91,15 +96,20 @@ defmodule ZtlpGateway.Sack do
   Returns an empty list for count 0 or malformed data.
   """
   def parse_sack_blocks(0, _sack_data), do: []
+
   def parse_sack_blocks(count, sack_data) when is_integer(count) and count > 0 do
     parse_sack_blocks_loop(count, sack_data, [])
   end
+
   def parse_sack_blocks(_count, _sack_data), do: []
 
   defp parse_sack_blocks_loop(0, _data, acc), do: Enum.reverse(acc)
-  defp parse_sack_blocks_loop(remaining, <<start::big-64, stop::big-64, rest::binary>>, acc) when remaining > 0 do
+
+  defp parse_sack_blocks_loop(remaining, <<start::big-64, stop::big-64, rest::binary>>, acc)
+       when remaining > 0 do
     parse_sack_blocks_loop(remaining - 1, rest, [{start, stop} | acc])
   end
+
   defp parse_sack_blocks_loop(_remaining, _data, acc), do: Enum.reverse(acc)
 
   @doc """
@@ -226,15 +236,15 @@ defmodule ZtlpGateway.Rekey do
       new_i2r = derive_new_key(state.i2r_key, client_key_material)
 
       {:ok,
-        %{
-          r2i_key: state.pending_r2i_key,
-          i2r_key: new_i2r,
-          rekey_pending: false,
-          pending_r2i_key: nil,
-          pending_i2r_key: nil,
-          rekey_packet_count: 0,
-          rekey_count: state.rekey_count + 1
-        }}
+       %{
+         r2i_key: state.pending_r2i_key,
+         i2r_key: new_i2r,
+         rekey_pending: false,
+         pending_r2i_key: nil,
+         pending_i2r_key: nil,
+         rekey_packet_count: 0,
+         rekey_count: state.rekey_count + 1
+       }}
     else
       :not_pending
     end
@@ -301,10 +311,12 @@ defmodule ZtlpGateway.RecvWindow do
         {:duplicate, :already_received}
 
       true ->
-        {:ok, %{window |
-          recv_window: MapSet.put(window.recv_window, seq),
-          recv_buffer: Map.put(window.recv_buffer, seq, data)
-        }}
+        {:ok,
+         %{
+           window
+           | recv_window: MapSet.put(window.recv_window, seq),
+             recv_buffer: Map.put(window.recv_buffer, seq, data)
+         }}
     end
   end
 
@@ -320,13 +332,17 @@ defmodule ZtlpGateway.RecvWindow do
 
   defp deliver_loop(window, acc) do
     base = window.recv_window_base
+
     if MapSet.member?(window.recv_window, base) do
       data = window.recv_buffer[base]
-      window = %{window |
-        recv_window: MapSet.delete(window.recv_window, base),
-        recv_buffer: Map.delete(window.recv_buffer, base),
-        recv_window_base: base + 1
+
+      window = %{
+        window
+        | recv_window: MapSet.delete(window.recv_window, base),
+          recv_buffer: Map.delete(window.recv_buffer, base),
+          recv_window_base: base + 1
       }
+
       deliver_loop(window, [{base, data} | acc])
     else
       {Enum.reverse(acc), window}
@@ -670,7 +686,8 @@ defmodule ZtlpGateway.Session do
         in_recovery: false,
         recovery_data_seq: 0,
         # cwnd value at recovery entry — restored on exit (inflation is temporary)
-        recovery_cwnd: @initial_cwnd,  # 16.0 after mobile tuning
+        # 16.0 after mobile tuning
+        recovery_cwnd: @initial_cwnd,
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
         sacked_set: MapSet.new(),
@@ -706,14 +723,22 @@ defmodule ZtlpGateway.Session do
   @impl true
   def handle_cast({:packet, packet_data, from_addr}, state) do
     Stats.bytes_received(byte_size(packet_data))
+
     if state.phase == :established and state.in_recovery do
-      pkt_seq = case Packet.parse(packet_data) do
-        {:ok, %{packet_seq: s}} -> s
-        _ -> -1
-      end
-      Logger.warning("[Session] PKT_IN_RECOVERY len=#{byte_size(packet_data)} pkt_seq=#{pkt_seq} recv_base=#{state.recv_window_base} window_max=#{state.recv_window_base + 256} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} dup_ack=#{state.dup_ack_count}")
+      pkt_seq =
+        case Packet.parse(packet_data) do
+          {:ok, %{packet_seq: s}} -> s
+          _ -> -1
+        end
+
+      Logger.warning(
+        "[Session] PKT_IN_RECOVERY len=#{byte_size(packet_data)} pkt_seq=#{pkt_seq} recv_base=#{state.recv_window_base} window_max=#{state.recv_window_base + 256} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} dup_ack=#{state.dup_ack_count}"
+      )
     end
-    Logger.debug("[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}")
+
+    Logger.debug(
+      "[Session] Received #{byte_size(packet_data)} bytes in phase=#{state.phase} from #{inspect(from_addr)}"
+    )
 
     # Reset idle timeout on every packet
     state = reset_timeout(state)
@@ -724,16 +749,24 @@ defmodule ZtlpGateway.Session do
         if Packet.handshake?(packet_data) do
           handle_handshake_msg1(packet_data, from_addr, state)
         else
-          Logger.debug("[Session] Buffering #{byte_size(packet_data)} byte packet during msg1 phase")
-          {:noreply, %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+          Logger.debug(
+            "[Session] Buffering #{byte_size(packet_data)} byte packet during msg1 phase"
+          )
+
+          {:noreply,
+           %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
         end
 
       :awaiting_msg3 ->
         if Packet.handshake?(packet_data) do
           handle_handshake_msg3(packet_data, from_addr, state)
         else
-          Logger.debug("[Session] Buffering #{byte_size(packet_data)} byte packet during msg3 phase")
-          {:noreply, %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+          Logger.debug(
+            "[Session] Buffering #{byte_size(packet_data)} byte packet during msg3 phase"
+          )
+
+          {:noreply,
+           %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
         end
 
       :established ->
@@ -746,9 +779,12 @@ defmodule ZtlpGateway.Session do
   def handle_info({:backend_data, data}, state) do
     Logger.debug("[Session] BACKEND_READ_LEGACY bytes=#{byte_size(data)}")
     chunks = chunk_data(data, @max_payload_bytes)
-    send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
-      :queue.in(chunk, q)
-    end)
+
+    send_queue =
+      Enum.reduce(chunks, state.send_queue, fn chunk, q ->
+        :queue.in(chunk, q)
+      end)
+
     state = %{state | send_queue: send_queue}
 
     # Try to send immediately if window allows
@@ -776,21 +812,30 @@ defmodule ZtlpGateway.Session do
       # For legacy sessions, keep alive for backend reconnect instead of draining.
       # Even if there are a few unacked packets in send_buffer, those will be
       # retransmitted by the existing retransmit timer. No need to kill the session.
-      Logger.info("[Session] Legacy backend closed (#{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{Float.round(state.cwnd + 0.0, 1)}), flushing + FIN")
+      Logger.info(
+        "[Session] Legacy backend closed (#{queue_len} queued, #{buf_len} in send_buffer, cwnd=#{Float.round(state.cwnd + 0.0, 1)}), flushing + FIN"
+      )
+
       state = %{state | backend_pid: nil}
       # Flush remaining queued data to the client — the backend sent its response
       # and closed, but we still need to deliver the queued packets.
       # Then queue a FIN so the client knows the response is complete.
-      state = if queue_len > 0 or buf_len > 0 do
-        # Queue FIN after remaining data
-        send_queue = :queue.in(:legacy_fin, state.send_queue)
-        state = %{state | send_queue: send_queue}
-        state = flush_send_queue(state)
-        Logger.info("[Session] After flush: #{:queue.len(state.send_queue)} queued, #{map_size(state.send_buffer)} in send_buffer, pacing_timer=#{inspect(state.pacing_timer_ref != nil)}")
-        state
-      else
-        state
-      end
+      state =
+        if queue_len > 0 or buf_len > 0 do
+          # Queue FIN after remaining data
+          send_queue = :queue.in(:legacy_fin, state.send_queue)
+          state = %{state | send_queue: send_queue}
+          state = flush_send_queue(state)
+
+          Logger.info(
+            "[Session] After flush: #{:queue.len(state.send_queue)} queued, #{map_size(state.send_buffer)} in send_buffer, pacing_timer=#{inspect(state.pacing_timer_ref != nil)}"
+          )
+
+          state
+        else
+          state
+        end
+
       {:noreply, state}
     end
   end
@@ -798,7 +843,10 @@ defmodule ZtlpGateway.Session do
   # Linger timeout expired — terminate even if send_buffer not empty
   def handle_info(:linger_timeout, state) do
     if state.draining do
-      Logger.info("[Session] Linger timeout expired, #{map_size(state.send_buffer)} unacked packets remaining")
+      Logger.info(
+        "[Session] Linger timeout expired, #{map_size(state.send_buffer)} unacked packets remaining"
+      )
+
       terminate_session(state, :linger_timeout)
     else
       {:noreply, state}
@@ -818,21 +866,27 @@ defmodule ZtlpGateway.Session do
     case Map.get(state.streams, stream_id) do
       %{backend_pid: pid} when pid != nil ->
         Backend.send_data(pid, data)
+
       _ ->
         Logger.warning("[Session] TLS decrypted data for unknown stream #{stream_id}")
     end
+
     {:noreply, state}
   end
 
   # TLS bridge closed — close the mux stream
   def handle_info({:tls_closed, stream_id}, state) do
     Logger.info("[Session] TLS bridge closed for stream #{stream_id}")
+
     case Map.get(state.streams, stream_id) do
       %{backend_pid: pid, tls_socket: sock} ->
         if pid && Process.alive?(pid), do: Backend.close(pid)
         if sock, do: :gen_tcp.close(sock)
-      _ -> :ok
+
+      _ ->
+        :ok
     end
+
     send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
     streams = Map.delete(state.streams, stream_id)
     state = %{state | send_queue: send_queue, streams: streams}
@@ -872,8 +926,11 @@ defmodule ZtlpGateway.Session do
       {stream_id, _} ->
         Logger.info("[Session] TLS client socket closed for stream #{stream_id}")
         send(self(), {:tls_closed, stream_id})
-      _ -> :ok
+
+      _ ->
+        :ok
     end
+
     {:noreply, state}
   end
 
@@ -944,21 +1001,31 @@ defmodule ZtlpGateway.Session do
 
       if stuck_ms >= 2000 and buffered > 0 do
         # Find the next available seq in the buffer
-        next_available = state.recv_buffer
+        next_available =
+          state.recv_buffer
           |> Map.keys()
           |> Enum.sort()
           |> List.first()
 
         if next_available && next_available > state.recv_window_base do
           skipped = next_available - state.recv_window_base
-          Logger.warning("[Session] RECV_GAP_SKIP: base=#{state.recv_window_base} -> #{next_available} (skipped #{skipped} lost packets, #{buffered} buffered, stuck #{stuck_ms}ms)")
+
+          Logger.warning(
+            "[Session] RECV_GAP_SKIP: base=#{state.recv_window_base} -> #{next_available} (skipped #{skipped} lost packets, #{buffered} buffered, stuck #{stuck_ms}ms)"
+          )
 
           # Advance recv_window_base to the next available seq, clearing the gap
-          state = %{state |
-            recv_window_base: next_available,
-            recv_window: Enum.reduce(state.recv_window_base..(next_available - 1), state.recv_window, fn seq, win ->
-              MapSet.delete(win, seq)
-            end)
+          state = %{
+            state
+            | recv_window_base: next_available,
+              recv_window:
+                Enum.reduce(
+                  state.recv_window_base..(next_available - 1),
+                  state.recv_window,
+                  fn seq, win ->
+                    MapSet.delete(win, seq)
+                  end
+                )
           }
 
           # Now try to deliver from the new base
@@ -989,11 +1056,21 @@ defmodule ZtlpGateway.Session do
   def handle_info(:pacing_tick, state) do
     queue_len = :queue.len(state.send_queue)
     buf_len = map_size(state.send_buffer)
+
     if queue_len > 0 do
-      effective_window = min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
+      effective_window =
+        min(
+          min(trunc(state.cwnd), cc_max_cwnd(state)),
+          Map.get(state, :peer_rwnd, @default_peer_rwnd)
+        )
+
       window_open = buf_len < effective_window
-      Logger.debug("[Session] pacing_tick: #{queue_len} queued, #{buf_len}/#{effective_window} inflight/cwnd, ssthresh=#{trunc(state.ssthresh)} open=#{window_open}")
+
+      Logger.debug(
+        "[Session] pacing_tick: #{queue_len} queued, #{buf_len}/#{effective_window} inflight/cwnd, ssthresh=#{trunc(state.ssthresh)} open=#{window_open}"
+      )
     end
+
     state = %{state | pacing_timer_ref: nil}
     state = flush_send_queue(state)
     state = maybe_resume_backends(state)
@@ -1011,23 +1088,32 @@ defmodule ZtlpGateway.Session do
 
     # First pass: clean up SACK'd and max-retransmit entries
     {state, expired_count} =
-      Enum.reduce(state.send_buffer, {state, 0}, fn {seq, {packet, _sent_at, retransmit_count, ds}}, {acc, exp_count} ->
+      Enum.reduce(state.send_buffer, {state, 0}, fn {seq,
+                                                     {packet, _sent_at, retransmit_count, ds}},
+                                                    {acc, exp_count} ->
         cond do
           is_integer(ds) and MapSet.member?(acc.sacked_set, ds) ->
-            acc = if @use_bbr do
-              %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
-            else
-              acc
-            end
+            acc =
+              if @use_bbr do
+                %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
+              else
+                acc
+              end
+
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count}
 
           retransmit_count >= @max_retransmits ->
-            Logger.warning("[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping")
-            acc = if @use_bbr do
-              %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
-            else
-              acc
-            end
+            Logger.warning(
+              "[Session] RTO: data_seq=#{ds} exceeded #{@max_retransmits} retransmits, dropping"
+            )
+
+            acc =
+              if @use_bbr do
+                %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
+              else
+                acc
+              end
+
             {%{acc | send_buffer: Map.delete(acc.send_buffer, seq)}, exp_count + 1}
 
           true ->
@@ -1053,6 +1139,7 @@ defmodule ZtlpGateway.Session do
     # remaining budget from tail. This ensures the missing packet gets
     # retransmitted within 1-2 ticks instead of N ticks.
     last_acked = state.last_acked_data_seq
+
     all_expired =
       state.send_buffer
       |> Enum.filter(fn {_seq, {_pkt, sent_at, rc, _ds}} ->
@@ -1066,38 +1153,62 @@ defmodule ZtlpGateway.Session do
     # last_acked). Put it at the front of the retransmit list.
     # Then add the remaining expired in data_seq order.
     first_missing_ds = last_acked + 1
-    {priority, rest} = Enum.split_with(all_expired, fn {_seq, {_pkt, _ts, _rc, ds}} ->
-      is_integer(ds) and ds == first_missing_ds
-    end)
+
+    {priority, rest} =
+      Enum.split_with(all_expired, fn {_seq, {_pkt, _ts, _rc, ds}} ->
+        is_integer(ds) and ds == first_missing_ds
+      end)
+
     expired_entries = (priority ++ rest) |> Enum.take(effective_rto_retransmit_limit(state))
 
     # Retransmit selected packets; halve cwnd ONCE for the entire batch
     {state, retransmit_count, _loss_reduced} =
-      Enum.reduce(expired_entries, {state, 0, false}, fn {seq, {packet, sent_at, retransmit_count, ds}}, {acc, rt_count, loss_reduced} ->
+      Enum.reduce(expired_entries, {state, 0, false}, fn {seq,
+                                                          {packet, sent_at, retransmit_count, ds}},
+                                                         {acc, rt_count, loss_reduced} ->
         nonce = <<0::32, seq::little-64>>
         {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, packet, <<>>)
         encrypted = ct <> tag
-        new_pkt = Packet.build_data(acc.session_id, seq,
-          payload: encrypted,
-          payload_len: byte_size(encrypted)
-        )
+
+        new_pkt =
+          Packet.build_data(acc.session_id, seq,
+            payload: encrypted,
+            payload_len: byte_size(encrypted)
+          )
+
         new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-        Logger.debug("[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc, retransmit_count)}ms attempt=#{retransmit_count + 1}")
+        Logger.debug(
+          "[Session] RTO retransmit data_seq=#{ds} seq=#{seq} elapsed=#{now - sent_at}ms rto=#{per_packet_rto(acc, retransmit_count)}ms attempt=#{retransmit_count + 1}"
+        )
+
         send_udp(acc, new_packet)
 
         # Multiplicative decrease ONCE per loss event, and NEVER during recovery.
         # When in recovery, new packets timing out for the first time are part
         # of the same loss event that triggered recovery — don't double-punish.
-        {acc, loss_reduced} = if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
-          new_ssthresh = max(trunc(acc.cwnd * cc_loss_beta(acc)), @min_ssthresh)
-          new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-          Logger.info("[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}")
-          recovery_target = max(acc.send_data_seq - 1, acc.last_acked_data_seq)
-          {%{acc | cwnd: new_cwnd, ssthresh: new_ssthresh, in_recovery: true, recovery_data_seq: recovery_target, recovery_cwnd: new_cwnd}, true}
-        else
-          {acc, loss_reduced}
-        end
+        {acc, loss_reduced} =
+          if retransmit_count == 0 and not loss_reduced and not acc.in_recovery do
+            new_ssthresh = max(trunc(acc.cwnd * cc_loss_beta(acc)), @min_ssthresh)
+            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+
+            Logger.info(
+              "[Session] RTO loss: cwnd #{Float.round(acc.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}, ssthresh → #{new_ssthresh}"
+            )
+
+            recovery_target = max(acc.send_data_seq - 1, acc.last_acked_data_seq)
+
+            {%{
+               acc
+               | cwnd: new_cwnd,
+                 ssthresh: new_ssthresh,
+                 in_recovery: true,
+                 recovery_data_seq: recovery_target,
+                 recovery_cwnd: new_cwnd
+             }, true}
+          else
+            {acc, loss_reduced}
+          end
 
         updated_buffer = Map.put(acc.send_buffer, seq, {packet, now, retransmit_count + 1, ds})
         {%{acc | send_buffer: updated_buffer}, rt_count + 1, loss_reduced}
@@ -1106,22 +1217,26 @@ defmodule ZtlpGateway.Session do
     # Enter recovery mode after RTO retransmit. While in recovery, dup ACKs
     # caused by our retransmits won't halve cwnd again. Recovery ends when
     # a new ACK advances past the highest data_seq at time of loss.
-    state = if retransmit_count > 0 and not state.in_recovery do
-      highest_ds = state.send_buffer
-        |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
-        |> Enum.max(fn -> 0 end)
-      Logger.info("[Session] Entering recovery mode (recovery_data_seq=#{highest_ds}, retransmitted=#{retransmit_count})")
-      %{state | in_recovery: true, recovery_data_seq: highest_ds}
-    else
-      state
-    end
+    state =
+      if retransmit_count > 0 and not state.in_recovery do
+        highest_ds =
+          state.send_buffer
+          |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
+          |> Enum.max(fn -> 0 end)
+
+        Logger.info(
+          "[Session] Entering recovery mode (recovery_data_seq=#{highest_ds}, retransmitted=#{retransmit_count})"
+        )
+
+        %{state | in_recovery: true, recovery_data_seq: highest_ds}
+      else
+        state
+      end
 
     # Session teardown check: kill if data in flight but no ACKs for 30s.
-    # We skip this check for pure datagram sessions (legacy_bypass).
     stall_age = now - state.last_ack_advance_at
-    legacy_bypass = not state.mux_mode
-    
-    if not legacy_bypass and map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
+
+    if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
       stream_dump =
         state.streams
         |> Enum.map(fn {sid, s} ->
@@ -1129,12 +1244,15 @@ defmodule ZtlpGateway.Session do
         end)
         |> Enum.join(",")
 
-      Logger.warning("[Session] STALL: no ACK advance for #{div(stall_age, 1000)}s inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} recv_base=#{state.recv_window_base} dup_ack=#{state.dup_ack_count} recovery=#{state.in_recovery} queue=#{:queue.len(state.send_queue)} backends_paused=#{state.backends_paused} streams=[#{stream_dump}] — tearing down")
+      Logger.warning(
+        "[Session] STALL: no ACK advance for #{div(stall_age, 1000)}s inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} recv_base=#{state.recv_window_base} dup_ack=#{state.dup_ack_count} recovery=#{state.in_recovery} queue=#{:queue.len(state.send_queue)} backends_paused=#{state.backends_paused} streams=[#{stream_dump}] — tearing down"
+      )
+
       {:stop, {:shutdown, :stall_timeout}, state}
     else
       # Reschedule if buffer is non-empty
       retransmit_timer_ref =
-        if not legacy_bypass and map_size(state.send_buffer) > 0 do
+        if map_size(state.send_buffer) > 0 do
           interval = min(div(state.rto_ms, 2), @retransmit_check_interval_ms)
           interval = max(interval, 10)
           Process.send_after(self(), :retransmit_check, interval)
@@ -1160,7 +1278,10 @@ defmodule ZtlpGateway.Session do
 
         buffered_chunks = length(stream.buffer)
         buffered_bytes = stream[:connect_buffer_bytes] || connecting_buffer_bytes(stream)
-        Logger.info("[Session] Stream #{stream_id} connected, buffered_chunks=#{buffered_chunks} buffered_bytes=#{buffered_bytes}")
+
+        Logger.info(
+          "[Session] Stream #{stream_id} connected, buffered_chunks=#{buffered_chunks} buffered_bytes=#{buffered_bytes}"
+        )
 
         if state.backends_paused do
           Backend.pause_read(pid)
@@ -1169,19 +1290,25 @@ defmodule ZtlpGateway.Session do
         # Flush buffered data to the backend (buffer is prepend-order, reverse for FIFO)
         flush_stream_buffer(stream, pid)
 
-        updated = %{stream |
-          state: :connected,
-          backend_pid: pid,
-          buffer: [],
-          connect_buffer_bytes: 0,
-          connect_timeout_ref: nil
+        updated = %{
+          stream
+          | state: :connected,
+            backend_pid: pid,
+            buffer: [],
+            connect_buffer_bytes: 0,
+            connect_timeout_ref: nil
         }
+
         streams = Map.put(state.streams, stream_id, updated)
 
         if updated.tls_creds do
-          Logger.info("[Session] Stream #{stream_id} opened with TLS termination (service=#{updated.service}), total_streams=#{map_size(streams)}")
+          Logger.info(
+            "[Session] Stream #{stream_id} opened with TLS termination (service=#{updated.service}), total_streams=#{map_size(streams)}"
+          )
         else
-          Logger.info("[Session] Stream #{stream_id} opened (service=#{updated.service}), total_streams=#{map_size(streams)}")
+          Logger.info(
+            "[Session] Stream #{stream_id} opened (service=#{updated.service}), total_streams=#{map_size(streams)}"
+          )
         end
 
         # Audit: stream opened
@@ -1203,7 +1330,11 @@ defmodule ZtlpGateway.Session do
         # Stream was already closed/removed (e.g. client sent FRAME_CLOSE during connect).
         # Close the backend we just connected since nobody needs it.
         if Process.alive?(pid), do: BackendPool.close(pid)
-        Logger.warning("[Session] Stream #{stream_id} connect result arrived but stream already gone, closing backend reason=client_close_before_connect queue=#{:queue.len(state.send_queue)} total_streams=#{map_size(state.streams)}")
+
+        Logger.warning(
+          "[Session] Stream #{stream_id} connect result arrived but stream already gone, closing backend reason=client_close_before_connect queue=#{:queue.len(state.send_queue)} total_streams=#{map_size(state.streams)}"
+        )
+
         {:noreply, state}
     end
   end
@@ -1318,7 +1449,10 @@ defmodule ZtlpGateway.Session do
             # Wrap msg2 in a HELLO_ACK packet
             response = Packet.build_hello_ack(state.session_id, msg2_bytes)
             result = send_udp(state, response)
-            Logger.info("[Session] Sent msg2 (#{byte_size(response)} bytes) to #{inspect(state.client_addr)}, result=#{inspect(result)}")
+
+            Logger.info(
+              "[Session] Sent msg2 (#{byte_size(response)} bytes) to #{inspect(state.client_addr)}, result=#{inspect(result)}"
+            )
 
             {:noreply, %{state | handshake: hs, phase: :awaiting_msg3}}
         end
@@ -1348,11 +1482,11 @@ defmodule ZtlpGateway.Session do
 
             Logger.info(
               "[Session] ClientProfile: class=#{client_profile.client_class} " <>
-              "iface=#{client_profile.interface_type} radio=#{inspect(client_profile.radio_tech)} " <>
-              "→ CC: cwnd=#{cc_profile.initial_cwnd} max=#{cc_profile.max_cwnd} " <>
-              "ssthresh=#{cc_profile.ssthresh} pacing=#{cc_profile.pacing_interval_ms}ms " <>
-              "burst=#{cc_profile.burst_size} beta=#{cc_profile.loss_beta} " <>
-              "rto=#{cc_profile.initial_rto_ms}/min=#{cc_profile.min_rto_ms}"
+                "iface=#{client_profile.interface_type} radio=#{inspect(client_profile.radio_tech)} " <>
+                "→ CC: cwnd=#{cc_profile.initial_cwnd} max=#{cc_profile.max_cwnd} " <>
+                "ssthresh=#{cc_profile.ssthresh} pacing=#{cc_profile.pacing_interval_ms}ms " <>
+                "burst=#{cc_profile.burst_size} beta=#{cc_profile.loss_beta} " <>
+                "rto=#{cc_profile.initial_rto_ms}/min=#{cc_profile.min_rto_ms}"
             )
 
             # Derive transport keys
@@ -1381,31 +1515,32 @@ defmodule ZtlpGateway.Session do
                       )
 
                       # Start rekey timer for periodic key rotation
-                      rekey_timer_ref = Process.send_after(self(), :rekey_timer, state.rekey_interval_ms)
+                      rekey_timer_ref =
+                        Process.send_after(self(), :rekey_timer, state.rekey_interval_ms)
 
-                      new_state =
-                        %{
-                          state
-                          | handshake: hs,
-                            phase: :established,
-                            i2r_key: keys.i2r_key,
-                            r2i_key: keys.r2i_key,
-                            backend_pid: backend_pid,
-                            backend_addr: {host, port, self()},
-                            pending_packets: [],
-                            rekey_timer_ref: rekey_timer_ref,
-                            client_profile: client_profile,
-                            cc_profile: cc_profile,
-                            cwnd: cc_profile.initial_cwnd,
-                            ssthresh: cc_profile.ssthresh,
-                            recovery_cwnd: cc_profile.initial_cwnd,
-                            rto_ms: cc_profile.initial_rto_ms,
-                            initial_rto_ms: cc_profile.initial_rto_ms,
-                            min_rto_ms: cc_profile.min_rto_ms
-                        }
+                      new_state = %{
+                        state
+                        | handshake: hs,
+                          phase: :established,
+                          i2r_key: keys.i2r_key,
+                          r2i_key: keys.r2i_key,
+                          backend_pid: backend_pid,
+                          backend_addr: {host, port, self()},
+                          pending_packets: [],
+                          rekey_timer_ref: rekey_timer_ref,
+                          client_profile: client_profile,
+                          cc_profile: cc_profile,
+                          cwnd: cc_profile.initial_cwnd,
+                          ssthresh: cc_profile.ssthresh,
+                          recovery_cwnd: cc_profile.initial_cwnd,
+                          rto_ms: cc_profile.initial_rto_ms,
+                          initial_rto_ms: cc_profile.initial_rto_ms,
+                          min_rto_ms: cc_profile.min_rto_ms
+                      }
 
                       # Process any packets that arrived during handshake
-                      new_state = process_pending_packets(Enum.reverse(state.pending_packets), new_state)
+                      new_state =
+                        process_pending_packets(Enum.reverse(state.pending_packets), new_state)
 
                       {:noreply, new_state}
 
@@ -1447,8 +1582,11 @@ defmodule ZtlpGateway.Session do
 
   defp handle_data_packet(packet_data, _from_addr, state) do
     case Packet.parse(packet_data) do
-      {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}} when type in [:data, :data_compact] ->
-        Logger.debug("[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} window_base=#{state.recv_window_base}")
+      {:ok, %{type: type, packet_seq: seq, payload: encrypted_payload}}
+      when type in [:data, :data_compact] ->
+        Logger.debug(
+          "[Session] Data packet: type=#{type} seq=#{seq} payload_len=#{byte_size(encrypted_payload)} window_base=#{state.recv_window_base}"
+        )
 
         # Sliding receive window: accept packets within
         # [recv_window_base, recv_window_base + @recv_window_size).
@@ -1458,13 +1596,19 @@ defmodule ZtlpGateway.Session do
           # Already delivered (below window base) — re-ACK so the sender
           # can clear its send_buffer (the original ACK may have been lost)
           seq < state.recv_window_base ->
-            Logger.info("[Session] BELOW_BASE seq=#{seq} base=#{state.recv_window_base} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}")
+            Logger.info(
+              "[Session] BELOW_BASE seq=#{seq} base=#{state.recv_window_base} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}"
+            )
+
             state = send_ack(state.recv_window_base - 1, state)
             {:noreply, state}
 
           # Beyond window (too far ahead)
           seq >= state.recv_window_base + @recv_window_size ->
-            Logger.warning("[Session] WINDOW_REJECT seq=#{seq} beyond window [#{state.recv_window_base}..#{state.recv_window_base + @recv_window_size - 1}] last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}")
+            Logger.warning(
+              "[Session] WINDOW_REJECT seq=#{seq} beyond window [#{state.recv_window_base}..#{state.recv_window_base + @recv_window_size - 1}] last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)}"
+            )
+
             {:noreply, state}
 
           # Already received (within window but duplicate) — re-ACK
@@ -1479,11 +1623,17 @@ defmodule ZtlpGateway.Session do
         end
 
       {:ok, other} ->
-        Logger.warning("[Session] NON_DATA_PKT in established phase: type=#{Map.get(other, :type, :unknown)} len=#{byte_size(packet_data)}")
+        Logger.warning(
+          "[Session] NON_DATA_PKT in established phase: type=#{Map.get(other, :type, :unknown)} len=#{byte_size(packet_data)}"
+        )
+
         {:noreply, state}
 
       {:error, reason} ->
-        Logger.warning("[Session] PARSE_FAIL: #{inspect(reason)} len=#{byte_size(packet_data)} first_bytes=#{Base.encode16(binary_part(packet_data, 0, min(16, byte_size(packet_data))))}")
+        Logger.warning(
+          "[Session] PARSE_FAIL: #{inspect(reason)} len=#{byte_size(packet_data)} first_bytes=#{Base.encode16(binary_part(packet_data, 0, min(16, byte_size(packet_data))))}"
+        )
+
         {:noreply, state}
     end
   end
@@ -1503,11 +1653,16 @@ defmodule ZtlpGateway.Session do
 
       case Crypto.decrypt(state.i2r_key, nonce, ct, <<>>, tag) do
         :error ->
-          Logger.warning("[Session] Decrypt FAILED seq=#{seq} window_base=#{state.recv_window_base} key_len=#{byte_size(state.i2r_key)} ct_len=#{ct_len} tag_len=#{byte_size(tag)} last_acked=#{state.last_acked_data_seq}")
+          Logger.warning(
+            "[Session] Decrypt FAILED seq=#{seq} window_base=#{state.recv_window_base} key_len=#{byte_size(state.i2r_key)} ct_len=#{ct_len} tag_len=#{byte_size(tag)} last_acked=#{state.last_acked_data_seq}"
+          )
+
           {:noreply, state}
 
         plaintext ->
-          Logger.debug("[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}")
+          Logger.debug(
+            "[Session] Decrypted #{byte_size(plaintext)} bytes, first_byte=#{:binary.at(plaintext, 0)}"
+          )
 
           # FAST-PATH for ACK frames: process immediately without waiting for
           # in-order delivery. ACK frames (0x01 + 8-byte data_seq, optionally
@@ -1521,30 +1676,36 @@ defmodule ZtlpGateway.Session do
           # the same fast-path. Its length is exactly 11 bytes
           # ([0x10 | ack_seq(8) | window_kb(2)]).
           first_byte = if byte_size(plaintext) > 0, do: :binary.at(plaintext, 0), else: nil
+
           is_ack_frame =
             (first_byte == @frame_ack and byte_size(plaintext) >= 9) or
               (first_byte == @frame_ack_v2 and byte_size(plaintext) == 11)
+
           is_probe_frame = first_byte in [@frame_ping, @frame_pong] and byte_size(plaintext) >= 9
 
           if is_ack_frame or is_probe_frame do
             # Process ACK/probe control frames immediately — don't buffer them.
             # Mark the seq as received (so it's not accepted again) but
             # don't add to recv_buffer (no data to deliver in order).
-            state = %{state |
-              recv_window: MapSet.put(state.recv_window, seq),
-              bytes_in: state.bytes_in + byte_size(packet_data)
+            state = %{
+              state
+              | recv_window: MapSet.put(state.recv_window, seq),
+                bytes_in: state.bytes_in + byte_size(packet_data)
             }
+
             # Also try to advance the recv_window base if this was the head
             state = advance_recv_window_base(state)
             # Now handle the control frame directly — bypasses in-order delivery
             handle_tunnel_frame(plaintext, state)
           else
             # Normal path: buffer for in-order delivery
-            state = %{state |
-              recv_window: MapSet.put(state.recv_window, seq),
-              recv_buffer: Map.put(state.recv_buffer, seq, plaintext),
-              bytes_in: state.bytes_in + byte_size(packet_data)
+            state = %{
+              state
+              | recv_window: MapSet.put(state.recv_window, seq),
+                recv_buffer: Map.put(state.recv_buffer, seq, plaintext),
+                bytes_in: state.bytes_in + byte_size(packet_data)
             }
+
             # Deliver as many contiguous packets as possible
             deliver_recv_window(state)
           end
@@ -1560,13 +1721,16 @@ defmodule ZtlpGateway.Session do
   # This prevents ACK-only seqs from permanently blocking the recv window.
   defp advance_recv_window_base(state) do
     base = state.recv_window_base
+
     if MapSet.member?(state.recv_window, base) and not Map.has_key?(state.recv_buffer, base) do
       # This seq was received (ACK fast-path) but has no buffered data —
       # advance past it so in-order delivery isn't blocked.
-      state = %{state |
-        recv_window: MapSet.delete(state.recv_window, base),
-        recv_window_base: base + 1
+      state = %{
+        state
+        | recv_window: MapSet.delete(state.recv_window, base),
+          recv_window_base: base + 1
       }
+
       advance_recv_window_base(state)
     else
       state
@@ -1585,39 +1749,51 @@ defmodule ZtlpGateway.Session do
         # Delivered at least one packet — send cumulative ACK
         new_state = send_ack(new_state.recv_window_base - 1, new_state)
         # Base advanced — reset stuck timer
-        new_state = %{new_state | recv_window_base_last_advance: System.monotonic_time(:millisecond)}
+        new_state = %{
+          new_state
+          | recv_window_base_last_advance: System.monotonic_time(:millisecond)
+        }
+
         new_state = cancel_recv_gap_timer(new_state)
         {:noreply, new_state}
 
       {:ok, new_state, false} ->
         # No contiguous delivery possible (gap at base), packet is buffered.
         # Schedule gap-skip timer if not already set and there are buffered packets.
-        new_state = if map_size(new_state.recv_buffer) > 0 and is_nil(new_state.recv_gap_timer_ref) do
-          now = System.monotonic_time(:millisecond)
-          new_state = if is_nil(new_state.recv_window_base_last_advance) do
-            %{new_state | recv_window_base_last_advance: now}
+        new_state =
+          if map_size(new_state.recv_buffer) > 0 and is_nil(new_state.recv_gap_timer_ref) do
+            now = System.monotonic_time(:millisecond)
+
+            new_state =
+              if is_nil(new_state.recv_window_base_last_advance) do
+                %{new_state | recv_window_base_last_advance: now}
+              else
+                new_state
+              end
+
+            ref = Process.send_after(self(), :recv_gap_check, 2000)
+            %{new_state | recv_gap_timer_ref: ref}
           else
             new_state
           end
-          ref = Process.send_after(self(), :recv_gap_check, 2000)
-          %{new_state | recv_gap_timer_ref: ref}
-        else
-          new_state
-        end
+
         {:noreply, new_state}
     end
   end
 
   defp deliver_recv_window_loop(state, delivered_any) do
     base = state.recv_window_base
+
     if MapSet.member?(state.recv_window, base) do
       plaintext = state.recv_buffer[base]
       # Advance window BEFORE delivering, so handle_tunnel_frame sees updated state
-      state = %{state |
-        recv_window: MapSet.delete(state.recv_window, base),
-        recv_buffer: Map.delete(state.recv_buffer, base),
-        recv_window_base: base + 1
+      state = %{
+        state
+        | recv_window: MapSet.delete(state.recv_window, base),
+          recv_buffer: Map.delete(state.recv_buffer, base),
+          recv_window_base: base + 1
       }
+
       case handle_tunnel_frame(plaintext, state) do
         {:noreply, new_state} ->
           deliver_recv_window_loop(new_state, true)
@@ -1656,6 +1832,7 @@ defmodule ZtlpGateway.Session do
   # this flag, the FRAME_DATA gets misinterpreted as legacy format.
   defp handle_tunnel_frame(<<@frame_data, rest::binary>>, state) do
     Logger.debug("[Session] handle_tunnel_frame START FRAME_DATA")
+
     if state.mux_mode do
       # Support BOTH inbound client formats:
       #   1. True mux outer frame:   [stream_id(4) | payload]
@@ -1668,18 +1845,28 @@ defmodule ZtlpGateway.Session do
 
       if candidate == 0 and byte_size(rest) >= 8 do
         <<data_seq::big-64, payload::binary>> = rest
-        Logger.debug("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)} mux_mode_legacy_outer=true")
+
+        Logger.debug(
+          "[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)} mux_mode_legacy_outer=true"
+        )
 
         if byte_size(payload) > 0 and mux_payload?(payload) do
-          Logger.info("[Session] Detected inner mux payload while in mux mode with legacy outer framing; dispatching as mux frame")
+          Logger.info(
+            "[Session] Detected inner mux payload while in mux mode with legacy outer framing; dispatching as mux frame"
+          )
+
           handle_inner_mux_payload(payload, state)
         else
-          Logger.warning("[Session] Legacy-outer FRAME_DATA in mux mode without inner mux payload, dropping #{byte_size(payload)} bytes")
+          Logger.warning(
+            "[Session] Legacy-outer FRAME_DATA in mux mode without inner mux payload, dropping #{byte_size(payload)} bytes"
+          )
+
           {:noreply, state}
         end
       else
         # True mux outer frame: [stream_id(4) | payload]
         <<stream_id::big-32, payload::binary>> = rest
+
         state =
           case Map.get(state.streams, stream_id) do
             %{tls_state: :active, tls_socket: tls_sock} when tls_sock != nil ->
@@ -1687,23 +1874,37 @@ defmodule ZtlpGateway.Session do
               if byte_size(payload) > 0 do
                 :gen_tcp.send(tls_sock, payload)
               end
+
               state
 
             %{tls_state: :pending_handshake, tls_creds: creds} = stream ->
               # First data on a TLS stream — start the TLS bridge and write the ClientHello
               case TlsTerminator.start_bridge(
-                creds.cert_pem, creds.key_pem, creds.chain_pem,
-                self(), stream_id
-              ) do
+                     creds.cert_pem,
+                     creds.key_pem,
+                     creds.chain_pem,
+                     self(),
+                     stream_id
+                   ) do
                 {:ok, client_socket, bridge_pid} ->
                   if byte_size(payload) > 0 do
                     :gen_tcp.send(client_socket, payload)
                   end
-                  updated = %{stream | tls_state: :active, tls_socket: client_socket, tls_bridge_pid: bridge_pid}
+
+                  updated = %{
+                    stream
+                    | tls_state: :active,
+                      tls_socket: client_socket,
+                      tls_bridge_pid: bridge_pid
+                  }
+
                   %{state | streams: Map.put(state.streams, stream_id, updated)}
 
                 {:error, reason} ->
-                  Logger.warning("[Session] TLS bridge failed for stream #{stream_id}: #{inspect(reason)}")
+                  Logger.warning(
+                    "[Session] TLS bridge failed for stream #{stream_id}: #{inspect(reason)}"
+                  )
+
                   state
               end
 
@@ -1715,14 +1916,25 @@ defmodule ZtlpGateway.Session do
                 new_bytes = current_bytes + byte_size(payload)
 
                 if new_bytes > @max_connecting_buffer_bytes do
-                  Logger.warning("[Session] Stream #{stream_id} exceeded connecting buffer cap (#{new_bytes} > #{@max_connecting_buffer_bytes}), closing stream")
+                  Logger.warning(
+                    "[Session] Stream #{stream_id} exceeded connecting buffer cap (#{new_bytes} > #{@max_connecting_buffer_bytes}), closing stream"
+                  )
+
                   send_queue = :queue.in({:stream_close, stream_id}, state.send_queue)
                   streams = Map.delete(state.streams, stream_id)
                   state = %{state | send_queue: send_queue, streams: streams}
                   flush_send_queue(state)
                 else
-                  Logger.debug("[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect (total=#{new_bytes})")
-                  updated = %{stream | buffer: [payload | buffer], connect_buffer_bytes: new_bytes}
+                  Logger.debug(
+                    "[Session] Stream #{stream_id} buffering #{byte_size(payload)} bytes during connect (total=#{new_bytes})"
+                  )
+
+                  updated = %{
+                    stream
+                    | buffer: [payload | buffer],
+                      connect_buffer_bytes: new_bytes
+                  }
+
                   %{state | streams: Map.put(state.streams, stream_id, updated)}
                 end
               else
@@ -1732,39 +1944,57 @@ defmodule ZtlpGateway.Session do
             %{backend_pid: pid} when pid != nil ->
               # Plain stream: forward directly to backend
               if byte_size(payload) > 0 do
-                Logger.debug("[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+                Logger.debug(
+                  "[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}"
+                )
+
                 Backend.send_data(pid, payload)
               end
+
               state
 
             _ ->
-              Logger.warning("[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes")
+              Logger.warning(
+                "[Session] Data for unknown stream #{stream_id}, dropping #{byte_size(payload)} bytes"
+              )
+
               state
           end
+
         # ACK is sent by deliver_recv_window after in-order delivery
         {:noreply, state}
       end
     else
       # Legacy single-stream mode: [data_seq(8) | payload]
       <<data_seq::big-64, payload::binary>> = rest
-      Logger.debug("[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}")
+
+      Logger.debug(
+        "[Session] FRAME_DATA data_seq=#{data_seq} payload_len=#{byte_size(payload)} backend_pid=#{inspect(state.backend_pid)}"
+      )
 
       # Relay-side VIP on iOS wraps mux OPEN/DATA/CLOSE frames inside the outer
       # transport FRAME_DATA envelope. When the session starts in legacy mode,
       # detect those inner mux payloads here and dispatch them through the mux
       # handlers instead of forwarding the raw control bytes to the backend.
       if byte_size(payload) > 0 and mux_payload?(payload) do
-        Logger.info("[Session] Detected inner mux payload while in legacy mode; dispatching as mux frame")
+        Logger.info(
+          "[Session] Detected inner mux payload while in legacy mode; dispatching as mux frame"
+        )
+
         handle_inner_mux_payload(payload, state)
       else
         # Reconnect backend if it was closed (e.g. idle timeout from vaultwarden)
         state =
           if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
-            Logger.debug("[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}")
+            Logger.debug(
+              "[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}"
+            )
+
             case Backend.start_link(state.backend_addr) do
               {:ok, pid} ->
                 Logger.debug("[Session] Legacy backend reconnected: #{inspect(pid)}")
                 %{state | backend_pid: pid}
+
               {:error, reason} ->
                 Logger.warning("[Session] Legacy backend reconnect failed: #{inspect(reason)}")
                 state
@@ -1774,9 +2004,13 @@ defmodule ZtlpGateway.Session do
           end
 
         if state.backend_pid && byte_size(payload) > 0 do
-          Logger.debug("[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}")
+          Logger.debug(
+            "[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}"
+          )
+
           Backend.send_data(state.backend_pid, payload)
         end
+
         # ACK is sent by deliver_recv_window after in-order delivery
         {:noreply, state}
       end
@@ -1809,8 +2043,14 @@ defmodule ZtlpGateway.Session do
   # This clause MUST come before the SACK clause because otherwise rwnd's first
   # byte would be misread as sack_count.
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, rwnd::big-16>>, state) do
-    Logger.debug("[Session] handle_tunnel_frame START FRAME_ACK with rwnd=#{rwnd} ack_seq=#{acked_data_seq}")
-    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} rwnd=#{rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+    Logger.debug(
+      "[Session] handle_tunnel_frame START FRAME_ACK with rwnd=#{rwnd} ack_seq=#{acked_data_seq}"
+    )
+
+    Logger.info(
+      "[Session] CLIENT_ACK data_seq=#{acked_data_seq} rwnd=#{rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}"
+    )
+
     state = %{state | peer_rwnd: max(1, rwnd)}
     state = log_ack_latency(state, acked_data_seq)
     state = process_cumulative_ack(acked_data_seq, state)
@@ -1841,7 +2081,11 @@ defmodule ZtlpGateway.Session do
     # At least one packet of headroom even if the client advertises zero —
     # otherwise effective_window collapses to 0 and the session stalls.
     rwnd_packets = max(1, div(window_bytes, @max_payload_bytes))
-    Logger.info("[Session] CLIENT_ACK_V2 data_seq=#{acked_data_seq} window_kb=#{window_kb} (=#{rwnd_packets} packets) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+
+    Logger.info(
+      "[Session] CLIENT_ACK_V2 data_seq=#{acked_data_seq} window_kb=#{window_kb} (=#{rwnd_packets} packets) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}"
+    )
+
     state =
       state
       |> Map.put(:peer_rwnd, rwnd_packets)
@@ -1861,9 +2105,16 @@ defmodule ZtlpGateway.Session do
     end
   end
 
-  defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
+  defp handle_tunnel_frame(
+         <<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>,
+         state
+       ) do
     Logger.debug("[Session] handle_tunnel_frame START FRAME_ACK with sack_count=#{sack_count}")
-    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} rwnd=#{state.peer_rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+
+    Logger.info(
+      "[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} rwnd=#{state.peer_rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}"
+    )
+
     state = log_ack_latency(state, acked_data_seq)
     # Cumulative ACK with SACK blocks from client
     state = process_cumulative_ack(acked_data_seq, state)
@@ -1891,7 +2142,11 @@ defmodule ZtlpGateway.Session do
   # Legacy ACK without SACK blocks (backward compatible)
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64>>, state) do
     Logger.debug("[Session] handle_tunnel_frame START bare FRAME_ACK")
-    Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} (no sack) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
+
+    Logger.info(
+      "[Session] CLIENT_ACK data_seq=#{acked_data_seq} (no sack) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}"
+    )
+
     state = log_ack_latency(state, acked_data_seq)
     state = process_cumulative_ack(acked_data_seq, state)
 
@@ -1914,20 +2169,33 @@ defmodule ZtlpGateway.Session do
   defp handle_tunnel_frame(<<@frame_nack, count::big-16, rest::binary>>, state) do
     # NACK from client: list of missing data_seqs to retransmit immediately
     nacked_data_seqs = parse_nack_seqs(rest, count, [])
-    Logger.debug("[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}")
+
+    Logger.debug(
+      "[Session] NACK received: #{count} missing data_seqs: #{inspect(nacked_data_seqs)}"
+    )
 
     now = System.monotonic_time(:millisecond)
 
     # Enter recovery mode (no cwnd reduction). On lossy WiFi, NACKs indicate
     # random packet drops, not congestion. Only RTO should reduce cwnd.
-    state = if not state.in_recovery do
-      Logger.info("[Session] NACK loss: entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)")
-      recovery_target = max(state.send_data_seq - 1, state.last_acked_data_seq)
-      %{state | in_recovery: true, recovery_data_seq: recovery_target, recovery_cwnd: state.cwnd}
-    else
-      Logger.debug("[Session] NACK during recovery — skipping")
-      state
-    end
+    state =
+      if not state.in_recovery do
+        Logger.info(
+          "[Session] NACK loss: entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)"
+        )
+
+        recovery_target = max(state.send_data_seq - 1, state.last_acked_data_seq)
+
+        %{
+          state
+          | in_recovery: true,
+            recovery_data_seq: recovery_target,
+            recovery_cwnd: state.cwnd
+        }
+      else
+        Logger.debug("[Session] NACK during recovery — skipping")
+        state
+      end
 
     # Filter out data_seqs that were already SACK'd — the client has them
     nacked_data_seqs = Enum.reject(nacked_data_seqs, &MapSet.member?(state.sacked_set, &1))
@@ -1935,7 +2203,9 @@ defmodule ZtlpGateway.Session do
     state =
       Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->
         # Find the send_buffer entry matching this data_seq
-        case Enum.find(acc.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == nacked_ds end) do
+        case Enum.find(acc.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
+               ds == nacked_ds
+             end) do
           {seq, {plaintext_frame, _sent_at, retransmit_count, ds}} ->
             if retransmit_count < @max_retransmits do
               # Retransmit with ORIGINAL packet_seq (same nonce = deterministic
@@ -1943,23 +2213,37 @@ defmodule ZtlpGateway.Session do
               nonce = <<0::32, seq::little-64>>
               {ct, tag} = Crypto.encrypt(acc.r2i_key, nonce, plaintext_frame, <<>>)
               encrypted = ct <> tag
-              new_pkt = Packet.build_data(acc.session_id, seq,
-                payload: encrypted,
-                payload_len: byte_size(encrypted)
-              )
+
+              new_pkt =
+                Packet.build_data(acc.session_id, seq,
+                  payload: encrypted,
+                  payload_len: byte_size(encrypted)
+                )
+
               new_packet = Packet.serialize_data_with_auth(new_pkt, acc.r2i_key)
 
-              Logger.debug("[Session] NACK retransmit data_seq=#{ds} seq=#{seq} attempt=#{retransmit_count + 1}")
+              Logger.debug(
+                "[Session] NACK retransmit data_seq=#{ds} seq=#{seq} attempt=#{retransmit_count + 1}"
+              )
+
               send_udp(acc, new_packet)
-              updated_buffer = Map.put(acc.send_buffer, seq, {plaintext_frame, now, retransmit_count + 1, ds})
+
+              updated_buffer =
+                Map.put(acc.send_buffer, seq, {plaintext_frame, now, retransmit_count + 1, ds})
+
               %{acc | send_buffer: updated_buffer}
             else
-              Logger.warning("[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping")
-              acc = if @use_bbr do
-                %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(plaintext_frame))}
-              else
-                acc
-              end
+              Logger.warning(
+                "[Session] NACK retransmit data_seq=#{ds} exceeded max_retransmits, dropping"
+              )
+
+              acc =
+                if @use_bbr do
+                  %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(plaintext_frame))}
+                else
+                  acc
+                end
+
               %{acc | send_buffer: Map.delete(acc.send_buffer, seq)}
             end
 
@@ -1983,7 +2267,10 @@ defmodule ZtlpGateway.Session do
     # irrelevant to the new TCP connection. Without clearing, old response
     # chunks (with stale data_seqs) interleave with new response data,
     # causing out-of-order delivery to the client's VIP proxy.
-    Logger.info("[Session] Received RESET frame, reconnecting backend (clearing #{:queue.len(state.send_queue)} queued + #{map_size(state.send_buffer)} in-flight)")
+    Logger.info(
+      "[Session] Received RESET frame, reconnecting backend (clearing #{:queue.len(state.send_queue)} queued + #{map_size(state.send_buffer)} in-flight)"
+    )
+
     if state.backend_pid && Process.alive?(state.backend_pid) do
       Backend.close(state.backend_pid)
     end
@@ -1998,25 +2285,29 @@ defmodule ZtlpGateway.Session do
         case Backend.start_link({host, port, self()}) do
           {:ok, new_pid} ->
             # Reset all send state for new stream, including congestion control
-            retransmit_ref = Process.send_after(self(), :retransmit_check, @retransmit_check_interval_ms)
-            {:noreply, %{state |
-              backend_pid: new_pid,
-              send_data_seq: 0,
-              send_queue: :queue.new(),
-              send_buffer: %{},
-              draining: false,
-              cwnd: @initial_cwnd,
-              ssthresh: @initial_ssthresh,
-              last_acked_data_seq: -1,
-              dup_ack_count: 0,
-              fast_retransmit_sent: false,
-              in_recovery: false,
-              recovery_data_seq: 0,
-              recovery_cwnd: 0,
-              retransmit_timer_ref: retransmit_ref,
-              bbr: if(@use_bbr, do: Bbr.new(), else: nil),
-              last_ack_advance_at: System.monotonic_time(:millisecond)
-            }}
+            retransmit_ref =
+              Process.send_after(self(), :retransmit_check, @retransmit_check_interval_ms)
+
+            {:noreply,
+             %{
+               state
+               | backend_pid: new_pid,
+                 send_data_seq: 0,
+                 send_queue: :queue.new(),
+                 send_buffer: %{},
+                 draining: false,
+                 cwnd: @initial_cwnd,
+                 ssthresh: @initial_ssthresh,
+                 last_acked_data_seq: -1,
+                 dup_ack_count: 0,
+                 fast_retransmit_sent: false,
+                 in_recovery: false,
+                 recovery_data_seq: 0,
+                 recovery_cwnd: 0,
+                 retransmit_timer_ref: retransmit_ref,
+                 bbr: if(@use_bbr, do: Bbr.new(), else: nil),
+                 last_ack_advance_at: System.monotonic_time(:millisecond)
+             }}
 
           {:error, _reason} ->
             terminate_session(state, :backend_reconnect_failed)
@@ -2029,7 +2320,10 @@ defmodule ZtlpGateway.Session do
 
   # FRAME_OPEN with service name: [0x06 | stream_id(4) | svc_len(1) | svc_name]
   # The packet router sends per-stream service names for VIP routing.
-  defp handle_tunnel_frame(<<@frame_open, stream_id::big-32, svc_len::8, svc_name::binary-size(svc_len)>>, state) do
+  defp handle_tunnel_frame(
+         <<@frame_open, stream_id::big-32, svc_len::8, svc_name::binary-size(svc_len)>>,
+         state
+       ) do
     Logger.info("[Session] FRAME_OPEN stream_id=#{stream_id} service=#{svc_name}")
     open_mux_stream(stream_id, svc_name, state)
   end
@@ -2049,6 +2343,7 @@ defmodule ZtlpGateway.Session do
           # Cancel connect timeout; the spawned connect will send a result
           # message that we'll ignore since the stream is already removed.
           if tref, do: Process.cancel_timer(tref)
+
           "client_close_before_connect service=#{Map.get(stream, :service, "?")} buffered_bytes=#{Map.get(stream, :connect_buffer_bytes, 0)} buffered_chunks=#{length(Map.get(stream, :buffer, []))}"
 
         %{backend_pid: pid, service: service, state: stream_state} when pid != nil ->
@@ -2065,8 +2360,13 @@ defmodule ZtlpGateway.Session do
 
     queued_bytes = Map.get(state.stream_queue_bytes || %{}, stream_id, 0)
     queued_chunks = Map.get(state.stream_queue_chunks || %{}, stream_id, 0)
-    {send_queue, dropped_chunks, dropped_bytes} = drop_queued_stream_items(state.send_queue, stream_id)
-    Logger.warning("[Session] FRAME_CLOSE stream_id=#{stream_id} reason=#{close_reason} queue=#{:queue.len(state.send_queue)} stream_queue_chunks=#{queued_chunks} stream_queue_bytes=#{queued_bytes} dropped_chunks=#{dropped_chunks} dropped_bytes=#{dropped_bytes} total_streams=#{map_size(state.streams)}")
+
+    {send_queue, dropped_chunks, dropped_bytes} =
+      drop_queued_stream_items(state.send_queue, stream_id)
+
+    Logger.warning(
+      "[Session] FRAME_CLOSE stream_id=#{stream_id} reason=#{close_reason} queue=#{:queue.len(state.send_queue)} stream_queue_chunks=#{queued_chunks} stream_queue_bytes=#{queued_bytes} dropped_chunks=#{dropped_chunks} dropped_bytes=#{dropped_bytes} total_streams=#{map_size(state.streams)}"
+    )
 
     # Audit: stream closed
     AuditCollector.log_event(%{
@@ -2083,7 +2383,15 @@ defmodule ZtlpGateway.Session do
     streams = Map.delete(state.streams, stream_id)
     stream_queue_bytes = Map.delete(state.stream_queue_bytes || %{}, stream_id)
     stream_queue_chunks = Map.delete(state.stream_queue_chunks || %{}, stream_id)
-    {:noreply, %{state | streams: streams, send_queue: send_queue, stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}}
+
+    {:noreply,
+     %{
+       state
+       | streams: streams,
+         send_queue: send_queue,
+         stream_queue_bytes: stream_queue_bytes,
+         stream_queue_chunks: stream_queue_chunks
+     }}
   end
 
   # FRAME_REKEY: client's ACK with their key material for key rotation
@@ -2093,10 +2401,12 @@ defmodule ZtlpGateway.Session do
         Logger.info("[Session] Rekey ##{rekey_updates.rekey_count} complete, keys rotated")
         # Schedule next rekey timer
         rekey_timer_ref = Process.send_after(self(), :rekey_timer, state.rekey_interval_ms)
+
         state =
           state
           |> Map.merge(rekey_updates)
           |> Map.put(:rekey_timer_ref, rekey_timer_ref)
+
         {:noreply, state}
 
       :not_pending ->
@@ -2111,18 +2421,23 @@ defmodule ZtlpGateway.Session do
   # no more data is coming and can finalize its response.
   defp handle_tunnel_frame(<<@frame_fin, fin_data_seq::big-64>>, state) do
     Logger.info("[Session] Received client FIN (data_seq=#{fin_data_seq})")
+
     if state.backend_pid && Process.alive?(state.backend_pid) do
       # Shutdown the write side of the backend socket so the backend sees EOF
       # and sends its response. The read side stays open for the response.
       Backend.shutdown_write(state.backend_pid)
     end
+
     {:noreply, state}
   end
 
   defp handle_tunnel_frame(<<type, _rest::binary>> = payload, state) do
-     Logger.debug("[Session] handle_tunnel_frame START fallback type=#{type} len=#{byte_size(payload)}")
-     Logger.warning("[Session] Unhandled tunnel frame of length #{byte_size(payload)}")
-     {:noreply, state}
+    Logger.debug(
+      "[Session] handle_tunnel_frame START fallback type=#{type} len=#{byte_size(payload)}"
+    )
+
+    Logger.warning("[Session] Unhandled tunnel frame of length #{byte_size(payload)}")
+    {:noreply, state}
   end
 
   # ── Mux stream opener (extracted to avoid splitting handle_tunnel_frame clauses) ──
@@ -2155,20 +2470,53 @@ defmodule ZtlpGateway.Session do
     send_queue = enqueue_stream_chunks(state.send_queue, stream_id, chunks)
     after_len = :queue.len(send_queue)
     enqueued_chunks = max(after_len - before_len, 0)
-    enqueued_bytes = chunks |> Enum.take(enqueued_chunks) |> Enum.reduce(0, fn chunk, acc -> acc + byte_size(chunk) end)
+
+    enqueued_bytes =
+      chunks
+      |> Enum.take(enqueued_chunks)
+      |> Enum.reduce(0, fn chunk, acc -> acc + byte_size(chunk) end)
 
     if enqueued_chunks < length(chunks) do
-      Logger.debug("[Session] Stream #{stream_id} enqueue capped enqueued_chunks=#{enqueued_chunks} requested_chunks=#{length(chunks)} queue=#{after_len} high=#{@queue_high}")
+      Logger.debug(
+        "[Session] Stream #{stream_id} enqueue capped enqueued_chunks=#{enqueued_chunks} requested_chunks=#{length(chunks)} queue=#{after_len} high=#{@queue_high}"
+      )
     end
 
-    stream_queue_bytes = Map.update(state.stream_queue_bytes || %{}, stream_id, enqueued_bytes, &(&1 + enqueued_bytes))
-    stream_queue_chunks = Map.update(state.stream_queue_chunks || %{}, stream_id, enqueued_chunks, &(&1 + enqueued_chunks))
-    %{state | send_queue: send_queue, stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}
+    stream_queue_bytes =
+      Map.update(
+        state.stream_queue_bytes || %{},
+        stream_id,
+        enqueued_bytes,
+        &(&1 + enqueued_bytes)
+      )
+
+    stream_queue_chunks =
+      Map.update(
+        state.stream_queue_chunks || %{},
+        stream_id,
+        enqueued_chunks,
+        &(&1 + enqueued_chunks)
+      )
+
+    %{
+      state
+      | send_queue: send_queue,
+        stream_queue_bytes: stream_queue_bytes,
+        stream_queue_chunks: stream_queue_chunks
+    }
   end
 
   defp decrement_stream_queue_accounting(state, stream_id, bytes) do
-    stream_queue_bytes = Map.update(state.stream_queue_bytes || %{}, stream_id, 0, fn current -> max(current - bytes, 0) end)
-    stream_queue_chunks = Map.update(state.stream_queue_chunks || %{}, stream_id, 0, fn current -> max(current - 1, 0) end)
+    stream_queue_bytes =
+      Map.update(state.stream_queue_bytes || %{}, stream_id, 0, fn current ->
+        max(current - bytes, 0)
+      end)
+
+    stream_queue_chunks =
+      Map.update(state.stream_queue_chunks || %{}, stream_id, 0, fn current ->
+        max(current - 1, 0)
+      end)
+
     %{state | stream_queue_bytes: stream_queue_bytes, stream_queue_chunks: stream_queue_chunks}
   end
 
@@ -2176,10 +2524,17 @@ defmodule ZtlpGateway.Session do
     {kept, dropped_chunks, dropped_bytes} =
       :queue.to_list(send_queue)
       |> Enum.reduce({[], 0, 0}, fn
-        {:stream, ^stream_id, chunk}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes + byte_size(chunk)}
-        {:stream_fin, ^stream_id}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes}
-        {:stream_close, ^stream_id}, {acc, chunks, bytes} -> {acc, chunks + 1, bytes}
-        item, {acc, chunks, bytes} -> {[item | acc], chunks, bytes}
+        {:stream, ^stream_id, chunk}, {acc, chunks, bytes} ->
+          {acc, chunks + 1, bytes + byte_size(chunk)}
+
+        {:stream_fin, ^stream_id}, {acc, chunks, bytes} ->
+          {acc, chunks + 1, bytes}
+
+        {:stream_close, ^stream_id}, {acc, chunks, bytes} ->
+          {acc, chunks + 1, bytes}
+
+        item, {acc, chunks, bytes} ->
+          {[item | acc], chunks, bytes}
       end)
 
     {kept |> Enum.reverse() |> :queue.from_list(), dropped_chunks, dropped_bytes}
@@ -2196,17 +2551,28 @@ defmodule ZtlpGateway.Session do
 
     cond do
       Map.has_key?(state.streams, stream_id) ->
-        Logger.warning("[Session] Duplicate FRAME_OPEN for existing stream #{stream_id}, ignoring")
+        Logger.warning(
+          "[Session] Duplicate FRAME_OPEN for existing stream #{stream_id}, ignoring"
+        )
+
         {:noreply, state}
 
       total_streams >= @max_mux_streams ->
-        reject_mux_stream(stream_id, "max mux streams reached (#{total_streams}/#{@max_mux_streams})", state)
+        reject_mux_stream(
+          stream_id,
+          "max mux streams reached (#{total_streams}/#{@max_mux_streams})",
+          state
+        )
 
       false and queue_len >= @queue_high ->
         # Do not reject browser mux streams just because an earlier response is
         # backpressured. Admitting the stream and pausing backend reads avoids
         # client-side close/retry churn; queue depth is controlled at enqueue time.
-        reject_mux_stream(stream_id, "send_queue already overloaded (queue=#{queue_len}, high=#{@queue_high})", state)
+        reject_mux_stream(
+          stream_id,
+          "send_queue already overloaded (queue=#{queue_len}, high=#{@queue_high})",
+          state
+        )
 
       true ->
         case find_backend(backends, service_name) do
@@ -2214,16 +2580,18 @@ defmodule ZtlpGateway.Session do
             # Check if we should do TLS termination for this stream.
             # When a cert is provisioned for this service, gateway terminates
             # TLS and forwards plain HTTP to the backend.
-            tls_creds = case CertProvisioner.lookup(service_name) do
-              {:ok, creds} -> creds
-              :error -> nil
-            end
+            tls_creds =
+              case CertProvisioner.lookup(service_name) do
+                {:ok, creds} -> creds
+                :error -> nil
+              end
 
             # Async backend connection: spawn a process to connect without
             # blocking the session GenServer. Data arriving for this stream
             # during connection is buffered and flushed on success.
             # Uses the BackendPool for connection reuse across mux streams.
             session_pid = self()
+
             spawn(fn ->
               result = BackendPool.checkout(host, port, session_pid, stream_id)
               send(session_pid, {:backend_connect_result, stream_id, result})
@@ -2244,8 +2612,13 @@ defmodule ZtlpGateway.Session do
               tls_bridge_pid: nil,
               service: service_name
             }
+
             streams = Map.put(state.streams, stream_id, stream_state)
-            Logger.info("[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}, queue=#{queue_len}")
+
+            Logger.info(
+              "[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}, queue=#{queue_len}"
+            )
+
             {:noreply, %{state | streams: streams}}
 
           :error ->
@@ -2269,10 +2642,12 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, ack_frame, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
@@ -2292,10 +2667,12 @@ defmodule ZtlpGateway.Session do
   # not re-armed). Once queue drops below @queue_low, re-arm all backends.
   defp maybe_resume_backends(state) do
     queue_len = :queue.len(state.send_queue)
+
     cond do
       queue_len >= @queue_high and not state.backends_paused ->
         # Queue is full — pause all backends AND TLS bridge sockets
         Logger.debug("[Session] Backpressure ON: pausing backend reads (queue=#{queue_len})")
+
         for {_stream_id, stream_info} <- state.streams do
           if pid = stream_info[:backend_pid], do: Backend.pause_read(pid)
           # Also pause TLS bridge client sockets to stop encrypted data delivery
@@ -2303,12 +2680,14 @@ defmodule ZtlpGateway.Session do
             :inet.setopts(socket, active: false)
           end
         end
+
         if state.backend_pid, do: Backend.pause_read(state.backend_pid)
         %{state | backends_paused: true}
 
       queue_len <= @queue_low and state.backends_paused ->
         # Queue drained — resume all stream backends AND TLS bridge sockets
         Logger.debug("[Session] Backpressure OFF: resuming backend reads (queue=#{queue_len})")
+
         for {_stream_id, stream_info} <- state.streams do
           if pid = stream_info[:backend_pid], do: Backend.resume_read(pid)
           # Resume TLS bridge client sockets
@@ -2316,6 +2695,7 @@ defmodule ZtlpGateway.Session do
             :inet.setopts(socket, active: true)
           end
         end
+
         if state.backend_pid, do: Backend.resume_read(state.backend_pid)
         %{state | backends_paused: false}
 
@@ -2332,9 +2712,11 @@ defmodule ZtlpGateway.Session do
   # internal buffer that keeps draining into our send_queue.
   defp maybe_pause_tls_socket(state, socket) do
     queue_len = :queue.len(state.send_queue)
+
     if queue_len >= @queue_high do
       :inet.setopts(socket, active: false)
     end
+
     state
   end
 
@@ -2363,26 +2745,22 @@ defmodule ZtlpGateway.Session do
     inflight = map_size(state.send_buffer)
     # Logging instrumentation for response progression
     if not :queue.is_empty(state.send_queue) or inflight > 0 do
-      Logger.debug("[Session] flush_send_queue: queue=#{:queue.len(state.send_queue)} inflight=#{inflight} cwnd=#{state.cwnd} rwnd=#{Map.get(state, :peer_rwnd, @default_peer_rwnd)}")
+      Logger.debug(
+        "[Session] flush_send_queue: queue=#{:queue.len(state.send_queue)} inflight=#{inflight} cwnd=#{state.cwnd} rwnd=#{Map.get(state, :peer_rwnd, @default_peer_rwnd)}"
+      )
     end
-    
-    legacy_bypass = not state.mux_mode
-    
+
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    # For legacy_bypass, we still enforce a pacing limit so we don't overflow OS UDP buffers.
-    effective_window = if legacy_bypass do
-      inflight + min(remaining_burst, 32)
-    else
-      min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
-    end
-    
-    window_full = if legacy_bypass do
-      false # Always keep going until limited by burst (in encrypt_and_send)
-    else
-      inflight >= effective_window
-    end
+    effective_window =
+      min(
+        min(trunc(state.cwnd), cc_max_cwnd(state)),
+        Map.get(state, :peer_rwnd, @default_peer_rwnd)
+      )
+
+    window_full = inflight >= effective_window
+
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.
@@ -2402,43 +2780,49 @@ defmodule ZtlpGateway.Session do
         {{:value, item}, remaining} = :queue.out(state.send_queue)
         state = %{state | send_queue: remaining}
 
-        result = case item do
-      {:stream, stream_id, plaintext} ->
-        # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
-        # Wait, if not mux_mode, and stream_id == 0, we bypass this enqueue.
-        # Oh, legacy legacy_outer_mux is a thing.
-        state = decrement_stream_queue_accounting(state, stream_id, byte_size(plaintext))
-        encrypt_and_send_stream(stream_id, plaintext, state)
+        result =
+          case item do
+            {:stream, stream_id, plaintext} ->
+              # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+              # Wait, if not mux_mode, and stream_id == 0, we bypass this enqueue.
+              # Oh, legacy legacy_outer_mux is a thing.
+              state = decrement_stream_queue_accounting(state, stream_id, byte_size(plaintext))
+              encrypt_and_send_stream(stream_id, plaintext, state)
 
-          {:stream_fin, stream_id} ->
-            # Stream FIN: send as a data frame with a sentinel payload so it
-            # participates in the reliable data_seq stream (retransmitted if
-            # lost). The payload is <<@frame_fin>> which the client detects
-            # after mux dispatch.
-            encrypt_and_send_stream(stream_id, <<@frame_fin>>, state)
+            {:stream_fin, stream_id} ->
+              # Stream FIN: send as a data frame with a sentinel payload so it
+              # participates in the reliable data_seq stream (retransmitted if
+              # lost). The payload is <<@frame_fin>> which the client detects
+              # after mux dispatch.
+              encrypt_and_send_stream(stream_id, <<@frame_fin>>, state)
 
-          {:stream_close, stream_id} ->
-            # Stream close: same approach — wrapped in data frame for reliability
-            encrypt_and_send_stream(stream_id, <<@frame_close>>, state)
+            {:stream_close, stream_id} ->
+              # Stream close: same approach — wrapped in data frame for reliability
+              encrypt_and_send_stream(stream_id, <<@frame_close>>, state)
 
-          :legacy_fin ->
-            # Legacy FIN: sent after backend closes and all data is flushed.
-            # Include data_seq so client waits for all preceding data before closing.
-            # send_data_seq is already the NEXT seq (one past last sent), which is
-            # exactly what the client expects as the FIN boundary.
-            fin_seq = state.send_data_seq
-            Logger.info("[Session] Sending legacy FIN to client (data_seq=#{fin_seq}, backend response complete)")
-            encrypt_and_send_control(<<@frame_fin, fin_seq::big-64>>, state)
+            :legacy_fin ->
+              # Legacy FIN: sent after backend closes and all data is flushed.
+              # Include data_seq so client waits for all preceding data before closing.
+              # send_data_seq is already the NEXT seq (one past last sent), which is
+              # exactly what the client expects as the FIN boundary.
+              fin_seq = state.send_data_seq
 
-          plaintext when is_binary(plaintext) ->
-            # Legacy single-stream data
-            encrypt_and_send(plaintext, state)
-        end
+              Logger.info(
+                "[Session] Sending legacy FIN to client (data_seq=#{fin_seq}, backend response complete)"
+              )
+
+              encrypt_and_send_control(<<@frame_fin, fin_seq::big-64>>, state)
+
+            plaintext when is_binary(plaintext) ->
+              # Legacy single-stream data
+              encrypt_and_send(plaintext, state)
+          end
 
         case result do
           {:ok, new_state} ->
             # Continue burst — send more packets in this tick
             flush_send_queue(new_state, remaining_burst - 1)
+
           {:error, _reason} ->
             state
         end
@@ -2446,14 +2830,17 @@ defmodule ZtlpGateway.Session do
   end
 
   defp schedule_pacing_timer(%{pacing_timer_ref: nil} = state) do
-    interval = if not state.mux_mode do
-      1
-    else
-      cc_pacing_interval_ms(state)
-    end
+    interval =
+      if not state.mux_mode do
+        1
+      else
+        cc_pacing_interval_ms(state)
+      end
+
     ref = Process.send_after(self(), :pacing_tick, interval)
     %{state | pacing_timer_ref: ref}
   end
+
   defp schedule_pacing_timer(state), do: state
 
   defp cancel_recv_gap_timer(state) do
@@ -2467,11 +2854,21 @@ defmodule ZtlpGateway.Session do
     if state.pacing_timer_ref, do: Process.cancel_timer(state.pacing_timer_ref)
     if state.rekey_timer_ref, do: Process.cancel_timer(state.rekey_timer_ref)
     if state.recv_gap_timer_ref, do: Process.cancel_timer(state.recv_gap_timer_ref)
-    %{state | retransmit_timer_ref: nil, pacing_timer_ref: nil, rekey_timer_ref: nil, recv_gap_timer_ref: nil}
+
+    %{
+      state
+      | retransmit_timer_ref: nil,
+        pacing_timer_ref: nil,
+        rekey_timer_ref: nil,
+        recv_gap_timer_ref: nil
+    }
   end
 
   defp encrypt_and_send(plaintext, state) do
-    Logger.debug("[Session] encrypt_and_send: q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}")
+    Logger.debug(
+      "[Session] encrypt_and_send: q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}"
+    )
+
     seq = state.send_seq + 1
     data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
@@ -2482,10 +2879,12 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
@@ -2502,21 +2901,23 @@ defmodule ZtlpGateway.Session do
     # Schedule retransmit timer if not already scheduled
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
 
-    new_state = %{state |
-      send_seq: seq,
-      send_data_seq: data_seq + 1,
-      bytes_out: state.bytes_out + byte_size(packet),
-      send_buffer: send_buffer,
-      retransmit_timer_ref: retransmit_timer_ref,
-      rekey_packet_count: state.rekey_packet_count + 1
+    new_state = %{
+      state
+      | send_seq: seq,
+        send_data_seq: data_seq + 1,
+        bytes_out: state.bytes_out + byte_size(packet),
+        send_buffer: send_buffer,
+        retransmit_timer_ref: retransmit_timer_ref,
+        rekey_packet_count: state.rekey_packet_count + 1
     }
 
     # Track inflight in BBR
-    new_state = if @use_bbr do
-      %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
-    else
-      new_state
-    end
+    new_state =
+      if @use_bbr do
+        %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
+      else
+        new_state
+      end
 
     new_state = maybe_initiate_rekey(new_state)
     {:ok, new_state}
@@ -2525,7 +2926,10 @@ defmodule ZtlpGateway.Session do
   # Encrypt and send a multiplexed stream data frame.
   # Wire format: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
   defp encrypt_and_send_stream(stream_id, plaintext, state) do
-    Logger.debug("[Session] encrypt_and_send_stream: stream_id=#{stream_id} q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}")
+    Logger.debug(
+      "[Session] encrypt_and_send_stream: stream_id=#{stream_id} q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}"
+    )
+
     seq = state.send_seq + 1
     data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
@@ -2533,19 +2937,22 @@ defmodule ZtlpGateway.Session do
     # Ensure backwards compatibility for clients without mux by falling back
     # to legacy if this stream is 0 and we are in a bare session. 
     # Mux framing includes the stream id.
-    framed = if not state.mux_mode and map_size(state.streams) == 1 do
+    framed =
+      if not state.mux_mode and map_size(state.streams) == 1 do
         <<@frame_data, data_seq::big-64, plaintext::binary>>
-    else
+      else
         <<@frame_data, stream_id::big-32, data_seq::big-64, plaintext::binary>>
-    end
+      end
 
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
@@ -2555,21 +2962,23 @@ defmodule ZtlpGateway.Session do
     send_buffer = Map.put(state.send_buffer, seq, {framed, now, 0, data_seq})
     retransmit_timer_ref = schedule_retransmit_timer(state.retransmit_timer_ref, state.rto_ms)
 
-    new_state = %{state |
-      send_seq: seq,
-      send_data_seq: data_seq + 1,
-      bytes_out: state.bytes_out + byte_size(packet),
-      send_buffer: send_buffer,
-      retransmit_timer_ref: retransmit_timer_ref,
-      rekey_packet_count: state.rekey_packet_count + 1
+    new_state = %{
+      state
+      | send_seq: seq,
+        send_data_seq: data_seq + 1,
+        bytes_out: state.bytes_out + byte_size(packet),
+        send_buffer: send_buffer,
+        retransmit_timer_ref: retransmit_timer_ref,
+        rekey_packet_count: state.rekey_packet_count + 1
     }
 
     # Track inflight in BBR
-    new_state = if @use_bbr do
-      %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
-    else
-      new_state
-    end
+    new_state =
+      if @use_bbr do
+        %{new_state | bbr: Bbr.on_send(new_state.bbr, byte_size(framed))}
+      else
+        new_state
+      end
 
     new_state = maybe_initiate_rekey(new_state)
     {:ok, new_state}
@@ -2584,19 +2993,18 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, control_frame, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))
 
-    {:ok, %{state |
-      send_seq: seq,
-      bytes_out: state.bytes_out + byte_size(packet)
-    }}
+    {:ok, %{state | send_seq: seq, bytes_out: state.bytes_out + byte_size(packet)}}
   end
 
   defp encrypt_and_send_probe(probe_frame, state) do
@@ -2606,19 +3014,18 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, probe_frame, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
     Stats.bytes_sent(byte_size(packet))
 
-    %{state |
-      send_seq: seq,
-      bytes_out: state.bytes_out + byte_size(packet)
-    }
+    %{state | send_seq: seq, bytes_out: state.bytes_out + byte_size(packet)}
   end
 
   # ---------------------------------------------------------------------------
@@ -2645,17 +3052,21 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, frame, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
     send_udp(state, packet)
 
     # Compute pending key and update state
     rekey_updates = Rekey.initiate(state, key_material)
 
-    Logger.info("[Session] Rekey initiated (packet_count=#{state.rekey_packet_count}), waiting for client ACK")
+    Logger.info(
+      "[Session] Rekey initiated (packet_count=#{state.rekey_packet_count}), waiting for client ACK"
+    )
 
     state
     |> Map.put(:send_seq, seq)
@@ -2706,11 +3117,14 @@ defmodule ZtlpGateway.Session do
   end
 
   defp process_pending_packets([], state), do: state
+
   defp process_pending_packets([{packet_data, from_addr} | rest], state) do
     Logger.debug("[Session] Processing buffered #{byte_size(packet_data)} byte packet")
+
     case handle_data_packet(packet_data, from_addr, state) do
       {:noreply, new_state} ->
         process_pending_packets(rest, new_state)
+
       {:stop, _reason, new_state} ->
         # Session terminating, stop processing
         new_state
@@ -2768,7 +3182,10 @@ defmodule ZtlpGateway.Session do
   # ---------------------------------------------------------------------------
 
   defp process_cumulative_ack(acked_data_seq, state) do
-    Logger.debug("[Session] process_cumulative_ack: ack_seq=#{acked_data_seq} l_ack=#{state.last_acked_data_seq}")
+    Logger.debug(
+      "[Session] process_cumulative_ack: ack_seq=#{acked_data_seq} l_ack=#{state.last_acked_data_seq}"
+    )
+
     now = System.monotonic_time(:millisecond)
 
     {acked_entries, remaining} =
@@ -2777,8 +3194,11 @@ defmodule ZtlpGateway.Session do
       end)
 
     newly_acked = length(acked_entries)
+
     if newly_acked > 0 do
-       Logger.debug("[Session] process_cumulative_ack: acked=#{newly_acked} rem=#{map_size(remaining)}")
+      Logger.debug(
+        "[Session] process_cumulative_ack: acked=#{newly_acked} rem=#{map_size(remaining)}"
+      )
     end
 
     # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
@@ -2795,52 +3215,65 @@ defmodule ZtlpGateway.Session do
 
     # Congestion control: Always use TCP-style slow start + AIMD for cwnd.
     # BBR is used for bandwidth estimation / pacing rate only.
-    state = if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
-      # Update BBR bandwidth estimation (if enabled)
-      state = if @use_bbr do
-        acked_bytes = Enum.reduce(acked_entries, 0, fn {_seq, {pkt, _sent_at, _rc, _ds}}, acc ->
-          acc + byte_size(pkt)
-        end)
-        rtt_ms = state.srtt_ms || @initial_rto_ms
-        bbr = Bbr.on_ack(state.bbr, acked_bytes, rtt_ms, now)
-        %{state | bbr: bbr}
+    state =
+      if newly_acked > 0 and acked_data_seq > state.last_acked_data_seq do
+        # Update BBR bandwidth estimation (if enabled)
+        state =
+          if @use_bbr do
+            acked_bytes =
+              Enum.reduce(acked_entries, 0, fn {_seq, {pkt, _sent_at, _rc, _ds}}, acc ->
+                acc + byte_size(pkt)
+              end)
+
+            rtt_ms = state.srtt_ms || @initial_rto_ms
+            bbr = Bbr.on_ack(state.bbr, acked_bytes, rtt_ms, now)
+            %{state | bbr: bbr}
+          else
+            state
+          end
+
+        # TCP-style cwnd growth: slow start (exponential) then congestion avoidance (linear)
+        cwnd = state.cwnd
+        ssthresh = state.ssthresh
+        max_cw = cc_max_cwnd(state) * 1.0
+
+        new_cwnd =
+          if cwnd < ssthresh do
+            # Slow start: grow by newly_acked (doubles per RTT)
+            min(cwnd + newly_acked, max_cw)
+          else
+            # Congestion avoidance: grow by ~1 packet per RTT
+            min(cwnd + newly_acked / cwnd, max_cw)
+          end
+
+        %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq, last_ack_advance_at: now}
       else
         state
       end
 
-      # TCP-style cwnd growth: slow start (exponential) then congestion avoidance (linear)
-      cwnd = state.cwnd
-      ssthresh = state.ssthresh
-      max_cw = cc_max_cwnd(state) * 1.0
-      new_cwnd = if cwnd < ssthresh do
-        # Slow start: grow by newly_acked (doubles per RTT)
-        min(cwnd + newly_acked, max_cw)
-      else
-        # Congestion avoidance: grow by ~1 packet per RTT
-        min(cwnd + newly_acked / cwnd, max_cw)
-      end
-      %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq, last_ack_advance_at: now}
-    else
-      state
-    end
-
     # Exit recovery mode when ACK advances past recovery_data_seq.
     # Restore cwnd to recovery_cwnd (the value at entry), stripping any
     # dup-ACK inflation that accumulated during recovery.
-    state = if state.in_recovery and newly_acked > 0 and acked_data_seq >= state.recovery_data_seq do
-      restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), cc_max_cwnd(state) * 1.0)
-      Logger.info("[Session] Exiting recovery (acked=#{acked_data_seq} >= recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}")
-      %{state | in_recovery: false, recovery_data_seq: 0, recovery_cwnd: 0, cwnd: restored_cwnd}
-    else
-      state
-    end
+    state =
+      if state.in_recovery and newly_acked > 0 and acked_data_seq >= state.recovery_data_seq do
+        restored_cwnd = min(max(state.recovery_cwnd, @min_cwnd * 1.0), cc_max_cwnd(state) * 1.0)
+
+        Logger.info(
+          "[Session] Exiting recovery (acked=#{acked_data_seq} >= recovery=#{state.recovery_data_seq}), cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(restored_cwnd, 1)}"
+        )
+
+        %{state | in_recovery: false, recovery_data_seq: 0, recovery_cwnd: 0, cwnd: restored_cwnd}
+      else
+        state
+      end
 
     # Duplicate ACK detection + fast retransmit (TCP NewReno-style).
     # In recovery mode, dup ACKs don't trigger fast retransmit or cwnd reduction
     # because they're caused by our own retransmits. Each dup ACK in recovery
     # inflates cwnd by 1 to allow new data (TCP NewReno "inflation").
     {dup_count, send_buffer, fast_retransmit_sent, state} =
-      if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and map_size(send_buffer) > 0 do
+      if newly_acked == 0 and acked_data_seq == state.last_acked_data_seq and
+           map_size(send_buffer) > 0 do
         new_count = state.dup_ack_count + 1
 
         if state.in_recovery do
@@ -2853,65 +3286,98 @@ defmodule ZtlpGateway.Session do
           # acked, the path is overwhelmed. Halve cwnd and ssthresh to drain.
           # This catches the case where cwnd is too large for the path —
           # receiver has a hole it can't fill because we're flooding it.
-          state = if new_count >= 20 and rem(new_count, 20) == 0 do
-            new_ssthresh = max(trunc(state.cwnd * cc_loss_beta(state)), @min_ssthresh)
-            new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
-            Logger.info("[Session] Dup ACK plateau (#{new_count}): path overwhelmed, cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}")
-            %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, recovery_cwnd: new_cwnd}
-          else
-            inflight = map_size(send_buffer)
-            max_recovery_cwnd = min(state.ssthresh + inflight, cc_max_cwnd(state)) * 1.0
-            new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
-            %{state | cwnd: new_cwnd}
-          end
+          state =
+            if new_count >= 20 and rem(new_count, 20) == 0 do
+              new_ssthresh = max(trunc(state.cwnd * cc_loss_beta(state)), @min_ssthresh)
+              new_cwnd = max(new_ssthresh, @min_cwnd) * 1.0
+
+              Logger.info(
+                "[Session] Dup ACK plateau (#{new_count}): path overwhelmed, cwnd #{Float.round(state.cwnd * 1.0, 1)} → #{Float.round(new_cwnd, 1)}"
+              )
+
+              %{state | cwnd: new_cwnd, ssthresh: new_ssthresh, recovery_cwnd: new_cwnd}
+            else
+              inflight = map_size(send_buffer)
+              max_recovery_cwnd = min(state.ssthresh + inflight, cc_max_cwnd(state)) * 1.0
+              new_cwnd = min(state.cwnd + 1.0, max_recovery_cwnd)
+              %{state | cwnd: new_cwnd}
+            end
+
           {new_count, send_buffer, state.fast_retransmit_sent, state}
         else
           # Not in recovery: normal fast retransmit at 3 dup ACKs
-          {send_buffer, state} = if new_count == 3 and not state.fast_retransmit_sent do
-            now_ms = System.monotonic_time(:millisecond)
-            # Sort by data_seq (not packet_seq) so we retransmit the packets the
-            # client actually needs. The old code sorted by Map.keys() (packet_seq),
-            # which would retransmit already-ACK'd data_seqs, causing a 30s stall.
-            oldest_seqs = send_buffer
-              |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
-              |> Enum.take(4)
-              |> Enum.map(fn {seq, _} -> seq end)
-            retransmit_count = Enum.reduce(oldest_seqs, 0, fn seq, count ->
-              case Map.get(send_buffer, seq) do
-                {packet, _sent_at, _rc, _ds} ->
-                  nonce = <<0::32, seq::little-64>>
-                  {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
-                  encrypted = ct <> tag
-                  new_pkt = Packet.build_data(state.session_id, seq,
-                    payload: encrypted,
-                    payload_len: byte_size(encrypted)
-                  )
-                  new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
-                  send_udp(state, new_packet)
-                  count + 1
-                _ -> count
-              end
-            end)
-            updated_buffer = Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
-              case Map.get(buf, seq) do
-                {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
-                _ -> buf
-              end
-            end)
+          {send_buffer, state} =
+            if new_count == 3 and not state.fast_retransmit_sent do
+              now_ms = System.monotonic_time(:millisecond)
+              # Sort by data_seq (not packet_seq) so we retransmit the packets the
+              # client actually needs. The old code sorted by Map.keys() (packet_seq),
+              # which would retransmit already-ACK'd data_seqs, causing a 30s stall.
+              oldest_seqs =
+                send_buffer
+                |> Enum.sort_by(fn {_seq, {_pkt, _ts, _rc, ds}} ->
+                  if is_integer(ds), do: ds, else: 0
+                end)
+                |> Enum.take(4)
+                |> Enum.map(fn {seq, _} -> seq end)
 
-            # Enter recovery WITHOUT reducing cwnd. On lossy WiFi, fast retransmits
-            # are almost always random drops, not congestion. Reducing cwnd on every
-            # 3-dup-ACK event pins throughput to min_ssthresh. Only RTO (true timeout)
-            # should reduce cwnd — that's the real congestion signal.
-            highest_ds = send_buffer
-              |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} -> if is_integer(ds), do: ds, else: 0 end)
-              |> Enum.max(fn -> 0 end)
-            Logger.info("[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)")
-            state = %{state | in_recovery: true, recovery_data_seq: highest_ds, recovery_cwnd: state.cwnd}
-            {updated_buffer, state}
-          else
-            {send_buffer, state}
-          end
+              retransmit_count =
+                Enum.reduce(oldest_seqs, 0, fn seq, count ->
+                  case Map.get(send_buffer, seq) do
+                    {packet, _sent_at, _rc, _ds} ->
+                      nonce = <<0::32, seq::little-64>>
+                      {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, packet, <<>>)
+                      encrypted = ct <> tag
+
+                      new_pkt =
+                        Packet.build_data(state.session_id, seq,
+                          payload: encrypted,
+                          payload_len: byte_size(encrypted)
+                        )
+
+                      new_packet = Packet.serialize_data_with_auth(new_pkt, state.r2i_key)
+                      send_udp(state, new_packet)
+                      count + 1
+
+                    _ ->
+                      count
+                  end
+                end)
+
+              updated_buffer =
+                Enum.reduce(oldest_seqs, send_buffer, fn seq, buf ->
+                  case Map.get(buf, seq) do
+                    {packet, _sent_at, rc, ds} -> Map.put(buf, seq, {packet, now_ms, rc, ds})
+                    _ -> buf
+                  end
+                end)
+
+              # Enter recovery WITHOUT reducing cwnd. On lossy WiFi, fast retransmits
+              # are almost always random drops, not congestion. Reducing cwnd on every
+              # 3-dup-ACK event pins throughput to min_ssthresh. Only RTO (true timeout)
+              # should reduce cwnd — that's the real congestion signal.
+              highest_ds =
+                send_buffer
+                |> Enum.map(fn {_seq, {_pkt, _ts, _rc, ds}} ->
+                  if is_integer(ds), do: ds, else: 0
+                end)
+                |> Enum.max(fn -> 0 end)
+
+              Logger.info(
+                "[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)"
+              )
+
+              state = %{
+                state
+                | in_recovery: true,
+                  recovery_data_seq: highest_ds,
+                  recovery_cwnd: state.cwnd
+              }
+
+              {updated_buffer, state}
+            else
+              {send_buffer, state}
+            end
+
           {new_count, send_buffer, new_count >= 3, state}
         end
       else
@@ -2919,9 +3385,16 @@ defmodule ZtlpGateway.Session do
         {0, send_buffer, false, state}
       end
 
-    Logger.debug("[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{trunc(state.ssthresh)}, buffer=#{map_size(send_buffer)}, dup_ack=#{dup_count}#{if state.in_recovery, do: " [RECOVERY]", else: ""}")
+    Logger.debug(
+      "[Session] ACK data_seq=#{acked_data_seq}, acked=#{newly_acked}, cwnd=#{Float.round(state.cwnd * 1.0, 1)}, ssthresh=#{trunc(state.ssthresh)}, buffer=#{map_size(send_buffer)}, dup_ack=#{dup_count}#{if state.in_recovery, do: " [RECOVERY]", else: ""}"
+    )
 
-    %{state | send_buffer: send_buffer, dup_ack_count: dup_count, fast_retransmit_sent: fast_retransmit_sent}
+    %{
+      state
+      | send_buffer: send_buffer,
+        dup_ack_count: dup_count,
+        fast_retransmit_sent: fast_retransmit_sent
+    }
   end
 
   # ---------------------------------------------------------------------------
@@ -2936,10 +3409,12 @@ defmodule ZtlpGateway.Session do
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, fin_frame, <<>>)
     encrypted = ct <> tag
 
-    pkt = Packet.build_data(state.session_id, seq,
-      payload: encrypted,
-      payload_len: byte_size(encrypted)
-    )
+    pkt =
+      Packet.build_data(state.session_id, seq,
+        payload: encrypted,
+        payload_len: byte_size(encrypted)
+      )
+
     packet = Packet.serialize_data_with_auth(pkt, state.r2i_key)
 
     send_udp(state, packet)
@@ -2983,9 +3458,11 @@ defmodule ZtlpGateway.Session do
 
   # Parse NACK payload: N x 8-byte big-endian data_seqs
   defp parse_nack_seqs(_rest, 0, acc), do: Enum.reverse(acc)
+
   defp parse_nack_seqs(<<ds::big-64, rest::binary>>, remaining, acc) when remaining > 0 do
     parse_nack_seqs(rest, remaining - 1, [ds | acc])
   end
+
   defp parse_nack_seqs(_rest, _remaining, acc), do: Enum.reverse(acc)
 
   # Schedule retransmit timer if not already scheduled
@@ -2994,6 +3471,7 @@ defmodule ZtlpGateway.Session do
     interval = max(interval, 10)
     Process.send_after(self(), :retransmit_check, interval)
   end
+
   defp schedule_retransmit_timer(existing_ref, _rto_ms), do: existing_ref
 
   # Per-packet RTO with mild backoff (1.5x per attempt, KCP-style).
@@ -3002,7 +3480,7 @@ defmodule ZtlpGateway.Session do
   # Capped at @max_rto_ms.
   defp per_packet_rto(state, retransmit_count) do
     base_rto = Map.get(state, :rto_ms, @initial_rto_ms)
-    backed_off = base_rto * :math.pow(1.5, retransmit_count) |> round()
+    backed_off = (base_rto * :math.pow(1.5, retransmit_count)) |> round()
     backed_off |> max(cc_min_rto_ms(state)) |> min(@max_rto_ms)
   end
 
@@ -3015,14 +3493,17 @@ defmodule ZtlpGateway.Session do
 
   # Split binary data into chunks of at most `max_size` bytes.
   defp chunk_data(data, max_size) when byte_size(data) <= max_size, do: [data]
+
   defp chunk_data(data, max_size) do
     chunk_data_acc(data, max_size, [])
   end
 
   defp chunk_data_acc(<<>>, _max_size, acc), do: Enum.reverse(acc)
+
   defp chunk_data_acc(data, max_size, acc) when byte_size(data) <= max_size do
     Enum.reverse([data | acc])
   end
+
   defp chunk_data_acc(data, max_size, acc) do
     <<chunk::binary-size(max_size), rest::binary>> = data
     chunk_data_acc(rest, max_size, [chunk | acc])
@@ -3185,12 +3666,15 @@ defmodule ZtlpGateway.Session do
   defp log_ack_latency(state, acked_data_seq) do
     now = System.monotonic_time(:millisecond)
 
-    case Enum.find(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} -> ds == acked_data_seq end) do
+    case Enum.find(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
+           ds == acked_data_seq
+         end) do
       {seq, {_pkt, sent_at, retransmit_count, _ds}} ->
         latency_ms = max(now - sent_at, 0)
+
         Logger.info(
           "[Session] ACK_LATENCY data_seq=#{acked_data_seq} pkt_seq=#{seq} latency_ms=#{latency_ms} " <>
-          "retransmits=#{retransmit_count} srtt=#{inspect(state.srtt_ms)} rto=#{state.rto_ms}"
+            "retransmits=#{retransmit_count} srtt=#{inspect(state.srtt_ms)} rto=#{state.rto_ms}"
         )
 
         state

@@ -731,6 +731,11 @@ defmodule ZtlpGateway.Session do
       }
       |> Map.merge(rekey_state)
 
+    # v30 DIAGNOSTIC: kick off per-second CC telemetry tick. The handler
+    # logs only when phase == :established, but reschedules unconditionally
+    # so it starts firing the moment the handshake completes.
+    Process.send_after(self(), :cc_telemetry, 1000)
+
     {:ok, state}
   end
 
@@ -1088,6 +1093,20 @@ defmodule ZtlpGateway.Session do
     {:noreply, state}
   end
 
+  # v30 DIAGNOSTIC: per-second CC telemetry. Always reschedules; logs only
+  # while the session is :established. Designed to be greppable: fields are
+  # space-separated key=value pairs on a single [CC_TELEM] line.
+  def handle_info(:cc_telemetry, state) do
+    if state.phase == :established do
+      Logger.warning(
+        "[CC_TELEM] inflight=#{map_size(state.send_buffer)} cwnd=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} dup_ack=#{state.dup_ack_count} in_recovery=#{state.in_recovery} last_acked=#{state.last_acked_data_seq} recv_base=#{inspect(state.recv_window_base)} peer_rwnd=#{state.peer_rwnd || 0} queue=#{:queue.len(state.send_queue)} fast_rt_sent=#{state.fast_retransmit_sent}"
+      )
+    end
+
+    Process.send_after(self(), :cc_telemetry, 1000)
+    {:noreply, state}
+  end
+
   # Retransmit timer — check send_buffer for timed-out packets.
   # Key design: only retransmit the OLDEST @max_rto_retransmit_per_tick packets
   # per firing. Retransmitting the entire buffer floods the phone with dups,
@@ -1209,6 +1228,10 @@ defmodule ZtlpGateway.Session do
 
             recovery_target = max(acc.send_data_seq - 1, acc.last_acked_data_seq)
 
+            Logger.warning(
+              "[CC_ENTER_RECOVERY] reason=rto cwnd_before=#{Float.round(acc.cwnd * 1.0, 1)} cwnd_after=#{Float.round(new_cwnd, 1)} ssthresh=#{trunc(new_ssthresh)} inflight=#{map_size(acc.send_buffer)} last_acked=#{acc.last_acked_data_seq} dup_ack=#{acc.dup_ack_count}"
+            )
+
             {%{
                acc
                | cwnd: new_cwnd,
@@ -1237,6 +1260,10 @@ defmodule ZtlpGateway.Session do
 
         Logger.info(
           "[Session] Entering recovery mode (recovery_data_seq=#{highest_ds}, retransmitted=#{retransmit_count})"
+        )
+
+        Logger.warning(
+          "[CC_ENTER_RECOVERY] reason=fast_rt cwnd_before=#{Float.round(state.cwnd * 1.0, 1)} cwnd_after=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} dup_ack=#{state.dup_ack_count}"
         )
 
         %{state | in_recovery: true, recovery_data_seq: highest_ds}
@@ -2197,6 +2224,10 @@ defmodule ZtlpGateway.Session do
         )
 
         recovery_target = max(state.send_data_seq - 1, state.last_acked_data_seq)
+
+        Logger.warning(
+          "[CC_ENTER_RECOVERY] reason=nack cwnd_before=#{Float.round(state.cwnd * 1.0, 1)} cwnd_after=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} inflight=#{map_size(state.send_buffer)} last_acked=#{state.last_acked_data_seq} dup_ack=#{state.dup_ack_count}"
+        )
 
         %{
           state
@@ -3380,6 +3411,10 @@ defmodule ZtlpGateway.Session do
 
               Logger.info(
                 "[Session] Fast retransmit: #{retransmit_count} packets (dup_ack=#{new_count}, data_seq=#{acked_data_seq}, buffer=#{map_size(send_buffer)}), entering recovery (cwnd #{Float.round(state.cwnd * 1.0, 1)} kept)"
+              )
+
+              Logger.warning(
+                "[CC_ENTER_RECOVERY] reason=dup_ack cwnd_before=#{Float.round(state.cwnd * 1.0, 1)} cwnd_after=#{Float.round(state.cwnd * 1.0, 1)} ssthresh=#{trunc(state.ssthresh)} inflight=#{map_size(send_buffer)} last_acked=#{state.last_acked_data_seq} dup_ack=#{new_count}"
               )
 
               state = %{

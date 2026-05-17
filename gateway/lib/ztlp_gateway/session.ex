@@ -1016,54 +1016,43 @@ defmodule ZtlpGateway.Session do
       now = System.monotonic_time(:millisecond)
       stuck_since = state.recv_window_base_last_advance || now
       stuck_ms = now - stuck_since
-      buffered = map_size(state.recv_buffer)
+      buffered_data = map_size(state.recv_buffer)
+      buffered_total = MapSet.size(state.recv_window)
 
-      if stuck_ms >= 2000 and buffered > 0 do
-        # Find the next available seq in the buffer
+      if stuck_ms >= 2000 and buffered_total > 0 do
+        # Find the next available seq in the receive window (includes data AND fast-tracked ACKs)
         next_available =
-          state.recv_buffer
-          |> Map.keys()
+          state.recv_window
+          |> Enum.filter(fn seq -> seq > state.recv_window_base end)
           |> Enum.sort()
           |> List.first()
 
-        if next_available && next_available > state.recv_window_base do
+        if next_available do
           skipped = next_available - state.recv_window_base
 
           Logger.warning(
-            "[Session] RECV_GAP_SKIP: base=#{state.recv_window_base} -> #{next_available} (skipped #{skipped} lost packets, #{buffered} buffered, stuck #{stuck_ms}ms)"
+            "[Session] RECV_GAP_SKIP: base=#{state.recv_window_base} -> #{next_available} (skipped #{skipped} lost packets, #{buffered_data} data buffered, stuck #{stuck_ms}ms)"
           )
 
           # Advance recv_window_base to the next available seq, clearing the gap
           state = %{
             state
             | recv_window_base: next_available,
-              recv_window:
-                Enum.reduce(
-                  state.recv_window_base..(next_available - 1),
-                  state.recv_window,
-                  fn seq, win ->
-                    MapSet.delete(win, seq)
-                  end
-                )
+              # Cleanup any elements that were strictly less than next_available (should be none, but to be sure)
+              recv_window: Enum.reject(state.recv_window, fn seq -> seq < next_available end) |> MapSet.new(),
+              recv_window_base_last_advance: now
           }
 
-          # Now try to deliver from the new base
-          case deliver_recv_window_loop(state, false) do
-            {:stop, reason, stop_state} ->
-              {:stop, reason, stop_state}
+          # Since we advanced the base, we need to try delivering the now-available head
+          # and also run the ACK-skip logic for the new base.
+          state = advance_recv_window_base(state)
+          state = deliver_recv_window(state)
 
-            {:ok, new_state, true} ->
-              new_state = send_ack(new_state.recv_window_base - 1, new_state)
-              new_state = %{new_state | recv_window_base_last_advance: now}
-              {:noreply, new_state}
-
-            {:ok, new_state, false} ->
-              # Still stuck — reschedule
-              ref = Process.send_after(self(), :recv_gap_check, 2000)
-              {:noreply, %{new_state | recv_gap_timer_ref: ref}}
-          end
+          ref = Process.send_after(self(), :recv_gap_check, 2000)
+          {:noreply, %{state | recv_gap_timer_ref: ref}}
         else
-          {:noreply, state}
+          ref = Process.send_after(self(), :recv_gap_check, 2000)
+          {:noreply, %{state | recv_gap_timer_ref: ref}}
         end
       else
         # Not stuck long enough or no buffered packets
@@ -3235,9 +3224,13 @@ defmodule ZtlpGateway.Session do
     now = System.monotonic_time(:millisecond)
 
     {acked_entries, remaining} =
-      Enum.split_with(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
-        is_integer(ds) and ds <= acked_data_seq
-      end)
+      if acked_data_seq <= state.last_acked_data_seq do
+        {[], state.send_buffer}
+      else
+        Enum.split_with(state.send_buffer, fn {_seq, {_pkt, _sent_at, _rc, ds}} ->
+          is_integer(ds) and ds <= acked_data_seq
+        end)
+      end
 
     newly_acked = length(acked_entries)
 
@@ -3655,8 +3648,8 @@ defmodule ZtlpGateway.Session do
     # peer recv_window causes the client to drop everything.
     %{
       initial_cwnd: 64.0,
-      max_cwnd: 256,
-      ssthresh: 128,
+      max_cwnd: 4096,
+      ssthresh: 2048,
       pacing_interval_ms: 1,
       burst_size: 8,
       loss_beta: 0.7,

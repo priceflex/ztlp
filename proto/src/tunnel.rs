@@ -866,10 +866,13 @@ where
                         gap_detected_or_progression = true;
                     }
                 }
-            } else if data_seq >= *last_acked_data_seq {
+            } 
+            if data_seq >= *last_acked_data_seq {
                 gap_detected_or_progression = true; // send dupack for fast recovery if gaps
             }
             
+            // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
+            // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
             // Construct and send FRAME_ACK (throttle? For now, we send it per contiguous read block or gap detected,
             // which helps slide window on sender). We will just emit an ACK here.
@@ -889,12 +892,15 @@ where
                     let send_key = session.send_key;
                     drop(pipeline_lock);
                     
-                    if let Err(e) = encrypt_and_send(
-                        &send_key, send_cipher,
-                        session_id, udp_send, peer_addr, &ack_frame,
-                    ).await {
-                        debug!("ack send error: {}", e);
-                    }
+                if let Err(e) = encrypt_and_send(
+                    &send_key, send_cipher,
+                    session_id, udp_send, peer_addr, &ack_frame,
+                ).await {
+                    debug!("ack send error: {}", e);
+                } else {
+                    debug!("CLIENT_ACK transmitted to {}, expected_seq={}, target: {}", 
+                           peer_addr, *last_acked_data_seq, session_id.to_string());
+                }
                 }
             }
         }

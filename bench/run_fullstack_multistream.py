@@ -117,7 +117,8 @@ def run_n(n,size):
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--size',type=int,default=10*1024*1024); ap.add_argument('--ns',default='1,4,8,16,32')
     args=ap.parse_args(); LOG_DIR.mkdir(parents=True,exist_ok=True)
-    for p in LOG_DIR.glob('*'): p.unlink()
+    for p in LOG_DIR.glob('*'):
+        if p.is_file(): p.unlink()
     ensure_identity(); lines=[]
     def emit(s=''): print(s,flush=True); lines.append(s)
     emit('═════════════════════════════════════════════════════════════════════════')

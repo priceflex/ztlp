@@ -2343,7 +2343,8 @@ defmodule ZtlpGateway.Session do
   # is non-empty but the window is full.
   defp flush_send_queue(state) do
     if not state.mux_mode do
-      flush_send_queue(state, max(cc_burst_size(state), 64))
+      # Limit to 32 packets per scheduled pacing tick for legacy
+      flush_send_queue(state, 32)
     else
       flush_send_queue(state, cc_burst_size(state))
     end
@@ -2370,8 +2371,18 @@ defmodule ZtlpGateway.Session do
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window = min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
-    window_full = not legacy_bypass and inflight >= effective_window
+    # For legacy_bypass, we still enforce a pacing limit so we don't overflow OS UDP buffers.
+    effective_window = if legacy_bypass do
+      min(remaining_burst, 32)
+    else
+      min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
+    end
+    
+    window_full = if legacy_bypass do
+      false # Always keep going until limited by burst (in encrypt_and_send)
+    else
+      inflight >= effective_window
+    end
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.

@@ -695,7 +695,7 @@ where
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
-            if let Err(e) = handle_incoming_packet(
+            match handle_incoming_packet(
                 &pkt,
                 &pipeline,
                 &recv_cipher,
@@ -706,7 +706,8 @@ where
             )
             .await
             {
-                debug!("prefetched packet handling error: {}", e);
+                Ok(_outcome) => {}
+                Err(e) => debug!("prefetched packet handling error: {}", e),
             }
             if reset_received {
                 break;
@@ -804,7 +805,7 @@ where
                         let pkt = &udp_buf[..len];
                         rx_batch_num = rx_batch_num.wrapping_add(1);
                         let decrypt_started = Instant::now();
-                        if let Err(e) = handle_incoming_packet(
+                        let outcome = match handle_incoming_packet(
                             pkt,
                             &pipeline,
                             &recv_cipher,
@@ -813,14 +814,19 @@ where
                             &mut reset_received,
                             &mut peer_fin,
                         ).await {
-                            debug!("incoming packet error: {}", e);
-                        }
-                        let delivered_tcp_bytes = if len >= DATA_HEADER_SIZE + 9 { len - DATA_HEADER_SIZE - 9 } else { 0 };
+                            Ok(o) => o,
+                            Err(e) => {
+                                debug!("incoming packet error: {}", e);
+                                IncomingPacketOutcome::dropped()
+                            }
+                        };
+                        let dropped = outcome.is_dropped();
+                        let delivered_tcp_bytes = outcome.delivered_tcp_bytes;
                         let batch = RxBatchStats {
                             batch_num: rx_batch_num,
                             gro_segments: 1,
-                            packets_processed: 1,
-                            packets_dropped: 0,
+                            packets_processed: if dropped { 0 } else { 1 },
+                            packets_dropped: if dropped { 1 } else { 0 },
                             udp_bytes: len,
                             tcp_bytes: delivered_tcp_bytes,
                             recv_time: recv_started.elapsed(),
@@ -877,8 +883,77 @@ where
     }
 }
 
+/// Classification of an incoming packet's frame type (or why it was dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncomingFrameKind {
+    /// Carried a DATA frame (may or may not have delivered bytes).
+    Data,
+    Fin,
+    Reset,
+    RttPing,
+    RttPong,
+    Ack,
+    Nack,
+    Sack,
+    CorruptionNack,
+    Reject,
+    /// A recognized but uninteresting frame type (e.g. unknown / mux).
+    Other,
+    /// Packet was dropped before yielding a frame (admission, replay, malformed
+    /// header, wrong session_id, decrypt failure, or empty plaintext).
+    Dropped,
+}
+
+/// Structured outcome of processing a single incoming UDP packet. Used by the
+/// RX instrumentation in `run_bridge_inner` to build accurate `RxBatchStats`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IncomingPacketOutcome {
+    pub frame_kind: IncomingFrameKind,
+    /// Bytes successfully written to `tcp_writer` for this packet.
+    pub delivered_tcp_bytes: usize,
+    /// True when `Pipeline::process` rejected the packet (admission/replay).
+    /// Not yet consumed by callers; kept for diagnostic future use.
+    #[allow(dead_code)]
+    pub admission_rejected: bool,
+}
+
+impl IncomingPacketOutcome {
+    fn dropped() -> Self {
+        Self {
+            frame_kind: IncomingFrameKind::Dropped,
+            delivered_tcp_bytes: 0,
+            admission_rejected: false,
+        }
+    }
+
+    fn admission_rejected() -> Self {
+        Self {
+            frame_kind: IncomingFrameKind::Dropped,
+            delivered_tcp_bytes: 0,
+            admission_rejected: true,
+        }
+    }
+
+    fn kind(kind: IncomingFrameKind) -> Self {
+        Self {
+            frame_kind: kind,
+            delivered_tcp_bytes: 0,
+            admission_rejected: false,
+        }
+    }
+
+    /// True when the packet did not yield a useful frame (control or data).
+    pub fn is_dropped(&self) -> bool {
+        matches!(self.frame_kind, IncomingFrameKind::Dropped)
+    }
+}
+
 /// Decrypt an incoming UDP packet and write any resulting TCP bytes.
 /// Sets flags on RESET / FIN. Replay/admission is done by Pipeline::process.
+///
+/// Returns a structured outcome so callers can build accurate instrumentation
+/// (frame kind, delivered bytes, dropped flag). The `Result` is reserved for
+/// the underlying `AsyncWrite` failure case only.
 async fn handle_incoming_packet<W>(
     pkt: &[u8],
     pipeline: &Mutex<Pipeline>,
@@ -887,7 +962,7 @@ async fn handle_incoming_packet<W>(
     tcp_writer: &mut W,
     reset_received: &mut bool,
     peer_fin: &mut bool,
-) -> Result<(), Box<dyn std::error::Error>>
+) -> Result<IncomingPacketOutcome, Box<dyn std::error::Error>>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -895,18 +970,18 @@ where
     {
         let pl = pipeline.lock().await;
         if !matches!(pl.process(pkt), AdmissionResult::Pass) {
-            return Ok(());
+            return Ok(IncomingPacketOutcome::admission_rejected());
         }
     }
     if pkt.len() < DATA_HEADER_SIZE {
-        return Ok(());
+        return Ok(IncomingPacketOutcome::dropped());
     }
     let header = match DataHeader::deserialize(pkt) {
         Ok(h) => h,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(IncomingPacketOutcome::dropped()),
     };
     if header.session_id != session_id {
-        return Ok(());
+        return Ok(IncomingPacketOutcome::dropped());
     }
     let ciphertext = &pkt[DATA_HEADER_SIZE..];
     let mut nonce_bytes = [0u8; 12];
@@ -914,44 +989,55 @@ where
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = match recv_cipher.decrypt(nonce, ciphertext) {
         Ok(p) => p,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(IncomingPacketOutcome::dropped()),
     };
     if plaintext.is_empty() {
-        return Ok(());
+        return Ok(IncomingPacketOutcome::dropped());
     }
-    match plaintext[0] {
+    let outcome = match plaintext[0] {
         FRAME_DATA => {
             // [FRAME_DATA | 8-byte data_seq | payload...]
             if plaintext.len() < 9 {
-                return Ok(());
+                return Ok(IncomingPacketOutcome::dropped());
             }
             let payload = &plaintext[9..];
+            let mut delivered = 0usize;
             if !payload.is_empty() {
                 tcp_writer.write_all(payload).await?;
+                delivered = payload.len();
+            }
+            IncomingPacketOutcome {
+                frame_kind: IncomingFrameKind::Data,
+                delivered_tcp_bytes: delivered,
+                admission_rejected: false,
             }
         }
         FRAME_FIN => {
             *peer_fin = true;
             let _ = tcp_writer.shutdown().await;
+            IncomingPacketOutcome::kind(IncomingFrameKind::Fin)
         }
         FRAME_RESET => {
             *reset_received = true;
+            IncomingPacketOutcome::kind(IncomingFrameKind::Reset)
         }
-        FRAME_RTT_PING | FRAME_RTT_PONG => {
-            // Ignore — keepalive only in dumb-pipe mode.
-        }
-        FRAME_ACK | FRAME_NACK | FRAME_SACK | FRAME_CORRUPTION_NACK => {
-            // Reliability frames from a pre-pivot peer; ignore silently.
-        }
+        FRAME_RTT_PING => IncomingPacketOutcome::kind(IncomingFrameKind::RttPing),
+        FRAME_RTT_PONG => IncomingPacketOutcome::kind(IncomingFrameKind::RttPong),
+        FRAME_ACK => IncomingPacketOutcome::kind(IncomingFrameKind::Ack),
+        FRAME_NACK => IncomingPacketOutcome::kind(IncomingFrameKind::Nack),
+        FRAME_SACK => IncomingPacketOutcome::kind(IncomingFrameKind::Sack),
+        FRAME_CORRUPTION_NACK => IncomingPacketOutcome::kind(IncomingFrameKind::CorruptionNack),
         FRAME_REJECT => {
             // Treat as a signal to tear down; surface as Closed.
             *peer_fin = true;
+            IncomingPacketOutcome::kind(IncomingFrameKind::Reject)
         }
         _ => {
             // Unknown / mux frames — not our concern; swallow.
+            IncomingPacketOutcome::kind(IncomingFrameKind::Other)
         }
-    }
-    Ok(())
+    };
+    Ok(outcome)
 }
 
 // ─── Service registry ───────────────────────────────────────────────────────

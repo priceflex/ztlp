@@ -1,6 +1,46 @@
 # Handoff: ZTLP Multi-Stream Stall & Full Stack Bench
 
-## Status as of 2026-05-16 (Phase A complete)
+## Status as of 2026-05-17 (Phase B B1+B4 complete, root cause found and fixed)
+
+Phase B1 (find where stalls originate) and B4 (update the diagnostic
+skill) are done and on `main` as commit `c6947e0`. Phase B2 was
+superseded — B1 evidence was sufficient. Phase B3 (full-stack
+gateway bench) is still pending and now untangled from the loopback
+stall question.
+
+### Phase B verdict
+
+**Root cause:** the dumb-pipe tunnel never called
+`setsockopt(SO_RCVBUF / SO_SNDBUF)`. Every `UdpSocket` inherited
+`net.core.rmem_default` (~200 KB - 1 MB), and the dumb-pipe has no
+retransmit, so any kernel-level rcvbuf overflow becomes a permanent
+transfer stall.
+
+**Fix:** add `set_udp_buffer_sizes()` helper in `proto/src/gso.rs`,
+call it from `run_bridge_inner` for both primary and demuxed recv
+sockets. 7 MiB matches `rmem_max` on the standard ZTLP-tuned host.
+All consumers (ztlp-cli, iOS NE FFI, Tauri desktop, relay) get it
+automatically because they all flow through `run_bridge_inner`.
+
+**Result on the 2-core VM** (`bench/run_multistream.sh`, SIZE=10 MB):
+
+| N  | Before (MB/s / stalls) | After (MB/s / stalls) |
+|----|------------------------|-----------------------|
+|  1 |   117 / 0              |   166 / 0             |
+|  2 |   0.3 / 1              |    69 / 0             |
+|  4 |    99 / 0 (lucky)      |   108 / 0             |
+|  8 |   1.3 / 5              |   144 / 0             |
+| 16 |   2.6 / 7              |   190 / 0             |
+| 32 |   5.2 / 11             |   214 / 0             |
+
+`UdpRcvbufErrors` delta across the whole bench: ~1.3M → 0.
+
+Detailed write-up: `bench/RESULTS-2026-05-17.md`.
+
+Skill `ztlp-throughput-stall-diagnosis` updated with the resolved
+multistream signature and the per-socket SO_RCVBUF root cause.
+
+## Original Phase A handoff (2026-05-16, kept for context)
 
 Phase A — narrowed instrumentation + benchmark scaffolding — is done and on
 `main`. Phase B (the actual stall root-cause investigation) has NOT started

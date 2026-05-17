@@ -1,0 +1,5 @@
+18:38:55.094 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+18:38:55.149 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+18:38:55.151 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+18:38:55.151 [info] [ztlp-ns] Started in standalone mode
+Paths given to "mix test" did not match any directory/file: test/ztlp_ns/registration_auth_test.exs

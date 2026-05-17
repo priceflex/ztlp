@@ -1,0 +1,5 @@
+COPY_STATUS=0
+18:35:05  Enabling developer disk image services.
+18:35:05  Acquired usage assertion.
+File received from Device
+/tmp/ztlp-phone.log

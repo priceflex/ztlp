@@ -1,0 +1,12 @@
+═════════════════════════════════════════════════════════════════════════
+  Full-stack ZTLP HTTP throughput (size=10 MB per stream)
+  Path: client → relay 44.243.42.123:23095 → gateway 54.190.82.255:23097 → HTTP backend
+═════════════════════════════════════════════════════════════════════════
+   1 streams: aggregate=    0.0 MB/s   wall= 90005 ms   per-stream-avg=   0.1 MB/s   stalled=1   ok=0
+       udp[client]: dIn=7843 dErr=0 dOut=7851
+       udp[relay]: dIn=8 dErr=0 dOut=8
+       udp[gateway]: dIn=7868 dErr=0 dOut=7864
+       errors=s0:rc=28 out=curl: (28) Operation timed out after 90000 milliseconds with 5719092 out of 10485760 bytes received
+200 5719092 90.000073 got=5719092
+
+Per-stream logs: /tmp/ztlp-fullstack

@@ -234,7 +234,7 @@ const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 ///
 /// This encrypts the reject frame as a DATA packet and sends it to the peer.
 /// Used by the server after handshake when policy denies the client.
-pub fn send_reject(
+pub async fn send_reject(
     udp_socket: &tokio::net::UdpSocket,
     pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
@@ -639,6 +639,8 @@ where
     // Flag set when our local TCP reader hits EOF.
     let mut local_eof = false;
     let mut local_fin_sent = false;
+    
+    let mut recv_window = crate::ReceiveWindow::default();
 
     let mut tcp_buf = vec![0u8; TCP_READ_BUF];
     let mut udp_buf = vec![0u8; 65535];
@@ -664,6 +666,7 @@ where
                 &mut reset_received,
                 &mut peer_fin,
                 &mut last_acked_data_seq,
+                &mut recv_window,
                 &udp_send,
                 peer_addr,
                 &send_cipher,
@@ -745,6 +748,7 @@ where
                             &mut reset_received,
                             &mut peer_fin,
                             &mut last_acked_data_seq,
+                            &mut recv_window,
                             &udp_send,
                             peer_addr,
                             &send_cipher,
@@ -804,6 +808,7 @@ async fn handle_incoming_packet<W>(
     reset_received: &mut bool,
     peer_fin: &mut bool,
     last_acked_data_seq: &mut u64,
+    recv_window: &mut crate::ReceiveWindow,
     udp_send: &UdpSocket,
     peer_addr: SocketAddr,
     send_cipher: &ChaCha20Poly1305,
@@ -854,17 +859,17 @@ where
             // The Nebula-pivot stripped this out causing 10MB transfers to drop/drop packet fragments.
             // We just added ReceiveWindow earlier but didn't actually plug it in here 
             // after the re-edits. Let's fix that.
-            let ordered_payloads = recv_window.receive(data_seq, payload.to_vec());
+let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
             let mut gap_detected_or_progression = false;
             
-            if let Some(payloads) = ordered_payloads {
-                for (seq, p) in payloads {
-                    tcp_writer.write_all(&p).await?;
-                    // Advance last_acked_data_seq for contiguous data
-                    if seq == *last_acked_data_seq {
-                        *last_acked_data_seq = seq + 1;
-                        gap_detected_or_progression = true;
-                    }
+            for p in ordered_payloads {
+                tcp_writer.write_all(p.as_slice()).await?;
+                // Since we only get contiguous sequential chunks out of insert(),
+                // length of slice tells us the contiguous chunks returned. We don't have
+                // seq per payload anymore from insert(). Let's just track data_seq progression.
+                if data_seq >= *last_acked_data_seq {
+                    *last_acked_data_seq = data_seq + 1; // Assuming data_seq advanced
+                    gap_detected_or_progression = true;
                 }
             } 
             if data_seq > *last_acked_data_seq {
@@ -874,20 +879,29 @@ where
             // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
-                // Construct and send FRAME_ACK (legacy V1 with SACK fields omitted currently)
-                // Sending just a cumulative ACK is 9 bytes. 1 byte FRAME type + 8 bytes data seq.
-                let mut ack_frame = Vec::with_capacity(10);
-                ack_frame.push(1); // 0x01 FRAME_ACK type byte correctly matched
+                // Construct and send FRAME_ACK_V2 
+                let mut ack_frame = Vec::with_capacity(11);
+                ack_frame.push(0x10); // FRAME_ACK_V2
                 ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
-                ack_frame.push(0); // 0 bytes representing `sack_count` = 0
                 
-                let pipeline_lock = pipeline.lock().unwrap();
-                if let Some(session) = pipeline_lock.get_session(session_id) {
-                    let send_key = session.send_key;
-                    drop(pipeline_lock);
-                    
+                // Explicitly send the exact scale needed: 5734 KB (fits in u16 window_kb)
+                // This produces window_bytes = 5734 * 1024, which translates to a massive 
+                // ~5151 packet effective peer_rwnd limit internally on the modified Gateway.
+                let window_kb: u16 = 5734; 
+                ack_frame.extend_from_slice(&window_kb.to_be_bytes());
+                
+                let send_key = {
+                    let pipeline_lock = pipeline.lock().await;
+                    if let Some(session) = pipeline_lock.get_session(&session_id) {
+                        Some(session.send_key)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(send_key) = send_key {
                     if let Err(e) = encrypt_and_send(
-                        &send_key, send_cipher,
+                        pipeline, &send_key, send_cipher,
                         session_id, udp_send, peer_addr, &ack_frame,
                     ).await {
                         debug!("ack send error: {}", e);

@@ -1,0 +1,1036 @@
+19:13:59.454 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:13:59.661 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:13:59.663 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:13:59.663 [info] [ztlp-ns] Started in standalone mode
+warning: variable "old_ts" is unused (if the variable is not meant to be used, prefix it with an underscore)
+  test/ztlp_ns/admin_test.exs:345: ZtlpNs.AdminTest."test Audit.since/1 returns entries since timestamp"/1
+
+warning: default values for the optional arguments in make_revocation/3 are never used
+  test/ztlp_ns/admin_test.exs:135
+
+...........warning: variable "initial" is unused (if the variable is not meant to be used, prefix it with an underscore)
+  test/ztlp_ns/cert_authority_test.exs:246: ZtlpNs.CertAuthorityTest."test persistence CA state survives restart"/1
+
+........................................................................warning: variable "port" is unused (if the variable is not meant to be used, prefix it with an underscore)
+  test/ztlp_ns/punch_protocol_test.exs:29: ZtlpNs.PunchProtocolTest."test PEER_ENDPOINTS (0x0A) query returns empty list for unknown target"/1
+
+.....................................warning: variable "ctx" is unused (if the variable is not meant to be used, prefix it with an underscore)
+  test/ztlp_ns/x509_test.exs:267: ZtlpNs.X509Test."test create_client_cert/6 with RSA software assurance level"/1
+
+...........................................................................19:14:10.817 [info] Registration accepted
+.....19:14:10.819 [warn] Registration rejected
+..19:14:11.321 [info] Registration accepted
+.......19:14:11.327 [warn] Registration rejected
+..................19:14:11.334 [info] Registration accepted
+19:14:11.334 [info] Registration accepted
+.19:14:11.335 [warn] Registration rejected
+............19:14:11.340 [info] Registration accepted
+......19:14:11.342 [warn] Oversized packet dropped
+....19:14:11.845 [warn] Registration rejected
+..19:14:11.846 [warn] Registration rejected
+............................................................................19:14:11.906 [error] Task #PID<0.2174.0> started from #PID<0.2107.0> terminating
+** (ArgumentError) errors were found at the given arguments:
+
+  * 1st argument: invalid table name (must be an atom)
+
+    (stdlib 3.17) :ets.whereis(:ztlp_ns_replication_metrics)
+    (ztlp_ns 0.23.0) lib/ztlp_ns/replication.ex:103: ZtlpNs.Replication.ensure_metrics_table/0
+    (ztlp_ns 0.23.0) lib/ztlp_ns/replication.ex:93: ZtlpNs.Replication.increment_metric/1
+    (ztlp_ns 0.23.0) lib/ztlp_ns/replication.ex:30: ZtlpNs.Replication.replicate/1
+    (elixir 1.12.2) lib/task/supervised.ex:90: Task.Supervised.invoke_mfa/2
+    (stdlib 3.17) proc_lib.erl:226: :proc_lib.init_p_do_apply/3
+Function: #Function<1.78061530/0 in ZtlpNs.Replication.replicate_async/1>
+    Args: []
+...........................................19:14:12.399 [info] Registration accepted
+.....................19:14:12.407 [info] Registration accepted
+...........................19:14:12.419 [info] Registration accepted
+.........................19:14:12.428 [info] Registration accepted
+...............................................................19:14:12.607 [warn] Registration rejected
+...19:14:12.608 [info] Registration accepted
+............19:14:12.616 [info] Registration accepted
+...............................................................19:14:13.747 [info] Application ztlp_ns exited: :stopped
+19:14:13.772 [info] Application mnesia exited: :stopped
+19:14:13.791 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:13.848 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:13.848 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:13.848 [info] [ztlp-ns] Started in standalone mode
+19:14:13.848 [info] Application ztlp_ns exited: :stopped
+19:14:13.865 [info] Application mnesia exited: :stopped
+.19:14:13.889 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:13.940 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:13.941 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:13.941 [info] [ztlp-ns] Started in standalone mode
+19:14:13.942 [info] Application ztlp_ns exited: :stopped
+19:14:13.961 [info] Application mnesia exited: :stopped
+.19:14:14.023 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.100 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.102 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.102 [info] [ztlp-ns] Started in standalone mode
+19:14:14.102 [info] Application ztlp_ns exited: :stopped
+19:14:14.109 [info] Application mnesia exited: :stopped
+.19:14:14.136 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.206 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.207 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.207 [info] [ztlp-ns] Started in standalone mode
+19:14:14.208 [info] Application ztlp_ns exited: :stopped
+19:14:14.218 [info] Application mnesia exited: :stopped
+.19:14:14.256 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.347 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.347 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.348 [info] [ztlp-ns] Started in standalone mode
+19:14:14.348 [info] Application ztlp_ns exited: :stopped
+19:14:14.361 [info] Application mnesia exited: :stopped
+.19:14:14.385 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.477 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.477 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.477 [info] [ztlp-ns] Started in standalone mode
+19:14:14.478 [info] Application ztlp_ns exited: :stopped
+19:14:14.487 [info] Application mnesia exited: :stopped
+.19:14:14.514 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.579 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.579 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.579 [info] [ztlp-ns] Started in standalone mode
+19:14:14.580 [error] [ztlp-ns] Failed to join cluster via nonexistent@nowhere.invalid: {:node_not_alive, :nonode@nohost}
+19:14:14.604 [info] Application mnesia exited: :stopped
+19:14:14.638 [info] Application ztlp_ns exited: :stopped
+19:14:14.649 [info] Application mnesia exited: :stopped
+.19:14:14.703 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.750 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.750 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.750 [info] [ztlp-ns] Started in standalone mode
+19:14:14.751 [info] Application ztlp_ns exited: :stopped
+19:14:14.768 [info] Application mnesia exited: :stopped
+.19:14:14.819 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:14.852 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:14.852 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:14.852 [info] [ztlp-ns] Started in standalone mode
+19:14:14.852 [info] [ztlp-ns] Attempting to join cluster via unreachable1@nowhere.invalid
+19:14:14.852 [error] [ztlp-ns] Failed to join cluster via unreachable1@nowhere.invalid: {:node_not_alive, :nonode@nohost}
+19:14:14.867 [info] Application mnesia exited: :stopped
+19:14:14.891 [warn] [ztlp-ns] Failed to join unreachable1@nowhere.invalid: {:node_not_alive, :nonode@nohost}, trying next seed
+19:14:14.891 [info] [ztlp-ns] Attempting to join cluster via unreachable2@nowhere.invalid
+19:14:14.891 [error] [ztlp-ns] Failed to join cluster via unreachable2@nowhere.invalid: {:node_not_alive, :nonode@nohost}
+19:14:14.907 [info] Application mnesia exited: :stopped
+19:14:14.923 [warn] [ztlp-ns] Failed to join unreachable2@nowhere.invalid: {:node_not_alive, :nonode@nohost}, trying next seed
+19:14:14.923 [warn] [ztlp-ns] No seed nodes reachable, operating standalone
+19:14:14.924 [info] Application ztlp_ns exited: :stopped
+19:14:14.928 [info] Application mnesia exited: :stopped
+.19:14:14.951 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:15.024 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:15.024 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:15.024 [info] [ztlp-ns] Started in standalone mode
+19:14:15.025 [info] Application ztlp_ns exited: :stopped
+19:14:15.042 [info] Application mnesia exited: :stopped
+.19:14:15.068 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:15.112 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:15.112 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:15.112 [info] [ztlp-ns] Started in standalone mode
+19:14:15.113 [info] Application ztlp_ns exited: :stopped
+19:14:15.124 [info] Application mnesia exited: :stopped
+.19:14:15.154 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:15.270 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:15.270 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:15.270 [info] [ztlp-ns] Started in standalone mode
+19:14:15.270 [info] Application ztlp_ns exited: :stopped
+19:14:15.317 [info] Application mnesia exited: :stopped
+.19:14:15.397 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:15.524 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:15.524 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:15.524 [info] [ztlp-ns] Started in standalone mode
+19:14:15.524 [info] Application ztlp_ns exited: :stopped
+19:14:15.562 [info] Application mnesia exited: :stopped
+.19:14:15.620 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:15.797 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:15.797 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:15.797 [info] [ztlp-ns] Started in standalone mode
+19:14:15.798 [info] Application ztlp_ns exited: :stopped
+19:14:15.829 [info] Application mnesia exited: :stopped
+.19:14:15.866 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:16.048 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:16.048 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:16.048 [info] [ztlp-ns] Started in standalone mode
+19:14:16.048 [info] Application ztlp_ns exited: :stopped
+19:14:16.087 [info] Application mnesia exited: :stopped
+.19:14:16.147 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:16.416 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:16.416 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:16.416 [info] [ztlp-ns] Started in standalone mode
+19:14:16.417 [info] Application ztlp_ns exited: :stopped
+19:14:16.448 [info] Application mnesia exited: :stopped
+.19:14:16.569 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:16.730 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:16.730 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:16.730 [info] [ztlp-ns] Started in standalone mode
+19:14:16.730 [info] Application ztlp_ns exited: :stopped
+19:14:16.763 [info] Application mnesia exited: :stopped
+.19:14:16.834 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:16.993 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:16.996 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:16.996 [info] [ztlp-ns] Started in standalone mode
+19:14:16.996 [error] [ztlp-ns] Failed to join cluster via fake_node@127.0.0.1: {:node_not_alive, :nonode@nohost}
+19:14:17.032 [info] Application mnesia exited: :stopped
+19:14:17.086 [info] Application ztlp_ns exited: :stopped
+19:14:17.106 [info] Application mnesia exited: :stopped
+.19:14:17.143 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:17.202 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:17.202 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:17.202 [info] [ztlp-ns] Started in standalone mode
+19:14:17.203 [info] Application ztlp_ns exited: :stopped
+19:14:17.212 [info] Application mnesia exited: :stopped
+.19:14:17.243 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:17.337 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:17.337 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:17.337 [info] [ztlp-ns] Started in standalone mode
+19:14:17.337 [info] Application ztlp_ns exited: :stopped
+19:14:17.391 [info] Application mnesia exited: :stopped
+.19:14:17.485 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:17.698 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:17.698 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:17.698 [info] [ztlp-ns] Started in standalone mode
+19:14:17.699 [info] Application ztlp_ns exited: :stopped
+19:14:17.755 [info] Application mnesia exited: :stopped
+.19:14:18.023 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:18.166 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:18.167 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:18.167 [info] [ztlp-ns] Started in standalone mode
+19:14:18.167 [error] [ztlp-ns] Failed to join cluster via phantom@nowhere.invalid: {:node_not_alive, :nonode@nohost}
+19:14:18.183 [info] Application mnesia exited: :stopped
+19:14:18.220 [info] Application ztlp_ns exited: :stopped
+19:14:18.232 [info] Application mnesia exited: :stopped
+.19:14:18.273 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:18.367 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:18.367 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:18.367 [info] [ztlp-ns] Started in standalone mode
+19:14:18.367 [info] Application ztlp_ns exited: :stopped
+19:14:18.397 [info] Application mnesia exited: :stopped
+.19:14:18.447 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:18.606 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:18.606 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:18.606 [info] [ztlp-ns] Started in standalone mode
+19:14:18.607 [info] Application ztlp_ns exited: :stopped
+19:14:18.631 [info] Application mnesia exited: :stopped
+.19:14:18.737 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:18.848 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:18.848 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:18.848 [info] [ztlp-ns] Started in standalone mode
+19:14:18.848 [info] Application ztlp_ns exited: :stopped
+19:14:18.865 [info] Application mnesia exited: :stopped
+.19:14:18.908 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:19.139 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:19.139 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:19.140 [info] [ztlp-ns] Started in standalone mode
+19:14:19.140 [info] Application ztlp_ns exited: :stopped
+19:14:19.153 [info] Application mnesia exited: :stopped
+.19:14:19.189 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:19.257 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:19.257 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:19.257 [info] [ztlp-ns] Started in standalone mode
+19:14:19.258 [info] Application ztlp_ns exited: :stopped
+19:14:19.274 [info] Application mnesia exited: :stopped
+.19:14:19.300 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:19.359 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:19.360 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:19.360 [info] [ztlp-ns] Started in standalone mode
+19:14:20.582 [info] Application ztlp_ns exited: :stopped
+19:14:20.599 [info] Application mnesia exited: :stopped
+.19:14:20.652 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:20.715 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:20.715 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:20.715 [info] [ztlp-ns] Started in standalone mode
+19:14:20.816 [info] Application ztlp_ns exited: :stopped
+19:14:20.828 [info] Application mnesia exited: :stopped
+.19:14:20.859 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:20.927 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:20.927 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:20.927 [info] [ztlp-ns] Started in standalone mode
+19:14:21.637 [info] Application ztlp_ns exited: :stopped
+19:14:21.651 [info] Application mnesia exited: :stopped
+.19:14:21.705 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:21.765 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:21.765 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:21.766 [info] [ztlp-ns] Started in standalone mode
+19:14:22.094 [info] Application ztlp_ns exited: :stopped
+.19:14:22.112 [info] Application mnesia exited: :stopped
+19:14:22.141 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:22.201 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:22.201 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:22.201 [info] [ztlp-ns] Started in standalone mode
+19:14:23.707 [info] Application ztlp_ns exited: :stopped
+19:14:23.727 [info] Application mnesia exited: :stopped
+.19:14:23.751 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:23.826 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:23.827 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:23.827 [info] [ztlp-ns] Started in standalone mode
+19:14:24.574 [info] Application ztlp_ns exited: :stopped
+19:14:24.586 [info] Application mnesia exited: :stopped
+.19:14:24.619 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:24.678 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:24.679 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:24.679 [info] [ztlp-ns] Started in standalone mode
+19:14:25.482 [info] Application ztlp_ns exited: :stopped
+19:14:25.502 [info] Application mnesia exited: :stopped
+.19:14:25.544 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:25.589 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:25.590 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:25.590 [info] [ztlp-ns] Started in standalone mode
+19:14:25.691 [info] Application ztlp_ns exited: :stopped
+19:14:25.702 [info] Application mnesia exited: :stopped
+.19:14:25.753 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:25.823 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:25.824 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:25.824 [info] [ztlp-ns] Started in standalone mode
+19:14:27.657 [info] Application ztlp_ns exited: :stopped
+19:14:27.671 [info] Application mnesia exited: :stopped
+.19:14:27.681 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:27.715 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:27.720 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:27.720 [info] [ztlp-ns] Started in standalone mode
+19:14:28.405 [info] Application ztlp_ns exited: :stopped
+19:14:28.436 [info] Application mnesia exited: :stopped
+.19:14:28.482 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:28.586 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:28.588 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:28.588 [info] [ztlp-ns] Started in standalone mode
+19:14:29.342 [info] Application ztlp_ns exited: :stopped
+19:14:29.360 [info] Application mnesia exited: :stopped
+.19:14:29.410 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:29.471 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:29.471 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:29.471 [info] [ztlp-ns] Started in standalone mode
+19:14:29.572 [info] Application ztlp_ns exited: :stopped
+19:14:29.602 [info] Application mnesia exited: :stopped
+.19:14:29.625 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:29.664 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:29.664 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:29.664 [info] [ztlp-ns] Started in standalone mode
+19:14:30.760 [info] Application ztlp_ns exited: :stopped
+19:14:30.773 [info] Application mnesia exited: :stopped
+.19:14:30.797 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:30.839 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:30.840 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:30.840 [info] [ztlp-ns] Started in standalone mode
+19:14:31.889 [info] Application ztlp_ns exited: :stopped
+19:14:31.898 [info] Application mnesia exited: :stopped
+.19:14:31.940 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:32.007 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:32.007 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:32.007 [info] [ztlp-ns] Started in standalone mode
+19:14:32.606 [info] Application ztlp_ns exited: :stopped
+19:14:32.616 [info] Application mnesia exited: :stopped
+.19:14:32.653 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:32.842 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:32.842 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:32.842 [info] [ztlp-ns] Started in standalone mode
+19:14:33.952 [info] Application ztlp_ns exited: :stopped
+19:14:33.967 [info] Application mnesia exited: :stopped
+.19:14:34.018 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:34.146 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:34.146 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:34.146 [info] [ztlp-ns] Started in standalone mode
+19:14:34.875 [info] Application ztlp_ns exited: :stopped
+19:14:34.901 [info] Application mnesia exited: :stopped
+.19:14:35.003 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:35.114 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:35.116 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:35.116 [info] [ztlp-ns] Started in standalone mode
+19:14:35.429 [info] Application ztlp_ns exited: :stopped
+19:14:35.454 [info] Application mnesia exited: :stopped
+.19:14:35.487 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:35.743 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:35.743 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:35.743 [info] [ztlp-ns] Started in standalone mode
+19:14:36.591 [info] Application ztlp_ns exited: :stopped
+19:14:36.605 [info] Application mnesia exited: :stopped
+.19:14:36.648 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:36.775 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:36.776 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:36.776 [info] [ztlp-ns] Started in standalone mode
+19:14:37.290 [info] Application ztlp_ns exited: :stopped
+19:14:37.313 [info] Application mnesia exited: :stopped
+.19:14:37.365 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:14:37.449 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:14:37.451 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:14:37.451 [info] [ztlp-ns] Started in standalone mode
+19:14:38.237 [info] Application ztlp_ns exited: :stopped
+19:14:38.255 [info] Application mnesia exited: :stopped
+.19:14:39.209 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_100638/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:39.209 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+...19:14:41.154 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_978507/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:41.154 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+..19:14:44.650 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_763162/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:44.650 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+..19:14:46.295 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_60095/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:46.295 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:14:48.764 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_244084/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:48.764 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:14:51.118 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_134359/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:51.118 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+19:14:51.169 [info] [CertAuthority] CA loaded from filesystem (/tmp/ztlp_ca_test_134359). For production, consider hardware-backed signing via SIGNING-ORACLE.
+..19:14:54.021 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_672849/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:54.021 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:14:56.606 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_536149/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:56.606 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:14:57.733 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_637632/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:57.733 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+...19:14:59.969 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_872121/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:14:59.969 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:15:01.965 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_84741/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:01.965 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:15:03.261 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_83597/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:03.261 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+..19:15:04.838 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_177626/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:04.838 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+....19:15:06.742 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_52254/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:06.742 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:15:08.738 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_930005/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:08.738 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+..19:15:10.516 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_436321/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:10.516 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:15:11.580 [warn] ⚠️  ROOT CA KEY SAVED TO FILESYSTEM (/tmp/ztlp_ca_test_680900/root.key.enc)
+
+    The root CA private key is stored as an encrypted file on disk.
+    This is INSECURE for production deployments. If this server is
+    compromised, the attacker can extract the root CA key.
+
+    For production, use the ZTLP Signing Oracle with a hardware
+    security module (YubiKey, TPM) to keep the root key in hardware.
+    See: docs/SIGNING-ORACLE.md
+
+    Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
+
+19:15:11.580 [warn] ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
+
+    Set ZTLP_CA_PASSPHRASE environment variable to a strong,
+    unique passphrase. The default passphrase provides NO security.
+
+.19:15:11.722 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:11.859 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:11.860 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:11.860 [info] [ztlp-ns] Started in standalone mode
+19:15:11.861 [info] Application ztlp_ns exited: :stopped
+19:15:11.878 [info] Application mnesia exited: :stopped
+.19:15:11.946 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:12.124 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:12.124 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:12.124 [info] [ztlp-ns] Started in standalone mode
+19:15:12.125 [info] Application ztlp_ns exited: :stopped
+19:15:12.194 [info] Application mnesia exited: :stopped
+.19:15:12.254 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:12.395 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:12.396 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:12.396 [info] [ztlp-ns] Started in standalone mode
+19:15:12.397 [info] Application ztlp_ns exited: :stopped
+19:15:12.404 [info] Application mnesia exited: :stopped
+.19:15:12.432 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:12.655 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:12.655 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:12.655 [info] [ztlp-ns] Started in standalone mode
+19:15:12.706 [info] Application ztlp_ns exited: :stopped
+19:15:12.720 [info] Application mnesia exited: :stopped
+.19:15:12.756 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:12.906 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:12.906 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:12.906 [info] [ztlp-ns] Started in standalone mode
+19:15:12.907 [info] Application ztlp_ns exited: :stopped
+19:15:12.926 [info] Application mnesia exited: :stopped
+.19:15:12.979 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.118 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.124 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.124 [info] [ztlp-ns] Started in standalone mode
+19:15:13.124 [info] Application ztlp_ns exited: :stopped
+19:15:13.136 [info] Application mnesia exited: :stopped
+.19:15:13.183 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.325 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.326 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.326 [info] [ztlp-ns] Started in standalone mode
+19:15:13.328 [info] Application ztlp_ns exited: :stopped
+19:15:13.358 [info] Application mnesia exited: :stopped
+.19:15:13.404 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.464 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.464 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.464 [info] [ztlp-ns] Started in standalone mode
+19:15:13.465 [info] Application ztlp_ns exited: :stopped
+19:15:13.481 [info] Application mnesia exited: :stopped
+.19:15:13.541 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.652 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.653 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.653 [info] [ztlp-ns] Started in standalone mode
+19:15:13.653 [info] Application ztlp_ns exited: :stopped
+19:15:13.672 [info] Application mnesia exited: :stopped
+.19:15:13.706 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.758 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.758 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.758 [info] [ztlp-ns] Started in standalone mode
+19:15:13.759 [info] Application ztlp_ns exited: :stopped
+19:15:13.765 [info] Application mnesia exited: :stopped
+.19:15:13.800 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:13.870 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:13.870 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:13.870 [info] [ztlp-ns] Started in standalone mode
+19:15:13.872 [info] Application ztlp_ns exited: :stopped
+19:15:13.884 [info] Application mnesia exited: :stopped
+.19:15:13.919 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.020 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.022 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.022 [info] [ztlp-ns] Started in standalone mode
+19:15:14.022 [info] Application ztlp_ns exited: :stopped
+19:15:14.040 [info] Application mnesia exited: :stopped
+.19:15:14.082 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.148 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.148 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.148 [info] [ztlp-ns] Started in standalone mode
+19:15:14.149 [info] Application ztlp_ns exited: :stopped
+19:15:14.156 [info] Application mnesia exited: :stopped
+.19:15:14.225 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.372 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.372 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.372 [info] [ztlp-ns] Started in standalone mode
+19:15:14.373 [info] Application ztlp_ns exited: :stopped
+19:15:14.398 [info] Application mnesia exited: :stopped
+.19:15:14.430 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.511 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.511 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.511 [info] [ztlp-ns] Started in standalone mode
+19:15:14.513 [info] Application ztlp_ns exited: :stopped
+19:15:14.523 [info] Application mnesia exited: :stopped
+.19:15:14.553 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.596 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.596 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.596 [info] [ztlp-ns] Started in standalone mode
+19:15:14.597 [info] Registration accepted
+19:15:14.698 [info] Application ztlp_ns exited: :stopped
+19:15:14.766 [info] Application mnesia exited: :stopped
+.19:15:14.779 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.820 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.820 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.820 [info] [ztlp-ns] Started in standalone mode
+19:15:14.821 [info] Application ztlp_ns exited: :stopped
+19:15:14.840 [info] Application mnesia exited: :stopped
+.19:15:14.878 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:14.926 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:14.926 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:14.926 [info] [ztlp-ns] Started in standalone mode
+19:15:14.927 [info] Application ztlp_ns exited: :stopped
+19:15:14.943 [info] Application mnesia exited: :stopped
+.19:15:14.982 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.044 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.044 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.044 [info] [ztlp-ns] Started in standalone mode
+19:15:15.046 [info] Application ztlp_ns exited: :stopped
+19:15:15.053 [info] Application mnesia exited: :stopped
+.19:15:15.082 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.166 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.166 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.166 [info] [ztlp-ns] Started in standalone mode
+19:15:15.268 [info] Application ztlp_ns exited: :stopped
+19:15:15.281 [info] Application mnesia exited: :stopped
+.19:15:15.311 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.344 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.344 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.344 [info] [ztlp-ns] Started in standalone mode
+19:15:15.345 [info] Application ztlp_ns exited: :stopped
+19:15:15.356 [info] Application mnesia exited: :stopped
+.19:15:15.379 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.412 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.412 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.412 [info] [ztlp-ns] Started in standalone mode
+19:15:15.413 [info] Application ztlp_ns exited: :stopped
+19:15:15.424 [info] Application mnesia exited: :stopped
+.19:15:15.447 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.522 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.522 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.522 [info] [ztlp-ns] Started in standalone mode
+19:15:15.575 [info] Application ztlp_ns exited: :stopped
+19:15:15.584 [info] Application mnesia exited: :stopped
+.19:15:15.611 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.660 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.660 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.660 [info] [ztlp-ns] Started in standalone mode
+19:15:15.661 [info] Application ztlp_ns exited: :stopped
+19:15:15.667 [info] Application mnesia exited: :stopped
+.19:15:15.691 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.828 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.828 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.828 [info] [ztlp-ns] Started in standalone mode
+19:15:15.829 [info] Application ztlp_ns exited: :stopped
+19:15:15.843 [info] Application mnesia exited: :stopped
+.19:15:15.864 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:15.993 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:15.994 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:15.994 [info] [ztlp-ns] Started in standalone mode
+19:15:15.995 [info] Application ztlp_ns exited: :stopped
+19:15:16.015 [info] Application mnesia exited: :stopped
+.19:15:16.061 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.212 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.214 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.214 [info] [ztlp-ns] Started in standalone mode
+19:15:16.215 [info] Application ztlp_ns exited: :stopped
+19:15:16.237 [info] Application mnesia exited: :stopped
+.19:15:16.262 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.335 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.335 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.335 [info] [ztlp-ns] Started in standalone mode
+19:15:16.337 [info] Application ztlp_ns exited: :stopped
+19:15:16.353 [info] Application mnesia exited: :stopped
+.19:15:16.390 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.485 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.486 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.486 [info] [ztlp-ns] Started in standalone mode
+19:15:16.486 [info] Application ztlp_ns exited: :stopped
+19:15:16.502 [info] Application mnesia exited: :stopped
+.19:15:16.526 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.615 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.616 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.616 [info] [ztlp-ns] Started in standalone mode
+19:15:16.616 [info] Application ztlp_ns exited: :stopped
+19:15:16.642 [info] Application mnesia exited: :stopped
+.19:15:16.675 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.769 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.769 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.769 [info] [ztlp-ns] Started in standalone mode
+19:15:16.771 [info] Application ztlp_ns exited: :stopped
+19:15:16.795 [info] Application mnesia exited: :stopped
+.19:15:16.847 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:16.954 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:16.954 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:16.954 [info] [ztlp-ns] Started in standalone mode
+19:15:16.955 [info] Application ztlp_ns exited: :stopped
+19:15:16.978 [info] Application mnesia exited: :stopped
+.19:15:17.018 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:17.093 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:17.094 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:17.094 [info] [ztlp-ns] Started in standalone mode
+19:15:17.146 [info] Application ztlp_ns exited: :stopped
+19:15:17.157 [info] Application mnesia exited: :stopped
+.19:15:17.180 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:17.256 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:17.256 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:17.256 [info] [ztlp-ns] Started in standalone mode
+19:15:17.257 [info] Application ztlp_ns exited: :stopped
+19:15:17.273 [info] Application mnesia exited: :stopped
+.19:15:17.322 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:17.420 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:17.420 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:17.420 [info] [ztlp-ns] Started in standalone mode
+19:15:17.421 [info] Application ztlp_ns exited: :stopped
+19:15:17.441 [info] Application mnesia exited: :stopped
+.19:15:17.545 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:17.731 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:17.731 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:17.731 [info] [ztlp-ns] Started in standalone mode
+19:15:17.731 [info] Application ztlp_ns exited: :stopped
+19:15:17.808 [info] Application mnesia exited: :stopped
+.19:15:17.848 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:17.939 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:17.940 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:17.940 [info] [ztlp-ns] Started in standalone mode
+19:15:17.941 [info] Application ztlp_ns exited: :stopped
+19:15:17.960 [info] Application mnesia exited: :stopped
+.19:15:17.994 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:18.105 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:18.107 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:18.107 [info] [ztlp-ns] Started in standalone mode
+19:15:18.108 [info] Application ztlp_ns exited: :stopped
+19:15:18.141 [info] Application mnesia exited: :stopped
+.19:15:18.167 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:18.252 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:18.252 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:18.252 [info] [ztlp-ns] Started in standalone mode
+19:15:18.254 [info] Application ztlp_ns exited: :stopped
+19:15:18.348 [info] Application mnesia exited: :stopped
+.19:15:18.377 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:18.562 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:18.562 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:18.562 [info] [ztlp-ns] Started in standalone mode
+19:15:18.615 [info] Application ztlp_ns exited: :stopped
+19:15:18.664 [info] Application mnesia exited: :stopped
+.19:15:18.749 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:18.824 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:18.824 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:18.824 [info] [ztlp-ns] Started in standalone mode
+19:15:18.825 [info] Application ztlp_ns exited: :stopped
+19:15:18.848 [info] Application mnesia exited: :stopped
+.19:15:18.890 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:18.930 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:18.930 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:18.930 [info] [ztlp-ns] Started in standalone mode
+19:15:18.931 [info] Application ztlp_ns exited: :stopped
+19:15:18.948 [info] Application mnesia exited: :stopped
+.19:15:18.983 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.074 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.074 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.074 [info] [ztlp-ns] Started in standalone mode
+19:15:19.075 [info] Application ztlp_ns exited: :stopped
+19:15:19.088 [info] Application mnesia exited: :stopped
+.19:15:19.115 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.216 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.216 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.216 [info] [ztlp-ns] Started in standalone mode
+19:15:19.217 [info] Application ztlp_ns exited: :stopped
+19:15:19.236 [info] Application mnesia exited: :stopped
+.19:15:19.279 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.380 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.380 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.380 [info] [ztlp-ns] Started in standalone mode
+19:15:19.381 [info] Application ztlp_ns exited: :stopped
+19:15:19.390 [info] Application mnesia exited: :stopped
+.19:15:19.435 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.507 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.507 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.507 [info] [ztlp-ns] Started in standalone mode
+19:15:19.509 [info] Application ztlp_ns exited: :stopped
+19:15:19.526 [info] Application mnesia exited: :stopped
+.19:15:19.556 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.643 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.643 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.643 [info] [ztlp-ns] Started in standalone mode
+19:15:19.644 [info] Application ztlp_ns exited: :stopped
+19:15:19.658 [info] Application mnesia exited: :stopped
+.19:15:19.681 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:19.730 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:19.731 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:19.731 [info] [ztlp-ns] Started in standalone mode
+19:15:19.833 [info] Application ztlp_ns exited: :stopped
+19:15:19.845 [info] Application mnesia exited: :stopped
+.19:15:19.933 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.046 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.046 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.046 [info] [ztlp-ns] Started in standalone mode
+19:15:20.047 [info] Application ztlp_ns exited: :stopped
+19:15:20.057 [info] Application mnesia exited: :stopped
+.19:15:20.088 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.131 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.132 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.132 [info] [ztlp-ns] Started in standalone mode
+19:15:20.133 [info] Application ztlp_ns exited: :stopped
+19:15:20.138 [info] Application mnesia exited: :stopped
+.19:15:20.161 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.235 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.235 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.235 [info] [ztlp-ns] Started in standalone mode
+19:15:20.235 [info] Application ztlp_ns exited: :stopped
+19:15:20.259 [info] Application mnesia exited: :stopped
+.19:15:20.296 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.341 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.341 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.341 [info] [ztlp-ns] Started in standalone mode
+19:15:20.342 [info] Application ztlp_ns exited: :stopped
+19:15:20.353 [info] Application mnesia exited: :stopped
+.19:15:20.386 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.420 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.420 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.420 [info] [ztlp-ns] Started in standalone mode
+19:15:20.422 [info] Application ztlp_ns exited: :stopped
+19:15:20.429 [info] Application mnesia exited: :stopped
+.19:15:20.467 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.518 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.518 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.518 [info] [ztlp-ns] Started in standalone mode
+19:15:20.519 [info] Application ztlp_ns exited: :stopped
+19:15:20.537 [info] Application mnesia exited: :stopped
+.19:15:20.584 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.636 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.636 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.636 [info] [ztlp-ns] Started in standalone mode
+19:15:20.637 [info] Application ztlp_ns exited: :stopped
+19:15:20.651 [info] Application mnesia exited: :stopped
+.19:15:20.686 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.756 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.756 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.756 [info] [ztlp-ns] Started in standalone mode
+19:15:20.757 [info] Application ztlp_ns exited: :stopped
+19:15:20.768 [info] Application mnesia exited: :stopped
+.19:15:20.803 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:20.865 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:20.866 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:20.866 [info] [ztlp-ns] Started in standalone mode
+19:15:20.866 [info] Application ztlp_ns exited: :stopped
+19:15:20.889 [info] Application mnesia exited: :stopped
+.19:15:20.958 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:21.094 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:21.095 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:21.095 [info] [ztlp-ns] Started in standalone mode
+19:15:21.096 [info] Application ztlp_ns exited: :stopped
+19:15:21.128 [info] Application mnesia exited: :stopped
+.19:15:21.200 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:21.399 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:21.399 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:21.399 [info] [ztlp-ns] Started in standalone mode
+19:15:21.401 [info] Application ztlp_ns exited: :stopped
+19:15:21.427 [info] Application mnesia exited: :stopped
+.19:15:21.517 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:21.772 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:21.772 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:21.772 [info] [ztlp-ns] Started in standalone mode
+19:15:21.774 [info] Application ztlp_ns exited: :stopped
+19:15:21.826 [info] Application mnesia exited: :stopped
+.19:15:21.950 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:22.151 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:22.152 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:22.152 [info] [ztlp-ns] Started in standalone mode
+19:15:22.153 [info] Application ztlp_ns exited: :stopped
+19:15:22.172 [info] Application mnesia exited: :stopped
+.19:15:22.243 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:22.431 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:22.431 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:22.431 [info] [ztlp-ns] Started in standalone mode
+19:15:22.432 [info] Application ztlp_ns exited: :stopped
+19:15:22.452 [info] Application mnesia exited: :stopped
+.19:15:22.476 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:22.568 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:22.568 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:22.568 [info] [ztlp-ns] Started in standalone mode
+19:15:22.569 [info] Application ztlp_ns exited: :stopped
+19:15:22.585 [info] Application mnesia exited: :stopped
+.19:15:22.639 [info] [ztlp-ns] No config file found (checked /etc/ztlp/ns.yaml), using defaults
+19:15:22.858 [info] [CertAuthority] CA loaded from filesystem (/home/trs/.ztlp/ca). For production, consider hardware-backed signing via SIGNING-ORACLE.
+19:15:22.858 [info] [ztlp-ns] No relay records to seed (ZTLP_NS_RELAY_RECORDS not set)
+19:15:22.858 [info] [ztlp-ns] Started in standalone mode
+19:15:22.859 [info] Application ztlp_ns exited: :stopped
+19:15:22.888 [info] Application mnesia exited: :stopped
+.
+
+Finished in 83.2 seconds (11.1s async, 72.0s sync)
+726 tests, 0 failures
+
+Randomized with seed 669116

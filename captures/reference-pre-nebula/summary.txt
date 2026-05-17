@@ -1,0 +1,184 @@
+phone_wk=7
+phone_wk_fail=3
+phone_dns=20
+phone_open=91
+phone_close=53
+phone_rwnd16=9
+phone_rwnd12=0
+phone_rwnd8=4
+phone_rwnd4=555
+phone_reconnect=4
+phone_vpn=15
+phone_bench_ok=0
+phone_bench_fail=2
+gw_open=6
+gw_close=1
+gw_ack_rwnd=1842
+gw_rto=136
+gw_stall=9
+gw_overload=0
+gw_queue_max=128
+
+## recent_phone_failures
+[2026-05-03T01:31:07.062Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:11.061Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:13.061Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:15.062Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:17.062Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:19.063Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:21.064Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:23.070Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:27.068Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:31.066Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:33.069Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:35.075Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:37.079Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:41.072Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:45.072Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:47.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:51.080Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:55.070Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:31:57.075Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:01.075Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:03.077Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:07.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:11.075Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:13.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:15.080Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:19.074Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:21.080Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:25.079Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:29.074Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:33.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:35.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:37.075Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:41.074Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:43.077Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:47.071Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:49.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:51.084Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:55.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:32:57.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:01.078Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:05.074Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:07.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:11.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:15.084Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:19.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:21.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:25.078Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:29.072Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:33.077Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:35.078Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:39.072Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:41.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:43.074Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:47.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:51.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:53.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:33:57.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:01.077Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:03.080Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:07.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:09.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:13.071Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:15.072Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:17.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:19.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:21.073Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:23.076Z] [DEBUG] [Tunnel] Advertised rwnd=4 reason=not enough progress for ramp active=false highSeqAdvanced=false outbound=0 healthyTicks=0
+[2026-05-03T01:34:32.700Z] [DEBUG] [App] VPN status changed: 1
+[2026-05-03T01:34:32.702Z] [DEBUG] [App] VPN status changed: 1
+[2026-05-03T01:34:45.615Z] [DEBUG] [App] VPN status changed: 2
+[2026-05-03T01:34:46.781Z] [INFO] [Tunnel] Session health manager enabled interval=2.0s suspectRx=5.0s probeTimeout=5.0s stuckTicks=3 queue=healthQueue
+[2026-05-03T01:34:48.266Z] [INFO] [Browser] WKWebView session=browser-722E9344 create requested=http://vault.techrockstars.ztlp actual=http://vault.techrockstars.ztlp
+[2026-05-03T01:34:48.266Z] [INFO] [Browser] WKWebView session=browser-722E9344 load url=http://vault.techrockstars.ztlp
+[2026-05-03T01:34:48.491Z] [INFO] [Browser] WKWebView session=browser-722E9344 didStart url=http://vault.techrockstars.ztlp/
+[2026-05-03T01:34:48.591Z] [INFO] [Browser] WKWebView session=browser-722E9344 didCommit url=http://vault.techrockstars.ztlp/
+[2026-05-03T01:34:48.786Z] [DEBUG] [Tunnel] Advertised rwnd=16 reason=browser burst target flows=5 streamMaps=5 healthyTicks=0
+[2026-05-03T01:34:52.786Z] [DEBUG] [Tunnel] Advertised rwnd=16 reason=browser burst target flows=5 streamMaps=5 healthyTicks=0
+[2026-05-03T01:34:56.788Z] [DEBUG] [Tunnel] Advertised rwnd=16 reason=browser burst target flows=5 streamMaps=5 healthyTicks=0
+[2026-05-03T01:35:00.782Z] [DEBUG] [Tunnel] Advertised rwnd=16 reason=browser burst target flows=5 streamMaps=5 healthyTicks=0
+[2026-05-03T01:35:02.785Z] [DEBUG] [Tunnel] Advertised rwnd=16 reason=browser burst target flows=5 streamMaps=5 healthyTicks=0
+
+## recent_gateway_close
+01:35:05.738 [info]  [Session] CLIENT_ACK data_seq=1763 rwnd=8 last_acked=1762 inflight=8 recovery=false
+01:35:05.821 [info]  [Session] CLIENT_ACK data_seq=1764 rwnd=8 last_acked=1763 inflight=8 recovery=false
+01:35:05.830 [info]  [Session] CLIENT_ACK data_seq=1765 rwnd=8 last_acked=1764 inflight=8 recovery=false
+01:35:05.831 [info]  [Session] CLIENT_ACK data_seq=1766 rwnd=8 last_acked=1765 inflight=8 recovery=false
+01:35:05.831 [info]  [Session] CLIENT_ACK data_seq=1767 rwnd=8 last_acked=1766 inflight=8 recovery=false
+01:35:05.832 [info]  [Session] CLIENT_ACK data_seq=1768 rwnd=8 last_acked=1767 inflight=8 recovery=false
+01:35:05.832 [info]  [Session] CLIENT_ACK data_seq=1769 rwnd=8 last_acked=1768 inflight=8 recovery=false
+01:35:05.833 [info]  [Session] CLIENT_ACK data_seq=1770 rwnd=8 last_acked=1769 inflight=8 recovery=false
+01:35:05.833 [info]  [Session] CLIENT_ACK data_seq=1771 rwnd=8 last_acked=1770 inflight=8 recovery=false
+01:35:05.887 [info]  [Session] CLIENT_ACK data_seq=1772 rwnd=8 last_acked=1771 inflight=8 recovery=false
+01:35:05.910 [info]  [Session] CLIENT_ACK data_seq=1773 rwnd=8 last_acked=1772 inflight=8 recovery=false
+01:35:05.910 [info]  [Session] CLIENT_ACK data_seq=1774 rwnd=8 last_acked=1773 inflight=8 recovery=false
+01:35:05.910 [info]  [Session] CLIENT_ACK data_seq=1775 rwnd=8 last_acked=1774 inflight=8 recovery=false
+01:35:05.911 [info]  [Session] CLIENT_ACK data_seq=1776 rwnd=8 last_acked=1775 inflight=8 recovery=false
+01:35:05.911 [info]  [Session] CLIENT_ACK data_seq=1777 rwnd=8 last_acked=1776 inflight=8 recovery=false
+01:35:05.911 [info]  [Session] CLIENT_ACK data_seq=1778 rwnd=8 last_acked=1777 inflight=8 recovery=false
+01:35:05.912 [info]  [Session] CLIENT_ACK data_seq=1779 rwnd=8 last_acked=1778 inflight=8 recovery=false
+01:35:05.976 [info]  [Session] CLIENT_ACK data_seq=1780 rwnd=8 last_acked=1779 inflight=8 recovery=false
+01:35:05.984 [info]  [Session] CLIENT_ACK data_seq=1781 rwnd=8 last_acked=1780 inflight=8 recovery=false
+01:35:05.985 [info]  [Session] CLIENT_ACK data_seq=1782 rwnd=8 last_acked=1781 inflight=8 recovery=false
+01:35:05.985 [info]  [Session] CLIENT_ACK data_seq=1783 rwnd=8 last_acked=1782 inflight=8 recovery=false
+01:35:05.985 [info]  [Session] CLIENT_ACK data_seq=1784 rwnd=8 last_acked=1783 inflight=8 recovery=false
+01:35:05.986 [info]  [Session] CLIENT_ACK data_seq=1785 rwnd=8 last_acked=1784 inflight=8 recovery=false
+01:35:05.986 [info]  [Session] CLIENT_ACK data_seq=1786 rwnd=8 last_acked=1785 inflight=8 recovery=false
+01:35:05.986 [info]  [Session] CLIENT_ACK data_seq=1787 rwnd=8 last_acked=1786 inflight=8 recovery=false
+01:35:06.060 [info]  [Session] CLIENT_ACK data_seq=1788 rwnd=8 last_acked=1787 inflight=8 recovery=false
+01:35:06.076 [info]  [Session] CLIENT_ACK data_seq=1789 rwnd=8 last_acked=1788 inflight=8 recovery=false
+01:35:06.077 [info]  [Session] CLIENT_ACK data_seq=1790 rwnd=8 last_acked=1789 inflight=8 recovery=false
+01:35:06.077 [info]  [Session] CLIENT_ACK data_seq=1791 rwnd=8 last_acked=1790 inflight=8 recovery=false
+01:35:06.077 [info]  [Session] CLIENT_ACK data_seq=1792 rwnd=8 last_acked=1791 inflight=8 recovery=false
+01:35:06.078 [info]  [Session] CLIENT_ACK data_seq=1793 rwnd=8 last_acked=1792 inflight=8 recovery=false
+01:35:06.078 [info]  [Session] CLIENT_ACK data_seq=1794 rwnd=8 last_acked=1793 inflight=8 recovery=false
+01:35:06.078 [info]  [Session] CLIENT_ACK data_seq=1795 rwnd=8 last_acked=1794 inflight=8 recovery=false
+01:35:06.115 [debug] [Session] RTO retransmit data_seq=4 seq=6 elapsed=5002ms rto=5000ms attempt=11
+01:35:06.141 [info]  [Session] CLIENT_ACK data_seq=1796 rwnd=8 last_acked=1795 inflight=8 recovery=false
+01:35:06.151 [info]  [Session] CLIENT_ACK data_seq=1797 rwnd=8 last_acked=1796 inflight=8 recovery=false
+01:35:06.167 [info]  [Session] CLIENT_ACK data_seq=1798 rwnd=8 last_acked=1797 inflight=8 recovery=false
+01:35:06.168 [info]  [Session] CLIENT_ACK data_seq=1799 rwnd=8 last_acked=1798 inflight=8 recovery=false
+01:35:06.168 [info]  [Session] CLIENT_ACK data_seq=1800 rwnd=8 last_acked=1799 inflight=8 recovery=false
+01:35:06.169 [info]  [Session] CLIENT_ACK data_seq=1801 rwnd=8 last_acked=1800 inflight=8 recovery=false
+01:35:06.169 [info]  [Session] CLIENT_ACK data_seq=1802 rwnd=8 last_acked=1801 inflight=8 recovery=false
+01:35:06.169 [info]  [Session] CLIENT_ACK data_seq=1803 rwnd=8 last_acked=1802 inflight=8 recovery=false
+01:35:06.208 [info]  [Session] CLIENT_ACK data_seq=1804 rwnd=8 last_acked=1803 inflight=8 recovery=false
+01:35:06.226 [info]  [Session] CLIENT_ACK data_seq=1805 rwnd=8 last_acked=1804 inflight=8 recovery=false
+01:35:06.255 [info]  [Session] CLIENT_ACK data_seq=1806 rwnd=8 last_acked=1805 inflight=8 recovery=false
+01:35:06.256 [info]  [Session] CLIENT_ACK data_seq=1807 rwnd=8 last_acked=1806 inflight=8 recovery=false
+01:35:06.256 [info]  [Session] CLIENT_ACK data_seq=1808 rwnd=8 last_acked=1807 inflight=8 recovery=false
+01:35:06.257 [info]  [Session] CLIENT_ACK data_seq=1809 rwnd=8 last_acked=1808 inflight=8 recovery=false
+01:35:06.257 [info]  [Session] CLIENT_ACK data_seq=1810 rwnd=8 last_acked=1809 inflight=8 recovery=false
+01:35:06.257 [info]  [Session] CLIENT_ACK data_seq=1811 rwnd=8 last_acked=1810 inflight=8 recovery=false
+01:35:06.287 [info]  [Session] CLIENT_ACK data_seq=1812 rwnd=8 last_acked=1811 inflight=8 recovery=false
+01:35:06.309 [info]  [Session] CLIENT_ACK data_seq=1813 rwnd=8 last_acked=1812 inflight=8 recovery=false
+01:35:06.328 [info]  [Session] CLIENT_ACK data_seq=1814 rwnd=8 last_acked=1813 inflight=8 recovery=false
+01:35:06.336 [info]  [Session] CLIENT_ACK data_seq=1815 rwnd=8 last_acked=1814 inflight=8 recovery=false
+01:35:06.337 [info]  [Session] CLIENT_ACK data_seq=1816 rwnd=8 last_acked=1815 inflight=8 recovery=false
+01:35:06.338 [info]  [Session] CLIENT_ACK data_seq=1817 rwnd=8 last_acked=1816 inflight=8 recovery=false
+01:35:06.338 [info]  [Session] CLIENT_ACK data_seq=1818 rwnd=8 last_acked=1817 inflight=8 recovery=false
+01:35:06.339 [info]  [Session] CLIENT_ACK data_seq=1819 rwnd=8 last_acked=1818 inflight=8 recovery=false
+01:35:06.368 [info]  [Session] CLIENT_ACK data_seq=1820 rwnd=8 last_acked=1819 inflight=8 recovery=false
+01:35:06.381 [info]  [Session] CLIENT_ACK data_seq=1821 rwnd=8 last_acked=1820 inflight=8 recovery=false
+01:35:06.394 [info]  [Session] CLIENT_ACK data_seq=1822 rwnd=8 last_acked=1821 inflight=8 recovery=false
+01:35:06.426 [info]  [Session] CLIENT_ACK data_seq=1823 rwnd=8 last_acked=1822 inflight=8 recovery=false
+01:35:06.427 [info]  [Session] CLIENT_ACK data_seq=1824 rwnd=8 last_acked=1823 inflight=8 recovery=false
+01:35:06.453 [info]  [Session] CLIENT_ACK data_seq=1825 rwnd=8 last_acked=1824 inflight=8 recovery=false
+01:35:06.454 [info]  [Session] CLIENT_ACK data_seq=1826 rwnd=8 last_acked=1825 inflight=8 recovery=false
+01:35:06.454 [info]  [Session] CLIENT_ACK data_seq=1827 rwnd=8 last_acked=1826 inflight=8 recovery=false
+01:35:06.455 [info]  [Session] CLIENT_ACK data_seq=1828 rwnd=8 last_acked=1827 inflight=8 recovery=false
+01:35:06.455 [info]  [Session] CLIENT_ACK data_seq=1829 rwnd=8 last_acked=1828 inflight=8 recovery=false
+01:35:06.487 [info]  [Session] CLIENT_ACK data_seq=1830 rwnd=8 last_acked=1829 inflight=8 recovery=false
+01:35:06.501 [info]  [Session] CLIENT_ACK data_seq=1831 rwnd=8 last_acked=1830 inflight=8 recovery=false
+01:35:06.509 [info]  [Session] CLIENT_ACK data_seq=1832 rwnd=8 last_acked=1831 inflight=8 recovery=false
+01:35:06.543 [info]  [Session] CLIENT_ACK data_seq=1833 rwnd=8 last_acked=1832 inflight=8 recovery=false
+01:35:06.544 [info]  [Session] CLIENT_ACK data_seq=1834 rwnd=8 last_acked=1833 inflight=8 recovery=false
+01:35:06.544 [info]  [Session] CLIENT_ACK data_seq=1835 rwnd=8 last_acked=1834 inflight=8 recovery=false
+01:35:06.544 [info]  [Session] CLIENT_ACK data_seq=1836 rwnd=8 last_acked=1835 inflight=8 recovery=false
+01:35:06.545 [info]  [Session] CLIENT_ACK data_seq=1837 rwnd=8 last_acked=1836 inflight=8 recovery=false
+01:35:06.567 [info]  [Session] CLIENT_ACK data_seq=1838 rwnd=8 last_acked=1837 inflight=8 recovery=false
+01:35:06.575 [info]  [Session] CLIENT_ACK data_seq=1839 rwnd=8 last_acked=1838 inflight=8 recovery=false
+01:35:06.584 [info]  [Session] CLIENT_ACK data_seq=1840 rwnd=8 last_acked=1839 inflight=8 recovery=false
+01:35:06.623 [info]  [Session] CLIENT_ACK data_seq=1841 rwnd=8 last_acked=1840 inflight=8 recovery=false

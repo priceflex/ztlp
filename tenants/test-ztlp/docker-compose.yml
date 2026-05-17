@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  ns:
+    image: ztlp-ns:latest
+    container_name: ztlp-ns-test-ztlp
+    ports:
+      - "21285:23096/udp"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_STORAGE_MODE: "disc_copies"
+      ZTLP_ROOT_KEY_PUB: "pub_e8d3e27aace46acd908ea9deff4cf6f3"
+    volumes:
+      - ./ns_data:/var/lib/ztlp
+
+  relay:
+    image: ztlp-relay:latest
+    container_name: ztlp-relay-test-ztlp
+    ports:
+      - "21286:23095/udp"
+    environment:
+      ZTLP_RELAY_NS_SERVER: "ns:23096"
+    depends_on:
+      - ns
+
+  gateway:
+    image: ztlp-gateway:latest
+    container_name: ztlp-gateway-test-ztlp
+    ports:
+      - "21287:23097/udp"
+    environment:
+      ZTLP_GATEWAY_NS_HOST: "ns"
+      ZTLP_GATEWAY_NS_PORT: "23096"
+      ZTLP_HEADER_HMAC_SECRET: "${HMAC_SECRET}"
+      ZTLP_GATEWAY_BACKENDS: "auth:bootstrap:3000"
+      ZTLP_GATEWAY_POLICIES: "*:auth" # Defaulting for the onboarding period
+      ZTLP_TRUST_ANCHOR: "pub_e8d3e27aace46acd908ea9deff4cf6f3"
+    depends_on:
+      - ns
+      - bootstrap
+
+  bootstrap:
+    image: priceflex/ztlp-bootstrap:latest
+    container_name: ztlp-bootstrap-test-ztlp
+    environment:
+      - RAILS_ENV=production
+      - DATABASE_PATH=/data/production.sqlite3
+      - ZTLP_ORCHESTRATOR_ONBOARDING=true # Bypasses standard omniauth for X-ZTLP headers
+    volumes:
+      - ./bootstrap_data:/data

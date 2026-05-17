@@ -1,0 +1,232 @@
+
+01:20:09.537 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:20:09.537 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:20:09.537 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:20:29.145 [info]  [stats] sessions=0 passed=190950 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=190940 uptime=315485s
+
+01:20:39.538 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:20:39.538 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:20:39.538 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:09.539 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:09.539 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:09.539 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:29.146 [info]  [stats] sessions=0 passed=190952 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=190942 uptime=315545s
+
+01:21:39.540 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:39.540 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:21:39.540 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:09.541 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:09.541 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:09.541 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:29.147 [info]  [stats] sessions=0 passed=190955 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=190945 uptime=315605s
+
+01:22:39.542 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:39.542 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:22:39.542 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:09.543 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:09.543 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:09.543 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:26.154 [info]  [GatewayFwd] Forwarding HELLO for session B250902D9CCCE66E7F49FC76 from {{204, 16, 122, 24}, 56319} to gateway {{172, 26, 11, 164}, 23097}
+
+01:23:26.740 [info]  [GatewayFwd] Forwarding HELLO for session CCA835C7E6C7FDC70576B284 from {{204, 16, 122, 24}, 58687} to gateway {{172, 26, 11, 164}, 23097}
+
+01:23:27.323 [info]  [GatewayFwd] Forwarding HELLO for session 78CAE27D722C1D7CF1540F16 from {{204, 16, 122, 24}, 58129} to gateway {{172, 26, 11, 164}, 23097}
+
+01:23:29.148 [info]  [stats] sessions=0 passed=191012 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191002 uptime=315665s
+
+01:23:39.544 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:39.544 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:23:39.544 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:09.545 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:09.545 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:09.545 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:29.149 [info]  [stats] sessions=0 passed=191022 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191012 uptime=315725s
+
+01:24:39.546 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:39.546 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:24:39.546 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:09.547 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:09.547 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:09.547 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:29.150 [info]  [stats] sessions=0 passed=191025 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191015 uptime=315785s
+
+01:25:39.548 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:39.548 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:25:39.548 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:09.549 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:09.549 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:09.549 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:29.151 [info]  [stats] sessions=0 passed=191027 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191017 uptime=315845s
+
+01:26:39.550 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:39.550 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:26:39.550 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:09.551 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:09.551 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:09.552 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:29.152 [info]  [stats] sessions=0 passed=191029 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191019 uptime=315905s
+
+01:27:39.552 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:39.552 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:27:39.552 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:09.553 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:09.553 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:09.554 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:29.153 [info]  [stats] sessions=0 passed=191032 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191022 uptime=315965s
+
+01:28:39.554 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:39.554 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:28:39.554 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:03.806 [info]  [GatewayFwd] Forwarding HELLO for session 820FA5F9C644A5F537496BAB from {{204, 16, 122, 24}, 46486} to gateway {{172, 26, 11, 164}, 23097}
+
+01:29:04.393 [info]  [GatewayFwd] Forwarding HELLO for session A77833A236CB427D1B15C45C from {{204, 16, 122, 24}, 56241} to gateway {{172, 26, 11, 164}, 23097}
+
+01:29:04.979 [info]  [GatewayFwd] Forwarding HELLO for session 1899E3EE10F9ABD4D57C7B79 from {{204, 16, 122, 24}, 44777} to gateway {{172, 26, 11, 164}, 23097}
+
+01:29:09.555 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:09.555 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:09.555 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:29.154 [info]  [stats] sessions=0 passed=191095 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191085 uptime=316025s
+
+01:29:39.556 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:39.556 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:39.556 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:29:52.259 [info]  [GatewayFwd] Forwarding HELLO for session 8F400DF02FD90A3BC23A31E6 from {{174, 193, 199, 65}, 10872} to gateway {{172, 26, 11, 164}, 23097}
+
+01:30:09.557 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:30:09.557 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:30:09.557 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:30:29.155 [info]  [stats] sessions=0 passed=191113 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191103 uptime=316085s
+
+01:30:39.558 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:30:39.558 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:30:39.559 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:09.559 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:09.559 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:09.560 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:29.156 [info]  [stats] sessions=0 passed=191117 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191107 uptime=316145s
+
+01:31:39.560 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:39.560 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:31:39.560 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:09.561 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:09.561 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:09.561 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:29.157 [info]  [stats] sessions=0 passed=191120 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191110 uptime=316205s
+
+01:32:39.562 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:39.562 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:32:39.562 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:09.563 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:09.563 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:09.564 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:29.158 [info]  [stats] sessions=0 passed=191122 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191112 uptime=316265s
+
+01:33:39.564 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:39.564 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:33:39.564 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:09.565 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:09.565 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:09.566 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:29.159 [info]  [stats] sessions=0 passed=191124 dropped_l1=0 dropped_l2=23 dropped_l3=0 forwarded=191114 uptime=316325s
+
+01:34:39.566 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=default addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:39.566 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=http addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:39.566 [info]  [GatewayForwarder] Registered dynamic gateway 977B7DC504470C104EEA9FB83A1A162A service=vault addr={{172, 26, 11, 164}, 23097} ttl=60s
+
+01:34:39.768 [info]  [GatewayFwd] Forwarding HELLO for session 1D4AED567C06F9078CD6EE40 from {{204, 16, 122, 24}, 43370} to gateway {{172, 26, 11, 164}, 23097}
+
+01:34:40.351 [info]  [GatewayFwd] Forwarding HELLO for session E74EBD9384A6C1DB442FF263 from {{204, 16, 122, 24}, 54123} to gateway {{172, 26, 11, 164}, 23097}
+
+01:34:40.932 [info]  [GatewayFwd] Forwarding HELLO for session AB1067421B75A9FBC0CBA0BA from {{204, 16, 122, 24}, 50608} to gateway {{172, 26, 11, 164}, 23097}
+
+01:34:45.870 [info]  [GatewayFwd] Forwarding HELLO for session DD1130679CD6F7220843DC74 from {{174, 193, 199, 65}, 10852} to gateway {{172, 26, 11, 164}, 23097}

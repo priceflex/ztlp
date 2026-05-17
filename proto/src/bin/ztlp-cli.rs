@@ -5128,7 +5128,7 @@ async fn cmd_ping(
     raw_socket.bind(&addr.into())?;
     
     let sock = UdpSocket::from_std(raw_socket.into())?;
-    let _ = crate::gso::enable_gro(&sock);
+    let _ = ztlp_proto::gso::enable_gro(&sock);
     let local_addr = sock.local_addr()?;
 
     eprintln!(

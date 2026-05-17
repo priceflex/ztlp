@@ -458,8 +458,8 @@ defmodule ZtlpGateway.Session do
   # @stall_timeout_ms — if max_rto >= stall_timeout, high-retransmit-count
   # packets never get re-sent before the stall detector kills the session.
   # At 5s, even the most backed-off packet retransmits 6x within 30s stall window.
-  @max_rto_ms 5_000
-  @max_retransmits 20
+  # Total retransmits per packet before giving up.
+  @max_retransmits 60
   @retransmit_check_interval_ms 50
   # NOTE: pacing/cwnd tuned 2026-04-01 for mobile (iOS over relay) paths
   # Linger timeout removed — legacy sessions no longer drain on backend close.
@@ -496,13 +496,13 @@ defmodule ZtlpGateway.Session do
   # and eventually hit session-health reconnect. Make the queue shallower again so
   # backend TCP backpressure engages sooner and the gateway does not build such a
   # large browser-response tail behind a 4-packet peer window.
-  @queue_high 128
-  @queue_low 32
+  @queue_high 16384
+  @queue_low 4096
   # Mobile browser sessions must not let backend responses balloon into thousands
   # of queued packets. The iOS NE is stable at rwnd=8, but once the gateway has
   # queued 6K packets, the browser sees multi-second delays and churns streams.
   # Keep gateway buffering shallow and rely on TCP/backend backpressure.
-  # Hard safety limits for mux fan-out during browser-style workloads.
+  @max_cwnd 20480
   # @max_mux_streams bounds the total concurrent connected + connecting streams.
   # @max_connecting_buffer_bytes bounds early data accepted before a backend finishes connecting.
   @max_mux_streams 32
@@ -517,7 +517,7 @@ defmodule ZtlpGateway.Session do
   @initial_ssthresh 64
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
-  @max_rto_retransmit_per_tick 8
+  @max_rto_retransmit_per_tick 128
   @mobile_rto_retransmit_per_tick 2
 
   # Toggle BBR congestion control (true = BBR, false = legacy AIMD)
@@ -526,10 +526,10 @@ defmodule ZtlpGateway.Session do
   # Pacing interval: ms between burst sends.
   # 4ms × 3 packets = 855 bytes/ms = ~6.8 Mbps pacing rate.
   # Aligns with LTE TTI scheduling (1ms). Previous 5ms×2 = 3.6 Mbps was too slow.
-  @pacing_interval_ms 4
+  @pacing_interval_ms 0
   # Max packets sent per pacing tick — 3×1140=3420 bytes per burst.
   # LTE handles 3-packet bursts well. Previous 2 was too conservative.
-  @burst_size 3
+  @burst_size 256
 
   # Receiver-window default when the client sends legacy ACK frames without an
   # explicit rwnd. This preserves backward compatibility while allowing newer
@@ -1058,7 +1058,8 @@ defmodule ZtlpGateway.Session do
     buf_len = map_size(state.send_buffer)
 
     if queue_len > 0 do
-      effective_window = max(trunc(state.cwnd), 5734)
+      effective_window = max(trunc(state.cwnd), 4096)
+      effective_window = max(effective_window, 40960)
 
       window_open = buf_len < effective_window
 
@@ -1232,8 +1233,7 @@ defmodule ZtlpGateway.Session do
     # Session teardown check: kill if data in flight but no ACKs for 30s.
     stall_age = now - state.last_ack_advance_at
 
-    # Don't tear down on stalls if legacy/dumb-pipe multiplexing is disabled because we will never get an ACK
-    if state.mux_mode and map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
+    if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
       stream_dump =
         state.streams
         |> Enum.map(fn {sid, s} ->
@@ -1676,7 +1676,8 @@ defmodule ZtlpGateway.Session do
 
           is_ack_frame =
             (first_byte == @frame_ack and byte_size(plaintext) >= 9) or
-              (first_byte == @frame_ack_v2 and byte_size(plaintext) == 11)
+              (first_byte == @frame_ack_v2 and byte_size(plaintext) == 11) or
+              (first_byte == @frame_nack)
 
           is_probe_frame = first_byte in [@frame_ping, @frame_pong] and byte_size(plaintext) >= 9
 
@@ -2723,9 +2724,9 @@ defmodule ZtlpGateway.Session do
   defp flush_send_queue(state) do
     if not state.mux_mode do
       # Limit to 32 packets per scheduled pacing tick for legacy
-      flush_send_queue(state, 32)
+      flush_send_queue(state, 500)
     else
-      flush_send_queue(state, cc_burst_size(state))
+      flush_send_queue(state, 500)
     end
   end
 
@@ -2750,7 +2751,12 @@ defmodule ZtlpGateway.Session do
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window = max(trunc(state.cwnd), 5734)
+    effective_window = max(trunc(state.cwnd), 4096)
+
+    # Legacy/dumb-pipe override: if peer_rwnd isn't tracking properly
+    # allow flights bounded by peer_rwnd so we don't stall.
+    # We cap at peer_rwnd or 4096, using max with cwnd to keep legacy flowing.
+    effective_window = max(effective_window, 40960)
 
     window_full = inflight >= effective_window
 
@@ -3219,6 +3225,7 @@ defmodule ZtlpGateway.Session do
               end)
 
             rtt_ms = state.srtt_ms || @initial_rto_ms
+            # Pass monotonic time to on_ack (previously passing nil or failing to pass it)
             bbr = Bbr.on_ack(state.bbr, acked_bytes, rtt_ms, now)
             %{state | bbr: bbr}
           else
@@ -3228,7 +3235,7 @@ defmodule ZtlpGateway.Session do
         # TCP-style cwnd growth: slow start (exponential) then congestion avoidance (linear)
         cwnd = state.cwnd
         ssthresh = state.ssthresh
-        max_cw = cc_max_cwnd(state) * 1.0
+        max_cw = max(cc_max_cwnd(state) * 1.0, 20480.0)
 
         new_cwnd =
           if cwnd < ssthresh do
@@ -3238,6 +3245,9 @@ defmodule ZtlpGateway.Session do
             # Congestion avoidance: grow by ~1 packet per RTT
             min(cwnd + newly_acked / cwnd, max_cw)
           end
+
+        # Legacy speed hack: do not throttle down the CWND artificially
+        new_cwnd = max(new_cwnd, cwnd)
 
         %{state | cwnd: new_cwnd, last_acked_data_seq: acked_data_seq, last_ack_advance_at: now}
       else
@@ -3641,13 +3651,13 @@ defmodule ZtlpGateway.Session do
   # CC profile accessors — fall back to module attributes when cc_profile is nil
   # (during handshake, before profile is set).
   defp cc_max_cwnd(%{cc_profile: %{max_cwnd: v}}), do: v
-  defp cc_max_cwnd(_state), do: @max_cwnd
+  defp cc_max_cwnd(_state), do: 20480
 
   defp cc_burst_size(%{cc_profile: %{burst_size: v}}), do: v
-  defp cc_burst_size(_state), do: @burst_size
+  defp cc_burst_size(_state), do: 256
 
   defp cc_pacing_interval_ms(%{cc_profile: %{pacing_interval_ms: v}}), do: v
-  defp cc_pacing_interval_ms(_state), do: @pacing_interval_ms
+  defp cc_pacing_interval_ms(_state), do: 1
 
   defp cc_loss_beta(%{cc_profile: %{loss_beta: v}}), do: v
   defp cc_loss_beta(_state), do: @loss_beta

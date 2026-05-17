@@ -1046,10 +1046,14 @@ defmodule ZtlpGateway.Session do
           # Since we advanced the base, we need to try delivering the now-available head
           # and also run the ACK-skip logic for the new base.
           state = advance_recv_window_base(state)
-          state = deliver_recv_window(state)
+          
+          new_state = case deliver_recv_window(state) do
+            {:noreply, st} -> st
+            {:stop, _reason, st} -> st
+          end
 
           ref = Process.send_after(self(), :recv_gap_check, 2000)
-          {:noreply, %{state | recv_gap_timer_ref: ref}}
+          {:noreply, %{new_state | recv_gap_timer_ref: ref}}
         else
           ref = Process.send_after(self(), :recv_gap_check, 2000)
           {:noreply, %{state | recv_gap_timer_ref: ref}}
@@ -1825,12 +1829,17 @@ defmodule ZtlpGateway.Session do
           recv_window_base: base + 1
       }
 
-      case handle_tunnel_frame(plaintext, state) do
-        {:noreply, new_state} ->
-          deliver_recv_window_loop(new_state, true)
+      if plaintext == nil do
+        # This was an ACK frame (fast tracked). Just skip it!
+        deliver_recv_window_loop(state, delivered_any)
+      else
+        case handle_tunnel_frame(plaintext, state) do
+          {:noreply, new_state} ->
+            deliver_recv_window_loop(new_state, true)
 
-        {:stop, reason, stop_state} ->
-          {:stop, reason, stop_state}
+          {:stop, reason, stop_state} ->
+            {:stop, reason, stop_state}
+        end
       end
     else
       {:ok, state, delivered_any}

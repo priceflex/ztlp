@@ -744,6 +744,7 @@ defmodule ZtlpGateway.Session do
   # Backend sent data — enqueue for paced sending
   @impl true
   def handle_info({:backend_data, data}, state) do
+    Logger.debug("[Session] BACKEND_READ_LEGACY bytes=#{byte_size(data)}")
     chunks = chunk_data(data, @max_payload_bytes)
     send_queue = Enum.reduce(chunks, state.send_queue, fn chunk, q ->
       :queue.in(chunk, q)
@@ -848,7 +849,9 @@ defmodule ZtlpGateway.Session do
     case find_stream_by_tls_socket(state.streams, socket) do
       {stream_id, _stream} ->
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
-        chunks = chunk_data(data, @max_payload_bytes - 13)
+        # Or if legacy: FRAME_DATA(1) + data_seq(8) = 9 bytes
+        overhead = if not state.mux_mode and map_size(state.streams) == 1, do: 9, else: 13
+        chunks = chunk_data(data, @max_payload_bytes - overhead)
         state = enqueue_stream_chunks_with_accounting(state, stream_id, chunks)
         state = flush_send_queue(state)
         # Backpressure on TLS bridge sockets: pause reading from this socket
@@ -889,7 +892,8 @@ defmodule ZtlpGateway.Session do
       _ ->
         # Plain stream: send directly
         # Mux overhead: FRAME_DATA(1) + stream_id(4) + data_seq(8) = 13 bytes
-        chunks = chunk_data(data, @max_payload_bytes - 13)
+        overhead = if not state.mux_mode and map_size(state.streams) == 1, do: 9, else: 13
+        chunks = chunk_data(data, @max_payload_bytes - overhead)
         state = enqueue_stream_chunks_with_accounting(state, stream_id, chunks)
         state = flush_send_queue(state)
         state = maybe_resume_backends(state)
@@ -1649,6 +1653,7 @@ defmodule ZtlpGateway.Session do
   # window, streams is empty but the client is still in mux mode. Without
   # this flag, the FRAME_DATA gets misinterpreted as legacy format.
   defp handle_tunnel_frame(<<@frame_data, rest::binary>>, state) do
+    Logger.debug("[Session] handle_tunnel_frame START FRAME_DATA")
     if state.mux_mode do
       # Support BOTH inbound client formats:
       #   1. True mux outer frame:   [stream_id(4) | payload]
@@ -1783,7 +1788,7 @@ defmodule ZtlpGateway.Session do
   # This prevents the keepalive → backend reconnect → immediate close cycle
   # that occurs when vaultwarden closes idle TCP connections.
   defp handle_tunnel_frame(<<0x01>>, state) do
-    Logger.debug("[Session] Keepalive received, resetting idle timer")
+    Logger.debug("[Session] handle_tunnel_frame START Keepalive(0x01)")
     {:noreply, reset_timeout(state)}
   end
 
@@ -1802,6 +1807,7 @@ defmodule ZtlpGateway.Session do
   # This clause MUST come before the SACK clause because otherwise rwnd's first
   # byte would be misread as sack_count.
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, rwnd::big-16>>, state) do
+    Logger.debug("[Session] handle_tunnel_frame START FRAME_ACK with rwnd=#{rwnd} ack_seq=#{acked_data_seq}")
     Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} rwnd=#{rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     state = %{state | peer_rwnd: max(1, rwnd)}
     state = log_ack_latency(state, acked_data_seq)
@@ -1828,6 +1834,7 @@ defmodule ZtlpGateway.Session do
   # A client that upgrades to V2 doesn't downgrade — set `peer_uses_v2 = true`
   # (sticky) so future logging and tuning can rely on it.
   defp handle_tunnel_frame(<<@frame_ack_v2, acked_data_seq::big-64, window_kb::big-16>>, state) do
+    Logger.debug("[Session] handle_tunnel_frame START FRAME_ACK_V2")
     window_bytes = window_kb * 1024
     # At least one packet of headroom even if the client advertises zero —
     # otherwise effective_window collapses to 0 and the session stalls.
@@ -1853,6 +1860,7 @@ defmodule ZtlpGateway.Session do
   end
 
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64, sack_count::8, sack_data::binary>>, state) do
+    Logger.debug("[Session] handle_tunnel_frame START FRAME_ACK with sack_count=#{sack_count}")
     Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} sack_count=#{sack_count} rwnd=#{state.peer_rwnd} last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     state = log_ack_latency(state, acked_data_seq)
     # Cumulative ACK with SACK blocks from client
@@ -1880,6 +1888,7 @@ defmodule ZtlpGateway.Session do
 
   # Legacy ACK without SACK blocks (backward compatible)
   defp handle_tunnel_frame(<<@frame_ack, acked_data_seq::big-64>>, state) do
+    Logger.debug("[Session] handle_tunnel_frame START bare FRAME_ACK")
     Logger.info("[Session] CLIENT_ACK data_seq=#{acked_data_seq} (no sack) last_acked=#{state.last_acked_data_seq} inflight=#{map_size(state.send_buffer)} recovery=#{state.in_recovery}")
     state = log_ack_latency(state, acked_data_seq)
     state = process_cumulative_ack(acked_data_seq, state)
@@ -2108,9 +2117,10 @@ defmodule ZtlpGateway.Session do
     {:noreply, state}
   end
 
-  defp handle_tunnel_frame(_other, state) do
-    # Unknown frame type — ignore
-    {:noreply, state}
+  defp handle_tunnel_frame(<<type, _rest::binary>> = payload, state) do
+     Logger.debug("[Session] handle_tunnel_frame START fallback type=#{type} len=#{byte_size(payload)}")
+     Logger.warning("[Session] Unhandled tunnel frame of length #{byte_size(payload)}")
+     {:noreply, state}
   end
 
   # ── Mux stream opener (extracted to avoid splitting handle_tunnel_frame clauses) ──
@@ -2344,11 +2354,18 @@ defmodule ZtlpGateway.Session do
 
   defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
+    # Logging instrumentation for response progression
+    if not :queue.is_empty(state.send_queue) or inflight > 0 do
+      Logger.debug("[Session] flush_send_queue: queue=#{:queue.len(state.send_queue)} inflight=#{inflight} cwnd=#{state.cwnd} rwnd=#{Map.get(state, :peer_rwnd, @default_peer_rwnd)}")
+    end
+    
+    legacy_bypass = not state.mux_mode
+    
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
     effective_window = min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
-    window_full = inflight >= effective_window
+    window_full = not legacy_bypass and inflight >= effective_window
     cond do
       :queue.is_empty(state.send_queue) ->
         # Nothing to send. If draining with empty buffer, we're done.
@@ -2369,10 +2386,12 @@ defmodule ZtlpGateway.Session do
         state = %{state | send_queue: remaining}
 
         result = case item do
-          {:stream, stream_id, plaintext} ->
-            # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
-            state = decrement_stream_queue_accounting(state, stream_id, byte_size(plaintext))
-            encrypt_and_send_stream(stream_id, plaintext, state)
+      {:stream, stream_id, plaintext} ->
+        # Multiplexed data: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
+        # Wait, if not mux_mode, and stream_id == 0, we bypass this enqueue.
+        # Oh, legacy legacy_outer_mux is a thing.
+        state = decrement_stream_queue_accounting(state, stream_id, byte_size(plaintext))
+        encrypt_and_send_stream(stream_id, plaintext, state)
 
           {:stream_fin, stream_id} ->
             # Stream FIN: send as a data frame with a sentinel payload so it
@@ -2430,6 +2449,7 @@ defmodule ZtlpGateway.Session do
   end
 
   defp encrypt_and_send(plaintext, state) do
+    Logger.debug("[Session] encrypt_and_send: q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}")
     seq = state.send_seq + 1
     data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
@@ -2483,13 +2503,19 @@ defmodule ZtlpGateway.Session do
   # Encrypt and send a multiplexed stream data frame.
   # Wire format: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
   defp encrypt_and_send_stream(stream_id, plaintext, state) do
+    Logger.debug("[Session] encrypt_and_send_stream: stream_id=#{stream_id} q_len=#{:queue.len(state.send_queue)} bytes=#{byte_size(plaintext)}")
     seq = state.send_seq + 1
     data_seq = state.send_data_seq
     nonce = <<0::32, seq::little-64>>
 
-    # Frame format: [FRAME_DATA | stream_id(4 BE) | data_seq(8 BE) | payload]
-    # data_seq is the global transport sequence — used by client for ACKs.
-    framed = <<@frame_data, stream_id::big-32, data_seq::big-64, plaintext::binary>>
+    # Ensure backwards compatibility for clients without mux by falling back
+    # to legacy if this stream is 0 and we are in a bare session. 
+    # Mux framing includes the stream id.
+    framed = if not state.mux_mode and map_size(state.streams) == 1 do
+        <<@frame_data, data_seq::big-64, plaintext::binary>>
+    else
+        <<@frame_data, stream_id::big-32, data_seq::big-64, plaintext::binary>>
+    end
 
     {ct, tag} = Crypto.encrypt(state.r2i_key, nonce, framed, <<>>)
     encrypted = ct <> tag
@@ -2720,6 +2746,7 @@ defmodule ZtlpGateway.Session do
   # ---------------------------------------------------------------------------
 
   defp process_cumulative_ack(acked_data_seq, state) do
+    Logger.debug("[Session] process_cumulative_ack: ack_seq=#{acked_data_seq} l_ack=#{state.last_acked_data_seq}")
     now = System.monotonic_time(:millisecond)
 
     {acked_entries, remaining} =
@@ -2728,6 +2755,9 @@ defmodule ZtlpGateway.Session do
       end)
 
     newly_acked = length(acked_entries)
+    if newly_acked > 0 do
+       Logger.debug("[Session] process_cumulative_ack: acked=#{newly_acked} rem=#{map_size(remaining)}")
+    end
 
     # Update RTT from acked entries (only non-retransmitted, per Karn's algorithm)
     state =

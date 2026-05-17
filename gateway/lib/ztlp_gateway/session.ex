@@ -2780,9 +2780,9 @@ defmodule ZtlpGateway.Session do
   defp flush_send_queue(state) do
     if not state.mux_mode do
       # Limit to 32 packets per scheduled pacing tick for legacy
-      flush_send_queue(state, 500)
+      flush_send_queue(state, cc_burst_size(state))
     else
-      flush_send_queue(state, 500)
+      flush_send_queue(state, cc_burst_size(state))
     end
   end
 

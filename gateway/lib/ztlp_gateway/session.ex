@@ -1119,7 +1119,9 @@ defmodule ZtlpGateway.Session do
     # Stall detection: if data is in flight but ACK hasn't advanced for
     # @stall_timeout_ms, the session is a zombie. Log and tear it down.
     stall_age = now - state.last_ack_advance_at
-    if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
+    legacy_bypass = not state.mux_mode
+    
+    if not legacy_bypass and map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
       stream_dump =
         state.streams
         |> Enum.map(fn {sid, s} ->
@@ -1132,7 +1134,7 @@ defmodule ZtlpGateway.Session do
     else
       # Reschedule if buffer is non-empty
       retransmit_timer_ref =
-        if map_size(state.send_buffer) > 0 do
+        if not legacy_bypass and map_size(state.send_buffer) > 0 do
           interval = min(div(state.rto_ms, 2), @retransmit_check_interval_ms)
           interval = max(interval, 10)
           Process.send_after(self(), :retransmit_check, interval)
@@ -2340,7 +2342,11 @@ defmodule ZtlpGateway.Session do
   # Paces sends by scheduling a timer for the next packet if the queue
   # is non-empty but the window is full.
   defp flush_send_queue(state) do
-    flush_send_queue(state, cc_burst_size(state))
+    if not state.mux_mode do
+      flush_send_queue(state, max(cc_burst_size(state), 64))
+    else
+      flush_send_queue(state, cc_burst_size(state))
+    end
   end
 
   defp flush_send_queue(state, 0) do

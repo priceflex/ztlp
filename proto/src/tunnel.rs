@@ -874,7 +874,7 @@ where
             // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
-    // Construct and send FRAME_ACK 
+                // Construct and send FRAME_ACK 
                 let mut ack_frame = Vec::with_capacity(11);
                 ack_frame.push(crate::tunnel::FRAME_ACK_V2);
                 ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
@@ -884,19 +884,16 @@ where
                 ack_frame.extend_from_slice(&rwnd.to_be_bytes());
                 
                 let pipeline_lock = pipeline.lock().unwrap();
-            if let Some(session) = pipeline_lock.get_session(session_id) {
+                if let Some(session) = pipeline_lock.get_session(session_id) {
                     let send_key = session.send_key;
                     drop(pipeline_lock);
                     
-                if let Err(e) = encrypt_and_send(
-                    &send_key, send_cipher,
-                    session_id, udp_send, peer_addr, &ack_frame,
-                ).await {
-                    debug!("ack send error: {}", e);
-                } else {
-                    debug!("CLIENT_ACK transmitted to {}, expected_seq={}, target: {}", 
-                           peer_addr, *last_acked_data_seq, session_id.to_string());
-                }
+                    if let Err(e) = encrypt_and_send(
+                        &send_key, send_cipher,
+                        session_id, udp_send, peer_addr, &ack_frame,
+                    ).await {
+                        debug!("ack send error: {}", e);
+                    }
                 }
             }
         }

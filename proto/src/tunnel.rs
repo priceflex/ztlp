@@ -875,9 +875,11 @@ where
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
                 // Construct and send FRAME_ACK (legacy V1 with SACK fields omitted currently)
-                let mut ack_frame = Vec::with_capacity(9);
-                ack_frame.push(1); // 0x01 FRAME_ACK type byte correctly matched
+                let mut ack_frame = Vec::with_capacity(11);
+                ack_frame.push(0x10); // FRAME_ACK_V2
                 ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
+                let window_kb: u16 = 5734; // 10s of Megabytes
+                ack_frame.extend_from_slice(&window_kb.to_be_bytes());
                 
                 let pipeline_lock = pipeline.lock().unwrap();
                 if let Some(session) = pipeline_lock.get_session(session_id) {

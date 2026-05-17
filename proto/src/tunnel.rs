@@ -855,32 +855,46 @@ where
             // We just added ReceiveWindow earlier but didn't actually plug it in here 
             // after the re-edits. Let's fix that.
             let ordered_payloads = recv_window.receive(data_seq, payload.to_vec());
+            let mut gap_detected_or_progression = false;
+            
             if let Some(payloads) = ordered_payloads {
                 for (seq, p) in payloads {
                     tcp_writer.write_all(&p).await?;
                     // Advance last_acked_data_seq for contiguous data
                     if seq == *last_acked_data_seq {
                         *last_acked_data_seq = seq + 1;
+                        gap_detected_or_progression = true;
                     }
                 }
+            } else if data_seq > *last_acked_data_seq {
+                gap_detected_or_progression = true; // send dupack for fast recovery if gaps
             }
             
+            if gap_detected_or_progression {
             // Construct and send FRAME_ACK (throttle? For now, we send it per contiguous read block or gap detected,
             // which helps slide window on sender). We will just emit an ACK here.
-            let mut ack_frame = Vec::with_capacity(9);
-            ack_frame.push(FRAME_ACK);
+            let mut ack_frame = Vec::with_capacity(11);
+            ack_frame.push(crate::tunnel::FRAME_ACK_V2);
             ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
             
+            // Re-installing the legacy rwnd behavior. Gateway expects V2 ACK with rwnd to slide window.
+            let rwnd: u16 = 256; 
+            ack_frame.extend_from_slice(&rwnd.to_be_bytes());
+            
+            // To prevent ACK storms and Gateway drops/exhaustion, we must throttle ACKS.
+            // Ideally only 1 ACK per packet gap or maybe per 8 packets.
+            // For now, let's at least guarantee we only run if a gap or progression occurred
             let pipeline_lock = pipeline.lock().unwrap();
             if let Some(session) = pipeline_lock.get_session(session_id) {
-                let send_key = session.send_key;
-                drop(pipeline_lock);
-                
-                if let Err(e) = encrypt_and_send(
-                    &send_key, send_cipher,
-                    session_id, udp_send, peer_addr, &ack_frame,
-                ).await {
-                    debug!("ack send error: {}", e);
+                    let send_key = session.send_key;
+                    drop(pipeline_lock);
+                    
+                    if let Err(e) = encrypt_and_send(
+                        &send_key, send_cipher,
+                        session_id, udp_send, peer_addr, &ack_frame,
+                    ).await {
+                        debug!("ack send error: {}", e);
+                    }
                 }
             }
         }

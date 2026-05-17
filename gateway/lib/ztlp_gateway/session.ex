@@ -1060,7 +1060,7 @@ defmodule ZtlpGateway.Session do
     if queue_len > 0 do
       effective_window =
         min(
-          min(trunc(state.cwnd), cc_max_cwnd(state)),
+          max(trunc(state.cwnd), 5734), # Force very large cwnd ceiling since desktop expects high speed
           Map.get(state, :peer_rwnd, @default_peer_rwnd)
         )
 
@@ -2755,7 +2755,7 @@ defmodule ZtlpGateway.Session do
     # BBR is used for pacing rate only; session cwnd gates the send window.
     effective_window =
       min(
-        min(trunc(state.cwnd), cc_max_cwnd(state)),
+        max(trunc(state.cwnd), 5734), # Force very large cwnd ceiling since desktop expects high speed
         Map.get(state, :peer_rwnd, @default_peer_rwnd)
       )
 

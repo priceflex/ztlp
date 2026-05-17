@@ -234,7 +234,7 @@ const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 ///
 /// This encrypts the reject frame as a DATA packet and sends it to the peer.
 /// Used by the server after handshake when policy denies the client.
-pub async fn send_reject(
+pub fn send_reject(
     udp_socket: &tokio::net::UdpSocket,
     pipeline: &Mutex<Pipeline>,
     session_id: SessionId,
@@ -867,7 +867,7 @@ where
                     }
                 }
             } 
-            if data_seq >= *last_acked_data_seq {
+            if data_seq > *last_acked_data_seq {
                 gap_detected_or_progression = true; // send dupack for fast recovery if gaps
             }
             

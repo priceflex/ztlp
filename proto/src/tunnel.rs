@@ -866,7 +866,7 @@ where
                         gap_detected_or_progression = true;
                     }
                 }
-            } else if data_seq > *last_acked_data_seq {
+            } else if data_seq >= *last_acked_data_seq {
                 gap_detected_or_progression = true; // send dupack for fast recovery if gaps
             }
             

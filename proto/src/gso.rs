@@ -44,6 +44,93 @@ const UDP_GRO: libc::c_int = 104;
 /// up to 64 coalesced segments, 1MB is sufficient.
 pub const GRO_RECV_BUF_SIZE: usize = 1_048_576;
 
+// ─── Socket buffer tuning ───────────────────────────────────────────────────
+
+/// Best-effort: bump SO_RCVBUF / SO_SNDBUF on a tokio UdpSocket to the given
+/// byte value. Errors are swallowed and logged at debug level — most kernels
+/// silently cap the value at `net.core.rmem_max` / `net.core.wmem_max` when
+/// the requested size is larger; callers should still verify with
+/// `getsockopt` if they need an exact size.
+///
+/// Rationale: by default Linux uses `net.core.rmem_default` (typically 212KB
+/// or 1MB depending on distro). When multiple ZTLP tunnels share the same
+/// host, a sender that bursts faster than the receiver drains will overflow
+/// this small buffer and the kernel will drop packets, incrementing
+/// `UdpRcvbufErrors`. The current dumb-pipe bridge has no retransmit, so each
+/// kernel drop becomes a permanent transfer stall.
+///
+/// 7 MiB matches `net.core.rmem_max` on the standard ZTLP-tuned host (see
+/// `ztlp-validation-suite` step 1b).
+#[cfg(target_os = "linux")]
+pub fn set_udp_buffer_sizes(socket: &UdpSocket, rcvbuf: usize, sndbuf: usize) {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    // SO_RCVBUF (and SO_SNDBUF) doubles the value internally; setting
+    // SO_RCVBUFFORCE (since 2.6.14, requires CAP_NET_ADMIN) bypasses the
+    // rmem_max cap. We try the privileged variant first, then fall back.
+    let r = rcvbuf as libc::c_int;
+    let s = sndbuf as libc::c_int;
+    unsafe {
+        // Try SO_RCVBUFFORCE first (#33 on Linux); falls back to SO_RCVBUF.
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUFFORCE,
+            &r as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        ) != 0
+        {
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &r as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUFFORCE,
+            &s as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        ) != 0
+        {
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &s as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    // Read back actual SO_RCVBUF for visibility (kernel reports doubled value).
+    let mut actual: libc::c_int = 0;
+    let mut sz = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rcv_actual = unsafe {
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &mut actual as *mut _ as *mut libc::c_void,
+            &mut sz,
+        ) == 0
+        {
+            Some(actual)
+        } else {
+            None
+        }
+    };
+    debug!(
+        "set_udp_buffer_sizes: requested rcv={} snd={}, kernel rcvbuf actual={:?}",
+        rcvbuf, sndbuf, rcv_actual
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_udp_buffer_sizes(_socket: &UdpSocket, _rcvbuf: usize, _sndbuf: usize) {}
+
 // ─── GSO capability detection ───────────────────────────────────────────────
 
 /// Whether GSO is available on this system/socket.

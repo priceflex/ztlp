@@ -147,6 +147,8 @@ async fn bench_ztlp_tunnel(
     // Client UDP socket
     let client_udp = Arc::new(UdpSocket::bind(format!("{}:0", bind)).await?);
     let _client_udp_addr = client_udp.local_addr()?;
+    // Note: SO_RCVBUF / SO_SNDBUF are set inside run_bridge_inner, so all
+    // tunnel sockets get tuned regardless of which binary creates them.
 
     // Pipelines
     let server_pipeline = Arc::new(Mutex::new(Pipeline::new()));

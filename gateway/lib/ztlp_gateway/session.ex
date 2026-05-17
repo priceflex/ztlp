@@ -260,7 +260,7 @@ defmodule ZtlpGateway.RecvWindow do
   `ZtlpGateway.Session` for its receive path and is also directly testable.
   """
 
-  @recv_window_size 4096
+  @recv_window_size 65536
 
   @doc "Returns the window size constant."
   def window_size, do: @recv_window_size
@@ -433,7 +433,7 @@ defmodule ZtlpGateway.Session do
   # so the receive window must be at least as large as cwnd. Was 256, raised
   # to 4096 (2026-05-17) after observing ACKs being silently dropped as
   # `WINDOW_REJECT seq=1586 beyond window [121..376]` causing 30s stalls.
-  @recv_window_size 4096
+  @recv_window_size 65536
 
   # Tunnel frame types (must match Rust tunnel.rs / mux.rs constants)
   @frame_data 0x00
@@ -1019,7 +1019,7 @@ defmodule ZtlpGateway.Session do
       buffered_data = map_size(state.recv_buffer)
       buffered_total = MapSet.size(state.recv_window)
 
-      if stuck_ms >= 2000 and buffered_total > 0 do
+      if stuck_ms >= 500 and buffered_total > 0 do
         # Find the next available seq in the receive window (includes data AND fast-tracked ACKs)
         next_available =
           state.recv_window
@@ -1052,16 +1052,16 @@ defmodule ZtlpGateway.Session do
             {:stop, _reason, st} -> st
           end
 
-          ref = Process.send_after(self(), :recv_gap_check, 2000)
+          ref = Process.send_after(self(), :recv_gap_check, 500)
           {:noreply, %{new_state | recv_gap_timer_ref: ref}}
         else
-          ref = Process.send_after(self(), :recv_gap_check, 2000)
+          ref = Process.send_after(self(), :recv_gap_check, 500)
           {:noreply, %{state | recv_gap_timer_ref: ref}}
         end
       else
         # Not stuck long enough or no buffered packets
         ref = if buffered_total > 0 do
-          Process.send_after(self(), :recv_gap_check, 2000)
+          Process.send_after(self(), :recv_gap_check, 500)
         else
           nil
         end
@@ -1819,7 +1819,7 @@ defmodule ZtlpGateway.Session do
           state
         end
 
-      ref = Process.send_after(self(), :recv_gap_check, 2000)
+      ref = Process.send_after(self(), :recv_gap_check, 500)
       %{state | recv_gap_timer_ref: ref}
     else
       state

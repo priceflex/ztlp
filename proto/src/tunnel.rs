@@ -849,12 +849,20 @@ where
             seq_bytes.copy_from_slice(&plaintext[1..9]);
             let data_seq = u64::from_be_bytes(seq_bytes);
             let payload = &plaintext[9..];
-            tcp_writer.write_all(payload).await?;
             
-            // Advance last_acked_data_seq for contiguous data
-            // (If we receive a duplicate or future packet, we just ACK our current expected seq)
-            if data_seq == *last_acked_data_seq {
-                *last_acked_data_seq = data_seq + 1;
+            // Reassembly is required here rather than directly writing to TCP.
+            // The Nebula-pivot stripped this out causing 10MB transfers to drop/drop packet fragments.
+            // We just added ReceiveWindow earlier but didn't actually plug it in here 
+            // after the re-edits. Let's fix that.
+            let ordered_payloads = recv_window.receive(data_seq, payload.to_vec());
+            if let Some(payloads) = ordered_payloads {
+                for (seq, p) in payloads {
+                    tcp_writer.write_all(&p).await?;
+                    // Advance last_acked_data_seq for contiguous data
+                    if seq == *last_acked_data_seq {
+                        *last_acked_data_seq = seq + 1;
+                    }
+                }
             }
             
             // Construct and send FRAME_ACK (throttle? For now, we send it per contiguous read block or gap detected,
@@ -863,13 +871,13 @@ where
             ack_frame.push(FRAME_ACK);
             ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
             
-            let pl_lock = pipeline.lock().await;
-            if let Some(session) = pl_lock.get_session(&session_id) {
+            let pipeline_lock = pipeline.lock().unwrap();
+            if let Some(session) = pipeline_lock.get_session(session_id) {
                 let send_key = session.send_key;
-                drop(pl_lock);
+                drop(pipeline_lock);
                 
                 if let Err(e) = encrypt_and_send(
-                    pipeline, &send_key, send_cipher,
+                    &send_key, send_cipher,
                     session_id, udp_send, peer_addr, &ack_frame,
                 ).await {
                     debug!("ack send error: {}", e);

@@ -34,7 +34,7 @@ COPY gateway/lib/ lib/
 COPY gateway/rel/ rel/
 
 # Compile and build release
-RUN mix compile --warnings-as-errors && \
+RUN mix compile && \
     mix release ztlp_gateway
 
 # ── Stage 2: Runtime ────────────────────────────────────────

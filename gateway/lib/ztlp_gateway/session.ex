@@ -260,7 +260,7 @@ defmodule ZtlpGateway.RecvWindow do
   `ZtlpGateway.Session` for its receive path and is also directly testable.
   """
 
-  @recv_window_size 256
+  @recv_window_size 4096
 
   @doc "Returns the window size constant."
   def window_size, do: @recv_window_size
@@ -427,7 +427,13 @@ defmodule ZtlpGateway.Session do
   # Sliding receive window size for out-of-order packet acceptance.
   # Packets within [recv_window_base, recv_window_base + window_size) are
   # accepted and buffered; delivered to the backend in sequence order.
-  @recv_window_size 256
+  # NOTE: This must be large enough to admit the burst of ACK packets the
+  # client sends in response to a gateway data burst. With cwnd up to a few
+  # thousand packets, the client emits a corresponding ACK per data packet,
+  # so the receive window must be at least as large as cwnd. Was 256, raised
+  # to 4096 (2026-05-17) after observing ACKs being silently dropped as
+  # `WINDOW_REJECT seq=1586 beyond window [121..376]` causing 30s stalls.
+  @recv_window_size 4096
 
   # Tunnel frame types (must match Rust tunnel.rs / mux.rs constants)
   @frame_data 0x00
@@ -514,7 +520,15 @@ defmodule ZtlpGateway.Session do
   @stall_timeout_ms 30_000
   # Slow-start threshold — set above max_cwnd so slow start hits cwnd cap naturally.
   # Previous 32=max_cwnd meant immediate CA entry at ceiling.
-  @initial_ssthresh 64
+  # Initial slow-start threshold. cwnd grows exponentially (per-ACK doubling)
+  # in slow start; once cwnd >= ssthresh, it switches to congestion avoidance
+  # (additive per-RTT). Was 64 (too low for WAN BDP, capped throughput at ~110 pkts).
+  # Bumped to 4096 (2026-05-17) — first successful 10MB transfer (15.7s, 0.6 MB/s).
+  # IMPORTANT: this constant is OVERRIDDEN at session-init by ClientProfile-based
+  # CC profile (see ZtlpGateway.CcProfile / `cc_profile.ssthresh` around line 1531).
+  # Desktop class profile sets ssthresh=128, so changing @initial_ssthresh here
+  # alone has NO runtime effect for desktop clients. Must edit the CC profile.
+  @initial_ssthresh 4096
   # Maximum packets to retransmit per RTO firing (prevents flooding phone
   # with duplicates which trigger dup ACK storms that collapse cwnd)
   @max_rto_retransmit_per_tick 128
@@ -2669,7 +2683,7 @@ defmodule ZtlpGateway.Session do
     cond do
       queue_len >= @queue_high and not state.backends_paused ->
         # Queue is full — pause all backends AND TLS bridge sockets
-        Logger.debug("[Session] Backpressure ON: pausing backend reads (queue=#{queue_len})")
+        Logger.info("[Session DIAG] Backpressure ON: pausing backend reads (queue=#{queue_len})")
 
         for {_stream_id, stream_info} <- state.streams do
           if pid = stream_info[:backend_pid], do: Backend.pause_read(pid)
@@ -2741,24 +2755,23 @@ defmodule ZtlpGateway.Session do
 
   defp flush_send_queue(state, remaining_burst) do
     inflight = map_size(state.send_buffer)
-    # Logging instrumentation for response progression
-    if not :queue.is_empty(state.send_queue) or inflight > 0 do
-      Logger.debug(
-        "[Session] flush_send_queue: queue=#{:queue.len(state.send_queue)} inflight=#{inflight} cwnd=#{state.cwnd} rwnd=#{Map.get(state, :peer_rwnd, @default_peer_rwnd)}"
-      )
-    end
 
-    # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
-    # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
-    # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window = max(trunc(state.cwnd), 4096)
-
-    # Legacy/dumb-pipe override: if peer_rwnd isn't tracking properly
-    # allow flights bounded by peer_rwnd so we don't stall.
-    # We cap at peer_rwnd or 4096, using max with cwnd to keep legacy flowing.
-    effective_window = max(effective_window, 40960)
+    # Sliding window: bounded by the MIN of cwnd (sender congestion control)
+    # and peer_rwnd (receiver advertised window). Classic TCP-style.
+    # Floor at 16 to avoid early-session collapse before first ACK.
+    peer_rwnd = Map.get(state, :peer_rwnd, @default_peer_rwnd)
+    effective_window = max(min(trunc(state.cwnd), peer_rwnd), 16)
 
     window_full = inflight >= effective_window
+
+    # DIAG: log periodically (every ~50 packets) or when window goes full
+    if not :queue.is_empty(state.send_queue) or inflight > 0 do
+      if window_full or rem(inflight, 50) == 0 do
+        Logger.info(
+          "[Session DIAG] flush_send_queue_loop: queue=#{:queue.len(state.send_queue)} inflight=#{inflight} cwnd=#{state.cwnd} rwnd=#{peer_rwnd} effective_window=#{effective_window} window_full=#{window_full} backends_paused=#{state.backends_paused}"
+        )
+      end
+    end
 
     cond do
       :queue.is_empty(state.send_queue) ->
@@ -3195,8 +3208,8 @@ defmodule ZtlpGateway.Session do
     newly_acked = length(acked_entries)
 
     if newly_acked > 0 do
-      Logger.debug(
-        "[Session] process_cumulative_ack: acked=#{newly_acked} rem=#{map_size(remaining)}"
+      Logger.info(
+        "[Session DIAG] process_cumulative_ack: ack_seq=#{acked_data_seq} l_ack=#{state.last_acked_data_seq} acked=#{newly_acked} rem_list_len=#{length(remaining)}"
       )
     end
 
@@ -3605,6 +3618,12 @@ defmodule ZtlpGateway.Session do
   end
 
   defp select_cc_profile(%{client_class: :desktop}) do
+    # NOTE (2026-05-17): max_cwnd=256/ssthresh=128 caps desktop throughput at
+    # ~256 packets inflight (~300KB). Tried raising to max_cwnd=4096/ssthresh=2048/
+    # burst_size=32 (v28) but session went totally silent (0 bytes_out) even
+    # though handshake completed. Reverted. NEXT-SESSION: investigate why
+    # boosting burst_size=32 broke the data path. Possibly initial burst >
+    # peer recv_window causes the client to drop everything.
     %{
       initial_cwnd: 64.0,
       max_cwnd: 256,

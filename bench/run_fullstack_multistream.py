@@ -115,6 +115,7 @@ def run_n(n,size):
         time.sleep(1)
 
 def main():
+    subprocess.run(['pkill', '-f', 'ztlp connect'], stderr=subprocess.DEVNULL)
     ap=argparse.ArgumentParser(); ap.add_argument('--size',type=int,default=10*1024*1024); ap.add_argument('--ns',default='1,4,8,16,32')
     args=ap.parse_args(); LOG_DIR.mkdir(parents=True,exist_ok=True)
     for p in LOG_DIR.glob('*'):

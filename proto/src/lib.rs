@@ -64,6 +64,8 @@ pub mod reject;
 pub mod rekey;
 pub mod relay_pool;
 pub mod roaming;
+#[cfg(feature = "ios-sync")]
+pub mod session_health;
 pub mod security;
 pub mod session;
 pub mod stats;
@@ -76,6 +78,8 @@ pub mod ack_socket;
 #[cfg(feature = "tokio-runtime")]
 pub mod batch;
 #[cfg(feature = "tokio-runtime")]
+pub mod congestion;
+#[cfg(feature = "tokio-runtime")]
 pub mod dns;
 #[cfg(feature = "tokio-runtime")]
 pub mod gro_batch;
@@ -86,12 +90,14 @@ pub mod mobile;
 #[cfg(feature = "tokio-runtime")]
 pub mod nat;
 #[cfg(feature = "tokio-runtime")]
+#[allow(unsafe_code)]
+pub mod pacing;
+#[cfg(feature = "tokio-runtime")]
 pub mod policy;
 #[cfg(feature = "tokio-runtime")]
 pub mod punch;
 #[cfg(feature = "tokio-runtime")]
 pub mod relay;
-// Nebula-pivot R1: real module deleted; `send_controller.rs` is a tiny stub shim for vip.rs.
 #[cfg(feature = "tokio-runtime")]
 pub mod send_controller;
 #[cfg(feature = "tokio-runtime")]

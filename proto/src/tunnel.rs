@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -75,7 +75,7 @@ use tracing::{debug, info, warn};
 
 use crate::packet::{DataHeader, SessionId, DATA_HEADER_SIZE};
 use crate::pipeline::{compute_header_auth_tag, AdmissionResult, Pipeline};
-use crate::stats::{RxBatchStats, TunnelStats, TxBatchStats};
+use crate::stats::TunnelStats;
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -122,7 +122,7 @@ const MAX_SUB_BATCH: usize = 64;
 /// Desktop: 1200B to match — this is an MTU constraint, not a memory one.
 /// NOTE: This value MUST match the gateway's @max_payload_bytes (1140 + framing).
 /// Increasing for desktop requires a corresponding gateway change.
-pub const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
+const MAX_PLAINTEXT_PER_PACKET: usize = 1200;
 
 // ─── Frame types ────────────────────────────────────────────────────────────
 
@@ -228,17 +228,6 @@ pub struct ResetWaitResult {
 /// Keepalive interval — send a heartbeat ping if idle this long.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Per-tunnel kernel UDP socket buffer size (SO_RCVBUF / SO_SNDBUF).
-///
-/// 7 MiB matches the standard ZTLP-tuned host's `net.core.rmem_max`. The
-/// kernel silently caps to rmem_max when SO_RCVBUF is set; SO_RCVBUFFORCE
-/// bypasses the cap if the caller has CAP_NET_ADMIN. Without this tuning
-/// each tunnel inherits the system default (~200 KB - 1 MB), and the
-/// dumb-pipe's lack of retransmit converts each kernel-level UDP drop into
-/// a permanent transfer stall. Empirically (2026-05-17): bumping to 7 MiB
-/// eliminates all multistream stalls on a 2-core VM under N=32 concurrency.
-pub(crate) const TUNNEL_UDP_BUF_BYTES: usize = 7 * 1024 * 1024;
-
 // ─── Lazy Connect ───────────────────────────────────────────────────────────
 
 /// Send a REJECT frame to a peer over an established ZTLP session.
@@ -272,9 +261,9 @@ pub async fn send_reject(
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
 
     let mut header = DataHeader::new(session_id, packet_seq);
-    header.payload_len = ciphertext.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+    header.payload_len = ciphertext.len() as u16;
 
     let mut packet = header.serialize();
     packet.extend_from_slice(&ciphertext);
@@ -313,6 +302,14 @@ pub async fn wait_for_first_data(
 
                 let data = buf[..len].to_vec();
 
+                {
+                    let pl = pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
                 if data.len() < DATA_HEADER_SIZE {
                     continue;
                 }
@@ -322,12 +319,6 @@ pub async fn wait_for_first_data(
                 };
                 if header.session_id != session_id {
                     continue;
-                }
-                {
-                    let pl = pipeline.lock().await;
-                    if !matches!(pl.process(&data), AdmissionResult::Pass) {
-                        continue;
-                    }
                 }
 
                 buffered_packets.push(data);
@@ -342,26 +333,9 @@ pub async fn wait_for_first_data(
                         Err(_) => break,
                         Ok(Err(_)) => break,
                         Ok(Ok((glen, gaddr))) => {
-                            if gaddr != peer_addr || glen < DATA_HEADER_SIZE {
-                                continue;
+                            if gaddr == peer_addr && glen >= DATA_HEADER_SIZE {
+                                buffered_packets.push(buf[..glen].to_vec());
                             }
-
-                            let gdata = buf[..glen].to_vec();
-                            let header = match DataHeader::deserialize(&gdata) {
-                                Ok(h) => h,
-                                Err(_) => continue,
-                            };
-                            if header.session_id != session_id {
-                                continue;
-                            }
-                            {
-                                let pl = pipeline.lock().await;
-                                if !matches!(pl.process(&gdata), AdmissionResult::Pass) {
-                                    continue;
-                                }
-                            }
-
-                            buffered_packets.push(gdata);
                         }
                     }
                 }
@@ -393,6 +367,14 @@ pub async fn wait_for_first_data_channeled(
                 return Err("channel closed while waiting for first data".into());
             }
             Ok(Some((data, _addr))) => {
+                {
+                    let pl = pipeline.lock().await;
+                    let result = pl.process(&data);
+                    if !matches!(result, AdmissionResult::Pass) {
+                        continue;
+                    }
+                }
+
                 if data.len() < DATA_HEADER_SIZE {
                     continue;
                 }
@@ -402,12 +384,6 @@ pub async fn wait_for_first_data_channeled(
                 };
                 if header.session_id != session_id {
                     continue;
-                }
-                {
-                    let pl = pipeline.lock().await;
-                    if !matches!(pl.process(&data), AdmissionResult::Pass) {
-                        continue;
-                    }
                 }
 
                 let _ = recv_socket.send_to(&data, recv_target).await;
@@ -420,25 +396,10 @@ pub async fn wait_for_first_data_channeled(
                         Err(_) => break,
                         Ok(None) => break,
                         Ok(Some((gdata, _gaddr))) => {
-                            if gdata.len() < DATA_HEADER_SIZE {
-                                continue;
+                            if gdata.len() >= DATA_HEADER_SIZE {
+                                let _ = recv_socket.send_to(&gdata, recv_target).await;
+                                buffered_packets.push(gdata);
                             }
-                            let header = match DataHeader::deserialize(&gdata) {
-                                Ok(h) => h,
-                                Err(_) => continue,
-                            };
-                            if header.session_id != session_id {
-                                continue;
-                            }
-                            {
-                                let pl = pipeline.lock().await;
-                                if !matches!(pl.process(&gdata), AdmissionResult::Pass) {
-                                    continue;
-                                }
-                            }
-
-                            let _ = recv_socket.send_to(&gdata, recv_target).await;
-                            buffered_packets.push(gdata);
                         }
                     }
                 }
@@ -571,10 +532,6 @@ where
     .await
 }
 
-pub fn bridge_instrumentation_enabled() -> bool {
-    TunnelStats::new().enabled
-}
-
 /// Encrypt a plaintext frame and send as a ZTLP data packet.
 /// Fire-and-forget; returns the packet_seq used on success.
 async fn encrypt_and_send(
@@ -588,7 +545,9 @@ async fn encrypt_and_send(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let packet_seq = {
         let mut pl = pipeline.lock().await;
-        let session = pl.get_session_mut(&session_id).ok_or("session not found")?;
+        let session = pl
+            .get_session_mut(&session_id)
+            .ok_or("session not found")?;
         session.next_send_seq()
     };
     let mut nonce_bytes = [0u8; 12];
@@ -598,9 +557,9 @@ async fn encrypt_and_send(
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
     let mut header = DataHeader::new(session_id, packet_seq);
-    header.payload_len = encrypted.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+    header.payload_len = encrypted.len() as u16;
     let mut packet = header.serialize();
     packet.extend_from_slice(&encrypted);
     udp.send_to(&packet, peer_addr).await?;
@@ -622,31 +581,11 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     info!(
-        "run_bridge (nebula dumb-pipe): starting for session {} peer={} local_udp={:?} recv_mode={}",
+        "run_bridge (nebula dumb-pipe): starting for session {} peer={} local_udp={:?}",
         session_id,
         peer_addr,
-        udp_socket.local_addr(),
-        if udp_recv_override.is_some() { "demuxed" } else { "shared" }
+        udp_socket.local_addr()
     );
-
-    // Tune kernel UDP buffer sizes to reduce RcvbufErrors under concurrent
-    // load. The dumb-pipe has no retransmit, so each kernel-level drop is a
-    // permanent transfer stall. Without setsockopt, every UdpSocket inherits
-    // `net.core.rmem_default` (often 200 KB - 1 MB) and bursts overflow
-    // quickly when multiple tunnels share a host. Empirically (2026-05-17):
-    // bumping rcv+snd to 7 MiB takes a 2-core loopback bench from 11 stalls
-    // out of 32 streams to 0 stalls at every concurrency level.
-    //
-    // 7 MiB matches `net.core.rmem_max` on the standard ZTLP-tuned host
-    // (see `ztlp-validation-suite` step 1b). On hosts where rmem_max is
-    // lower the kernel silently caps the request; the SO_RCVBUFFORCE path
-    // bypasses the cap when ZTLP has CAP_NET_ADMIN (e.g. iOS NE,
-    // root-launched relay). On platforms that don't expose either knob
-    // the call is a no-op.
-    crate::gso::set_udp_buffer_sizes(&udp_socket, TUNNEL_UDP_BUF_BYTES, TUNNEL_UDP_BUF_BYTES);
-    if let Some(recv_sock) = udp_recv_override.as_ref() {
-        crate::gso::set_udp_buffer_sizes(recv_sock, TUNNEL_UDP_BUF_BYTES, TUNNEL_UDP_BUF_BYTES);
-    }
 
     // Pre-extract AEAD keys once.
     let (send_key, recv_key) = {
@@ -681,7 +620,6 @@ where
 
     let (mut tcp_reader, mut tcp_writer) = tokio::io::split(tcp_stream);
 
-    let use_demux_recv = udp_recv_override.is_some();
     let udp_send = udp_socket.clone();
     let udp_recv = udp_recv_override.unwrap_or_else(|| udp_socket.clone());
 
@@ -690,20 +628,9 @@ where
     // older tools that still parse it don't break.
     let mut data_seq: u64 = 0;
 
+    // Stats (dropped-to-stub for now; TODO(nebula-pivot-R5): wire real stats).
     let tunnel_stats = Arc::new(TunnelStats::new());
-    if let Ok(mut strategy) = tunnel_stats.send_strategy.lock() {
-        *strategy = if use_demux_recv {
-            "sendto/demuxed-recv".to_string()
-        } else {
-            "sendto/shared-recv".to_string()
-        };
-    }
-    tunnel_stats
-        .gro_available
-        .store(use_demux_recv, std::sync::atomic::Ordering::Relaxed);
-
-    let mut tx_batch_num: u64 = 0;
-    let mut rx_batch_num: u64 = 0;
+    let _ = tunnel_stats;
 
     // Flag set when a RESET frame arrives.
     let mut reset_received = false;
@@ -725,7 +652,7 @@ where
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
-            match handle_incoming_packet(
+            if let Err(e) = handle_incoming_packet(
                 &pkt,
                 &pipeline,
                 &recv_cipher,
@@ -736,8 +663,7 @@ where
             )
             .await
             {
-                Ok(_outcome) => {}
-                Err(e) => debug!("prefetched packet handling error: {}", e),
+                debug!("prefetched packet handling error: {}", e);
             }
             if reset_received {
                 break;
@@ -748,7 +674,6 @@ where
         tokio::select! {
             // ─── TCP → UDP: encrypt and fire-and-forget ──────────────
             read_result = tcp_reader.read(&mut tcp_buf), if !local_eof => {
-                let tcp_read_started = Instant::now();
                 match read_result {
                     Ok(0) => {
                         local_eof = true;
@@ -770,10 +695,6 @@ where
                         }
                     }
                     Ok(n) => {
-                        tx_batch_num = tx_batch_num.wrapping_add(1);
-                        let encrypt_started = Instant::now();
-                        let mut packet_count = 0usize;
-                        let mut udp_bytes = 0usize;
                         // Chunk into <= MAX_PLAINTEXT_PER_PACKET frames.
                         let mut off = 0;
                         while off < n {
@@ -784,8 +705,6 @@ where
                             frame.extend_from_slice(&data_seq.to_be_bytes());
                             frame.extend_from_slice(chunk);
                             data_seq = data_seq.wrapping_add(1);
-                            packet_count += 1;
-                            udp_bytes += DATA_HEADER_SIZE + frame.len() + 16;
                             if let Err(e) = encrypt_and_send(
                                 &pipeline, &send_key, &send_cipher,
                                 session_id, &udp_send, peer_addr, &frame,
@@ -794,28 +713,6 @@ where
                             }
                             off = chunk_end;
                         }
-                        let batch = TxBatchStats {
-                            batch_num: tx_batch_num,
-                            packet_count,
-                            tcp_bytes: n,
-                            udp_bytes,
-                            tcp_read_time: tcp_read_started.elapsed(),
-                            encrypt_time: encrypt_started.elapsed(),
-                            send_time: Duration::ZERO,
-                            window_wait_time: Duration::ZERO,
-                            send_strategy: if use_demux_recv {
-                                "sendto/demuxed-recv".to_string()
-                            } else {
-                                "sendto/shared-recv".to_string()
-                            },
-                            data_seq,
-                            cwnd: 0.0,
-                            effective_window: 0,
-                            window_stall: false,
-                        };
-                        batch.log();
-                        tunnel_stats.record_tx(&batch);
-                        let _ = tunnel_stats.maybe_report(0.0, 0.0, 0.0, 0.0);
                     }
                     Err(e) => {
                         debug!("tcp read error: {}", e);
@@ -826,16 +723,13 @@ where
 
             // ─── UDP → TCP: admission/replay → decrypt → write ──────
             udp_result = udp_recv.recv_from(&mut udp_buf) => {
-                let recv_started = Instant::now();
                 match udp_result {
                     Ok((len, from)) => {
-                        if !use_demux_recv && from != peer_addr {
+                        if from != peer_addr {
                             continue;
                         }
                         let pkt = &udp_buf[..len];
-                        rx_batch_num = rx_batch_num.wrapping_add(1);
-                        let decrypt_started = Instant::now();
-                        let outcome = match handle_incoming_packet(
+                        if let Err(e) = handle_incoming_packet(
                             pkt,
                             &pipeline,
                             &recv_cipher,
@@ -844,33 +738,8 @@ where
                             &mut reset_received,
                             &mut peer_fin,
                         ).await {
-                            Ok(o) => o,
-                            Err(e) => {
-                                debug!("incoming packet error: {}", e);
-                                IncomingPacketOutcome::dropped()
-                            }
-                        };
-                        let dropped = outcome.is_dropped();
-                        let delivered_tcp_bytes = outcome.delivered_tcp_bytes;
-                        let batch = RxBatchStats {
-                            batch_num: rx_batch_num,
-                            gro_segments: 1,
-                            packets_processed: if dropped { 0 } else { 1 },
-                            packets_dropped: if dropped { 1 } else { 0 },
-                            udp_bytes: len,
-                            tcp_bytes: delivered_tcp_bytes,
-                            recv_time: recv_started.elapsed(),
-                            pipeline_time: Duration::ZERO,
-                            decrypt_time: decrypt_started.elapsed(),
-                            reassembly_time: Duration::ZERO,
-                            tcp_write_time: Duration::ZERO,
-                            delivered_count: usize::from(delivered_tcp_bytes > 0),
-                            buffered_count: 0,
-                            reasm_buffer_depth: 0,
-                        };
-                        batch.log();
-                        tunnel_stats.record_rx(&batch);
-                        let _ = tunnel_stats.maybe_report(0.0, 0.0, 0.0, 0.0);
+                            debug!("incoming packet error: {}", e);
+                        }
                         if reset_received {
                             break;
                         }
@@ -904,7 +773,6 @@ where
     }
 
     let _ = tcp_writer.shutdown().await;
-    tunnel_stats.final_report(0.0, 0.0, 0.0, 0.0);
     info!("tunnel bridge terminated for session {}", session_id);
     if reset_received {
         Ok(BridgeOutcome::ResetReceived)
@@ -913,77 +781,8 @@ where
     }
 }
 
-/// Classification of an incoming packet's frame type (or why it was dropped).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IncomingFrameKind {
-    /// Carried a DATA frame (may or may not have delivered bytes).
-    Data,
-    Fin,
-    Reset,
-    RttPing,
-    RttPong,
-    Ack,
-    Nack,
-    Sack,
-    CorruptionNack,
-    Reject,
-    /// A recognized but uninteresting frame type (e.g. unknown / mux).
-    Other,
-    /// Packet was dropped before yielding a frame (admission, replay, malformed
-    /// header, wrong session_id, decrypt failure, or empty plaintext).
-    Dropped,
-}
-
-/// Structured outcome of processing a single incoming UDP packet. Used by the
-/// RX instrumentation in `run_bridge_inner` to build accurate `RxBatchStats`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct IncomingPacketOutcome {
-    pub frame_kind: IncomingFrameKind,
-    /// Bytes successfully written to `tcp_writer` for this packet.
-    pub delivered_tcp_bytes: usize,
-    /// True when `Pipeline::process` rejected the packet (admission/replay).
-    /// Not yet consumed by callers; kept for diagnostic future use.
-    #[allow(dead_code)]
-    pub admission_rejected: bool,
-}
-
-impl IncomingPacketOutcome {
-    fn dropped() -> Self {
-        Self {
-            frame_kind: IncomingFrameKind::Dropped,
-            delivered_tcp_bytes: 0,
-            admission_rejected: false,
-        }
-    }
-
-    fn admission_rejected() -> Self {
-        Self {
-            frame_kind: IncomingFrameKind::Dropped,
-            delivered_tcp_bytes: 0,
-            admission_rejected: true,
-        }
-    }
-
-    fn kind(kind: IncomingFrameKind) -> Self {
-        Self {
-            frame_kind: kind,
-            delivered_tcp_bytes: 0,
-            admission_rejected: false,
-        }
-    }
-
-    /// True when the packet did not yield a useful frame (control or data).
-    pub fn is_dropped(&self) -> bool {
-        matches!(self.frame_kind, IncomingFrameKind::Dropped)
-    }
-}
-
 /// Decrypt an incoming UDP packet and write any resulting TCP bytes.
 /// Sets flags on RESET / FIN. Replay/admission is done by Pipeline::process.
-///
-/// Returns a structured outcome so callers can build accurate instrumentation
-/// (frame kind, delivered bytes, dropped flag). The `Result` is reserved for
-/// the underlying `AsyncWrite` failure case only.
 async fn handle_incoming_packet<W>(
     pkt: &[u8],
     pipeline: &Mutex<Pipeline>,
@@ -992,7 +791,7 @@ async fn handle_incoming_packet<W>(
     tcp_writer: &mut W,
     reset_received: &mut bool,
     peer_fin: &mut bool,
-) -> Result<IncomingPacketOutcome, Box<dyn std::error::Error>>
+) -> Result<(), Box<dyn std::error::Error>>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -1000,18 +799,18 @@ where
     {
         let pl = pipeline.lock().await;
         if !matches!(pl.process(pkt), AdmissionResult::Pass) {
-            return Ok(IncomingPacketOutcome::admission_rejected());
+            return Ok(());
         }
     }
     if pkt.len() < DATA_HEADER_SIZE {
-        return Ok(IncomingPacketOutcome::dropped());
+        return Ok(());
     }
     let header = match DataHeader::deserialize(pkt) {
         Ok(h) => h,
-        Err(_) => return Ok(IncomingPacketOutcome::dropped()),
+        Err(_) => return Ok(()),
     };
     if header.session_id != session_id {
-        return Ok(IncomingPacketOutcome::dropped());
+        return Ok(());
     }
     let ciphertext = &pkt[DATA_HEADER_SIZE..];
     let mut nonce_bytes = [0u8; 12];
@@ -1019,56 +818,46 @@ where
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = match recv_cipher.decrypt(nonce, ciphertext) {
         Ok(p) => p,
-        Err(_) => return Ok(IncomingPacketOutcome::dropped()),
+        Err(_) => return Ok(()),
     };
     if plaintext.is_empty() {
-        return Ok(IncomingPacketOutcome::dropped());
+        return Ok(());
     }
-    let outcome = match plaintext[0] {
+    match plaintext[0] {
         FRAME_DATA => {
             // [FRAME_DATA | 8-byte data_seq | payload...]
             if plaintext.len() < 9 {
-                return Ok(IncomingPacketOutcome::dropped());
+                return Ok(());
             }
             let payload = &plaintext[9..];
-            let mut delivered = 0usize;
             if !payload.is_empty() {
                 tcp_writer.write_all(payload).await?;
-                delivered = payload.len();
-            }
-            IncomingPacketOutcome {
-                frame_kind: IncomingFrameKind::Data,
-                delivered_tcp_bytes: delivered,
-                admission_rejected: false,
             }
         }
         FRAME_FIN => {
             *peer_fin = true;
             let _ = tcp_writer.shutdown().await;
-            IncomingPacketOutcome::kind(IncomingFrameKind::Fin)
         }
         FRAME_RESET => {
             *reset_received = true;
-            IncomingPacketOutcome::kind(IncomingFrameKind::Reset)
         }
-        FRAME_RTT_PING => IncomingPacketOutcome::kind(IncomingFrameKind::RttPing),
-        FRAME_RTT_PONG => IncomingPacketOutcome::kind(IncomingFrameKind::RttPong),
-        FRAME_ACK => IncomingPacketOutcome::kind(IncomingFrameKind::Ack),
-        FRAME_NACK => IncomingPacketOutcome::kind(IncomingFrameKind::Nack),
-        FRAME_SACK => IncomingPacketOutcome::kind(IncomingFrameKind::Sack),
-        FRAME_CORRUPTION_NACK => IncomingPacketOutcome::kind(IncomingFrameKind::CorruptionNack),
+        FRAME_RTT_PING | FRAME_RTT_PONG => {
+            // Ignore — keepalive only in dumb-pipe mode.
+        }
+        FRAME_ACK | FRAME_NACK | FRAME_SACK | FRAME_CORRUPTION_NACK => {
+            // Reliability frames from a pre-pivot peer; ignore silently.
+        }
         FRAME_REJECT => {
             // Treat as a signal to tear down; surface as Closed.
             *peer_fin = true;
-            IncomingPacketOutcome::kind(IncomingFrameKind::Reject)
         }
         _ => {
             // Unknown / mux frames — not our concern; swallow.
-            IncomingPacketOutcome::kind(IncomingFrameKind::Other)
         }
-    };
-    Ok(outcome)
+    }
+    Ok(())
 }
+
 
 // ─── Service registry ───────────────────────────────────────────────────────
 
@@ -1432,8 +1221,13 @@ mod tests {
         let send_key = [0x42u8; 32];
         let recv_key = [0x43u8; 32];
 
-        let server_session =
-            SessionState::new(session_id, id_client.node_id, recv_key, send_key, false);
+        let server_session = SessionState::new(
+            session_id,
+            id_client.node_id,
+            recv_key,
+            send_key,
+            false,
+        );
 
         let _ = recv_key;
 
@@ -1501,11 +1295,7 @@ mod tests {
 
         client_task.await.unwrap();
 
-        assert!(
-            result.is_ok(),
-            "should receive first data: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "should receive first data: {:?}", result.err());
         let packets = result.unwrap();
         assert!(!packets.is_empty());
     }
@@ -1542,38 +1332,6 @@ mod tests {
 
             tokio::time::sleep(Duration::from_millis(50)).await;
             let good_pkt = build_data_packet(session_id, &send_key, 0, 0, b"right");
-            client_sock.send_to(&good_pkt, server_addr).await.unwrap();
-        });
-
-        let result = wait_for_first_data(
-            &server_sock,
-            &pipeline,
-            session_id,
-            client_addr,
-            Duration::from_secs(5),
-        )
-        .await;
-
-        client_task.await.unwrap();
-
-        assert!(result.is_ok());
-        let packets = result.unwrap();
-        assert_eq!(packets.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_wait_for_first_data_ignores_failed_admission() {
-        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
-            setup_lazy_connect_pair().await;
-
-        let client_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let mut bad_pkt = build_data_packet(session_id, &send_key, 0, 0, b"bad");
-            bad_pkt[0] ^= 0x01;
-            client_sock.send_to(&bad_pkt, server_addr).await.unwrap();
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let good_pkt = build_data_packet(session_id, &send_key, 1, 1, b"good");
             client_sock.send_to(&good_pkt, server_addr).await.unwrap();
         });
 

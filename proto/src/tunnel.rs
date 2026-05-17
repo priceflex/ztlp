@@ -876,12 +876,13 @@ where
             if gap_detected_or_progression {
                 // Construct and send FRAME_ACK 
                 let mut ack_frame = Vec::with_capacity(11);
-                ack_frame.push(crate::tunnel::FRAME_ACK_V2);
-                ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
+                ack_frame.push(1); // FRAME_ACK 
                 
-                // Set explicitly very high rwnd for tuning throughput (7MB approx window).
-                let rwnd: u16 = 5734; // 5734 packets * 1200 bytes = ~6.8MB 
-                ack_frame.extend_from_slice(&rwnd.to_be_bytes());
+                let cumulative_ack = *last_acked_data_seq;
+                ack_frame.extend_from_slice(&cumulative_ack.to_be_bytes());
+                
+                let sack_count: u8 = 0;
+                ack_frame.push(sack_count);
                 
                 let pipeline_lock = pipeline.lock().unwrap();
                 if let Some(session) = pipeline_lock.get_session(session_id) {

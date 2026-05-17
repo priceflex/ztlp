@@ -874,20 +874,16 @@ where
             // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
-            // Construct and send FRAME_ACK (throttle? For now, we send it per contiguous read block or gap detected,
-            // which helps slide window on sender). We will just emit an ACK here.
-            let mut ack_frame = Vec::with_capacity(11);
-            ack_frame.push(crate::tunnel::FRAME_ACK_V2);
-            ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
-            
-            // Re-installing the legacy rwnd behavior. Gateway expects V2 ACK with rwnd to slide window.
-            let rwnd: u16 = 256; 
-            ack_frame.extend_from_slice(&rwnd.to_be_bytes());
-            
-            // To prevent ACK storms and Gateway drops/exhaustion, we must throttle ACKS.
-            // Ideally only 1 ACK per packet gap or maybe per 8 packets.
-            // For now, let's at least guarantee we only run if a gap or progression occurred
-            let pipeline_lock = pipeline.lock().unwrap();
+    // Construct and send FRAME_ACK 
+                let mut ack_frame = Vec::with_capacity(11);
+                ack_frame.push(crate::tunnel::FRAME_ACK_V2);
+                ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
+                
+                // Set explicitly very high rwnd for tuning throughput (7MB approx window).
+                let rwnd: u16 = 5734; // 5734 packets * 1200 bytes = ~6.8MB 
+                ack_frame.extend_from_slice(&rwnd.to_be_bytes());
+                
+                let pipeline_lock = pipeline.lock().unwrap();
             if let Some(session) = pipeline_lock.get_session(session_id) {
                     let send_key = session.send_key;
                     drop(pipeline_lock);

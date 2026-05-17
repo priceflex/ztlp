@@ -2343,8 +2343,8 @@ defmodule ZtlpGateway.Session do
   # is non-empty but the window is full.
   defp flush_send_queue(state) do
     if not state.mux_mode do
-      # Limit to 128 packets per scheduled pacing tick for legacy
-      flush_send_queue(state, 128)
+      # Limit to 32 packets per scheduled pacing tick for legacy
+      flush_send_queue(state, 32)
     else
       flush_send_queue(state, cc_burst_size(state))
     end
@@ -2373,7 +2373,7 @@ defmodule ZtlpGateway.Session do
     # BBR is used for pacing rate only; session cwnd gates the send window.
     # For legacy_bypass, we still enforce a pacing limit so we don't overflow OS UDP buffers.
     effective_window = if legacy_bypass do
-      inflight + min(remaining_burst, 256)
+      inflight + min(remaining_burst, 32)
     else
       min(min(trunc(state.cwnd), cc_max_cwnd(state)), Map.get(state, :peer_rwnd, @default_peer_rwnd))
     end
@@ -2446,7 +2446,12 @@ defmodule ZtlpGateway.Session do
   end
 
   defp schedule_pacing_timer(%{pacing_timer_ref: nil} = state) do
-    ref = Process.send_after(self(), :pacing_tick, cc_pacing_interval_ms(state))
+    interval = if not state.mux_mode do
+      1
+    else
+      cc_pacing_interval_ms(state)
+    end
+    ref = Process.send_after(self(), :pacing_tick, interval)
     %{state | pacing_timer_ref: ref}
   end
   defp schedule_pacing_timer(state), do: state

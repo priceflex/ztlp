@@ -1058,11 +1058,7 @@ defmodule ZtlpGateway.Session do
     buf_len = map_size(state.send_buffer)
 
     if queue_len > 0 do
-      effective_window =
-        min(
-          max(trunc(state.cwnd), 5734), # Force very large cwnd ceiling since desktop expects high speed
-          Map.get(state, :peer_rwnd, @default_peer_rwnd)
-        )
+      effective_window = max(trunc(state.cwnd), 5734)
 
       window_open = buf_len < effective_window
 
@@ -1236,7 +1232,8 @@ defmodule ZtlpGateway.Session do
     # Session teardown check: kill if data in flight but no ACKs for 30s.
     stall_age = now - state.last_ack_advance_at
 
-    if map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
+    # Don't tear down on stalls if legacy/dumb-pipe multiplexing is disabled because we will never get an ACK
+    if state.mux_mode and map_size(state.send_buffer) > 0 and stall_age > @stall_timeout_ms do
       stream_dump =
         state.streams
         |> Enum.map(fn {sid, s} ->
@@ -2753,11 +2750,7 @@ defmodule ZtlpGateway.Session do
     # Always gate on session cwnd (packet count), NOT BBR's byte-based cwnd.
     # BBR cwnd collapses to BDP (~16 pkts at 120ms RTT) which throttles throughput.
     # BBR is used for pacing rate only; session cwnd gates the send window.
-    effective_window =
-      min(
-        max(trunc(state.cwnd), 5734), # Force very large cwnd ceiling since desktop expects high speed
-        Map.get(state, :peer_rwnd, @default_peer_rwnd)
-      )
+    effective_window = max(trunc(state.cwnd), 5734)
 
     window_full = inflight >= effective_window
 

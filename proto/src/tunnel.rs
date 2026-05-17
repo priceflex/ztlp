@@ -874,8 +874,8 @@ where
             // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
-                // Construct and send FRAME_ACK 
-                let mut ack_frame = Vec::with_capacity(11);
+                // Construct and send FRAME_ACK (V1)
+                let mut ack_frame = Vec::with_capacity(10);
                 ack_frame.push(1); // FRAME_ACK 
                 
                 let cumulative_ack = *last_acked_data_seq;

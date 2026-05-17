@@ -5110,7 +5110,24 @@ async fn cmd_ping(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (target_addr, _) = resolve_target(target, ns_server).await?;
 
-    let sock = UdpSocket::bind(bind).await?;
+    let raw_socket = socket2::Socket::new(
+        if bind.contains(':') && bind.starts_with('[') {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        },
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+
+    // Desktop/testbed multi-megabyte window tuning
+    let _ = raw_socket.set_recv_buffer_size(7 * 1024 * 1024);
+    let _ = raw_socket.set_send_buffer_size(7 * 1024 * 1024);
+
+    let addr: std::net::SocketAddr = bind.parse()?;
+    raw_socket.bind(&addr.into())?;
+    
+    let sock = UdpSocket::from_std(raw_socket.into())?;
     let local_addr = sock.local_addr()?;
 
     eprintln!(

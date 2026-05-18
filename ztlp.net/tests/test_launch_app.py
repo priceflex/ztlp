@@ -7,7 +7,7 @@ import unittest
 from http import HTTPStatus
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from launch_app.app import LaunchApp
+from launch_app.app import LaunchApp, validate_zone
 
 
 class LaunchAppTest(unittest.TestCase):
@@ -279,6 +279,62 @@ class LaunchAppTest(unittest.TestCase):
         self.assertIn('"key": "windows"', body)
         self.assertIn('"launch_url": "http://testserver/downloads/windows"', body)
         self.assertIn('"url": "https://github.com/priceflex/ztlp/releases/download/v-before-nebula-collapse/ztlp-v-before-nebula-collapse-x86_64-pc-windows-msvc.zip"', body)
+
+    def test_zone_accepts_long_dns_name(self):
+        # Construct a 200-char DNS-valid name made of multiple labels.
+        # label1 = 63 'a', label2 = 63 'b', label3 = 63 'c', plus ".ztlp" suffix = 63+1+63+1+63+5 = 196 — pad to 200.
+        long_zone = ("a" * 63) + "." + ("b" * 63) + "." + ("c" * 63) + ".ztlp"
+        self.assertEqual(len(long_zone), 196)
+        # extend with extra label to reach exactly 200
+        long_zone = ("a" * 63) + "." + ("b" * 63) + "." + ("c" * 63) + ".example.ztlp"
+        self.assertEqual(len(long_zone), 204)
+        # Use one that is <=253 — 204 is fine.
+        self.assertEqual([], validate_zone(long_zone))
+
+    def test_zone_rejects_overlong_total(self):
+        zone = ("a" * 63) + "." + ("b" * 63) + "." + ("c" * 63) + "." + ("d" * 63)
+        # 63*4 + 3 = 255 — should be rejected
+        self.assertGreater(len(zone), 253)
+        errors = validate_zone(zone)
+        self.assertTrue(errors, "expected validation errors for overlong zone")
+        self.assertTrue(any("253" in e or "long" in e.lower() for e in errors), errors)
+
+    def test_zone_rejects_overlong_label(self):
+        zone = ("a" * 64) + ".ztlp"
+        errors = validate_zone(zone)
+        self.assertTrue(errors)
+        self.assertTrue(any("63" in e or "label" in e.lower() for e in errors), errors)
+
+    def test_zone_rejects_leading_hyphen_label(self):
+        self.assertTrue(validate_zone("-bad.ztlp"))
+        self.assertTrue(validate_zone("bad-.ztlp"))
+
+    def test_zone_rejects_uppercase_then_normalized(self):
+        # validate_zone receives an already-normalized (lowercased) value in the app pipeline,
+        # so feeding "ACME.ZTLP" directly should fail; but a /start POST with "ACME.ZTLP"
+        # must succeed via normalize_zone + validate.
+        self.assertTrue(validate_zone("ACME.ZTLP"))
+        status, _headers, body = self.post_form(
+            "/start",
+            {
+                "organization_name": "Upper Org",
+                "admin_name": "Upper Admin",
+                "admin_email": "u@example.com",
+                "zone": "ACME.ZTLP",
+            },
+        )
+        self.assertEqual(HTTPStatus.CREATED, status)
+        conn = sqlite3.connect(self.db_path)
+        zone = conn.execute("SELECT zone FROM onboarding_requests").fetchone()[0]
+        conn.close()
+        self.assertEqual("acme.ztlp", zone)
+
+    def test_zone_rejects_underscore(self):
+        self.assertTrue(validate_zone("bad_zone.ztlp"))
+
+    def test_zone_rejects_empty_label(self):
+        self.assertTrue(validate_zone("acme..ztlp"))
+        self.assertTrue(validate_zone(".acme.ztlp"))
 
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="

@@ -103,7 +103,44 @@ DOWNLOAD_ASSETS = [
 ]
 ASSET_BY_KEY = {asset["key"]: asset for asset in DOWNLOAD_ASSETS}
 CHECKSUM_ASSET = "SHA256SUMS.txt"
-ZONE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$")
+ZONE_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def validate_zone(zone: str) -> list[str]:
+    """RFC 1035 zone validation.
+
+    Total length 1..253. At least one label (dot-separated). Each label 1..63 chars,
+    matches LDH (letters/digits/hyphen) but cannot start or end with a hyphen.
+    Assumes the caller has already lower-cased + stripped trailing dot; uppercase
+    inputs and double-dots are rejected as invalid.
+    """
+    errors: list[str] = []
+    if not zone:
+        errors.append("Zone is required.")
+        return errors
+    if len(zone) > 253:
+        errors.append("Zone is too long (must be 253 characters or fewer).")
+    if ".." in zone:
+        errors.append("Zone cannot contain empty labels (consecutive dots).")
+    labels = zone.split(".")
+    if not labels or any(label == "" for label in labels):
+        errors.append("Zone cannot contain empty labels.")
+    for label in labels:
+        if not label:
+            continue
+        if len(label) > 63:
+            errors.append(f"Zone label '{label[:16]}…' is longer than 63 characters.")
+            continue
+        if not ZONE_LABEL_RE.match(label):
+            errors.append(f"Zone label '{label}' must be lowercase letters, digits, or hyphens (and may not start or end with a hyphen).")
+    # de-dup while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for e in errors:
+        if e not in seen:
+            unique.append(e)
+            seen.add(e)
+    return unique
 
 
 def utcnow() -> dt.datetime:
@@ -610,8 +647,10 @@ def validate_start(values: dict) -> list[str]:
     if "@" not in values["admin_email"] or values["admin_email"].startswith("@") or values["admin_email"].endswith("@"):
         errors.append("A valid admin email is required.")
     zone = values["zone"]
-    if not zone or not ZONE_RE.match(zone) or ".." in zone:
-        errors.append("Zone must be a DNS-like name such as acme.ztlp.")
+    zone_errors = validate_zone(zone)
+    if zone_errors:
+        # Surface a friendly summary; keep the detail for logging via the list.
+        errors.append("Zone must be a valid DNS name (RFC 1035): " + zone_errors[0])
     return errors
 
 

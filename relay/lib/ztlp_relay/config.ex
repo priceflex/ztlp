@@ -320,6 +320,35 @@ defmodule ZtlpRelay.Config do
   end
 
   @doc """
+  Blocked gateway addresses to ignore during dynamic registration.
+
+  Useful for excluding stale or decommissioned gateways that still send
+  `GATEWAY_REGISTER` packets (e.g. an old testbed behind NAT that hasn't
+  been fully decommissioned). These addresses are filtered out from both
+  `pick_gateway/0` and `pick_gateway_for_service/1`.
+
+  Format: `ZTLP_RELAY_BLOCKED_GATEWAYS=host1:port1,host2:port2`
+  """
+  @spec blocked_gateway_addresses() :: MapSet.t({:inet.ip_address(), non_neg_integer()})
+  def blocked_gateway_addresses do
+    case System.get_env("ZTLP_RELAY_BLOCKED_GATEWAYS") do
+      nil ->
+        MapSet.new()
+
+      addrs_str ->
+        addrs_str
+        |> String.split(",", trim: true)
+        |> Enum.flat_map(fn addr_str ->
+          case parse_address(String.trim(addr_str)) do
+            {:ok, addr} -> [addr]
+            :error -> []
+          end
+        end)
+        |> MapSet.new()
+    end
+  end
+
+  @doc """
   Shared secret for gateway dynamic registration HMAC verification.
 
   Set via `ZTLP_RELAY_REGISTRATION_SECRET` env var.

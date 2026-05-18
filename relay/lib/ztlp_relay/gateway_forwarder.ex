@@ -230,28 +230,45 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   @impl true
   def handle_cast({:register_dynamic, address, node_id, service_name, ttl}, state) do
-    now = System.monotonic_time(:second)
-    expires_at = now + ttl
+    blocked = Config.blocked_gateway_addresses()
 
-    # Remove any existing entry for this node_id + service_name, then add fresh
-    dynamic =
-      Enum.reject(state.dynamic_gateways, fn gw ->
-        gw.node_id == node_id and gw.service_name == service_name
-      end)
+    if MapSet.member?(blocked, address) do
+      Logger.info(
+        "[GatewayForwarder] Blocked gateway registration from #{inspect(address)} " <>
+          "(node #{Base.encode16(node_id)}, service=#{service_name}) — on block list"
+      )
 
-    new_entry = %{
-      address: address,
-      node_id: node_id,
-      service_name: service_name,
-      expires_at: expires_at
-    }
+      # Remove any existing entry for this blocked gateway (decommission cleanup)
+      dynamic =
+        Enum.reject(state.dynamic_gateways, fn gw ->
+          gw.address == address
+        end)
 
-    Logger.info(
-      "[GatewayForwarder] Registered dynamic gateway #{Base.encode16(node_id)} " <>
-        "service=#{service_name} addr=#{inspect(address)} ttl=#{ttl}s"
-    )
+      {:noreply, %{state | dynamic_gateways: dynamic}}
+    else
+      now = System.monotonic_time(:second)
+      expires_at = now + ttl
 
-    {:noreply, %{state | dynamic_gateways: [new_entry | dynamic]}}
+      # Remove any existing entry for this node_id + service_name, then add fresh
+      dynamic =
+        Enum.reject(state.dynamic_gateways, fn gw ->
+          gw.node_id == node_id and gw.service_name == service_name
+        end)
+
+      new_entry = %{
+        address: address,
+        node_id: node_id,
+        service_name: service_name,
+        expires_at: expires_at
+      }
+
+      Logger.info(
+        "[GatewayForwarder] Registered dynamic gateway #{Base.encode16(node_id)} " <>
+          "service=#{service_name} addr=#{inspect(address)} ttl=#{ttl}s"
+      )
+
+      {:noreply, %{state | dynamic_gateways: [new_entry | dynamic]}}
+    end
   end
 
   def handle_cast({:register, session_id, client_addr, gateway_addr}, state) do

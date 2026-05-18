@@ -971,6 +971,10 @@ impl ServiceRegistry {
     ///
     /// If the DstSvcID is all zeros, returns the default service.
     /// Otherwise, trims trailing zeros and looks up by name.
+    /// If the named service is not found and the registry has exactly
+    /// one service (the implicit default), fall back to it. This allows
+    /// gateways with a single unnamed `--forward` to handle clients
+    /// that send an explicit service name (e.g., `tcp:22`).
     pub fn resolve(&self, dst_svc_id: &[u8; 16]) -> Option<(&str, SocketAddr)> {
         let name = if dst_svc_id == &[0u8; 16] {
             DEFAULT_SERVICE.to_string()
@@ -984,9 +988,23 @@ impl ServiceRegistry {
             String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
         };
 
-        self.services
-            .get_key_value(&name)
-            .map(|(key, addr)| (key.as_str(), *addr))
+        // Direct match
+        if let Some(entry) = self.services.get_key_value(&name) {
+            return Some((entry.0.as_str(), *entry.1));
+        }
+
+        // Fallback: if the registry only contains the default service, route
+        // any unrecognized name to it rather than rejecting outright.
+        if self.services.len() == 1
+            && self.services.contains_key(DEFAULT_SERVICE)
+        {
+            return self
+                .services
+                .get_key_value(DEFAULT_SERVICE)
+                .map(|(key, addr)| (key.as_str(), *addr));
+        }
+
+        None
     }
 
     /// Check if this registry has any services.
@@ -1224,6 +1242,42 @@ mod tests {
         let mut name = [0u8; 16];
         let src = b"unknown";
         name[..src.len()].copy_from_slice(src);
+        assert!(reg.resolve(&name).is_none());
+    }
+
+    #[test]
+    fn test_resolve_default_fallback() {
+        // When the gateway has only an unnamed --forward (default service)
+        // and the client requests a named service like "tcp:22", resolve
+        // should fall back to the default service.
+        let args = vec!["127.0.0.1:22".to_string()];
+        let reg = ServiceRegistry::from_forward_args(&args).unwrap();
+
+        // Request "tcp:22" which doesn't match _default exactly
+        let mut name = [0u8; 16];
+        let svc = b"tcp:22";
+        name[..svc.len()].copy_from_slice(svc);
+
+        // Should fall back to the default service
+        let result = reg.resolve(&name);
+        assert!(result.is_some());
+        let (svc_name, addr) = result.unwrap();
+        assert_eq!(svc_name, DEFAULT_SERVICE);
+        assert_eq!(addr, "127.0.0.1:22".parse::<std::net::SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_no_fallback_with_multiple_services() {
+        // When the gateway has multiple named services, an unrecognized
+        // name should NOT fall back to any default.
+        let args = vec![
+            "ssh:127.0.0.1:22".to_string(),
+            "rdp:127.0.0.1:3389".to_string(),
+        ];
+        let reg = ServiceRegistry::from_forward_args(&args).unwrap();
+        let mut name = [0u8; 16];
+        let svc = b"unknown";
+        name[..svc.len()].copy_from_slice(svc);
         assert!(reg.resolve(&name).is_none());
     }
 

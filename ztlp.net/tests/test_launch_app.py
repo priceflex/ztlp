@@ -595,6 +595,64 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.BAD_REQUEST, status)
         self.assertIn("verification", body.lower())
 
+    def test_two_separate_onboardings_get_distinct_metadata_and_third_collision_is_detected(self):
+        """Full end-to-end multi-zone flow:
+
+        1) Two distinct onboarding requests (acme.ztlp + bravo.ztlp) each go
+           through /start -> /claim -> /claim/launch.
+        2) Each gets its own bootstrap_service_name, enrollment token URI, and
+           the bootstrap.<zone> service name is zone-specific.
+        3) A third /api/zone-available?zone=acme.ztlp call reports the zone
+           as taken_locally.
+        """
+        zones = ["acme.ztlp", "bravo.ztlp"]
+        captured = []
+        for zone in zones:
+            status, _h, body = self.post_form(
+                "/start",
+                {
+                    "organization_name": f"Org {zone}",
+                    "admin_name": f"Admin {zone}",
+                    "admin_email": f"admin-{zone.replace('.', '-')}@example.com",
+                    "zone": zone,
+                },
+            )
+            self.assertEqual(HTTPStatus.CREATED, status, body[:200])
+            token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
+
+            status, _h, claim_body = self.request("GET", f"/claim?token={token}")
+            self.assertEqual(HTTPStatus.OK, status)
+            self.assertIn(f"bootstrap.{zone}", claim_body)
+
+            status, _h, launch_body = self.post_form("/claim/launch", {"token": token})
+            self.assertEqual(HTTPStatus.OK, status)
+            self.assertIn("Status: launch_requested", launch_body)
+            self.assertIn(f"bootstrap.{zone}", launch_body)
+            captured.append((zone, token))
+
+        # Pull metadata for both rows and verify they are distinct.
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT zone, bootstrap_service_name, enrollment_token_uri FROM onboarding_requests ORDER BY id"
+        ).fetchall()
+        conn.close()
+        self.assertEqual(2, len(rows))
+        zones_seen = {r[0] for r in rows}
+        services_seen = {r[1] for r in rows}
+        tokens_seen = {r[2] for r in rows}
+        self.assertEqual({"acme.ztlp", "bravo.ztlp"}, zones_seen)
+        self.assertEqual({"bootstrap.acme.ztlp", "bootstrap.bravo.ztlp"}, services_seen)
+        self.assertEqual(2, len(tokens_seen), "each onboarding must mint its own enrollment token URI")
+
+        # Third request with acme.ztlp must report taken_locally.
+        status, headers, body = self.request("GET", "/api/zone-available?zone=acme.ztlp")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        import json as _json
+        payload = _json.loads(body)
+        self.assertFalse(payload["available"])
+        self.assertEqual("taken_locally", payload["reason"])
+
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="
         start = body.index(marker)

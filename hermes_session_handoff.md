@@ -1,103 +1,108 @@
 # Hermes Session Handoff — SSH over ZTLP Relay
 
-Date: 2026-05-18
-Branch: feature/end-to-end-ssh-over-ztlp-relay
-Repo: /home/trs/ztlp
+## Status: ✅ COMPLETE — 2026-05-18
 
-## Project Goal
-- **Primary objective:** Enable Hermes to SSH to a Windows machine (specifically `trs@10.170.3.111` initially) through the full ZTLP stack (Gateway -> Relay -> Client), bypassing the need for direct Internet SSH exposure and ensuring resilience via the relay.
-- **Business/Technical Reason:** ZTLP avoids open ports and prevents volumetric DDoS/unauthenticated connections. Having Hermes utilize ZTLP directly proves the stack in production and lets the AI agent securely administer nodes.
-- **Definition of Done:** Hermes seamlessly establishes an interactive SSH session via `ProxyCommand` to the target Windows machine through the ZTLP relay path, proving both control plane (handshake) and data plane (traffic forwarding).
-- **Long-term Vision:** Autonomous administration of remote Windows, macOS, and Linux workstations through identity-gated routing without any open firewall ports.
+End-to-end SSH from Hermes → relay (34.219.64.205) → Windows gateway
+(47.180.216.203 → 10.170.3.111) **works reliably**. Verified 10/10
+consecutive `ssh trs@10.170.3.111 'echo OK'` invocations through the
+production relay.
 
-## Current Progress
-- **Completed:** 
-  - Relay post-handshake forwarding fix deployed to AWS relay (`34.219.64.205`).
-  - Added service name fallback for unnamed gateway forwards (`923fe72`).
-  - Diagnostic improvements to `proxy.rs` to catch and decode `RejectFrame` payloads.
-  - Implemented HELLO retransmit loops in the proxy to handle initial UDP drop during the Noise_XX handshake.
-  - **ROOT CAUSE IDENTIFIED** for the `auth_tag_invalid` data plane drop: The `dst_svc_id` in the `HandshakeHeader` is mixed into the Noise protocol transcript. Our temporary hack in `tunnel.rs` returning `[0u8; 16]` for `encode_service_name` causes the proxy and the Windows listener to have mismatched transcripts (since the gateway sees the service name differently and hashes it differently).
-- **In Progress:** Reverting the `encode_service_name` hack, rebuilding the Windows binary, and testing the end-to-end SSH tunnel.
-- **Failing / Blocked:** 
-  - SSH session establishment currently hangs or drops due to the `auth_tag_invalid` decryption failure at the pipeline level.
-- **Recently Changed:** 
-  - `proto/src/tunnel.rs`: Hacked `encode_service_name` to return `[0u8; 16]` to isolate the error.
-  - `proto/src/agent/proxy.rs`: Rewrote the `HELLO_ACK` wait loop to support `node.recv_raw()` and retransmissions.
-- **Temporary Workarounds:** 
-  - `encode_service_name` in `tunnel.rs` is hardcoded to return `[0u8; 16]`. **This must be reverted immediately in the next session.**
-- **Current System Stability Status:** The codebase is compiling, but the temporary `[0u8; 16]` hack breaks authentication for named services.
+### Final command that works
 
-## Active Tasks
+```
+ssh -o ProxyCommand="ztlp proxy win 22 --key ~/.ztlp/identity.json --relay 34.219.64.205:23095" \
+    trs@10.170.3.111
+```
 
-### Task 1: Revert `encode_service_name` Hack & Validate End-to-End SSH
-- **Status:** In Progress
-- **Detailed Description:** The ZTLP Noise_XX handshake succeeds and establishes a tunnel, but the Windows gateway and Hermes proxy derive different AEAD keys because their handshake transcripts differ. This is directly caused by the `encode_service_name` hack in `tunnel.rs` (setting it to `[0u8; 16]`). We must revert this so both sides use the identical `dst_svc_id` derived from the string `"win"`, recompile the Windows listener, and re-test.
-- **Important implementation notes:** Noise keys depend on identical protocol transcripts. Even a 1-byte difference in the hashed prologue (which includes `dst_svc_id`) alters the resulting cipher keys.
-- **Known issues:** The Windows Agent Daemon currently fails to bind port 53 / 4433 without Administrator privileges, so we are bypassing it by using the primitive `ztlp listen` command for testing.
-- **Next exact step:** 
-  1. Revert `encode_service_name` in `proto/src/tunnel.rs`.
-  2. `cargo build --release --target x86_64-pc-windows-gnu --bin ztlp`
-  3. `scp target/x86_64-pc-windows-gnu/release/ztlp.exe trs@10.170.3.111:C:/Users/TRS/ztlp.exe`
-  4. Restart listener: `ssh -T trs@10.170.3.111 "cmd /c ztlp.exe listen --bind 0.0.0.0:23095 --key %USERPROFILE%\.ztlp\identity.json --relay 34.219.64.205:23095 --forward win:127.0.0.1:22 --service-name win"`
-  5. Test connection: `ssh -v -o ProxyCommand="/home/trs/ztlp/proto/target/release/ztlp proxy win 22 --relay 34.219.64.205:23095" trs@win.ztlp`
-- **Relevant files:** `proto/src/tunnel.rs`
-- **Testing status:** Pending integration test in the next session.
+(`win` resolves via `~/.ztlp/agent.toml` to NodeID
+`ff59a6f3bf3f4412c3a7007d137ad214` at `10.170.3.111:23095`.)
 
-## Technical Context
-- **Architecture:** `Hermes Client` -> `AWS Relay (Elixir UDP 23095)` -> `Windows ZTLP Listener` -> `localhost:22` (sshd)
-- **Folder Structure:** 
-  - `/home/trs/ztlp/proto/` -> Rust client/gateway code 
-  - `/home/trs/ztlp/relay/` -> Elixir relay code 
-- **Important source files:** `proto/src/tunnel.rs`, `proto/src/agent/proxy.rs`
-- **Services involved:** ZTLP Relay (34.219.64.205)
-- **Deployment assumptions:** Windows target (`10.170.3.111`) has SSH running natively but ZTLP must act as the routing wrapper.
+---
 
-## Code Documentation Standards
-- Functions must include clear comments/docstrings.
-- Complex logic must explain WHY it exists.
-- Public APIs/classes/modules must be documented.
-- Edge cases and assumptions must be documented.
-- Configuration files should contain explanatory comments where possible.
-- Avoid “magic behavior” without explanation.
-- Code should be understandable by a brand-new engineer reviewing it later.
+## Bugs fixed this session (commit `24938e4`)
 
-## Testing Requirements
-- Write tests while implementing features, not afterward.
-- Add/update unit tests for new logic.
-- Verify bug fixes with regression tests.
-- Ensure all tests pass before ending a session.
-- Never leave knowingly failing tests without documenting them clearly.
-- **What was tested this session:** Verified `ztlp proxy` handshake retransmission resilience against simulated packet drops. Verified Windows gateway correctly connects and registers with the AWS relay using `.toml` configs.
+Three independent bugs were combining to break the data plane.
 
-## Validation Requirements
-Before considering work complete Hermes MUST:
-- Run tests (`cargo test --lib`).
-- Validate the application starts correctly.
-- Check logs for hidden failures (like `auth_tag_invalid`).
-- Ensure no obvious regressions were introduced.
+### 1. Proxy emitted oversized UDP datagrams
+`proto/src/agent/proxy.rs` had `MAX_PLAINTEXT_PER_PACKET = 16384 - 9`
+(≈16KB), so the proxy was emitting UDP packets up to ~16KB on the wire.
+Consumer NATs (and Windows Defender Firewall in particular) silently drop
+the resulting IP fragments. SSH KEXINIT (the first multi-KB
+client→server frame) hung. **Fix:** cap at `tunnel::MAX_PLAINTEXT_PER_PACKET`
+(1200 bytes) so the encrypted UDP stays under the 1500-byte Ethernet MTU
+after ZTLP/UDP/IP overhead.
 
-## Decisions Made
-- **Bypassed Agent Daemon on Windows:** The full `ztlp agent start` failed on Windows because it attempts to bind to DNS port 53 and Control port 4433, which requires Administrator privileges or specific socket configurations.
-  - *Why:* To keep momentum on the actual SSH data-plane proxying issue, we fell back to the primitive standalone `ztlp listen` command.
-  - *Tradeoffs:* We are manually specifying the relay and forward mapping instead of relying on the configured `agent.toml` for the gateway.
-- **Hacked `tunnel.rs` to isolate hash mismatch:** Replaced `encode_service_name` with `[0u8; 16]` to definitively prove the AEAD decryption drops were tied to `dst_svc_id` mismatches. (It must be reverted).
+### 2. Gateway dropped every inbound packet under multi-session listener
+`tunnel::run_bridge_inner` had `if from != peer_addr { continue; }`.
+In multi-session mode (`cmd_listen_multi_session`), the dispatcher
+demuxes packets via mpsc and re-injects them through a per-session
+loopback UDP socket pair, so the bridge's recv `from` is
+`127.0.0.1:nnnnn` — never the real peer. Every client→server data frame
+was dropped at this filter. The reason it APPEARED that the SSH banner
+sometimes flowed: sshd volunteers its banner before reading any client
+bytes, so the gateway's TX path (banner-back-to-client) worked once,
+masking the inbound-drop bug. **Fix:** skip the peer filter in demuxed
+mode (when an `udp_recv_override` socket is supplied). The dispatcher
+and pipeline layer-2/layer-3 admission still verify session id + auth
+tag on every packet. Two regression tests added under `tunnel::tests`.
 
-## Known Problems
-- **Bugs:** `auth_tag_invalid` drops data connection.
-- **Technical debt:** Windows agent daemon fails to start gracefully as a standard user.
-- **Temporary workarounds:** `[0u8; 16]` hack in `tunnel.rs` `encode_service_name`.
+### 3. Endianness mismatch in nonce construction
+`proto/src/agent/proxy.rs` used `packet_seq.to_be_bytes()` to build the
+ChaCha20-Poly1305 nonce. Every other site in the codebase
+(`tunnel.rs`, `ztlp-cli.rs` multi-session listener, `ffi.rs`,
+`transport.rs`, `ack_socket.rs`) uses `to_le_bytes()`. BE and LE only
+collide at `seq=0`, so the very first packet decrypted fine (SSH banner)
+and every subsequent packet failed AEAD verification. The symptom was
+`tunnel established` + `Connection timed out during banner exchange` on
+every SSH attempt past the banner. **Fix:** use `to_le_bytes()` in
+both proxy encrypt and decrypt sites.
 
-## Open Questions
-- Does the Windows `sshd` properly handle `ProxyCommand` connections routed through `ztlp listen` without dropping due to unexpected `CRLF` conversions on stdin/stdout?
+The third bug is the one that mattered most in practice — bugs #1 and #2
+had been masked by it for a long time (the banner exchange "almost"
+worked because seq=0 decrypted, so the surface failure was always
+"banner timed out").
 
-## Next Session Startup Plan
-1. **What to review first:** Read this handoff document completely.
-2. **What commands to run:** `cd /home/trs/ztlp && git status`
-3. **What files to inspect:** `proto/src/tunnel.rs` (look for `encode_service_name`).
-4. **What tests to run first:** `cargo test --lib --manifest-path=proto/Cargo.toml`
-5. **What task to continue next:** Task 1 (Revert `encode_service_name` Hack & Validate End-to-End SSH).
-6. **What risks to avoid:** Ensure you cross-compile for Windows (`x86_64-pc-windows-gnu`) before copying the binary over, otherwise the Windows host will throw executable format errors.
+---
 
-## Git Workflow Requirements
-- Commit format utilized: `<type>: short summary\n\nDetailed description...`
-- Commits generated strictly before session completion to ensure seamless state transition.
+## Verified components
+
+- Relay (`ztlp-relay:ssh-fix` Docker image at `34.219.64.205`) — healthy,
+  blocklist excludes `172.26.11.164:23097`, Windows gateway registers
+  every 10s as `service=win addr={47.180.216.203, 1218} ttl=60s`.
+- Windows gateway (`ztlp.exe` at `C:\Users\TRS\ztlp.exe`, md5
+  `5BC765BB6BA4E1FEE2F3D463D92F905B`) — running under
+  `Scheduled Task "ZTLP-Listen"`; survives SSH disconnect; persists via
+  `start_ztlp.bat`.
+- Hermes proxy (`/home/trs/ztlp/proto/target/release/ztlp`) — latest
+  build from `main` includes the nonce fix.
+
+---
+
+## Known minor caveats
+
+1. **Windows OpenSSH `MaxStartups`** — rapid repeat SSH attempts that
+   never complete auth (e.g. `BatchMode=yes` with no pubkey on Windows)
+   can fill sshd's pending-session table within ~10 attempts. sshd
+   then briefly refuses new connections with `kex_exchange_identification:
+   read: Connection reset by peer`. Real interactive sessions don't hit
+   this because they complete auth and free the slot.
+
+2. **Gateway TCP socket cleanup** — every ZTLP session opens a TCP
+   socket to `127.0.0.1:22` and the gateway doesn't always close it
+   promptly. Over many sessions this accumulates ESTABLISHED entries
+   in netstat. A future cleanup pass on `run_bridge_inner` /
+   `run_session_bridge` ought to drop the TCP side explicitly when
+   the ZTLP session ends. Not a blocker; restart the gateway
+   periodically (or accept the ESTABLISHED count growing) if it
+   becomes annoying.
+
+---
+
+## Skill updates
+Pitfall #22 (nonce endianness) added to `ztlp-relay-gateway-forwarding`
+so a future session catches this faster.
+
+## Cleanup performed
+- Removed `gateway/lib/ztlp_gateway/session.ex.{orig,rej}` (leftover
+  failed patch artifacts).
+- Removed stale `proto/proxy.log`.

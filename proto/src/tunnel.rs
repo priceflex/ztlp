@@ -1020,10 +1020,18 @@ impl ServiceRegistry {
 ///
 /// Pads with zeros if shorter than 16 bytes.
 /// Returns an error if the name is too long.
-// TEMPORARY HACK: ZTLP gateway ignores dst_svc_id in actual routing because it only uses
-// port config mapping, but protocol transcript requires identical bytes on both ends.
 pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    Ok([0u8; 16])
+    let bytes = name.as_bytes();
+    if bytes.len() > 16 {
+        return Err(format!(
+            "service name '{}' too long ({} bytes, max 16)",
+            name,
+            bytes.len()
+        ));
+    }
+    let mut buf = [0u8; 16];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(buf)
 }
 
 /// Parse a single `--forward` argument.

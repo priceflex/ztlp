@@ -314,11 +314,15 @@ use crate::ns_cbor::{cbor_extract_string, parse_ns_record, NsResponseStatus};
 /// * `port` — TCP port on the remote peer (e.g., 22 for SSH)
 /// * `identity_path` — Optional path to identity file (default: `~/.ztlp/identity.json`)
 /// * `ns_server` — Optional NS server address override
+/// * `relay_addr` — Optional relay server address (host:port). When set, handshake
+///   packets are sent to the relay instead of directly to the peer, enabling
+///   connectivity to peers behind NAT.
 pub async fn run_proxy(
     hostname: &str,
     port: u16,
     identity_path: Option<&str>,
     ns_server_override: Option<&str>,
+    relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Load config + identity ──────────────────────────────────────────
     let config = AgentConfig::load();
@@ -366,10 +370,22 @@ pub async fn run_proxy(
     let node = TransportNode::bind(&config.tunnel.bind).await?;
 
     let peer_addr = resolved_peer_addr(&resolution);
+
+    // ── Determine send address (relay or direct) ────────────────────────
+    let send_addr = if let Some(relay) = relay_addr {
+        let relay_sock: std::net::SocketAddr = relay.parse().map_err(|e| {
+            format!("invalid relay address '{}': {}", relay, e)
+        })?;
+        eprintln!("[ztlp proxy] relay: {} (target: {})", relay, peer_addr);
+        relay_sock
+    } else {
+        peer_addr
+    };
+
     let session_id = SessionId::generate();
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
-    eprintln!("[ztlp proxy] handshake → {}:{}", peer_addr, port);
+    eprintln!("[ztlp proxy] handshake → {}:{}{}", peer_addr, port, if relay_addr.is_some() { " [via relay]" } else { "" });
     // Encode the port as a service name for the remote listener
     let service_name = format!("tcp:{}", port);
     let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
@@ -390,7 +406,7 @@ pub async fn run_proxy(
     hello_hdr.dst_svc_id = dst_svc_id;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
-    node.send_raw(&pkt1, peer_addr).await?;
+    node.send_raw(&pkt1, send_addr).await?;
 
     // Message 2: receive HELLO_ACK
     let (recv2, _from2) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
@@ -416,7 +432,7 @@ pub async fn run_proxy(
     final_hdr.payload_len = msg3.len() as u16;
     let mut pkt3 = final_hdr.serialize();
     pkt3.extend_from_slice(&msg3);
-    node.send_raw(&pkt3, peer_addr).await?;
+    node.send_raw(&pkt3, send_addr).await?;
 
     // Finalize handshake
     if !ctx.is_finished() {
@@ -442,11 +458,15 @@ pub async fn run_proxy(
     );
 
     // ── Bidirectional pipe: stdin/stdout ↔ ZTLP tunnel ─────────────────
+    // Note: When a relay is configured, send_addr != peer_addr and the
+    // relay forwards our encrypted packets to the peer. The peer's
+    // responses come back directly to our UDP socket (via NAT punch-
+    // through from the handshake), so the recv path still works.
     run_stdio_bridge(
         node.socket.clone(),
         node.pipeline.clone(),
         session_id,
-        peer_addr,
+        send_addr,
         &send_key_bytes,
         &recv_key_bytes,
     )

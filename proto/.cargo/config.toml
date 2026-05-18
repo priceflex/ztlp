@@ -1,9 +1,3 @@
-# Per-target build overrides.
-# Desktop/server targets use Cargo.toml defaults (opt-level=3, unwind panics).
-# iOS targets override to optimize for size + abort panics (15MB NE limit).
-
-[target.aarch64-apple-ios]
-rustflags = ["-C", "opt-level=z", "-C", "panic=abort"]
-
-[target.aarch64-apple-ios-sim]
-rustflags = ["-C", "opt-level=z", "-C", "panic=abort"]
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-gcc-ar"

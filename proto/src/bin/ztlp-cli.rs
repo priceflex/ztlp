@@ -275,10 +275,11 @@ enum Commands {
     ///
     /// Acts as a responder for Noise_XX handshakes. After a peer connects
     /// and the handshake completes, enters interactive data exchange mode.
-    #[command(after_help = "EXAMPLES:\n  \
-            ztlp listen\n  \
-            ztlp listen --bind 0.0.0.0:23095\n  \
-            ztlp listen --key ~/.ztlp/identity.json --bind 0.0.0.0:23095")]
+    #[command(after_help = "EXAMPLES:\n  \\\
+            ztlp listen\n  \\\
+            ztlp listen --bind 0.0.0.0:23095\n  \\\
+            ztlp listen --key ~/.ztlp/identity.json --bind 0.0.0.0:23095\n  \\\
+            ztlp listen --key identity.json --bind 0.0.0.0:23095 --forward 127.0.0.1:22 --relay 34.219.64.205:23095")]
     Listen {
         /// Address to bind on
         #[arg(short, long, default_value = "0.0.0.0:23095")]
@@ -319,6 +320,18 @@ enum Commands {
         /// Maximum number of concurrent sessions (default 100)
         #[arg(long, default_value = "100")]
         max_sessions: usize,
+
+        /// Relay address for automatic gateway registration.
+        /// When set, the listener sends periodic GATEWAY_REGISTER packets
+        /// to the relay, enabling it to forward incoming HELLO packets
+        /// to this listener.
+        #[arg(long)]
+        relay: Option<String>,
+
+        /// Service name to register with the relay (default: "ztlp-gateway").
+        /// Only used when --relay is set. Padded to 16 bytes in the packet.
+        #[arg(long, default_value = "ztlp-gateway")]
+        service_name: String,
     },
 
     /// Manage ZTLP relay nodes
@@ -523,6 +536,12 @@ enum Commands {
         /// NS server address override (host:port)
         #[arg(long)]
         ns_server: Option<String>,
+
+        /// Relay server address (host:port). When specified, handshake
+        /// packets are sent to the relay instead of directly to the peer.
+        /// Useful for reaching peers behind NAT: `ztlp proxy server.ztlp 22 --relay relay.ztlp.net:23095`
+        #[arg(long)]
+        relay: Option<String>,
     },
 
     /// Manage the ZTLP agent daemon
@@ -2602,6 +2621,153 @@ async fn cmd_connect(
     Ok(())
 }
 
+// ─── Relay Gateway Registration ───────────────────────────────────────────
+
+/// GATEWAY_REGISTER packet format (as consumed by ztlp-relay UDP listener):
+///   magic:       0x5A37     (2 bytes, big-endian)
+///   type:        0x0A       (1 byte — GATEWAY_REGISTER)
+///   node_id:     16 bytes
+///   service_name:16 bytes   (padded with zeros)
+///   ttl:         4 bytes    (big-endian u32)
+///   timestamp:   8 bytes    (big-endian i64, unix timestamp)
+///   hmac:        32 bytes   (zeroed in dev mode when no registration secret)
+///
+/// Total: 14 + 16 + 16 + 4 + 8 + 32 = 78 bytes
+///
+/// The relay code at relay/lib/ztlp_relay/udp_listener.ex looks for:
+///   <<0x5A, 0x37, 0x0A, rest::binary>>
+/// and then parses the remaining fields.
+const GATEWAY_REGISTER_MAGIC: [u8; 2] = [0x5A, 0x37];
+const GATEWAY_REGISTER_TYPE: u8 = 0x0A;
+const RELAY_REGISTER_TTL: u32 = 60; // seconds — relay expires registration after TTL
+const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(30); // refresh at half-TTL
+
+/// Build a GATEWAY_REGISTER packet.
+///
+/// The HMAC is zeroed (dev-mode). In production the relay may require
+/// a configured registration secret — when it does, the HMAC must be
+/// computed over <<0x0A, node_id, service, ttl, timestamp>> using
+/// HMAC-SHA256 keyed with the shared secret.  For now we follow the
+/// same pattern the relay uses in unverified (nil secret) mode.
+fn build_gateway_register_packet(
+    node_id: &[u8; 16],
+    service_name: &str,
+    timestamp: i64,
+) -> Vec<u8> {
+    // Pad or truncate service name to exactly 16 bytes
+    let mut service_bytes = [0u8; 16];
+    let name_bytes = service_name.as_bytes();
+    let copy_len = name_bytes.len().min(16);
+    service_bytes[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    // Build the signed payload that HMAC would cover (for correctness if
+    // we later add secret-based auth).  The relay expects:
+    //   <<0x0A, node_id::16, service::16, ttl::32(big), timestamp::64(big)>>
+    let signed_payload: [u8; 1 + 16 + 16 + 4 + 8] = {
+        let mut buf = [0u8; 1 + 16 + 16 + 4 + 8];
+        buf[0] = GATEWAY_REGISTER_TYPE;
+        buf[1..17].copy_from_slice(node_id);
+        buf[17..33].copy_from_slice(&service_bytes);
+        buf[33..37].copy_from_slice(&RELAY_REGISTER_TTL.to_be_bytes());
+        buf[37..45].copy_from_slice(&timestamp.to_be_bytes());
+        buf
+    };
+
+    // HMAC (dev-mode: zeroed).  Production could use:
+    //   hmac = hmac_sha256(secret, &signed_payload)
+    let hmac = [0u8; 32];
+
+    // Full packet: magic + the rest (type + node_id + service + ttl + timestamp + hmac)
+    let mut packet = Vec::with_capacity(2 + GATEWAY_REGISTER_TYPE as usize + 16 + 16 + 4 + 8 + 32);
+    packet.extend_from_slice(&GATEWAY_REGISTER_MAGIC);
+    packet.extend_from_slice(&signed_payload);
+    packet.extend_from_slice(&hmac);
+    packet
+}
+
+/// Spawn a background task that sends an initial GATEWAY_REGISTER packet to the
+/// relay and then re-registers every 30 seconds to keep the registration alive.
+///
+/// The relay uses TTL-based expiration — by re-registering before the TTL
+/// expires (TTL=60s, interval=30s), the gateway stays registered indefinitely.
+///
+/// This uses the node's bound UDP socket so the source port matches the
+/// listener — the relay uses the sender address for forwarding.
+fn spawn_relay_registration(
+    node: &TransportNode,
+    identity: &NodeIdentity,
+    relay_addr: SocketAddr,
+    service_name: &str,
+) {
+    let socket = Arc::clone(&node.socket);
+    let node_id = identity.node_id.0;
+    let svc = service_name.to_string();
+
+    tokio::spawn(async move {
+        // Send initial registration
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let pkt = build_gateway_register_packet(&node_id, &svc, ts);
+
+        match socket.send_to(&pkt, relay_addr).await {
+            Ok(n) => {
+                debug!(
+                    "gateway registration sent to {} ({} bytes)",
+                    relay_addr, n
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "failed to send gateway registration to {}: {}",
+                    relay_addr, e
+                );
+            }
+        }
+
+        // Periodic re-registration loop
+        loop {
+            tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
+
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let pkt = build_gateway_register_packet(&node_id, &svc, ts);
+
+            match socket.send_to(&pkt, relay_addr).await {
+                Ok(n) => {
+                    debug!(
+                        "gateway re-registration sent to {} ({} bytes)",
+                        relay_addr, n
+                    );
+                    eprintln!(
+                        "{} gateway re-registered with {} (service: {})",
+                        c_green("✓"),
+                        relay_addr,
+                        svc
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "failed to re-register gateway with {}: {}",
+                        relay_addr, e
+                    );
+                    eprintln!(
+                        "{} failed to re-register with {}: {}",
+                        c_red("✗"),
+                        relay_addr,
+                        e
+                    );
+                }
+            }
+        }
+    });
+}
+
+// ─── Listen ─────────────────────────────────────────────────────────────────
+
 /// `ztlp listen` — Listen for incoming connections
 #[allow(clippy::too_many_arguments)]
 async fn cmd_listen(
@@ -2614,6 +2780,8 @@ async fn cmd_listen(
     stun_server: &Option<String>,
     nat_assist: bool,
     max_sessions: usize,
+    relay_addr: Option<&str>,
+    service_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
 
@@ -2685,6 +2853,24 @@ async fn cmd_listen(
             PolicyEngine::allow_all()
         }
     };
+
+    // Relay registration: when --relay is set, send periodic GATEWAY_REGISTER
+    // packets to the relay so it forwards incoming HELLO packets to this listener.
+    if let Some(relay) = relay_addr {
+        let relay_addr: SocketAddr = relay
+            .parse()
+            .map_err(|e| format!("invalid --relay address '{}': {}", relay, e))?;
+
+        // Spawn the relay registration task — sends initial REGISTER + periodic refreshes
+        spawn_relay_registration(
+            &node,
+            &identity,
+            relay_addr,
+            service_name,
+        );
+
+        eprintln!("{} {} (service: {})", c_cyan("Relay registered:"), relay, service_name);
+    }
 
     // Multi-session mode: when --forward is set and max_sessions > 1
     if !forward.is_empty() && max_sessions > 1 {
@@ -9114,13 +9300,15 @@ async fn cmd_proxy(
     port: u16,
     key: &Option<PathBuf>,
     ns_server: &Option<String>,
+    relay: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::proxy;
 
     let key_str = key.as_ref().map(|p| p.to_string_lossy().to_string());
     let ns_str = ns_server.as_ref().map(|s| s.as_str());
+    let relay_str = relay.as_ref().map(|s| s.as_str());
 
-    proxy::run_proxy(hostname, port, key_str.as_deref(), ns_str)
+    proxy::run_proxy(hostname, port, key_str.as_deref(), ns_str, relay_str)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
 }
@@ -9765,6 +9953,8 @@ async fn main() {
             stun_server,
             nat_assist,
             max_sessions,
+            relay,
+            service_name,
         } => {
             cmd_listen(
                 bind,
@@ -9776,6 +9966,8 @@ async fn main() {
                 stun_server,
                 *nat_assist,
                 *max_sessions,
+                relay.as_deref(),
+                service_name,
             )
             .await
         }
@@ -9975,7 +10167,8 @@ async fn main() {
             port,
             key,
             ns_server,
-        } => cmd_proxy(hostname, *port, key, ns_server).await,
+            relay,
+        } => cmd_proxy(hostname, *port, key, ns_server, relay).await,
 
         Commands::Agent(subcmd) => match subcmd {
             AgentCommands::Start { foreground, config } => {

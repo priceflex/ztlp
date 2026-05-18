@@ -2640,7 +2640,7 @@ async fn cmd_connect(
 const GATEWAY_REGISTER_MAGIC: [u8; 2] = [0x5A, 0x37];
 const GATEWAY_REGISTER_TYPE: u8 = 0x0A;
 const RELAY_REGISTER_TTL: u32 = 60; // seconds — relay expires registration after TTL
-const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(30); // refresh at half-TTL
+const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(10); // refresh at half-TTL
 
 /// Build a GATEWAY_REGISTER packet.
 ///

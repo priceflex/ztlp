@@ -1,148 +1,78 @@
 # Hermes Session Handoff (Updated 2026-05-18)
 
 ## 1. Project Goal
-- Primary objective: enable Hermes to SSH to a Windows machine through ZTLP using the real relay-backed production path, so Hermes can administer Windows hosts without direct Internet SSH exposure.
-- Immediate target host: `trs@10.170.3.111`.
-- Scope for this session: complete the client-side/proxy-side engineering needed for relay-based SSH targeting, document the workflow, and verify what is still missing on the Windows host.
+- **Primary objective:** Enable Hermes to SSH to a Windows machine (specifically `trs@10.170.3.111` initially) through the full ZTLP stack (Gateway -> Relay -> Client), bypassing the need for direct Internet SSH exposure and ensuring resilience via the relay.
+- **Vision:** Hermes acts autonomously to administer, test, and manage remote Windows (and eventually macOS/Linux) workstations securely over ZTLP.
+- **Definition of Done:** Hermes can seamlessly establish an interactive SSH session to the target Windows machine through the ZTLP relay path, proving both the control plane (handshake) and data plane (traffic forwarding) function perfectly.
 
-## 2. What Was Completed This Session
-1. Created feature branch: `feature/windows-relay-ssh-access`.
-2. Reviewed repo docs, existing handoff, git state, CI workflow, proto README, and proxy-related design docs.
-3. Verified the Windows host is reachable by normal SSH and inspected its current state.
-4. Confirmed on the Windows host:
-   - hostname: `DESKTOP-LRC8DKH`
-   - user: `desktop-lrc8dkh\trs`
-   - OpenSSH `sshd` service is running
-   - port 22 is listening on `0.0.0.0` and `::`
-   - OpenSSH firewall rules are enabled
-   - `ztlp` is NOT currently installed on PATH there
-5. Replaced the temporary hardcoded Windows hack in `proto/src/agent/proxy.rs` with a production-safe, config-driven mechanism.
-6. Added agent config support for static proxy targets in `proto/src/agent/config.rs`.
-7. Added/updated unit tests with TDD coverage for:
-   - static proxy target TOML parsing
-   - optional NodeID decoding
-   - static-target preference over NS lookup
-   - domain-map / native-name fallback to NS lookup
-   - SVC parsing error path when address is missing
-   - resolved peer address usage
-8. Added operator documentation: `docs/WINDOWS-RELAY-SSH.md`.
-9. Saved implementation plan: `docs/plans/2026-05-18-windows-relay-ssh-access.md`.
+## 2. Current Progress
+- **What Was Completed This Session:**
+  - **Identified and fixed the root cause of the data-plane stall over relay:** After the Noise_XX handshake completes, ZTLP peers switch to Noise transport packets (which lack the ZTLP magic header). The relay's admission pipeline was dropping these at Layer 1.
+  - **Implemented the fix in the Relay:**
+    - Modified `GatewayForwarder` to maintain a public ETS table (`:ztlp_gateway_peers`) mapping `peer_addr` -> `{session_id, other_peer_addr}`.
+    - Added an O(1) fast-path lookup (`lookup_by_peer/1`) to `GatewayForwarder`.
+    - Modified `UdpListener.handle_packet/3` to fall back to this fast-path lookup when a packet fails the Layer 1 magic check. If the sender is a known peer in an established forwarded session, the relay now blind-forwards the raw bytes to the other peer.
+  - **Added comprehensive tests:** Wrote 4 new unit tests in `gateway_forwarder_test.exs` verifying client->gateway routing, gateway->client routing, unknown peer drops, and NAT rebinding (`update_client/2`).
+  - **Validated the Relay Fix:** All 583 Elixir tests pass locally with 0 failures (`mix compile --warnings-as-errors` and `mix test`).
+  - **Committed and Pushed:** The relay fix is committed locally (`bf687ec`) and pushed to the remote branch `feature/ssh-over-ztlp-relay-fix`.
+  - **DevOps Skill Created:** Formally documented the "always mirror and compile locally before patching production" rule as a Hermes skill to prevent the hours of blind `sed` patching errors encountered today.
 
-## 3. Code Changes Landed
-### Commit 1
-- `9d8c1ca` — Add config-driven static proxy targets
+- **What is Currently in Progress / Blocked:**
+  - **Blocked:** Deploying the validated relay fix to the AWS production server (`34.219.64.205`). The `scp` command to transfer the fixed `.ex` files and the subsequent SSH command to trigger the docker rebuild require user approval due to the raw IP address.
 
-### Commit 2
-- `8d38559` — Remove remaining hardcoded Windows-specific fallback logic from proxy runtime path
+- **System Stability:** The relay codebase on `feature/ssh-over-ztlp-relay-fix` in the `ztlp` repo is heavily tested and stable locally. The production AWS server is currently running an older image.
 
-### Files changed
-- `proto/src/agent/config.rs`
-- `proto/src/agent/proxy.rs`
-- `docs/WINDOWS-RELAY-SSH.md`
-- `docs/plans/2026-05-18-windows-relay-ssh-access.md`
+## 3. Active Tasks
 
-## 4. New Behavior
-`ztlp proxy` now resolves a target in this order:
-1. exact hostname match in `~/.ztlp/agent.toml` `[proxy_targets."host"]`
-2. otherwise existing native `.ztlp` / `dns.domain_map` → NS lookup path
+### Task 1: Deploy Relay Fix to Production
+- **Status:** **Blocked** (Awaiting user approval for SCP/SSH commands to raw IP)
+- **Description:** Transfer the validated Elixir source files to the AWS relay server and rebuild the docker container.
+- **Relevant Files:**
+  - `relay/lib/ztlp_relay/gateway_forwarder.ex`
+  - `relay/lib/ztlp_relay/udp_listener.ex`
+  - `relay/test/ztlp_relay/gateway_forwarder_test.exs`
+- **Next exact step:** Once approved, execute the `scp` transfer and `ssh` rebuild commands.
+  ```bash
+  scp -i /home/trs/.ssh/id_rsa -o ConnectTimeout=10 /home/trs/ztlp/relay/lib/ztlp_relay/gateway_forwarder.ex /home/trs/ztlp/relay/lib/ztlp_relay/udp_listener.ex /home/trs/ztlp/relay/test/ztlp_relay/gateway_forwarder_test.exs ubuntu@34.219.64.205:/tmp/
+  
+  ssh -o ConnectTimeout=10 -i /home/trs/.ssh/id_rsa ubuntu@34.219.64.205 "mv /tmp/gateway_forwarder.ex ~/ztlp-relay/lib/ztlp_relay/gateway_forwarder.ex && mv /tmp/udp_listener.ex ~/ztlp-relay/lib/ztlp_relay/udp_listener.ex && mv /tmp/gateway_forwarder_test.exs ~/ztlp-relay/test/ztlp_relay/gateway_forwarder_test.exs && cd ~/ztlp-relay && docker build -t ztlp-relay:noise-fix . && docker rm -f ztlp-relay && docker run -d --name ztlp-relay -p 23095:23095/udp -p 9101:9101 -e ZTLP_RELAY_PORT=23095 -e ZTLP_RELAY_VIP_ENABLED=false -e ZTLP_RELAY_METRICS_ENABLED=true -e ZTLP_RELAY_METRICS_PORT=9101 -e ZTLP_LOG_LEVEL=debug -e ZTLP_RELAY_SESSION_TIMEOUT_MS=300000 ztlp-relay:noise-fix"
+  ```
+- **Testing:** Production deployment must be followed immediately by an end-to-end SSH test.
 
-Static proxy targets support:
-- `ztlp_name` (optional)
-- `addr` (required, `host:port`)
-- `node_id` (optional, 32-char hex)
+### Task 2: End-to-End SSH Validation
+- **Status:** **Not Started** (Depends on Task 1)
+- **Description:** Verify that Hermes can establish an interactive SSH session to the Windows host through the updated relay.
+- **Next exact step:** Run the proxy command and attempt SSH.
+  ```bash
+  /home/trs/ztlp/proto/target/release/ztlp proxy windows-workstation.techrockstars.ztlp 22 --key /home/trs/.ztlp/identity.json --relay 34.219.64.205:23095
+  ```
+  (Note: The proxy command needs to bridge stdio to the SSH client).
 
-This gives us a clean bridge for real-world relay testing before NS records are fully present.
+## 4. Technical Context
+- **Architecture:** 
+  - **Relay (Elixir):** Runs on AWS (`34.219.64.205`). Handles UDP packet routing. Uses a 3-layer admission pipeline. 
+  - **Client/Gateway (Rust):** Windows host runs `ztlp listen` (acting as gateway). Hermes Linux host runs `ztlp proxy` (acting as client).
+- **Core issue resolved:** The Relay previously only routed ZTLP handshake packets. It now acts as a pure UDP forwarder for recognized peer pairs after the handshake, enabling the Noise transport packets (which lack ZTLP headers) to flow.
+- **Folder Structure:** 
+  - Rust client/gateway code: `/home/trs/ztlp/proto/`
+  - Elixir relay code: `/home/trs/ztlp/relay/` (Crucially, the relay source is tracked within the main `ztlp` repo.)
+- **Configuration:** Static proxy mappings are defined in `/home/trs/.ztlp/agent.toml`.
 
-## 5. Example Operator Config
-Example Linux-side `~/.ztlp/agent.toml`:
+## 5. Decisions Made
+1. **Relay Data-Plane Forwarding via ETS:** Decided to implement the post-handshake forwarding lookup as an O(1) ETS read (`:ztlp_gateway_peers`) rather than a GenServer call to `GatewayForwarder`. This avoids adding a GenServer bottleneck to the hot data path in the UDP listener.
+2. **"Never edit production source blind" Skill:** Established a hard rule (saved as a Hermes skill) to always pull production code into a local git branch and compile it using the local toolchain before attempting fixes. This decision was made after wasting significant time battling Elixir syntax errors via remote `sed` patches. The local toolchain guarantees syntax correctness before deployment.
 
-```toml
-[ns]
-servers = ["<ns-host>:23096"]
+## 6. Known Problems
+- **Stale Gateway Registrations:** Previously, a stale docker gateway from an old AWS testbed (`172.26.11.164:23097`) was interfering with the round-robin gateway selection on the relay. This was killed earlier, but if the full-stack testbed is spun up again, it may cause routing conflicts unless gateway targeting is strictly scoped (e.g., via distinct service names rather than round-robin).
 
-[tunnel]
-prefer_relay = true
-relays = ["<relay-host>:23095"]
+## 7. Open Questions
+- Does the Windows `ztlp listen` command currently running (`PID 8832` via Scheduled Tasks) need to be restarted to re-register with the relay after the Docker container is rebuilt and restarted? (Most likely, yes, or wait 30s for its periodic `--relay` registration tick).
 
-[proxy_targets."windows-relay.internal.techrockstars.com"]
-ztlp_name = "windows.techrockstars.ztlp"
-addr = "10.170.3.111:23095"
-node_id = "b88397923c2518ca6aa400eb79a18c7b"
-```
-
-Example SSH config:
-
-```sshconfig
-Host windows-relay.internal.techrockstars.com
-    User trs
-    ProxyCommand ztlp proxy %h %p
-```
-
-## 6. Validation Performed
-### Git / repo startup checks
-- current working repo: `/home/trs/ztlp`
-- starting branch was `main`
-- feature branch created successfully
-- existing unrelated local changes were present before work:
-  - `proto/src/agent/proxy.rs` was already modified with a dev hack
-  - `v30-telemetry-evidence.log` untracked
-
-### Test execution
-Ran from `/home/trs/ztlp/proto`:
-- `cargo test --lib agent::config` → passed
-- `cargo test --lib agent::proxy` → passed
-- `cargo test --lib` → passed (`884 passed, 0 failed`)
-
-Note: test output still contains pre-existing warnings in unrelated proto code (`ffi.rs`, `recv_window.rs`, `tunnel.rs`). No failures.
-
-### CI relevance
-Current CI in `.github/workflows/ci.yml` covers:
-- Rust formatting, clippy, build, lib tests
-- relay/ns/gateway Elixir tests
-- interop suite
-- performance gate
-
-This session only reran the Rust lib-test subset locally.
-
-## 7. What Is Still Blocked
-End-to-end ZTLP SSH to the Windows host is NOT complete yet because the Windows machine does not currently have `ztlp` installed/running.
-
-That means:
-- client-side ProxyCommand support is ready
-- relay-first config shape is ready
-- but the remote Windows endpoint is not yet exposing a ZTLP listener such as:
-
-```powershell
-ztlp listen --key C:\ProgramData\ztlp\machine.json --bind 0.0.0.0:23095 --forward ssh:127.0.0.1:22
-```
-
-Without that listener, Hermes cannot complete a real ZTLP handshake to the Windows box.
-
-## 8. Exact Next Steps
-1. Build or provide a Windows `ztlp.exe` binary for the target machine.
-2. Copy/install it on `10.170.3.111`.
-3. Generate or provision a ZTLP identity on that host.
-4. Start `ztlp listen` on Windows forwarding to `127.0.0.1:22`.
-5. Decide the final relay endpoint and populate Linux-side `tunnel.relays` / `prefer_relay = true`.
-6. If NS records are not ready, keep using `proxy_targets`; if NS is ready, register proper SVC/KEY records and remove the static override.
-7. From Hermes/Linux, run:
-   - `ztlp proxy windows-relay.internal.techrockstars.com 22`
-   - then `ssh windows-relay.internal.techrockstars.com`
-8. If the Windows listener is long-lived, install it as a Windows service after validation.
-
-## 9. Operational Notes / Pitfalls
-- `proxy_targets` is exact-match by hostname.
-- `addr` must point to the actual ZTLP endpoint, not just the SSH endpoint.
-- `node_id` is optional; omit it if not yet known.
-- `parse_svc_response` now fails cleanly instead of silently substituting a host-specific fallback.
-- `run_proxy` now uses the resolved address; there is no remaining runtime hardcoded `10.170.3.111` logic.
-- Remaining appearances of `10.170.3.111` in `proxy.rs` are test fixtures only.
-- Do not lose sight of the unrelated untracked file: `v30-telemetry-evidence.log`.
-
-## 10. Recommended Startup For Next Session
-1. Read this handoff and `docs/WINDOWS-RELAY-SSH.md`.
-2. Check branch and git status.
-3. Build or locate a Windows `ztlp.exe`.
-4. SSH to `trs@10.170.3.111` and install/configure ZTLP.
-5. Start a Windows-side ZTLP listener for SSH.
-6. Run a real `ztlp proxy` / `ssh` validation over the relay path.
+## 8. Next Session Startup Plan
+1. **Review:** Read this handoff document completely.
+2. **Check Git:** Run `git status` and `git branch` (Ensure you are on `feature/ssh-over-ztlp-relay-fix`).
+3. **Execute Deployment (Action Required):** Once user approval is granted for the raw IP, run the `scp` and `ssh` docker rebuild commands detailed in Task 1.
+4. **Restart Windows Listener:** Ensure the Windows host (`trs@10.170.3.111`) has restarted its `ztlp` listener to register with the freshly started relay.
+5. **Validation Test:** Run the `ztlp proxy` command and use the `ssh` client to connect through it. Verify the SSH banner arrives and an interactive terminal is established.
+6. **Merge and Release:** Once E2E testing passes, merge `feature/ssh-over-ztlp-relay-fix` to `main`, push, ensure CI/CD is green, and create the final GitHub release.
+7. **Risk Avoidance:** Do NOT edit `.ex` files directly on the AWS server. Use the `relay/` directory locally, run `mix compile --warnings-as-errors`, and then push.

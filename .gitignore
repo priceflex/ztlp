@@ -43,3 +43,6 @@ macos/ZTLP/Libraries/*.a
 *.xcuserstate
 macos/ZTLP/build/
 xcuserdata/
+/relay/_build/
+/relay/deps/
+v30-telemetry-evidence.log

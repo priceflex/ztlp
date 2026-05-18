@@ -1,9 +1,10 @@
 # Hermes Session Handoff — ztlp.net Onboarding Hardening
 
-**Branch:** `feature/ztlp-net-onboarding-hardening`
+**Branch:** `feature/ztlp-net-onboarding-hardening` (pushed to origin)
+**PR URL:** https://github.com/priceflex/ztlp/pull/new/feature/ztlp-net-onboarding-hardening (gh CLI couldn't auto-create — token lacks PR-create scope; Steve to click that link, or use the GitHub web UI)
 **Started:** 2026-05-18
 **Owner:** Hermes (driven by Steve Price)
-**Status:** in progress
+**Status:** ✅ implementation complete + pushed; awaiting PR open + CI green
 
 ---
 
@@ -116,18 +117,57 @@ curl -fsS 'http://127.0.0.1:8080/api/zone-available?zone=really-long-corp-name-t
 
 ## Carry-forward / follow-up
 
-1. **Layer A (16-byte wire service-name cap)** — separate epic. Touch
+1. **Open the PR** — gh CLI was blocked by token scope. Click the
+   pre-baked link at the top of this file (or run `gh pr create` with a
+   token that has PR write).
+2. **Layer A (16-byte wire service-name cap)** — separate epic. Touch
    list: `proto/src/{packet.rs,ffi.rs,tunnel.rs}`, `relay/lib/ztlp_relay/
    udp_listener.ex`, gateway HELLO parser, NS SVC handling, macOS/iOS/
    Windows callers. Wire bump = packet version bump + dual-stack
    negotiation. Needs Steve's explicit go-ahead.
-2. **Hooking `bin/launch` into Launch app** — currently `/claim/launch`
-   only updates metadata; it does not actually `docker compose up` a real
-   bootstrap container. The "functional test" in Goal 2 will exercise the
-   *metadata flow* until that wiring lands.
-3. **Email delivery** — claim links still printed once; production
-   deployment will need SMTP wiring before Steve can hand out URLs to
-   customers.
-4. **Live deploy** — once CI passes, deploy to the prod ztlp.net VM
-   following `ztlp-bootstrap-deploy` SKILL pattern. Need separate sign-off
-   per Steve's standing rule ("tell me before restarting anything").
+3. **`/api/zone-available` upstream NS lookup** — the `taken_upstream`
+   reason is stubbed. Wire NS lookup of `<zone>` and `bootstrap.<zone>`
+   so we catch collisions across all Launch deployments, not just the
+   local sqlite. Same NS the claim page already points at
+   (`10.69.95.14:23096`).
+4. **Hooking `bin/launch` into Launch app** — `/claim/launch` still
+   only updates metadata; actually starting a docker-backed bootstrap
+   container is the next milestone. The "two containers" goal from
+   Steve's request currently passes at the metadata level; flipping it
+   to spawn real containers is a separate, larger change.
+5. **Email delivery** — claim links printed once. Production needs SMTP.
+6. **Live deploy to ztlp.net VM** — once PR is merged and CI is green,
+   follow `ztlp-bootstrap-deploy` SKILL pattern. Need Steve's go-ahead
+   per standing rule ("tell me before restarting anything").
+7. **Bootstrap Network model RFC 1035 mirror** — the Launch app enforces
+   the new rules; the bootstrap Rails `Network` model still uses the
+   older loose regex (`app/models/network.rb:31`). Mirror it so the
+   server-side and Launch-side validations agree before turning on real
+   container launch.
+
+---
+
+## Session summary (2026-05-18)
+
+**7 commits on the feature branch:**
+
+```
+97ce9e6 ci(ztlp.net): add Launch app test workflow + README docs
+c35afbd test(ztlp.net): end-to-end multi-zone onboarding + collision test
+9725f4b ztlp.net: proof-of-work CAPTCHA on POST /start
+59ae0ee ztlp.net: rate-limit POST /start by email + client IP
+cf56071 ztlp.net: add GET /api/zone-available JSON endpoint
+393143d ztlp.net: enforce RFC 1035 zone validation in Launch app
+7a75514 docs(ztlp.net): hermes handoff for onboarding-hardening session
+```
+
+**Test count: 32/32 passing locally** (up from 13 baseline).
+- 7 zone-validation tests
+- 3 `/api/zone-available` tests
+- 4 rate-limit tests
+- 4 PoW CAPTCHA tests
+- 1 end-to-end multi-zone collision test
+- 13 baseline tests untouched
+
+**Lines: +890 / -5 across 5 files** (no wire-protocol code touched).
+

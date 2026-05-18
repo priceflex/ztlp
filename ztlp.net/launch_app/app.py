@@ -46,6 +46,9 @@ LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
 BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR", "10.69.95.14:23095")
 LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR", "5"))
 LAUNCH_RATE_LIMIT_IP_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_IP_PER_HOUR", "20"))
+LAUNCH_POW_DIFFICULTY_BITS = int(os.environ.get("LAUNCH_POW_DIFFICULTY_BITS", "20"))
+LAUNCH_POW_TTL_SECONDS = int(os.environ.get("LAUNCH_POW_TTL_SECONDS", "600"))
+LAUNCH_REQUIRE_POW_DEFAULT = os.environ.get("LAUNCH_REQUIRE_POW", "1") not in ("0", "false", "False", "no", "off")
 
 DOWNLOAD_ASSETS = [
     {
@@ -145,6 +148,22 @@ def validate_zone(zone: str) -> list[str]:
     return unique
 
 
+def has_leading_zero_bits(digest: bytes, bits: int) -> bool:
+    """True when the first `bits` bits of `digest` (MSB-first) are all zero."""
+    if bits <= 0:
+        return True
+    full_bytes, rem = divmod(bits, 8)
+    if full_bytes > len(digest):
+        return False
+    if any(b != 0 for b in digest[:full_bytes]):
+        return False
+    if rem == 0:
+        return True
+    if full_bytes >= len(digest):
+        return False
+    return (digest[full_bytes] >> (8 - rem)) == 0
+
+
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -167,6 +186,9 @@ class LaunchApp:
         environment: str = DEFAULT_ENVIRONMENT,
         email_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR,
         ip_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_IP_PER_HOUR,
+        pow_difficulty_bits: int = LAUNCH_POW_DIFFICULTY_BITS,
+        pow_ttl_seconds: int = LAUNCH_POW_TTL_SECONDS,
+        require_pow: bool = LAUNCH_REQUIRE_POW_DEFAULT,
     ) -> None:
         self.db_path = db_path
         self.environment = (environment or "development").lower()
@@ -177,6 +199,9 @@ class LaunchApp:
         self.public_host = public_host
         self.email_rate_limit_per_hour = int(email_rate_limit_per_hour)
         self.ip_rate_limit_per_hour = int(ip_rate_limit_per_hour)
+        self.pow_difficulty_bits = int(pow_difficulty_bits)
+        self.pow_ttl_seconds = int(pow_ttl_seconds)
+        self.require_pow = bool(require_pow)
         self.ensure_schema()
 
     def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
@@ -306,6 +331,48 @@ class LaunchApp:
         error_html = ""
         if errors:
             error_html = "<div class='error'><strong>Please fix:</strong><ul>" + "".join(f"<li>{esc(e)}</li>" for e in errors) + "</ul></div>"
+        pow_html = ""
+        pow_script = ""
+        noscript_html = ""
+        if self.require_pow:
+            pow_fields = self.issue_pow_challenge()
+            pow_html = (
+                f'<input type="hidden" name="pow_challenge" value="{esc(pow_fields["pow_challenge"])}">'
+                f'<input type="hidden" name="pow_difficulty" value="{esc(pow_fields["pow_difficulty"])}">'
+                f'<input type="hidden" name="pow_issued_at" value="{esc(pow_fields["pow_issued_at"])}">'
+                f'<input type="hidden" name="pow_signature" value="{esc(pow_fields["pow_signature"])}">'
+                f'<input type="hidden" name="math_question" value="{esc(pow_fields["math_question"])}">'
+                f'<input type="hidden" name="math_signature" value="{esc(pow_fields["math_signature"])}">'
+                f'<input type="hidden" name="pow_nonce" value="">'
+            )
+            # The math captcha is hidden by default and only shown when JS is off.
+            noscript_html = (
+                f'<noscript><label>Verification (no JavaScript): what is '
+                f'{esc(pow_fields["math_question"].replace("+", " + "))}?'
+                f' <input name="math_answer" inputmode="numeric" pattern="[0-9]+" required>'
+                f'</label></noscript>'
+            )
+            pow_script = """
+<script>
+(function(){
+  function hexToBytes(h){var a=new Uint8Array(h.length/2);for(var i=0;i<a.length;i++)a[i]=parseInt(h.substr(i*2,2),16);return a;}
+  function leadingZeroBits(buf,bits){var full=Math.floor(bits/8),rem=bits%8;for(var i=0;i<full;i++)if(buf[i]!==0)return false;if(rem===0)return true;return (buf[full]>>(8-rem))===0;}
+  async function solve(challengeHex,bits){var c=hexToBytes(challengeHex);var enc=new TextEncoder();var n=0;while(true){var nonce=n.toString(16);var data=new Uint8Array(c.length+nonce.length);data.set(c,0);data.set(enc.encode(nonce),c.length);var hash=new Uint8Array(await crypto.subtle.digest('SHA-256',data));if(leadingZeroBits(hash,bits))return nonce;n++;if(n>5000000)return null;}}
+  document.addEventListener('DOMContentLoaded',function(){
+    var form=document.querySelector('form[action="/start"]');if(!form)return;
+    var challenge=form.querySelector('input[name=pow_challenge]');
+    var diff=form.querySelector('input[name=pow_difficulty]');
+    var nonceField=form.querySelector('input[name=pow_nonce]');
+    if(!challenge||!diff||!nonceField||!crypto||!crypto.subtle)return;
+    form.addEventListener('submit',function(ev){
+      if(nonceField.value)return; // already computed
+      ev.preventDefault();
+      solve(challenge.value,parseInt(diff.value,10)).then(function(nonce){nonceField.value=nonce||'';form.submit();});
+    });
+  });
+})();
+</script>
+"""
         body = f"""
         <p class="eyebrow">Request onboarding</p>
         <h1>Start ZTLP onboarding</h1>
@@ -316,8 +383,11 @@ class LaunchApp:
           <label>Admin name <input name="admin_name" required maxlength="200" value="{esc(values.get('admin_name', ''))}"></label>
           <label>Admin email <input type="email" name="admin_email" required maxlength="320" value="{esc(values.get('admin_email', ''))}"></label>
           <label>Zone <input name="zone" required maxlength="253" placeholder="acme.ztlp" value="{esc(values.get('zone', ''))}"></label>
+          {pow_html}
+          {noscript_html}
           <button type="submit">Create onboarding request</button>
         </form>
+        {pow_script}
         """
         status = HTTPStatus.BAD_REQUEST if errors else HTTPStatus.OK
         return (status, "text/html; charset=utf-8", self.page("Request onboarding", body))
@@ -329,6 +399,11 @@ class LaunchApp:
         errors = validate_start(values)
         if errors:
             return self.render_start_form(errors, values)
+
+        if self.require_pow:
+            pow_error = self.verify_pow(form)
+            if pow_error is not None:
+                return self.render_start_form([pow_error], values)
 
         email_key = values["admin_email"].lower()
         ip_key = self.client_ip(environ)
@@ -638,6 +713,103 @@ class LaunchApp:
         <p><a href=\"/\">Back to home</a></p>
         """
         return (HTTPStatus.TOO_MANY_REQUESTS, "text/html; charset=utf-8", self.page("Rate limit reached", body))
+
+    def issue_pow_challenge(self) -> Dict[str, str]:
+        challenge = secrets.token_hex(16)  # 16 bytes = 32 hex chars
+        difficulty = self.pow_difficulty_bits
+        issued_at = int(self.now().timestamp())
+        signature = self.sign_pow(challenge, difficulty, issued_at)
+        # Noscript math captcha — small 1..9 + 1..9 problem, signed identically.
+        a = secrets.randbelow(9) + 1
+        b = secrets.randbelow(9) + 1
+        math_question = f"{a}+{b}"
+        math_signature = self.sign_pow(math_question, 0, issued_at)
+        return {
+            "pow_challenge": challenge,
+            "pow_difficulty": str(difficulty),
+            "pow_issued_at": str(issued_at),
+            "pow_signature": signature,
+            "math_question": math_question,
+            "math_signature": math_signature,
+            "math_expected": str(a + b),
+        }
+
+    def sign_pow(self, challenge: str, difficulty: int, issued_at: int) -> str:
+        msg = f"{challenge}|{int(difficulty)}|{int(issued_at)}".encode("ascii")
+        return hmac.new(self.token_secret, msg, hashlib.sha256).hexdigest()
+
+    def verify_pow(self, form: Dict[str, list[str]]) -> Optional[str]:
+        """Verify proof-of-work fields from a POST form.
+
+        Accepts either the JS PoW (challenge/nonce) or the noscript math captcha
+        (math_question/math_signature/math_answer). Returns None on success, or
+        a string describing the failure reason for re-rendering with an error.
+        """
+        # Noscript math captcha fallback path
+        math_question = form.get("math_question", [""])[0]
+        math_answer = form.get("math_answer", [""])[0]
+        math_signature = form.get("math_signature", [""])[0]
+        math_issued_at = form.get("pow_issued_at", [""])[0]
+        if math_question and math_answer and math_signature:
+            try:
+                issued_at = int(math_issued_at)
+            except ValueError:
+                return "Browser verification failed: malformed math captcha."
+            expected_sig = self.sign_pow(math_question, 0, issued_at)
+            if not hmac.compare_digest(expected_sig, math_signature):
+                return "Browser verification failed: math captcha signature mismatch."
+            now_unix = int(self.now().timestamp())
+            if (now_unix - issued_at) > self.pow_ttl_seconds:
+                return "Browser verification expired: please reload and try again."
+            try:
+                a_str, b_str = math_question.split("+", 1)
+                expected = int(a_str) + int(b_str)
+            except (ValueError, TypeError):
+                return "Browser verification failed: malformed math captcha."
+            try:
+                if int(math_answer.strip()) != expected:
+                    return "Browser verification failed: incorrect math captcha answer."
+            except ValueError:
+                return "Browser verification failed: math captcha answer must be a number."
+            return None
+
+        # JS proof-of-work path
+        try:
+            challenge = form.get("pow_challenge", [""])[0]
+            difficulty_raw = form.get("pow_difficulty", [""])[0]
+            issued_at_raw = form.get("pow_issued_at", [""])[0]
+            signature = form.get("pow_signature", [""])[0]
+            nonce = form.get("pow_nonce", [""])[0]
+        except Exception:
+            return "Browser verification failed: missing PoW fields."
+        if not (challenge and difficulty_raw and issued_at_raw and signature and nonce):
+            return "Browser verification failed: missing PoW fields."
+        try:
+            difficulty = int(difficulty_raw)
+            issued_at = int(issued_at_raw)
+        except ValueError:
+            return "Browser verification failed: malformed PoW fields."
+        # length check on challenge: 16 bytes hex = 32 chars
+        if len(challenge) != 32:
+            return "Browser verification failed: invalid challenge."
+        try:
+            challenge_bytes = bytes.fromhex(challenge)
+        except ValueError:
+            return "Browser verification failed: invalid challenge."
+        expected_sig = self.sign_pow(challenge, difficulty, issued_at)
+        if not hmac.compare_digest(expected_sig, signature):
+            return "Browser verification failed: signature mismatch."
+        now_unix = int(self.now().timestamp())
+        if issued_at > now_unix + 60:
+            return "Browser verification failed: future timestamp."
+        if (now_unix - issued_at) > self.pow_ttl_seconds:
+            return "Browser verification expired: please reload and try again."
+        if difficulty < 1 or difficulty > 32:
+            return "Browser verification failed: invalid difficulty."
+        digest = hashlib.sha256(challenge_bytes + nonce.encode("ascii")).digest()
+        if not has_leading_zero_bits(digest, difficulty):
+            return "Browser verification failed: nonce does not satisfy the difficulty target."
+        return None
 
     def read_form(self, environ: dict) -> Dict[str, list[str]]:
         try:

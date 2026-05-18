@@ -18,6 +18,7 @@ class LaunchAppTest(unittest.TestCase):
             db_path=self.db_path,
             token_secret="test-secret",
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            require_pow=False,
         )
 
     def tearDown(self):
@@ -392,6 +393,7 @@ class LaunchAppTest(unittest.TestCase):
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
             email_rate_limit_per_hour=5,
             ip_rate_limit_per_hour=10_000,
+            require_pow=False,
         )
         self.app = app
         for i in range(5):
@@ -408,6 +410,7 @@ class LaunchAppTest(unittest.TestCase):
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
             email_rate_limit_per_hour=10_000,
             ip_rate_limit_per_hour=20,
+            require_pow=False,
         )
         self.app = app
         for i in range(20):
@@ -425,6 +428,7 @@ class LaunchAppTest(unittest.TestCase):
             now=lambda: clock[0],
             email_rate_limit_per_hour=2,
             ip_rate_limit_per_hour=10_000,
+            require_pow=False,
         )
         self.app = app
         for i in range(2):
@@ -445,6 +449,7 @@ class LaunchAppTest(unittest.TestCase):
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
             email_rate_limit_per_hour=10_000,
             ip_rate_limit_per_hour=2,
+            require_pow=False,
         )
         self.app = app
         headers_base = {
@@ -469,6 +474,126 @@ class LaunchAppTest(unittest.TestCase):
         }
         status, _h, _b = self.request("POST", "/start", urlencode(data), headers_base)
         self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+
+    # ---- Proof-of-work CAPTCHA -------------------------------------------------
+
+    def _compute_pow_nonce(self, challenge_hex: str, difficulty_bits: int) -> str:
+        import hashlib as _hl
+        prefix_bytes = difficulty_bits // 8
+        remainder_bits = difficulty_bits % 8
+        n = 0
+        challenge_bytes = bytes.fromhex(challenge_hex)
+        while True:
+            nonce = f"{n:x}"
+            digest = _hl.sha256(challenge_bytes + nonce.encode("ascii")).digest()
+            if digest[:prefix_bytes] == b"\x00" * prefix_bytes:
+                if remainder_bits == 0 or (digest[prefix_bytes] >> (8 - remainder_bits)) == 0:
+                    return nonce
+            n += 1
+
+    def _fresh_pow_app(self, difficulty_bits=8, pow_ttl_seconds=600, now=None):
+        if now is None:
+            now = lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+        return LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=now,
+            pow_difficulty_bits=difficulty_bits,
+            pow_ttl_seconds=pow_ttl_seconds,
+            require_pow=True,
+        )
+
+    def _extract_pow_fields(self, body):
+        import re as _re
+        fields = {}
+        for name in ("pow_challenge", "pow_difficulty", "pow_issued_at", "pow_signature"):
+            m = _re.search(rf'name="{name}"\s+value="([^"]*)"', body)
+            self.assertIsNotNone(m, f"missing PoW field {name} in form body")
+            fields[name] = m.group(1)
+        return fields
+
+    def test_post_start_rejects_missing_pow(self):
+        self.app = self._fresh_pow_app(difficulty_bits=8)
+        status, _h, body = self.post_form(
+            "/start",
+            {
+                "organization_name": "PoW Org",
+                "admin_name": "Pow Admin",
+                "admin_email": "pow@example.com",
+                "zone": "pow.ztlp",
+            },
+        )
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("verification", body.lower())
+        # And the re-rendered form should contain a fresh challenge
+        fields = self._extract_pow_fields(body)
+        self.assertEqual(32, len(fields["pow_challenge"]))  # 16 bytes hex = 32 chars
+
+    def test_post_start_accepts_valid_pow(self):
+        self.app = self._fresh_pow_app(difficulty_bits=8)
+        # GET the form to get a fresh challenge
+        status, _h, form_body = self.request("GET", "/start")
+        self.assertEqual(HTTPStatus.OK, status)
+        fields = self._extract_pow_fields(form_body)
+        nonce = self._compute_pow_nonce(fields["pow_challenge"], int(fields["pow_difficulty"]))
+        post_data = {
+            "organization_name": "PoW Org",
+            "admin_name": "Pow Admin",
+            "admin_email": "pow@example.com",
+            "zone": "pow.ztlp",
+            "pow_challenge": fields["pow_challenge"],
+            "pow_difficulty": fields["pow_difficulty"],
+            "pow_issued_at": fields["pow_issued_at"],
+            "pow_signature": fields["pow_signature"],
+            "pow_nonce": nonce,
+        }
+        status, _h, body = self.post_form("/start", post_data)
+        self.assertEqual(HTTPStatus.CREATED, status, body[:400])
+        self.assertIn("Claim link", body)
+
+    def test_post_start_rejects_stale_pow_signature(self):
+        clock = [dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)]
+        self.app = self._fresh_pow_app(difficulty_bits=8, pow_ttl_seconds=600, now=lambda: clock[0])
+        status, _h, form_body = self.request("GET", "/start")
+        self.assertEqual(HTTPStatus.OK, status)
+        fields = self._extract_pow_fields(form_body)
+        nonce = self._compute_pow_nonce(fields["pow_challenge"], int(fields["pow_difficulty"]))
+        # advance the clock past the TTL
+        clock[0] = clock[0] + dt.timedelta(seconds=601)
+        post_data = {
+            "organization_name": "PoW Org",
+            "admin_name": "Pow Admin",
+            "admin_email": "pow@example.com",
+            "zone": "pow.ztlp",
+            "pow_challenge": fields["pow_challenge"],
+            "pow_difficulty": fields["pow_difficulty"],
+            "pow_issued_at": fields["pow_issued_at"],
+            "pow_signature": fields["pow_signature"],
+            "pow_nonce": nonce,
+        }
+        status, _h, body = self.post_form("/start", post_data)
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("verification", body.lower())
+
+    def test_post_start_rejects_tampered_pow_signature(self):
+        self.app = self._fresh_pow_app(difficulty_bits=8)
+        status, _h, form_body = self.request("GET", "/start")
+        fields = self._extract_pow_fields(form_body)
+        nonce = self._compute_pow_nonce(fields["pow_challenge"], int(fields["pow_difficulty"]))
+        post_data = {
+            "organization_name": "PoW Org",
+            "admin_name": "Pow Admin",
+            "admin_email": "pow@example.com",
+            "zone": "pow.ztlp",
+            "pow_challenge": fields["pow_challenge"],
+            "pow_difficulty": "4",  # tamper — must invalidate signature
+            "pow_issued_at": fields["pow_issued_at"],
+            "pow_signature": fields["pow_signature"],
+            "pow_nonce": nonce,
+        }
+        status, _h, body = self.post_form("/start", post_data)
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("verification", body.lower())
 
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="

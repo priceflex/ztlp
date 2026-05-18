@@ -14,86 +14,89 @@ Repo: /home/trs/ztlp
 - **Completed:** 
   - Relay post-handshake forwarding fix deployed to AWS relay (`34.219.64.205`).
   - Added service name fallback for unnamed gateway forwards (`923fe72`).
-  - Diagnostic improvements to `proxy.rs` (implemented this session) to catch and decode `RejectFrame` payloads in a 500ms post-handshake window.
-- **In Progress:** Diagnosing SSH data plane failure (`auth_tag_invalid`).
+  - Diagnostic improvements to `proxy.rs` to catch and decode `RejectFrame` payloads.
+  - Implemented HELLO retransmit loops in the proxy to handle initial UDP drop during the Noise_XX handshake.
+  - **ROOT CAUSE IDENTIFIED** for the `auth_tag_invalid` data plane drop: The `dst_svc_id` in the `HandshakeHeader` is mixed into the Noise protocol transcript. Our temporary hack in `tunnel.rs` returning `[0u8; 16]` for `encode_service_name` causes the proxy and the Windows listener to have mismatched transcripts (since the gateway sees the service name differently and hashes it differently).
+- **In Progress:** Reverting the `encode_service_name` hack, rebuilding the Windows binary, and testing the end-to-end SSH tunnel.
 - **Failing / Blocked:** 
-  - SSH over the relay fails because incoming data packets from the gateway are being rejected by the proxy's local pipeline at Layer 3 (`auth_tag_invalid`).
+  - SSH session establishment currently hangs or drops due to the `auth_tag_invalid` decryption failure at the pipeline level.
 - **Recently Changed:** 
-  - `proto/src/agent/proxy.rs` was updated with `decode_reject_payload`, `poll_for_post_handshake_reject`, and related unit tests.
+  - `proto/src/tunnel.rs`: Hacked `encode_service_name` to return `[0u8; 16]` to isolate the error.
+  - `proto/src/agent/proxy.rs`: Rewrote the `HELLO_ACK` wait loop to support `node.recv_raw()` and retransmissions.
 - **Temporary Workarounds:** 
-  - `dst_svc_id` is unconditionally zeroed in `proxy.rs:388` to accommodate an older Windows gateway that defaults to `_default`.
-  - Environmental block on `172.26.11.164:23097` on the relay due to it being a stale testbed.
-- **Stability Status:** The codebase builds cleanly. Rust unit tests pass (13/13 in proxy, 800+ repo-wide). Elixir tests pass (583). Data plane routing via relay works, but encryption/decryption is failing due to a presumed key/nonce mismatch.
+  - `encode_service_name` in `tunnel.rs` is hardcoded to return `[0u8; 16]`. **This must be reverted immediately in the next session.**
+- **Current System Stability Status:** The codebase is compiling, but the temporary `[0u8; 16]` hack breaks authentication for named services.
 
 ## Active Tasks
 
-### Task 1: Resolve `auth_tag_invalid` (Layer 3) Data Plane Drop
+### Task 1: Revert `encode_service_name` Hack & Validate End-to-End SSH
 - **Status:** In Progress
-- **Detailed Description:** The ZTLP Noise_XX handshake succeeds and the tunnel establishes. The Windows gateway sends back encrypted SSH traffic via the relay. However, the Hermes proxy drops these packets locally with `SECURITY: auth_tag_invalid (rx)`. Because `dst_svc_id` is included in the Noise transcript, the current hack in `proxy.rs` (setting `dst_svc_id` to all zeros) likely causes a hash mismatch between the client's handshake transcript and the gateway's handshake transcript, causing derived AEAD keys to differ.
-- **Important implementation notes:** Noise keys depend on identical protocol transcripts. If the gateway expects `tcp:22` and Hermes sends/hashes `0u8; 16`, the keys will diverge without the handshake explicitly failing.
-- **Known issues:** SSH times out during banner exchange.
-- **Next exact step:** Revert the `dst_svc_id = [0u8; 16]` zeroing in `proxy.rs` (restore `encode_service_name(service_name)`), compile, and test the SSH connection again.
-- **Relevant files:** `proto/src/agent/proxy.rs`
-- **Dependencies or assumptions:** Assumes the Windows gateway actually fails at decoding due to this hash mismatch, or vice-versa.
-- **Testing status:** Unit tests for diagnostics are passing. Live integration failing.
-
-### Task 2: Validate Windows Gateway Binary Build
-- **Status:** Not Started
-- **Detailed Description:** Check the actual deployed binary on `10.170.3.111` to see if it includes the newest `tunnel.rs` fallback logic and the latest relay-aware listener logic.
-- **Next exact step:** Run PowerShell commands over the existing working raw SSH connection to determine the file creation date or hash of `ztlp.exe` running on `10.170.3.111`.
-- **Relevant files:** N/A
-- **Relevant commands:** `ssh -T trs@10.170.3.111 "cmd /c dir ztlp.exe"`
-- **Testing status:** Blocked behind Task 1.
+- **Detailed Description:** The ZTLP Noise_XX handshake succeeds and establishes a tunnel, but the Windows gateway and Hermes proxy derive different AEAD keys because their handshake transcripts differ. This is directly caused by the `encode_service_name` hack in `tunnel.rs` (setting it to `[0u8; 16]`). We must revert this so both sides use the identical `dst_svc_id` derived from the string `"win"`, recompile the Windows listener, and re-test.
+- **Important implementation notes:** Noise keys depend on identical protocol transcripts. Even a 1-byte difference in the hashed prologue (which includes `dst_svc_id`) alters the resulting cipher keys.
+- **Known issues:** The Windows Agent Daemon currently fails to bind port 53 / 4433 without Administrator privileges, so we are bypassing it by using the primitive `ztlp listen` command for testing.
+- **Next exact step:** 
+  1. Revert `encode_service_name` in `proto/src/tunnel.rs`.
+  2. `cargo build --release --target x86_64-pc-windows-gnu --bin ztlp`
+  3. `scp target/x86_64-pc-windows-gnu/release/ztlp.exe trs@10.170.3.111:C:/Users/TRS/ztlp.exe`
+  4. Restart listener: `ssh -T trs@10.170.3.111 "cmd /c ztlp.exe listen --bind 0.0.0.0:23095 --key %USERPROFILE%\.ztlp\identity.json --relay 34.219.64.205:23095 --forward win:127.0.0.1:22 --service-name win"`
+  5. Test connection: `ssh -v -o ProxyCommand="/home/trs/ztlp/proto/target/release/ztlp proxy win 22 --relay 34.219.64.205:23095" trs@win.ztlp`
+- **Relevant files:** `proto/src/tunnel.rs`
+- **Testing status:** Pending integration test in the next session.
 
 ## Technical Context
-- **Architecture:** `Hermes Client` -> `AWS Relay (Elixir UDP 23095)` -> `Windows ZTLP Gateway` -> `localhost:22`
+- **Architecture:** `Hermes Client` -> `AWS Relay (Elixir UDP 23095)` -> `Windows ZTLP Listener` -> `localhost:22` (sshd)
 - **Folder Structure:** 
   - `/home/trs/ztlp/proto/` -> Rust client/gateway code 
   - `/home/trs/ztlp/relay/` -> Elixir relay code 
-- **Important source files:** `proto/src/agent/proxy.rs`, `proto/src/handshake.rs`, `relay/lib/ztlp_relay/gateway_forwarder.ex`
-- **Services involved:** ZTLP Relay (34.219.64.205), ZTLP Windows Listener (47.180.216.203)
-- **Deployment assumptions:** The Windows target currently requires regular proxy commands without PowerShell specific formatting issues `&`/`&&` due to shell invocation nuances over Windows SSH.
-- **Build/runtime commands:** `cargo build --release --bin ztlp`
-- **Security assumptions:** Standard ZTLP Zero-Trust model; relay cannot read payload logic; magic byte checking is enforced.
+- **Important source files:** `proto/src/tunnel.rs`, `proto/src/agent/proxy.rs`
+- **Services involved:** ZTLP Relay (34.219.64.205)
+- **Deployment assumptions:** Windows target (`10.170.3.111`) has SSH running natively but ZTLP must act as the routing wrapper.
 
 ## Code Documentation Standards
-- Functions must include clear docstrings.
-- Explanations for *why* specific frame drop handlers (e.g. `poll_for_post_handshake_reject`) exist must be documented inline.
-- Maintainability and consistency with the rest of the `ztlp-proto` codebase is mandatory.
+- Functions must include clear comments/docstrings.
+- Complex logic must explain WHY it exists.
+- Public APIs/classes/modules must be documented.
+- Edge cases and assumptions must be documented.
+- Configuration files should contain explanatory comments where possible.
+- Avoid “magic behavior” without explanation.
+- Code should be understandable by a brand-new engineer reviewing it later.
 
 ## Testing Requirements
-- **Test-first/TDD executed this session:** Wrote three unit tests for `decode_reject_payload` prior to integrating the polling logic.
-- **What was tested:** The proxy's ability to decode `RejectFrames` properly, reject malformed bytes, and ignore standard data frames.
-- **Commands used:** `cargo test --lib decode_reject_payload -- --nocapture` and `cargo test --lib agent::proxy::tests`
-- **Remaining testing gaps:** Need integration testing to automatically replicate end-to-end `auth_tag_invalid` state without manually invoking `ssh`.
+- Write tests while implementing features, not afterward.
+- Add/update unit tests for new logic.
+- Verify bug fixes with regression tests.
+- Ensure all tests pass before ending a session.
+- Never leave knowingly failing tests without documenting them clearly.
+- **What was tested this session:** Verified `ztlp proxy` handshake retransmission resilience against simulated packet drops. Verified Windows gateway correctly connects and registers with the AWS relay using `.toml` configs.
 
 ## Validation Requirements
-- Ran `cargo test --lib` successfully.
-- Ran live proxy command to SSH target.
-- Discovered and explicitly documented that the live application fails specifically at the local pipeline auth tag validation due to AEAD decryption failures.
+Before considering work complete Hermes MUST:
+- Run tests (`cargo test --lib`).
+- Validate the application starts correctly.
+- Check logs for hidden failures (like `auth_tag_invalid`).
+- Ensure no obvious regressions were introduced.
 
 ## Decisions Made
-- **Implemented 500ms post-handshake REJECT polling in the proxy:** 
-  - *Why:* To mirror `ztlp-cli.rs` and `ffi.rs`, and quickly diagnose if gateways were cleanly dropping data due to policy or service unavailability.
-  - *Tradeoffs:* Adds a blocking 500ms delay to proxy setup, but this is negligible for human-driven SSH and critical for clear diagnostics.
-- **Retained `dst_svc_id` hack (for now):**
-  - *Why:* Originally added as a temporary workaround for an old gateway build; retained in this session solely to isolate the diagnostic fix testing.
-  - *Current stance:* This decision should be reversed in the next session as it is highly likely the cause of the `auth_tag_invalid` drop.
+- **Bypassed Agent Daemon on Windows:** The full `ztlp agent start` failed on Windows because it attempts to bind to DNS port 53 and Control port 4433, which requires Administrator privileges or specific socket configurations.
+  - *Why:* To keep momentum on the actual SSH data-plane proxying issue, we fell back to the primitive standalone `ztlp listen` command.
+  - *Tradeoffs:* We are manually specifying the relay and forward mapping instead of relying on the configured `agent.toml` for the gateway.
+- **Hacked `tunnel.rs` to isolate hash mismatch:** Replaced `encode_service_name` with `[0u8; 16]` to definitively prove the AEAD decryption drops were tied to `dst_svc_id` mismatches. (It must be reverted).
 
 ## Known Problems
-- **Bugs/Incomplete Implementations:** Data plane AES/ChaCha authentication drops packets returning from the Windows gateway (`auth_tag_invalid`).
-- **Temporary workarounds:** `dst_svc_id = [0u8; 16]` zeroing.
+- **Bugs:** `auth_tag_invalid` drops data connection.
+- **Technical debt:** Windows agent daemon fails to start gracefully as a standard user.
+- **Temporary workarounds:** `[0u8; 16]` hack in `tunnel.rs` `encode_service_name`.
 
 ## Open Questions
-- Is the Windows gateway using an older version of the `snow` / Noise transcript protocol, or is the `dst_svc_id` hack solely responsible for the transcript hash divergence?
+- Does the Windows `sshd` properly handle `ProxyCommand` connections routed through `ztlp listen` without dropping due to unexpected `CRLF` conversions on stdin/stdout?
 
 ## Next Session Startup Plan
 1. **What to review first:** Read this handoff document completely.
-2. **What commands to run:** `cd /home/trs/ztlp ; git status && git log --oneline -5`
-3. **What files to inspect:** `proto/src/agent/proxy.rs` specifically around line 386-398.
-4. **What task to continue next:** Task 1 (Resolve `auth_tag_invalid` data plane drop).
-5. **What to execute:** Remove `dst_svc_id = [0u8; 16]`, build the client (`cargo build --release --bin ztlp`), and run the live `ssh -v ...` command to confirm if the `auth_tag_invalid` issue resolves.
-6. **Risks to avoid:** Do not assume the gateway binary on Windows is up-to-date without verifying it. Do not use powershell command separators (`&&` or `&`) when invoking commands on the Windows SSH target.
+2. **What commands to run:** `cd /home/trs/ztlp && git status`
+3. **What files to inspect:** `proto/src/tunnel.rs` (look for `encode_service_name`).
+4. **What tests to run first:** `cargo test --lib --manifest-path=proto/Cargo.toml`
+5. **What task to continue next:** Task 1 (Revert `encode_service_name` Hack & Validate End-to-End SSH).
+6. **What risks to avoid:** Ensure you cross-compile for Windows (`x86_64-pc-windows-gnu`) before copying the binary over, otherwise the Windows host will throw executable format errors.
 
 ## Git Workflow Requirements
 - Commit format utilized: `<type>: short summary\n\nDetailed description...`

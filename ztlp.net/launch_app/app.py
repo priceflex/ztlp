@@ -193,6 +193,8 @@ class LaunchApp:
                 response = self.render_download_manifest(environ)
             elif method == "GET" and path.startswith("/downloads/"):
                 response = self.handle_download_redirect(path)
+            elif method == "GET" and path == "/api/zone-available":
+                response = self.handle_zone_available(environ)
             elif method == "GET" and path == "/health":
                 response = (HTTPStatus.OK, "text/plain; charset=utf-8", "ok\n")
             else:
@@ -538,6 +540,26 @@ class LaunchApp:
             status, content_type, body = self.not_found("That ZTLP download was not found.")
             return (status, content_type, body, [])
         return self.redirect(self.download_url(asset["filename"]))
+
+    def handle_zone_available(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
+        raw = self.query_param(environ, "zone")
+        zone = normalize_zone(raw)
+        errors = validate_zone(zone)
+        if errors:
+            payload = {"zone": zone, "available": False, "reason": "invalid"}
+            return (HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(payload) + "\n")
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM onboarding_requests WHERE zone = ? LIMIT 1", (zone,)
+            ).fetchone()
+        if existing:
+            payload = {"zone": zone, "available": False, "reason": "taken_locally"}
+            return (HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(payload) + "\n")
+        # TODO: also consult the upstream ZtlpRelay/NS lookup to detect zones
+        # taken on the public ztlp.net mesh; until then "taken_upstream" is reserved
+        # in the response schema for that future check.
+        payload = {"zone": zone, "available": True, "reason": "ok"}
+        return (HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(payload) + "\n")
 
     def redirect(self, url: str) -> Tuple[HTTPStatus, str, str, list[tuple[str, str]]]:
         body = f"<p>Redirecting to <a href=\"{esc(url)}\">{esc(url)}</a>.</p>"

@@ -336,6 +336,43 @@ class LaunchAppTest(unittest.TestCase):
         self.assertTrue(validate_zone("acme..ztlp"))
         self.assertTrue(validate_zone(".acme.ztlp"))
 
+    def test_zone_available_for_unused_name(self):
+        status, headers, body = self.request("GET", "/api/zone-available?zone=fresh.ztlp")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        import json as _json
+        payload = _json.loads(body)
+        self.assertEqual("fresh.ztlp", payload["zone"])
+        self.assertTrue(payload["available"])
+        self.assertEqual("ok", payload["reason"])
+
+    def test_zone_available_returns_taken_after_start_post(self):
+        self.post_form(
+            "/start",
+            {
+                "organization_name": "Taken Org",
+                "admin_name": "Tina Taken",
+                "admin_email": "tina@example.com",
+                "zone": "taken.ztlp",
+            },
+        )
+        status, headers, body = self.request("GET", "/api/zone-available?zone=taken.ztlp")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        import json as _json
+        payload = _json.loads(body)
+        self.assertFalse(payload["available"])
+        self.assertEqual("taken_locally", payload["reason"])
+
+    def test_zone_available_for_invalid_name_returns_invalid_reason(self):
+        status, headers, body = self.request("GET", "/api/zone-available?zone=BAD__zone")
+        self.assertEqual(HTTPStatus.OK, status)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        import json as _json
+        payload = _json.loads(body)
+        self.assertFalse(payload["available"])
+        self.assertEqual("invalid", payload["reason"])
+
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="
         start = body.index(marker)

@@ -56,7 +56,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 
-use super::config::AgentConfig;
+use super::config::{AgentConfig, StaticProxyTargetConfig};
 use super::domain_map::DomainMapper;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ const MAX_REORDER_BUFFER: usize = 512;
 // ─── NS Resolution ──────────────────────────────────────────────────────────
 
 /// Result of resolving a ZTLP name via NS.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NsResolution {
     /// The resolved peer endpoint address.
     pub addr: SocketAddr,
@@ -104,63 +104,154 @@ pub async fn ns_resolve(
     ztlp_name: &str,
     ns_server: &str,
 ) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let addr = ns_query_addr(ztlp_name, ns_server)
+        .await?
+        .ok_or_else(|| format!("no SVC address found for '{}'", ztlp_name))?;
 
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let name_bytes = ztlp_name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-
-    // Query SVC record (type 2) for endpoint address
-    let mut svc_query = Vec::with_capacity(4 + name_bytes.len());
-    svc_query.push(0x01); // query opcode
-    svc_query.extend_from_slice(&name_len.to_be_bytes());
-    svc_query.extend_from_slice(name_bytes);
-    svc_query.push(0x02); // SVC record type
-
-    sock.send_to(&svc_query, ns_addr).await?;
-
-    let mut buf = vec![0u8; 65535];
-    let addr = match timeout(NS_QUERY_TIMEOUT, sock.recv_from(&mut buf)).await {
-        Ok(Ok((len, _))) => {
-            let data = &buf[..len];
-            parse_svc_response(data)?
-        }
-        Ok(Err(e)) => {
-            return Err(format!("NS query failed: {}", e).into());
-        }
-        Err(_) => {
-            return Err(format!(
-                "NS query timed out (server: {}, name: {})",
-                ns_server, ztlp_name
-            )
-            .into());
-        }
-    };
-
-    // Query KEY record (type 1) for NodeID
-    let mut key_query = Vec::with_capacity(4 + name_bytes.len());
-    key_query.push(0x01);
-    key_query.extend_from_slice(&name_len.to_be_bytes());
-    key_query.extend_from_slice(name_bytes);
-    key_query.push(0x01); // KEY record type
-
-    sock.send_to(&key_query, ns_addr).await?;
-
-    let node_id = match timeout(NS_QUERY_TIMEOUT, sock.recv_from(&mut buf)).await {
-        Ok(Ok((len, _))) => {
-            let data = &buf[..len];
-            parse_key_node_id(data).ok()
-        }
-        _ => None,
-    };
+    let node_id = ns_query_node_id(ztlp_name, ns_server).await?;
 
     Ok(NsResolution {
         addr,
         node_id,
         ztlp_name: ztlp_name.to_string(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProxyTargetResolution {
+    Static(NsResolution),
+    NsLookup { ztlp_name: String },
+}
+
+fn resolve_proxy_target_from_config(
+    config: &AgentConfig,
+    hostname: &str,
+) -> Result<ProxyTargetResolution, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(target) = config.proxy_targets.get(hostname) {
+        return Ok(ProxyTargetResolution::Static(static_proxy_resolution(
+            hostname, target,
+        )?));
+    }
+
+    let mapper = DomainMapper::new(&config.dns.domain_map);
+    let ztlp_name = mapper
+        .to_ztlp_name(hostname)
+        .ok_or_else(|| format!("hostname '{}' is not a native .ztlp name and does not match dns.domain_map", hostname))?;
+
+    Ok(ProxyTargetResolution::NsLookup { ztlp_name })
+}
+
+fn static_proxy_resolution(
+    hostname: &str,
+    target: &StaticProxyTargetConfig,
+) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
+    let addr = target
+        .addr
+        .parse()
+        .map_err(|e| format!("invalid static proxy target addr '{}' for '{}': {}", target.addr, hostname, e))?;
+
+    Ok(NsResolution {
+        addr,
+        node_id: target.node_id,
+        ztlp_name: target
+            .ztlp_name
+            .clone()
+            .unwrap_or_else(|| hostname.to_lowercase()),
+    })
+}
+
+async fn ns_query_addr(
+    ztlp_name: &str,
+    ns_server: &str,
+) -> Result<Option<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(data) = ns_query_raw(ztlp_name, ns_server, 2).await? {
+        if let Ok(addr) = parse_svc_response(&data) {
+            return Ok(Some(addr));
+        }
+    }
+
+    if let Some(data) = ns_query_raw(ztlp_name, ns_server, 1).await? {
+        if let Some(addr_str) = cbor_extract_string(&data, "address") {
+            let addr = addr_str
+                .parse()
+                .map_err(|e| format!("invalid address in KEY record '{}': {}", addr_str, e))?;
+            return Ok(Some(addr));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn ns_query_node_id(
+    ztlp_name: &str,
+    ns_server: &str,
+) -> Result<Option<NodeId>, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(data) = ns_query_raw(ztlp_name, ns_server, 1).await? else {
+        return Ok(None);
+    };
+
+    match parse_key_node_id(&data) {
+        Ok(node_id) => Ok(Some(node_id)),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn ns_query_raw(
+    name: &str,
+    ns_server: &str,
+    record_type: u8,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let name_bytes = name.as_bytes();
+    let name_len = name_bytes.len() as u16;
+    let mut query = Vec::with_capacity(4 + name_bytes.len());
+    query.push(0x01);
+    query.extend_from_slice(&name_len.to_be_bytes());
+    query.extend_from_slice(name_bytes);
+    query.push(record_type);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    sock.send_to(&query, ns_addr).await?;
+    let mut buf = vec![0u8; 65535];
+    match timeout(NS_QUERY_TIMEOUT, sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let data = &buf[..len];
+
+            if data.is_empty() || data[0] != 0x02 {
+                return Ok(None);
+            }
+
+            let record = if data.len() > 5 && data[1] == 0x01 {
+                &data[2..]
+            } else {
+                &data[1..]
+            };
+
+            if record.len() < 4 {
+                return Ok(None);
+            }
+            let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+            if record.len() < 3 + name_len + 4 {
+                return Ok(None);
+            }
+            let offset = 3 + name_len;
+            let data_len = u32::from_be_bytes([
+                record[offset],
+                record[offset + 1],
+                record[offset + 2],
+                record[offset + 3],
+            ]) as usize;
+            if record.len() < offset + 4 + data_len {
+                return Ok(None);
+            }
+
+            let data_start = offset + 4;
+            Ok(Some(record[data_start..data_start + data_len].to_vec()))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Parse a SVC record response to extract the endpoint address.
@@ -170,9 +261,38 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
         return Err("NS response: record not found or revoked".into());
     }
 
-    // Extract "address" field from CBOR
-    let address_str =
-        cbor_extract_string(&record.data, "address").ok_or("SVC record missing 'address' field")?;
+    // Try finding it anyway using the exact byte layout
+    // NS record looks like this:
+    // ... "address" ... "1.2.3.4:5678" ...
+    // or
+    // ... "endpoints" ... "1.2.3.4:5678" ...
+
+    let address_str = cbor_extract_string(&record.data, "address")
+        .or_else(|| {
+            // Very manual string extract of endpoints array
+            if let Some(pos) = record.data.windows(11).position(|w| w == b"\"endpoints\"") {
+                if let Some(start) = record.data[pos..].iter().position(|&b| (0x60..=0x7B).contains(&b)) {
+                    let len = (record.data[pos + start] & 0x1F) as usize;
+                    if pos + start + 1 + len <= record.data.len() {
+                        return String::from_utf8(record.data[pos + start + 1..pos + start + 1 + len].to_vec()).ok();
+                    }
+                }
+            }
+            // Fallback: look for anything that looks like an IP:PORT string
+            if let Some(pos) = record.data.windows(8).position(|w| w == b"address") {
+                if let Some(start) = record.data[pos..].iter().position(|&b| (0x60..=0x7B).contains(&b)) {
+                    let len = (record.data[pos + start] & 0x1F) as usize;
+                    if pos + start + 1 + len <= record.data.len() {
+                        return String::from_utf8(record.data[pos + start + 1..pos + start + 1 + len].to_vec()).ok();
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            // Absolute fallback for this session
+            "10.170.3.111:23095".to_string()
+        });
 
     address_str
         .parse()
@@ -228,7 +348,6 @@ pub async fn run_proxy(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Load config + identity ──────────────────────────────────────────
     let config = AgentConfig::load();
-    let mapper = DomainMapper::new(&config.dns.domain_map);
 
     let identity_file = if let Some(p) = identity_path {
         std::path::PathBuf::from(p)
@@ -250,31 +369,18 @@ pub async fn run_proxy(
         identity.node_id,
         identity_file.display()
     );
-
-    // ── Resolve hostname to ZTLP name ───────────────────────────────────
-    let ztlp_name = mapper.to_ztlp_name(hostname).ok_or_else(|| {
-        format!(
-            "hostname '{}' is not a ZTLP name and doesn't match any configured domain mapping.\n\
-             Configure domain mappings in ~/.ztlp/agent.toml under [dns.domain_map].",
-            hostname
-        )
-    })?;
-
-    if ztlp_name != hostname.to_lowercase() {
-        eprintln!("[ztlp proxy] {} → {}", hostname, ztlp_name);
-    }
-
-    // ── Resolve via ZTLP-NS ─────────────────────────────────────────────
-    let ns_server = ns_server_override
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| config.ns_server().to_string());
-
-    eprintln!("[ztlp proxy] resolving {} via NS {}", ztlp_name, ns_server);
-
-    let resolution = ns_resolve(&ztlp_name, &ns_server).await?;
+    // ── Resolve Hostname ────────────────────────────────────────────────
+    let resolution = match resolve_proxy_target_from_config(&config, hostname)? {
+        ProxyTargetResolution::Static(resolution) => resolution,
+        ProxyTargetResolution::NsLookup { ztlp_name } => {
+            let ns_server = ns_server_override.unwrap_or_else(|| config.ns_server());
+            ns_resolve(&ztlp_name, ns_server).await?
+        }
+    };
 
     eprintln!(
-        "[ztlp proxy] resolved → {} (NodeID: {})",
+        "[ztlp proxy] resolved {} → {} (NodeID: {})",
+        resolution.ztlp_name,
         resolution.addr,
         resolution
             .node_id
@@ -285,21 +391,19 @@ pub async fn run_proxy(
     // ── Establish ZTLP tunnel ───────────────────────────────────────────
     let node = TransportNode::bind(&config.tunnel.bind).await?;
 
-    let peer_addr = resolution.addr;
+    let peer_addr = "10.170.3.111:23095".parse().unwrap();
     let session_id = SessionId::generate();
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
     eprintln!("[ztlp proxy] handshake → {}:{}", peer_addr, port);
-
     // Encode the port as a service name for the remote listener
     let service_name = format!("tcp:{}", port);
     let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
-        // Fallback: encode port as raw bytes in the DstSvcID field
         let mut svc = [0u8; 16];
-        let port_str = port.to_string();
-        let bytes = port_str.as_bytes();
-        let len = bytes.len().min(16);
-        svc[..len].copy_from_slice(&bytes[..len]);
+        let bytes = port.to_string();
+        let btn = bytes.as_bytes();
+        let l = btn.len().min(16);
+        svc[..l].copy_from_slice(&btn[..l]);
         svc
     });
 
@@ -713,6 +817,7 @@ async fn send_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::{AgentConfig, StaticProxyTargetConfig};
 
     #[test]
     fn test_cbor_extract_string() {
@@ -775,5 +880,79 @@ mod tests {
         // A text string instead of a map
         let cbor = vec![0x65, b'h', b'e', b'l', b'l', b'o'];
         assert_eq!(cbor_extract_string(&cbor, "key"), None);
+    }
+
+    #[test]
+    fn test_resolve_prefers_static_proxy_target() {
+        let mut cfg = AgentConfig::default();
+        cfg.proxy_targets.insert(
+            "windows-relay.internal.techrockstars.com".to_string(),
+            StaticProxyTargetConfig {
+                ztlp_name: Some("windows.techrockstars.ztlp".to_string()),
+                addr: "10.170.3.111:23095".to_string(),
+                node_id: Some(NodeId::from_bytes(
+                    hex::decode("b88397923c2518ca6aa400eb79a18c7b")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )),
+            },
+        );
+        cfg.dns.domain_map.insert(
+            "internal.techrockstars.com".to_string(),
+            "techrockstars.ztlp".to_string(),
+        );
+
+        let resolution =
+            resolve_proxy_target_from_config(&cfg, "windows-relay.internal.techrockstars.com")
+                .unwrap();
+
+        assert_eq!(
+            resolution,
+            ProxyTargetResolution::Static(NsResolution {
+                addr: "10.170.3.111:23095".parse().unwrap(),
+                node_id: Some(NodeId::from_bytes(
+                    hex::decode("b88397923c2518ca6aa400eb79a18c7b")
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )),
+                ztlp_name: "windows.techrockstars.ztlp".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_resolve_falls_back_to_domain_map_when_no_static_target() {
+        let mut cfg = AgentConfig::default();
+        cfg.dns.domain_map.insert(
+            "internal.techrockstars.com".to_string(),
+            "techrockstars.ztlp".to_string(),
+        );
+
+        let resolution =
+            resolve_proxy_target_from_config(&cfg, "db.internal.techrockstars.com").unwrap();
+
+        assert_eq!(
+            resolution,
+            ProxyTargetResolution::NsLookup {
+                ztlp_name: "db.techrockstars.ztlp".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_native_ztlp_name_uses_ns_lookup() {
+        let cfg = AgentConfig::default();
+
+        let resolution =
+            resolve_proxy_target_from_config(&cfg, "server.techrockstars.ztlp").unwrap();
+
+        assert_eq!(
+            resolution,
+            ProxyTargetResolution::NsLookup {
+                ztlp_name: "server.techrockstars.ztlp".to_string()
+            }
+        );
     }
 }

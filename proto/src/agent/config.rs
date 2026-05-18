@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::local_tls::TlsConfig;
+use crate::identity::NodeId;
 
 /// IPC configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +48,51 @@ pub struct AgentConfig {
 
     /// IPC settings.
     pub ipc: IpcConfig,
+
+    /// Static proxy targets keyed by SSH hostname.
+    ///
+    /// These are an operational escape hatch for real-world relay testing,
+    /// especially when a host is reachable through ZTLP transport before its
+    /// namespace records are fully registered.
+    pub proxy_targets: HashMap<String, StaticProxyTargetConfig>,
+}
+
+/// Static proxy target override for `ztlp proxy` keyed by hostname.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct StaticProxyTargetConfig {
+    /// Optional ZTLP name for logging and future NS fallback semantics.
+    pub ztlp_name: Option<String>,
+    /// Direct endpoint to connect to for the override path.
+    pub addr: String,
+    /// Optional peer NodeID as a 32-char hex string.
+    #[serde(default, deserialize_with = "deserialize_optional_node_id")]
+    pub node_id: Option<NodeId>,
+}
+
+fn deserialize_optional_node_id<'de, D>(deserializer: D) -> Result<Option<NodeId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let hex_value = Option::<String>::deserialize(deserializer)?;
+    let Some(hex_value) = hex_value else {
+        return Ok(None);
+    };
+
+    let bytes = hex::decode(&hex_value)
+        .map_err(|e| Error::custom(format!("invalid node_id hex '{}': {}", hex_value, e)))?;
+
+    if bytes.len() != 16 {
+        return Err(Error::custom(format!(
+            "node_id must decode to 16 bytes, got {} bytes",
+            bytes.len()
+        )));
+    }
+
+    let mut node_id = [0u8; 16];
+    node_id.copy_from_slice(&bytes);
+    Ok(Some(NodeId::from_bytes(node_id)))
 }
 
 /// Identity file location.
@@ -514,6 +560,63 @@ json = true
         assert_eq!(cfg.ns.timeout_ms, 3000);
         assert_eq!(cfg.tunnel.max_tunnels, 512);
         assert!(cfg.log.json);
+    }
+
+    #[test]
+    fn test_parse_static_proxy_targets_from_toml() {
+        let toml_str = r#"
+[proxy_targets.windows-relay]
+ztlp_name = "windows.techrockstars.ztlp"
+addr = "10.170.3.111:23095"
+node_id = "b88397923c2518ca6aa400eb79a18c7b"
+
+[proxy_targets.bootstrap-only]
+addr = "127.0.0.1:23095"
+"#;
+
+        let cfg: AgentConfig = toml::from_str(toml_str).unwrap();
+        let windows = cfg.proxy_targets.get("windows-relay").unwrap();
+        assert_eq!(
+            windows.ztlp_name.as_deref(),
+            Some("windows.techrockstars.ztlp")
+        );
+        assert_eq!(windows.addr, "10.170.3.111:23095");
+        assert_eq!(
+            windows.node_id,
+            Some(NodeId::from_bytes(
+                hex::decode("b88397923c2518ca6aa400eb79a18c7b")
+                    .unwrap()
+                    .try_into()
+                    .unwrap()
+            ))
+        );
+
+        let bootstrap_only = cfg.proxy_targets.get("bootstrap-only").unwrap();
+        assert_eq!(bootstrap_only.ztlp_name, None);
+        assert_eq!(bootstrap_only.node_id, None);
+    }
+
+    #[test]
+    fn test_static_proxy_target_node_id_is_optional() {
+        let toml_str = r#"
+[proxy_targets.windows-relay]
+addr = "10.170.3.111:23095"
+"#;
+
+        let cfg: AgentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.proxy_targets["windows-relay"].node_id, None);
+    }
+
+    #[test]
+    fn test_static_proxy_target_invalid_node_id_fails_decode() {
+        let toml_str = r#"
+[proxy_targets.windows-relay]
+addr = "10.170.3.111:23095"
+node_id = "abcd"
+"#;
+
+        let err = toml::from_str::<AgentConfig>(toml_str).unwrap_err().to_string();
+        assert!(err.contains("node_id must decode to 16 bytes"));
     }
 
     #[test]

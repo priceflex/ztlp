@@ -373,6 +373,103 @@ class LaunchAppTest(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertEqual("invalid", payload["reason"])
 
+    def _start_form(self, email="rl@example.com", zone_suffix="a", ip=None):
+        data = {
+            "organization_name": "Rate Org",
+            "admin_name": "Rate Limiter",
+            "admin_email": email,
+            "zone": f"rl-{zone_suffix}.ztlp",
+        }
+        headers = {"CONTENT_TYPE": "application/x-www-form-urlencoded"}
+        if ip is not None:
+            headers["REMOTE_ADDR"] = ip
+        return self.request("POST", "/start", urlencode(data), headers)
+
+    def test_rate_limit_blocks_after_email_threshold(self):
+        app = LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            email_rate_limit_per_hour=5,
+            ip_rate_limit_per_hour=10_000,
+        )
+        self.app = app
+        for i in range(5):
+            status, _h, _b = self._start_form(email="floody@example.com", zone_suffix=f"e{i}", ip=f"10.0.0.{i+1}")
+            self.assertEqual(HTTPStatus.CREATED, status, f"attempt {i+1} should be CREATED")
+        status, _h, body = self._start_form(email="floody@example.com", zone_suffix="e9", ip="10.0.0.99")
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+        self.assertIn("rate", body.lower())
+
+    def test_rate_limit_blocks_after_ip_threshold(self):
+        app = LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            email_rate_limit_per_hour=10_000,
+            ip_rate_limit_per_hour=20,
+        )
+        self.app = app
+        for i in range(20):
+            status, _h, _b = self._start_form(email=f"u{i}@example.com", zone_suffix=f"i{i}", ip="192.0.2.7")
+            self.assertEqual(HTTPStatus.CREATED, status, f"attempt {i+1} should be CREATED, got {status}")
+        status, _h, body = self._start_form(email="u20@example.com", zone_suffix="i20", ip="192.0.2.7")
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+        self.assertIn("rate", body.lower())
+
+    def test_rate_limit_window_resets_after_an_hour(self):
+        clock = [dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)]
+        app = LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: clock[0],
+            email_rate_limit_per_hour=2,
+            ip_rate_limit_per_hour=10_000,
+        )
+        self.app = app
+        for i in range(2):
+            status, _h, _b = self._start_form(email="reset@example.com", zone_suffix=f"r{i}", ip=f"10.0.1.{i+1}")
+            self.assertEqual(HTTPStatus.CREATED, status)
+        # third one in the same window is blocked
+        status, _h, _b = self._start_form(email="reset@example.com", zone_suffix="r2", ip="10.0.1.50")
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+        # advance 65 minutes — window resets
+        clock[0] = clock[0] + dt.timedelta(minutes=65)
+        status, _h, _b = self._start_form(email="reset@example.com", zone_suffix="r3", ip="10.0.1.51")
+        self.assertEqual(HTTPStatus.CREATED, status)
+
+    def test_rate_limit_uses_x_forwarded_for_when_remote_addr_is_proxy(self):
+        app = LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            email_rate_limit_per_hour=10_000,
+            ip_rate_limit_per_hour=2,
+        )
+        self.app = app
+        headers_base = {
+            "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            # No REMOTE_ADDR — simulate reverse proxy stripping it
+            "HTTP_X_FORWARDED_FOR": "203.0.113.45, 10.0.0.1",
+        }
+        for i in range(2):
+            data = {
+                "organization_name": "Xff Org",
+                "admin_name": "Xff User",
+                "admin_email": f"x{i}@example.com",
+                "zone": f"xff-{i}.ztlp",
+            }
+            status, _h, _b = self.request("POST", "/start", urlencode(data), headers_base)
+            self.assertEqual(HTTPStatus.CREATED, status)
+        data = {
+            "organization_name": "Xff Org",
+            "admin_name": "Xff User",
+            "admin_email": "x3@example.com",
+            "zone": "xff-3.ztlp",
+        }
+        status, _h, _b = self.request("POST", "/start", urlencode(data), headers_base)
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="
         start = body.index(marker)

@@ -44,6 +44,8 @@ LAUNCH_ENROLLMENT_TTL_SECONDS = int(os.environ.get("ZTLP_ENROLLMENT_TTL_SECONDS"
 LAUNCH_RELAY_ADDR = os.environ.get("ZTLP_RELAY_ADDR", "")
 LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
 BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR", "10.69.95.14:23095")
+LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR", "5"))
+LAUNCH_RATE_LIMIT_IP_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_IP_PER_HOUR", "20"))
 
 DOWNLOAD_ASSETS = [
     {
@@ -163,6 +165,8 @@ class LaunchApp:
         now: Callable[[], dt.datetime] = utcnow,
         public_host: str = DEFAULT_HOST,
         environment: str = DEFAULT_ENVIRONMENT,
+        email_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR,
+        ip_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_IP_PER_HOUR,
     ) -> None:
         self.db_path = db_path
         self.environment = (environment or "development").lower()
@@ -171,6 +175,8 @@ class LaunchApp:
         self.token_secret = token_secret.encode("utf-8")
         self.now = now
         self.public_host = public_host
+        self.email_rate_limit_per_hour = int(email_rate_limit_per_hour)
+        self.ip_rate_limit_per_hour = int(ip_rate_limit_per_hour)
         self.ensure_schema()
 
     def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
@@ -269,6 +275,17 @@ class LaunchApp:
             }.items():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE onboarding_requests ADD COLUMN {column} {ddl}")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rate_limit_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_scope_key_time ON rate_limit_attempts(scope, key, occurred_at)")
 
     def render_landing(self) -> Tuple[HTTPStatus, str, str]:
         body = """
@@ -313,9 +330,20 @@ class LaunchApp:
         if errors:
             return self.render_start_form(errors, values)
 
+        email_key = values["admin_email"].lower()
+        ip_key = self.client_ip(environ)
+        now_dt = self.now().replace(microsecond=0)
+        # Always record the attempt — denying does not give bots a freebie.
+        self.record_rate_attempt("email", email_key, now_dt)
+        self.record_rate_attempt("ip", ip_key, now_dt)
+        if self.rate_limit_exceeded("email", email_key, now_dt, self.email_rate_limit_per_hour):
+            return self.rate_limited_response("email")
+        if self.rate_limit_exceeded("ip", ip_key, now_dt, self.ip_rate_limit_per_hour):
+            return self.rate_limited_response("ip")
+
         token = secrets.token_urlsafe(32)
         digest = self.token_digest(token)
-        now = self.now().replace(microsecond=0)
+        now = now_dt
         expires = now + dt.timedelta(days=TOKEN_TTL_DAYS)
         with self.connect() as conn:
             conn.execute(
@@ -567,6 +595,49 @@ class LaunchApp:
 
     def download_url(self, filename: str) -> str:
         return f"{RELEASE_BASE_URL.rstrip('/')}/{filename}"
+
+    def client_ip(self, environ: dict) -> str:
+        """Resolve the client IP, preferring X-Forwarded-For when behind a reverse proxy.
+
+        Production runs behind a reverse proxy that sets HTTP_X_FORWARDED_FOR.
+        The first value in the list is the original client. Fall back to
+        REMOTE_ADDR for direct connections, then to 'unknown'.
+        """
+        xff = environ.get("HTTP_X_FORWARDED_FOR", "")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        remote = environ.get("REMOTE_ADDR", "").strip()
+        return remote or "unknown"
+
+    def record_rate_attempt(self, scope: str, key: str, occurred_at: dt.datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO rate_limit_attempts (scope, key, occurred_at) VALUES (?, ?, ?)",
+                (scope, key, occurred_at.isoformat()),
+            )
+
+    def rate_limit_exceeded(self, scope: str, key: str, now_dt: dt.datetime, limit: int) -> bool:
+        if limit <= 0:
+            return False
+        window_start = (now_dt - dt.timedelta(hours=1)).isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM rate_limit_attempts WHERE scope = ? AND key = ? AND occurred_at >= ?",
+                (scope, key, window_start),
+            ).fetchone()
+        count = row[0] if row else 0
+        return count > limit
+
+    def rate_limited_response(self, scope: str) -> Tuple[HTTPStatus, str, str]:
+        body = f"""
+        <p class=\"eyebrow\">Slow down</p>
+        <h1>Rate limit reached</h1>
+        <p>Too many onboarding attempts in the last hour for this {esc(scope)}. Please wait a bit and try again — this protects ztlp.net from abuse.</p>
+        <p><a href=\"/\">Back to home</a></p>
+        """
+        return (HTTPStatus.TOO_MANY_REQUESTS, "text/html; charset=utf-8", self.page("Rate limit reached", body))
 
     def read_form(self, environ: dict) -> Dict[str, list[str]]:
         try:

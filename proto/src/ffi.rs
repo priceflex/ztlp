@@ -3863,9 +3863,7 @@ pub extern "C" fn ztlp_ios_tunnel_engine_udp_send(
 
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 #[no_mangle]
-pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(
-    engine: *mut ZtlpIosTunnelEngine,
-) -> i32 {
+pub extern "C" fn ztlp_ios_tunnel_engine_udp_local_port(engine: *mut ZtlpIosTunnelEngine) -> i32 {
     if engine.is_null() {
         set_last_error("engine is null");
         return -(ZtlpResult::InvalidArgument as i32);
@@ -4037,10 +4035,7 @@ pub extern "C" fn ztlp_mux_enqueue_open(
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_enqueue_close(
-    engine: *mut ZtlpMuxEngine,
-    stream_id: u32,
-) -> i32 {
+pub extern "C" fn ztlp_mux_enqueue_close(engine: *mut ZtlpMuxEngine, stream_id: u32) -> i32 {
     if engine.is_null() {
         set_last_error("engine is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -4062,11 +4057,7 @@ pub extern "C" fn ztlp_mux_enqueue_close(
 /// callback must NOT retain the pointer after returning — copy the bytes
 /// if needed.
 #[cfg(feature = "ios-sync")]
-pub type ZtlpMuxFrameCallback = extern "C" fn(
-    user_data: *mut c_void,
-    frame: *const u8,
-    len: usize,
-);
+pub type ZtlpMuxFrameCallback = extern "C" fn(user_data: *mut c_void, frame: *const u8, len: usize);
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
@@ -4134,11 +4125,7 @@ pub extern "C" fn ztlp_mux_take_retransmit_bytes(
 /// of inflight packets released, or -1 on error.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_on_ack(
-    engine: *mut ZtlpMuxEngine,
-    cumulative: u64,
-    rwnd: u16,
-) -> i32 {
+pub extern "C" fn ztlp_mux_on_ack(engine: *mut ZtlpMuxEngine, cumulative: u64, rwnd: u16) -> i32 {
     // TODO(nebula-pivot-R4): delete this FFI fn
     0
 }
@@ -4147,10 +4134,7 @@ pub extern "C" fn ztlp_mux_on_ack(
 /// advances the cumulative ACK the engine advertises back to the peer.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_on_data_received(
-    engine: *mut ZtlpMuxEngine,
-    data_seq: u64,
-) -> i32 {
+pub extern "C" fn ztlp_mux_on_data_received(engine: *mut ZtlpMuxEngine, data_seq: u64) -> i32 {
     if engine.is_null() {
         set_last_error("engine is null");
         return ZtlpResult::InvalidArgument as i32;
@@ -4366,10 +4350,7 @@ pub extern "C" fn ztlp_mux_advertised_window_kb(engine: *mut ZtlpMuxEngine) -> u
 /// observed peer V2. Returns 0 on success, negative on error.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_set_initial_window_kb(
-    engine: *mut ZtlpMuxEngine,
-    kb: u16,
-) -> i32 {
+pub extern "C" fn ztlp_mux_set_initial_window_kb(engine: *mut ZtlpMuxEngine, kb: u16) -> i32 {
     // TODO(nebula-pivot-R4): delete this FFI fn
     0
 }
@@ -4542,7 +4523,9 @@ pub extern "C" fn ztlp_health_tick(
             if !out_reason.is_null() && out_reason_len > 0 {
                 let bytes = reason.as_bytes();
                 let copy = bytes.len().min(out_reason_len - 1);
-                let dst = unsafe { std::slice::from_raw_parts_mut(out_reason as *mut u8, out_reason_len) };
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(out_reason as *mut u8, out_reason_len)
+                };
                 dst[..copy].copy_from_slice(&bytes[..copy]);
                 dst[copy] = 0;
             }
@@ -4858,7 +4841,10 @@ pub extern "C" fn ztlp_router_gateway_data_sync(
 /// Return 1 if the router currently maps stream_id to an active TCP flow,
 /// 0 if unmapped, and -1 on error.
 #[no_mangle]
-pub extern "C" fn ztlp_router_has_stream_sync(router: *mut ZtlpPacketRouter, stream_id: u32) -> i32 {
+pub extern "C" fn ztlp_router_has_stream_sync(
+    router: *mut ZtlpPacketRouter,
+    stream_id: u32,
+) -> i32 {
     if router.is_null() {
         set_last_error("null argument");
         return -1;

@@ -545,9 +545,7 @@ async fn encrypt_and_send(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let packet_seq = {
         let mut pl = pipeline.lock().await;
-        let session = pl
-            .get_session_mut(&session_id)
-            .ok_or("session not found")?;
+        let session = pl.get_session_mut(&session_id).ok_or("session not found")?;
         session.next_send_seq()
     };
     let mut nonce_bytes = [0u8; 12];
@@ -639,7 +637,7 @@ where
     // Flag set when our local TCP reader hits EOF.
     let mut local_eof = false;
     let mut local_fin_sent = false;
-    
+
     let mut recv_window = crate::ReceiveWindow::default();
 
     let mut tcp_buf = vec![0u8; TCP_READ_BUF];
@@ -653,7 +651,7 @@ where
 
     // Track the highest continuous data_seq received for reliability
     let mut last_acked_data_seq: u64 = 0;
-    
+
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
@@ -854,14 +852,14 @@ where
             seq_bytes.copy_from_slice(&plaintext[1..9]);
             let data_seq = u64::from_be_bytes(seq_bytes);
             let payload = &plaintext[9..];
-            
+
             // Reassembly is required here rather than directly writing to TCP.
             // The Nebula-pivot stripped this out causing 10MB transfers to drop/drop packet fragments.
-            // We just added ReceiveWindow earlier but didn't actually plug it in here 
+            // We just added ReceiveWindow earlier but didn't actually plug it in here
             // after the re-edits. Let's fix that.
-let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
+            let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
             let mut gap_detected_or_progression = false;
-            
+
             for p in ordered_payloads {
                 tcp_writer.write_all(p.as_slice()).await?;
                 // Since we only get contiguous sequential chunks out of insert(),
@@ -871,25 +869,25 @@ let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
                     *last_acked_data_seq = data_seq + 1; // Assuming data_seq advanced
                     gap_detected_or_progression = true;
                 }
-            } 
+            }
             if data_seq > *last_acked_data_seq {
                 gap_detected_or_progression = true; // send dupack for fast recovery if gaps
             }
-            
+
             // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
             // need to trigger loss recovery or window opening on the Gateway side.
             if gap_detected_or_progression {
-                // Construct and send FRAME_ACK_V2 
+                // Construct and send FRAME_ACK_V2
                 let mut ack_frame = Vec::with_capacity(11);
                 ack_frame.push(0x10); // FRAME_ACK_V2
                 ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
-                
+
                 // Explicitly send the exact scale needed: 5734 KB (fits in u16 window_kb)
-                // This produces window_bytes = 5734 * 1024, which translates to a massive 
+                // This produces window_bytes = 5734 * 1024, which translates to a massive
                 // ~5151 packet effective peer_rwnd limit internally on the modified Gateway.
-                let window_kb: u16 = 5734; 
+                let window_kb: u16 = 5734;
                 ack_frame.extend_from_slice(&window_kb.to_be_bytes());
-                
+
                 let send_key = {
                     let pipeline_lock = pipeline.lock().await;
                     if let Some(session) = pipeline_lock.get_session(&session_id) {
@@ -901,9 +899,16 @@ let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
 
                 if let Some(send_key) = send_key {
                     if let Err(e) = encrypt_and_send(
-                        pipeline, &send_key, send_cipher,
-                        session_id, udp_send, peer_addr, &ack_frame,
-                    ).await {
+                        pipeline,
+                        &send_key,
+                        send_cipher,
+                        session_id,
+                        udp_send,
+                        peer_addr,
+                        &ack_frame,
+                    )
+                    .await
+                    {
                         debug!("ack send error: {}", e);
                     }
                 }
@@ -932,7 +937,6 @@ let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
     }
     Ok(())
 }
-
 
 // ─── Service registry ───────────────────────────────────────────────────────
 
@@ -995,10 +999,10 @@ impl ServiceRegistry {
 
         // Fallback: if the registry only contains the default service, route
         // any unrecognized name to it rather than rejecting outright.
-        if self.services.len() == 1
-            && self.services.contains_key(DEFAULT_SERVICE)
-        {
-            return self.services.get_key_value(DEFAULT_SERVICE)
+        if self.services.len() == 1 && self.services.contains_key(DEFAULT_SERVICE) {
+            return self
+                .services
+                .get_key_value(DEFAULT_SERVICE)
                 .map(|(key, addr)| (key.as_str(), *addr));
         }
 
@@ -1260,7 +1264,10 @@ mod tests {
         assert!(result.is_some());
         let (svc_name, addr) = result.unwrap();
         assert_eq!(svc_name, DEFAULT_SERVICE);
-        assert_eq!(addr, "127.0.0.1:22".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(
+            addr,
+            "127.0.0.1:22".parse::<std::net::SocketAddr>().unwrap()
+        );
     }
 
     #[test]
@@ -1353,13 +1360,8 @@ mod tests {
         let send_key = [0x42u8; 32];
         let recv_key = [0x43u8; 32];
 
-        let server_session = SessionState::new(
-            session_id,
-            id_client.node_id,
-            recv_key,
-            send_key,
-            false,
-        );
+        let server_session =
+            SessionState::new(session_id, id_client.node_id, recv_key, send_key, false);
 
         let _ = recv_key;
 
@@ -1427,7 +1429,11 @@ mod tests {
 
         client_task.await.unwrap();
 
-        assert!(result.is_ok(), "should receive first data: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should receive first data: {:?}",
+            result.err()
+        );
         let packets = result.unwrap();
         assert!(!packets.is_empty());
     }

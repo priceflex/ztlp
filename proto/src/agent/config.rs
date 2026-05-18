@@ -615,7 +615,9 @@ addr = "10.170.3.111:23095"
 node_id = "abcd"
 "#;
 
-        let err = toml::from_str::<AgentConfig>(toml_str).unwrap_err().to_string();
+        let err = toml::from_str::<AgentConfig>(toml_str)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("node_id must decode to 16 bytes"));
     }
 

@@ -2713,10 +2713,7 @@ fn spawn_relay_registration(
 
         match socket.send_to(&pkt, relay_addr).await {
             Ok(n) => {
-                debug!(
-                    "gateway registration sent to {} ({} bytes)",
-                    relay_addr, n
-                );
+                debug!("gateway registration sent to {} ({} bytes)", relay_addr, n);
             }
             Err(e) => {
                 warn!(
@@ -2750,10 +2747,7 @@ fn spawn_relay_registration(
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        "failed to re-register gateway with {}: {}",
-                        relay_addr, e
-                    );
+                    warn!("failed to re-register gateway with {}: {}", relay_addr, e);
                     eprintln!(
                         "{} failed to re-register with {}: {}",
                         c_red("✗"),
@@ -2862,14 +2856,14 @@ async fn cmd_listen(
             .map_err(|e| format!("invalid --relay address '{}': {}", relay, e))?;
 
         // Spawn the relay registration task — sends initial REGISTER + periodic refreshes
-        spawn_relay_registration(
-            &node,
-            &identity,
-            relay_addr,
-            service_name,
-        );
+        spawn_relay_registration(&node, &identity, relay_addr, service_name);
 
-        eprintln!("{} {} (service: {})", c_cyan("Relay registered:"), relay, service_name);
+        eprintln!(
+            "{} {} (service: {})",
+            c_cyan("Relay registered:"),
+            relay,
+            service_name
+        );
     }
 
     // Multi-session mode: when --forward is set and max_sessions > 1
@@ -5312,7 +5306,7 @@ async fn cmd_ping(
 
     let addr: std::net::SocketAddr = bind.parse()?;
     raw_socket.bind(&addr.into())?;
-    
+
     let sock = UdpSocket::from_std(raw_socket.into())?;
     let _ = ztlp_proto::gso::enable_gro(&sock);
     let local_addr = sock.local_addr()?;

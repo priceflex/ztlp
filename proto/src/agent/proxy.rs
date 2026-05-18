@@ -138,9 +138,12 @@ fn resolve_proxy_target_from_config(
     }
 
     let mapper = DomainMapper::new(&config.dns.domain_map);
-    let ztlp_name = mapper
-        .to_ztlp_name(hostname)
-        .ok_or_else(|| format!("hostname '{}' is not a native .ztlp name and does not match dns.domain_map", hostname))?;
+    let ztlp_name = mapper.to_ztlp_name(hostname).ok_or_else(|| {
+        format!(
+            "hostname '{}' is not a native .ztlp name and does not match dns.domain_map",
+            hostname
+        )
+    })?;
 
     Ok(ProxyTargetResolution::NsLookup { ztlp_name })
 }
@@ -149,10 +152,12 @@ fn static_proxy_resolution(
     hostname: &str,
     target: &StaticProxyTargetConfig,
 ) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
-    let addr = target
-        .addr
-        .parse()
-        .map_err(|e| format!("invalid static proxy target addr '{}' for '{}': {}", target.addr, hostname, e))?;
+    let addr = target.addr.parse().map_err(|e| {
+        format!(
+            "invalid static proxy target addr '{}' for '{}': {}",
+            target.addr, hostname, e
+        )
+    })?;
 
     Ok(NsResolution {
         addr,
@@ -265,8 +270,8 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
         return Err("NS response: record not found or revoked".into());
     }
 
-    let address_str = cbor_extract_string(&record.data, "address")
-        .ok_or("SVC record missing address")?;
+    let address_str =
+        cbor_extract_string(&record.data, "address").ok_or("SVC record missing address")?;
 
     address_str
         .parse()
@@ -411,9 +416,9 @@ pub async fn run_proxy(
 
     // ── Determine send address (relay or direct) ────────────────────────
     let send_addr = if let Some(relay) = relay_addr {
-        let relay_sock: std::net::SocketAddr = relay.parse().map_err(|e| {
-            format!("invalid relay address '{}': {}", relay, e)
-        })?;
+        let relay_sock: std::net::SocketAddr = relay
+            .parse()
+            .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?;
         eprintln!("[ztlp proxy] relay: {} (target: {})", relay, peer_addr);
         relay_sock
     } else {
@@ -423,9 +428,18 @@ pub async fn run_proxy(
     let session_id = SessionId::generate();
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
-    eprintln!("[ztlp proxy] handshake → {}:{}{}", peer_addr, port, if relay_addr.is_some() { " [via relay]" } else { "" });
+    eprintln!(
+        "[ztlp proxy] handshake → {}:{}{}",
+        peer_addr,
+        port,
+        if relay_addr.is_some() {
+            " [via relay]"
+        } else {
+            ""
+        }
+    );
     let dst_svc_id = crate::tunnel::encode_service_name(&resolution.ztlp_name)?;
-    
+
     // Message 1: HELLO
     let msg1 = ctx.write_message(&[])?;
     let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
@@ -440,7 +454,7 @@ pub async fn run_proxy(
     // Message 2: receive HELLO_ACK (with retransmit)
     let mut retry_delay = std::time::Duration::from_millis(500);
     let mut retries = 0;
-    
+
     let (recv2, _from2) = loop {
         match timeout(retry_delay, node.recv_raw()).await {
             Ok(Ok((data, addr))) => {
@@ -457,7 +471,9 @@ pub async fn run_proxy(
             Err(_) => {
                 retries += 1;
                 if retries > 5 {
-                    return Err("handshake timeout waiting for HELLO_ACK (max retries reached)".into());
+                    return Err(
+                        "handshake timeout waiting for HELLO_ACK (max retries reached)".into(),
+                    );
                 }
                 node.send_raw(&pkt1, send_addr).await?;
                 retry_delay = (retry_delay * 2).min(std::time::Duration::from_millis(2000));
@@ -1067,8 +1083,8 @@ mod tests {
 
     #[test]
     fn test_decode_reject_payload_surfaces_message_and_reason() {
-        let payload = RejectFrame::new(RejectReason::ServiceUnavailable, "ssh service disabled")
-            .encode();
+        let payload =
+            RejectFrame::new(RejectReason::ServiceUnavailable, "ssh service disabled").encode();
 
         let err = decode_reject_payload(&payload).expect("reject should decode");
 

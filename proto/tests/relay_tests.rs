@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod relay_tests {
     use super::*;
-    
+
     // Test that --relay flag is parsed correctly in listen command
     #[test]
     fn test_listen_relay_flag_parsing() {
@@ -12,7 +12,7 @@ mod relay_tests {
         // and tested implicitly when the binary runs
         assert!(true);
     }
-    
+
     // Test that --service-name flag works with --relay
     #[test]
     fn test_listen_service_name_with_relay() {

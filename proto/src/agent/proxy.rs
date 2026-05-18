@@ -261,42 +261,16 @@ fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Err
         return Err("NS response: record not found or revoked".into());
     }
 
-    // Try finding it anyway using the exact byte layout
-    // NS record looks like this:
-    // ... "address" ... "1.2.3.4:5678" ...
-    // or
-    // ... "endpoints" ... "1.2.3.4:5678" ...
-
     let address_str = cbor_extract_string(&record.data, "address")
-        .or_else(|| {
-            // Very manual string extract of endpoints array
-            if let Some(pos) = record.data.windows(11).position(|w| w == b"\"endpoints\"") {
-                if let Some(start) = record.data[pos..].iter().position(|&b| (0x60..=0x7B).contains(&b)) {
-                    let len = (record.data[pos + start] & 0x1F) as usize;
-                    if pos + start + 1 + len <= record.data.len() {
-                        return String::from_utf8(record.data[pos + start + 1..pos + start + 1 + len].to_vec()).ok();
-                    }
-                }
-            }
-            // Fallback: look for anything that looks like an IP:PORT string
-            if let Some(pos) = record.data.windows(8).position(|w| w == b"address") {
-                if let Some(start) = record.data[pos..].iter().position(|&b| (0x60..=0x7B).contains(&b)) {
-                    let len = (record.data[pos + start] & 0x1F) as usize;
-                    if pos + start + 1 + len <= record.data.len() {
-                        return String::from_utf8(record.data[pos + start + 1..pos + start + 1 + len].to_vec()).ok();
-                    }
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| {
-            // Absolute fallback for this session
-            "10.170.3.111:23095".to_string()
-        });
+        .ok_or("SVC record missing address")?;
 
     address_str
         .parse()
         .map_err(|e| format!("invalid address in SVC record '{}': {}", address_str, e).into())
+}
+
+fn resolved_peer_addr(resolution: &NsResolution) -> SocketAddr {
+    resolution.addr
 }
 
 /// Parse a KEY record response to extract the NodeID.
@@ -391,7 +365,7 @@ pub async fn run_proxy(
     // ── Establish ZTLP tunnel ───────────────────────────────────────────
     let node = TransportNode::bind(&config.tunnel.bind).await?;
 
-    let peer_addr = "10.170.3.111:23095".parse().unwrap();
+    let peer_addr = resolved_peer_addr(&resolution);
     let session_id = SessionId::generate();
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
@@ -880,6 +854,56 @@ mod tests {
         // A text string instead of a map
         let cbor = vec![0x65, b'h', b'e', b'l', b'l', b'o'];
         assert_eq!(cbor_extract_string(&cbor, "key"), None);
+    }
+
+    fn ns_found_response(record_type: u8, name: &str, cbor_data: &[u8]) -> Vec<u8> {
+        let mut resp = vec![0x02, record_type];
+        resp.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        resp.extend_from_slice(name.as_bytes());
+        resp.extend_from_slice(&(cbor_data.len() as u32).to_be_bytes());
+        resp.extend_from_slice(cbor_data);
+        resp
+    }
+
+    #[test]
+    fn test_parse_svc_response_extracts_address_field() {
+        let mut cbor = Vec::new();
+        cbor.push(0xA1);
+        cbor.push(0x67);
+        cbor.extend_from_slice(b"address");
+        cbor.push(0x6E);
+        cbor.extend_from_slice(b"10.0.0.1:23095");
+
+        let response = ns_found_response(0x02, "test.techrockstars.ztlp", &cbor);
+        let addr = parse_svc_response(&response).unwrap();
+
+        assert_eq!(addr, "10.0.0.1:23095".parse().unwrap());
+    }
+
+    #[test]
+    fn test_parse_svc_response_errors_when_address_missing() {
+        let mut cbor = Vec::new();
+        cbor.push(0xA1);
+        cbor.push(0x64);
+        cbor.extend_from_slice(b"zone");
+        cbor.push(0x69);
+        cbor.extend_from_slice(b"test.ztlp");
+
+        let response = ns_found_response(0x02, "test.techrockstars.ztlp", &cbor);
+        let err = parse_svc_response(&response).unwrap_err().to_string();
+
+        assert!(err.contains("missing address"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_resolved_peer_addr_uses_resolution_addr() {
+        let resolution = NsResolution {
+            addr: "10.0.0.99:22000".parse().unwrap(),
+            node_id: None,
+            ztlp_name: "test.techrockstars.ztlp".to_string(),
+        };
+
+        assert_eq!(resolved_peer_addr(&resolution), resolution.addr);
     }
 
     #[test]

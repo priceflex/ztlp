@@ -555,9 +555,9 @@ async fn encrypt_and_send(
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("AEAD encrypt failed: {}", e))?;
     let mut header = DataHeader::new(session_id, packet_seq);
+    header.payload_len = encrypted.len() as u16;
     let aad = header.aad_bytes();
     header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
-    header.payload_len = encrypted.len() as u16;
     let mut packet = header.serialize();
     packet.extend_from_slice(&encrypted);
     udp.send_to(&packet, peer_addr).await?;
@@ -660,9 +660,6 @@ where
     // Skip the immediate first tick.
     keepalive_tick.tick().await;
 
-    // Track the highest continuous data_seq received for reliability
-    let mut last_acked_data_seq: u64 = 0;
-
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
@@ -674,11 +671,7 @@ where
                 &mut tcp_writer,
                 &mut reset_received,
                 &mut peer_fin,
-                &mut last_acked_data_seq,
                 &mut recv_window,
-                &udp_send,
-                peer_addr,
-                &send_cipher,
             )
             .await
             {
@@ -756,11 +749,7 @@ where
                             &mut tcp_writer,
                             &mut reset_received,
                             &mut peer_fin,
-                            &mut last_acked_data_seq,
                             &mut recv_window,
-                            &udp_send,
-                            peer_addr,
-                            &send_cipher,
                         ).await {
                             debug!("incoming packet error: {}", e);
                         }
@@ -816,11 +805,7 @@ async fn handle_incoming_packet<W>(
     tcp_writer: &mut W,
     reset_received: &mut bool,
     peer_fin: &mut bool,
-    last_acked_data_seq: &mut u64,
     recv_window: &mut crate::ReceiveWindow,
-    udp_send: &UdpSocket,
-    peer_addr: SocketAddr,
-    send_cipher: &ChaCha20Poly1305,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -869,60 +854,9 @@ where
             // We just added ReceiveWindow earlier but didn't actually plug it in here
             // after the re-edits. Let's fix that.
             let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
-            let mut gap_detected_or_progression = false;
 
             for p in ordered_payloads {
                 tcp_writer.write_all(p.as_slice()).await?;
-                // Since we only get contiguous sequential chunks out of insert(),
-                // length of slice tells us the contiguous chunks returned. We don't have
-                // seq per payload anymore from insert(). Let's just track data_seq progression.
-                if data_seq >= *last_acked_data_seq {
-                    *last_acked_data_seq = data_seq + 1; // Assuming data_seq advanced
-                    gap_detected_or_progression = true;
-                }
-            }
-            if data_seq > *last_acked_data_seq {
-                gap_detected_or_progression = true; // send dupack for fast recovery if gaps
-            }
-
-            // To prevent ACK storms, limit ACK generation slightly. Gap progression implies we definitely
-            // need to trigger loss recovery or window opening on the Gateway side.
-            if gap_detected_or_progression {
-                // Construct and send FRAME_ACK_V2
-                let mut ack_frame = Vec::with_capacity(11);
-                ack_frame.push(0x10); // FRAME_ACK_V2
-                ack_frame.extend_from_slice(&last_acked_data_seq.to_be_bytes());
-
-                // Explicitly send the exact scale needed: 5734 KB (fits in u16 window_kb)
-                // This produces window_bytes = 5734 * 1024, which translates to a massive
-                // ~5151 packet effective peer_rwnd limit internally on the modified Gateway.
-                let window_kb: u16 = 5734;
-                ack_frame.extend_from_slice(&window_kb.to_be_bytes());
-
-                let send_key = {
-                    let pipeline_lock = pipeline.lock().await;
-                    if let Some(session) = pipeline_lock.get_session(&session_id) {
-                        Some(session.send_key)
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(send_key) = send_key {
-                    if let Err(e) = encrypt_and_send(
-                        pipeline,
-                        &send_key,
-                        send_cipher,
-                        session_id,
-                        udp_send,
-                        peer_addr,
-                        &ack_frame,
-                    )
-                    .await
-                    {
-                        debug!("ack send error: {}", e);
-                    }
-                }
             }
         }
         FRAME_FIN => {

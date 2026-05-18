@@ -482,7 +482,7 @@ defmodule ZtlpGateway.Session do
   @initial_cwnd 10.0
   # Maximum congestion window. 32 × 1140 = 36.5KB inflight max.
   # Gives headroom above sustainable 16-24 range so sawtooth stays in range.
-  @max_cwnd 32
+  # @max_cwnd 32
   # Minimum cwnd — low floor allows meaningful recovery (cwnd 22→4 vs old 12→10)
   @min_cwnd 4
   # Minimum ssthresh floor. Low floor for deep lossy-path backoff.
@@ -508,7 +508,7 @@ defmodule ZtlpGateway.Session do
   # of queued packets. The iOS NE is stable at rwnd=8, but once the gateway has
   # queued 6K packets, the browser sees multi-second delays and churns streams.
   # Keep gateway buffering shallow and rely on TCP/backend backpressure.
-  @max_cwnd 20480
+  # @max_cwnd 20480
   # @max_mux_streams bounds the total concurrent connected + connecting streams.
   # @max_connecting_buffer_bytes bounds early data accepted before a backend finishes connecting.
   @max_mux_streams 32
@@ -540,10 +540,10 @@ defmodule ZtlpGateway.Session do
   # Pacing interval: ms between burst sends.
   # 4ms × 3 packets = 855 bytes/ms = ~6.8 Mbps pacing rate.
   # Aligns with LTE TTI scheduling (1ms). Previous 5ms×2 = 3.6 Mbps was too slow.
-  @pacing_interval_ms 0
+  # @pacing_interval_ms 0
   # Max packets sent per pacing tick — 3×1140=3420 bytes per burst.
   # LTE handles 3-packet bursts well. Previous 2 was too conservative.
-  @burst_size 256
+  # @burst_size 256
 
   # Receiver-window default when the client sends legacy ACK frames without an
   # explicit rwnd. This preserves backward compatibility while allowing newer
@@ -3510,7 +3510,7 @@ defmodule ZtlpGateway.Session do
   defp update_rtt(state, _rtt), do: state
 
   defp clamp_rto(state, rto) do
-    rto |> max(cc_min_rto_ms(state)) |> min(@max_rto_ms)
+    rto |> max(cc_min_rto_ms(state)) |> min(3000)
   end
 
   # Parse NACK payload: N x 8-byte big-endian data_seqs
@@ -3538,7 +3538,7 @@ defmodule ZtlpGateway.Session do
   defp per_packet_rto(state, retransmit_count) do
     base_rto = Map.get(state, :rto_ms, @initial_rto_ms)
     backed_off = (base_rto * :math.pow(1.5, retransmit_count)) |> round()
-    backed_off |> max(cc_min_rto_ms(state)) |> min(@max_rto_ms)
+    backed_off |> max(cc_min_rto_ms(state)) |> min(3000)
   end
 
   defp effective_rto_retransmit_limit(%{peer_rwnd: peer_rwnd})

@@ -619,7 +619,18 @@ where
     let (mut tcp_reader, mut tcp_writer) = tokio::io::split(tcp_stream);
 
     let udp_send = udp_socket.clone();
-    let udp_recv = udp_recv_override.unwrap_or_else(|| udp_socket.clone());
+    let udp_recv = udp_recv_override
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| udp_socket.clone());
+    // When a dedicated per-session recv socket is supplied (multi-session
+    // listener mode), the listener's demuxer is responsible for delivering
+    // only this session's packets, and it does so via a loopback UDP socket
+    // pair whose `from` address will *not* match `peer_addr`. In that mode,
+    // skip the per-packet peer_addr filter — otherwise every client→server
+    // data packet is silently dropped and the local TCP backend never sees
+    // any inbound bytes (the gateway just sits idle until SSH times out).
+    let enforce_peer_filter = udp_recv_override.is_none();
 
     // Monotonic data_seq for the DATA frame's in-band counter. The receiver
     // no longer reassembles on it, but we keep the field so gateways and
@@ -733,7 +744,7 @@ where
             udp_result = udp_recv.recv_from(&mut udp_buf) => {
                 match udp_result {
                     Ok((len, from)) => {
-                        if from != peer_addr {
+                        if enforce_peer_filter && from != peer_addr {
                             continue;
                         }
                         let pkt = &udp_buf[..len];
@@ -1455,6 +1466,217 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap().to_string();
         assert!(err.contains("timeout"));
+    }
+
+    /// Regression test for the multi-frame inbound bug under the real
+    /// multi-session listener topology.
+    ///
+    /// In `cmd_listen_multi_session`, packets coming off the wire (from the
+    /// relay or the actual peer) arrive on the listener's main UDP socket and
+    /// are routed through a per-session mpsc channel; a forwarder task then
+    /// writes them into a loopback UDP socket pair which feeds the bridge.
+    /// The bridge is invoked via `run_bridge_demuxed`, with `peer_addr` set
+    /// to the *original* peer (e.g. the relay's external address).
+    ///
+    /// That means the `from` address the bridge sees on its `udp_recv` socket
+    /// is the **forwarder's loopback address**, not `peer_addr`. The pre-fix
+    /// code in `run_bridge_inner` rejected those packets with
+    /// `if from != peer_addr { continue; }`, dropping every client→server
+    /// data packet (single-frame *and* multi-frame). The only thing that
+    /// "worked" was the gateway sending the local TCP backend's banner back
+    /// to the client on the TX path.
+    ///
+    /// This test wires up the same topology and asserts that two FRAME_DATA
+    /// packets are decrypted and written to the TCP backend.
+    #[tokio::test]
+    async fn test_run_bridge_demuxed_multi_frame_inbound_via_loopback_forwarder() {
+        let (recv_socket, fwd_socket, pipeline, session_id, _peer_loopback, recv_addr, send_key) =
+            setup_lazy_connect_pair().await;
+
+        // Pretend the "real" peer is somewhere off-host. The listener would
+        // record this as `peer_addr` when the HELLO arrived.
+        let pretend_peer_addr: SocketAddr = "203.0.113.42:50000".parse().unwrap();
+
+        // Build the bridge's two sockets:
+        //   - udp_send_socket: the shared listener socket (we won't actually
+        //     send anything outbound in this test, but it's a required arg).
+        //   - udp_recv_socket: the per-session loopback socket the bridge
+        //     reads from. The forwarder task (fwd_socket) writes into it.
+        let udp_send_socket = Arc::new(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .unwrap(),
+        );
+
+        let (tcp_side_for_bridge, mut tcp_test_side) = tokio::io::duplex(64 * 1024);
+
+        let bridge_pipeline = pipeline.clone();
+        let recv_socket_for_bridge = recv_socket.clone();
+        let bridge_handle = tokio::spawn(async move {
+            let _ = run_bridge_inner(
+                tcp_side_for_bridge,
+                udp_send_socket,
+                Some(recv_socket_for_bridge),
+                bridge_pipeline,
+                session_id,
+                pretend_peer_addr, // <-- the "real" peer, NOT recv_addr
+                false,
+                Vec::new(),
+            )
+            .await
+            .map_err(|e| e.to_string());
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Build two FRAME_DATA packets and "forward" them via the loopback
+        // socket pair, exactly as the real listener's forwarder does.
+        let chunk_a = vec![b'A'; 1200];
+        let chunk_b = vec![b'B'; 400];
+
+        let pkt0 = build_data_packet(session_id, &send_key, 0, 0, &chunk_a);
+        let pkt1 = build_data_packet(session_id, &send_key, 1, 1, &chunk_b);
+
+        fwd_socket.send_to(&pkt0, recv_addr).await.unwrap();
+        fwd_socket.send_to(&pkt1, recv_addr).await.unwrap();
+
+        let expected_total = chunk_a.len() + chunk_b.len();
+        let mut got = Vec::with_capacity(expected_total);
+        let read_fut = async {
+            let mut tmp = vec![0u8; 4096];
+            while got.len() < expected_total {
+                let n = tcp_test_side.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&tmp[..n]);
+            }
+        };
+        let read_res = tokio::time::timeout(Duration::from_secs(3), read_fut).await;
+
+        bridge_handle.abort();
+
+        assert!(
+            read_res.is_ok(),
+            "timed out waiting for bridge to write both chunks via loopback forwarder; only got {} of {} bytes",
+            got.len(),
+            expected_total,
+        );
+        assert_eq!(
+            got.len(),
+            expected_total,
+            "bridge wrote {} bytes, expected {}",
+            got.len(),
+            expected_total,
+        );
+        assert!(
+            got[..chunk_a.len()].iter().all(|&b| b == b'A'),
+            "first chunk corrupted"
+        );
+        assert!(
+            got[chunk_a.len()..].iter().all(|&b| b == b'B'),
+            "second chunk corrupted"
+        );
+    }
+
+    /// Regression test for the multi-frame inbound bug.
+    ///
+    /// Two FRAME_DATA packets are sent back-to-back from the "client" UDP
+    /// socket to the bridge:
+    ///   - seq=0, payload = 1200 bytes of 'A'
+    ///   - seq=1, payload =  400 bytes of 'B'
+    ///
+    /// `run_bridge_inner` must write BOTH chunks to the TCP side of its
+    /// in-memory duplex stream.
+    #[tokio::test]
+    async fn test_run_bridge_inner_writes_multi_frame_inbound_data() {
+        let (server_sock, client_sock, pipeline, session_id, client_addr, server_addr, send_key) =
+            setup_lazy_connect_pair().await;
+        let _ = server_addr;
+
+        // Build a duplex pair: `tcp_side_for_bridge` is what the bridge thinks
+        // is the local TCP backend. `tcp_test_side` is what our test reads to
+        // verify the bridge wrote the decrypted payloads.
+        let (tcp_side_for_bridge, mut tcp_test_side) = tokio::io::duplex(64 * 1024);
+
+        // Spawn the bridge. It will:
+        //   - read from `tcp_side_for_bridge` (we never send anything → idles)
+        //   - recv from `server_sock`
+        //   - decrypt and write into `tcp_side_for_bridge`'s write half,
+        //     which appears on `tcp_test_side`'s read half.
+        let bridge_pipeline = pipeline.clone();
+        let bridge_handle = tokio::spawn(async move {
+            let _ = run_bridge_inner(
+                tcp_side_for_bridge,
+                server_sock,
+                None,
+                bridge_pipeline,
+                session_id,
+                client_addr,
+                false,
+                Vec::new(),
+            )
+            .await
+            .map_err(|e| e.to_string());
+        });
+
+        // Give the bridge a moment to enter its select loop.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send two FRAME_DATA packets back-to-back.
+        let chunk_a = vec![b'A'; 1200];
+        let chunk_b = vec![b'B'; 400];
+
+        let pkt0 = build_data_packet(session_id, &send_key, 0, 0, &chunk_a);
+        let pkt1 = build_data_packet(session_id, &send_key, 1, 1, &chunk_b);
+
+        // server_addr was returned as the address `server_sock` is bound to —
+        // but since `server_sock` was moved into the bridge task we already
+        // captured it in server_addr above.
+        client_sock.send_to(&pkt0, server_addr).await.unwrap();
+        client_sock.send_to(&pkt1, server_addr).await.unwrap();
+
+        // Read up to chunk_a.len() + chunk_b.len() bytes from the TCP side,
+        // with a deadline so a hung bridge fails the test instead of hanging.
+        let expected_total = chunk_a.len() + chunk_b.len();
+        let mut got = Vec::with_capacity(expected_total);
+        let read_fut = async {
+            let mut tmp = vec![0u8; 4096];
+            while got.len() < expected_total {
+                let n = tcp_test_side.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&tmp[..n]);
+            }
+        };
+        let read_res = tokio::time::timeout(Duration::from_secs(3), read_fut).await;
+
+        // Stop the bridge.
+        bridge_handle.abort();
+
+        assert!(
+            read_res.is_ok(),
+            "timed out waiting for bridge to write both chunks; only got {} of {} bytes; first 16: {:02x?}",
+            got.len(),
+            expected_total,
+            &got[..got.len().min(16)],
+        );
+        assert_eq!(
+            got.len(),
+            expected_total,
+            "bridge wrote {} bytes, expected {}",
+            got.len(),
+            expected_total,
+        );
+        assert!(
+            got[..chunk_a.len()].iter().all(|&b| b == b'A'),
+            "first chunk corrupted"
+        );
+        assert!(
+            got[chunk_a.len()..].iter().all(|&b| b == b'B'),
+            "second chunk corrupted"
+        );
     }
 
     #[tokio::test]

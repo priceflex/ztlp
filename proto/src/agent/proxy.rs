@@ -74,9 +74,13 @@ const NS_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum read buffer for stdin.
 const STDIN_READ_BUF: usize = 65536;
 
-/// Maximum plaintext per ZTLP data packet (same as tunnel.rs).
-/// 16KB minus frame header (1 byte type + 8 byte seq = 9 bytes).
-const MAX_PLAINTEXT_PER_PACKET: usize = 16384 - 9;
+/// Maximum plaintext per ZTLP data packet — kept identical to the gateway's
+/// `tunnel::MAX_PLAINTEXT_PER_PACKET` so the on-wire UDP packet stays under
+/// the ~1500-byte Ethernet MTU after ZTLP/UDP/IP overhead. A larger value
+/// here causes UDP fragmentation, and most consumer NATs (and Windows
+/// Defender Firewall in particular) silently drop fragmented inbound UDP,
+/// which manifests as SSH KEXINIT hanging immediately after the banner.
+const MAX_PLAINTEXT_PER_PACKET: usize = tunnel::MAX_PLAINTEXT_PER_PACKET;
 
 /// Frame type bytes (must match tunnel.rs).
 const FRAME_DATA: u8 = 0x00;
@@ -682,7 +686,13 @@ async fn run_stdio_bridge(
                         // Decrypt payload
                         let ciphertext = &pkt[DATA_HEADER_SIZE..];
                         let mut nonce_bytes = [0u8; 12];
-                        nonce_bytes[4..].copy_from_slice(&header.packet_seq.to_be_bytes());
+                        // NOTE: nonce uses little-endian to match the rest of the codebase
+                        // (tunnel.rs, ztlp-cli.rs multi-session listener, ffi.rs, transport.rs).
+                        // An earlier version used to_be_bytes() here which made every packet
+                        // past packet_seq=0 fail decryption (BE and LE only collide on 0).
+                        // Symptom: SSH banner exchange works (seq=0) but KEXINIT response is
+                        // silently dropped (seq=2), and SSH times out with "banner timed out".
+                        nonce_bytes[4..].copy_from_slice(&header.packet_seq.to_le_bytes());
                         let nonce = Nonce::from_slice(&nonce_bytes);
 
                         let plaintext = match recv_cipher.decrypt(nonce, ciphertext) {
@@ -867,7 +877,10 @@ async fn send_frame(
 
     // Encrypt
     let mut nonce_bytes = [0u8; 12];
-    nonce_bytes[4..].copy_from_slice(&packet_seq.to_be_bytes());
+    // NOTE: nonce uses little-endian to match the rest of the codebase (gateway side).
+    // Using to_be_bytes() here caused every proxy→gateway data packet past packet_seq=0
+    // to fail decryption on the gateway side (see decryption-side note above).
+    nonce_bytes[4..].copy_from_slice(&packet_seq.to_le_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_ref())

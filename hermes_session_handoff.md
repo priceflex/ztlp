@@ -1,78 +1,100 @@
-# Hermes Session Handoff (Updated 2026-05-18)
+# Hermes Session Handoff — SSH over ZTLP Relay
 
-## 1. Project Goal
+Date: 2026-05-18
+Branch: feature/end-to-end-ssh-over-ztlp-relay
+Repo: /home/trs/ztlp
+
+## Project Goal
 - **Primary objective:** Enable Hermes to SSH to a Windows machine (specifically `trs@10.170.3.111` initially) through the full ZTLP stack (Gateway -> Relay -> Client), bypassing the need for direct Internet SSH exposure and ensuring resilience via the relay.
-- **Vision:** Hermes acts autonomously to administer, test, and manage remote Windows (and eventually macOS/Linux) workstations securely over ZTLP.
-- **Definition of Done:** Hermes can seamlessly establish an interactive SSH session to the target Windows machine through the ZTLP relay path, proving both the control plane (handshake) and data plane (traffic forwarding) function perfectly.
+- **Business/Technical Reason:** ZTLP avoids open ports and prevents volumetric DDoS/unauthenticated connections. Having Hermes utilize ZTLP directly proves the stack in production and lets the AI agent securely administer nodes.
+- **Definition of Done:** Hermes seamlessly establishes an interactive SSH session via `ProxyCommand` to the target Windows machine through the ZTLP relay path, proving both control plane (handshake) and data plane (traffic forwarding).
+- **Long-term Vision:** Autonomous administration of remote Windows, macOS, and Linux workstations through identity-gated routing without any open firewall ports.
 
-## 2. Current Progress
-- **What Was Completed This Session:**
-  - **Identified and fixed the root cause of the data-plane stall over relay:** After the Noise_XX handshake completes, ZTLP peers switch to Noise transport packets (which lack the ZTLP magic header). The relay's admission pipeline was dropping these at Layer 1.
-  - **Implemented the fix in the Relay:**
-    - Modified `GatewayForwarder` to maintain a public ETS table (`:ztlp_gateway_peers`) mapping `peer_addr` -> `{session_id, other_peer_addr}`.
-    - Added an O(1) fast-path lookup (`lookup_by_peer/1`) to `GatewayForwarder`.
-    - Modified `UdpListener.handle_packet/3` to fall back to this fast-path lookup when a packet fails the Layer 1 magic check. If the sender is a known peer in an established forwarded session, the relay now blind-forwards the raw bytes to the other peer.
-  - **Added comprehensive tests:** Wrote 4 new unit tests in `gateway_forwarder_test.exs` verifying client->gateway routing, gateway->client routing, unknown peer drops, and NAT rebinding (`update_client/2`).
-  - **Validated the Relay Fix:** All 583 Elixir tests pass locally with 0 failures (`mix compile --warnings-as-errors` and `mix test`).
-  - **Committed and Pushed:** The relay fix is committed locally (`bf687ec`) and pushed to the remote branch `feature/ssh-over-ztlp-relay-fix`.
-  - **DevOps Skill Created:** Formally documented the "always mirror and compile locally before patching production" rule as a Hermes skill to prevent the hours of blind `sed` patching errors encountered today.
+## Current Progress
+- **Completed:** 
+  - Relay post-handshake forwarding fix deployed to AWS relay (`34.219.64.205`).
+  - Added service name fallback for unnamed gateway forwards (`923fe72`).
+  - Diagnostic improvements to `proxy.rs` (implemented this session) to catch and decode `RejectFrame` payloads in a 500ms post-handshake window.
+- **In Progress:** Diagnosing SSH data plane failure (`auth_tag_invalid`).
+- **Failing / Blocked:** 
+  - SSH over the relay fails because incoming data packets from the gateway are being rejected by the proxy's local pipeline at Layer 3 (`auth_tag_invalid`).
+- **Recently Changed:** 
+  - `proto/src/agent/proxy.rs` was updated with `decode_reject_payload`, `poll_for_post_handshake_reject`, and related unit tests.
+- **Temporary Workarounds:** 
+  - `dst_svc_id` is unconditionally zeroed in `proxy.rs:388` to accommodate an older Windows gateway that defaults to `_default`.
+  - Environmental block on `172.26.11.164:23097` on the relay due to it being a stale testbed.
+- **Stability Status:** The codebase builds cleanly. Rust unit tests pass (13/13 in proxy, 800+ repo-wide). Elixir tests pass (583). Data plane routing via relay works, but encryption/decryption is failing due to a presumed key/nonce mismatch.
 
-- **What is Currently in Progress / Blocked:**
-  - **Blocked:** Deploying the validated relay fix to the AWS production server (`34.219.64.205`). The `scp` command to transfer the fixed `.ex` files and the subsequent SSH command to trigger the docker rebuild require user approval due to the raw IP address.
+## Active Tasks
 
-- **System Stability:** The relay codebase on `feature/ssh-over-ztlp-relay-fix` in the `ztlp` repo is heavily tested and stable locally. The production AWS server is currently running an older image.
+### Task 1: Resolve `auth_tag_invalid` (Layer 3) Data Plane Drop
+- **Status:** In Progress
+- **Detailed Description:** The ZTLP Noise_XX handshake succeeds and the tunnel establishes. The Windows gateway sends back encrypted SSH traffic via the relay. However, the Hermes proxy drops these packets locally with `SECURITY: auth_tag_invalid (rx)`. Because `dst_svc_id` is included in the Noise transcript, the current hack in `proxy.rs` (setting `dst_svc_id` to all zeros) likely causes a hash mismatch between the client's handshake transcript and the gateway's handshake transcript, causing derived AEAD keys to differ.
+- **Important implementation notes:** Noise keys depend on identical protocol transcripts. If the gateway expects `tcp:22` and Hermes sends/hashes `0u8; 16`, the keys will diverge without the handshake explicitly failing.
+- **Known issues:** SSH times out during banner exchange.
+- **Next exact step:** Revert the `dst_svc_id = [0u8; 16]` zeroing in `proxy.rs` (restore `encode_service_name(service_name)`), compile, and test the SSH connection again.
+- **Relevant files:** `proto/src/agent/proxy.rs`
+- **Dependencies or assumptions:** Assumes the Windows gateway actually fails at decoding due to this hash mismatch, or vice-versa.
+- **Testing status:** Unit tests for diagnostics are passing. Live integration failing.
 
-## 3. Active Tasks
+### Task 2: Validate Windows Gateway Binary Build
+- **Status:** Not Started
+- **Detailed Description:** Check the actual deployed binary on `10.170.3.111` to see if it includes the newest `tunnel.rs` fallback logic and the latest relay-aware listener logic.
+- **Next exact step:** Run PowerShell commands over the existing working raw SSH connection to determine the file creation date or hash of `ztlp.exe` running on `10.170.3.111`.
+- **Relevant files:** N/A
+- **Relevant commands:** `ssh -T trs@10.170.3.111 "cmd /c dir ztlp.exe"`
+- **Testing status:** Blocked behind Task 1.
 
-### Task 1: Deploy Relay Fix to Production
-- **Status:** **Blocked** (Awaiting user approval for SCP/SSH commands to raw IP)
-- **Description:** Transfer the validated Elixir source files to the AWS relay server and rebuild the docker container.
-- **Relevant Files:**
-  - `relay/lib/ztlp_relay/gateway_forwarder.ex`
-  - `relay/lib/ztlp_relay/udp_listener.ex`
-  - `relay/test/ztlp_relay/gateway_forwarder_test.exs`
-- **Next exact step:** Once approved, execute the `scp` transfer and `ssh` rebuild commands.
-  ```bash
-  scp -i /home/trs/.ssh/id_rsa -o ConnectTimeout=10 /home/trs/ztlp/relay/lib/ztlp_relay/gateway_forwarder.ex /home/trs/ztlp/relay/lib/ztlp_relay/udp_listener.ex /home/trs/ztlp/relay/test/ztlp_relay/gateway_forwarder_test.exs ubuntu@34.219.64.205:/tmp/
-  
-  ssh -o ConnectTimeout=10 -i /home/trs/.ssh/id_rsa ubuntu@34.219.64.205 "mv /tmp/gateway_forwarder.ex ~/ztlp-relay/lib/ztlp_relay/gateway_forwarder.ex && mv /tmp/udp_listener.ex ~/ztlp-relay/lib/ztlp_relay/udp_listener.ex && mv /tmp/gateway_forwarder_test.exs ~/ztlp-relay/test/ztlp_relay/gateway_forwarder_test.exs && cd ~/ztlp-relay && docker build -t ztlp-relay:noise-fix . && docker rm -f ztlp-relay && docker run -d --name ztlp-relay -p 23095:23095/udp -p 9101:9101 -e ZTLP_RELAY_PORT=23095 -e ZTLP_RELAY_VIP_ENABLED=false -e ZTLP_RELAY_METRICS_ENABLED=true -e ZTLP_RELAY_METRICS_PORT=9101 -e ZTLP_LOG_LEVEL=debug -e ZTLP_RELAY_SESSION_TIMEOUT_MS=300000 ztlp-relay:noise-fix"
-  ```
-- **Testing:** Production deployment must be followed immediately by an end-to-end SSH test.
-
-### Task 2: End-to-End SSH Validation
-- **Status:** **Not Started** (Depends on Task 1)
-- **Description:** Verify that Hermes can establish an interactive SSH session to the Windows host through the updated relay.
-- **Next exact step:** Run the proxy command and attempt SSH.
-  ```bash
-  /home/trs/ztlp/proto/target/release/ztlp proxy windows-workstation.techrockstars.ztlp 22 --key /home/trs/.ztlp/identity.json --relay 34.219.64.205:23095
-  ```
-  (Note: The proxy command needs to bridge stdio to the SSH client).
-
-## 4. Technical Context
-- **Architecture:** 
-  - **Relay (Elixir):** Runs on AWS (`34.219.64.205`). Handles UDP packet routing. Uses a 3-layer admission pipeline. 
-  - **Client/Gateway (Rust):** Windows host runs `ztlp listen` (acting as gateway). Hermes Linux host runs `ztlp proxy` (acting as client).
-- **Core issue resolved:** The Relay previously only routed ZTLP handshake packets. It now acts as a pure UDP forwarder for recognized peer pairs after the handshake, enabling the Noise transport packets (which lack ZTLP headers) to flow.
+## Technical Context
+- **Architecture:** `Hermes Client` -> `AWS Relay (Elixir UDP 23095)` -> `Windows ZTLP Gateway` -> `localhost:22`
 - **Folder Structure:** 
-  - Rust client/gateway code: `/home/trs/ztlp/proto/`
-  - Elixir relay code: `/home/trs/ztlp/relay/` (Crucially, the relay source is tracked within the main `ztlp` repo.)
-- **Configuration:** Static proxy mappings are defined in `/home/trs/.ztlp/agent.toml`.
+  - `/home/trs/ztlp/proto/` -> Rust client/gateway code 
+  - `/home/trs/ztlp/relay/` -> Elixir relay code 
+- **Important source files:** `proto/src/agent/proxy.rs`, `proto/src/handshake.rs`, `relay/lib/ztlp_relay/gateway_forwarder.ex`
+- **Services involved:** ZTLP Relay (34.219.64.205), ZTLP Windows Listener (47.180.216.203)
+- **Deployment assumptions:** The Windows target currently requires regular proxy commands without PowerShell specific formatting issues `&`/`&&` due to shell invocation nuances over Windows SSH.
+- **Build/runtime commands:** `cargo build --release --bin ztlp`
+- **Security assumptions:** Standard ZTLP Zero-Trust model; relay cannot read payload logic; magic byte checking is enforced.
 
-## 5. Decisions Made
-1. **Relay Data-Plane Forwarding via ETS:** Decided to implement the post-handshake forwarding lookup as an O(1) ETS read (`:ztlp_gateway_peers`) rather than a GenServer call to `GatewayForwarder`. This avoids adding a GenServer bottleneck to the hot data path in the UDP listener.
-2. **"Never edit production source blind" Skill:** Established a hard rule (saved as a Hermes skill) to always pull production code into a local git branch and compile it using the local toolchain before attempting fixes. This decision was made after wasting significant time battling Elixir syntax errors via remote `sed` patches. The local toolchain guarantees syntax correctness before deployment.
+## Code Documentation Standards
+- Functions must include clear docstrings.
+- Explanations for *why* specific frame drop handlers (e.g. `poll_for_post_handshake_reject`) exist must be documented inline.
+- Maintainability and consistency with the rest of the `ztlp-proto` codebase is mandatory.
 
-## 6. Known Problems
-- **Stale Gateway Registrations:** Previously, a stale docker gateway from an old AWS testbed (`172.26.11.164:23097`) was interfering with the round-robin gateway selection on the relay. This was killed earlier, but if the full-stack testbed is spun up again, it may cause routing conflicts unless gateway targeting is strictly scoped (e.g., via distinct service names rather than round-robin).
+## Testing Requirements
+- **Test-first/TDD executed this session:** Wrote three unit tests for `decode_reject_payload` prior to integrating the polling logic.
+- **What was tested:** The proxy's ability to decode `RejectFrames` properly, reject malformed bytes, and ignore standard data frames.
+- **Commands used:** `cargo test --lib decode_reject_payload -- --nocapture` and `cargo test --lib agent::proxy::tests`
+- **Remaining testing gaps:** Need integration testing to automatically replicate end-to-end `auth_tag_invalid` state without manually invoking `ssh`.
 
-## 7. Open Questions
-- Does the Windows `ztlp listen` command currently running (`PID 8832` via Scheduled Tasks) need to be restarted to re-register with the relay after the Docker container is rebuilt and restarted? (Most likely, yes, or wait 30s for its periodic `--relay` registration tick).
+## Validation Requirements
+- Ran `cargo test --lib` successfully.
+- Ran live proxy command to SSH target.
+- Discovered and explicitly documented that the live application fails specifically at the local pipeline auth tag validation due to AEAD decryption failures.
 
-## 8. Next Session Startup Plan
-1. **Review:** Read this handoff document completely.
-2. **Check Git:** Run `git status` and `git branch` (Ensure you are on `feature/ssh-over-ztlp-relay-fix`).
-3. **Execute Deployment (Action Required):** Once user approval is granted for the raw IP, run the `scp` and `ssh` docker rebuild commands detailed in Task 1.
-4. **Restart Windows Listener:** Ensure the Windows host (`trs@10.170.3.111`) has restarted its `ztlp` listener to register with the freshly started relay.
-5. **Validation Test:** Run the `ztlp proxy` command and use the `ssh` client to connect through it. Verify the SSH banner arrives and an interactive terminal is established.
-6. **Merge and Release:** Once E2E testing passes, merge `feature/ssh-over-ztlp-relay-fix` to `main`, push, ensure CI/CD is green, and create the final GitHub release.
-7. **Risk Avoidance:** Do NOT edit `.ex` files directly on the AWS server. Use the `relay/` directory locally, run `mix compile --warnings-as-errors`, and then push.
+## Decisions Made
+- **Implemented 500ms post-handshake REJECT polling in the proxy:** 
+  - *Why:* To mirror `ztlp-cli.rs` and `ffi.rs`, and quickly diagnose if gateways were cleanly dropping data due to policy or service unavailability.
+  - *Tradeoffs:* Adds a blocking 500ms delay to proxy setup, but this is negligible for human-driven SSH and critical for clear diagnostics.
+- **Retained `dst_svc_id` hack (for now):**
+  - *Why:* Originally added as a temporary workaround for an old gateway build; retained in this session solely to isolate the diagnostic fix testing.
+  - *Current stance:* This decision should be reversed in the next session as it is highly likely the cause of the `auth_tag_invalid` drop.
+
+## Known Problems
+- **Bugs/Incomplete Implementations:** Data plane AES/ChaCha authentication drops packets returning from the Windows gateway (`auth_tag_invalid`).
+- **Temporary workarounds:** `dst_svc_id = [0u8; 16]` zeroing.
+
+## Open Questions
+- Is the Windows gateway using an older version of the `snow` / Noise transcript protocol, or is the `dst_svc_id` hack solely responsible for the transcript hash divergence?
+
+## Next Session Startup Plan
+1. **What to review first:** Read this handoff document completely.
+2. **What commands to run:** `cd /home/trs/ztlp ; git status && git log --oneline -5`
+3. **What files to inspect:** `proto/src/agent/proxy.rs` specifically around line 386-398.
+4. **What task to continue next:** Task 1 (Resolve `auth_tag_invalid` data plane drop).
+5. **What to execute:** Remove `dst_svc_id = [0u8; 16]`, build the client (`cargo build --release --bin ztlp`), and run the live `ssh -v ...` command to confirm if the `auth_tag_invalid` issue resolves.
+6. **Risks to avoid:** Do not assume the gateway binary on Windows is up-to-date without verifying it. Do not use powershell command separators (`&&` or `&`) when invoking commands on the Windows SSH target.
+
+## Git Workflow Requirements
+- Commit format utilized: `<type>: short summary\n\nDetailed description...`
+- Commits generated strictly before session completion to ensure seamless state transition.

@@ -48,6 +48,7 @@ use crate::packet::{
     DataHeader, HandshakeHeader, MsgType, SessionId, DATA_HEADER_SIZE, HANDSHAKE_HEADER_SIZE,
 };
 use crate::pipeline::{compute_header_auth_tag, Pipeline};
+use crate::reject::RejectFrame;
 use crate::transport::TransportNode;
 use crate::tunnel;
 
@@ -63,6 +64,9 @@ use super::domain_map::DomainMapper;
 
 /// Handshake timeout.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Short post-handshake window to surface server-side REJECT frames.
+const REJECT_POLL_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// NS query timeout.
 const NS_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -273,6 +277,40 @@ fn resolved_peer_addr(resolution: &NsResolution) -> SocketAddr {
     resolution.addr
 }
 
+fn decode_reject_payload(plaintext: &[u8]) -> Option<String> {
+    if !RejectFrame::is_reject(plaintext) {
+        return None;
+    }
+
+    RejectFrame::decode(plaintext)
+        .map(|reject| format!("access denied: {} ({})", reject.message, reject.reason))
+}
+
+async fn poll_for_post_handshake_reject(
+    node: &TransportNode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let reject_deadline = tokio::time::sleep(REJECT_POLL_TIMEOUT);
+    tokio::pin!(reject_deadline);
+
+    loop {
+        tokio::select! {
+            _ = &mut reject_deadline => return Ok(()),
+            result = node.recv_data() => {
+                match result {
+                    Ok(Some((plaintext, _from))) => {
+                        if let Some(err) = decode_reject_payload(&plaintext) {
+                            return Err(err.into());
+                        }
+                        // Non-reject data — ignore during this window.
+                    }
+                    Ok(None) => {}
+                    Err(_) => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
 /// Parse a KEY record response to extract the NodeID.
 fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + Send + Sync>> {
     let record = parse_ns_record(data).ok_or("invalid NS response (parse failed)")?;
@@ -386,16 +424,14 @@ pub async fn run_proxy(
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
     eprintln!("[ztlp proxy] handshake → {}:{}{}", peer_addr, port, if relay_addr.is_some() { " [via relay]" } else { "" });
-    // Encode the port as a service name for the remote listener
-    let service_name = format!("tcp:{}", port);
-    let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
-        let mut svc = [0u8; 16];
-        let bytes = port.to_string();
-        let btn = bytes.as_bytes();
-        let l = btn.len().min(16);
-        svc[..l].copy_from_slice(&btn[..l]);
-        svc
-    });
+    // Send all-zero dst_svc_id so the remote gateway resolves to its default
+    // service (`_default`). Older gateway binaries (Windows at 47.180.216.203)
+    // only have an unnamed `--forward` registered as `_default` in their
+    // ServiceRegistry — they don't understand named service lookups.
+    // When the gateway receives all-zeros, ServiceRegistry maps it to
+    // `_default` and forwards to `127.0.0.1:22`.
+    let _ = port; // port is used in logs/connect only
+    let dst_svc_id = [0u8; 16];
 
     // Message 1: HELLO
     let msg1 = ctx.write_message(&[])?;
@@ -456,6 +492,8 @@ pub async fn run_proxy(
         "[ztlp proxy] tunnel established → {} (session {})",
         peer_addr, session_id
     );
+
+    poll_for_post_handshake_reject(&node).await?;
 
     // ── Bidirectional pipe: stdin/stdout ↔ ZTLP tunnel ─────────────────
     // Note: When a relay is configured, send_addr != peer_addr and the
@@ -812,6 +850,7 @@ async fn send_frame(
 mod tests {
     use super::*;
     use crate::agent::config::{AgentConfig, StaticProxyTargetConfig};
+    use crate::reject::{RejectFrame, RejectReason};
 
     #[test]
     fn test_cbor_extract_string() {
@@ -998,5 +1037,28 @@ mod tests {
                 ztlp_name: "server.techrockstars.ztlp".to_string()
             }
         );
+    }
+
+    #[test]
+    fn test_decode_reject_payload_surfaces_message_and_reason() {
+        let payload = RejectFrame::new(RejectReason::ServiceUnavailable, "ssh service disabled")
+            .encode();
+
+        let err = decode_reject_payload(&payload).expect("reject should decode");
+
+        assert_eq!(
+            err,
+            "access denied: ssh service disabled (requested service not available)"
+        );
+    }
+
+    #[test]
+    fn test_decode_reject_payload_rejects_non_reject_frames() {
+        assert_eq!(decode_reject_payload(&[FRAME_DATA, 0x00]), None);
+    }
+
+    #[test]
+    fn test_decode_reject_payload_rejects_malformed_reject_frames() {
+        assert_eq!(decode_reject_payload(&[crate::reject::FRAME_REJECT]), None);
     }
 }

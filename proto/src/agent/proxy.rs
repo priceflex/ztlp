@@ -424,15 +424,8 @@ pub async fn run_proxy(
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
     eprintln!("[ztlp proxy] handshake → {}:{}{}", peer_addr, port, if relay_addr.is_some() { " [via relay]" } else { "" });
-    // Send all-zero dst_svc_id so the remote gateway resolves to its default
-    // service (`_default`). Older gateway binaries (Windows at 47.180.216.203)
-    // only have an unnamed `--forward` registered as `_default` in their
-    // ServiceRegistry — they don't understand named service lookups.
-    // When the gateway receives all-zeros, ServiceRegistry maps it to
-    // `_default` and forwards to `127.0.0.1:22`.
-    let _ = port; // port is used in logs/connect only
-    let dst_svc_id = [0u8; 16];
-
+    let dst_svc_id = crate::tunnel::encode_service_name(&resolution.ztlp_name)?;
+    
     // Message 1: HELLO
     let msg1 = ctx.write_message(&[])?;
     let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
@@ -444,10 +437,33 @@ pub async fn run_proxy(
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;
 
-    // Message 2: receive HELLO_ACK
-    let (recv2, _from2) = timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "handshake timeout waiting for HELLO_ACK")??;
+    // Message 2: receive HELLO_ACK (with retransmit)
+    let mut retry_delay = std::time::Duration::from_millis(500);
+    let mut retries = 0;
+    
+    let (recv2, _from2) = loop {
+        match timeout(retry_delay, node.recv_raw()).await {
+            Ok(Ok((data, addr))) => {
+                if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                        if hdr.msg_type == MsgType::HelloAck && hdr.session_id == session_id {
+                            break (data, addr);
+                        }
+                    }
+                }
+                continue;
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                retries += 1;
+                if retries > 5 {
+                    return Err("handshake timeout waiting for HELLO_ACK (max retries reached)".into());
+                }
+                node.send_raw(&pkt1, send_addr).await?;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_millis(2000));
+            }
+        }
+    };
 
     if recv2.len() < HANDSHAKE_HEADER_SIZE {
         return Err("received packet too short for handshake header".into());

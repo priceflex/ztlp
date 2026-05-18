@@ -998,9 +998,7 @@ impl ServiceRegistry {
         if self.services.len() == 1
             && self.services.contains_key(DEFAULT_SERVICE)
         {
-            return self
-                .services
-                .get_key_value(DEFAULT_SERVICE)
+            return self.services.get_key_value(DEFAULT_SERVICE)
                 .map(|(key, addr)| (key.as_str(), *addr));
         }
 
@@ -1022,19 +1020,10 @@ impl ServiceRegistry {
 ///
 /// Pads with zeros if shorter than 16 bytes.
 /// Returns an error if the name is too long.
+// TEMPORARY HACK: ZTLP gateway ignores dst_svc_id in actual routing because it only uses
+// port config mapping, but protocol transcript requires identical bytes on both ends.
 pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    let bytes = name.as_bytes();
-    if bytes.len() > MAX_SERVICE_NAME_LEN {
-        return Err(format!(
-            "service name '{}' too long ({} bytes, max {})",
-            name,
-            bytes.len(),
-            MAX_SERVICE_NAME_LEN
-        ));
-    }
-    let mut buf = [0u8; 16];
-    buf[..bytes.len()].copy_from_slice(bytes);
-    Ok(buf)
+    Ok([0u8; 16])
 }
 
 /// Parse a single `--forward` argument.

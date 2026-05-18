@@ -48,6 +48,10 @@ defmodule ZtlpRelay.GatewayForwarder do
           gateway_index: non_neg_integer()
         }
 
+  # ETS table name for peer→session lookups. Populated as a write-through
+  # index from the in-memory `sessions` map. See `lookup_by_peer/1`.
+  @peer_table :ztlp_gateway_peers
+
   # Client API
 
   @doc "Start the gateway forwarder."
@@ -171,6 +175,29 @@ defmodule ZtlpRelay.GatewayForwarder do
     GenServer.call(__MODULE__, :clear_all)
   end
 
+  @doc """
+  Look up a forwarded session by peer address (the {ip, port} of either
+  the client or the gateway). Returns `{:ok, session_id, other_peer_addr}`
+  if the sender is one of the two peers of an established forwarded
+  session, otherwise `:error`.
+
+  This is the fast-path used by the UDP listener to forward Noise transport
+  packets (which lack ZTLP headers) between peers after the handshake has
+  completed. The lookup is an O(1) ETS read with no GenServer hop, so it
+  is safe to call on every inbound packet.
+
+  The ETS table `@peer_table` is populated as a write-through index from
+  `handle_cast({:register, ...})` and cleaned up alongside the session map.
+  """
+  @spec lookup_by_peer({:inet.ip_address(), :inet.port_number()}) ::
+          {:ok, binary(), {:inet.ip_address(), :inet.port_number()}} | :error
+  def lookup_by_peer(sender) do
+    case :ets.lookup(@peer_table, sender) do
+      [{^sender, session_id, other_peer}] -> {:ok, session_id, other_peer}
+      [] -> :error
+    end
+  end
+
   # GenServer callbacks
 
   @impl true
@@ -182,6 +209,18 @@ defmodule ZtlpRelay.GatewayForwarder do
         "[GatewayForwarder] Gateway forwarding enabled for #{length(gateways)} static gateway(s): #{inspect(gateways)}"
       )
     end
+
+    # Public ETS table for peer→session lookups. Used by the UDP listener
+    # to forward post-handshake Noise transport packets (which have no
+    # ZTLP header and thus fail the magic check in the pipeline).
+    # Layout: {peer_addr, session_id, other_peer_addr}
+    :ets.new(@peer_table, [
+      :named_table,
+      :set,
+      :public,
+      read_concurrency: true,
+      write_concurrency: true
+    ])
 
     # Always schedule cleanup (for sessions and dynamic gateway expiry)
     Process.send_after(self(), :cleanup, 60_000)
@@ -224,6 +263,12 @@ defmodule ZtlpRelay.GatewayForwarder do
 
     sessions = Map.put(state.sessions, session_id, session)
 
+    # Write-through to the public ETS peer index so the UDP listener can
+    # forward post-handshake Noise transport packets without a GenServer hop.
+    # Both directions are inserted so either peer can find the other.
+    :ets.insert(@peer_table, {client_addr, session_id, gateway_addr})
+    :ets.insert(@peer_table, {gateway_addr, session_id, client_addr})
+
     Logger.debug(
       "[GatewayForwarder] Registered forwarded session #{Base.encode16(session_id)}: " <>
         "client=#{inspect(client_addr)} gateway=#{inspect(gateway_addr)}"
@@ -238,6 +283,14 @@ defmodule ZtlpRelay.GatewayForwarder do
         {:noreply, state}
 
       session ->
+        # Update both the in-memory map and the ETS peer index. Delete the
+        # stale client_addr→session entry and write the new one. The gateway
+        # side already points at the new client by virtue of the second
+        # insert below.
+        :ets.delete(@peer_table, session.client)
+        :ets.insert(@peer_table, {new_client_addr, session_id, session.gateway})
+        :ets.insert(@peer_table, {session.gateway, session_id, new_client_addr})
+
         updated = %{session | client: new_client_addr}
         {:noreply, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
     end
@@ -353,6 +406,7 @@ defmodule ZtlpRelay.GatewayForwarder do
   end
 
   def handle_call(:clear_all, _from, state) do
+    :ets.delete_all_objects(@peer_table)
     {:reply, :ok, %{state | sessions: %{}, dynamic_gateways: %{}}}
   end
 
@@ -364,12 +418,20 @@ defmodule ZtlpRelay.GatewayForwarder do
     # Remove sessions older than 10 minutes
     max_age_ms = 600_000
 
-    sessions =
+    {sessions, stale} =
       state.sessions
-      |> Enum.reject(fn {_id, s} -> now_ms - s.created_at > max_age_ms end)
-      |> Map.new()
+      |> Enum.split_with(fn {_id, s} -> now_ms - s.created_at <= max_age_ms end)
 
-    removed_sessions = map_size(state.sessions) - map_size(sessions)
+    sessions = Map.new(sessions)
+
+    # Purge stale entries from the ETS peer index too. Both directions
+    # were inserted in handle_cast({:register, ...}) so both must be removed.
+    Enum.each(stale, fn {_id, s} ->
+      :ets.delete(@peer_table, s.client)
+      :ets.delete(@peer_table, s.gateway)
+    end)
+
+    removed_sessions = length(stale)
 
     if removed_sessions > 0 do
       Logger.debug("[GatewayForwarder] Cleaned up #{removed_sessions} stale forwarded sessions")

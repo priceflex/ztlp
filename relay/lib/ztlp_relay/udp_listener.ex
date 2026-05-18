@@ -221,13 +221,29 @@ defmodule ZtlpRelay.UdpListener do
         handle_admitted_packet(parsed, data, sender, state)
 
       {:drop, layer, reason} ->
-        # In mesh mode, check if this is a RELAY_FORWARD message
-        # (which won't pass the ZTLP magic check since it uses inter-relay protocol)
-        if state.mesh_enabled and InterRelay.inter_relay_message?(data) do
-          handle_inter_relay_packet(data, sender, state)
-        else
-          Logger.debug("Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}")
-          :ok
+        cond do
+          # In mesh mode, check if this is a RELAY_FORWARD message
+          # (which won't pass the ZTLP magic check since it uses inter-relay protocol)
+          state.mesh_enabled and InterRelay.inter_relay_message?(data) ->
+            handle_inter_relay_packet(data, sender, state)
+
+          # Post-handshake Noise transport packets have no ZTLP header and
+          # will fail the Layer 1 magic check. If the sender is a known peer
+          # of an established forwarded session, blind-forward the raw bytes
+          # to the other peer. This is the data-plane path for SSH-over-ZTLP
+          # through the gateway forwarder; without it, only the handshake
+          # packets ever cross the relay.
+          true ->
+            case GatewayForwarder.lookup_by_peer(sender) do
+              {:ok, _session_id, {dest_ip, dest_port}} ->
+                :gen_udp.send(state.socket, dest_ip, dest_port, data)
+                Stats.increment(:forwarded)
+                :ok
+
+              :error ->
+                Logger.debug("Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}")
+                :ok
+            end
         end
     end
   end

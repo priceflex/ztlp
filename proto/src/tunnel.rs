@@ -1502,11 +1502,7 @@ mod tests {
         //     send anything outbound in this test, but it's a required arg).
         //   - udp_recv_socket: the per-session loopback socket the bridge
         //     reads from. The forwarder task (fwd_socket) writes into it.
-        let udp_send_socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let udp_send_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
         let (tcp_side_for_bridge, mut tcp_test_side) = tokio::io::duplex(64 * 1024);
 

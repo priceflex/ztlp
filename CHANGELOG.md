@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.24.0 — 2026-05-18
+
+### iOS — Rust-Owned Tunnel Architecture
+- **Rust owns UDP socket**: ZTLP iOS NetworkExtension delegates the tunnel socket entirely to Rust (`IosTunnelEngine`). Eliminates Swift↔Rust packet-shuffling overhead on every datagram.
+- **Rust-owned UDP recv thread**: dedicated Rust thread reads tunnel bytes; Swift no longer marshals them.
+- **Dual-library iOS build**: separate `libztlp_proto.a` (main app, ~48 MB, full tokio) and `libztlp_proto_ne.a` (NE, ~25 MB, `--no-default-features --features ios-sync`, no tokio) keep the Network Extension under the 15 MB resident-memory cap.
+- **MuxEngine + Rust SessionHealth on iOS**: Phase 2.7 + 3.3 cutover. iOS clients drive the Rust-side mux receive-window policy (Vaultwarden hold=12 etc.) and session-health detector directly.
+- **WKWebView in-app browser**: ZTLP iOS now uses WKWebView (not SFSafariViewController) for in-app links so DNS resolution honors the NE split-DNS routing (10.122.0.1) for `*.ztlp` services.
+- **Manual log dump path**: a Send-Logs flow that works even when the backend is unreachable.
+
+### Mux Engine & Reliability (proto)
+- **`proto::mux` scaffolding** with frame codec, rwnd policy, send buffer, cwnd, retransmit.
+- **FRAME_ACK_V2 (0x10)** — byte-unit receive window upgrade path on the wire and FFI for engine-driven flow control.
+- **`ReceiveWindow`** reconstructed for client-side reliability layer (ordered delivery).
+- **Receive-path client ACK emit intentionally deferred**: the v0.24.0 client does *not* emit FRAME_ACK_V2 from the receive path. The first implementation shared `send_cipher` with the bridge sender loop and caused an AAD/nonce desync (`auth_tag_invalid` storms, 0 MB/s on 1MB transfers). Client ACK_V2 emission will return once it has its own cipher state or a serialized send queue. Loopback throughput is currently ~175 MB/s on the no-GSO path.
+
+### Relay & SSH-over-Relay
+- `--relay` support on `ztlp listen` and `ztlp proxy` (CLI).
+- Relay forwards post-handshake Noise transport packets in gateway mode.
+- Relay drops packets from unrecognized senders for established sessions (security).
+- Tunnel/proxy data-plane repairs for SSH-over-relay end-to-end.
+- `RELAY_REREGISTER_INTERVAL` reduced 30s → 10s for faster failover.
+
+### Gateway
+- BBR-style cc_telemetry tick + recovery-entry logging (v30 diagnostic).
+- UDP pacing respects `cc_profile.burst_size` to prevent 500-packet microburst AWS queue overruns.
+- Stall-detection / RTO timer disabled for non-mux (dumb-pipe) sessions.
+- Legacy clients paced at 32 packets/tick, cwnd bypassed.
+- Removed hardcoded dumb-pipe large-window values in favor of negotiated rwnd.
+- Socket buffer sizes tuned for production speeds.
+
+### Desktop & Bootstrap
+- Native desktop app connected to ZTLP IPC and shell processes.
+- Frontend UI config persistence + error displays.
+- Configuration save + unmocked enroll/services.
+- ZTLP launch bootstrap auth flow wired end-to-end.
+- Bootstrap local ngrok tunnel for `ztlp.net` testing.
+- Agent control socket switched from UDS to TCP loopback.
+
+### Perf Gate (CI)
+- End-to-end throughput regression test (`tests/throughput_regression_test.rs`) guards against the AAD-desync class of bug at 0 MB/s. Caught the v0.24.0-ship-blocker live.
+- `bench/perf-gate.sh` enforces 5 perf checks + full test suite as a CI gate: L1 reject <100 ns, full pipeline >500K ops/s, Noise_XX <800 µs, ChaCha20 64B <3 µs, tunnel ≥10 MB/s.
+
+### Bug Fixes (notable)
+- `fix(tunnel)`: restore `DataHeader.payload_len` ordering before `aad_bytes()` — re-fix of the 366a53a class regression that returned during the mux/reliability churn.
+- `fix(proxy)`: canonical `aad_bytes()` helper in `send_frame`; HELLO_ACK retransmit loop; drop `dst_svc_id` constraint.
+- `fix(tunnel)`: 16-byte canonical service-name encoding; service-name fallback for unnamed forward gateways.
+- `fix(ns)`: 5 fixes across name service.
+- `fix(gateway)`: 14 fixes across gateway, congestion control, telemetry.
+
+### Test Counts
+- 1,253 Rust tests, 0 failures (release build)
+- Elixir relay / ns / gateway test suites: all passing
+- Performance gate: 6/6 checks pass on CI
+
 ## v0.23.0 — 2026-03-29
 
 ### Mobile Clients — Phase 5

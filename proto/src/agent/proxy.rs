@@ -810,6 +810,17 @@ async fn run_stdio_bridge(
     Ok(())
 }
 
+/// Build the AAD bytes used when authenticating an outbound ZTLP data header.
+///
+/// The verifier (Pipeline::layer3_auth_check) authenticates the non-contiguous
+/// tag-free header bytes via DataHeader::aad_bytes(). Producers MUST use the
+/// same construction or every packet will be rejected as auth_tag_invalid.
+fn data_frame_aad(header: &DataHeader) -> Vec<u8> {
+    // AAD must be the non-contiguous tag-free header bytes — use the canonical
+    // DataHeader::aad_bytes() helper so producer and verifier agree.
+    header.aad_bytes()
+}
+
 /// Encrypt and send a framed data packet through the ZTLP tunnel.
 #[allow(clippy::too_many_arguments)]
 async fn send_frame(
@@ -850,10 +861,9 @@ async fn send_frame(
     let mut header = DataHeader::new(session_id, packet_seq);
     header.payload_len = ciphertext.len() as u16;
 
-    // Compute auth tag using the session's send key
-    let header_bytes = header.serialize();
-    let aad = &header_bytes[..DATA_HEADER_SIZE.min(header_bytes.len())];
-    header.header_auth_tag = compute_header_auth_tag(&send_key, aad);
+    // Compute auth tag using the session's send key.
+    let aad = data_frame_aad(&header);
+    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
 
     let mut pkt = header.serialize();
     pkt.extend_from_slice(&ciphertext);
@@ -1076,5 +1086,44 @@ mod tests {
     #[test]
     fn test_decode_reject_payload_rejects_malformed_reject_frames() {
         assert_eq!(decode_reject_payload(&[crate::reject::FRAME_REJECT]), None);
+    }
+
+    /// Regression test for the AAD-construction bug in `send_frame`.
+    ///
+    /// The data-header HeaderAuthTag is computed by the producer with one AAD
+    /// definition and verified by `Pipeline::layer3_auth_check` with another.
+    /// The verifier uses `DataHeader::aad_bytes()` (non-contiguous, 30 bytes,
+    /// tag region excluded). The producer in `send_frame` MUST use the same
+    /// construction or every data frame is rejected as `auth_tag_invalid`.
+    ///
+    /// This test pins the producer-side AAD (via `data_frame_aad`) to match
+    /// the canonical `DataHeader::aad_bytes()`. It will FAIL while the helper
+    /// returns the broken full-serialized-header AAD and PASS after the fix.
+    #[test]
+    fn test_send_frame_aad_matches_verifier_aad() {
+        // Build a DataHeader exactly the way send_frame does.
+        let session_id = SessionId([0x11; 12]);
+        let packet_seq: u64 = 42;
+        let mut header = DataHeader::new(session_id, packet_seq);
+        header.payload_len = 128;
+
+        let producer_aad = data_frame_aad(&header);
+        let verifier_aad = header.aad_bytes();
+
+        assert_eq!(
+            producer_aad, verifier_aad,
+            "send_frame's AAD must match DataHeader::aad_bytes() used by \
+             Pipeline::layer3_auth_check; otherwise every data packet is \
+             rejected as auth_tag_invalid"
+        );
+
+        // And the resulting tags must match under the same key.
+        let send_key = [0u8; 32];
+        let producer_tag = compute_header_auth_tag(&send_key, &producer_aad);
+        let verifier_tag = compute_header_auth_tag(&send_key, &verifier_aad);
+        assert_eq!(
+            producer_tag, verifier_tag,
+            "producer and verifier must compute identical auth tags"
+        );
     }
 }

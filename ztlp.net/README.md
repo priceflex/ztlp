@@ -60,6 +60,47 @@ It provides:
 
 Claim tokens are stored as HMAC-SHA256 digests only. The app does not publish Bootstrap admin URLs, Rails login URLs, ngrok tunnels, or dashboard routes.
 
+### Public API
+
+- `GET /api/zone-available?zone=<zone>` — JSON `{zone, available, reason}`
+  where `reason` is one of `ok`, `taken_locally`, or `invalid`. Used by the
+  `/start` form to check zone uniqueness inline before submission. The
+  endpoint never reveals private bootstrap state — only "is this zone
+  already requested in this Launch instance?". A future `taken_upstream`
+  reason will be added once NS lookup is wired into Launch.
+
+### Anti-abuse controls on `POST /start`
+
+The public onboarding endpoint enforces three layers of abuse protection:
+
+1. **RFC 1035 zone validation.** Zones may be up to 253 total characters
+   with each label up to 63 characters (regular DNS limits). Labels are
+   `[a-z0-9]` plus hyphens, with no leading or trailing hyphen, no double
+   dots, no underscores. Uppercase input is normalized to lowercase.
+2. **Rate limiting.** Default 5 onboarding requests per hour per email
+   address, 20 per hour per client IP. Override via env:
+   `LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR`, `LAUNCH_RATE_LIMIT_IP_PER_HOUR`.
+   The client IP is read from `REMOTE_ADDR`, falling back to the first
+   value of `X-Forwarded-For` when behind a reverse proxy. Denied
+   attempts are still recorded so brute-forcing the limit doesn't reset
+   the window.
+3. **Proof-of-work CAPTCHA.** Each `GET /start` mints a signed challenge
+   (HMAC-SHA-256 over `challenge || difficulty || issued_at` with the
+   Launch token secret). The browser computes a SHA-256 nonce with the
+   required leading zero bits and submits it as `pow_nonce`. Default
+   difficulty is 20 bits (about one second on a phone, milliseconds on a
+   desktop); override via `LAUNCH_POW_DIFFICULTY_BITS`. Signed challenges
+   expire after `LAUNCH_POW_TTL_SECONDS` (default 600). No third-party
+   JS, no privacy leak, no captcha service to pay for.
+
+### Quick smoke for long zone names
+
+```bash
+# Confirm a 200-character DNS-style zone is accepted
+ZONE="$(python3 -c 'print(("a"*40+".")+ ("b"*40+".") + ("c"*40+".") + "example.ztlp")')"
+curl -fsS "http://127.0.0.1:8080/api/zone-available?zone=$ZONE"
+# -> {"zone":"...","available":true,"reason":"ok"}
+```
 
 Current default release: `v-before-nebula-collapse`. Override with `ZTLP_RELEASE_TAG` when a newer tagged release is ready. The CLI bundles currently used by Launch are:
 

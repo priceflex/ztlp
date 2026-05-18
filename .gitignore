@@ -46,3 +46,6 @@ xcuserdata/
 /relay/_build/
 /relay/deps/
 v30-telemetry-evidence.log
+
+# Hermes Agent local state (plans, logs, scratch)
+.hermes/

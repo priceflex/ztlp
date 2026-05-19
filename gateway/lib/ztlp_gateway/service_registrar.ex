@@ -487,7 +487,11 @@ defmodule ZtlpGateway.ServiceRegistrar do
 
   # ── Private: Service Name Derivation ────────────────────────
 
-  defp derive_service_names(zone) do
+  @doc false
+  # Public for testing only — see service_registrar_derive_test.exs.
+  # Builds the fully-qualified service name list from
+  # Application :backends + ZTLP_GATEWAY_SERVICE_ALIASES.
+  def derive_service_names(zone) do
     backends = Config.get(:backends) || []
 
     # Extract service names from backend config
@@ -501,12 +505,17 @@ defmodule ZtlpGateway.ServiceRegistrar do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    # Auto-detect aliases from backend hostnames
+    # Auto-detect aliases from backend hostnames. Backend `:host` may be
+    # an erlang IP tuple (`{127, 0, 0, 1}`) — common in the compile-time
+    # defaults — OR a hostname string. `to_string/1` raises
+    # Protocol.UndefinedError for tuples, so normalise first via
+    # hostname_to_string/1 below before alias detection. IP tuples never
+    # carry alias hints anyway, so the rendered "127.0.0.1" simply yields [].
     auto_aliases =
       backends
       |> Enum.flat_map(fn
-        %{host: host} -> detect_aliases(to_string(host))
-        {_name, host, _port} -> detect_aliases(to_string(host))
+        %{host: host} -> detect_aliases(hostname_to_string(host))
+        {_name, host, _port} -> detect_aliases(hostname_to_string(host))
         _ -> []
       end)
 
@@ -529,6 +538,30 @@ defmodule ZtlpGateway.ServiceRegistrar do
       end
     end)
   end
+
+  # Render a backend :host value safely as a hostname string. Accepts:
+  #   - a binary (returned as-is)
+  #   - an erlang IPv4 tuple {a, b, c, d}
+  #   - an erlang IPv6 tuple (8-tuple of 16-bit ints)
+  #   - a charlist (`~c"vaultwarden.internal"`)
+  # Anything else falls back to inspect/1 so the call site never raises.
+  defp hostname_to_string(host) when is_binary(host), do: host
+
+  defp hostname_to_string(host) when is_tuple(host) do
+    case :inet.ntoa(host) do
+      {:error, _} -> inspect(host)
+      addr -> List.to_string(addr)
+    end
+  end
+
+  defp hostname_to_string(host) when is_list(host) do
+    # charlist
+    List.to_string(host)
+  rescue
+    _ -> inspect(host)
+  end
+
+  defp hostname_to_string(host), do: inspect(host)
 
   defp detect_aliases(hostname) do
     cond do

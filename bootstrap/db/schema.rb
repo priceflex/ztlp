@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_03_22_010000) do
+ActiveRecord::Schema[7.1].define(version: 2026_05_09_000000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -58,6 +58,40 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_22_010000) do
     t.index ["action"], name: "index_audit_logs_on_action"
     t.index ["created_at"], name: "index_audit_logs_on_created_at"
     t.index ["target_type", "target_id"], name: "index_audit_logs_on_target_type_and_target_id"
+  end
+
+  create_table "benchmarks", force: :cascade do |t|
+    t.integer "ztlp_device_id"
+    t.integer "network_id", null: false
+    t.string "device_id"
+    t.string "node_id"
+    t.string "app_version"
+    t.string "build_tag"
+    t.string "device_model"
+    t.string "ios_version"
+    t.integer "ne_memory_mb"
+    t.integer "ne_virtual_mb"
+    t.boolean "ne_memory_pass"
+    t.integer "benchmarks_passed"
+    t.integer "benchmarks_total"
+    t.json "individual_results"
+    t.string "relay_address"
+    t.string "gateway_address"
+    t.string "ns_address"
+    t.integer "latency_ms"
+    t.integer "throughput_kbps"
+    t.integer "p99_latency_ms"
+    t.integer "packet_loss_pct"
+    t.text "error_details"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.text "device_logs"
+    t.integer "replay_reject_count"
+    t.index ["device_id"], name: "index_benchmarks_on_device_id"
+    t.index ["network_id", "created_at"], name: "index_benchmarks_on_network_id_and_created_at"
+    t.index ["network_id"], name: "index_benchmarks_on_network_id"
+    t.index ["node_id", "created_at"], name: "index_benchmarks_on_node_id_and_created_at"
+    t.index ["ztlp_device_id"], name: "index_benchmarks_on_ztlp_device_id"
   end
 
   create_table "certificates", force: :cascade do |t|
@@ -147,10 +181,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_22_010000) do
     t.text "notes"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.integer "ztlp_user_id"
     t.index ["network_id", "status"], name: "index_enrollment_tokens_on_network_id_and_status"
     t.index ["network_id"], name: "index_enrollment_tokens_on_network_id"
     t.index ["status"], name: "index_enrollment_tokens_on_status"
     t.index ["token_id"], name: "index_enrollment_tokens_on_token_id", unique: true
+    t.index ["ztlp_user_id"], name: "index_enrollment_tokens_on_ztlp_user_id"
   end
 
   create_table "group_memberships", force: :cascade do |t|
@@ -364,9 +400,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_03_22_010000) do
 
   add_foreign_key "alerts", "machines"
   add_foreign_key "alerts", "networks"
+  add_foreign_key "benchmarks", "networks"
+  add_foreign_key "benchmarks", "ztlp_devices"
   add_foreign_key "certificates", "networks"
   add_foreign_key "deployments", "machines"
   add_foreign_key "enrollment_tokens", "networks"
+  add_foreign_key "enrollment_tokens", "ztlp_users"
   add_foreign_key "group_memberships", "ztlp_groups"
   add_foreign_key "group_memberships", "ztlp_users"
   add_foreign_key "health_checks", "machines"

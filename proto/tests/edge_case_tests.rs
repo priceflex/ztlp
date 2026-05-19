@@ -129,11 +129,11 @@ fn test_session_id_zero_roundtrip() {
 fn test_node_id_all_ones() {
     let mut h = HandshakeHeader::new(MsgType::Hello);
     h.src_node_id = [0xFF; 16];
-    h.dst_svc_id = [0xFF; 16];
+    h.dst_svc_hash = [0xFF; 16];
     let bytes = h.serialize();
     let restored = HandshakeHeader::deserialize(&bytes).unwrap();
     assert_eq!(restored.src_node_id, [0xFF; 16]);
-    assert_eq!(restored.dst_svc_id, [0xFF; 16]);
+    assert_eq!(restored.dst_svc_hash, [0xFF; 16]);
 }
 
 #[test]

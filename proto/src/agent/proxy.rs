@@ -442,7 +442,7 @@ pub async fn run_proxy(
             ""
         }
     );
-    let dst_svc_id = crate::tunnel::encode_service_name(&resolution.ztlp_name)?;
+    let dst_svc_hash = crate::tunnel::encode_service_name(&resolution.ztlp_name)?;
 
     // Message 1: HELLO
     let msg1 = ctx.write_message(&[])?;
@@ -450,7 +450,7 @@ pub async fn run_proxy(
     hello_hdr.session_id = session_id;
     hello_hdr.src_node_id = *identity.node_id.as_bytes();
     hello_hdr.payload_len = msg1.len() as u16;
-    hello_hdr.dst_svc_id = dst_svc_id;
+    hello_hdr.dst_svc_hash = dst_svc_hash;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;

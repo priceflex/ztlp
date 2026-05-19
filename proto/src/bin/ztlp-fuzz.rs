@@ -248,7 +248,7 @@ fn mutate_field_boundary(data: &[u8], rng: &mut impl Rng) -> Vec<u8> {
         (23, 31, "packet_seq"),
         (31, 39, "timestamp"),
         (39, 55, "src_node_id"),
-        (55, 71, "dst_svc_id"),
+        (55, 71, "dst_svc_hash"),
         (71, 75, "policy_tag"),
         (75, 77, "ext_len"),
         (77, 79, "payload_len"),

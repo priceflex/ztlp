@@ -78,7 +78,7 @@ enum DecodedPacket {
         packet_seq: u64,
         timestamp: u64,
         src_node_id: String,
-        dst_svc_id: String,
+        dst_svc_hash: String,
         policy_tag: String,
         ext_len: u16,
         payload_len: u16,
@@ -259,7 +259,7 @@ fn decode_handshake(
                 packet_seq: hdr.packet_seq,
                 timestamp: hdr.timestamp,
                 src_node_id: hex::encode(hdr.src_node_id),
-                dst_svc_id: hex::encode(hdr.dst_svc_id),
+                dst_svc_hash: hex::encode(hdr.dst_svc_hash),
                 policy_tag: format!("0x{:08X}", hdr.policy_tag),
                 ext_len: hdr.ext_len,
                 payload_len: hdr.payload_len,
@@ -365,7 +365,7 @@ fn display_pretty(pkt: &DecodedPacket, raw: &[u8]) {
             packet_seq,
             timestamp,
             src_node_id,
-            dst_svc_id,
+            dst_svc_hash,
             policy_tag,
             ext_len,
             payload_len,
@@ -445,7 +445,7 @@ fn display_pretty(pkt: &DecodedPacket, raw: &[u8]) {
                 "{}  {:<20} {}",
                 "║".cyan(),
                 "DstSvcID:".bright_blue(),
-                dst_svc_id
+                dst_svc_hash
             );
             println!(
                 "{}  {:<20} {}",

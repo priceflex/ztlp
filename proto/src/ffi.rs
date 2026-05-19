@@ -120,20 +120,29 @@ const MAX_FFI_ADDRESS_LEN: usize = 256;
 /// 65535 is the maximum UDP payload size.
 const MAX_RECV_PACKET_SIZE: usize = 65535;
 
-/// Encode a service name into a 16-byte buffer (sync-only fallback for no-tokio builds).
-/// The canonical version lives in tunnel.rs, but that module is gated behind tokio-runtime.
+/// Encode a service name into a 16-byte routing hash (sync-only fallback for no-tokio builds).
+///
+/// **Option C wire decoupling.** Returns a 16-byte truncated SHA-256 of
+/// `lowercase(name)` (no zone scope at this FFI layer — zone-aware hashing is
+/// performed in the higher-level tunnel module). MUST stay byte-for-byte
+/// identical to [`crate::tunnel::encode_service_id`]`(None, name)` so the
+/// tokio-runtime build and the ios-sync build agree on the on-wire
+/// `dst_svc_hash`. The legacy 16-byte ASCII length cap is gone — long
+/// DNS-class names are hashed without error.
+///
+/// The canonical implementation lives in `tunnel.rs` but that module is
+/// gated behind `tokio-runtime`, so we duplicate the hashing here for the
+/// `ios-sync` build path.
 #[cfg(not(feature = "tokio-runtime"))]
 fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    let bytes = name.as_bytes();
-    if bytes.len() > 16 {
-        return Err(format!(
-            "service name '{}' too long ({} bytes, max 16)",
-            name,
-            bytes.len()
-        ));
-    }
+    use sha2::{Digest, Sha256};
+    let canon = name.to_ascii_lowercase();
+    let canon = canon.trim_end_matches('.');
+    let mut h = Sha256::new();
+    h.update(canon.as_bytes());
+    let out = h.finalize();
     let mut buf = [0u8; 16];
-    buf[..bytes.len()].copy_from_slice(bytes);
+    buf.copy_from_slice(&out[..16]);
     Ok(buf)
 }
 
@@ -886,7 +895,7 @@ async fn do_connect(
 
     // Set service name if specified (for gateway routing)
     if let Some(svc) = service_name {
-        hello_hdr.dst_svc_id =
+        hello_hdr.dst_svc_hash =
             encode_service_name(svc).map_err(|e| format!("bad service name: {}", e))?;
     }
 
@@ -5136,7 +5145,7 @@ pub extern "C" fn ztlp_handshake_start(
     hello_hdr.src_node_id = *node_identity.node_id.as_bytes();
     hello_hdr.payload_len = msg1.len() as u16;
     if let Some(svc) = service_name {
-        hello_hdr.dst_svc_id = match encode_service_name(svc) {
+        hello_hdr.dst_svc_hash = match encode_service_name(svc) {
             Ok(svc_id) => svc_id,
             Err(e) => {
                 set_last_error(&format!("bad service name: {}", e));
@@ -5845,7 +5854,7 @@ fn do_connect_sync(
     hello_hdr.payload_len = msg1.len() as u16;
 
     if let Some(svc) = service_name {
-        hello_hdr.dst_svc_id =
+        hello_hdr.dst_svc_hash =
             encode_service_name(svc).map_err(|e| format!("bad service name: {}", e))?;
     }
 
@@ -7296,11 +7305,15 @@ mod tests {
     }
 
     #[test]
-    fn test_config_set_service_too_long() {
+    fn test_config_set_service_long_name_ok() {
+        // Option C: the on-wire dst_svc_hash is now a 16-byte truncated SHA-256
+        // of the canonicalized name, so long human-readable names no longer
+        // overflow the wire field. Anything that previously errored at >16 bytes
+        // must now succeed.
         let config = ztlp_config_new();
-        let svc = CString::new("this_is_way_too_long_for_service").unwrap();
+        let svc = CString::new("this-is-a-much-longer-dns-style.acme.ztlp").unwrap();
         let result = ztlp_config_set_service(config, svc.as_ptr());
-        assert_eq!(result, ZtlpResult::InvalidArgument as i32);
+        assert_eq!(result, ZtlpResult::Ok as i32);
         ztlp_config_free(config);
     }
 

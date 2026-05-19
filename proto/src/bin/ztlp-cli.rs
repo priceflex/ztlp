@@ -2421,7 +2421,7 @@ async fn cmd_connect(
     hello_hdr.payload_len = msg1.len() as u16;
     // Set DstSvcID if a service is requested
     if let Some(svc_name) = service {
-        hello_hdr.dst_svc_id = tunnel::encode_service_name(svc_name)?;
+        hello_hdr.dst_svc_hash = tunnel::encode_service_name(svc_name)?;
         eprintln!("  {} {}", c_cyan("Service:"), svc_name);
     }
     let mut pkt1 = hello_hdr.serialize();
@@ -3053,19 +3053,13 @@ async fn cmd_listen(
         let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
 
         // Resolve which backend this client wants
-        let resolve_result = registry.resolve(&recv1_header.dst_svc_id);
+        let resolve_result = registry.resolve(&recv1_header.dst_svc_hash);
         let (svc_name, forward_addr) = match resolve_result {
             Some(pair) => pair,
             None => {
-                let requested = String::from_utf8_lossy(
-                    &recv1_header.dst_svc_id[..recv1_header
-                        .dst_svc_id
-                        .iter()
-                        .rposition(|&b| b != 0)
-                        .map(|i| i + 1)
-                        .unwrap_or(0)],
-                )
-                .to_string();
+                // Option C: dst_svc_hash is an opaque 16-byte hash, not UTF-8.
+                // Surface the hex form so the operator can correlate with NS records.
+                let requested = hex::encode(recv1_header.dst_svc_hash);
                 let msg = if requested.is_empty() {
                     "client requested default service but no unnamed --forward was configured"
                         .to_string()
@@ -3714,19 +3708,13 @@ async fn handle_new_session(
     };
 
     // Resolve service
-    let resolve_result = registry.resolve(&recv1_header.dst_svc_id);
+    let resolve_result = registry.resolve(&recv1_header.dst_svc_hash);
     let (svc_name, forward_addr) = match resolve_result {
         Some(pair) => pair,
         None => {
-            let requested = String::from_utf8_lossy(
-                &recv1_header.dst_svc_id[..recv1_header
-                    .dst_svc_id
-                    .iter()
-                    .rposition(|&b| b != 0)
-                    .map(|i| i + 1)
-                    .unwrap_or(0)],
-            )
-            .to_string();
+            // Option C: dst_svc_hash is an opaque 16-byte hash, not UTF-8.
+            // Surface the hex form so the operator can correlate with NS records.
+            let requested = hex::encode(recv1_header.dst_svc_hash);
             let msg = if requested.is_empty() {
                 "no unnamed --forward configured".to_string()
             } else {
@@ -5144,7 +5132,7 @@ fn inspect_handshake_header(data: &[u8]) -> Result<(), Box<dyn std::error::Error
     eprintln!(
         "  {} {}",
         c_cyan("DstSvcID:"),
-        hex::encode(header.dst_svc_id)
+        hex::encode(header.dst_svc_hash)
     );
     eprintln!("  {} 0x{:08X}", c_cyan("PolicyTag:"), header.policy_tag);
     eprintln!("  {} {} bytes", c_cyan("ExtLen:"), header.ext_len);

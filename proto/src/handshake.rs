@@ -400,7 +400,7 @@ impl HandshakeContext {
 pub fn build_handshake_packet(
     msg_type: MsgType,
     src_node_id: &NodeId,
-    dst_svc_id: &[u8; 16],
+    dst_svc_hash: &[u8; 16],
     session_id: SessionId,
     packet_seq: u64,
     noise_payload: &[u8],
@@ -410,7 +410,7 @@ pub fn build_handshake_packet(
     header.session_id = session_id;
     header.packet_seq = packet_seq;
     header.src_node_id = *src_node_id.as_bytes();
-    header.dst_svc_id = *dst_svc_id;
+    header.dst_svc_hash = *dst_svc_hash;
     header.payload_len = noise_payload.len() as u16;
 
     // Compute auth tag if we have a key

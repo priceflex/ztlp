@@ -558,7 +558,7 @@ where
 
     // Encode port as service name
     let service_name = format!("tcp:{}", port);
-    let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
+    let dst_svc_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
         let mut svc = [0u8; 16];
         let port_str = port.to_string();
         let bytes = port_str.as_bytes();
@@ -573,7 +573,7 @@ where
     hello_hdr.session_id = session_id;
     hello_hdr.src_node_id = *identity.node_id.as_bytes();
     hello_hdr.payload_len = msg1.len() as u16;
-    hello_hdr.dst_svc_id = dst_svc_id;
+    hello_hdr.dst_svc_hash = dst_svc_hash;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;
@@ -683,7 +683,7 @@ async fn handle_tcp_connection(
 
     // Encode port as service name
     let service_name = format!("tcp:{}", port);
-    let dst_svc_id = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
+    let dst_svc_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
         let mut svc = [0u8; 16];
         let port_str = port.to_string();
         let bytes = port_str.as_bytes();
@@ -698,7 +698,7 @@ async fn handle_tcp_connection(
     hello_hdr.session_id = session_id;
     hello_hdr.src_node_id = *identity.node_id.as_bytes();
     hello_hdr.payload_len = msg1.len() as u16;
-    hello_hdr.dst_svc_id = dst_svc_id;
+    hello_hdr.dst_svc_hash = dst_svc_hash;
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
     node.send_raw(&pkt1, send_addr).await?;

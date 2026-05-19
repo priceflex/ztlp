@@ -893,7 +893,15 @@ where
 /// - Multiple `--forward` flags → multi-service listener
 #[derive(Debug, Clone)]
 pub struct ServiceRegistry {
+    /// Services keyed by human-readable name. Preserved so error messages
+    /// and logs can still surface the name a registry was configured with.
+    /// Lookups from the wire (`resolve(&dst_svc_hash)`) go through
+    /// `name_by_hash` first.
     pub services: HashMap<String, SocketAddr>,
+    /// Reverse index: 16-byte truncated SHA-256 of the canonicalized name
+    /// → service name string. Populated alongside `services`. Hash lookups
+    /// match the canonical `encode_service_id(None, name)` value.
+    name_by_hash: HashMap<[u8; 16], String>,
 }
 
 impl ServiceRegistry {
@@ -904,51 +912,63 @@ impl ServiceRegistry {
     /// - `HOST:PORT` — the default (unnamed) service
     pub fn from_forward_args(args: &[String]) -> Result<Self, String> {
         let mut services = HashMap::new();
+        let mut name_by_hash = HashMap::new();
 
         for arg in args {
             let (name, addr) = parse_forward_arg(arg)?;
             if services.contains_key(&name) {
                 return Err(format!("duplicate service name '{}'", name));
             }
+            // Index by the canonical wire hash. DEFAULT_SERVICE keeps its
+            // sentinel zero-hash so unspecified clients still resolve to it.
+            let hash = if name == DEFAULT_SERVICE {
+                [0u8; 16]
+            } else {
+                encode_service_id(None, &name)
+            };
+            name_by_hash.insert(hash, name.clone());
             services.insert(name, addr);
         }
 
-        Ok(Self { services })
+        Ok(Self {
+            services,
+            name_by_hash,
+        })
     }
 
-    /// Look up a service by the DstSvcID bytes from the handshake header.
+    /// Look up a service by the `dst_svc_hash` bytes from the handshake header.
     ///
-    /// If the DstSvcID is all zeros, returns the default service.
-    /// Otherwise, trims trailing zeros and looks up by name.
-    /// If the named service is not found and the registry has exactly
-    /// one service (the implicit default), fall back to it. This allows
-    /// gateways with a single unnamed `--forward` to handle clients
-    /// that send an explicit service name (e.g., `tcp:22`).
-    pub fn resolve(&self, dst_svc_id: &[u8; 16]) -> Option<(&str, SocketAddr)> {
-        let name = if dst_svc_id == &[0u8; 16] {
-            DEFAULT_SERVICE.to_string()
+    /// **Option C wire decoupling.** The wire field is now an opaque
+    /// 16-byte truncated SHA-256 of the canonicalized service name (see
+    /// [`encode_service_id`]). This function does:
+    ///   1. All-zero hash → default service sentinel (covers clients that
+    ///      did not specify any service name).
+    ///   2. Otherwise, direct hash lookup against `name_by_hash` populated
+    ///      at registry construction time.
+    ///   3. If the named service is not found and the registry has exactly
+    ///      one service (the implicit default), fall back to it. This allows
+    ///      gateways with a single unnamed `--forward` to handle clients
+    ///      that send an explicit service name.
+    pub fn resolve(&self, dst_svc_hash: &[u8; 16]) -> Option<(&str, SocketAddr)> {
+        let name_opt: Option<&str> = if dst_svc_hash == &[0u8; 16] {
+            Some(DEFAULT_SERVICE)
         } else {
-            // Trim trailing null bytes to get the service name
-            let end = dst_svc_id
-                .iter()
-                .rposition(|&b| b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
+            self.name_by_hash.get(dst_svc_hash).map(|s| s.as_str())
         };
 
-        // Direct match
-        if let Some(entry) = self.services.get_key_value(&name) {
-            return Some((entry.0.as_str(), *entry.1));
+        if let Some(name) = name_opt {
+            if let Some(entry) = self.services.get_key_value(name) {
+                return Some((entry.0.as_str(), *entry.1));
+            }
         }
 
         // Fallback: if the registry only contains the default service, route
-        // any unrecognized name to it rather than rejecting outright.
+        // any unrecognized hash to it rather than rejecting outright.
         if self.services.len() == 1 && self.services.contains_key(DEFAULT_SERVICE) {
             return self
                 .services
                 .get_key_value(DEFAULT_SERVICE)
-                .map(|(key, addr)| (key.as_str(), *addr));
+                .map(|(k, v)| (k.as_str(), *v));
         }
 
         None
@@ -1196,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_zero_dst_svc_id() {
+    fn test_resolve_zero_dst_svc_hash() {
         let args = vec!["127.0.0.1:22".to_string()];
         let reg = ServiceRegistry::from_forward_args(&args).unwrap();
         let addr = reg.resolve(&[0u8; 16]);
@@ -1205,22 +1225,29 @@ mod tests {
 
     #[test]
     fn test_resolve_named_service() {
+        // Option C: lookup key is the canonical 16-byte SHA-256 hash, not zero-padded ASCII.
         let args = vec!["ssh:127.0.0.1:22".to_string()];
         let reg = ServiceRegistry::from_forward_args(&args).unwrap();
-        let mut name = [0u8; 16];
-        let src = b"ssh";
-        name[..src.len()].copy_from_slice(src);
-        assert!(reg.resolve(&name).is_some());
+        let key = encode_service_id(None, "ssh");
+        let resolved = reg
+            .resolve(&key)
+            .expect("ssh service should resolve via hash");
+        assert_eq!(resolved.0, "ssh");
     }
 
     #[test]
     fn test_resolve_unknown_service() {
-        let args = vec!["ssh:127.0.0.1:22".to_string()];
+        // Option C: an unknown name hashes to a value not present in the registry,
+        // and the single-service fallback only kicks in when DEFAULT_SERVICE is
+        // the only entry — here we have a named "ssh" service so an unknown
+        // request must NOT resolve.
+        let args = vec![
+            "ssh:127.0.0.1:22".to_string(),
+            "http:127.0.0.1:80".to_string(),
+        ];
         let reg = ServiceRegistry::from_forward_args(&args).unwrap();
-        let mut name = [0u8; 16];
-        let src = b"unknown";
-        name[..src.len()].copy_from_slice(src);
-        assert!(reg.resolve(&name).is_none());
+        let key = encode_service_id(None, "definitely-not-registered");
+        assert!(reg.resolve(&key).is_none());
     }
 
     #[test]

@@ -15,7 +15,7 @@ fn test_handshake_header_roundtrip() {
     header.packet_seq = 0xDEADBEEFCAFE;
     header.timestamp = 1700000000000;
     header.src_node_id = [0xAA; 16];
-    header.dst_svc_id = [0xBB; 16];
+    header.dst_svc_hash = [0xBB; 16];
     header.policy_tag = 0x12345678;
     header.ext_len = 64;
     header.payload_len = 1024;
@@ -43,7 +43,7 @@ fn test_handshake_header_roundtrip() {
     assert_eq!(restored.packet_seq, 0xDEADBEEFCAFE);
     assert_eq!(restored.timestamp, 1700000000000);
     assert_eq!(restored.src_node_id, [0xAA; 16]);
-    assert_eq!(restored.dst_svc_id, [0xBB; 16]);
+    assert_eq!(restored.dst_svc_hash, [0xBB; 16]);
     assert_eq!(restored.policy_tag, 0x12345678);
     assert_eq!(restored.ext_len, 64);
     assert_eq!(restored.payload_len, 1024);

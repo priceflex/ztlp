@@ -153,8 +153,24 @@ pub struct HandshakeHeader {
     pub timestamp: u64,
     /// Sender's 128-bit Node ID.
     pub src_node_id: [u8; 16],
-    /// Destination 128-bit Service ID.
-    pub dst_svc_id: [u8; 16],
+    /// Destination 128-bit Service Hash.
+    ///
+    /// Opaque 16-byte routing key — the truncated SHA-256 of the canonical
+    /// `lowercase(zone)/lowercase(service_name)` string (or `lowercase(name)`
+    /// alone when no zone is in scope). Strictly NOT a UTF-8 string and NOT
+    /// zero-padded ASCII. Relays/gateways compare these byte-wise and never
+    /// round-trip them back to a human-readable name; that mapping lives in
+    /// the Name Service (NS) layer.
+    ///
+    /// Field width and offset are fixed (16 bytes) to preserve the zero-
+    /// allocation, O(1) packet header parsing invariant. The 16-byte limit
+    /// on the WIRE is unchanged; the limit on human-readable SERVICE NAMES
+    /// is removed — names hash to 128 bits regardless of length. Collision
+    /// space is 2^128 (identical to IPv6 SLAAC and well beyond birthday
+    /// bounds for any realistic service population).
+    ///
+    /// Populated via [`crate::tunnel::encode_service_id`].
+    pub dst_svc_hash: [u8; 16],
     /// Compact policy tag.
     pub policy_tag: u32,
     /// Extension TLV length in bytes.
@@ -204,7 +220,7 @@ impl HandshakeHeader {
         buf.extend_from_slice(&self.src_node_id);
 
         // DstSvcID (128 bits = 16 bytes)
-        buf.extend_from_slice(&self.dst_svc_id);
+        buf.extend_from_slice(&self.dst_svc_hash);
 
         // PolicyTag (32 bits)
         buf.extend_from_slice(&self.policy_tag.to_be_bytes());
@@ -306,8 +322,8 @@ impl HandshakeHeader {
         pos += 16;
 
         // DstSvcID (16 bytes)
-        let mut dst_svc_id = [0u8; 16];
-        dst_svc_id.copy_from_slice(&data[pos..pos + 16]);
+        let mut dst_svc_hash = [0u8; 16];
+        dst_svc_hash.copy_from_slice(&data[pos..pos + 16]);
         pos += 16;
 
         // PolicyTag
@@ -342,7 +358,7 @@ impl HandshakeHeader {
             packet_seq,
             timestamp,
             src_node_id,
-            dst_svc_id,
+            dst_svc_hash,
             policy_tag,
             ext_len,
             payload_len,
@@ -413,7 +429,7 @@ impl HandshakeHeader {
                 .unwrap_or_default()
                 .as_millis() as u64,
             src_node_id: [0u8; 16],
-            dst_svc_id: [0u8; 16],
+            dst_svc_hash: [0u8; 16],
             policy_tag: 0,
             ext_len: 0,
             payload_len: 0,

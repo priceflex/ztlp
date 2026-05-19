@@ -15,25 +15,36 @@
   - Plain-ZTLP `HttpHeaderInjector` logic finalized. Protocol Sniffing natively injects X-ZTLP Identity elements directly into the TCP buffer on initial chunk (Phase 4c-4/Phase 11).
   - Internal Certificate Authority fully functional via `ZTLP_CA_AUTO_INIT=true`.
   - Manual UI auditing discovered confusion between "Machines" and "Devices"; `app/views/networks/index.html.erb` heavily annotated with instructions pointing end users seamlessly to next-steps (Phase 8).
-  - Testing suite in `gateway/` repaired, explicitly adapting assertions to newly enforced identity headers.
-- What is currently in progress: N/A - E2E Stack Test Goal successfully closed.
+  - Rust proto codebase pipeline compilation fixes generated and accepted into main via `v26.1`.
+- What is currently in progress: Implement a persistent `ZTLP_GATEWAY_OPERATOR_KEY` credential strategy inside production environment manifests.
 - What is failing or blocked: N/A.
-- What was recently changed: Gateway routing logic overhauled to accommodate Protocol Sniffing intercept without SNI dependence.
+- What was recently changed: Rust proto namespace dependencies patched, fixing strict CI/CD `cargo clippy` and `cargo fmt` errors blocking Github workflow progression.
 - Any temporary workarounds currently in place: Gateway on `54.218.127.30` is currently authenticated using an Ephemeral Operator Key. Mnesia has to be wiped on the NS (`35.91.88.177`) if the Gateway bounces, to bypass Zone KEY locking rejections.
-- Current system stability status: Extremely stable. Elixir tests pass natively, Python scripts pass safely.
+- Current system stability status: Extremely stable. Elixir tests pass natively, Rust proto tests pass natively, GitHub action CI/CD returns green ✅.
 
 # Active Tasks
 
-**Task Name:** Production ZTLP Stack E2E Release Verification
+**Task Name:** Continuous Integration & Delivery Stabilization
 - Status: completed
-- Detailed description: Validate the entire onboarding, tunneling, and authentication proxy layer.
-- Important implementation notes: `session.ex` uses a lightweight `#Session{}` buffer to track `first_chunk` state. `HttpHeaderInjector` leverages simple Regex-free prefix matching `<<method, _>>` when `method in [?G, ?P, ...]` to cheaply identify HTTP traffic vs raw SSH.
-- Known issues: `ZTLP_GATEWAY_OPERATOR_KEY` ephemeral limitations inside Docker container lifecycles.
-- Next exact step to perform: Consolidate `vaultwarden` container environments under production infrastructure rules instead of `host` networked volatile storage.
-- Relevant files: `gateway/lib/ztlp_gateway/session.ex`, `ztlp.net/launch_app/app.py`
-- Relevant commands: `mix test`, `docker compose up -d`
-- Dependencies or assumptions: Assumes Elixir compilation inside Docker works cache-cleanly (requires `--no-cache` often to bypass layer hash persistence during hotfixes).
-- Testing status: Integration and Unit Tests passing locally on Main.
+- Detailed description: Stabilized Rust parsing payloads for `cbor_extract_string` inside `proto/src/ns_cbor.rs` to allow SVC mapping tests to pass. Adhered to strict `cargo clippy` and `cargo fmt` demands.
+- Important implementation notes: `cargo fmt` breaks Github pipelines ungracefully.
+- Known issues: N/A.
+- Next exact step to perform: Move to Container Identity persistence.
+- Relevant files: `proto/src/agent/proxy.rs`, `proto/src/ns_cbor.rs`, `.github/workflows/ci.yml`
+- Relevant commands: `cargo test`, `cargo clippy --fix`, `gh release create`
+- Dependencies or assumptions: Tested and tagged `v26.1` officially on Github releases.
+- Testing status: CI/CD complete and tagged `v26.1`.
+
+**Task Name:** Production ZTLP Stack Gateway Key Persistence 
+- Status: not started
+- Detailed description: Validate a method allowing Dockerized Gateway hosts to survive container recreation natively without dropping Mnesia PKI linkage on Nameservers.
+- Important implementation notes: N/A.
+- Known issues: `ZTLP_GATEWAY_OPERATOR_KEY` ephemeral limitations inside Docker container lifecycles locking node_id signatures.
+- Next exact step to perform: Inspect Gateway `docker-compose.yml` to identify path volume mounting options for `.env` states.
+- Relevant files: `gateway/docker-compose.yml`, `gateway/lib/ztlp_gateway/operator.ex`
+- Relevant commands: `ssh ubuntu@54.218.127.30 docker load` 
+- Dependencies or assumptions: The NS correctly updates metadata references when an identical key persists across TCP resets.
+- Testing status: Blocked pending implementation.
 
 # Technical Context
 - Overall architecture: Rust `ztlp` CLI generates Noise_XX encrypted UDP traffic; Elixir Gateway (`:23097`) parses ZTLP headers, decrypts it, determines protocol flow (HTTP vs SSH), injects authentication headers, and sends to pure backend listeners (like `vaultwarden:8081`).

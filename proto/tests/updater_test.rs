@@ -81,8 +81,8 @@ fn semver_ordering_equal() {
     let a = SemVer::new(1, 2, 3);
     let b = SemVer::new(1, 2, 3);
     assert_eq!(a, b);
-    assert!(!(a > b));
-    assert!(!(a < b));
+    assert!((a <= b));
+    assert!((a >= b));
 }
 
 #[test]

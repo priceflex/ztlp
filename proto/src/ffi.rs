@@ -1806,9 +1806,9 @@ async fn recv_loop(
                     let has_gap = !received_ahead.is_empty();
                     let in_startup = next_expected_seq < ACK_STARTUP_THRESHOLD;
                     let is_coalesce_point = if in_startup {
-                        next_expected_seq % ACK_STARTUP_EVERY == 0
+                        next_expected_seq.is_multiple_of(ACK_STARTUP_EVERY)
                     } else {
-                        next_expected_seq % ACK_COALESCE_COUNT == 0
+                        next_expected_seq.is_multiple_of(ACK_COALESCE_COUNT)
                     };
                     let is_first = next_expected_seq <= 1;
 
@@ -1836,12 +1836,12 @@ async fn recv_loop(
                     diag_packets_received += 1;
                     diag_packets_decrypted += 1;
                     let now_diag = std::time::Instant::now();
-                    if diag_packets_received % DIAG_REPORT_PACKET_INTERVAL == 0
+                    if diag_packets_received.is_multiple_of(DIAG_REPORT_PACKET_INTERVAL)
                         || now_diag.duration_since(diag_last_report).as_millis()
                             > DIAG_REPORT_INTERVAL_MS
                     {
                         let elapsed_ms = now_diag.duration_since(diag_last_report).as_millis();
-                        let pps = if elapsed_ms > 0 {
+                        let _pps = if elapsed_ms > 0 {
                             diag_packets_received as u128 * 1000 / elapsed_ms
                         } else {
                             0
@@ -4958,15 +4958,15 @@ pub extern "C" fn ztlp_router_stats(router: *mut ZtlpPacketRouter) -> *mut std::
         Ok(r) => {
             let stats = r.router_stats();
             let bytes = stats.as_bytes();
-            let c_str = unsafe {
+
+            unsafe {
                 let ptr = libc::malloc(bytes.len() + 1) as *mut std::ffi::c_char;
                 if !ptr.is_null() {
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
                     *ptr.add(bytes.len()) = 0;
                 }
                 ptr
-            };
-            c_str
+            }
         }
         Err(_) => std::ptr::null_mut(),
     }
@@ -5829,7 +5829,7 @@ fn do_connect_sync(
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|e| format!("set_read_timeout: {}", e))?;
-    let local_addr = socket
+    let _local_addr = socket
         .local_addr()
         .map_err(|e| format!("local_addr: {}", e))?;
     diag_log!(
@@ -8874,6 +8874,6 @@ mod tests {
 
     #[test]
     fn test_relay_pool_needs_refresh_null() {
-        assert_eq!(ztlp_relay_pool_needs_refresh(std::ptr::null()), false);
+        assert!(!ztlp_relay_pool_needs_refresh(std::ptr::null()));
     }
 }

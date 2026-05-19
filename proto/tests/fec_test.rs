@@ -71,7 +71,7 @@ fn encoder_parity_is_correct_xor() {
     let parity_pkt = r3.parity_packet.unwrap();
     // Header: [0x0F, group_id(2), group_size(1)] = 4 bytes
     let parity_payload = &parity_pkt[4..];
-    let expected = vec![0xAA ^ 0xCC ^ 0x11, 0xBB ^ 0xDD ^ 0x22];
+    let expected = [0xAA ^ 0xCC ^ 0x11, 0xBB ^ 0xDD ^ 0x22];
     assert_eq!(parity_payload, &expected[..]);
 }
 
@@ -395,7 +395,7 @@ fn variable_length_payloads_in_same_group() {
 
     // Expected parity (XOR with zero-padding to max len=3):
     // [0xAA^0x11^0x22, 0xBB^0x00^0x33, 0xCC^0x00^0x00]
-    let expected_parity = vec![0xAA ^ 0x11 ^ 0x22, 0xBB ^ 0x00 ^ 0x33, 0xCC ^ 0x00 ^ 0x00];
+    let expected_parity = [0xAA ^ 0x11 ^ 0x22, 0xBB ^ 0x33, 0xCC];
 
     enc.encode(&p0);
     enc.encode(&p1);

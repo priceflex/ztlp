@@ -3,7 +3,6 @@
 
 #[cfg(test)]
 mod relay_tests {
-    use super::*;
 
     // Test that --relay flag is parsed correctly in listen command
     #[test]

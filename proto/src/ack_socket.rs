@@ -115,7 +115,7 @@ fn raw_sendto(fd: i32, data: &[u8], dest: &SocketAddr) -> Result<usize, std::io:
             if sent < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            return Ok(sent as usize);
+            Ok(sent as usize)
         }
     }
 }
@@ -278,7 +278,7 @@ pub fn spawn_ack_sender(config: AckSenderConfig) -> std::sync::mpsc::Sender<Vec<
                 }
 
                 // Periodic status log
-                if sent_count > 0 && sent_count % 500 == 0 {
+                if sent_count > 0 && sent_count.is_multiple_of(500) {
                     tracing::info!(
                         "ack_sender: sent={} errors={} seq={}",
                         sent_count,

@@ -26,7 +26,11 @@ pub fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
 
     // Must be a map (major type 5)
     if major != 5 {
-        eprintln!("DEBUG: parse_ns_record MAP RET None at line {}, major={}", line!(), major);
+        eprintln!(
+            "DEBUG: parse_ns_record MAP RET None at line {}, major={}",
+            line!(),
+            major
+        );
         return None;
     }
 

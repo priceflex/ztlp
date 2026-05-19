@@ -1981,7 +1981,7 @@ mod tests {
 
         // Should have ACK + FIN in outbound
         let outbound = router.drain_outbound();
-        assert!(outbound.len() >= 1);
+        assert!(!outbound.is_empty());
 
         // At least one should have FIN flag
         let has_fin = outbound.iter().any(|pkt| {
@@ -2333,7 +2333,7 @@ mod tests {
         // Same SYN again (retransmit)
         let actions2 = router.process_inbound(&syn);
         // Should close old stream and open new one
-        assert!(actions2.len() >= 1);
+        assert!(!actions2.is_empty());
         assert_eq!(router.flow_count(), 1);
     }
 }

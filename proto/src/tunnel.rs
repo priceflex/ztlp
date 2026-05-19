@@ -1132,7 +1132,6 @@ pub fn bridge_instrumentation_enabled() -> bool {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::Ordering;
     // ── Service registry + forward parsing tests (kept) ─────────────────
 
     #[test]

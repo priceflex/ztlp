@@ -15,7 +15,6 @@
 //! These tests are designed to run on macOS/iOS (where the contention manifests)
 //! but also pass on Linux (where the contention is less severe but still measurable).
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,12 +61,12 @@ async fn test_single_socket_ack_contention_under_load() {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let ack_receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    let gateway_addr = gateway.local_addr().unwrap();
+    let _gateway_addr = gateway.local_addr().unwrap();
     let client_addr = client.local_addr().unwrap();
     let ack_receiver_addr = ack_receiver.local_addr().unwrap();
 
     let client = Arc::new(client);
-    let stop = Arc::new(AtomicBool::new(false));
+    let _stop = Arc::new(AtomicBool::new(false));
     let acks_sent = Arc::new(AtomicU64::new(0));
     let acks_send_errors = Arc::new(AtomicU64::new(0));
 
@@ -90,7 +89,7 @@ async fn test_single_socket_ack_contention_under_load() {
                     packets_received += 1;
 
                     // Send ACK every N packets on the SAME socket
-                    if packets_received % ack_every as u64 == 0 {
+                    if packets_received.is_multiple_of(ack_every as u64) {
                         let ack = [0x01u8; ACK_SIZE]; // simplified ACK frame
                         match client_clone.send_to(&ack, ack_receiver_addr).await {
                             Ok(_) => {
@@ -262,7 +261,7 @@ async fn test_separate_socket_no_contention() {
                 Ok(Ok((_len, _from))) => {
                     packets_received += 1;
 
-                    if packets_received % ack_every as u64 == 0 {
+                    if packets_received.is_multiple_of(ack_every as u64) {
                         let _ = ack_tx.send(packets_received);
                     }
 
@@ -718,7 +717,7 @@ async fn test_10mb_transfer_separate_ack_socket() {
 
     let total_packets = PACKETS_10MB;
     let ack_every: usize = 8;
-    let expected_acks = total_packets / ack_every;
+    let _expected_acks = total_packets / ack_every;
 
     // Track state
     let data_received = Arc::new(AtomicU64::new(0));
@@ -778,7 +777,7 @@ async fn test_10mb_transfer_separate_ack_socket() {
                 Ok(Ok(_)) => {
                     count += 1;
                     data_recv_clone.fetch_add(1, Ordering::Relaxed);
-                    if count % ack_every as u64 == 0 {
+                    if count.is_multiple_of(ack_every as u64) {
                         let _ = ack_tx.send(count);
                     }
                     if count as usize >= total_packets {

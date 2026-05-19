@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 use ztlp_proto::metrics::{
-    format_f64, format_labels, latency_buckets, size_buckets, MetricsRegistry, ZtlpMetrics,
+    format_f64, latency_buckets, size_buckets, MetricsRegistry, ZtlpMetrics,
 };
 
 // ── Counter tests ──────────────────────────────────────────────────

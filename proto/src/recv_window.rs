@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io;
 
 /// A receive window that buffers out-of-order data payloads and yields contiguous sequences.
 pub struct ReceiveWindow {

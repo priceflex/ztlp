@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTANCE_ROOT="${LAUNCH_INSTANCE_ROOT:-$ROOT/data/instances}"
-BOOTSTRAP_IMAGE="${LAUNCH_BOOTSTRAP_IMAGE:-priceflex/ztlp-bootstrap:latest}"
+BOOTSTRAP_IMAGE="${LAUNCH_BOOTSTRAP_IMAGE:-$ROOT/../bootstrap}"
 BASE_PORT="${LAUNCH_INSTANCE_BASE_PORT:-39000}"
 DEFAULT_ZONE_SUFFIX="${LAUNCH_DEFAULT_ZONE_SUFFIX:-ztlp}"
 
@@ -63,7 +63,8 @@ write_instance() {
   cat > "$dir/docker-compose.yml" <<EOF
 services:
   bootstrap:
-    image: "${BOOTSTRAP_IMAGE}"
+    build:
+      context: "${BOOTSTRAP_IMAGE}"
     container_name: "ztlp-bootstrap-${slug}"
     ports:
       - "127.0.0.1:${port}:3000"
@@ -79,6 +80,7 @@ services:
       ZTLP_ADMIN_EMAIL: "${email}"
       ZTLP_ZONE: "${zone}"
       ZTLP_TRUST_GATEWAY_AUTH: "true"
+      FORCE_SSL: "false"
       # TODO: inject ZTLP service identity once bootstrap.<zone> registration is wired.
     restart: unless-stopped
     healthcheck:

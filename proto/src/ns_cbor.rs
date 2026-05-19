@@ -14,7 +14,7 @@
 /// Returns `None` if the map doesn't contain the key or if the value isn't a text string.
 pub fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
     if data.is_empty() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let mut pos = 0;
@@ -25,7 +25,7 @@ pub fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
 
     // Must be a map (major type 5)
     if major != 5 {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let (arity, new_pos) = cbor_read_uint(additional, data, pos)?;
@@ -51,7 +51,7 @@ pub fn cbor_extract_string(data: &[u8], target_key: &str) -> Option<String> {
 /// Returns `None` if the key isn't found or the value isn't a uint.
 pub fn cbor_extract_uint(data: &[u8], target_key: &str) -> Option<u64> {
     if data.is_empty() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let mut pos = 0;
@@ -61,7 +61,7 @@ pub fn cbor_extract_uint(data: &[u8], target_key: &str) -> Option<u64> {
     pos += 1;
 
     if major != 5 {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let (arity, new_pos) = cbor_read_uint(additional, data, pos)?;
@@ -77,7 +77,7 @@ pub fn cbor_extract_uint(data: &[u8], target_key: &str) -> Option<u64> {
                 if let Ok(n) = val_str.parse::<u64>() {
                     return Some(n);
                 }
-                return None;
+                eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
             }
             pos = new_pos2;
         } else {
@@ -95,7 +95,7 @@ pub fn cbor_extract_uint(data: &[u8], target_key: &str) -> Option<u64> {
             } else {
                 // Skip unknown value type — not text, not uint
                 // We can't easily skip arbitrary CBOR, so bail
-                return None;
+                eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
             }
         }
     }
@@ -111,18 +111,18 @@ pub fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize,
         Some((additional as usize, pos))
     } else if additional == 24 {
         if pos >= data.len() {
-            return None;
+            eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
         }
         Some((data[pos] as usize, pos + 1))
     } else if additional == 25 {
         if pos + 2 > data.len() {
-            return None;
+            eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
         }
         let n = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         Some((n, pos + 2))
     } else if additional == 26 {
         if pos + 4 > data.len() {
-            return None;
+            eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
         }
         let n =
             u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
@@ -137,17 +137,17 @@ pub fn cbor_read_uint(additional: u8, data: &[u8], pos: usize) -> Option<(usize,
 /// Returns (string, new_position) or None if parsing fails.
 pub fn cbor_read_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
     if pos >= data.len() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
     let initial = data[pos];
     let major = initial >> 5;
     let additional = initial & 0x1F;
     if major != 3 {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
     let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
     if new_pos + len > data.len() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
     let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
     Some((s.to_string(), new_pos + len))
@@ -158,17 +158,17 @@ pub fn cbor_read_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
 /// Unlike `cbor_read_text`, this doesn't fail for non-text — it just returns None.
 fn cbor_read_text_raw(data: &[u8], pos: usize) -> Option<(String, usize)> {
     if pos >= data.len() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
     let initial = data[pos];
     let major = initial >> 5;
     if major != 3 {
-        return None; // Not a text string
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None; // Not a text string
     }
     let additional = initial & 0x1F;
     let (len, new_pos) = cbor_read_uint(additional, data, pos + 1)?;
     if new_pos + len > data.len() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
     let s = std::str::from_utf8(&data[new_pos..new_pos + len]).ok()?;
     Some((s.to_string(), new_pos + len))
@@ -183,7 +183,7 @@ fn cbor_read_text_raw(data: &[u8], pos: usize) -> Option<(String, usize)> {
 /// Also handles NOT_FOUND (0x03) and REVOKED (0x04) responses.
 pub fn parse_ns_record(data: &[u8]) -> Option<NsRecordPayload> {
     if data.is_empty() {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let status = data[0];
@@ -217,13 +217,13 @@ pub fn parse_ns_record(data: &[u8]) -> Option<NsRecordPayload> {
         &data[1..]
     };
     if record.len() < 4 {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let record_type = record[0];
     let rname_len = u16::from_be_bytes([record[1], record[2]]) as usize;
     if record.len() < 3 + rname_len + 4 {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let offset = 3 + rname_len;
@@ -238,7 +238,7 @@ pub fn parse_ns_record(data: &[u8]) -> Option<NsRecordPayload> {
     ]) as usize;
 
     if record.len() < offset + 4 + data_len {
-        return None;
+        eprintln!("DEBUG: parse_ns_record RET None at line {}", line!()); return None;
     }
 
     let data_start = offset + 4;

@@ -178,8 +178,9 @@ async fn ns_query_addr(
     ns_server: &str,
 ) -> Result<Option<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(data) = ns_query_raw(ztlp_name, ns_server, 2).await? {
-        if let Ok(addr) = parse_svc_response(&data) {
-            return Ok(Some(addr));
+        match parse_svc_response(&data) {
+            Ok(addr) => return Ok(Some(addr)),
+            Err(e) => eprintln!("DEBUG: parse_svc_response failed for type 2: {}", e),
         }
     }
 
@@ -269,13 +270,8 @@ async fn ns_query_raw(
 
 /// Parse a SVC record response to extract the endpoint address.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    let record = parse_ns_record(data).ok_or("invalid NS response (parse failed)")?;
-    if record.status != NsResponseStatus::Found {
-        return Err("NS response: record not found or revoked".into());
-    }
-
     let address_str =
-        cbor_extract_string(&record.data, "address").ok_or("SVC record missing address")?;
+        cbor_extract_string(data, "address").ok_or("SVC record missing address")?;
 
     address_str
         .parse()

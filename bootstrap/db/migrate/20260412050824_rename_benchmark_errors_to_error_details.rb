@@ -2,6 +2,8 @@
 
 class RenameBenchmarkErrorsToErrorDetails < ActiveRecord::Migration[7.1]
   def change
-    rename_column :benchmarks, :errors, :error_details
+    if column_exists?(:benchmarks, :errors)
+      rename_column :benchmarks, :errors, :error_details
+    end
   end
 end

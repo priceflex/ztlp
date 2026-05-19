@@ -28,7 +28,19 @@ Rails.application.config.after_initialize do
   end
 
   # Find the first network with an NS server
-  network = Network.joins(:machines).where(machines: { roles: "ns" }).first
+  # Use a begin/rescue block here because during db:prepare or db:schema:load the networks table might not exist yet
+  # Using execute directly to test table existence safely
+  network = begin
+    if ActiveRecord::Base.connection.table_exists?('networks')
+      Network.joins(:machines).where(machines: { roles: "ns" }).first
+    else
+      Rails.logger.info("[ZTLP Enrollment] Networks table does not exist yet — skipping auto-enrollment")
+      nil
+    end
+  rescue ActiveRecord::StatementInvalid, ActiveRecord::ConnectionNotEstablished, ActiveRecord::NoDatabaseError
+    Rails.logger.info("[ZTLP Enrollment] DB not ready yet — skipping auto-enrollment")
+    nil
+  end
   unless network
     Rails.logger.info("[ZTLP Enrollment] No network with NS found — skipping auto-enrollment")
     next

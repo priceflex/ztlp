@@ -181,7 +181,22 @@ defmodule ZtlpGateway.Config do
   end
 
   def get(:header_signing_enabled) do
-    Application.get_env(:ztlp_gateway, :header_signing_enabled, false)
+    # ZTLP_HEADER_SIGNING_ENABLED env var takes precedence over app env.
+    # Accepts true/1/yes/on (case-insensitive) as truthy; everything else
+    # (including empty string) is false. Unset → fall back to app env.
+    case System.get_env("ZTLP_HEADER_SIGNING_ENABLED") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :header_signing_enabled, false)
+
+      val ->
+        case String.downcase(val) do
+          "true" -> true
+          "1" -> true
+          "yes" -> true
+          "on" -> true
+          _ -> false
+        end
+    end
   end
 
   def get(:header_signing_secret) do

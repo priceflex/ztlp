@@ -30,4 +30,31 @@ fi
 # Prepare database (create + migrate)
 ./bin/rails db:prepare
 
+# Seed built-in policy templates + the default admin record. This is
+# idempotent thanks to find_or_create_by!, so it's safe to run on every
+# container start.
+./bin/rails db:seed
+
+# If the launch app provisioned us with ZTLP_BOOTSTRAP_ADMIN_EMAIL, ensure
+# that email is registered as a super_admin so the registering operator
+# can log in immediately after onboarding completes. The password is
+# left blank (the operator sets it via the first-login flow / ZTLP-
+# native enrollment), but the user record exists.
+if [ -n "$ZTLP_BOOTSTRAP_ADMIN_EMAIL" ]; then
+  ./bin/rails runner "
+    email = ENV['ZTLP_BOOTSTRAP_ADMIN_EMAIL'].to_s.downcase
+    name  = ENV['ZTLP_BOOTSTRAP_ADMIN_NAME'].presence || 'Admin'
+    pwd   = ENV['ZTLP_BOOTSTRAP_ADMIN_PASSWORD'].presence || SecureRandom.hex(16)
+    u = AdminUser.find_or_initialize_by(email: email)
+    u.name = name if u.name.blank?
+    if u.new_record?
+      u.password = pwd
+      u.password_confirmation = pwd
+    end
+    u.role = 'super_admin'
+    u.save!
+    puts \"[entrypoint] super_admin ensured: #{email} (created? #{u.previously_new_record?})\"
+  "
+fi
+
 exec "${@}"

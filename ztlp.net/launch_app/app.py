@@ -598,7 +598,32 @@ class LaunchApp:
             image = os.environ.get("LAUNCH_BOOTSTRAP_IMAGE", "priceflex/ztlp-bootstrap:latest")
             zone = row["zone"] or ""
             admin_email = row["admin_email"] or ""
+            admin_name = row["admin_name"] or "Admin"
             created_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+            # Each bootstrap instance gets a stable, randomly-generated set of
+            # Rails secrets so sessions survive container restarts and ActiveRecord
+            # encrypted columns can be decrypted across restarts. We store them
+            # in instance.env (chmod 600) and reference them from docker-compose.yml
+            # so the same values get rehydrated every recreate. Generated once per
+            # instance and never re-emitted to the user.
+            secrets_env_path = os.path.join(instance_dir, "secrets.env")
+            if os.path.exists(secrets_env_path):
+                # Reuse existing secrets — never rotate on re-provision.
+                pass
+            else:
+                with open(secrets_env_path, "w", encoding="utf-8") as fh:
+                    fh.write(
+                        f"SECRET_KEY_BASE={secrets.token_hex(64)}\n"
+                        f"ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY={secrets.token_hex(16)}\n"
+                        f"ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY={secrets.token_hex(16)}\n"
+                        f"ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT={secrets.token_hex(16)}\n"
+                    )
+                # Best-effort chmod — fine if we're already non-root.
+                try:
+                    os.chmod(secrets_env_path, 0o600)
+                except OSError:
+                    pass
 
             env_lines = [
                 f"ZTLP_INSTANCE_SLUG={slug}",
@@ -620,15 +645,34 @@ class LaunchApp:
                 f"      - \"127.0.0.1:{port}:3000\"\n"
                 "    volumes:\n"
                 f"      - bootstrap_{slug}_data:/data\n"
+                "    env_file:\n"
+                "      # Stable per-instance Rails secrets (SECRET_KEY_BASE and the\n"
+                "      # ActiveRecord encryption triplet). Generated once on first\n"
+                "      # provision and re-read on every recreate.\n"
+                "      - secrets.env\n"
                 "    environment:\n"
                 "      RAILS_ENV: \"production\"\n"
                 "      DATABASE_PATH: \"/data/production.sqlite3\"\n"
                 f"      ZTLP_INSTANCE_SLUG: \"{slug}\"\n"
                 f"      ORG_NAME: \"{org_name}\"\n"
                 f"      ADMIN_EMAIL: \"{admin_email}\"\n"
+                f"      ADMIN_NAME: \"{admin_name}\"\n"
                 f"      ZONE: \"{zone}\"\n"
-                "      TRUST_GATEWAY_AUTH: \"true\"\n"
+                "      # The bootstrap entrypoint reads ZTLP_BOOTSTRAP_ADMIN_EMAIL\n"
+                "      # to auto-promote the registering admin to super_admin on\n"
+                "      # first start. The matching ZTLP_BOOTSTRAP_ADMIN_PASSWORD is\n"
+                "      # NOT set here — admin sets it during ZTLP-native enrollment.\n"
+                "      ZTLP_BOOTSTRAP_ADMIN_EMAIL: \"" + admin_email + "\"\n"
+                f"      ZTLP_BOOTSTRAP_ADMIN_NAME: \"{admin_name}\"\n"
+                "      # Trust X-ZTLP-Authenticated + X-ZTLP-Admin-Email headers\n"
+                "      # injected by an upstream ZTLP gateway, so users authenticate\n"
+                "      # via their ZTLP identity instead of passwords. The variable\n"
+                "      # name MUST be ZTLP_TRUST_GATEWAY_AUTH (not TRUST_GATEWAY_AUTH)\n"
+                "      # — application_controller.rb reads ENV['ZTLP_TRUST_GATEWAY_AUTH'].\n"
+                "      ZTLP_TRUST_GATEWAY_AUTH: \"true\"\n"
                 "      FORCE_SSL: \"false\"\n"
+                "      RAILS_LOG_TO_STDOUT: \"1\"\n"
+                "      RAILS_SERVE_STATIC_FILES: \"true\"\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "volumes:\n"

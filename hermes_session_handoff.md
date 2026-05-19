@@ -24,7 +24,7 @@ Bonus: clean up the bootstrap UX so next-steps are obvious.
 | Role | Host | Port | Notes |
 |------|------|------|-------|
 | **Public site (ztlp.net)** | runs on Nameserver host, behind ngrok at `www.ztlp.net` | 8080 → 443 | Python WSGI launch app |
-| **Nameserver (NS)** | `34.219.38.89` | UDP 23096 | also hosts ztlp.net + bootstrap |
+| **Nameserver (NS)** | `35.91.88.177` *(replaced 34.219.38.89 — OOM'd on bootstrap build)* | UDP 23096 | also hosts ztlp.net + bootstrap. Fresh Ubuntu, 3.8GB RAM, 77GB disk |
 | **Relay** | `34.218.240.106` | UDP 23095 | |
 | **Gateway** | `54.218.127.30` | UDP 23097 | gateway = "copy private key" device |
 | **Windows user box** | `10.170.3.111` | — | Steve runs commands here — private LAN, not reachable from dev box |

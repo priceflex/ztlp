@@ -7,10 +7,22 @@ services:
     ports:
       - "${LAUNCH_PORT:-8080}:8080"
     environment:
-      LAUNCH_BIND_HOST: 0.0.0.0
+      # Bind the WSGI app on every interface so ngrok (host network) can reach it.
+      LAUNCH_BIND_HOST: ${LAUNCH_BIND_HOST:-0.0.0.0}
       LAUNCH_BIND_PORT: 8080
       LAUNCH_DB_PATH: /app/data/launch.sqlite3
+      # Public hostname used to render absolute URLs (claim links etc.).
       LAUNCH_PUBLIC_HOST: ${LAUNCH_PUBLIC_HOST:-localhost:8080}
+      # Per-zone bootstrap stack defaults, sourced from .env so they can vary
+      # per environment without editing the compose file.
+      LAUNCH_INSTANCE_BASE_PORT: ${LAUNCH_INSTANCE_BASE_PORT:-39000}
+      LAUNCH_INSTANCE_ROOT: ${LAUNCH_INSTANCE_ROOT:-/app/data/instances}
+      LAUNCH_BOOTSTRAP_IMAGE: ${LAUNCH_BOOTSTRAP_IMAGE:-priceflex/ztlp-bootstrap:latest}
+      LAUNCH_DEFAULT_ZONE_SUFFIX: ${LAUNCH_DEFAULT_ZONE_SUFFIX:-ztlp}
+      # Onboarding policy (POW + referral codes). Sourcing these from .env so
+      # operators can rotate referral codes without rebuilding the image.
+      LAUNCH_REQUIRE_POW: ${LAUNCH_REQUIRE_POW:-1}
+      LAUNCH_REFERRAL_CODES: ${LAUNCH_REFERRAL_CODES:-}
       LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET:-ztlp-launch-dev-secret-change-me}
       ZTLP_DOWNLOAD_MANIFEST_URL: ${ZTLP_DOWNLOAD_MANIFEST_URL:-https://www.ztlp.net/downloads/manifest.json}
       ZTLP_RELEASE_TAG: ${ZTLP_RELEASE_TAG:-v-before-nebula-collapse}

@@ -1,84 +1,182 @@
-# Hermes Session Handoff — ZTLP Launch App to AWS Prod
+# Hermes Session Handoff — ZTLP End-to-End Stack Test
 
-## 1. Project Goal
-Deploy the `ztlp.net` Launch app to the production test AWS Nameserver (`34.219.38.89`) using Docker, and expose it via ngrok so Steve can use the referral code flow. Provide production-grade readiness instead of running it locally.
-**Success:** The `ztlp.net` public launcher is reachable over the internet via an ngrok tunnel.
-
----
-
-## 2. What Was Done This Session
-
-### 1. Repository Migration & Deployment
-- Copied `~/ztlp/ztlp.net` to the AWS Nameserver (`34.219.38.89`) via `rsync`.
-- Created production `.env` config.
-  - `LAUNCH_BIND_HOST=0.0.0.0`
-  - `LAUNCH_REQUIRE_POW=0`
-  - `LAUNCH_PUBLIC_HOST=kathyrn-fraternal-alayah.ngrok-free.dev`
-- Built and started the `ztlp-launch` Python WSGI app container via `docker compose up -d`.
-
-### 2. Networking (ngrok)
-- Deployed `ngrok` container (`ngrok/ngrok`) attached to `--network host` to forward traffic securely to localhost:8080.
-- Resolved address binding conflict (`listen tcp 0.0.0.0:4040`) by reusing local host ports and correctly pointing ngrok to HTTP 8080.
-- Verified ngrok tunnel is healthy and serving HTTP 200 responses to public requests for the `ztlp.net` Launch app.
+> **Active session:** 2026-05-19 — feature/ztlp-end-to-end-stack-test
+> **Agent:** Hermes (anthropic/claude-opus-4.7)
+> **Operator:** Steve Price
 
 ---
 
-## 3. Active Tasks
+## 1. Mission
 
-### Task 1: Verify End-to-End Onboarding Flow
-**Status:** In Progress
-**Description:** Steve wants to test the ZTLP Launch onboarding flow using his referral code. The ngrok tunnel is live. We need to confirm the claim UI works, SQLite persists correctly, and the zone is properly processed.
-**Next steps:** Test going to `https://kathyrn-fraternal-alayah.ngrok-free.dev/start` and using the referral code `ZTLP-E2E-2026`.
-**Relevant files:** `ztlp.net/launch_app/app.py`, `ztlp.net/data/launch.sqlite3`
+Run a real end-to-end test of the entire ZTLP stack — public site → bootstrap →
+enrollment → device-to-device communication — exactly like a human user would.
+
+Validate the data model: **a user can have many devices; a device must be
+registered before it can communicate; both device-to-device and
+user-on-device communication must work over the ZTLP network.**
+
+Bonus: clean up the bootstrap UX so next-steps are obvious.
 
 ---
 
-## 4. Technical Context
+## 2. Topology — Locked In
 
-### Architecture
+| Role | Host | Port | Notes |
+|------|------|------|-------|
+| **Public site (ztlp.net)** | runs on Nameserver host, behind ngrok at `www.ztlp.net` | 8080 → 443 | Python WSGI launch app |
+| **Nameserver (NS)** | `34.219.38.89` | UDP 23096 | also hosts ztlp.net + bootstrap |
+| **Relay** | `34.218.240.106` | UDP 23095 | |
+| **Gateway** | `54.218.127.30` | UDP 23097 | gateway = "copy private key" device |
+| **Windows user box** | `10.170.3.111` | — | Steve runs commands here — private LAN, not reachable from dev box |
+| **Vaultwarden test app** | TBD — co-locate on Gateway host | 80/443 | ZTLP-only access |
+
+**SSH key** for all 3 AWS hosts: `~/ztlp/.ssh/ztlp_aws_key` (RSA, 0600, untracked).
+
+**Users / roles:**
+- `trs` — standard user, enrolled on the nameserver
+- `hermes` — admin (auto-promoted by the registration flow on ztlp.net)
+
+---
+
+## 3. Implementation Plan
+
+Each phase ends with a git commit on `feature/ztlp-end-to-end-stack-test` and an
+update to this handoff file.
+
+### Phase 1 — ztlp.net branded ngrok URL ✅ in progress
+- Re-launch ngrok with the supplied authtoken `2w0XOBlQ...` and `--url=www.ztlp.net`
+- Update `LAUNCH_PUBLIC_HOST=www.ztlp.net` in `.env`
+- Restart launch container, verify `https://www.ztlp.net/health` returns `ok`
+- Commit `.env.example` change locally; rsync to NS
+
+### Phase 2 — Real human onboarding flow
+- Pre-create referral code `ZTLP-HERMES-2026` (hermes admin) and `ZTLP-TRS-2026` (standard)
+- Steve walks through `https://www.ztlp.net/` → /start → /claim
+- Verify SQLite `onboarding_requests` row + `_provision_zone_dockers()` actually
+  starts the bootstrap stack on the NS host
+- Verify hermes is auto-flagged admin
+
+### Phase 3 — Bootstrap reachable + admin login
+- Find what port the provisioned bootstrap landed on (per-zone `LAUNCH_INSTANCE_BASE_PORT=39000+`)
+- Stand up a second ngrok tunnel `bootstrap.ztlp.net` (or port-forward) so Steve can hit it
+- Login as hermes; confirm admin nav
+
+### Phase 4 — Re-point the relay + gateway to the new zone
+- Existing `ztlp-relay` (34.218.240.106) and `ztlp-gateway` (54.218.127.30)
+  are healthy but on the prior zone.
+- Re-issue NS records and/or restart with new `ZTLP_ZONE` env
+- Verify gateway works from key-copy alone (no extra registration steps)
+
+### Phase 5 — Enroll hermes admin + trs user devices via ZTLP CLI
+- From bootstrap admin UI, mint enrollment tokens for hermes + trs
+- Use `ztlp setup --token "ztlp://enroll/?..."` on this dev box (hermes admin)
+- Provide URI for trs's device(s) — Steve runs on Windows box
+- Verify rows in `ztlp_devices` table linked to correct `ztlp_user_id`
+
+### Phase 6 — Register Windows test box as trs's user-computer
+- Build/copy the Windows ZTLP CLI bundle to `trs@10.170.3.111`
+- Steve runs `ztlp setup --token "..."` — I supply the URI
+- Confirm device appears in bootstrap, status=enrolled
+
+### Phase 7 — Vaultwarden behind ZTLP
+- `docker run -d vaultwarden/server` on Gateway host
+- Register as ZTLP service via gateway forwarder (svc_id → vault.techrockstars.ztlp)
+- Verify reachability:
+  - `hermes` (this dev box) → `https://vault.techrockstars.ztlp` works
+  - `trs` (Windows) → same URL works
+- Grant access (RBAC) to both trs and hermes
+
+### Phase 8 — Bootstrap UX cleanup
+- Add prominent "Next Step" CTAs on the dashboard
+- Improve nav labels (Networks/Users/Devices/Tokens/Services)
+- Make "create enrollment token" reachable in 1 click
+- Add inline help on every form
+- Make the enrollment URI copy-pasteable + QR'able
+
+### Phase 9 — Tests + CI
+- Unit/integration tests for ztlp.net referral + provisioning flow
+  (`ztlp.net/tests/test_launch_app.py`)
+- New tests for bootstrap UX changes (Rails system specs if feasible)
+- Push branch, open PR, watch CI, merge when green
+
+---
+
+## 4. Ground State (verified at session start)
+
+| Item | Status |
+|------|--------|
+| Branch `feature/ztlp-end-to-end-stack-test` | ✅ already checked out, clean working tree |
+| `ztlp-launch` on NS | ✅ healthy, 0.0.0.0:8080 |
+| `ngrok-launch` on NS | ✅ tunneling to `kathyrn-fraternal-alayah.ngrok-free.dev` (will swap to `www.ztlp.net`) |
+| `ztlp-ns` on NS | ✅ healthy (2h) |
+| `ztlp-relay` on Relay host | ✅ healthy (3h) |
+| `ztlp-gateway` on Gateway host | ✅ healthy (3h) |
+| SSH access to all 3 AWS hosts | ✅ key works |
+| SSH access to Windows box | ❌ not reachable from this dev box (private 10.170/16 LAN) — Steve drives Windows steps |
+
+---
+
+## 5. Decisions
+
+1. **Run ztlp.net on the NS host (not local dev box)** — already there, already
+   ngrok'd, just swap to the branded URL.
+2. **Use the existing AWS test triplet for relay/gateway** — they're up,
+   re-point to the new zone rather than rebuild.
+3. **Vaultwarden lives on the Gateway host** — gives us a real "register a service
+   behind a gateway" test instead of a fake one.
+4. **No live edits to source on AWS hosts** — per Steve's standing rule, all
+   code changes happen locally on `feature/ztlp-end-to-end-stack-test`,
+   committed, then `rsync`d to the NS host for the launch app or `git pull`d
+   for relay/gateway.
+5. **Windows box is human-in-the-loop** — I print exact commands for Steve to
+   paste; I don't try to drive it remotely.
+
+---
+
+## 6. Known Risks / Watch Items
+
+- ngrok free static URL `www.ztlp.net` is single-tenant — only one tunnel can
+  bind it at a time. The currently-running container holds the older URL —
+  must `docker stop` it before launching the branded one.
+- `_provision_zone_dockers()` runs in a daemon thread inside the WSGI app —
+  per skill `ztlp-net-launch` pitfall #5, must capture stderr.
+- Bootstrap container on the NS will compete with `ztlp-ns` for ports.
+  Bootstrap runs on Rails port 3000 by default; NS is UDP 23096 — no overlap,
+  but Docker bridge IPs may need attention.
+- Auto-promotion of `hermes` to admin needs verification — the launch app
+  doesn't currently hardcode this; bootstrap may need a seed pass.
+
+---
+
+## 7. Quick Commands
+
+```bash
+# SSH to the three AWS hosts
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89   # NS
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.218.240.106 # Relay
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@54.218.127.30  # Gateway
+
+# Tail launch app logs
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 'docker logs -f ztlp-launch'
+
+# Inspect the SQLite DB (sqlite3 not installed on host — go through container)
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 \
+  'docker exec ztlp-launch python3 -c "import sqlite3,sys;c=sqlite3.connect(\"/app/data/launch.sqlite3\");[print(r) for r in c.execute(\"select * from onboarding_requests\")]"'
+
+# rsync local launch app changes to the NS host
+rsync -av --delete -e "ssh -i ~/ztlp/.ssh/ztlp_aws_key" \
+  ~/ztlp/ztlp.net/ ubuntu@34.219.38.89:~/ztlp.net/
+ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 \
+  'cd ~/ztlp.net && docker compose up -d --build'
 ```
-Public Internet (Steve) ──https──► ngrok tunnel ──http──► ztlp-launch container (0.0.0.0:8080)
-                                    (AWS NS Host)
-```
-
-### Key Assets
-- AWS Host: `34.219.38.89` (ssh `ubuntu@34.219.38.89` via `ztlp_test_key`)
-- Launch App Path: `~/ztlp.net` (on AWS host)
-- Ngrok URL: `https://kathyrn-fraternal-alayah.ngrok-free.dev`
-
-### Containers Running
-| Container | Description |
-|-----------|-------------|
-| `ztlp-launch` | Python 3.12 WSGI App, binds to `0.0.0.0:8080`. Restart policy: `unless-stopped`. |
-| `ngrok-launch` | Hosts the ngrok edge tunnel routing to `8080`. |
 
 ---
 
-## 5. Decisions Made
+## 8. Session Log
 
-1. **Move launch app from local to AWS:** Running locally hit port binding and ngrok issues. Moving to the AWS Nameserver test host ensures it's reachable and running alongside the canonical NS.
-2. **POW Disabled:** Explicitly disabled Proof-of-Work to simplify testing and to match the referral flow requirements (using `LAUNCH_REQUIRE_POW=0`).
+- **08:25 UTC** — Session start. Read prior handoff, verified all 3 AWS hosts
+  reachable with new key, all containers healthy, ngrok tunnel live.
+- **08:30 UTC** — Plan written, todo list created, this handoff replaces prior.
+  About to begin Phase 1.
 
----
-
-## 6. Known Problems
-- `LAUNCH_PORT` uses `8080`. If another container attempts to bind `8080` on the network host level, it will collide.
-- Ngrok is running in a throwaway container without persistent credentials for the free static domain, meaning a container restart or recreation will result in a random URL change unless the URL is updated in the `.env` again.
-
----
-
-## 7. Open Questions
-1. Do we need to hook up email configuration immediately for onboarding flows?
-2. Does the local AWS `ztlp-ns` container interact with this Launch app instance correctly to retrieve enrollment tokens?
-
----
-
-## 8. Next Session Startup Plan
-1. Send an HTTP request to `https://kathyrn-fraternal-alayah.ngrok-free.dev/health` to confirm the proxy works.
-2. Read the SQLite DB: `ssh -i ~/ztlp/.ssh/ztlp_test_key ubuntu@34.219.38.89 'sqlite3 ~/ztlp.net/data/launch.sqlite3 "select * from onboarding_requests"'`
-3. Ask Steve if he encountered any issues during the referral flow.
-
----
-
-## 9. Git Workflow Status
-Did not commit anything to Git because the main migration was an `rsync` of untracked files directly to the AWS box. Will review local `~/ztlp` untracked files and commit them if necessary on the next turn.
+(More entries appended as work progresses.)

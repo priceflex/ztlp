@@ -28,8 +28,23 @@ services:
       ZTLP_RELEASE_TAG: ${ZTLP_RELEASE_TAG:-v-before-nebula-collapse}
     volumes:
       - launch_data:/app/data
-    cap_drop:
-      - ALL
+      # Mount the host docker socket so the launch app can provision
+      # per-zone bootstrap stacks via `docker compose up -d`. The launch
+      # process runs as a non-root user — group_add gives it read/write
+      # access via the docker group GID (typically 999 on Ubuntu hosts).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the host instances directory so docker-compose stacks the
+      # launch app generates live on the host filesystem and are visible
+      # to the host's docker daemon when launched.
+      - ${LAUNCH_INSTANCE_HOST_ROOT:-./data/instances}:/app/data/instances
+    group_add:
+      # Host docker group GID. Override with DOCKER_GID env when the host
+      # uses a non-default GID. 999 is the default on Ubuntu/Debian.
+      - "${DOCKER_GID:-999}"
+    # The launch app needs to spawn `docker compose up -d` as a subprocess —
+    # remove cap_drop ALL so the alpine docker-cli can fork/exec normally.
+    # The bigger security boundary is the docker socket itself; tightening
+    # capabilities here is theatre.
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped

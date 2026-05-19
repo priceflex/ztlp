@@ -14,6 +14,20 @@ class LaunchAppTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmpdir.name, "launch.sqlite3")
+        # Isolate provisioning side-effects: pin LAUNCH_INSTANCE_ROOT into a
+        # temp dir and stub subprocess.run so /claim/launch never invokes the
+        # real `docker compose up -d`.
+        self.instance_root = tempfile.TemporaryDirectory()
+        self._orig_instance_root = os.environ.get("LAUNCH_INSTANCE_ROOT")
+        os.environ["LAUNCH_INSTANCE_ROOT"] = self.instance_root.name
+        import subprocess as _subprocess
+        self._subprocess = _subprocess
+        self._real_subprocess_run = _subprocess.run
+
+        def _fake_run(cmd, *args, **kwargs):
+            return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        _subprocess.run = _fake_run
         self.app = LaunchApp(
             db_path=self.db_path,
             token_secret="test-secret",
@@ -22,6 +36,12 @@ class LaunchAppTest(unittest.TestCase):
         )
 
     def tearDown(self):
+        self._subprocess.run = self._real_subprocess_run
+        if self._orig_instance_root is None:
+            os.environ.pop("LAUNCH_INSTANCE_ROOT", None)
+        else:
+            os.environ["LAUNCH_INSTANCE_ROOT"] = self._orig_instance_root
+        self.instance_root.cleanup()
         self.tmpdir.cleanup()
 
     def request(self, method, path, body="", headers=None):
@@ -132,8 +152,8 @@ class LaunchAppTest(unittest.TestCase):
         self.assertIn("bootstrap.example.ztlp", claim_body)
         self.assertIn("ztlp://enroll/", claim_body)
         self.assertIn("ztlp setup --token", claim_body)
-        self.assertIn("10.69.95.14:23096", claim_body)
-        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 10.69.95.14:23096", claim_body)
+        self.assertIn("34.219.38.89:23096", claim_body)
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
@@ -147,7 +167,7 @@ class LaunchAppTest(unittest.TestCase):
         self.assertTrue(row[2].startswith("ztlp://enroll/"))
         self.assertNotEqual(token, row[2])
         self.assertEqual("bootstrap.example.ztlp", row[3])
-        self.assertEqual("10.69.95.14:23096", row[4])
+        self.assertEqual("34.219.38.89:23096", row[4])
 
     def test_claim_launch_requires_claim_token_and_updates_status_without_exposing_admin_url(self):
         _status, _headers, body = self.post_form(
@@ -171,7 +191,7 @@ class LaunchAppTest(unittest.TestCase):
         self.assertIn("Status: launch_requested", launch_body)
         self.assertIn("bootstrap.launch.ztlp", launch_body)
         self.assertIn("ztlp://enroll/", launch_body)
-        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 10.69.95.14:23096", launch_body)
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
 
@@ -180,8 +200,8 @@ class LaunchAppTest(unittest.TestCase):
         conn.close()
         self.assertEqual("launch_requested", row[0])
         self.assertEqual("bootstrap.launch.ztlp", row[1])
-        self.assertEqual("10.69.95.14:23096", row[2])
-        self.assertEqual("10.69.95.14:23095", row[3])
+        self.assertEqual("34.219.38.89:23096", row[2])
+        self.assertEqual("34.218.240.106:23095", row[3])
 
     def test_invalid_or_missing_token_is_not_found(self):
         for method, path, data in [
@@ -658,6 +678,188 @@ class LaunchAppTest(unittest.TestCase):
         start = body.index(marker)
         end = body.index('"', start)
         return body[start:end].replace("&amp;", "&")
+
+
+class ProvisionZoneDockersTest(unittest.TestCase):
+    """Exercise LaunchApp._provision_zone_dockers in pure-Python (no docker)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.instance_root = tempfile.TemporaryDirectory()
+        self._orig_instance_root = os.environ.get("LAUNCH_INSTANCE_ROOT")
+        os.environ["LAUNCH_INSTANCE_ROOT"] = self.instance_root.name
+        self.db_path = os.path.join(self.tmpdir.name, "launch.sqlite3")
+        self.app = LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            require_pow=False,
+        )
+        # Save and stub subprocess.run inside launch_app.app.
+        import launch_app.app as launch_module
+        import subprocess as _subprocess
+        self._launch_module = launch_module
+        self._real_subprocess_run = _subprocess.run
+        self._calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            self._calls.append({"cmd": cmd, "cwd": kwargs.get("cwd")})
+            return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        _subprocess.run = fake_run
+        self._subprocess = _subprocess
+
+    def tearDown(self):
+        self._subprocess.run = self._real_subprocess_run
+        if self._orig_instance_root is None:
+            os.environ.pop("LAUNCH_INSTANCE_ROOT", None)
+        else:
+            os.environ["LAUNCH_INSTANCE_ROOT"] = self._orig_instance_root
+        self.instance_root.cleanup()
+        self.tmpdir.cleanup()
+
+    def _create_row(self, org="Acme Corp", zone="acme.ztlp", email="admin@example.com"):
+        # Use the real /start flow so we get a real sqlite3.Row out of the DB.
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/start",
+            "QUERY_STRING": "",
+            "SERVER_NAME": "testserver",
+            "SERVER_PORT": "80",
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": "http",
+            "wsgi.input": io.BytesIO(urlencode({
+                "organization_name": org,
+                "admin_name": "Ada Admin",
+                "admin_email": email,
+                "zone": zone,
+            }).encode("utf-8")),
+            "wsgi.errors": io.StringIO(),
+            "wsgi.multithread": False,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+            "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            "CONTENT_LENGTH": "0",
+        }
+        body = urlencode({
+            "organization_name": org,
+            "admin_name": "Ada Admin",
+            "admin_email": email,
+            "zone": zone,
+        }).encode("utf-8")
+        environ["wsgi.input"] = io.BytesIO(body)
+        environ["CONTENT_LENGTH"] = str(len(body))
+        self.app(environ, lambda status, headers, exc_info=None: None)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM onboarding_requests").fetchone()
+        conn.close()
+        return row
+
+    def test_provision_creates_instance_dir_and_files(self):
+        row = self._create_row(org="Acme Corp", zone="acme.ztlp")
+        result = self.app._provision_zone_dockers(row)
+        self.assertIsNotNone(result)
+        self.assertEqual("acme-corp", result["slug"])
+        self.assertTrue(39000 <= result["port"] < 39900, result["port"])
+        instance_dir = result["instance_dir"]
+        self.assertTrue(os.path.isdir(instance_dir))
+        env_path = os.path.join(instance_dir, "instance.env")
+        compose_path = os.path.join(instance_dir, "docker-compose.yml")
+        self.assertTrue(os.path.isfile(env_path))
+        self.assertTrue(os.path.isfile(compose_path))
+        with open(env_path) as fh:
+            env_text = fh.read()
+        self.assertIn("ZTLP_INSTANCE_SLUG=acme-corp", env_text)
+        self.assertIn("ZTLP_ORG_NAME=Acme Corp", env_text)
+        self.assertIn("ZTLP_ZONE=acme.ztlp", env_text)
+        self.assertIn(f"ZTLP_PRIVATE_PORT={result['port']}", env_text)
+        with open(compose_path) as fh:
+            compose_text = fh.read()
+        self.assertIn("priceflex/ztlp-bootstrap:latest", compose_text)
+        self.assertIn("ztlp-bootstrap-acme-corp", compose_text)
+        self.assertIn(f"127.0.0.1:{result['port']}:3000", compose_text)
+        # subprocess.run should have been invoked with `docker compose up -d`.
+        self.assertTrue(self._calls, "expected subprocess.run to have been called")
+        last = self._calls[-1]
+        self.assertEqual(["docker", "compose", "up", "-d"], last["cmd"])
+        self.assertEqual(instance_dir, last["cwd"])
+
+    def test_provision_handles_docker_compose_failure_without_raising(self):
+        # Replace stub with one that returns a non-zero rc.
+        import subprocess as _subprocess
+
+        def failing_run(cmd, *args, **kwargs):
+            return _subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+        _subprocess.run = failing_run
+        captured_err = io.StringIO()
+        orig_stderr = None
+        import sys as _sys
+        orig_stderr, _sys.stderr = _sys.stderr, captured_err
+        try:
+            row = self._create_row(org="FailCo", zone="failco.ztlp")
+            result = self.app._provision_zone_dockers(row)  # must not raise
+        finally:
+            _sys.stderr = orig_stderr
+        self.assertIsNone(result)
+        self.assertIn("boom", captured_err.getvalue())
+        # Files should still have been written before the failed docker call.
+        instance_dir = os.path.join(self.instance_root.name, "failco")
+        self.assertTrue(os.path.isfile(os.path.join(instance_dir, "instance.env")))
+        self.assertTrue(os.path.isfile(os.path.join(instance_dir, "docker-compose.yml")))
+
+
+class AbsoluteUrlTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.app = LaunchApp(
+            db_path=os.path.join(self.tmpdir.name, "launch.sqlite3"),
+            token_secret="test-secret",
+        )
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_absolute_url_honours_x_forwarded_proto(self):
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_X_FORWARDED_PROTO": "https",
+            "HTTP_HOST": "www.ztlp.net",
+        }
+        result = self.app.absolute_url(environ, "/claim?token=X")
+        self.assertTrue(
+            result.startswith("https://www.ztlp.net/claim"),
+            f"unexpected absolute URL: {result!r}",
+        )
+
+    def test_absolute_url_honours_x_forwarded_host(self):
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_X_FORWARDED_PROTO": "https",
+            "HTTP_X_FORWARDED_HOST": "public.example.com",
+            "HTTP_HOST": "internal:8080",
+        }
+        result = self.app.absolute_url(environ, "/start")
+        self.assertEqual("https://public.example.com/start", result)
+
+    def test_absolute_url_handles_comma_separated_forwarded_headers(self):
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_X_FORWARDED_PROTO": "https, http",
+            "HTTP_X_FORWARDED_HOST": "edge.example.com, internal",
+            "HTTP_HOST": "internal",
+        }
+        result = self.app.absolute_url(environ, "/")
+        self.assertEqual("https://edge.example.com/", result)
+
+    def test_absolute_url_falls_back_to_wsgi_scheme_when_no_forwarded(self):
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_HOST": "localhost:8080",
+        }
+        result = self.app.absolute_url(environ, "/foo")
+        self.assertEqual("http://localhost:8080/foo", result)
 
 
 if __name__ == "__main__":

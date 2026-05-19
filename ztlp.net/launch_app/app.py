@@ -36,7 +36,7 @@ MAX_FORM_BYTES = int(os.environ.get("LAUNCH_MAX_FORM_BYTES", "65536"))
 RELEASE_TAG = os.environ.get("ZTLP_RELEASE_TAG", "v-before-nebula-collapse")
 RELEASE_BASE_URL = os.environ.get("ZTLP_RELEASE_BASE_URL", f"https://github.com/priceflex/ztlp/releases/download/{RELEASE_TAG}")
 RELEASE_PAGE_URL = os.environ.get("ZTLP_RELEASE_PAGE_URL", f"https://github.com/priceflex/ztlp/releases/tag/{RELEASE_TAG}")
-LAUNCH_NS_SERVER = os.environ.get("ZTLP_NS_SERVER", "10.69.95.14:23096")
+LAUNCH_NS_SERVER = os.environ.get("ZTLP_NS_SERVER", "34.219.38.89:23096")
 LAUNCH_ENROLLMENT_SECRET_HEX = os.environ.get(
     "ZTLP_ENROLLMENT_SECRET",
     "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -44,7 +44,7 @@ LAUNCH_ENROLLMENT_SECRET_HEX = os.environ.get(
 LAUNCH_ENROLLMENT_TTL_SECONDS = int(os.environ.get("ZTLP_ENROLLMENT_TTL_SECONDS", "86400"))
 LAUNCH_RELAY_ADDR = os.environ.get("ZTLP_RELAY_ADDR", "")
 LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
-BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR", "10.69.95.14:23095")
+BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR", "34.218.240.106:23095")
 LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR", "5"))
 LAUNCH_RATE_LIMIT_IP_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_IP_PER_HOUR", "20"))
 LAUNCH_POW_DIFFICULTY_BITS = int(os.environ.get("LAUNCH_POW_DIFFICULTY_BITS", "20"))
@@ -560,53 +560,106 @@ class LaunchApp:
             
         return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, note="Launch request recorded. Bootstrap provisioning metadata is ready for the private ZTLP service path."))
 
-    def _provision_zone_dockers(self, row: sqlite3.Row) -> None:
-        """Invokes the bin/launch script to provision the docker containers."""
+    def _provision_zone_dockers(self, row: sqlite3.Row) -> Optional[dict]:
+        """Provision the docker compose scaffold for a zone's bootstrap container.
+
+        Pure-Python rewrite of the old bin/launch bash wrapper: writes
+        instance.env and docker-compose.yml under LAUNCH_INSTANCE_ROOT/<slug>/
+        and then runs ``docker compose up -d`` directly. Any failure is logged
+        to stderr but never raised (the caller is a daemon-style thread).
+
+        Returns {slug, port, instance_dir} on success or None on failure.
+        """
         import subprocess
         import sys
+        import traceback
         try:
-            # Zone is usually 'myorg.ztlp', but bin/launch derives a slug.
-            # We'll use organization name as a fast slug source that bin/launch cleans up.
-            # Ensure it exists
-            slug = "".join(c if c.isalnum() else '-' for c in row["organization_name"].lower())
-            launch_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "launch"))
-            
-            args = [
-                launch_script, "create", slug,
-                "--org", row["organization_name"],
-                "--email", row["admin_email"],
-                "--zone", row["zone"]
+            org_name = row["organization_name"] or ""
+            slug_raw = "".join(c if c.isalnum() else "-" for c in org_name.lower())
+            # Collapse repeated '-' and strip leading/trailing.
+            while "--" in slug_raw:
+                slug_raw = slug_raw.replace("--", "-")
+            slug = slug_raw.strip("-")
+            if not slug:
+                print("_provision_zone_dockers: empty slug, skipping", file=sys.stderr)
+                return None
+
+            base_port = int(os.environ.get("LAUNCH_INSTANCE_BASE_PORT", "39000"))
+            digest_prefix = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:6]
+            port = base_port + (int(digest_prefix, 16) % 900)
+
+            instance_root = os.environ.get(
+                "LAUNCH_INSTANCE_ROOT",
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "instances")),
+            )
+            instance_dir = os.path.join(instance_root, slug)
+            os.makedirs(instance_dir, exist_ok=True)
+
+            image = os.environ.get("LAUNCH_BOOTSTRAP_IMAGE", "priceflex/ztlp-bootstrap:latest")
+            zone = row["zone"] or ""
+            admin_email = row["admin_email"] or ""
+            created_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+            env_lines = [
+                f"ZTLP_INSTANCE_SLUG={slug}",
+                f"ZTLP_ORG_NAME={org_name}",
+                f"ZTLP_ADMIN_EMAIL={admin_email}",
+                f"ZTLP_ZONE={zone}",
+                f"ZTLP_PRIVATE_PORT={port}",
+                f"ZTLP_CREATED_AT={created_at}",
             ]
-            # Always return OK locally so tests pass
-            out1 = subprocess.run(args, capture_output=True, check=False, text=True)
-            print(f"bin/launch args: {args}\n", file=sys.stderr)
-            print(f"bin/launch stdout: {out1.stdout}\n", file=sys.stderr)
-            print(f"bin/launch stderr: {out1.stderr}\n", file=sys.stderr)
+            with open(os.path.join(instance_dir, "instance.env"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(env_lines) + "\n")
+
+            compose_yaml = (
+                "services:\n"
+                "  bootstrap:\n"
+                f"    image: \"{image}\"\n"
+                f"    container_name: \"ztlp-bootstrap-{slug}\"\n"
+                "    ports:\n"
+                f"      - \"127.0.0.1:{port}:3000\"\n"
+                "    volumes:\n"
+                f"      - bootstrap_{slug}_data:/data\n"
+                "    environment:\n"
+                "      RAILS_ENV: \"production\"\n"
+                "      DATABASE_PATH: \"/data/production.sqlite3\"\n"
+                f"      ZTLP_INSTANCE_SLUG: \"{slug}\"\n"
+                f"      ORG_NAME: \"{org_name}\"\n"
+                f"      ADMIN_EMAIL: \"{admin_email}\"\n"
+                f"      ZONE: \"{zone}\"\n"
+                "      TRUST_GATEWAY_AUTH: \"true\"\n"
+                "      FORCE_SSL: \"false\"\n"
+                "    restart: unless-stopped\n"
+                "\n"
+                "volumes:\n"
+                f"  bootstrap_{slug}_data:\n"
+                f"    name: \"ztlp_bootstrap_{slug}_data\"\n"
+            )
+            with open(os.path.join(instance_dir, "docker-compose.yml"), "w", encoding="utf-8") as fh:
+                fh.write(compose_yaml)
+
+            result = subprocess.run(
+                ["docker", "compose", "up", "-d"],
+                cwd=instance_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            print(f"docker compose up stdout for {slug}: {result.stdout}", file=sys.stderr)
+            print(f"docker compose up stderr for {slug}: {result.stderr}", file=sys.stderr)
             sys.stderr.flush()
-            
-            # Copy ztlp to bootstrap directory so it can be built
-            bootstrap_src_dir = os.path.abspath(os.path.join(launch_script, "..", "..", "..", "bootstrap"))
-            ztlp_bin = os.path.abspath(os.path.join(launch_script, "..", "..", "..", "proto", "target", "debug", "ztlp"))
-            if os.path.isfile(ztlp_bin):
-                os.makedirs(os.path.join(bootstrap_src_dir, "bin"), exist_ok=True)
-                import shutil
-                shutil.copy2(ztlp_bin, os.path.join(bootstrap_src_dir, "bin", "ztlp"))
-            
-            # Then docker compose up -d
-            instance_dir = os.environ.get("LAUNCH_INSTANCE_ROOT", os.path.abspath(os.path.join(os.path.dirname(launch_script), "..", "data", "instances", slug)))
-            print(f"instance_dir: {instance_dir}\n", file=sys.stderr)
-            sys.stderr.flush()
-            if os.path.isdir(instance_dir):
-                out2 = subprocess.run(["docker", "compose", "up", "-d"], cwd=instance_dir, capture_output=True, check=False, text=True)
-                print(f"docker compose stdout: {out2.stdout}\n", file=sys.stderr)
-                print(f"docker compose stderr: {out2.stderr}\n", file=sys.stderr)
-                sys.stderr.flush()
-        except Exception as e:
-            import traceback
-            import sys
-            print(f"_provision_zone_dockers failed: {e}", file=sys.stderr)
+            if result.returncode != 0:
+                print(
+                    f"_provision_zone_dockers: docker compose up failed for {slug} (rc={result.returncode})",
+                    file=sys.stderr,
+                )
+                return None
+            return {"slug": slug, "port": port, "instance_dir": instance_dir}
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"_provision_zone_dockers failed: {exc}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
+            return None
 
     def render_claim_page(self, row: sqlite3.Row, note: str = "") -> str:
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
@@ -938,7 +991,16 @@ class LaunchApp:
             return conn.execute("SELECT * FROM onboarding_requests WHERE claim_token_digest = ?", (digest,)).fetchone()
 
     def absolute_url(self, environ: dict, path: str) -> str:
-        host = environ.get("HTTP_HOST")
+        # Honour reverse-proxy forwarded headers (ngrok / load balancers etc.).
+        # Both may be comma-separated; take the first entry, stripped.
+        def _first(header_value: Optional[str]) -> Optional[str]:
+            if not header_value:
+                return None
+            first = header_value.split(",")[0].strip()
+            return first or None
+
+        forwarded_host = _first(environ.get("HTTP_X_FORWARDED_HOST"))
+        host = forwarded_host or environ.get("HTTP_HOST")
         if not host:
             server_name = environ.get("SERVER_NAME")
             server_port = environ.get("SERVER_PORT")
@@ -948,7 +1010,8 @@ class LaunchApp:
                 host = f"{server_name}:{server_port}"
             else:
                 host = self.public_host
-        scheme = environ.get("wsgi.url_scheme", "http")
+        forwarded_proto = _first(environ.get("HTTP_X_FORWARDED_PROTO"))
+        scheme = forwarded_proto or environ.get("wsgi.url_scheme", "http")
         return f"{scheme}://{host}{path}"
 
     def invalid_token(self, message: str = "That claim token was not found.") -> Tuple[HTTPStatus, str, str]:

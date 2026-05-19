@@ -1535,13 +1535,12 @@ defmodule ZtlpGateway.Session do
             remote_static = hs.rs
             identity = Identity.resolve_or_hex(remote_static)
 
-            # Policy check — is this identity allowed to access the service?
-            if PolicyEngine.authorize?(identity, state.service) do
-              # Try to connect to the backend
-              backends = Config.get(:backends)
-
-              case find_backend(backends, state.service) do
-                {:ok, %{host: host, port: port}} ->
+            # Try to resolve the backend service name before policy check
+            backends = Config.get(:backends)
+            case find_backend(backends, state.service) do
+              {:ok, %{name: resolved_name, host: host, port: port}} ->
+                # Policy check — is this identity allowed to access the service?
+                if PolicyEngine.authorize?(identity, resolved_name) do
                   case Backend.start_link({host, port, self()}) do
                     {:ok, backend_pid} ->
                       Stats.handshake_ok()
@@ -1550,7 +1549,7 @@ defmodule ZtlpGateway.Session do
                         state.session_id,
                         remote_static,
                         state.client_addr,
-                        state.service
+                        resolved_name
                       )
 
                       # Start rekey timer for periodic key rotation
@@ -1588,25 +1587,25 @@ defmodule ZtlpGateway.Session do
                       Stats.backend_error()
                       {:stop, :normal, state}
                   end
-
-                :error ->
-                  Logger.warning("[Session] No backend configured for service: #{state.service}")
-                  Stats.backend_error()
+                else
+                  # Policy denied
+                  Logger.info("[Session] Policy denied: #{identity} → #{resolved_name}")
+                  Stats.policy_denied()
+                  
+                  AuditLog.policy_denied(
+                    remote_static,
+                    state.client_addr,
+                    resolved_name,
+                    :not_authorized
+                  )
+                  
                   {:stop, :normal, state}
-              end
-            else
-              # Policy denied
-              Logger.info("[Session] Policy denied: #{identity} → #{state.service}")
-              Stats.policy_denied()
+                end
 
-              AuditLog.policy_denied(
-                remote_static,
-                state.client_addr,
-                state.service,
-                :not_authorized
-              )
-
-              {:stop, :normal, state}
+              :error ->
+                Logger.warning("[Session] No backend configured for service hash: #{inspect(state.service)}")
+                Stats.backend_error()
+                {:stop, :normal, state}
             end
         end
 

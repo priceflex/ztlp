@@ -271,7 +271,8 @@ async fn ns_query_raw(
 /// Parse a SVC record response to extract the endpoint address.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     let payload = crate::ns_cbor::parse_ns_record(data).ok_or("Invalid or not-found NS record")?;
-    let address_str = crate::ns_cbor::cbor_extract_string(&payload.data, "address").ok_or("SVC record missing address")?;
+    let address_str = crate::ns_cbor::cbor_extract_string(&payload.data, "address")
+        .ok_or("SVC record missing address")?;
 
     address_str
         .parse()

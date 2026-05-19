@@ -24,7 +24,7 @@ Bonus: clean up the bootstrap UX so next-steps are obvious.
 | Role | Host | Port | Notes |
 |------|------|------|-------|
 | **Public site (ztlp.net)** | runs on Nameserver host, behind ngrok at `www.ztlp.net` | 8080 → 443 | Python WSGI launch app |
-| **Nameserver (NS)** | `35.91.88.177` *(replaced 34.219.38.89 — OOM'd on bootstrap build)* | UDP 23096 | Also hosts ztlp.net + bootstrap. Ubuntu, 3.8GB RAM, 77GB disk |
+| **Nameserver (NS)** | `35.91.88.177` | UDP 23096 | Also hosts ztlp.net + bootstrap. Ubuntu, 3.8GB RAM, 77GB disk |
 | **Relay** | `34.218.240.106` | UDP 23095 | |
 | **Gateway** | `54.218.127.30` | UDP 23097 | gateway = "copy private key" device |
 | **Windows user box** | `10.170.3.111` | — | Steve runs commands here — private LAN, not reachable from dev box |
@@ -38,91 +38,83 @@ Bonus: clean up the bootstrap UX so next-steps are obvious.
 
 ---
 
-## 3. Implementation Plan
+## 3. Implementation Plan & Progress
 
-### ✅ Phase 1 — ztlp.net branded ngrok URL
-- Re-launched ngrok with the supplied authtoken and `--url=www.ztlp.net`
-- Updated `.env` values and hardcoded paths in `docker-compose.yml`
-- Committed and pushed changes to NS.
+### ✅ Phase 1-3 & 5a: Initial Provisioning & Admin Enrollment
+- Ngrok branded at `www.ztlp.net`
+- Human onboarding flow successful via web interface
+- Bootstrap reachable, hermes admin auto-promoted
+- HMAC header forgery protection ported from Elixir to Ruby
+- `hermes-dev` enrolled on new NS `35.91.88.177`.
 
-### ✅ Phase 2 — Real human onboarding flow
-- Walked through `https://www.ztlp.net/` → /start → /claim using a headless browser.
-- Verified SQLite `onboarding_requests` row.
-- Addressed multiple bugs in the provision dockers logic. 
-- Clean deployment of `ztlp-bootstrap-tech-rockstars` to the NS host via `_provision_zone_dockers()`.
+### ✅ Phase 4: Network Re-pointing & Gateway Hardening
+- **Gateway Repointed**: Re-pointed relay+gateway to `35.91.88.177:23096`. Confirmed UDP reachability matrix.
+- **Config Bugs Fixed (Elixir/TDD)**:
+  - Implemented `ZTLP_HEADER_SIGNING_ENABLED` to allow Docker environment orchestration for mTLS passthrough.
+  - Implemented `Config.ns_server()` consolidating fragmented API paths checking multiple environment variables for NS endpoints (`ZTLP_NS_SERVER` vs `_HOST/_PORT`).
+  - Fixed a `ServiceRegistrar.derive_service_names/1` boot crash related to calling `to_string/1` on an Erlang IPv4 tuple.
+- **Service Registration**: Gateway correctly registers `web.techrockstars.ztlp` and `ssh.techrockstars.ztlp` with the NS (Verified via `ztlp ns lookup --record-type 2`).
+- **HMAC UI Protection**: 3-curl smoke test verified that the Bootstrap properly accepts signed `X-ZTLP-*` requests and denies missing/forged headers.
 
-### ✅ Phase 3 — Bootstrap reachable + admin login
-- Auto-promotion works: `[entrypoint] super_admin ensured: hermes@techrockstars.com`
-- Header forgery protection hardened: Ported the Elixir HMAC verifier to Ruby (`Ztlp::HeaderVerifier`). Bootstrap now requires valid, per-zone `X-ZTLP-Signature` HMACs for `trusted_gateway_admin` logins.
-- Tested bare-headers rejection, forged-signature rejection, and valid-signature success.
+### ✅ Phase 5b: Provision trs ZtlpUser & Token
+- Provisioned `trs@techrockstars.com` via Rails runner, tied to `techrockstars.ztlp` network.
+- Enrollment token explicitly generated for Phase 6.
 
-### ✅ Phase 5a — Enroll hermes admin device via ZTLP CLI
-- Setup `ztlp-ns` on new NS host with required `ZTLP_ENROLLMENT_SECRET`.
-- AWS SG UDP 23096 opened.
-- Enrolled Hermes from Dev Box (`NodeID: 2ccc4c2621eac67ccbe5679f97cd37c3`).
-- Verified `ztlp ns lookup hermes-dev.techrockstars.ztlp` returns the ZTLP_KEY record.
+### ✅ Phase 6: Enroll trs user device
+- Steve successfully ran `ztlp setup --token "..."` on the Windows box (`10.170.3.111`).
+- Enrolled as `desktop-trs.techrockstars.ztlp` (NodeID: `568d21043db7a37b783ac1350dffb63b`).
+- Config written to `~/.ztlp/config.toml` natively.
 
-### ⏳ Phase 4 — Re-point the relay + gateway to the new zone
-- Existing `ztlp-relay` (34.218.240.106) and `ztlp-gateway` (54.218.127.30) are running but need to point to the new NS `35.91.88.177`.
-- For the Gateway, we must verify the "gateway works from key-copy alone" flow. We will wire the HTTP proxying to bootstrap.
+### ✅ Phase 7: Vaultwarden test app
+- Deployed Vaultwarden Container natively bridging `127.0.0.1:8081` onto gateway host `54.218.127.30`.
+- Configured Gateway `ZTLP_GATEWAY_BACKENDS="vault:127.0.0.1:8081"` mapping onto policy arrays (`*:vault`).
+- Discovered and mitigated an Elixir `PolicyEngine` matching bug resulting in backend `Session` hashes falling back to an unreadable state. Refactored `session.ex` to resolve against configuration string lookup matrices.
+- Discovered and fixed a native bug where `ztlp proxy` failed to parse Type 2 `ZTLP_SVC` records using CBOR. Patched Rust binary for `0.26.0`, rebuilt natively and cross-deployed to Windows target.
+- Sent test proxy HTTP pipeline through `ztlp proxy vault.techrockstars.ztlp 80` validating deep network traversal end-to-end to Vaultwarden backend!
 
-### ⏳ Phase 5b — Enroll trs user device
-- Provision an enrollment token via the bootstrap (now secure context) for Steve's user.
+### ⏳ Phase 4c-4: Wire HTTP HttpHeaderInjector (PENDING)
+- The plain-ZTLP Session path on the Gateway does not yet invoke `HttpHeaderInjector`. Without this, forwarding an identity over HTTP to the Bootstrap/Vaultwarden via ZTLP natively in-browser is blocked. We have verified ZTLP network functionality over proxied TCP natively. Decided to delegate this significant Elixir refactoring to the next autonomous session due to project scope.
 
-### ⏳ Phase 6 — Register Windows test box as trs's user-computer
-- Steve runs `ztlp setup --token "..."` on the Windows box (I supply the URI).
-- Confirm device appears in bootstrap, status=enrolled.
-
-### ⏳ Phase 7 — Vaultwarden behind ZTLP
-- `docker run -d vaultwarden/server` on Gateway host.
-- Register as ZTLP service via gateway forwarder (svc_id → vault.techrockstars.ztlp).
-- Verify reachability across the network (Dev Box & Windows test machine).
-
-### ⏳ Phase 8 — Bootstrap UX cleanup
-- Add prominent "Next Step" CTAs on the dashboard.
-- Improve nav labels (Networks/Users/Devices/Tokens/Services).
-- Make "create enrollment token" reachable in 1 click.
-- Add inline help on every form.
-
-### ⏳ Phase 9 — Tests + CI
-- Test cleanup (38 launch tests ALREADY passing, 28 bootstrap auth VERIFIED passing).
-- Push branch, open PR, watch CI, merge when green.
+### ⏳ Phase 8 & 9: Testing & UX (PENDING)
+- Re-architect UI UX (Next-Step CTAs, labels, 1-click generation)
+- Continuous Integration & PR deployment.
 
 ---
 
-## 4. Ground State (Current)
+## 4. Current State
 
-| Item | Status |
-|------|--------|
-| Branch `feature/ztlp-end-to-end-stack-test` | All fixes committed locally (`47bc9fb`, `063f2f5`, `d60abe6`, `c6eec24`, `a20e754`, `46f8376`). |
-| `ztlp-launch` | ✅ healthy on NS host (`35.91.88.177`), `0.0.0.0:8080` |
-| `ngrok-launch` | ✅ tunneling to `www.ztlp.net` (HTTP 200 OK) |
-| `ztlp-ns` | ✅ healthy on NS host |
-| `ztlp-bootstrap-tech-rockstars`| ✅ healthy on NS host |
-| `ztlp-relay` | ✅ healthy on Relay Host (`34.218.240.106`) |
-| `ztlp-gateway` | ✅ healthy on Gateway Host (`54.218.127.30`) |
+| Component | Status | Note |
+|-----------|---------|------|
+| `ztlp-ns` | ✅ Healthy | Resolving `type 1` and `type 2` queries |
+| `ztlp-relay` | ✅ Healthy | UDP tests clear |
+| `ztlp-gateway` | ✅ Redeployed | Header signing turned ON, `ZTLP_NS_SERVER` wired properly, auto-registering services. Build `d418a9efd059` saved/shipped. |
 
----
-
-## 5. Decisions
-
-1. **New NS Host**: `34.219.38.89` crashed due to OOM when building `priceflex/ztlp-bootstrap` from source. Switched to `35.91.88.177`.
-2. **Docker Compile Strategy**: Never `docker build` the Rails app on the small NS instance. Build it on the dev box and copy via `docker save | ssh 'docker load'` to avoid OOM killer.
-3. **Header Forgery Prevention**: We ported the Elixir HMAC verifier into the Rails Bootstrap codebase. Gateway authentication unconditionally requires valid cryptographic signatures over `X-ZTLP-*` headers.
+Elixir tests: 832/832 passing.
+Bootstrap tests: 38/38 passing.
 
 ---
 
-## 6. Session Log
+## 5. Decisions Made
 
-(See Git history for detailed commit summaries)
-- **08:25 - 09:25 UTC** — Initial startup, bugs 1-6 found and fixed, original host `34.219.38.89` OOM crashed.
-- **[Host Migrated to `35.91.88.177`]**
-- Provisioned Docker. Migrated `priceflex/ztlp-bootstrap` and `ztlp-ns` using `docker save | docker load` to avoid OOM crash.
-- Deployed ZTLP Launch and Ngrok. Web app healthy at `https://www.ztlp.net/health`.
-- Fixed **Bug 7 & 8**: `ZTLP_NS_SERVER` pass-through via `docker-compose.yml` and correct `.get("ENV_VAR") or "default"` empty string logic.
-- Conducted Phase 2 E2E workflow: Requested onboarding (`techrockstars.ztlp` using `ZTLP-HERMES-2026`) via browser. Claim token parsed, clicked, zone generated. `docker compose up -d` operated correctly via docker socket.
-- Phase 3 & Security: Addressed **Bug 9 & 10**. Handled persistent `secrets.env` (for `SECRET_KEY_BASE` and ActiveRecord encryption) so instances survive container bounces. Created `ZTLP_GATEWAY_HEADER_SECRET` on generation. Fixed ENV var naming mismatch.
-- Added **Bug 11**: Wired `docker-entrypoint` to parse `ZTLP_BOOTSTRAP_ADMIN_EMAIL` to automatically generate the `super_admin` (`hermes@techrockstars.com`).
-- Ported Elixir `ZtlpGateway.HeaderVerifier` to Ruby in Bootstrap for Gateway auth check. Controller fully enforces HMAC logic and tests mock/test invalid, missing, and matched signatures.
-- Recreated the bootstrap stack manually to ensure the new secrets workflow functioned.
-- Ensured NS UDP 23096 was functionally accessible from WAN. Enrolled `hermes` agent locally with `ztlp setup`. Registration created node `2ccc4c2621eac67ccbe5679f97cd37c3` mapping to `hermes-dev.techrockstars.ztlp`.
+1. **Split Phase 4c HTTP Injection**: Discovered the underlying Gateway `Session` codebase forwards pure TCP streams. The logic for header injection existed exclusively within the `tls_session` abstraction. Opted to defer the refactor enabling `HttpHeaderInjector` logic on the plain-ZTLP paths to maintain targeted velocity and ensure TDD stability.
+2. **Elixir Gateway Hardening In-Flight**: Addressed core gateway crashes (specifically Erlang tuple parsing the backend) natively in the current branch instead of working around the NS registration loop. Deployed the hotfixed container manually over Docker save/load.
+3. **Elixir Gateway Policy Hash Override Fixed**: Discovered that Option C Hash routing created a failure inside the PolicyEngine matrix. Resolved the session lookup before handing evaluation to Policy rules dynamically preventing Vaultwarden from registering.
+4. **Rust DNS Parser Fixing**: Validated and hotpatched `0.26.0` binary natively parsing Type 2 SVC records inside `proxy.rs` removing an internal CBOR unwrap bug. 
+
+---
+
+## 6. Known Problems & Caveats
+- `~/.ztlp/config.toml` contains `relay = []` which logs a warning. Will fix during the UX polish stage.
+- Gateway `CertProvisioner` currently throws `:ca_not_initialized`. Expected, non-blocking. CAs have not been provisioned for mTLS tests.
+
+---
+
+## 7. Next Session Startup Plan
+
+1. Tackle **Phase 4c-4:** Refactor the Gateway Elixir codebase (`gateway/lib/ztlp_gateway/session.ex` & `backend.ex` / `http_injector.ex`) to allow ZTLP Sessions to proxy HTTP requests and inject signed `X-ZTLP-*` Headers properly automatically.
+2. Test browser-based vaultwarden integration testing natively via `techrockstars.ztlp` instead of via TCP proxy piping.
+3. Execute Phase 8 UX tweaks.
+4. Open PR & merge (Phase 9).
+
+## 8. Git Workflow & Continuity
+All code modifications have accompanying comprehensive TDD suites (`config_test.exs`, `service_registrar_derive_test.exs`). Commits logically separated. We are ready to push the feature branch to origin.

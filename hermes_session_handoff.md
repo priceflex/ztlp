@@ -72,12 +72,26 @@ Bonus: clean up the bootstrap UX so next-steps are obvious.
 - Discovered and fixed a native bug where `ztlp proxy` failed to parse Type 2 `ZTLP_SVC` records using CBOR. Patched Rust binary for `0.26.0`, rebuilt natively and cross-deployed to Windows target.
 - Sent test proxy HTTP pipeline through `ztlp proxy vault.techrockstars.ztlp 80` validating deep network traversal end-to-end to Vaultwarden backend!
 
-### ⏳ Phase 4c-4: Wire HTTP HttpHeaderInjector (PENDING)
-- The plain-ZTLP Session path on the Gateway does not yet invoke `HttpHeaderInjector`. Without this, forwarding an identity over HTTP to the Bootstrap/Vaultwarden via ZTLP natively in-browser is blocked. We have verified ZTLP network functionality over proxied TCP natively. Decided to delegate this significant Elixir refactoring to the next autonomous session due to project scope.
+### ⏳ Phase 4c-4: Protocol-Aware Proxying, HTTP Injection & Benchmarking (PENDING)
+- Refactor the Gateway Elixir codebase (`session.ex` & `backend.ex`) to introduce a **protocol sniffer**. It must dynamically detect whether a stream is HTTP or raw TCP (like SSH).
+- If HTTP: Inject signed `X-ZTLP-*` Headers smoothly.
+- If raw TCP (SSH/RDP): Forward bytes blindly without modifications.
+- **Benchmarking requirement:** Validate that multi-stream throughput remains high (comparable to previous Rust tests), ensuring the Elixir protocol sniffer doesn't introduce severe latency bottlenecks. Decided to delegate this to the next session.
 
-### ⏳ Phase 8 & 9: Testing & UX (PENDING)
+### ⏳ Phase 8 & 9: Testing, UX, CI/CD (PENDING)
 - Re-architect UI UX (Next-Step CTAs, labels, 1-click generation)
 - Continuous Integration & PR deployment.
+
+### ⏳ Phase 10: ztlp.net Public Security Audit & HTTPS (NEW)
+- Conduct a rigorous security audit of the public-facing `ztlp.net` Python WSGI app.
+- Enforce strict input sanitization on all endpoints to protect internal systems from public-facing malicious payloads.
+- Guarantee that the `ztlp.net` entrypoint has a robust HTTPS configuration before production deployment.
+
+### ⏳ Phase 11: Internal PKI & Local TLS Integration (NEW)
+- Resolve the gateway's `:ca_not_initialized` warning by properly configuring the internal Certificate Authority (CA) on the Nameserver / Bootstrap.
+- **Key Protection:** Architect highly secure protection for the CA's private key within the NS/Bootstrap layer.
+- **Agent Distribution:** Implement a flow where local agents (like the Windows CLI) can securely pull and trust the internal Root CA.
+- **End-User Result:** Accessing `https://vault.techrockstars.ztlp` from a user's local browser via the local ZTLP proxy will result in a fully trusted, green-padlock HTTPS connection without manual certificate warnings.
 
 ---
 
@@ -110,11 +124,14 @@ Bootstrap tests: 38/38 passing.
 ---
 
 ## 7. Next Session Startup Plan
-
-1. Tackle **Phase 4c-4:** Refactor the Gateway Elixir codebase (`gateway/lib/ztlp_gateway/session.ex` & `backend.ex` / `http_injector.ex`) to allow ZTLP Sessions to proxy HTTP requests and inject signed `X-ZTLP-*` Headers properly automatically.
-2. Test browser-based vaultwarden integration testing natively via `techrockstars.ztlp` instead of via TCP proxy piping.
-3. Execute Phase 8 UX tweaks.
-4. Open PR & merge (Phase 9).
+## 7. Next Session Startup Plan
+1. Tackle **Phase 4c-4:** Refactor the Gateway Elixir codebase (`session.ex` & `backend.ex` / `http_injector.ex`) to allow ZTLP Sessions to proxy HTTP requests and inject signed `X-ZTLP-*` Headers properly. Ensure this implements a protocol-sniffer that auto-switches between injecting HTTP headers and routing pure TCP (SSH/RDP).
+2. Benchmark `Phase 4c-4` to ensure Multi-Stream bandwidth didn't plummet.
+3. Test browser-based vaultwarden integration testing natively via `techrockstars.ztlp` instead of via TCP proxy piping.
+4. Execute **Phase 10**: Secure `ztlp.net`. Sanitize inputs and enforce HTTPS.
+5. Execute **Phase 11**: PKI distribution. Enable NS-driven CA certs to automatically populate on the local agents allowing for green-padlocks. 
+6. Execute Phase 8 UX tweaks.
+7. Open PR & merge (Phase 9).
 
 ## 8. Git Workflow & Continuity
 All code modifications have accompanying comprehensive TDD suites (`config_test.exs`, `service_registrar_derive_test.exs`). Commits logically separated. We are ready to push the feature branch to origin.

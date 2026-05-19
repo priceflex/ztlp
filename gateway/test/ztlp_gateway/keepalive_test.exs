@@ -173,7 +173,12 @@ defmodule ZtlpGateway.KeepaliveTest do
 
       # Backend should receive the payload
       {:ok, received} = :gen_tcp.recv(ctx.backend_sock, 0, 2000)
-      assert received == payload
+      
+      # Protocol Sniffing intercepts plain HTTP payload and injects Headers natively:
+      assert String.starts_with?(received, "GET / HTTP/1.1")
+      assert String.contains?(received, "X-ZTLP-Authenticated")
+      assert String.contains?(received, "X-ZTLP-Node-ID")
+
 
       cleanup(ctx)
     end

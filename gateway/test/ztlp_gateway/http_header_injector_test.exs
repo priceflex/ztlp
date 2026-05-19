@@ -194,13 +194,18 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
     end
   end
 
-  describe "inject/3 with passthrough mode" do
-    test "returns data unchanged" do
+
+  describe "inject/3 with generic HTTP stream validation" do
+    test "injects identity headers dynamically natively" do
       request = make_http_request("GET", "/", [{"Host", "example.com"}])
-      result = HttpHeaderInjector.inject(request, make_identity(), nil)
+      # Mock the passthrough route
+      SniRouter.put_route("example.com", "127.0.0.1:8080", auth_mode: :passthrough)
+      result = HttpHeaderInjector.inject(request, make_identity(), "example.com")
       assert result == request
+      SniRouter.delete_route("example.com")
     end
   end
+
 
   describe "inject/3 with identity mode" do
     setup do

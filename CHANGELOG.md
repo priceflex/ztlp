@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.26.0 — 2026-05-19
+
+### ztlp.net Onboarding Hardening (Launch app)
+- RFC 1035 zone validation enforced on POST /start.
+- Rate-limiting (by email + client IP) and proof-of-work CAPTCHA on POST /start.
+- GET /api/zone-available JSON endpoint for live availability checks.
+- End-to-end multi-zone onboarding + collision tests; CI workflow added.
+- README documents the onboarding flow.
+
+### ZTLP Service Name Wire Decoupling — Option C (proto + gateway)
+**The 16-byte ASCII service-name limit is gone.** Service names can now be DNS-class strings (up to 253 chars) at the user/UI layer, while the on-wire routing key remains a fixed 16-byte field — preserving the zero-allocation, O(1) packet header parsing invariant.
+
+- **`encode_service_id(zone, name) -> [u8;16]`** (`proto/src/tunnel.rs`): canonical truncated SHA-256 of `lowercase(zone)/lowercase(name)` (or `lowercase(name)` alone when no zone is in scope). Lowercases inputs and strips trailing dots. Collision space is 2^128, identical to IPv6 SLAAC.
+- **`dst_svc_id` → `dst_svc_hash`** field rename across the Rust codebase (44 occurrences, 11 files). Same wire offset, same 16 bytes. New rustdoc on the field explains it is an opaque hash, NOT a UTF-8 string.
+- **Hash-keyed `ServiceRegistry`**: builds a `name_by_hash` reverse index at construction. `resolve(&dst_svc_hash)` does a direct hash lookup with `[0u8;16]` sentinel routing to `DEFAULT_SERVICE`. Single-service fallback preserved.
+- **CLI REJECT messages** now print `hex::encode(dst_svc_hash)` instead of trying to UTF-8-decode the hash (which becomes gibberish).
+- **FFI no-tokio fallback** (`proto/src/ffi.rs`, ios-sync build path) updated to use the same canonicalization + truncated SHA-256, byte-for-byte identical to the tokio path. Obsolete `test_config_set_service_too_long` replaced with `test_config_set_service_long_name_ok` pinning the new behavior.
+- **Elixir gateway hash-keyed routing**: `Packet.extract_service_hash/1` returns the raw 16-byte hash; new `Packet.service_hash/1` mirrors the Rust canonicalization; `Session.find_backend/2` resolves the wire hash against `Packet.service_hash(b.name)` for each configured backend. Backward-compat clause keeps tests that pass `service: "name"` working.
+- **Relay & NS unchanged**: relay already treats the field as opaque `<<_::binary-size(16)>>`; NS operates on `(zone, name)` strings at a higher layer.
+
+Sha2 0.10 added as a direct dep (already present transitively, so build cost unchanged).
+
+Verified across the stack:
+- proto: 898 lib + ~340 integration tests pass, both default-features (tokio) and `--no-default-features --features ios-sync` build paths clean.
+- gateway: 809 tests, 0 failures.
+- relay:   583 tests, 0 failures.
+- ns:      726 tests, 0 failures.
+
 ## v0.24.0 — 2026-05-18
 
 ### iOS — Rust-Owned Tunnel Architecture

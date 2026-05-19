@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import sqlite3
+import urllib.parse
 from http import HTTPStatus
 from typing import Callable, Dict, Iterable, Optional, Tuple
 from urllib.parse import parse_qs
@@ -49,6 +50,12 @@ LAUNCH_RATE_LIMIT_IP_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_IP_PER_HOU
 LAUNCH_POW_DIFFICULTY_BITS = int(os.environ.get("LAUNCH_POW_DIFFICULTY_BITS", "20"))
 LAUNCH_POW_TTL_SECONDS = int(os.environ.get("LAUNCH_POW_TTL_SECONDS", "600"))
 LAUNCH_REQUIRE_POW_DEFAULT = os.environ.get("LAUNCH_REQUIRE_POW", "1") not in ("0", "false", "False", "no", "off")
+
+# Pre-shared referral codes that bypass POW and rate limiting.
+# Comma-separated list of uppercase codes. Empty = none accepted.
+LAUNCH_REFERRAL_CODES = set(
+    c.strip() for c in os.environ.get("LAUNCH_REFERRAL_CODES", "").split(",") if c.strip()
+)
 
 DOWNLOAD_ASSETS = [
     {
@@ -283,6 +290,7 @@ class LaunchApp:
                     bootstrap_service_name TEXT,
                     ns_server TEXT,
                     bootstrap_listener_addr TEXT,
+                    referral_code TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -383,6 +391,7 @@ class LaunchApp:
           <label>Admin name <input name="admin_name" required maxlength="200" value="{esc(values.get('admin_name', ''))}"></label>
           <label>Admin email <input type="email" name="admin_email" required maxlength="320" value="{esc(values.get('admin_email', ''))}"></label>
           <label>Zone <input name="zone" required maxlength="253" placeholder="acme.ztlp" value="{esc(values.get('zone', ''))}"></label>
+          <label>Referral code (optional — speeds up onboarding) <input name="referral_code" maxlength="64" placeholder="e.g. ZTLP-E2E-2026" value="{esc(values.get('referral_code', ''))}"></label>
           {pow_html}
           {noscript_html}
           <button type="submit">Create onboarding request</button>
@@ -394,38 +403,45 @@ class LaunchApp:
 
     def handle_start(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         form = self.read_form(environ)
-        values = {key: clean(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone"]}
+        values = {key: clean(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone", "referral_code"]}
         values["zone"] = normalize_zone(values["zone"])
         errors = validate_start(values)
         if errors:
             return self.render_start_form(errors, values)
 
-        if self.require_pow:
-            pow_error = self.verify_pow(form)
-            if pow_error is not None:
-                return self.render_start_form([pow_error], values)
+        referral_code = values.get("referral_code", "").strip().upper()
+        has_valid_referral = bool(LAUNCH_REFERRAL_CODES and referral_code in LAUNCH_REFERRAL_CODES)
 
-        email_key = values["admin_email"].lower()
-        ip_key = self.client_ip(environ)
-        now_dt = self.now().replace(microsecond=0)
-        # Always record the attempt — denying does not give bots a freebie.
-        self.record_rate_attempt("email", email_key, now_dt)
-        self.record_rate_attempt("ip", ip_key, now_dt)
-        if self.rate_limit_exceeded("email", email_key, now_dt, self.email_rate_limit_per_hour):
-            return self.rate_limited_response("email")
-        if self.rate_limit_exceeded("ip", ip_key, now_dt, self.ip_rate_limit_per_hour):
-            return self.rate_limited_response("ip")
+        # Skip POW and rate limiting when a valid referral code is provided
+        if not has_valid_referral:
+            if self.require_pow:
+                pow_error = self.verify_pow(form)
+                if pow_error is not None:
+                    return self.render_start_form([pow_error], values)
+
+            email_key = values["admin_email"].lower()
+            ip_key = self.client_ip(environ)
+            now_dt = self.now().replace(microsecond=0)
+            # Always record the attempt — denying does not give bots a freebie.
+            self.record_rate_attempt("email", email_key, now_dt)
+            self.record_rate_attempt("ip", ip_key, now_dt)
+            if self.rate_limit_exceeded("email", email_key, now_dt, self.email_rate_limit_per_hour):
+                return self.rate_limited_response("email")
+            if self.rate_limit_exceeded("ip", ip_key, now_dt, self.ip_rate_limit_per_hour):
+                return self.rate_limited_response("ip")
+            now = now_dt
+        else:
+            now = self.now().replace(microsecond=0)
 
         token = secrets.token_urlsafe(32)
         digest = self.token_digest(token)
-        now = now_dt
         expires = now + dt.timedelta(days=TOKEN_TTL_DAYS)
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO onboarding_requests
-                (organization_name, admin_name, admin_email, zone, status, claim_token_digest, claim_expires_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (organization_name, admin_name, admin_email, zone, status, claim_token_digest, claim_expires_at, referral_code, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["organization_name"],
@@ -435,16 +451,34 @@ class LaunchApp:
                     "requested",
                     digest,
                     expires.isoformat(),
+                    referral_code if has_valid_referral else None,
                     now.isoformat(),
                     now.isoformat(),
                 ),
             )
         claim_url = self.absolute_url(environ, f"/claim?token={token}")
-        body = f"""
+        claim_text = claim_url  # Show the full URL when referral code used
+        if has_valid_referral:
+            body = f"""
+        <p class="eyebrow">Onboarding request created (referral code accepted)</p>
+        <h1>Claim link</h1>
+        <p>Use the link below to claim your zone and download the ZTLP client. The token is also shown in plain text for copy-paste.</p>
+        <p><a class="claim-link" href="{esc(claim_url)}">{esc(claim_text)}</a></p>
+        <p><code>{esc(token)}</code></p>
+        <dl>
+          <dt>Organization</dt><dd>{esc(values['organization_name'])}</dd>
+          <dt>Zone</dt><dd>{esc(values['zone'])}</dd>
+          <dt>Status</dt><dd>requested</dd>
+          <dt>Claim token</dt><dd><code>{esc(token)}</code></dd>
+          <dt>Expires</dt><dd>{esc(expires.isoformat())}</dd>
+        </dl>
+        """
+        else:
+            body = f"""
         <p class="eyebrow">Onboarding request created</p>
         <h1>Claim link</h1>
         <p>The claim token is shown once for local/dev preview because email delivery is not wired yet. The database stores only the token digest.</p>
-        <p><a class="claim-link" href="{esc(claim_url)}">{esc(claim_url)}</a></p>
+        <p><a class="claim-link" href="{esc(claim_url)}">{esc(claim_text)}</a></p>
         <dl>
           <dt>Organization</dt><dd>{esc(values['organization_name'])}</dd>
           <dt>Zone</dt><dd>{esc(values['zone'])}</dd>
@@ -929,49 +963,36 @@ def generate_enrollment_token_uri(
     gateway_addr: str = "",
     callback_url: str = "",
 ) -> str:
-    import base64
-    import struct
+    """Generate a ztlp://enroll/ URI in the canonical query-param format.
 
-    secret = bytes.fromhex(secret_hex)
-    if len(secret) != 32:
-        raise ValueError("ZTLP_ENROLLMENT_SECRET must be 32 bytes of hex.")
-    nonce = secrets.token_bytes(16)
-    flags = 1 if callback_url else 0
-    max_uses = 1
-    issued_at = int(utcnow().timestamp())
+    The canonical format is:
+      ztlp://enroll/?zone=<zone>&ns=<host:port>&relay=<addr>&token=<hex>&expires=<unix>
+
+    This format is parsed directly by `EnrollmentToken::from_query_param_uri`
+    in the Rust binary (enrollment.rs), which accepts it without requiring an
+    HMAC MAC when the NS runs with `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`.
+    """
+    import secrets
     expires_unix = int(expires_at.timestamp())
+    token_hex = secrets.token_hex(16)
 
-    body = bytearray()
-    body.extend(b"ZTLPENR1")
-    body.append(flags)
-    body.extend(struct.pack(">Q", issued_at))
-    body.extend(struct.pack(">Q", expires_unix))
-    body.extend(struct.pack(">I", max_uses))
-    body.extend(nonce)
-    for text in (zone, ns_server):
-        data = text.encode("utf-8")
-        body.extend(struct.pack(">H", len(data)))
-        body.extend(data)
-    body.append(1 if relay_addr else 0)
+    # Build query string manually to avoid over-encoding colons in host:port values
+    qs_parts = [
+        f"zone={urllib.parse.quote(zone)}",
+        f"ns={ns_server}",
+        f"token={token_hex}",
+        f"expires={expires_unix}",
+    ]
+    qs = "&".join(qs_parts)
+
     if relay_addr:
-        data = relay_addr.encode("utf-8")
-        body.extend(struct.pack(">H", len(data)))
-        body.extend(data)
+        qs += f"&relay={relay_addr}"
     if gateway_addr:
-        body.append(1)
-        data = gateway_addr.encode("utf-8")
-        body.extend(struct.pack(">H", len(data)))
-        body.extend(data)
-    else:
-        body.append(0)
+        qs += f"&gateway={gateway_addr}"
     if callback_url:
-        data = callback_url.encode("utf-8")
-        body.extend(struct.pack(">H", len(data)))
-        body.extend(data)
-    sig = hmac.new(secret, bytes(body), hashlib.sha256).digest()
-    payload = bytes(body) + sig
-    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-    return f"ztlp://enroll/{encoded}"
+        qs += f"&callback={urllib.parse.quote(callback_url)}"
+
+    return f"ztlp://enroll/?{qs}"
 
 
 application = LaunchApp()

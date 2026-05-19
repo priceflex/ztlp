@@ -174,4 +174,87 @@ defmodule ZtlpGateway.ConfigTest do
       assert Config.get(:header_signing_enabled) == false
     end
   end
+
+  describe "ns_server/0 — consolidated NS server accessor" do
+    # ZTLP gateway operators may configure the NS coordinates two ways:
+    #   1. ZTLP_NS_SERVER=host:port (canonical, used by ServiceRegistrar /
+    #      CertProvisioner / Federation)
+    #   2. ZTLP_GATEWAY_NS_HOST=host + ZTLP_GATEWAY_NS_PORT=port (split form
+    #      used by the existing Config.ns_host/0 + ns_port/0 accessors)
+    #
+    # Before this accessor existed, those who deployed with only the split
+    # form (#2) ended up with NS registration disabled because the modules
+    # above only checked ZTLP_NS_SERVER directly. ns_server/0 unifies the
+    # two conventions and returns nil only when nothing is configured.
+
+    setup do
+      prev_ns_server = System.get_env("ZTLP_NS_SERVER")
+      prev_ns_host = System.get_env("ZTLP_GATEWAY_NS_HOST")
+      prev_ns_port = System.get_env("ZTLP_GATEWAY_NS_PORT")
+
+      System.delete_env("ZTLP_NS_SERVER")
+      System.delete_env("ZTLP_GATEWAY_NS_HOST")
+      System.delete_env("ZTLP_GATEWAY_NS_PORT")
+
+      on_exit(fn ->
+        if prev_ns_server,
+          do: System.put_env("ZTLP_NS_SERVER", prev_ns_server),
+          else: System.delete_env("ZTLP_NS_SERVER")
+
+        if prev_ns_host,
+          do: System.put_env("ZTLP_GATEWAY_NS_HOST", prev_ns_host),
+          else: System.delete_env("ZTLP_GATEWAY_NS_HOST")
+
+        if prev_ns_port,
+          do: System.put_env("ZTLP_GATEWAY_NS_PORT", prev_ns_port),
+          else: System.delete_env("ZTLP_GATEWAY_NS_PORT")
+      end)
+
+      :ok
+    end
+
+    test "ZTLP_NS_SERVER takes precedence and is returned verbatim" do
+      System.put_env("ZTLP_NS_SERVER", "35.91.88.177:23096")
+      assert Config.ns_server() == "35.91.88.177:23096"
+    end
+
+    test "split ZTLP_GATEWAY_NS_HOST + ZTLP_GATEWAY_NS_PORT are joined" do
+      System.put_env("ZTLP_GATEWAY_NS_HOST", "ns.example.com")
+      System.put_env("ZTLP_GATEWAY_NS_PORT", "23096")
+      assert Config.ns_server() == "ns.example.com:23096"
+    end
+
+    test "ZTLP_NS_SERVER wins when both forms are present" do
+      System.put_env("ZTLP_NS_SERVER", "canonical:1111")
+      System.put_env("ZTLP_GATEWAY_NS_HOST", "split-form")
+      System.put_env("ZTLP_GATEWAY_NS_PORT", "2222")
+      assert Config.ns_server() == "canonical:1111"
+    end
+
+    test "only ZTLP_GATEWAY_NS_HOST set (no port) returns nil" do
+      System.put_env("ZTLP_GATEWAY_NS_HOST", "lonely-host")
+      assert Config.ns_server() == nil
+    end
+
+    test "only ZTLP_GATEWAY_NS_PORT set (no host) returns nil" do
+      System.put_env("ZTLP_GATEWAY_NS_PORT", "23096")
+      assert Config.ns_server() == nil
+    end
+
+    test "nothing configured returns nil" do
+      assert Config.ns_server() == nil
+    end
+
+    test "empty ZTLP_NS_SERVER falls through to split form" do
+      System.put_env("ZTLP_NS_SERVER", "")
+      System.put_env("ZTLP_GATEWAY_NS_HOST", "fallback.host")
+      System.put_env("ZTLP_GATEWAY_NS_PORT", "23096")
+      assert Config.ns_server() == "fallback.host:23096"
+    end
+
+    test "empty ZTLP_NS_SERVER with no split form returns nil" do
+      System.put_env("ZTLP_NS_SERVER", "")
+      assert Config.ns_server() == nil
+    end
+  end
 end

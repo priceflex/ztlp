@@ -408,4 +408,38 @@ defmodule ZtlpGateway.Config do
     end
   end
 
+  @doc """
+  Consolidated NS server address as a `"host:port"` string, or `nil` if not
+  configured.
+
+  Resolution priority:
+  1. `ZTLP_NS_SERVER` env var (canonical form, returned verbatim if non-empty)
+  2. `ZTLP_GATEWAY_NS_HOST` + `ZTLP_GATEWAY_NS_PORT` joined with `:` (both
+     must be present and non-empty; otherwise falls through to nil)
+  3. `nil`
+
+  This unifies the two configuration conventions that grew up independently
+  in the codebase. `ServiceRegistrar`, `CertProvisioner`, and `Federation`
+  historically called `System.get_env("ZTLP_NS_SERVER")` directly, which
+  silently disabled NS interaction when operators set only the split form
+  used by `ns_host/0` + `ns_port/0`.
+  """
+  @spec ns_server() :: String.t() | nil
+  def ns_server do
+    case System.get_env("ZTLP_NS_SERVER") do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _ ->
+        case {ns_host(), System.get_env("ZTLP_GATEWAY_NS_PORT")} do
+          {host, port}
+          when is_binary(host) and host != "" and is_binary(port) and port != "" ->
+            "#{host}:#{port}"
+
+          _ ->
+            nil
+        end
+    end
+  end
+
 end

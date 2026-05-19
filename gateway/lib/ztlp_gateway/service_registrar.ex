@@ -556,7 +556,10 @@ defmodule ZtlpGateway.ServiceRegistrar do
   # ── Private: Utilities ──────────────────────────────────────
 
   defp get_ns_server do
-    case System.get_env("ZTLP_NS_SERVER") do
+    # Reads via ZtlpGateway.Config.ns_server/0 so the split
+    # ZTLP_GATEWAY_NS_HOST + ZTLP_GATEWAY_NS_PORT convention also works,
+    # not just the consolidated ZTLP_NS_SERVER form.
+    case ZtlpGateway.Config.ns_server() do
       nil -> nil
       "" -> nil
       addr ->

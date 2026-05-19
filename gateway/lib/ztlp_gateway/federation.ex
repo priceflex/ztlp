@@ -478,7 +478,9 @@ defmodule ZtlpGateway.Federation do
   end
 
   defp ns_server do
-    System.get_env("ZTLP_NS_SERVER")
+    # Delegates to Config.ns_server/0 to honour both ZTLP_NS_SERVER and
+    # the split ZTLP_GATEWAY_NS_HOST + ZTLP_GATEWAY_NS_PORT form.
+    ZtlpGateway.Config.ns_server()
   end
 
   defp local_services do

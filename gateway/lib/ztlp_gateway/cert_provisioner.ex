@@ -451,7 +451,9 @@ defmodule ZtlpGateway.CertProvisioner do
   # ── Config Parsing ─────────────────────────────────────────────────
 
   defp parse_ns_server do
-    case System.get_env("ZTLP_NS_SERVER") do
+    # Honour both the consolidated ZTLP_NS_SERVER form and the split
+    # ZTLP_GATEWAY_NS_HOST + ZTLP_GATEWAY_NS_PORT form via Config.ns_server/0.
+    case ZtlpGateway.Config.ns_server() do
       nil -> nil
       addr ->
         case String.split(addr, ":") do

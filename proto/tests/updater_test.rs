@@ -149,8 +149,8 @@ fn update_channel_accepts_prerelease() {
 #[test]
 fn update_config_default_values() {
     let config = UpdateConfig::default();
-    // Should parse from CARGO_PKG_VERSION = "0.22.0"
-    assert_eq!(config.current_version, SemVer::new(0, 24, 0));
+    // Should parse from CARGO_PKG_VERSION — keep this in sync with proto/Cargo.toml.
+    assert_eq!(config.current_version, SemVer::new(0, 26, 0));
     assert_eq!(config.channel, UpdateChannel::Stable);
     assert!(config.release_url.contains("github.com"));
     assert!(config.release_url.contains("priceflex/ztlp"));

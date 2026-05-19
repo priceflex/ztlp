@@ -270,8 +270,7 @@ async fn ns_query_raw(
 
 /// Parse a SVC record response to extract the endpoint address.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    let address_str =
-        cbor_extract_string(data, "address").ok_or("SVC record missing address")?;
+    let address_str = cbor_extract_string(data, "address").ok_or("SVC record missing address")?;
 
     address_str
         .parse()

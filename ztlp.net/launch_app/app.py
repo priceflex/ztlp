@@ -212,6 +212,29 @@ class LaunchApp:
         self.ensure_schema()
 
     def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
+        # Strict HTTPS Enforce
+        forwarded_proto = environ.get("HTTP_X_FORWARDED_PROTO", "").split(",")[0].strip().lower()
+        scheme = forwarded_proto or environ.get("wsgi.url_scheme", "http").lower()
+        if self.environment in ["production", "staging" "launch"] and scheme != "https":
+            host = environ.get("HTTP_X_FORWARDED_HOST", "").split(",")[0].strip() or environ.get("HTTP_HOST") or self.public_host
+            path = environ.get("PATH_INFO", "/") or "/"
+            query = environ.get("QUERY_STRING", "")
+            url = f"https://{host}{path}"
+            if query:
+                url += f"?{query}"
+            
+            body = f"<p>Redirecting to secure connection: <a href=\"{esc(url)}\">{esc(url)}</a>.</p>"
+            headers = [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Location", url),
+                ("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            ]
+            start_response("301 Moved Permanently", headers)
+            return [body.encode("utf-8")]
+
+        # HSTS Header enforcement for HTTPS connections
+        extra_hsts = [("Strict-Transport-Security", "max-age=31536000; includeSubDomains")] if scheme == "https" else []
+
         method = environ.get("REQUEST_METHOD", "GET").upper()
         path = environ.get("PATH_INFO", "/") or "/"
         try:
@@ -233,7 +256,7 @@ class LaunchApp:
                 response = self.handle_download_redirect(path)
             elif method == "GET" and path == "/api/zone-available":
                 response = self.handle_zone_available(environ)
-            elif method == "GET" and path == "/health":
+            elif method in ["GET", "HEAD"] and path == "/health":
                 response = (HTTPStatus.OK, "text/plain; charset=utf-8", "ok\n")
             else:
                 response = self.not_found("The requested Launch page was not found.")
@@ -254,6 +277,9 @@ class LaunchApp:
         else:
             status, content_type, body = response
             extra_headers = []
+        
+        extra_headers.extend(extra_hsts)
+
         body_bytes = body.encode("utf-8")
         headers = [
             ("Content-Type", content_type),
@@ -403,7 +429,15 @@ class LaunchApp:
 
     def handle_start(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         form = self.read_form(environ)
-        values = {key: clean(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone", "referral_code"]}
+        
+        # Enforce strict input sanitization: drop characters that could be used for XSS.
+        # This protects internal databases and dashboards even if they fail to escape.
+        import re
+        def sanitize(text: str) -> str:
+            # Remove any angle brackets or common injection vectors.
+            return re.sub(r'[<>{}[\];]', '', clean(text))
+            
+        values = {key: sanitize(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone", "referral_code"]}
         values["zone"] = normalize_zone(values["zone"])
         errors = validate_start(values)
         if errors:

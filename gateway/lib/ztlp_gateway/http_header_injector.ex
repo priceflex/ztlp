@@ -89,11 +89,32 @@ defmodule ZtlpGateway.HttpHeaderInjector do
   """
   @spec build_headers(map() | nil) :: [{String.t(), String.t()}]
   def build_headers(nil), do: build_headers(ZtlpGateway.TlsIdentity.anonymous_identity())
-  def build_headers(identity) do
+  def build_headers(identity_str) when is_binary(identity_str) do
+    # For plain ZTLP sessions, the identity is just the resolved string or unknown:<hex>
+    node_id = case String.split(identity_str, ":", parts: 2) do
+      ["unknown", hex] -> hex
+      _ -> identity_str
+    end
+
+    pseudo_identity = %{
+      node_id: node_id,
+      node_name: identity_str,
+      zone: "",
+      authenticated: true,
+      assurance: :device_bound,
+      key_source: "ztlp-noise",
+      attestation_verified: false,
+      cert_fingerprint: "",
+      cert_serial: ""
+    }
+    build_headers(pseudo_identity)
+  end
+
+  def build_headers(identity) when is_map(identity) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
     nonce = generate_nonce()
     request_id = generate_request_id()
-
+    
     headers = [
       {"X-ZTLP-Node-ID", Map.get(identity, :node_id) || ""},
       {"X-ZTLP-Node-Name", Map.get(identity, :node_name) || ""},
@@ -250,11 +271,19 @@ defmodule ZtlpGateway.HttpHeaderInjector do
     body
   end
 
-  defp get_route_config(nil), do: %{auth_mode: :passthrough}
+  defp get_route_config(nil), do: %{auth_mode: :identity}
   defp get_route_config(service) do
-    case ZtlpGateway.SniRouter.get_route(service) do
-      {:ok, route} -> route
-      _ -> %{auth_mode: :passthrough}
+    if :ets.info(:ztlp_sni_routes) == :undefined do
+      %{auth_mode: :identity}
+    else
+      try do
+        case ZtlpGateway.SniRouter.get_route(service) do
+          {:ok, route} -> route
+          _ -> %{auth_mode: :identity}
+        end
+      rescue
+        _e in ArgumentError -> %{auth_mode: :identity}
+      end
     end
   end
 
@@ -263,4 +292,11 @@ defmodule ZtlpGateway.HttpHeaderInjector do
   defp assurance_to_string(:software), do: "software"
   defp assurance_to_string(:unknown), do: "unknown"
   defp assurance_to_string(_), do: "unknown"
+
+  @doc """
+  Basic protocol sniffing to detect if a raw TCP payload looks like a safe
+  HTTP request, rather than an SSH/RDP connection stream. 
+  """
+  def http_request?(<<method, _::binary>>) when method in [?G, ?P, ?H, ?D, ?O, ?T, ?C], do: true
+  def http_request?(_), do: false
 end

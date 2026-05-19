@@ -658,6 +658,8 @@ defmodule ZtlpGateway.Session do
         # Timeout
         timeout_ms: timeout_ms,
         timer_ref: schedule_timeout(timeout_ms),
+        identity: nil,
+        legacy_first_chunk: false,
         # Buffer for packets that arrive before handshake completes
         pending_packets: [],
         # Send buffer for retransmission (KCP-inspired ARQ)
@@ -1327,7 +1329,7 @@ defmodule ZtlpGateway.Session do
         end
 
         # Flush buffered data to the backend (buffer is prepend-order, reverse for FIFO)
-        flush_stream_buffer(stream, pid)
+        flush_stream_buffer(stream, pid, state)
 
         updated = %{
           stream
@@ -1335,7 +1337,8 @@ defmodule ZtlpGateway.Session do
             backend_pid: pid,
             buffer: [],
             connect_buffer_bytes: 0,
-            connect_timeout_ref: nil
+            connect_timeout_ref: nil,
+            first_chunk: false
         }
 
         streams = Map.put(state.streams, stream_id, updated)
@@ -1568,10 +1571,11 @@ defmodule ZtlpGateway.Session do
                           rekey_timer_ref: rekey_timer_ref,
                           client_profile: client_profile,
                           cc_profile: cc_profile,
+                          identity: identity,
+                          legacy_first_chunk: true,
                           cwnd: cc_profile.initial_cwnd,
                           ssthresh: cc_profile.ssthresh,
                           recovery_cwnd: cc_profile.initial_cwnd,
-                          rto_ms: cc_profile.initial_rto_ms,
                           initial_rto_ms: cc_profile.initial_rto_ms,
                           min_rto_ms: cc_profile.min_rto_ms
                       }
@@ -1990,14 +1994,24 @@ defmodule ZtlpGateway.Session do
                 state
               end
 
-            %{backend_pid: pid} when pid != nil ->
+            %{backend_pid: pid} = stream when pid != nil ->
               # Plain stream: forward directly to backend
-              if byte_size(payload) > 0 do
+              state = if byte_size(payload) > 0 do
                 Logger.debug(
                   "[Session] Stream #{stream_id} forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}"
                 )
 
-                Backend.send_data(pid, payload)
+                {data_to_send, stream} = 
+                  if Map.get(stream, :first_chunk) and ZtlpGateway.HttpHeaderInjector.http_request?(payload) do
+                    {ZtlpGateway.HttpHeaderInjector.inject(payload, state.identity, stream.service), %{stream | first_chunk: false}}
+                  else
+                    {payload, %{stream | first_chunk: false}}
+                  end
+                
+                Backend.send_data(pid, data_to_send)
+                %{state | streams: Map.put(state.streams, stream_id, stream)}
+              else
+                state
               end
 
               state
@@ -2052,12 +2066,22 @@ defmodule ZtlpGateway.Session do
             state
           end
 
-        if state.backend_pid && byte_size(payload) > 0 do
+        state = if state.backend_pid && byte_size(payload) > 0 do
           Logger.debug(
             "[Session] Forwarding #{byte_size(payload)} bytes to backend: #{inspect(String.slice(payload, 0..60))}"
           )
 
-          Backend.send_data(state.backend_pid, payload)
+          {data_to_send, next_state} = 
+            if Map.get(state, :legacy_first_chunk) and ZtlpGateway.HttpHeaderInjector.http_request?(payload) do
+              {ZtlpGateway.HttpHeaderInjector.inject(payload, state.identity, state.service), %{state | legacy_first_chunk: false}}
+            else
+              {payload, %{state | legacy_first_chunk: false}}
+            end
+
+          Backend.send_data(next_state.backend_pid, data_to_send)
+          next_state
+        else
+          state
         end
 
         # ACK is sent by deliver_recv_window after in-order delivery
@@ -2359,7 +2383,8 @@ defmodule ZtlpGateway.Session do
                  recovery_cwnd: 0,
                  retransmit_timer_ref: retransmit_ref,
                  bbr: if(@use_bbr, do: Bbr.new(), else: nil),
-                 last_ack_advance_at: System.monotonic_time(:millisecond)
+                 last_ack_advance_at: System.monotonic_time(:millisecond),
+                 legacy_first_chunk: true
              }}
 
           {:error, _reason} ->
@@ -2663,7 +2688,8 @@ defmodule ZtlpGateway.Session do
               tls_creds: tls_creds,
               tls_socket: nil,
               tls_bridge_pid: nil,
-              service: service_name
+              service: service_name,
+              first_chunk: true
             }
 
             streams = Map.put(state.streams, stream_id, stream_state)
@@ -3140,10 +3166,24 @@ defmodule ZtlpGateway.Session do
   # Flush buffered data accumulated during :connecting state to the backend.
   # Buffer is a list with most recent data prepended (O(1) append), so we
   # reverse to restore original order before sending.
-  defp flush_stream_buffer(stream, pid) do
-    stream.buffer
-    |> Enum.reverse()
-    |> Enum.each(fn data -> Backend.send_data(pid, data) end)
+  defp flush_stream_buffer(stream, pid, state) do
+    # When flushing the accumulated buffer, if the first chunk is HTTP, we must inject headers.
+    # The buffer was prepended, so reversing makes it chronologically correct.
+    chunks = Enum.reverse(stream.buffer)
+
+    case chunks do
+      [first | rest] ->
+        {data_to_send, _stream_first_chunk} = 
+          if Map.get(stream, :first_chunk, true) and ZtlpGateway.HttpHeaderInjector.http_request?(first) do
+            {ZtlpGateway.HttpHeaderInjector.inject(first, state.identity, stream.service), false}
+          else
+            {first, false}
+          end
+        
+        Backend.send_data(pid, data_to_send)
+        Enum.each(rest, fn data -> Backend.send_data(pid, data) end)
+      [] -> :ok
+    end
   end
 
   # Option C: `service` is the 16-byte routing hash extracted from the HELLO

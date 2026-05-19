@@ -1,0 +1,829 @@
+ZTLP Launch listening on 0.0.0.0:8080; db=/home/trs/ztlp/ztlp.net/data/launch.sqlite3
+127.0.0.1 - - [19/May/2026 06:54:12] "POST /start HTTP/1.1" 201 3326
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme21-corp', '--org', 'Acme21 Corp', '--email', 'alice@acme21corp.example.com', '--zone', 'acme21.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: acme21-corp
+  org: Acme21 Corp
+  admin: alice@acme21corp.example.com
+  zone: acme21.ztlp
+  private dev URL: http://127.0.0.1:39499
+  files: /home/trs/ztlp/ztlp.net/data/instances/acme21-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/acme21-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme21-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.3s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 1.0s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context:
+#5 transferring context: 325B 0.0s done
+#5 DONE 0.4s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 24.43kB 0.0s done
+#7 DONE 0.5s
+
+#8 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#8 CACHED
+
+#9 [bootstrap base 2/2] WORKDIR /rails
+#9 CACHED
+
+#10 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#10 CACHED
+
+#11 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#11 CACHED
+
+#12 [bootstrap build 4/6] COPY . .
+#12 DONE 3.4s
+
+#13 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#13 DONE 2.0s
+
+#14 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#14 2.530 I, [2026-05-19T06:50:58.788237 #6]  INFO -- : Writing /rails/public/assets/manifest-b84bfa46a33d7f0dc4d2e7b8889486c9a957a5e40713d58f54be71b66954a1ff.js
+#14 2.530 I, [2026-05-19T06:50:58.788409 #6]  INFO -- : Writing /rails/public/assets/manifest-b84bfa46a33d7f0dc4d2e7b8889486c9a957a5e40713d58f54be71b66954a1ff.js.gz
+#14 2.530 I, [2026-05-19T06:50:58.788507 #6]  INFO -- : Writing /rails/public/assets/application-e0cf9d8fcb18bf7f909d8d91a5e78499f82ac29523d475bf3a9ab265d5e2b451.css
+#14 2.530 I, [2026-05-19T06:50:58.788806 #6]  INFO -- : Writing /rails/public/assets/application-e0cf9d8fcb18bf7f909d8d91a5e78499f82ac29523d475bf3a9ab265d5e2b451.css.gz
+#14 2.530 I, [2026-05-19T06:50:58.788883 #6]  INFO -- : Writing /rails/public/assets/application-37f365cbecf1fa2810a8303f4b6571676fa1f9c56c248528bc14ddb857531b95.js
+#14 2.530 I, [2026-05-19T06:50:58.788944 #6]  INFO -- : Writing /rails/public/assets/application-37f365cbecf1fa2810a8303f4b6571676fa1f9c56c248528bc14ddb857531b95.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789007 #6]  INFO -- : Writing /rails/public/assets/controllers/alert_controller-da33c4dc8fef65859fc7a8a482a16c8968817cb2b190d43502b5717bb28ccc49.js
+#14 2.531 I, [2026-05-19T06:50:58.789056 #6]  INFO -- : Writing /rails/public/assets/controllers/alert_controller-da33c4dc8fef65859fc7a8a482a16c8968817cb2b190d43502b5717bb28ccc49.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789178 #6]  INFO -- : Writing /rails/public/assets/controllers/application-368d98631bccbf2349e0d4f8269afb3fe9625118341966de054759d96ea86c7e.js
+#14 2.531 I, [2026-05-19T06:50:58.789222 #6]  INFO -- : Writing /rails/public/assets/controllers/application-368d98631bccbf2349e0d4f8269afb3fe9625118341966de054759d96ea86c7e.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789336 #6]  INFO -- : Writing /rails/public/assets/controllers/deploy_log_controller-6a2ed1e2bd29ba88f9efdebfc612b37c76aa1c162c78176bfae02c703a87d26d.js
+#14 2.531 I, [2026-05-19T06:50:58.789376 #6]  INFO -- : Writing /rails/public/assets/controllers/deploy_log_controller-6a2ed1e2bd29ba88f9efdebfc612b37c76aa1c162c78176bfae02c703a87d26d.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789434 #6]  INFO -- : Writing /rails/public/assets/controllers/health_dashboard_controller-d4b0bda28ce6702a5ca8e4ea6639f488bf818ec8e90081dbd2ccac133f06ee56.js
+#14 2.531 I, [2026-05-19T06:50:58.789476 #6]  INFO -- : Writing /rails/public/assets/controllers/health_dashboard_controller-d4b0bda28ce6702a5ca8e4ea6639f488bf818ec8e90081dbd2ccac133f06ee56.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789581 #6]  INFO -- : Writing /rails/public/assets/controllers/hello_controller-549135e8e7c683a538c3d6d517339ba470fcfb79d62f738a0a089ba41851a554.js
+#14 2.531 I, [2026-05-19T06:50:58.789635 #6]  INFO -- : Writing /rails/public/assets/controllers/hello_controller-549135e8e7c683a538c3d6d517339ba470fcfb79d62f738a0a089ba41851a554.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789692 #6]  INFO -- : Writing /rails/public/assets/controllers/index-31a9bee606cbc5cdb1593881f388bbf4c345bf693ea24e124f84b6d5c98ab648.js
+#14 2.531 I, [2026-05-19T06:50:58.789780 #6]  INFO -- : Writing /rails/public/assets/controllers/index-31a9bee606cbc5cdb1593881f388bbf4c345bf693ea24e124f84b6d5c98ab648.js.gz
+#14 2.531 I, [2026-05-19T06:50:58.789844 #6]  INFO -- : Writing /rails/public/assets/controllers/machine_form_controller-7bbc3cc70603f1f089138e0cef85b05d99684943e64eee1840b2e5514cf76e55.js
+#14 2.531 I, [2026-05-19T06:50:58.789876 #6]  INFO -- : Writing /rails/public/assets/controllers/machine_form_controller-7bbc3cc70603f1f089138e0cef85b05d99684943e64eee1840b2e5514cf76e55.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.789972 #6]  INFO -- : Writing /rails/public/assets/controllers/metrics_controller-61906091b7df90e30c97e339a37ba1c266ba5554f64f73197e6b1e33515d6192.js
+#14 2.532 I, [2026-05-19T06:50:58.790126 #6]  INFO -- : Writing /rails/public/assets/controllers/metrics_controller-61906091b7df90e30c97e339a37ba1c266ba5554f64f73197e6b1e33515d6192.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790185 #6]  INFO -- : Writing /rails/public/assets/controllers/wizard_controller-49c08cbae01806c8c9799bd1586f8337c4d51e8946fad5c46500bb3fa7aa2f6a.js
+#14 2.532 I, [2026-05-19T06:50:58.790215 #6]  INFO -- : Writing /rails/public/assets/controllers/wizard_controller-49c08cbae01806c8c9799bd1586f8337c4d51e8946fad5c46500bb3fa7aa2f6a.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790262 #6]  INFO -- : Writing /rails/public/assets/turbo-c1b3ed88d59a5edf70c018abb8555cfb697b2550044dd05c8f2e902bd49c60da.js
+#14 2.532 I, [2026-05-19T06:50:58.790290 #6]  INFO -- : Writing /rails/public/assets/turbo-c1b3ed88d59a5edf70c018abb8555cfb697b2550044dd05c8f2e902bd49c60da.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790338 #6]  INFO -- : Writing /rails/public/assets/turbo.min-c85b4c5406dd49df1f63e03a5b07120d39cc3e33bc2448f5e926b80514f9dfc8.js
+#14 2.532 I, [2026-05-19T06:50:58.790366 #6]  INFO -- : Writing /rails/public/assets/turbo.min-c85b4c5406dd49df1f63e03a5b07120d39cc3e33bc2448f5e926b80514f9dfc8.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790414 #6]  INFO -- : Writing /rails/public/assets/turbo.min.js-b37fe2e710d4d836c38c1a68c68eed4e6beb4c80ad938d735f440216fe051c44.map
+#14 2.532 I, [2026-05-19T06:50:58.790449 #6]  INFO -- : Writing /rails/public/assets/turbo.min.js-b37fe2e710d4d836c38c1a68c68eed4e6beb4c80ad938d735f440216fe051c44.map.gz
+#14 2.532 I, [2026-05-19T06:50:58.790498 #6]  INFO -- : Writing /rails/public/assets/stimulus-f75215805563870a61ee9dc5a207ce46d4675c7e667558a54344fd1e7baa697f.js
+#14 2.532 I, [2026-05-19T06:50:58.790524 #6]  INFO -- : Writing /rails/public/assets/stimulus-f75215805563870a61ee9dc5a207ce46d4675c7e667558a54344fd1e7baa697f.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790572 #6]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js
+#14 2.532 I, [2026-05-19T06:50:58.790598 #6]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790644 #6]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js
+#14 2.532 I, [2026-05-19T06:50:58.790670 #6]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790716 #6]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js
+#14 2.532 I, [2026-05-19T06:50:58.790741 #6]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790785 #6]  INFO -- : Writing /rails/public/assets/stimulus.min-dd364f16ec9504dfb72672295637a1c8838773b01c0b441bd41008124c407894.js
+#14 2.532 I, [2026-05-19T06:50:58.790812 #6]  INFO -- : Writing /rails/public/assets/stimulus.min-dd364f16ec9504dfb72672295637a1c8838773b01c0b441bd41008124c407894.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790858 #6]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js
+#14 2.532 I, [2026-05-19T06:50:58.790884 #6]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js.gz
+#14 2.532 I, [2026-05-19T06:50:58.790927 #6]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js
+#14 2.532 I, [2026-05-19T06:50:58.790954 #6]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js.gz
+#14 2.533 I, [2026-05-19T06:50:58.791000 #6]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js
+#14 2.533 I, [2026-05-19T06:50:58.791028 #6]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js.gz
+#14 2.533 I, [2026-05-19T06:50:58.791109 #6]  INFO -- : Writing /rails/public/assets/stimulus.min.js-2cc63625fa177963b45da974806e7aee846cbf1d4930815733d0fdf3fb232325.map
+#14 2.533 I, [2026-05-19T06:50:58.791155 #6]  INFO -- : Writing /rails/public/assets/stimulus.min.js-2cc63625fa177963b45da974806e7aee846cbf1d4930815733d0fdf3fb232325.map.gz
+#14 2.533 I, [2026-05-19T06:50:58.791194 #6]  INFO -- : Writing /rails/public/assets/actioncable-1c7f008c6deb7b55c6878be38700ff6bf56b75444a086fa1f46e3b781365a3ea.js
+#14 2.533 I, [2026-05-19T06:50:58.791234 #6]  INFO -- : Writing /rails/public/assets/actioncable-1c7f008c6deb7b55c6878be38700ff6bf56b75444a086fa1f46e3b781365a3ea.js.gz
+#14 2.533 I, [2026-05-19T06:50:58.791270 #6]  INFO -- : Writing /rails/public/assets/actioncable.esm-06609b0ecaffe2ab952021b9c8df8b6c68f65fc23bee728fc678a2605e1ce132.js
+#14 2.533 I, [2026-05-19T06:50:58.791310 #6]  INFO -- : Writing /rails/public/assets/actioncable.esm-06609b0ecaffe2ab952021b9c8df8b6c68f65fc23bee728fc678a2605e1ce132.js.gz
+#14 2.571 I, [2026-05-19T06:50:58.647909 #6]  INFO -- : [ZTLP Enrollment] CLI not available at ztlp — skipping auto-enrollment
+#14 DONE 3.1s
+
+#15 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#15 DONE 2.4s
+
+#16 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#16 DONE 1.3s
+
+#17 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#17 DONE 270.3s
+
+#18 [bootstrap] exporting to image
+#18 exporting layers
+#18 exporting layers 4.7s done
+#18 writing image sha256:8a61915d2eda89c9f5c1a8ead09f25b6fc37c05d6221284604ee96fb7055db53
+#18 writing image sha256:8a61915d2eda89c9f5c1a8ead09f25b6fc37c05d6221284604ee96fb7055db53 0.0s done
+#18 naming to docker.io/library/acme21-corp-bootstrap 0.1s done
+#18 DONE 5.4s
+
+#19 [bootstrap] resolving provenance for metadata file
+#19 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T06:54:27Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network acme21-corp_default  Creating
+ Network acme21-corp_default  Created
+ Volume "ztlp_bootstrap_acme21-corp_data"  Creating
+ Volume "ztlp_bootstrap_acme21-corp_data"  Created
+ Container ztlp-bootstrap-acme21-corp  Creating
+ Container ztlp-bootstrap-acme21-corp  Created
+ Container ztlp-bootstrap-acme21-corp  Starting
+ Container ztlp-bootstrap-acme21-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 06:55:46] "GET /claim?token=L7a8vixqOANpeQdEvreWBUY9beRQ3CpN1eoWlc38Y5Q HTTP/1.1" 200 3917
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme21-corp', '--org', 'Acme21 Corp', '--email', 'alice@acme21corp.example.com', '--zone', 'acme21.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: acme21-corp (/home/trs/ztlp/ztlp.net/data/instances/acme21-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme21-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-acme21-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 06:55:46] "POST /claim/launch HTTP/1.1" 200 4048
+127.0.0.1 - - [19/May/2026 06:57:16] "POST /start HTTP/1.1" 201 3326
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme22-corp', '--org', 'Acme22 Corp', '--email', 'alice@acme22corp.example.com', '--zone', 'acme22.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: acme22-corp
+  org: Acme22 Corp
+  admin: alice@acme22corp.example.com
+  zone: acme22.ztlp
+  private dev URL: http://127.0.0.1:39086
+  files: /home/trs/ztlp/ztlp.net/data/instances/acme22-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/acme22-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme22-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.1s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.7s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context: 325B done
+#5 DONE 0.1s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 21.49kB done
+#7 DONE 0.1s
+
+#8 [bootstrap base 2/2] WORKDIR /rails
+#8 CACHED
+
+#9 [bootstrap build 1/6] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       build-essential git pkg-config libsqlite3-dev &&     rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [bootstrap build 2/6] COPY Gemfile Gemfile.lock ./
+#10 CACHED
+
+#11 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#11 CACHED
+
+#12 [bootstrap build 4/6] COPY . .
+#12 DONE 0.9s
+
+#13 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#13 DONE 1.6s
+
+#14 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#14 1.974 I, [2026-05-19T06:57:38.483737 #7]  INFO -- : Writing /rails/public/assets/manifest-b84bfa46a33d7f0dc4d2e7b8889486c9a957a5e40713d58f54be71b66954a1ff.js
+#14 1.974 I, [2026-05-19T06:57:38.483901 #7]  INFO -- : Writing /rails/public/assets/manifest-b84bfa46a33d7f0dc4d2e7b8889486c9a957a5e40713d58f54be71b66954a1ff.js.gz
+#14 1.974 I, [2026-05-19T06:57:38.484039 #7]  INFO -- : Writing /rails/public/assets/application-e0cf9d8fcb18bf7f909d8d91a5e78499f82ac29523d475bf3a9ab265d5e2b451.css
+#14 1.974 I, [2026-05-19T06:57:38.484089 #7]  INFO -- : Writing /rails/public/assets/application-e0cf9d8fcb18bf7f909d8d91a5e78499f82ac29523d475bf3a9ab265d5e2b451.css.gz
+#14 1.974 I, [2026-05-19T06:57:38.484237 #7]  INFO -- : Writing /rails/public/assets/application-37f365cbecf1fa2810a8303f4b6571676fa1f9c56c248528bc14ddb857531b95.js
+#14 1.975 I, [2026-05-19T06:57:38.484306 #7]  INFO -- : Writing /rails/public/assets/application-37f365cbecf1fa2810a8303f4b6571676fa1f9c56c248528bc14ddb857531b95.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484371 #7]  INFO -- : Writing /rails/public/assets/controllers/alert_controller-da33c4dc8fef65859fc7a8a482a16c8968817cb2b190d43502b5717bb28ccc49.js
+#14 1.975 I, [2026-05-19T06:57:38.484405 #7]  INFO -- : Writing /rails/public/assets/controllers/alert_controller-da33c4dc8fef65859fc7a8a482a16c8968817cb2b190d43502b5717bb28ccc49.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484458 #7]  INFO -- : Writing /rails/public/assets/controllers/application-368d98631bccbf2349e0d4f8269afb3fe9625118341966de054759d96ea86c7e.js
+#14 1.975 I, [2026-05-19T06:57:38.484489 #7]  INFO -- : Writing /rails/public/assets/controllers/application-368d98631bccbf2349e0d4f8269afb3fe9625118341966de054759d96ea86c7e.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484540 #7]  INFO -- : Writing /rails/public/assets/controllers/deploy_log_controller-6a2ed1e2bd29ba88f9efdebfc612b37c76aa1c162c78176bfae02c703a87d26d.js
+#14 1.975 I, [2026-05-19T06:57:38.484580 #7]  INFO -- : Writing /rails/public/assets/controllers/deploy_log_controller-6a2ed1e2bd29ba88f9efdebfc612b37c76aa1c162c78176bfae02c703a87d26d.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484629 #7]  INFO -- : Writing /rails/public/assets/controllers/health_dashboard_controller-d4b0bda28ce6702a5ca8e4ea6639f488bf818ec8e90081dbd2ccac133f06ee56.js
+#14 1.975 I, [2026-05-19T06:57:38.484676 #7]  INFO -- : Writing /rails/public/assets/controllers/health_dashboard_controller-d4b0bda28ce6702a5ca8e4ea6639f488bf818ec8e90081dbd2ccac133f06ee56.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484731 #7]  INFO -- : Writing /rails/public/assets/controllers/hello_controller-549135e8e7c683a538c3d6d517339ba470fcfb79d62f738a0a089ba41851a554.js
+#14 1.975 I, [2026-05-19T06:57:38.484775 #7]  INFO -- : Writing /rails/public/assets/controllers/hello_controller-549135e8e7c683a538c3d6d517339ba470fcfb79d62f738a0a089ba41851a554.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484853 #7]  INFO -- : Writing /rails/public/assets/controllers/index-31a9bee606cbc5cdb1593881f388bbf4c345bf693ea24e124f84b6d5c98ab648.js
+#14 1.975 I, [2026-05-19T06:57:38.484901 #7]  INFO -- : Writing /rails/public/assets/controllers/index-31a9bee606cbc5cdb1593881f388bbf4c345bf693ea24e124f84b6d5c98ab648.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.484956 #7]  INFO -- : Writing /rails/public/assets/controllers/machine_form_controller-7bbc3cc70603f1f089138e0cef85b05d99684943e64eee1840b2e5514cf76e55.js
+#14 1.975 I, [2026-05-19T06:57:38.484987 #7]  INFO -- : Writing /rails/public/assets/controllers/machine_form_controller-7bbc3cc70603f1f089138e0cef85b05d99684943e64eee1840b2e5514cf76e55.js.gz
+#14 1.975 I, [2026-05-19T06:57:38.485198 #7]  INFO -- : Writing /rails/public/assets/controllers/metrics_controller-61906091b7df90e30c97e339a37ba1c266ba5554f64f73197e6b1e33515d6192.js
+#14 1.976 I, [2026-05-19T06:57:38.485280 #7]  INFO -- : Writing /rails/public/assets/controllers/metrics_controller-61906091b7df90e30c97e339a37ba1c266ba5554f64f73197e6b1e33515d6192.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485314 #7]  INFO -- : Writing /rails/public/assets/controllers/wizard_controller-49c08cbae01806c8c9799bd1586f8337c4d51e8946fad5c46500bb3fa7aa2f6a.js
+#14 1.976 I, [2026-05-19T06:57:38.485334 #7]  INFO -- : Writing /rails/public/assets/controllers/wizard_controller-49c08cbae01806c8c9799bd1586f8337c4d51e8946fad5c46500bb3fa7aa2f6a.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485360 #7]  INFO -- : Writing /rails/public/assets/turbo-c1b3ed88d59a5edf70c018abb8555cfb697b2550044dd05c8f2e902bd49c60da.js
+#14 1.976 I, [2026-05-19T06:57:38.485378 #7]  INFO -- : Writing /rails/public/assets/turbo-c1b3ed88d59a5edf70c018abb8555cfb697b2550044dd05c8f2e902bd49c60da.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485404 #7]  INFO -- : Writing /rails/public/assets/turbo.min-c85b4c5406dd49df1f63e03a5b07120d39cc3e33bc2448f5e926b80514f9dfc8.js
+#14 1.976 I, [2026-05-19T06:57:38.485422 #7]  INFO -- : Writing /rails/public/assets/turbo.min-c85b4c5406dd49df1f63e03a5b07120d39cc3e33bc2448f5e926b80514f9dfc8.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485448 #7]  INFO -- : Writing /rails/public/assets/turbo.min.js-b37fe2e710d4d836c38c1a68c68eed4e6beb4c80ad938d735f440216fe051c44.map
+#14 1.976 I, [2026-05-19T06:57:38.485466 #7]  INFO -- : Writing /rails/public/assets/turbo.min.js-b37fe2e710d4d836c38c1a68c68eed4e6beb4c80ad938d735f440216fe051c44.map.gz
+#14 1.976 I, [2026-05-19T06:57:38.485492 #7]  INFO -- : Writing /rails/public/assets/stimulus-f75215805563870a61ee9dc5a207ce46d4675c7e667558a54344fd1e7baa697f.js
+#14 1.976 I, [2026-05-19T06:57:38.485510 #7]  INFO -- : Writing /rails/public/assets/stimulus-f75215805563870a61ee9dc5a207ce46d4675c7e667558a54344fd1e7baa697f.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485538 #7]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js
+#14 1.976 I, [2026-05-19T06:57:38.485555 #7]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485582 #7]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js
+#14 1.976 I, [2026-05-19T06:57:38.485599 #7]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485636 #7]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js
+#14 1.976 I, [2026-05-19T06:57:38.485658 #7]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485684 #7]  INFO -- : Writing /rails/public/assets/stimulus.min-dd364f16ec9504dfb72672295637a1c8838773b01c0b441bd41008124c407894.js
+#14 1.976 I, [2026-05-19T06:57:38.485701 #7]  INFO -- : Writing /rails/public/assets/stimulus.min-dd364f16ec9504dfb72672295637a1c8838773b01c0b441bd41008124c407894.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485726 #7]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js
+#14 1.976 I, [2026-05-19T06:57:38.485742 #7]  INFO -- : Writing /rails/public/assets/stimulus-autoloader-c584942b568ba74879da31c7c3d51366737bacaf6fbae659383c0a5653685693.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485767 #7]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js
+#14 1.976 I, [2026-05-19T06:57:38.485785 #7]  INFO -- : Writing /rails/public/assets/stimulus-importmap-autoloader-db2076c783bf2dbee1226e2add52fef290b5d31b5bcd1edd999ac8a6dd31c44a.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485814 #7]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js
+#14 1.976 I, [2026-05-19T06:57:38.485831 #7]  INFO -- : Writing /rails/public/assets/stimulus-loading-3576ce92b149ad5d6959438c6f291e2426c86df3b874c525b30faad51b0d96b3.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485857 #7]  INFO -- : Writing /rails/public/assets/stimulus.min.js-2cc63625fa177963b45da974806e7aee846cbf1d4930815733d0fdf3fb232325.map
+#14 1.976 I, [2026-05-19T06:57:38.485875 #7]  INFO -- : Writing /rails/public/assets/stimulus.min.js-2cc63625fa177963b45da974806e7aee846cbf1d4930815733d0fdf3fb232325.map.gz
+#14 1.976 I, [2026-05-19T06:57:38.485899 #7]  INFO -- : Writing /rails/public/assets/actioncable-1c7f008c6deb7b55c6878be38700ff6bf56b75444a086fa1f46e3b781365a3ea.js
+#14 1.976 I, [2026-05-19T06:57:38.485914 #7]  INFO -- : Writing /rails/public/assets/actioncable-1c7f008c6deb7b55c6878be38700ff6bf56b75444a086fa1f46e3b781365a3ea.js.gz
+#14 1.976 I, [2026-05-19T06:57:38.485939 #7]  INFO -- : Writing /rails/public/assets/actioncable.esm-06609b0ecaffe2ab952021b9c8df8b6c68f65fc23bee728fc678a2605e1ce132.js
+#14 1.976 I, [2026-05-19T06:57:38.485955 #7]  INFO -- : Writing /rails/public/assets/actioncable.esm-06609b0ecaffe2ab952021b9c8df8b6c68f65fc23bee728fc678a2605e1ce132.js.gz
+#14 2.014 I, [2026-05-19T06:57:38.316304 #7]  INFO -- : [ZTLP Enrollment] CLI not available at ztlp — skipping auto-enrollment
+#14 DONE 2.5s
+
+#15 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#15 CACHED
+
+#16 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#16 CACHED
+
+#17 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#17 DONE 2.9s
+
+#18 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#18 DONE 2.0s
+
+#19 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#19 DONE 193.5s
+
+#20 [bootstrap] exporting to image
+#20 exporting layers
+#20 exporting layers 1.1s done
+#20 writing image sha256:de34f3707f75cf4ba4b4d1f62a6134c92e1ffa24b62c3849f4a18a46135928f1 done
+#20 naming to docker.io/library/acme22-corp-bootstrap
+#20 naming to docker.io/library/acme22-corp-bootstrap 0.3s done
+#20 DONE 1.6s
+
+#21 [bootstrap] resolving provenance for metadata file
+#21 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T06:57:31Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network acme22-corp_default  Creating
+ Network acme22-corp_default  Created
+ Volume "ztlp_bootstrap_acme22-corp_data"  Creating
+ Volume "ztlp_bootstrap_acme22-corp_data"  Created
+ Container ztlp-bootstrap-acme22-corp  Creating
+ Container ztlp-bootstrap-acme22-corp  Created
+ Container ztlp-bootstrap-acme22-corp  Starting
+ Container ztlp-bootstrap-acme22-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 07:01:03] "GET /claim?token=fjWi40xIJPueQNqtuxhpGGzBEU2ScBkAR8kld9crI_Y HTTP/1.1" 200 3917
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme22-corp', '--org', 'Acme22 Corp', '--email', 'alice@acme22corp.example.com', '--zone', 'acme22.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: acme22-corp (/home/trs/ztlp/ztlp.net/data/instances/acme22-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme22-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-acme22-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 07:01:03] "POST /claim/launch HTTP/1.1" 200 4048
+127.0.0.1 - - [19/May/2026 07:01:45] "POST /start HTTP/1.1" 201 3326
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme23-corp', '--org', 'Acme23 Corp', '--email', 'alice@acme23corp.example.com', '--zone', 'acme23.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: acme23-corp
+  org: Acme23 Corp
+  admin: alice@acme23corp.example.com
+  zone: acme23.ztlp
+  private dev URL: http://127.0.0.1:39418
+  files: /home/trs/ztlp/ztlp.net/data/instances/acme23-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/acme23-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme23-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.2s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.6s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context: 325B done
+#5 DONE 0.2s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 21.24kB done
+#7 DONE 0.2s
+
+#8 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#8 CACHED
+
+#9 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#9 CACHED
+
+#10 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#10 CACHED
+
+#11 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#11 CACHED
+
+#12 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#12 CACHED
+
+#13 [bootstrap build 4/6] COPY . .
+#13 CACHED
+
+#14 [bootstrap base 2/2] WORKDIR /rails
+#14 CACHED
+
+#15 [bootstrap build 2/6] COPY Gemfile Gemfile.lock ./
+#15 CACHED
+
+#16 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#16 CACHED
+
+#17 [bootstrap build 1/6] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       build-essential git pkg-config libsqlite3-dev &&     rm -rf /var/lib/apt/lists/*
+#17 CACHED
+
+#18 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#18 CACHED
+
+#19 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#19 CACHED
+
+#20 [bootstrap] exporting to image
+#20 exporting layers done
+#20 writing image sha256:b69adcd3208105181d945f4bd6c5b34ff1b07e0b4df5fc54918b6871396fa2b9 0.1s done
+#20 naming to docker.io/library/acme23-corp-bootstrap 0.1s done
+#20 DONE 0.3s
+
+#21 [bootstrap] resolving provenance for metadata file
+#21 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T07:02:18Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network acme23-corp_default  Creating
+ Network acme23-corp_default  Created
+ Volume "ztlp_bootstrap_acme23-corp_data"  Creating
+ Volume "ztlp_bootstrap_acme23-corp_data"  Created
+ Container ztlp-bootstrap-acme23-corp  Creating
+ Container ztlp-bootstrap-acme23-corp  Created
+ Container ztlp-bootstrap-acme23-corp  Starting
+ Container ztlp-bootstrap-acme23-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 07:02:24] "GET /claim?token=Zrv1XtHMHkP8V8azN2ErHo5xasgAVx_1VPUyN66E258 HTTP/1.1" 200 3917
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme23-corp', '--org', 'Acme23 Corp', '--email', 'alice@acme23corp.example.com', '--zone', 'acme23.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: acme23-corp (/home/trs/ztlp/ztlp.net/data/instances/acme23-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme23-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-acme23-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 07:02:24] "POST /claim/launch HTTP/1.1" 200 4048
+127.0.0.1 - - [19/May/2026 07:04:35] "POST /start HTTP/1.1" 201 3326
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme24-corp', '--org', 'Acme24 Corp', '--email', 'alice@acme24corp.example.com', '--zone', 'acme24.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: acme24-corp
+  org: Acme24 Corp
+  admin: alice@acme24corp.example.com
+  zone: acme24.ztlp
+  private dev URL: http://127.0.0.1:39614
+  files: /home/trs/ztlp/ztlp.net/data/instances/acme24-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/acme24-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme24-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile:
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.2s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.5s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context: 325B done
+#5 DONE 0.1s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 21.24kB done
+#7 DONE 0.1s
+
+#8 [bootstrap build 1/6] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       build-essential git pkg-config libsqlite3-dev &&     rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#9 CACHED
+
+#10 [bootstrap build 4/6] COPY . .
+#10 CACHED
+
+#11 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#11 CACHED
+
+#12 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#12 CACHED
+
+#13 [bootstrap build 2/6] COPY Gemfile Gemfile.lock ./
+#13 CACHED
+
+#14 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#14 CACHED
+
+#15 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#15 CACHED
+
+#16 [bootstrap base 2/2] WORKDIR /rails
+#16 CACHED
+
+#17 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#17 CACHED
+
+#18 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#18 CACHED
+
+#19 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#19 CACHED
+
+#20 [bootstrap] exporting to image
+#20 exporting layers done
+#20 writing image sha256:83c213d67e4b5dc0f1d2a5dcf2c898e694bf0c2f051f787cb9962b36fbc9167d 0.0s done
+#20 naming to docker.io/library/acme24-corp-bootstrap 0.0s done
+#20 DONE 0.2s
+
+#21 [bootstrap] resolving provenance for metadata file
+#21 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T07:04:44Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network acme24-corp_default  Creating
+ Network acme24-corp_default  Created
+ Volume "ztlp_bootstrap_acme24-corp_data"  Creating
+ Volume "ztlp_bootstrap_acme24-corp_data"  Created
+ Container ztlp-bootstrap-acme24-corp  Creating
+ Container ztlp-bootstrap-acme24-corp  Created
+ Container ztlp-bootstrap-acme24-corp  Starting
+ Container ztlp-bootstrap-acme24-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 07:04:50] "GET /claim?token=ole3SRheoKqLUwkOxrwotdHwTKmD-evLNCoJwV2j9DA HTTP/1.1" 200 3917
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme24-corp', '--org', 'Acme24 Corp', '--email', 'alice@acme24corp.example.com', '--zone', 'acme24.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: acme24-corp (/home/trs/ztlp/ztlp.net/data/instances/acme24-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme24-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-acme24-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 07:04:51] "POST /claim/launch HTTP/1.1" 200 4048
+127.0.0.1 - - [19/May/2026 07:07:14] "POST /start HTTP/1.1" 201 3326
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme25-corp', '--org', 'Acme25 Corp', '--email', 'alice@acme25corp.example.com', '--zone', 'acme25.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: acme25-corp
+  org: Acme25 Corp
+  admin: alice@acme25corp.example.com
+  zone: acme25.ztlp
+  private dev URL: http://127.0.0.1:39049
+  files: /home/trs/ztlp/ztlp.net/data/instances/acme25-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/acme25-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme25-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.3s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.8s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context: 325B done
+#5 DONE 0.2s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 21.24kB done
+#7 DONE 0.1s
+
+#8 [bootstrap build 2/6] COPY Gemfile Gemfile.lock ./
+#8 CACHED
+
+#9 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#9 CACHED
+
+#10 [bootstrap build 4/6] COPY . .
+#10 CACHED
+
+#11 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#11 CACHED
+
+#12 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#12 CACHED
+
+#13 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#13 CACHED
+
+#14 [bootstrap base 2/2] WORKDIR /rails
+#14 CACHED
+
+#15 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#15 CACHED
+
+#16 [bootstrap build 1/6] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       build-essential git pkg-config libsqlite3-dev &&     rm -rf /var/lib/apt/lists/*
+#16 CACHED
+
+#17 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#17 CACHED
+
+#18 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#18 CACHED
+
+#19 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#19 CACHED
+
+#20 [bootstrap] exporting to image
+#20 exporting layers done
+#20 writing image sha256:6574e272b8ed7909192055e9e8938c09fa9356c66346994b115af1f63f99337e 0.0s done
+#20 naming to docker.io/library/acme25-corp-bootstrap 0.0s done
+#20 DONE 0.2s
+
+#21 [bootstrap] resolving provenance for metadata file
+#21 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T07:07:27Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network acme25-corp_default  Creating
+ Network acme25-corp_default  Created
+ Volume "ztlp_bootstrap_acme25-corp_data"  Creating
+ Volume "ztlp_bootstrap_acme25-corp_data"  Created
+ Container ztlp-bootstrap-acme25-corp  Creating
+ Container ztlp-bootstrap-acme25-corp  Created
+ Container ztlp-bootstrap-acme25-corp  Starting
+ Container ztlp-bootstrap-acme25-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 07:07:33] "GET /claim?token=pRwQ5c5NgrKW12a_ejUHyV-Kd5UnLbqaSGeUC8v4_nE HTTP/1.1" 200 3917
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'acme25-corp', '--org', 'Acme25 Corp', '--email', 'alice@acme25corp.example.com', '--zone', 'acme25.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: acme25-corp (/home/trs/ztlp/ztlp.net/data/instances/acme25-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/acme25-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-acme25-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 07:07:33] "POST /claim/launch HTTP/1.1" 200 4048
+127.0.0.1 - - [19/May/2026 07:08:27] "POST /start HTTP/1.1" 201 3330
+127.0.0.1 - - [19/May/2026 07:08:27] "POST /claim/launch HTTP/1.1" 404 2565
+127.0.0.1 - - [19/May/2026 07:08:57] "POST /claim/launch HTTP/1.1" 400 2533
+127.0.0.1 - - [19/May/2026 07:09:06] "POST /claim/launch HTTP/1.1" 400 2533
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'test-100-corp', '--org', 'Test 100 Corp', '--email', 'alice@test-100.example.com', '--zone', 'test-100.ztlp']
+
+bin/launch stdout: Created ZTLP bootstrap instance scaffold: test-100-corp
+  org: Test 100 Corp
+  admin: alice@test-100.example.com
+  zone: test-100.ztlp
+  private dev URL: http://127.0.0.1:39188
+  files: /home/trs/ztlp/ztlp.net/data/instances/test-100-corp
+
+Start locally with:
+  cd '/home/trs/ztlp/ztlp.net/data/instances/test-100-corp' && docker compose up -d
+
+
+bin/launch stderr: 
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/test-100-corp
+
+docker compose stdout: #0 building with "default" instance using docker driver
+
+#1 [bootstrap internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.41kB done
+#1 DONE 0.1s
+
+#2 [bootstrap] resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.9s
+
+#3 [bootstrap] docker-image://docker.io/docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+#3 CACHED
+
+#4 [bootstrap internal] load metadata for registry.docker.com/library/ruby:3.2.7-slim
+#4 DONE 0.0s
+
+#5 [bootstrap internal] load .dockerignore
+#5 transferring context: 325B done
+#5 DONE 0.1s
+
+#6 [bootstrap base 1/2] FROM registry.docker.com/library/ruby:3.2.7-slim
+#6 DONE 0.0s
+
+#7 [bootstrap internal] load build context
+#7 transferring context: 21.24kB done
+#7 DONE 0.2s
+
+#8 [bootstrap build 4/6] COPY . .
+#8 CACHED
+
+#9 [bootstrap base 2/2] WORKDIR /rails
+#9 CACHED
+
+#10 [bootstrap stage-2 1/5] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       curl libsqlite3-0 openssh-client &&     rm -rf /var/lib/apt/lists /var/cache/apt/archives
+#10 CACHED
+
+#11 [bootstrap build 3/6] RUN bundle install &&     rm -rf ~/.bundle/ "/usr/local/bundle"/ruby/*/cache "/usr/local/bundle"/ruby/*/bundler/gems/*/.git &&     bundle exec bootsnap precompile --gemfile
+#11 CACHED
+
+#12 [bootstrap stage-2 3/5] COPY --from=build /rails /rails
+#12 CACHED
+
+#13 [bootstrap build 1/6] RUN apt-get update -qq &&     apt-get install --no-install-recommends -y       build-essential git pkg-config libsqlite3-dev &&     rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [bootstrap build 2/6] COPY Gemfile Gemfile.lock ./
+#14 CACHED
+
+#15 [bootstrap stage-2 2/5] COPY --from=build /usr/local/bundle /usr/local/bundle
+#15 CACHED
+
+#16 [bootstrap stage-2 4/5] COPY bin/ztlp /usr/local/bin/ztlp
+#16 CACHED
+
+#17 [bootstrap build 5/6] RUN bundle exec bootsnap precompile app/ lib/
+#17 CACHED
+
+#18 [bootstrap build 6/6] RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+#18 CACHED
+
+#19 [bootstrap stage-2 5/5] RUN mkdir -p /data /rails/log /rails/storage /rails/tmp /rails/db &&     useradd rails --create-home --shell /bin/bash &&     chown -R rails:rails /rails/db /rails/log /rails/storage /rails/tmp /data &&     chmod +x /usr/local/bin/ztlp &&     mkdir -p /home/rails/.ztlp &&     chown rails:rails /home/rails/.ztlp
+#19 CACHED
+
+#20 [bootstrap] exporting to image
+#20 exporting layers done
+#20 writing image sha256:e1da3b6693f87cc0661a1b70d545231e9415a40707d815851a2eb18337cea87d 0.1s done
+#20 naming to docker.io/library/test-100-corp-bootstrap
+#20 naming to docker.io/library/test-100-corp-bootstrap 0.1s done
+#20 DONE 0.4s
+
+#21 [bootstrap] resolving provenance for metadata file
+#21 DONE 0.0s
+
+
+docker compose stderr: time="2026-05-19T07:09:43Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+ bootstrap  Built
+ Network test-100-corp_default  Creating
+ Network test-100-corp_default  Created
+ Volume "ztlp_bootstrap_test-100-corp_data"  Creating
+ Volume "ztlp_bootstrap_test-100-corp_data"  Created
+ Container ztlp-bootstrap-test-100-corp  Creating
+ Container ztlp-bootstrap-test-100-corp  Created
+ Container ztlp-bootstrap-test-100-corp  Starting
+ Container ztlp-bootstrap-test-100-corp  Started
+
+
+127.0.0.1 - - [19/May/2026 07:09:49] "GET /claim?token=p52o1ifj0dImzuNEQ4rTo3dz_zpoYq4n_k4FMrrlkhk HTTP/1.1" 200 3925
+bin/launch args: ['/home/trs/ztlp/ztlp.net/bin/launch', 'create', 'test-100-corp', '--org', 'Test 100 Corp', '--email', 'alice@test-100.example.com', '--zone', 'test-100.ztlp']
+
+bin/launch stdout: 
+
+bin/launch stderr: Instance already exists: test-100-corp (/home/trs/ztlp/ztlp.net/data/instances/test-100-corp)
+
+
+instance_dir: /home/trs/ztlp/ztlp.net/data/instances/test-100-corp
+
+docker compose stdout: 
+
+docker compose stderr:  Container ztlp-bootstrap-test-100-corp  Running
+
+
+127.0.0.1 - - [19/May/2026 07:09:49] "POST /claim/launch HTTP/1.1" 200 4056
+127.0.0.1 - - [19/May/2026 07:17:29] "GET / HTTP/1.1" 200 3307
+127.0.0.1 - - [19/May/2026 07:30:09] "GET / HTTP/1.1" 200 3307
+127.0.0.1 - - [19/May/2026 07:34:02] "GET / HTTP/1.1" 200 3307
+127.0.0.1 - - [19/May/2026 07:34:03] "GET / HTTP/1.1" 200 3307
+127.0.0.1 - - [19/May/2026 07:34:06] "GET /start HTTP/1.1" 200 5575
+127.0.0.1 - - [19/May/2026 07:35:23] "POST /start HTTP/1.1" 201 3330
+127.0.0.1 - - [19/May/2026 07:35:23] "POST /claim/launch HTTP/1.1" 404 2565
+127.0.0.1 - - [19/May/2026 07:36:14] "POST /start HTTP/1.1" 201 3330
+127.0.0.1 - - [19/May/2026 07:36:14] "POST /claim/launch HTTP/1.1" 404 2565
+127.0.0.1 - - [19/May/2026 07:36:36] "POST /start HTTP/1.1" 201 3330

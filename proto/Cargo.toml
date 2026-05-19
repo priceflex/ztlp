@@ -45,6 +45,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 blake2 = "0.10"
+sha2 = { version = "0.10", default-features = false }
 subtle = "2.6"
 toml = "0.8"
 base64 = "0.22"

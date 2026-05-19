@@ -965,22 +965,54 @@ impl ServiceRegistry {
     }
 }
 
-/// Encode a service name into a 16-byte DstSvcID field.
+/// Encode a service name into a 16-byte DstSvcHash field.
 ///
-/// Pads with zeros if shorter than 16 bytes.
-/// Returns an error if the name is too long.
+/// **DEPRECATED single-string surface.** Prefer [`encode_service_id`] which
+/// accepts an optional zone for namespacing. Retained for FFI call sites
+/// that have not yet been threaded with a zone context. Internally delegates
+/// to `encode_service_id(None, name)` — i.e. it is now a SHA-256 hash, NOT
+/// zero-padded ASCII. The `Result` return type is kept for source-compat;
+/// the error arm is unreachable (hashing never fails).
 pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    let bytes = name.as_bytes();
-    if bytes.len() > 16 {
-        return Err(format!(
-            "service name '{}' too long ({} bytes, max 16)",
-            name,
-            bytes.len()
-        ));
-    }
+    Ok(encode_service_id(None, name))
+}
+
+/// Canonicalize+hash a `(zone, name)` pair into a 16-byte routing key.
+///
+/// This is the on-wire `dst_svc_hash` value carried by HELLO packets. The
+/// 16-byte field is opaque — relays/gateways compare it byte-wise; they do
+/// NOT round-trip it back to a UTF-8 string. The collision space is 2^128,
+/// identical to IPv6 SLAAC and well beyond the birthday bound for any
+/// realistic service population.
+///
+/// Canonicalization (deterministic across all implementations):
+///   1. Lowercase `zone` (if present) and `name`.
+///   2. Strip trailing `.` characters from each (DNS-style root marker).
+///   3. Form canonical bytes: `format!("{}/{}", zone, name)` when `zone`
+///      is `Some`, else just `name`.
+///   4. Truncate `SHA-256(canonical_utf8)` to the first 16 bytes.
+///
+/// Empty inputs are accepted and hash deterministically (do not panic).
+/// Long inputs (DNS-class 253 chars and beyond) are accepted — the legacy
+/// 16-byte ASCII limit is lifted by this encoder.
+pub fn encode_service_id(zone: Option<&str>, name: &str) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let name_canon = name.to_ascii_lowercase();
+    let name_canon = name_canon.trim_end_matches('.');
+    let canonical: String = match zone {
+        Some(z) => {
+            let z_canon = z.to_ascii_lowercase();
+            let z_canon = z_canon.trim_end_matches('.');
+            format!("{}/{}", z_canon, name_canon)
+        }
+        None => name_canon.to_string(),
+    };
+    let mut h = Sha256::new();
+    h.update(canonical.as_bytes());
+    let out = h.finalize();
     let mut buf = [0u8; 16];
-    buf[..bytes.len()].copy_from_slice(bytes);
-    Ok(buf)
+    buf.copy_from_slice(&out[..16]);
+    buf
 }
 
 /// Parse a single `--forward` argument.
@@ -1232,12 +1264,98 @@ mod tests {
 
     #[test]
     fn test_encode_service_name() {
-        let encoded = encode_service_name("ssh").unwrap();
-        assert_eq!(&encoded[..3], b"ssh");
-        for &b in &encoded[3..] {
-            assert_eq!(b, 0);
-        }
-        assert!(encode_service_name(&"a".repeat(MAX_SERVICE_NAME_LEN + 1)).is_err());
+        // The legacy entry point is now a thin wrapper over `encode_service_id(None, _)`.
+        // It MUST be deterministic and MUST match the underlying hash exactly. The
+        // historic "name too long" error path is gone — long names are valid now.
+        let a = encode_service_name("ssh").unwrap();
+        let b = encode_service_name("ssh").unwrap();
+        assert_eq!(a, b, "deterministic");
+        assert_eq!(a, encode_service_id(None, "ssh"));
+        // Names longer than the old 16-byte ASCII cap must succeed (was the
+        // original failure mode at ffi.rs:128).
+        let long = "a".repeat(64);
+        assert!(encode_service_name(&long).is_ok());
+    }
+
+    // ── encode_service_id hash-vector tests (Option C wire decoupling) ──
+    //
+    // These pin the canonical SHA-256-truncated-to-128-bit encoding of the
+    // on-wire `dst_svc_hash` field. Canonicalization rules:
+    //   • Lowercase both `zone` and `name`
+    //   • Strip trailing dots
+    //   • Join as `lowercase(zone) + "/" + lowercase(name)` when zone given
+    //   • Use `lowercase(name)` alone when no zone
+    //   • Truncate `sha256(canonical_utf8)` to first 16 bytes
+
+    fn sha256_16(s: &str) -> [u8; 16] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        let out = h.finalize();
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&out[..16]);
+        buf
+    }
+
+    #[test]
+    fn test_encode_service_id_bare_name() {
+        assert_eq!(encode_service_id(None, "ssh"), sha256_16("ssh"));
+    }
+
+    #[test]
+    fn test_encode_service_id_zone_plus_name() {
+        assert_eq!(
+            encode_service_id(Some("acme.ztlp"), "bootstrap"),
+            sha256_16("acme.ztlp/bootstrap")
+        );
+    }
+
+    #[test]
+    fn test_encode_service_id_canonicalization() {
+        // Mixed case + trailing-dot zone must canonicalize to the lowercase,
+        // dot-stripped form.
+        assert_eq!(
+            encode_service_id(Some("ACME.Ztlp."), "Bootstrap"),
+            encode_service_id(Some("acme.ztlp"), "bootstrap")
+        );
+        // Trailing dot stripped on bare name too.
+        assert_eq!(
+            encode_service_id(None, "SSH."),
+            encode_service_id(None, "ssh")
+        );
+    }
+
+    #[test]
+    fn test_encode_service_id_empty_name_is_deterministic() {
+        // Must NOT panic. Deterministic hash of empty string.
+        let a = encode_service_id(None, "");
+        let b = encode_service_id(None, "");
+        assert_eq!(a, b);
+        assert_eq!(a, sha256_16(""));
+    }
+
+    #[test]
+    fn test_encode_service_id_long_name_does_not_error() {
+        // The original encoder bombed on names > 16 bytes. The hash encoder
+        // must accept arbitrary lengths up to DNS-class 253 chars.
+        let zone = "a".repeat(125);
+        let name = "b".repeat(125); // 125 + "/" + 125 = 251 bytes canonical
+        let h1 = encode_service_id(Some(&zone), &name);
+        let h2 = encode_service_id(Some(&zone), &name);
+        assert_eq!(h1, h2, "must be deterministic");
+        // And still produces a 16-byte hash (compile-time guaranteed but sanity check).
+        assert_eq!(h1.len(), 16);
+    }
+
+    #[test]
+    fn test_encode_service_id_distinct_inputs_differ() {
+        // Different inputs should (with overwhelming probability) hash differently.
+        let a = encode_service_id(None, "ssh");
+        let b = encode_service_id(Some("acme.ztlp"), "ssh");
+        let c = encode_service_id(Some("other.ztlp"), "ssh");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
     }
 
     #[test]

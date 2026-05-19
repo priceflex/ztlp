@@ -177,6 +177,125 @@ ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 \
 - **08:25 UTC** — Session start. Read prior handoff, verified all 3 AWS hosts
   reachable with new key, all containers healthy, ngrok tunnel live.
 - **08:30 UTC** — Plan written, todo list created, this handoff replaces prior.
-  About to begin Phase 1.
+- **08:32 UTC** — Phase 1 done: ngrok flipped to branded `https://www.ztlp.net/`.
+  Bug found + fixed: docker-compose hardcoded LAUNCH_REFERRAL_CODES /
+  LAUNCH_REQUIRE_POW, ignoring .env. Three referral codes seeded.
+  Commit `47bc9fb`.
+- **08:32–08:40 UTC** — Phase 2 walkthrough: drove the live https://www.ztlp.net/
+  flow with a headless browser as a real human would.
+  - Submitted form: Tech Rockstars / hermes@techrockstars.com /
+    techrockstars.ztlp / referral ZTLP-HERMES-2026.
+  - Got claim token `5z53bDA0cIlV2j1-...`; clicked claim link; saw
+    `Status: claimed`.
+  - **5 real bugs surfaced from server logs + DB inspection:**
+    1. `bin/launch` bash wrapper uses `printf '%q'`, which busybox sh
+       (the only shell in the alpine launch image) does not support.
+       Also: the wrapper isn't even copied into the image by Dockerfile.
+    2. `_provision_zone_dockers` has a `NameError: name 'out2' is not
+       defined` on the error path — silently marked requests `claimed`
+       even when nothing was provisioned.
+    3. Default NS server is `10.69.95.14:23096` (old openclaw LAN IP),
+       not the production AWS NS at `34.219.38.89:23096`.
+    4. `absolute_url()` renders `http://` URLs behind ngrok's TLS
+       termination (doesn't honour `X-Forwarded-Proto`).
+    5. Launch container has no docker CLI and no docker socket mount,
+       so even if the code worked it couldn't spawn sub-containers.
+- **08:40–09:05 UTC** — TDD fix pass for bugs 1–5:
+  - Delegated code changes to subagent (per standing rule).
+  - Rewrote `_provision_zone_dockers` in pure Python (no bash wrapper).
+  - Updated `absolute_url()` to honour `X-Forwarded-Proto/Host`.
+  - Switched NS / listener defaults to AWS prod addresses.
+  - Added docker-cli + compose plugin to launch Dockerfile.
+  - Mounted `/var/run/docker.sock` + `LAUNCH_INSTANCE_HOST_ROOT` and
+    added `group_add: [988]` for docker-group access.
+  - Added 8 new tests (provision + absolute_url). 38/38 passing in 16s.
+  - Independently re-verified by main agent.
+  - Commit `063f2f5` (340 insertions / 52 deletions).
+- **09:05 UTC** — Synced fixes to NS host, rebuilt + recreated `ztlp-launch`
+  with docker socket access — verified container can `docker ps` against
+  the host daemon. https://www.ztlp.net/health = 200 OK.
+- **09:08 UTC** — Discovered Bug #6: `priceflex/ztlp-bootstrap:latest` is a
+  PRIVATE Docker Hub repo → unauthorized to pull on NS host. The launch
+  app's `docker compose up -d` would fail to find the image.
+  - Decision: build the bootstrap image locally on the NS host from
+    `~/ztlp/bootstrap/` source (Rails app).
+  - rsync'd ~123MB of bootstrap source to NS host successfully.
+- **09:09–09:25 UTC** — `docker build` on NS host **hung the entire host**.
+  - Rails image build (Ruby + bundler + node + asset compilation) on a
+    small AWS instance with `ztlp-launch` + `ngrok-launch` + `ztlp-ns`
+    already running pushed memory/swap past the limit.
+  - SSH connections began returning `Connection timed out during banner
+    exchange` — sshd alive but host too overloaded to negotiate.
+  - ngrok tunnel disconnected → `https://www.ztlp.net/` now serves
+    "endpoint offline" page.
+  - 30+ minutes of waiting did not recover the host.
 
-(More entries appended as work progresses.)
+---
+
+## 9. CURRENT STATE — STOPPED, NEEDS OPERATOR ACTION
+
+🛑 **NS host (34.219.38.89) is unresponsive. SSH banner times out at 22.
+   ngrok endpoint is offline. Likely OOM-stalled by the Rails docker build.**
+
+### What works
+- All code fixes are committed locally on `feature/ztlp-end-to-end-stack-test`
+  (commits `47bc9fb`, `063f2f5`). 38/38 tests passing.
+- Relay host `34.218.240.106` (ztlp-relay) — last confirmed healthy 08:25 UTC.
+- Gateway host `54.218.127.30` (ztlp-gateway) — last confirmed healthy 08:25 UTC.
+- Local dev box has full bootstrap source and full ztlp.net source on this
+  branch.
+
+### What's broken
+- NS host completely unresponsive (sshd / ngrok / launch all unreachable).
+- Cannot continue without bringing the NS host back online.
+
+### Action required from Steve
+**Reboot the NS host via AWS console** (or `aws ec2 reboot-instances
+--instance-ids i-XXXX`). Once it's back, the auto-start containers
+(`ztlp-launch`, `ngrok-launch`, `ztlp-ns`) should come up on their own
+because they all have `restart: unless-stopped`. Then ping me to resume.
+
+### Next session — first 5 minutes
+1. Verify NS host reachable: `ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 uptime`
+2. Verify `docker ps` shows all 3 containers running and `https://www.ztlp.net/health` returns 200.
+3. **Switch strategy on bootstrap image:** instead of building on the
+   small NS host, build on the dev box (this machine has plenty of RAM)
+   and `docker save | ssh ... docker load` the tarball:
+   ```bash
+   cd ~/ztlp/bootstrap && docker build -t priceflex/ztlp-bootstrap:latest .
+   docker save priceflex/ztlp-bootstrap:latest | \
+     ssh -i ~/ztlp/.ssh/ztlp_aws_key ubuntu@34.219.38.89 'docker load'
+   ```
+   This won't OOM the NS host because we just import the finished image.
+4. Resume Phase 2: re-trigger the claim for `techrockstars.ztlp` (row 12
+   in the launch DB) — should now succeed end-to-end and spawn a
+   `ztlp-bootstrap-tech-rockstars` container on the NS host.
+
+### Decisions deferred to operator
+- Whether to stay on the small NS instance class (risks recurrence on
+  any future heavy build) or resize to a larger instance.
+- Whether to give the launch agent Docker Hub credentials so it can
+  `docker pull` instead of relying on the locally-built image.
+- Whether to move the bootstrap container off the NS host entirely
+  (gateway/relay box has more headroom).
+
+---
+
+## 10. Pitfalls captured for the next session
+
+1. **Don't run `docker build` of the Rails bootstrap image on the small
+   NS host** — it OOMs the box. Build on dev, `docker save | docker load`.
+2. **Launch container needs docker-cli + socket mount + group_add: 988**
+   to drive the host daemon. Reverted from `cap_drop: ALL` because the
+   non-root user must fork/exec `docker-cli`. Documented in the
+   commit message of `063f2f5`.
+3. **`absolute_url()` must read `X-Forwarded-Proto`** behind any TLS
+   terminator (ngrok, nginx, ALB). Tests now lock this in.
+4. **The `bin/launch` shell wrapper is dead code from the Python path's
+   perspective.** Kept on disk for human ops use only. If someone
+   re-introduces a subprocess call to it from app.py, the Python tests
+   should still catch the regression because they assert the absence
+   of a `bin/launch` argv in `subprocess.run` calls.
+5. **ngrok's free tier serves a branded "endpoint offline" 404 page**
+   when the backend is down — easy to mistake for an app bug. Always
+   `ssh uptime` the underlying host first.

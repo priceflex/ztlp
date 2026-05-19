@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "ztlp/header_verifier"
 
 class AuthenticationTest < ActionDispatch::IntegrationTest
+  GATEWAY_SECRET = "auth-test-shared-secret-XYZ"
+
   setup do
     @admin = admin_users(:super_admin)
   end
@@ -42,23 +45,67 @@ class AuthenticationTest < ActionDispatch::IntegrationTest
     assert_response :success
   end
 
-  test "trusted gateway header auto signs in without password" do
-    with_env("ZTLP_TRUST_GATEWAY_AUTH" => "true") do
-      get root_path, headers: {
-        "X-ZTLP-Authenticated" => "1",
-        "X-ZTLP-Admin-Email" => @admin.email
-      }
+  test "trusted gateway header with valid HMAC auto signs in without password" do
+    headers = signed_gateway_headers(email: @admin.email)
+    with_env(
+      "ZTLP_TRUST_GATEWAY_AUTH" => "true",
+      "ZTLP_GATEWAY_HEADER_SECRET" => GATEWAY_SECRET
+    ) do
+      get root_path, headers: headers
     end
 
     assert_response :success
   end
 
+  test "trusted gateway header with corrupted signature redirects to login" do
+    headers = signed_gateway_headers(email: @admin.email)
+    headers["X-ZTLP-Signature"] = "0" * headers["X-ZTLP-Signature"].length
+
+    with_env(
+      "ZTLP_TRUST_GATEWAY_AUTH" => "true",
+      "ZTLP_GATEWAY_HEADER_SECRET" => GATEWAY_SECRET
+    ) do
+      get root_path, headers: headers
+    end
+
+    assert_redirected_to login_path
+  end
+
+  test "trusted gateway header with no signature redirects to login" do
+    headers = signed_gateway_headers(email: @admin.email)
+    headers.delete("X-ZTLP-Signature")
+
+    with_env(
+      "ZTLP_TRUST_GATEWAY_AUTH" => "true",
+      "ZTLP_GATEWAY_HEADER_SECRET" => GATEWAY_SECRET
+    ) do
+      get root_path, headers: headers
+    end
+
+    assert_redirected_to login_path
+  end
+
+  test "trusted gateway header redirects to login when server secret is unset" do
+    headers = signed_gateway_headers(email: @admin.email)
+
+    with_env(
+      "ZTLP_TRUST_GATEWAY_AUTH" => "true",
+      "ZTLP_GATEWAY_HEADER_SECRET" => nil
+    ) do
+      get root_path, headers: headers
+    end
+
+    assert_redirected_to login_path
+  end
+
   test "trusted gateway header is ignored unless explicitly enabled" do
-    with_env("ZTLP_TRUST_GATEWAY_AUTH" => nil) do
-      get root_path, headers: {
-        "X-ZTLP-Authenticated" => "1",
-        "X-ZTLP-Admin-Email" => @admin.email
-      }
+    headers = signed_gateway_headers(email: @admin.email)
+
+    with_env(
+      "ZTLP_TRUST_GATEWAY_AUTH" => nil,
+      "ZTLP_GATEWAY_HEADER_SECRET" => GATEWAY_SECRET
+    ) do
+      get root_path, headers: headers
     end
 
     assert_redirected_to login_path
@@ -117,6 +164,18 @@ class AuthenticationTest < ActionDispatch::IntegrationTest
 
   def sign_in(admin)
     post login_path, params: { email: admin.email, password: "password123" }
+  end
+
+  # Build a valid signed X-ZTLP-* header set. Secret defaults to GATEWAY_SECRET.
+  def signed_gateway_headers(email:, secret: GATEWAY_SECRET, timestamp: Time.now.utc.iso8601)
+    base = {
+      "X-ZTLP-Authenticated" => "1",
+      "X-ZTLP-Admin-Email" => email,
+      "X-ZTLP-Timestamp" => timestamp
+    }
+    canonical = Ztlp::HeaderVerifier.canonical_string(base.to_a)
+    sig = Ztlp::HeaderVerifier.hmac_hex(canonical, secret)
+    base.merge("X-ZTLP-Signature" => sig)
   end
 
   def with_env(overrides)

@@ -21,9 +21,22 @@ class ApplicationController < ActionController::Base
 
   def trusted_gateway_admin
     return unless ActiveModel::Type::Boolean.new.cast(ENV["ZTLP_TRUST_GATEWAY_AUTH"])
-    return unless request.headers["X-ZTLP-Authenticated"].to_s == "1"
 
-    email = request.headers["X-ZTLP-Admin-Email"].to_s.downcase.strip
+    secret = ENV["ZTLP_GATEWAY_HEADER_SECRET"].to_s
+    if secret.empty?
+      ApplicationController.warn_gateway_secret_missing!
+      return nil
+    end
+
+    status, payload = Ztlp::HeaderVerifier.verify_request(request.headers, secret: secret)
+    if status != :ok
+      Rails.logger.warn("[gateway-auth] rejected gateway header set: #{payload}")
+      return nil
+    end
+
+    return unless payload["authenticated"].to_s == "1" || payload["authenticated"].to_s.downcase == "true"
+
+    email = payload["admin-email"].to_s.downcase.strip
     return if email.blank?
 
     admin = AdminUser.find_by("LOWER(email) = ?", email)
@@ -39,6 +52,15 @@ class ApplicationController < ActionController::Base
       ip_address: request.remote_ip
     )
     admin
+  end
+
+  # Log the "secret missing" warning at most once per process, so a
+  # misconfigured deployment isn't drowned in repeated entries.
+  def self.warn_gateway_secret_missing!
+    @gateway_secret_warning_logged ||= begin
+      Rails.logger.warn("[gateway-auth] disabled: ZTLP_GATEWAY_HEADER_SECRET not set")
+      true
+    end
   end
 
   def orchestrator_onboarding_admin

@@ -618,6 +618,11 @@ class LaunchApp:
                         f"ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY={secrets.token_hex(16)}\n"
                         f"ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY={secrets.token_hex(16)}\n"
                         f"ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT={secrets.token_hex(16)}\n"
+                        # Per-zone HMAC secret shared between the ZTLP gateway
+                        # (which signs X-ZTLP-* headers) and the bootstrap Rails app
+                        # (which verifies them via Ztlp::HeaderVerifier). Forged
+                        # headers from any other source are rejected.
+                        f"ZTLP_GATEWAY_HEADER_SECRET={secrets.token_hex(32)}\n"
                     )
                 # Best-effort chmod — fine if we're already non-root.
                 try:

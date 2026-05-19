@@ -166,8 +166,10 @@ defmodule ZtlpGateway.Listener do
           _ -> :crypto.strong_rand_bytes(12)
         end
 
-      # Extract service name from HELLO packet's dst_svc_id field
-      service = Packet.extract_service_name(packet_data)
+      # Option C: dst_svc_hash is now an opaque 16-byte truncated SHA-256, not a
+      # printable name. Carry the raw hash on the session; find_backend/2 resolves
+      # it against the configured backends.
+      service_hash = Packet.extract_service_hash(packet_data)
 
       opts = %{
         session_id: session_id,
@@ -175,7 +177,7 @@ defmodule ZtlpGateway.Listener do
         udp_socket: state.socket,
         static_pub: state.static_pub,
         static_priv: state.static_priv,
-        service: service
+        service: service_hash
       }
 
       case DynamicSupervisor.start_child(

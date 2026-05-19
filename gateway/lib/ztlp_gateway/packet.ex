@@ -168,21 +168,59 @@ defmodule ZtlpGateway.Packet do
   def extract_session_id(_), do: {:error, :cannot_extract_session_id}
 
   @doc """
-  Extract the service name from a handshake packet's dst_svc_id field.
-  Returns the service name as a trimmed UTF-8 string (null bytes stripped).
+  Extract the 16-byte `dst_svc_hash` (Option C wire decoupling) from a HELLO packet.
+
+  Returns the raw 16-byte routing hash — an opaque truncated SHA-256 of the
+  canonical `lowercase(service_name)` (or `lowercase(zone)/lowercase(name)`
+  when a zone is in scope). Callers compare hashes byte-wise; they MUST NOT
+  attempt to round-trip this back to a UTF-8 string. The Rust producer side
+  lives in `proto/src/tunnel.rs::encode_service_id`.
+
+  Returns `<<0::128>>` on a malformed packet, which the gateway's
+  `find_backend/2` resolves to the `"default"` backend (same convention as
+  a client that did not specify any service).
   """
-  def extract_service_name(
+  @spec extract_service_hash(binary()) :: <<_::128>>
+  def extract_service_hash(
         <<@magic::16, @version::4, @handshake_hdr_len::12, _flags::16, _msg_type::8,
           _crypto_suite::16, _key_id::16, _session_id::binary-size(12),
           _packet_seq::64, _timestamp::64, _src_node_id::binary-size(16),
-          dst_svc_id::binary-size(16), _::binary>>
+          dst_svc_hash::binary-size(16), _::binary>>
       ) do
-    # Strip trailing null bytes and decode as UTF-8
-    name = dst_svc_id |> :binary.replace(<<0>>, <<>>, [:global]) |> String.trim()
-    if name == "", do: "default", else: name
+    dst_svc_hash
   end
 
-  def extract_service_name(_), do: "default"
+  def extract_service_hash(_), do: <<0::128>>
+
+  @doc """
+  Compute the 16-byte routing hash for a human-readable service name.
+
+  This is the Elixir-side mirror of the Rust `encode_service_id(None, name)`
+  helper. The two MUST stay byte-identical so the gateway can resolve a
+  HELLO packet's `dst_svc_hash` against its configured backend names.
+
+  Canonicalization: lowercase + strip trailing dots, then truncate
+  `SHA-256(canonical_utf8)` to the first 16 bytes.
+  """
+  @spec service_hash(String.t()) :: <<_::128>>
+  def service_hash(name) when is_binary(name) do
+    canon =
+      name
+      |> String.downcase()
+      |> String.trim_trailing(".")
+
+    :crypto.hash(:sha256, canon) |> :binary.part(0, 16)
+  end
+
+  @doc """
+  DEPRECATED. Backward-compat shim that returns the 16-byte routing hash
+  instead of the legacy zero-padded ASCII name. Kept so any external caller
+  that still references `extract_service_name/1` keeps compiling, but the
+  returned value is now an opaque binary, not a printable string. New code
+  should use `extract_service_hash/1`.
+  """
+  @deprecated "Use extract_service_hash/1 (returns the raw 16-byte routing hash)"
+  def extract_service_name(packet_data), do: extract_service_hash(packet_data)
 
   @doc """
   Extract the HdrLen field to determine packet type.

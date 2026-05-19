@@ -3147,10 +3147,33 @@ defmodule ZtlpGateway.Session do
     |> Enum.each(fn data -> Backend.send_data(pid, data) end)
   end
 
-  defp find_backend(backends, service) do
+  # Option C: `service` is the 16-byte routing hash extracted from the HELLO
+  # packet's `dst_svc_hash` field. We resolve it by comparing against
+  # `Packet.service_hash(b.name)` for each configured backend. The all-zero
+  # sentinel (client sent no service) or any unmatched hash falls through to
+  # the backend named "default" — preserving the historic single-service
+  # convenience behaviour.
+  defp find_backend(backends, <<service_hash::binary-size(16)>>) do
+    case Enum.find(backends, fn b -> Packet.service_hash(b.name) == service_hash end) do
+      nil ->
+        # Fall back to "default" backend if the hash isn't recognized
+        case Enum.find(backends, fn b -> b.name == "default" end) do
+          nil -> :error
+          backend -> {:ok, backend}
+        end
+
+      backend ->
+        {:ok, backend}
+    end
+  end
+
+  # Legacy fallback for any caller that still passes a string. The runtime
+  # value flowing through Listener -> Session.opts -> state.service is the
+  # 16-byte hash binary, so this clause is hit only by tests that still
+  # construct sessions with `service: "name"`.
+  defp find_backend(backends, service) when is_binary(service) do
     case Enum.find(backends, fn b -> b.name == service end) do
       nil ->
-        # Fall back to "default" backend if the requested service isn't found
         case Enum.find(backends, fn b -> b.name == "default" end) do
           nil -> :error
           backend -> {:ok, backend}

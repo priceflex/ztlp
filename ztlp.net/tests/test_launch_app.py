@@ -779,6 +779,21 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         self.assertIn("priceflex/ztlp-bootstrap:latest", compose_text)
         self.assertIn("ztlp-bootstrap-acme-corp", compose_text)
         self.assertIn(f"127.0.0.1:{result['port']}:3000", compose_text)
+        # Regression: the gateway sidecar must use the v0.26 CLI shape.
+        # `ztlp listen` removed `--service` in favor of `--service-name`, and
+        # the value must stay under 16 bytes (relay-side padding). The NS
+        # SVC record (long FQDN) is registered separately via `ns register`.
+        self.assertIn("--service-name gw-acme-corp", compose_text)
+        self.assertNotIn("--service bootstrap", compose_text)
+        # Regression: `ztlp keygen` v0.26 does NOT accept -y (no interactive
+        # prompt exists for keygen). Earlier compose generation copy-pasted
+        # `-y` from `ztlp setup` and the gateway sidecar crash-looped.
+        self.assertNotIn("ztlp keygen --output /data/keys/identity.json -y", compose_text)
+        self.assertIn("ztlp keygen --output /data/keys/identity.json", compose_text)
+        # Regression: `ztlp ns register` v0.26 takes --name <FQDN> + --zone
+        # (positional NAME and `--type svc` were removed).
+        self.assertIn("ns register --name bootstrap.acme.ztlp --zone acme.ztlp", compose_text)
+        self.assertNotIn("--type svc", compose_text)
         # subprocess.run should have been invoked with `docker compose up -d`.
         self.assertTrue(self._calls, "expected subprocess.run to have been called")
         last = self._calls[-1]

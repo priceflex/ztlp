@@ -23,8 +23,10 @@ class LaunchAppTest(unittest.TestCase):
         import subprocess as _subprocess
         self._subprocess = _subprocess
         self._real_subprocess_run = _subprocess.run
+        self._subprocess_calls = []
 
         def _fake_run(cmd, *args, **kwargs):
+            self._subprocess_calls.append({"cmd": cmd, "cwd": kwargs.get("cwd")})
             return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
         _subprocess.run = _fake_run
@@ -672,6 +674,162 @@ class LaunchAppTest(unittest.TestCase):
         payload = _json.loads(body)
         self.assertFalse(payload["available"])
         self.assertEqual("taken_locally", payload["reason"])
+
+    # ── /api/admin-pubkey ────────────────────────────────────────────
+
+    def _claim_token_for(self, org_name, zone):
+        """Provision a tenant via /start + /claim and return the claim token.
+
+        Both /start (compose generation) and /claim (which calls
+        _provision_zone_dockers + docker compose up) run their `docker compose`
+        invocation through the fake subprocess.run in setUp, so this is pure
+        Python + a populated instance dir on disk.
+        """
+        _status, _headers, body = self.post_form(
+            "/start",
+            {
+                "organization_name": org_name,
+                "admin_name": "Pubkey Admin",
+                "admin_email": "pubkey@example.com",
+                "zone": zone,
+            },
+        )
+        token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
+        # Hit /claim to actually provision the instance dir + instance.env.
+        self.request("GET", f"/claim?token={token}")
+        return token
+
+    def test_admin_pubkey_rejects_missing_token(self):
+        status, _headers, body = self.post_form(
+            "/api/admin-pubkey",
+            {"pubkey_hex": "a" * 64},
+        )
+        self.assertEqual(HTTPStatus.UNAUTHORIZED, status)
+        self.assertIn("invalid", body.lower())
+
+    def test_admin_pubkey_rejects_invalid_token(self):
+        status, _headers, body = self.post_form(
+            "/api/admin-pubkey",
+            {"token": "not-a-real-token", "pubkey_hex": "a" * 64},
+        )
+        self.assertEqual(HTTPStatus.UNAUTHORIZED, status)
+        self.assertIn("invalid", body.lower())
+
+    def test_admin_pubkey_rejects_bad_hex(self):
+        token = self._claim_token_for("Pubkey BadHex Co", "pubkey-badhex.ztlp")
+        for bad in [
+            "",
+            "short",
+            "G" * 64,  # non-hex char (uppercase G)
+            "a" * 63,  # off by one
+            "a" * 65,  # off by one
+        ]:
+            with self.subTest(bad=bad):
+                status, _headers, body = self.post_form(
+                    "/api/admin-pubkey",
+                    {"token": token, "pubkey_hex": bad},
+                )
+                self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+                self.assertIn("64 lowercase hex", body)
+
+    def test_admin_pubkey_accepts_uppercase_hex_by_normalizing(self):
+        token = self._claim_token_for("Pubkey Upper Co", "pubkey-upper.ztlp")
+        valid_upper = "AB" * 32  # 64 chars, uppercase hex, lowercases to a valid 32-byte key
+        status, _headers, body = self.post_form(
+            "/api/admin-pubkey",
+            {"token": token, "pubkey_hex": valid_upper},
+        )
+        self.assertEqual(HTTPStatus.OK, status, msg=body)
+        # Verify the file was written with the lowercased value.
+        instance_env = os.path.join(
+            self.instance_root.name, "pubkey-upper-co", "instance.env"
+        )
+        with open(instance_env, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={'ab' * 32}", text)
+
+    def test_admin_pubkey_writes_env_and_recreates_gateway(self):
+        token = self._claim_token_for("Pubkey Demo Co", "pubkey-demo.ztlp")
+        # Clear the call log so we only see the docker recreate invocation.
+        self._subprocess_calls.clear()
+
+        pubkey = "0123456789abcdef" * 4  # 64 hex chars
+        status, headers, body = self.post_form(
+            "/api/admin-pubkey",
+            {"token": token, "pubkey_hex": pubkey},
+        )
+        self.assertEqual(HTTPStatus.OK, status, msg=body)
+        self.assertEqual("application/json; charset=utf-8", headers["Content-Type"])
+        import json as _json
+        payload = _json.loads(body)
+        self.assertTrue(payload["applied"])
+        self.assertEqual("pubkey-demo-co", payload["slug"])
+
+        # instance.env now contains the new pubkey.
+        instance_dir = os.path.join(self.instance_root.name, "pubkey-demo-co")
+        with open(os.path.join(instance_dir, "instance.env"), "r", encoding="utf-8") as fh:
+            env_text = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey}", env_text)
+        # The empty default line was REPLACED, not appended — assert only one
+        # occurrence of the key.
+        self.assertEqual(1, env_text.count("ZTLP_ADMIN_PUBKEY_HEX="))
+
+        # And we invoked `docker compose up -d --force-recreate gateway` in the
+        # instance dir. Without --force-recreate the running container would
+        # keep the old (empty) env value.
+        recreate_calls = [
+            c for c in self._subprocess_calls
+            if c["cmd"][:1] == ["docker"] and "--force-recreate" in c["cmd"]
+        ]
+        self.assertEqual(1, len(recreate_calls), msg=str(self._subprocess_calls))
+        self.assertEqual(instance_dir, recreate_calls[0]["cwd"])
+        self.assertIn("gateway", recreate_calls[0]["cmd"])
+
+    def test_admin_pubkey_rebind_overwrites_previous_value(self):
+        token = self._claim_token_for("Pubkey Rebind Co", "pubkey-rebind.ztlp")
+        first = "11" * 32
+        second = "22" * 32
+
+        status1, _h1, _b1 = self.post_form(
+            "/api/admin-pubkey", {"token": token, "pubkey_hex": first},
+        )
+        self.assertEqual(HTTPStatus.OK, status1)
+        status2, _h2, _b2 = self.post_form(
+            "/api/admin-pubkey", {"token": token, "pubkey_hex": second},
+        )
+        self.assertEqual(HTTPStatus.OK, status2)
+
+        instance_env = os.path.join(self.instance_root.name, "pubkey-rebind-co", "instance.env")
+        with open(instance_env, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={second}", text)
+        self.assertNotIn(f"ZTLP_ADMIN_PUBKEY_HEX={first}", text)
+        # Still exactly one occurrence of the key.
+        self.assertEqual(1, text.count("ZTLP_ADMIN_PUBKEY_HEX="))
+
+    def test_admin_pubkey_returns_404_when_instance_not_provisioned(self):
+        # /start creates the request row but does NOT provision the instance —
+        # provisioning happens on the first GET /claim. If the admin POSTs to
+        # /api/admin-pubkey BEFORE clicking the claim link, there is no
+        # instance.env to write into.
+        _status, _headers, body = self.post_form(
+            "/start",
+            {
+                "organization_name": "Pubkey 404 Co",
+                "admin_name": "Pubkey Admin",
+                "admin_email": "pubkey@example.com",
+                "zone": "pubkey-404.ztlp",
+            },
+        )
+        token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
+        # Skip the /claim hit — instance.env does not exist yet.
+
+        status, _h, body = self.post_form(
+            "/api/admin-pubkey",
+            {"token": token, "pubkey_hex": "a" * 64},
+        )
+        self.assertEqual(HTTPStatus.NOT_FOUND, status)
+        self.assertIn("not provisioned", body)
 
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="

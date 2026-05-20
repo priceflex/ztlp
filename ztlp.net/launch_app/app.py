@@ -754,6 +754,7 @@ class LaunchApp:
                 "  register_ns:\n"
                 "    image: priceflex/ztlp-node:latest\n"
                 f"    container_name: \"ztlp-ns-reg-{slug}\"\n"
+                "    network_mode: host\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
                 f"    command: [\"sh\", \"-c\", \"while [ ! -s /data/keys/identity.json ] || grep -q '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json; do sleep 1; done; exec ztlp ns register {service} --type svc --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"

@@ -112,3 +112,13 @@ pub mod vip;
 
 pub mod recv_window;
 pub use recv_window::ReceiveWindow;
+
+// ─── Experimental QUIC transport (Phase 0 scaffold) ─────────────────────
+//
+// Gated behind the `quic-transport` cargo feature. OFF by default so the
+// existing tree — including the iOS NE `ios-sync` build — stays unchanged
+// while the QUIC pivot is being implemented in parallel. See
+// `docs/architecture/quic-noise-handshake.md` and
+// `hermes_session_handoff.md` Task A.
+#[cfg(feature = "quic-transport")]
+pub mod quic_transport;

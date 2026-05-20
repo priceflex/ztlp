@@ -32,6 +32,11 @@ tokio-runtime = [
 ]
 diag = []
 ios-sync = []  # Builds without tokio — for iOS Network Extension
+# Experimental QUIC transport (replaces hand-rolled UDP reliability). OFF by
+# default — pulls in quinn (tokio-backed) + quinn-proto (sans-io) + rustls.
+# Gated so the existing tree keeps building and shipping while the QUIC pivot
+# is being developed in parallel. See docs/architecture/quic-noise-handshake.md.
+quic-transport = ["dep:quinn", "dep:quinn-proto", "dep:rustls"]
 
 [dependencies]
 # --- Always included (sync core + crypto) ---
@@ -68,6 +73,19 @@ qr2term = { version = "0.3", optional = true }
 dirs = { version = "5", optional = true }
 httparse = "1.10.1"
 hmac = "0.12"
+
+# --- Optional: QUIC transport (gated behind `quic-transport` feature) ---
+# Why optional: the QUIC pivot is in-progress (see hermes_session_handoff.md
+# Task A). Keeping these gated means default builds — including the iOS
+# Network Extension's `ios-sync` profile — stay lean and unchanged while
+# the new transport is wired up.
+# - `quinn`       : tokio-backed QUIC endpoint for Gateway/Relay.
+# - `quinn-proto` : sans-io state machine; used by iOS NE (no tokio, <15MB).
+# - `rustls`      : TLS provider required by quinn (we still tunnel Noise
+#                   inside the QUIC stream for Ed25519 identity binding).
+quinn = { version = "0.11.9", optional = true }
+quinn-proto = { version = "0.11.14", optional = true }
+rustls = { version = "0.23.40", optional = true }
 
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.

@@ -2497,20 +2497,32 @@ async fn cmd_connect(
                         return;
                     }
                 };
-
-                // Extract session_id: try DataHeader first (the common case
-                // once sessions are up), then HandshakeHeader (HELLO_ACK /
-                // msg3 echo, anything we might see during handshake).
-                let sid_opt: Option<SessionId> = if data.len() >= DATA_HEADER_SIZE {
-                    DataHeader::deserialize(&data).ok().map(|h| h.session_id)
+                // Extract session_id by discriminating header type via msg_type.
+                // HandshakeHeader and DataHeader have DIFFERENT layouts —
+                // session_id is at offset 11 in HandshakeHeader (after
+                // magic+ver+flags+msg_type+crypto+key_id) but at offset 6 in
+                // DataHeader (after magic+ver+flags). So we MUST identify the
+                // packet type before extracting the session_id.
+                //
+                // We try HandshakeHeader first: if the parse succeeds AND
+                // msg_type is a handshake type (Hello, HelloAck), use the
+                // handshake-shaped session_id. Otherwise, fall back to
+                // DataHeader parsing (which is what every encrypted data
+                // packet uses, including the msg3 final handshake confirmation
+                // which is sent as MsgType::Data).
+                let sid_opt: Option<SessionId> = if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    match HandshakeHeader::deserialize(&data) {
+                        Ok(hdr) if matches!(hdr.msg_type, MsgType::Hello | MsgType::HelloAck) => {
+                            Some(hdr.session_id)
+                        }
+                        _ => None,
+                    }
                 } else {
                     None
                 };
                 let sid_opt = sid_opt.or_else(|| {
-                    if data.len() >= HANDSHAKE_HEADER_SIZE {
-                        HandshakeHeader::deserialize(&data)
-                            .ok()
-                            .map(|h| h.session_id)
+                    if data.len() >= DATA_HEADER_SIZE {
+                        DataHeader::deserialize(&data).ok().map(|h| h.session_id)
                     } else {
                         None
                     }

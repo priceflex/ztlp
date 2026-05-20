@@ -537,42 +537,49 @@ class LaunchApp:
             return self.invalid_token()
         if parse_iso(row["claim_expires_at"]) < self.now():
             return self.invalid_token("That claim token has expired or was revoked.")
-        
-        needs_provision = False
+
+        # First visit (token not yet claimed): render a confirmation form
+        # asking the user to optionally paste their ztlp pubkey BEFORE we
+        # spin up the docker stack. This lets us bake the admin pubkey
+        # into ZTLP_ADMIN_PUBKEY_HEX on first start and skip the
+        # post-provision /api/admin-pubkey + force-recreate dance.
+        #
+        # Subsequent visits (already claimed) just render the status view
+        # — same behavior as before so users can revisit the page to
+        # copy commands.
         if not row["claimed_at"]:
-            now = self.now().replace(microsecond=0).isoformat()
-            with self.connect() as conn:
-                conn.execute(
-                    "UPDATE onboarding_requests SET status = ?, claimed_at = ?, updated_at = ? WHERE id = ?",
-                    ("claimed", now, now, row["id"]),
-                )
-            row = self.find_by_token(token)
-            needs_provision = True
-            
+            return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_confirm(row, token))
+
         row = self.ensure_enrollment_metadata(row)
-        
-        # Provision AFTER we ensure enrollment metadata, so service names exist
-        if needs_provision and row:
-            # Inline execution instead of Thread
-            import sys
-            try:
-                self._provision_zone_dockers(row)
-            except Exception as e:
-                print(f"Error executing provision: {e}", file=sys.stderr)
-            
-        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row))
+        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, token=token))
 
     def handle_claim_launch(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         form = self.read_form(environ)
-        token = form.get("token", [""])[0]
+        token = form.get("token", [""])[0].strip()
+        # Optional admin pubkey paste — see /api/admin-pubkey for the same
+        # validation rule. Empty is allowed (user opts out of passwordless,
+        # falls back to Rails password form).
+        pubkey_hex = form.get("pubkey_hex", [""])[0].strip().lower()
+
         row = self.find_by_token(token) if token else None
         if not row:
             return self.invalid_token()
         if parse_iso(row["claim_expires_at"]) < self.now():
             return self.invalid_token("That claim token has expired or was revoked.")
-        if not row["claimed_at"]:
-            return (HTTPStatus.BAD_REQUEST, "text/html; charset=utf-8", self.page("Claim confirmation required", "<p>The claim token must be confirmed first.</p>"))
-        row = self.ensure_enrollment_metadata(row)
+
+        if pubkey_hex and not re.fullmatch(r"[0-9a-f]{64}", pubkey_hex):
+            # Re-render the confirm form with an error so the user can fix
+            # their paste instead of being thrown to an empty 400 page.
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "text/html; charset=utf-8",
+                self.render_claim_confirm(
+                    row, token,
+                    error="Public key must be exactly 64 lowercase hex characters (32-byte X25519 key).",
+                    submitted_pubkey=pubkey_hex,
+                ),
+            )
+
         now = self.now().replace(microsecond=0).isoformat()
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         with self.connect() as conn:
@@ -591,22 +598,34 @@ class LaunchApp:
         row = self.find_by_token(token)
         if not row:
             return self.invalid_token()
-            
+        row = self.ensure_enrollment_metadata(row)
+
         import sys
         try:
-            self._provision_zone_dockers(row)
+            self._provision_zone_dockers(row, pubkey_hex=pubkey_hex)
         except Exception as e:
             print(f"Error executing provision: {e}", file=sys.stderr)
-            
-        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, note="Launch request recorded. Bootstrap provisioning metadata is ready for the private ZTLP service path."))
 
-    def _provision_zone_dockers(self, row: sqlite3.Row) -> Optional[dict]:
+        note = (
+            "Bootstrap is provisioning. Passwordless sign-in is enabled for the device whose public key you pasted."
+            if pubkey_hex
+            else "Bootstrap is provisioning. Passwordless sign-in is OFF — sign in with the email/password the admin sets on first launch, or POST your device pubkey to /api/admin-pubkey later."
+        )
+        return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, token=token, note=note))
+
+    def _provision_zone_dockers(self, row: sqlite3.Row, pubkey_hex: str = "") -> Optional[dict]:
         """Provision the docker compose scaffold for a zone's bootstrap container.
 
         Pure-Python rewrite of the old bin/launch bash wrapper: writes
         instance.env and docker-compose.yml under LAUNCH_INSTANCE_ROOT/<slug>/
         and then runs ``docker compose up -d`` directly. Any failure is logged
         to stderr but never raised (the caller is a daemon-style thread).
+
+        If ``pubkey_hex`` is a non-empty 64-char lowercase hex string, it is
+        written into ``ZTLP_ADMIN_PUBKEY_HEX`` so the gateway emits an
+        ``--admin-pubkey-email`` flag on first start and passwordless
+        Bootstrap sign-in is live immediately — no separate
+        ``/api/admin-pubkey`` call + recreate is needed.
 
         Returns {slug, port, instance_dir} on success or None on failure.
         """
@@ -670,18 +689,20 @@ class LaunchApp:
                 f"ZTLP_PRIVATE_PORT={port}",
                 f"ZTLP_CREATED_AT={created_at}",
                 # ZTLP_ADMIN_PUBKEY_HEX: the admin's Noise static public key
-                # (hex). Initially empty — the gateway compose command only
-                # emits `--admin-pubkey-email HEX=EMAIL` when this is non-empty,
-                # so passwordless auth stays OFF until an operator deliberately
-                # binds an enrolled device's pubkey here. Until then Rails sees
-                # unsigned traffic and falls back to its normal password form.
+                # (hex). When set at provision time (from the claim
+                # confirmation form), the gateway compose command emits
+                # `--admin-pubkey-email HEX=EMAIL` on first start, so
+                # passwordless sign-in is live the moment the bootstrap
+                # container is healthy — no recreate needed. When left
+                # blank, the gateway accepts traffic but injects no admin
+                # headers and Rails falls back to the password form.
                 #
-                # To flip on passwordless auth without SSH, POST to
-                # /api/admin-pubkey with token=<claim_token>&pubkey_hex=<64hex>
-                # — the handler rewrites this line and runs
-                # `docker compose up -d --force-recreate gateway` so the new
-                # value takes effect immediately. See handle_admin_pubkey.
-                "ZTLP_ADMIN_PUBKEY_HEX=",
+                # To bind a pubkey AFTER provisioning (e.g. when an admin
+                # enrolls a second device), POST to /api/admin-pubkey with
+                # token=<claim_token>&pubkey_hex=<64hex> — the handler
+                # rewrites this line and runs
+                # `docker compose up -d --force-recreate gateway`.
+                f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}",
             ]
             with open(os.path.join(instance_dir, "instance.env"), "w", encoding="utf-8") as fh:
                 fh.write("\n".join(env_lines) + "\n")
@@ -831,7 +852,75 @@ class LaunchApp:
             sys.stderr.flush()
             return None
 
-    def render_claim_page(self, row: sqlite3.Row, note: str = "") -> str:
+    def render_claim_confirm(
+        self,
+        row: sqlite3.Row,
+        token: str,
+        error: str = "",
+        submitted_pubkey: str = "",
+    ) -> str:
+        """Pre-provision confirmation page.
+
+        Shown on the FIRST visit to /claim?token=... before any docker
+        containers are spun up. Asks the user to optionally paste their
+        ztlp device public key (printed at the end of ``ztlp setup``) so
+        the gateway can bake passwordless sign-in into ZTLP_ADMIN_PUBKEY_HEX
+        on first start.
+
+        ``error`` and ``submitted_pubkey`` are populated when handle_claim_launch
+        re-renders this page after rejecting a malformed pubkey paste, so
+        the user doesn't lose their input.
+        """
+        row = self.ensure_enrollment_metadata(row)
+        enrollment_token = row["enrollment_token_uri"] or ""
+        enrollment_command = (
+            f"ztlp setup --token \"{enrollment_token}\" -y"
+            if enrollment_token
+            else "Claim this request to generate enrollment instructions."
+        )
+        error_html = (
+            f"<p class='notice' style='color:#c00'>{esc(error)}</p>" if error else ""
+        )
+        body = f"""
+        <p class="eyebrow">Confirm your claim</p>
+        <h1>{esc(row['organization_name'])}</h1>
+        <p>You're about to provision a private Bootstrap admin panel for
+        zone <code>{esc(row['zone'])}</code>. This step spins up the
+        per-tenant docker stack on the ZTLP host.</p>
+
+        <h2 style="margin-top:1.5em">Step 1 — Enroll a device (recommended)</h2>
+        <p>Run the setup command on the machine you want to use to
+        administer this zone. <code>ztlp setup</code> will print your
+        device's public key at the end — copy it into the box below to
+        enable passwordless Bootstrap sign-in from that device.</p>
+        <pre><code>{esc(enrollment_command)}</code></pre>
+
+        <h2 style="margin-top:1.5em">Step 2 — Bind your device (optional)</h2>
+        <p>Paste the 64-character hex public key from the end of the
+        <code>ztlp setup</code> output. Leave blank to use the classic
+        email + password sign-in on the Bootstrap UI.</p>
+        {error_html}
+        <form method="post" action="/claim/launch">
+          <input type="hidden" name="token" value="{esc(token)}">
+          <p>
+            <label for="pubkey_hex">Device public key (hex, 64 chars):</label><br>
+            <input type="text" name="pubkey_hex" id="pubkey_hex"
+                   value="{esc(submitted_pubkey)}"
+                   pattern="[0-9a-fA-F]{{64}}"
+                   placeholder="a1b2c3...  (or leave blank)"
+                   style="width:100%;font-family:monospace;font-size:0.9em">
+          </p>
+          <p>
+            <button type="submit" class="button">Provision Bootstrap</button>
+          </p>
+        </form>
+        <p class="small">Only the public half of your ztlp identity is
+        sent to ztlp.net. The private key stays in <code>~/.ztlp/identity.json</code>
+        on the machine that ran <code>ztlp setup</code>.</p>
+        """
+        return self.page("Confirm claim", body)
+
+    def render_claim_page(self, row: sqlite3.Row, token: str = "", note: str = "") -> str:
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         ns_server = row["ns_server"] or LAUNCH_NS_SERVER
         enrollment_token = row["enrollment_token_uri"] or ""
@@ -854,8 +943,10 @@ class LaunchApp:
           <dt>Connect command</dt><dd><code>{esc(connect_command)}</code></dd>
         </dl>
         <form method="post" action="/claim/launch">
-          <input type="hidden" name="token" value="">
-          <p class="small">Use the original claim link to request private Bootstrap provisioning. The public page never exposes a Bootstrap admin URL.</p>
+          <input type="hidden" name="token" value="{esc(token)}">
+          <p class="small">Already provisioned — to bind a different
+          device pubkey, POST to <code>/api/admin-pubkey</code> with
+          your token and the new pubkey hex.</p>
         </form>
         <p>Provisioning exposes the Bootstrap service through ZTLP-native identity only. No private admin URL is published here.</p>
         <p><a class="button" href="/downloads">Download ZTLP</a></p>

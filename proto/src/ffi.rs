@@ -3943,7 +3943,10 @@ pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) 
 /// Opaque handle for a MuxEngine.
 #[cfg(feature = "ios-sync")]
 pub struct ZtlpMuxEngine {
-    // Phase 3 stub: hold an internal dummy value
+    // Phase 4 stub: hold the quinn SansIoConnection logic or a dummy
+    #[cfg(feature = "quic-transport")]
+    pub(crate) inner: Option<crate::quic_transport::SansIoConnection>,
+    #[cfg(not(feature = "quic-transport"))]
     pub(crate) inner: std::sync::Mutex<i32>,
 }
 
@@ -3952,6 +3955,9 @@ pub struct ZtlpMuxEngine {
 pub extern "C" fn ztlp_mux_new() -> *mut ZtlpMuxEngine {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let engine = ZtlpMuxEngine {
+            #[cfg(feature = "quic-transport")]
+            inner: None,
+            #[cfg(not(feature = "quic-transport"))]
             inner: std::sync::Mutex::new(0),
         };
         Box::into_raw(Box::new(engine))

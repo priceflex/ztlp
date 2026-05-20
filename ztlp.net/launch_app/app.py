@@ -738,8 +738,13 @@ class LaunchApp:
                 "    network_mode: host\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
-                # If key doesn't exist, this shell command writes it first 
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json -y && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service {service}\"]\n"
+                # If key doesn't exist, this shell command writes it first.
+                # `ztlp listen` v0.26 CLI: --service-name (NOT --service) is the
+                # short label registered with the relay (max 16 bytes, padded).
+                # We deliberately use a short slug-derived name to stay under
+                # the 16-byte cap; the user-facing SVC record (bootstrap.<zone>)
+                # is registered separately by the register_ns sidecar below.
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]}\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"
@@ -748,7 +753,11 @@ class LaunchApp:
                 "    network_mode: host\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
-                f"    command: [\"sh\", \"-c\", \"while [ ! -s /data/keys/identity.json ] || grep -q '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json; do sleep 1; done; exec ztlp ns register {service} --type svc --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
+                # `ztlp ns register` v0.26 CLI takes --name (FQDN) + --zone
+                # explicitly, plus --address for the SVC endpoint. The legacy
+                # positional NAME + `--type svc` flags were removed; pass the
+                # canonical `--name {fqdn} --zone {zone}` shape instead.
+                f"    command: [\"sh\", \"-c\", \"while [ ! -s /data/keys/identity.json ] || grep -q '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json; do sleep 1; done; exec ztlp ns register --name {service} --zone {zone} --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
                 "\n"
                 "volumes:\n"
                 f"  bootstrap_{slug}_data:\n"

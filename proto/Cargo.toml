@@ -38,6 +38,11 @@ ios-sync = []  # Builds without tokio — for iOS Network Extension
 # is being developed in parallel. See docs/architecture/quic-noise-handshake.md.
 quic-transport = ["dep:quinn", "dep:quinn-proto", "dep:rustls", "dep:rcgen"]
 
+[[bench]]
+name = "quic_multistream"
+path = "bench/quic_multistream.rs"
+harness = false
+
 [dependencies]
 # --- Always included (sync core + crypto) ---
 snow = "0.9"

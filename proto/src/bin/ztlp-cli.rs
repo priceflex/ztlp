@@ -332,6 +332,28 @@ enum Commands {
         /// Only used when --relay is set. Padded to 16 bytes in the packet.
         #[arg(long, default_value = "ztlp-gateway")]
         service_name: String,
+
+        /// Enable HTTP X-ZTLP-* header injection for passwordless admin auth.
+        ///
+        /// When set, the FIRST HTTP request on each forwarded TCP connection
+        /// is rewritten on the wire to inject signed `X-ZTLP-Authenticated`,
+        /// `X-ZTLP-Admin-Email`, `X-ZTLP-Timestamp`, and `X-ZTLP-Signature`
+        /// headers. Upstream apps (Rails/Phoenix) verify the signature with
+        /// the same `--header-hmac-secret` and treat the request as
+        /// pre-authenticated for the listed admin pubkey.
+        #[arg(long, default_value_t = false)]
+        http_inject_headers: bool,
+
+        /// Shared HMAC-SHA256 secret used to sign injected `X-ZTLP-*` headers.
+        /// Must match the secret configured in the upstream HeaderVerifier.
+        #[arg(long)]
+        header_hmac_secret: Option<String>,
+
+        /// Map a peer Noise static-public-key hex to an admin email.
+        /// Repeatable. Format: `HEX=email@example.com`.
+        /// Example: `--admin-pubkey-email deadbeef...=ops@trs.com`
+        #[arg(long, value_name = "HEX=EMAIL")]
+        admin_pubkey_email: Vec<String>,
     },
 
     /// Manage ZTLP relay nodes
@@ -2776,8 +2798,67 @@ async fn cmd_listen(
     max_sessions: usize,
     relay_addr: Option<&str>,
     service_name: &str,
+    http_inject_headers: bool,
+    header_hmac_secret: Option<&str>,
+    admin_pubkey_email: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_or_generate_identity(key)?;
+
+    // ── Build HTTP injection config (passwordless admin auth) ──
+    // Validate flag + secret + map up front so we fail fast with a clear
+    // error before we ever accept a session.
+    let http_injection: Arc<tunnel::HttpInjectionConfig> = {
+        if http_inject_headers {
+            let secret =
+                header_hmac_secret.ok_or("--http-inject-headers requires --header-hmac-secret")?;
+            if secret.is_empty() {
+                return Err("--header-hmac-secret must not be empty".into());
+            }
+            let mut map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for entry in admin_pubkey_email {
+                let mut parts = entry.splitn(2, '=');
+                let hex = parts
+                    .next()
+                    .ok_or_else(|| format!("invalid --admin-pubkey-email '{}'", entry))?
+                    .trim();
+                let email = parts.next().ok_or_else(|| {
+                    format!(
+                        "invalid --admin-pubkey-email '{}' (expected HEX=EMAIL)",
+                        entry
+                    )
+                })?;
+                if hex.is_empty() || email.is_empty() {
+                    return Err(format!(
+                        "invalid --admin-pubkey-email '{}' (HEX and EMAIL must be non-empty)",
+                        entry
+                    )
+                    .into());
+                }
+                map.insert(hex.to_lowercase(), email.to_string());
+            }
+            if map.is_empty() {
+                eprintln!(
+                    "{} --http-inject-headers set but no --admin-pubkey-email entries; \
+                     no peers will be treated as admins",
+                    c_yellow("⚠")
+                );
+            } else {
+                eprintln!(
+                    "{} HTTP header injection ENABLED for {} admin pubkey(s)",
+                    c_cyan("✦"),
+                    map.len()
+                );
+            }
+            Arc::new(tunnel::HttpInjectionConfig {
+                enabled: true,
+                hmac_secret: secret.to_string(),
+                admin_pubkey_to_email: map,
+            })
+        } else {
+            Arc::new(tunnel::HttpInjectionConfig::default())
+        }
+    };
 
     let node = TransportNode::bind(bind).await?;
     eprintln!("{} {}", c_cyan("Listening on:"), node.local_addr);
@@ -2875,6 +2956,7 @@ async fn cmd_listen(
             &policy,
             ns_server,
             max_sessions,
+            http_injection.clone(),
         )
         .await;
     }
@@ -3334,6 +3416,7 @@ async fn cmd_listen_multi_session(
     policy: &PolicyEngine,
     ns_server: &Option<String>,
     max_sessions: usize,
+    http_injection: Arc<tunnel::HttpInjectionConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = tunnel::ServiceRegistry::from_forward_args(forward)?;
     let session_mgr = Arc::new(SessionManager::new(max_sessions));
@@ -3471,6 +3554,7 @@ async fn cmd_listen_multi_session(
                         ns_server,
                         &session_mgr,
                         &mut half_open_cache,
+                        http_injection.clone(),
                     )
                     .await
                     {
@@ -3578,6 +3662,7 @@ async fn handle_new_session(
     ns_server: &Option<String>,
     session_mgr: &Arc<SessionManager>,
     half_open_cache: &mut HalfOpenCache,
+    http_injection: Arc<tunnel::HttpInjectionConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let recv1_header = HandshakeHeader::deserialize(hello_data)?;
     let session_id = recv1_header.session_id;
@@ -3789,7 +3874,17 @@ async fn handle_new_session(
         // Run the bridge and capture outcome as a string (not Box<dyn Error>)
         // to keep the future Send-safe.
         let err_msg: Option<String> = {
-            match run_session_bridge(udp, pipeline, session_id, from, &forward_addr_owned, rx).await
+            match run_session_bridge(
+                udp,
+                pipeline,
+                session_id,
+                from,
+                &forward_addr_owned,
+                rx,
+                http_injection.clone(),
+                peer_pubkey_hex.clone(),
+            )
+            .await
             {
                 Ok(()) => None,
                 Err(e) => Some(e.to_string()),
@@ -3892,6 +3987,7 @@ async fn wait_for_reset_on_socket(
 /// shared socket.
 ///
 /// Returns `String` errors (not `Box<dyn Error>`) so the future is `Send`.
+#[allow(clippy::too_many_arguments)]
 async fn run_session_bridge(
     udp_send_socket: Arc<UdpSocket>,
     pipeline: Arc<Mutex<Pipeline>>,
@@ -3899,6 +3995,8 @@ async fn run_session_bridge(
     peer_addr: SocketAddr,
     forward_addr: &str,
     mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
+    http_injection: Arc<tunnel::HttpInjectionConfig>,
+    peer_pubkey_hex: Option<String>,
 ) -> Result<(), String> {
     use tokio::net::TcpStream;
 
@@ -3911,6 +4009,7 @@ async fn run_session_bridge(
     let recv_addr = recv_socket
         .local_addr()
         .map_err(|e| format!("recv socket addr: {}", e))?;
+
     let fwd_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("bind fwd socket: {}", e))?;
@@ -3955,7 +4054,7 @@ async fn run_session_bridge(
     });
 
     // Run bridge with demuxed sockets (send via shared socket, recv via per-session socket)
-    let result = tunnel::run_bridge_demuxed(
+    let result = tunnel::run_bridge_demuxed_with_http_injection(
         tcp_stream,
         udp_send_socket.clone(),
         recv_socket.clone(),
@@ -3963,6 +4062,8 @@ async fn run_session_bridge(
         session_id,
         peer_addr,
         Vec::new(), // initial_packets already forwarded to recv_socket
+        http_injection.clone(),
+        peer_pubkey_hex.clone(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -4005,7 +4106,7 @@ async fn run_session_bridge(
             forward_addr
         );
 
-        last_outcome = tunnel::run_bridge_demuxed(
+        last_outcome = tunnel::run_bridge_demuxed_with_http_injection(
             tcp_stream,
             udp_send_socket.clone(),
             recv_socket.clone(),
@@ -4013,6 +4114,8 @@ async fn run_session_bridge(
             session_id,
             peer_addr,
             Vec::new(),
+            http_injection.clone(),
+            peer_pubkey_hex.clone(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -5910,6 +6013,7 @@ async fn cmd_scan(
 }
 
 /// Probe a UDP port by sending a ZTLP magic byte packet and checking for
+
 /// any response (including ICMP unreachable via recv error).
 async fn check_ztlp_udp(target: &str, port: u16) -> bool {
     let addr = format!("{}:{}", target, port);
@@ -6548,7 +6652,11 @@ zone = {zone}
         zone_comment = zone,
         key_path = toml_string(&key_path.display().to_string()),
         ns_server = toml_string(ns_server),
-        relay_str = if relay_str == "[]" { "".to_string() } else { format!("relay = {}", relay_str) },
+        relay_str = if relay_str == "[]" {
+            "".to_string()
+        } else {
+            format!("relay = {}", relay_str)
+        },
         zone = toml_string(zone),
     );
 
@@ -9937,6 +10045,9 @@ async fn main() {
             max_sessions,
             relay,
             service_name,
+            http_inject_headers,
+            header_hmac_secret,
+            admin_pubkey_email,
         } => {
             cmd_listen(
                 bind,
@@ -9950,6 +10061,9 @@ async fn main() {
                 *max_sessions,
                 relay.as_deref(),
                 service_name,
+                *http_inject_headers,
+                header_hmac_secret.as_deref(),
+                admin_pubkey_email,
             )
             .await
         }

@@ -263,11 +263,29 @@ impl HttpInjectionConfig {
 /// Per-bridge state for tracking whether the first HTTP request has been
 /// rewritten. Once `done` is true, all subsequent plaintext is forwarded
 /// untouched.
+///
+/// `pending_buffer` accumulates plaintext bytes from the decrypted stream
+/// across multiple frames until the first HTTP request is fully parseable
+/// (header section ends with `\r\n\r\n`). This is required because a single
+/// HTTP request can arrive split across several decrypted chunks — TCP
+/// segmentation, MTU constraints on the underlying UDP carrier, or the
+/// browser sending headers in multiple writes. The buffer is bounded to
+/// MAX_HTTP_INJECT_BUFFER to prevent unbounded growth on non-HTTP traffic
+/// or pathological clients.
 struct HttpInjectionState {
     config: Arc<HttpInjectionConfig>,
     peer_email: String,
     done: bool,
+    pending_buffer: Vec<u8>,
 }
+
+/// Cap on how much plaintext we'll accumulate while waiting for the first
+/// HTTP request's header section to complete. 64 KiB is far above any
+/// realistic HTTP/1.1 request-line + headers (rarely exceed 8 KiB even
+/// with large cookies); going over the cap means the stream is almost
+/// certainly not HTTP and we should drop the connection rather than buffer
+/// forever.
+const MAX_HTTP_INJECT_BUFFER: usize = 64 * 1024;
 
 /// Format `SystemTime::now()` as a UTC ISO-8601 / RFC-3339 second-precision
 /// timestamp (e.g. `2026-05-20T12:34:56Z`). Used as the value for the injected
@@ -621,6 +639,7 @@ pub async fn run_bridge_demuxed_with_http_injection(
                 config: http_injection_config,
                 peer_email: email,
                 done: false,
+                pending_buffer: Vec::new(),
             })
         }
         None => None,
@@ -1022,14 +1041,41 @@ where
 
             for p in ordered_payloads {
                 // HTTP header-injection hook — runs ONCE per TCP bridge,
-                // on the first decrypted plaintext chunk only. After it
-                // runs (success OR failure), `done` flips and all
+                // on the FIRST complete HTTP request only. After it
+                // runs (success OR hard failure), `done` flips and all
                 // subsequent bytes flow through untouched.
+                //
+                // HTTP requests can arrive split across multiple decrypted
+                // chunks (TCP segmentation, MTU on the UDP carrier, large
+                // cookie headers, browser pipelining). On each chunk we:
+                //   1. Append to `pending_buffer`.
+                //   2. Try to parse the accumulated buffer.
+                //   3. If `Ok(Complete)` — rewrite + flush the rewritten
+                //      header section AND any pipelined bytes after it,
+                //      then `done = true`.
+                //   4. If `Ok(Partial)` — keep buffering, wait for next
+                //      chunk. Bail out only if we exceed
+                //      MAX_HTTP_INJECT_BUFFER (non-HTTP traffic or attack).
+                //   5. If `Err(...)` — non-recoverable parse error (e.g.
+                //      bad request line on a non-HTTP stream). Drop the
+                //      connection so we never forward garbage.
                 if let Some(state) = http_injection.as_deref_mut() {
                     if !state.done {
+                        state.pending_buffer.extend_from_slice(p.as_slice());
+
+                        if state.pending_buffer.len() > MAX_HTTP_INJECT_BUFFER {
+                            state.done = true;
+                            *injection_failed = true;
+                            warn!(
+                                "http injection: buffer exceeded {} bytes without complete request for {} — dropping (not HTTP?)",
+                                MAX_HTTP_INJECT_BUFFER, state.peer_email
+                            );
+                            return Ok(());
+                        }
+
                         let ts = iso8601_utc_now();
                         match crate::http_injector::inject_headers(
-                            p.as_slice(),
+                            state.pending_buffer.as_slice(),
                             &state.peer_email,
                             &ts,
                             state.config.hmac_secret.as_bytes(),
@@ -1037,12 +1083,25 @@ where
                             Ok(rewritten) => {
                                 state.done = true;
                                 info!(
-                                    "http injection: rewrote first request for {} ({} → {} bytes)",
+                                    "http injection: rewrote first request for {} ({} buffered -> {} rewritten bytes)",
                                     state.peer_email,
-                                    p.len(),
+                                    state.pending_buffer.len(),
                                     rewritten.len()
                                 );
+                                // `inject_headers` returns the full rewritten
+                                // request (rewritten header section + the
+                                // body bytes that were already buffered).
+                                // Flush it as one write; any subsequent
+                                // chunks land in the `done == true` branch
+                                // and pass through untouched.
                                 tcp_writer.write_all(&rewritten).await?;
+                                state.pending_buffer.clear();
+                                continue;
+                            }
+                            Err(e) if e.contains("Partial HTTP request") => {
+                                // Need more bytes. Don't forward anything
+                                // yet — keep buffering and wait for the
+                                // next frame.
                                 continue;
                             }
                             Err(e) => {

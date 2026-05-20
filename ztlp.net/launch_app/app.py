@@ -794,6 +794,17 @@ class LaunchApp:
                 # We deliberately use a short slug-derived name to stay under
                 # the 16-byte cap; the user-facing SVC record (bootstrap.<zone>)
                 # is registered separately by the register_ns sidecar below.
+                #
+                # **Marker file detection (subtle):** Python's `json.dump` emits
+                # `"node_id": ""` (with a space after the colon) using default
+                # `separators=(', ', ': ')`. The shell grep MUST tolerate that
+                # whitespace or it will always think the marker has real keys
+                # and skip keygen — see the live triage 2026-05-20 where
+                # --force-recreate of an existing gateway crash-looped with
+                # `error: json error: expected 16 bytes for NodeId, got 0`.
+                # Use an extended regex with optional whitespace around the
+                # colon AND look for ANY of the three empty values so partial
+                # corruption (e.g. a half-written file) still triggers keygen.
                 # HTTP header injection: when ZTLP_GATEWAY_HEADER_SECRET is set
                 # (always true under Launch — see secrets.env above) the gateway
                 # strips inbound X-ZTLP-* spoofing attempts and injects
@@ -807,7 +818,7 @@ class LaunchApp:
                 # the password login form. Operators set this var in
                 # instance.env after the admin's device is enrolled to flip on
                 # passwordless auth without rebuilding the image.
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"

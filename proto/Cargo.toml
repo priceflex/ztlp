@@ -36,7 +36,7 @@ ios-sync = []  # Builds without tokio — for iOS Network Extension
 # default — pulls in quinn (tokio-backed) + quinn-proto (sans-io) + rustls.
 # Gated so the existing tree keeps building and shipping while the QUIC pivot
 # is being developed in parallel. See docs/architecture/quic-noise-handshake.md.
-quic-transport = ["dep:quinn", "dep:quinn-proto", "dep:rustls"]
+quic-transport = ["dep:quinn", "dep:quinn-proto", "dep:rustls", "dep:rcgen"]
 
 [dependencies]
 # --- Always included (sync core + crypto) ---
@@ -86,6 +86,12 @@ hmac = "0.12"
 quinn = { version = "0.11.9", optional = true }
 quinn-proto = { version = "0.11.14", optional = true }
 rustls = { version = "0.23.40", optional = true }
+# Self-signed cert generator. Needed only for the tokio-backed server endpoint
+# because rustls/quinn always require a server certificate even though we pin
+# identity via the Noise XX prologue tunneled over stream 0 (so the X.509
+# layer is effectively ignored). Gated behind `quic-transport` to keep the
+# default + ios-sync builds lean.
+rcgen = { version = "0.13", optional = true }
 
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.

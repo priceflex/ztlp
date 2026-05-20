@@ -56,17 +56,66 @@ pub const STREAM0_MAGIC_V1: u8 = b'Z';
 #[derive(Debug, thiserror::Error)]
 pub enum QuicTransportError {
     /// The caller invoked a code path that has not been implemented yet.
-    ///
-    /// This is distinct from a runtime failure: it means the *feature*
-    /// is not built. Returning a real error (rather than `unimplemented!()`)
-    /// lets tests assert on it without panicking.
     #[error("QUIC transport phase {phase} not yet implemented: {what}")]
-    NotImplemented {
-        /// Which migration phase owns this code path (see design doc §8).
-        phase: u8,
-        /// Short human-readable description of the missing capability.
-        what: &'static str,
-    },
+    NotImplemented { phase: u8, what: &'static str },
+
+    #[error("endpoint error: {0}")]
+    Endpoint(#[from] std::io::Error),
+
+    #[error("connect error: {0}")]
+    Connect(String),
+
+    #[error("connection error: {0}")]
+    Connection(String),
+
+    #[error("read error: {0}")]
+    Read(String),
+
+    #[error("read exact error: {0}")]
+    ReadExact(String),
+
+    #[error("write error: {0}")]
+    Write(String),
+
+    #[error("bad magic: expected {expected:#04x}, got {got:#04x}")]
+    BadMagic { expected: u8, got: u8 },
+
+    #[error("frame too large: {sz}")]
+    FrameTooLarge { sz: usize },
+
+    #[error("handshake error: {0}")]
+    Handshake(String),
+}
+
+impl From<quinn::ConnectError> for QuicTransportError {
+    fn from(e: quinn::ConnectError) -> Self {
+        QuicTransportError::Connect(e.to_string())
+    }
+}
+impl From<quinn::ConnectionError> for QuicTransportError {
+    fn from(e: quinn::ConnectionError) -> Self {
+        QuicTransportError::Connection(e.to_string())
+    }
+}
+impl From<quinn::ReadError> for QuicTransportError {
+    fn from(e: quinn::ReadError) -> Self {
+        QuicTransportError::Read(e.to_string())
+    }
+}
+impl From<quinn::ReadExactError> for QuicTransportError {
+    fn from(e: quinn::ReadExactError) -> Self {
+        QuicTransportError::ReadExact(e.to_string())
+    }
+}
+impl From<quinn::WriteError> for QuicTransportError {
+    fn from(e: quinn::WriteError) -> Self {
+        QuicTransportError::Write(e.to_string())
+    }
+}
+impl From<crate::error::HandshakeError> for QuicTransportError {
+    fn from(e: crate::error::HandshakeError) -> Self {
+        QuicTransportError::Handshake(e.to_string())
+    }
 }
 
 /// Sans-io QUIC endpoint configuration shared by both backends.
@@ -101,48 +150,261 @@ impl Default for QuicEndpointConfig {
 
 #[cfg(feature = "tokio-runtime")]
 pub mod tokio_endpoint {
-    //! `quinn::Endpoint`-backed server/client. Not implemented yet —
-    //! Phase 1 deliverable.
+    //! `quinn::Endpoint`-backed server/client. Phase 1 deliverable.
 
     use super::{QuicEndpointConfig, QuicTransportError};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
 
-    /// Tokio-backed QUIC endpoint wrapping `quinn::Endpoint`.
-    ///
-    /// Empty in Phase 0. Phase 1 will hold the `quinn::Endpoint`,
-    /// a `tokio::task::JoinHandle` for the accept loop, and a
-    /// channel surface for incoming connections.
+    fn ensure_crypto() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    #[derive(Debug)]
+    struct NoCertVerifier;
+    impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ED25519,
+            ]
+        }
+    }
+
+    fn generate_self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        (
+            vec![cert.cert.into()],
+            PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
+        )
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct QuicConnection {
+        pub inner: quinn::Connection,
+    }
+
+    impl QuicConnection {
+        pub async fn open_bi(
+            &self,
+        ) -> Result<(quinn::SendStream, quinn::RecvStream), QuicTransportError> {
+            Ok(self.inner.open_bi().await?)
+        }
+
+        pub async fn accept_bi(
+            &self,
+        ) -> Result<(quinn::SendStream, quinn::RecvStream), QuicTransportError> {
+            Ok(self.inner.accept_bi().await?)
+        }
+
+        pub fn close(&self) {
+            self.inner.close(0u32.into(), b"closed");
+        }
+    }
+
     #[derive(Debug)]
     pub struct QuicEndpoint {
-        _cfg: QuicEndpointConfig,
+        pub _cfg: QuicEndpointConfig,
+        pub inner: quinn::Endpoint,
     }
 
     impl QuicEndpoint {
-        /// Bind the underlying UDP socket and start accepting QUIC
-        /// connections.
-        ///
-        /// # Phase 0 behavior
-        ///
-        /// Returns `NotImplemented`. The signature is locked in so
-        /// callers (Gateway / Relay forwarder) can be written against
-        /// it now.
         pub async fn bind(cfg: QuicEndpointConfig) -> Result<Self, QuicTransportError> {
-            Err(QuicTransportError::NotImplemented {
-                phase: 1,
-                what: "QuicEndpoint::bind — quinn endpoint setup",
+            ensure_crypto();
+            let (certs, key) = generate_self_signed();
+            let mut server_crypto = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|e| {
+                    QuicTransportError::Endpoint(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+
+            server_crypto.alpn_protocols = cfg.alpn.clone();
+            let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+                quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
+            ));
+
+            let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let endpoint = quinn::Endpoint::server(server_config, bind_addr)?;
+
+            Ok(Self {
+                _cfg: cfg,
+                inner: endpoint,
             })
         }
 
-        /// Accept the next incoming QUIC connection.
-        ///
-        /// Phase 0: always errors. Phase 1 returns a typed handle
-        /// that exposes a stream-0 bidi stream pre-opened for Noise
-        /// handshake bytes.
-        pub async fn accept(&self) -> Result<(), QuicTransportError> {
-            Err(QuicTransportError::NotImplemented {
-                phase: 1,
-                what: "QuicEndpoint::accept — quinn incoming connection",
+        pub async fn connect(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+        ) -> Result<QuicConnection, QuicTransportError> {
+            ensure_crypto();
+            let mut client_crypto = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+                .with_no_client_auth();
+
+            client_crypto.alpn_protocols = cfg.alpn.clone();
+            let client_config = quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap(),
+            ));
+
+            let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+            endpoint.set_default_client_config(client_config);
+
+            let conn = endpoint.connect(remote, server_name)?.await?;
+            Ok(QuicConnection { inner: conn })
+        }
+
+        pub async fn accept(&self) -> Result<QuicConnection, QuicTransportError> {
+            let incoming = self.inner.accept().await.ok_or_else(|| {
+                QuicTransportError::Endpoint(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "endpoint closed",
+                ))
+            })?;
+            Ok(QuicConnection {
+                inner: incoming.await?,
             })
         }
+    }
+}
+
+pub mod noise_stream {
+    use super::tokio_endpoint::QuicConnection;
+    use super::QuicTransportError;
+    use crate::handshake::{HandshakeContext, HandshakeResult};
+    use crate::identity::{NodeId, NodeIdentity};
+
+    pub const STREAM0_MAGIC_V1: u8 = super::STREAM0_MAGIC_V1;
+    const MAX_FRAME_SIZE: usize = 65536;
+
+    pub async fn read_noise_frame(
+        recv: &mut quinn::RecvStream,
+    ) -> Result<Vec<u8>, QuicTransportError> {
+        let mut magic = [0u8; 1];
+        recv.read_exact(&mut magic).await?;
+        if magic[0] != STREAM0_MAGIC_V1 {
+            return Err(QuicTransportError::BadMagic {
+                expected: STREAM0_MAGIC_V1,
+                got: magic[0],
+            });
+        }
+
+        let mut len_bytes = [0u8; 2];
+        recv.read_exact(&mut len_bytes).await?;
+        let len = u16::from_be_bytes(len_bytes) as usize;
+
+        if len > MAX_FRAME_SIZE {
+            return Err(QuicTransportError::FrameTooLarge { sz: len });
+        }
+
+        let mut payload = vec![0u8; len];
+        recv.read_exact(&mut payload).await?;
+        Ok(payload)
+    }
+
+    pub async fn write_noise_frame(
+        send: &mut quinn::SendStream,
+        payload: &[u8],
+    ) -> Result<(), QuicTransportError> {
+        if payload.len() > MAX_FRAME_SIZE {
+            return Err(QuicTransportError::FrameTooLarge { sz: payload.len() });
+        }
+
+        let len_bytes = (payload.len() as u16).to_be_bytes();
+        let mut frame = Vec::with_capacity(1 + 2 + payload.len());
+        frame.push(STREAM0_MAGIC_V1);
+        frame.extend_from_slice(&len_bytes);
+        frame.extend_from_slice(payload);
+
+        send.write_all(&frame).await?;
+        Ok(())
+    }
+
+    pub async fn run_initiator_handshake(
+        conn: &QuicConnection,
+        identity: &NodeIdentity,
+        responder_id: NodeId,
+    ) -> Result<HandshakeResult, QuicTransportError> {
+        let (mut send, mut recv) = conn.open_bi().await?;
+        let mut ctx = HandshakeContext::new_initiator(identity)?;
+
+        let msg1 = ctx.write_message(&[])?;
+        write_noise_frame(&mut send, &msg1).await?;
+
+        let msg2 = read_noise_frame(&mut recv).await?;
+        ctx.read_message(&msg2)?;
+
+        let msg3 = ctx.write_message(&[])?;
+        write_noise_frame(&mut send, &msg3).await?;
+
+        let session_id = crate::packet::SessionId::generate();
+        let (_, init_sess) = ctx.finalize(responder_id, session_id)?;
+
+        Ok(HandshakeResult {
+            initiator_session: init_sess.clone(),
+            responder_session: init_sess, // Placeholder
+        })
+    }
+
+    pub async fn run_responder_handshake(
+        conn: &QuicConnection,
+        identity: &NodeIdentity,
+        initiator_id: NodeId,
+    ) -> Result<HandshakeResult, QuicTransportError> {
+        let (mut send, mut recv) = conn.accept_bi().await?;
+        let mut ctx = HandshakeContext::new_responder(identity)?;
+
+        let msg1 = read_noise_frame(&mut recv).await?;
+        ctx.read_message(&msg1)?;
+
+        let msg2 = ctx.write_message(&[])?;
+        write_noise_frame(&mut send, &msg2).await?;
+
+        let msg3 = read_noise_frame(&mut recv).await?;
+        ctx.read_message(&msg3)?;
+
+        let session_id = crate::packet::SessionId::generate();
+        let (_, resp_sess) = ctx.finalize(initiator_id, session_id)?;
+
+        Ok(HandshakeResult {
+            initiator_session: resp_sess.clone(), // Placeholder
+            responder_session: resp_sess,
+        })
     }
 }
 
@@ -213,6 +475,7 @@ mod tests {
         let err = SansIoConnection::new(QuicEndpointConfig::default()).unwrap_err();
         match err {
             QuicTransportError::NotImplemented { phase, .. } => assert_eq!(phase, 4),
+            _ => panic!("Expected NotImplemented"),
         }
     }
 }

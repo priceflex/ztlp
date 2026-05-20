@@ -47,8 +47,6 @@ pub fn inject_headers(
         }
 
         let value_str = String::from_utf8_lossy(h.value).into_owned();
-        canonical_headers.push((name_lower, value_str.clone()));
-
         kept_headers.push((h.name.to_string(), value_str));
     }
 
@@ -65,13 +63,14 @@ pub fn inject_headers(
     // Compute HMAC
     canonical_headers.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut canonical_string = String::new();
-    for (k, v) in canonical_headers {
-        canonical_string.push_str(&k);
-        canonical_string.push(':');
-        canonical_string.push_str(&v);
-        canonical_string.push('\n');
-    }
+    // Canonical format matches the Ruby/Elixir HeaderVerifier exactly:
+    //   lowercased "name:value" pairs joined by "\n" — NO trailing newline.
+    // Ruby reference: `headers.map { |n,v| "#{n}:#{v}" }.join("\n")`.
+    let canonical_string = canonical_headers
+        .iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let mut mac = HmacSha256::new_from_slice(hmac_key).map_err(|e| e.to_string())?;
     mac.update(canonical_string.as_bytes());
@@ -127,15 +126,75 @@ mod tests {
 
         // Signature checks
         // Canonical format expectation:
-        // baz:qux\nhost:example.com\nx-ztlp-admin-email:admin@example.com\nx-ztlp-authenticated:1\nx-ztlp-timestamp:2026-05-20T12:00:00Z\n
+        // x-ztlp-admin-email:admin@example.com\nx-ztlp-authenticated:1\nx-ztlp-timestamp:2026-05-20T12:00:00Z
+        // (no trailing newline — matches Ruby `.join("\n")` semantics)
 
         let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
-        mac.update(b"baz:qux\nhost:example.com\nx-ztlp-admin-email:admin@example.com\nx-ztlp-authenticated:1\nx-ztlp-timestamp:2026-05-20T12:00:00Z\n");
+        mac.update(b"x-ztlp-admin-email:admin@example.com\nx-ztlp-authenticated:1\nx-ztlp-timestamp:2026-05-20T12:00:00Z");
         let expected_signature = hex::encode(mac.finalize().into_bytes());
 
         assert!(modified_str.contains(&format!("X-ZTLP-Signature: {}", expected_signature)));
 
         // Verify body preservation
         assert!(modified_str.ends_with("\r\n\r\nBODYDATA"));
+    }
+
+    /// BDD: locks the canonical-string format byte-for-byte against the
+    /// Ruby/Elixir HeaderVerifier contract. If this test breaks, the Rails
+    /// `Ztlp::HeaderVerifier` will reject all gateway-signed requests.
+    ///
+    /// Reference: bootstrap/lib/ztlp/header_verifier.rb#canonical_string
+    ///   headers.map { |n,v| [n.downcase, v] }
+    ///          .sort_by { |n,_| n }
+    ///          .map { |n,v| "#{n}:#{v}" }
+    ///          .join("\n")
+    #[test]
+    fn test_canonical_string_matches_ruby_contract() {
+        // Empty body, multiple non-ztlp headers (must be excluded from MAC),
+        // and a pre-existing forged x-ztlp-signature (must be excluded too).
+        let raw_req = b"POST /api HTTP/1.1\r\n\
+                        Host: bootstrap.example.ztlp\r\n\
+                        Content-Length: 0\r\n\
+                        X-ZTLP-Signature: forged-deadbeef\r\n\
+                        X-Forwarded-For: 10.0.0.1\r\n\
+                        \r\n";
+        let email = "ops@techrockstars.com";
+        let timestamp = "2025-01-01T00:00:00Z";
+        let hmac_key = b"shared-tenant-secret";
+
+        // Expected canonical string: only the THREE injected ZTLP headers,
+        // lowercased, sorted, joined by '\n', NO trailing newline.
+        let expected_canonical = "x-ztlp-admin-email:ops@techrockstars.com\n\
+             x-ztlp-authenticated:1\n\
+             x-ztlp-timestamp:2025-01-01T00:00:00Z";
+
+        let mut mac = HmacSha256::new_from_slice(hmac_key).unwrap();
+        mac.update(expected_canonical.as_bytes());
+        let expected_sig = hex::encode(mac.finalize().into_bytes());
+
+        let modified = inject_headers(raw_req, email, timestamp, hmac_key).unwrap();
+        let s = String::from_utf8(modified).unwrap();
+
+        // Forged signature must be stripped.
+        assert!(!s.contains("forged-deadbeef"));
+        // Non-ZTLP headers must be preserved verbatim (case + value).
+        assert!(s.contains("Host: bootstrap.example.ztlp\r\n"));
+        assert!(s.contains("X-Forwarded-For: 10.0.0.1\r\n"));
+        // Trusted signature must match the Ruby canonicalization byte-for-byte.
+        assert!(
+            s.contains(&format!("X-ZTLP-Signature: {}\r\n", expected_sig)),
+            "signature mismatch — canonical contract drift. Got body:\n{}",
+            s
+        );
+    }
+
+    /// BDD: a partial/streaming request (no \r\n\r\n boundary yet) MUST be
+    /// rejected rather than signed, otherwise we'd be HMAC-signing an
+    /// attacker-controlled prefix. Documents the safe-failure contract.
+    #[test]
+    fn test_partial_request_is_rejected() {
+        let partial = b"GET / HTTP/1.1\r\nHost: example.com\r\n"; // no terminator
+        let result = inject_headers(partial, "x@y.z", "2025-01-01T00:00:00Z", b"k");
+        assert!(result.is_err(), "partial requests must not be signed");
     }
 }

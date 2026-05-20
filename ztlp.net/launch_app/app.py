@@ -748,7 +748,7 @@ class LaunchApp:
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         ns_server = row["ns_server"] or LAUNCH_NS_SERVER
         enrollment_token = row["enrollment_token_uri"] or ""
-        enrollment_command = f"ztlp setup --token '{enrollment_token}' --name '<HOSTNAME>' -y" if enrollment_token else "Claim this request to generate enrollment instructions."
+        enrollment_command = f"ztlp setup --token \"{enrollment_token}\" -y" if enrollment_token else "Claim this request to generate enrollment instructions."
         connect_command = f"ztlp connect {service} --ns-server {ns_server} --service http -L 18080:127.0.0.1:3000"
         note_html = f"<p class='notice'>{esc(note)}</p>" if note else ""
         body = f"""
@@ -893,6 +893,8 @@ class LaunchApp:
             payload = {"zone": zone, "available": False, "reason": "invalid"}
             return (HTTPStatus.OK, "application/json; charset=utf-8", json.dumps(payload) + "\n")
         with self.connect() as conn:
+            # We track uniqueness by zone, not company name, because zone translates directly
+            # to the DNS routing required. Company name is superficial.
             existing = conn.execute(
                 "SELECT 1 FROM onboarding_requests WHERE zone = ? LIMIT 1", (zone,)
             ).fetchone()

@@ -191,10 +191,75 @@ mod tests {
     /// BDD: a partial/streaming request (no \r\n\r\n boundary yet) MUST be
     /// rejected rather than signed, otherwise we'd be HMAC-signing an
     /// attacker-controlled prefix. Documents the safe-failure contract.
+    ///
+    /// **Stability contract for tunnel.rs**: the returned error string MUST
+    /// start with "Partial HTTP request" — the tunnel.rs HTTP-injection
+    /// hook pattern-matches on that prefix to distinguish "need more bytes"
+    /// (keep buffering across decrypted chunks) from "non-recoverable
+    /// parse error" (drop the connection). Changing this message will
+    /// silently break multi-chunk HTTP injection — turbo.min.js requests
+    /// and any other request that straddles a TCP frame will start
+    /// failing again.
     #[test]
     fn test_partial_request_is_rejected() {
         let partial = b"GET / HTTP/1.1\r\nHost: example.com\r\n"; // no terminator
         let result = inject_headers(partial, "x@y.z", "2025-01-01T00:00:00Z", b"k");
         assert!(result.is_err(), "partial requests must not be signed");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Partial HTTP request"),
+            "partial error message must start with 'Partial HTTP request' \
+             (tunnel.rs pattern-matches on this prefix to keep buffering \
+             across chunks) — got: {err}"
+        );
+    }
+
+    /// BDD: when a complete request is reassembled from multiple chunks,
+    /// the injector produces the same output as if the request had
+    /// arrived in one piece. Locks the "buffer-and-retry" semantics that
+    /// the tunnel.rs hook depends on for fragmented HTTP requests.
+    #[test]
+    fn test_inject_is_idempotent_across_reassembled_chunks() {
+        let chunk_a = b"GET /assets/turbo.min.js HTTP/1.1\r\nHost: bootstrap.test.ztlp\r\nCookie: ";
+        let chunk_b = b"big_cookie=";
+        let chunk_c = &[b'x'; 600][..];
+        let chunk_d = b"\r\n\r\n";
+
+        let email = "admin@example.com";
+        let ts = "2026-05-20T12:00:00Z";
+        let key = b"shared-tenant-secret";
+
+        // Single-shot: the request arrives in one frame.
+        let mut single = Vec::new();
+        single.extend_from_slice(chunk_a);
+        single.extend_from_slice(chunk_b);
+        single.extend_from_slice(chunk_c);
+        single.extend_from_slice(chunk_d);
+        let single_out = inject_headers(&single, email, ts, key).expect("single-shot must inject");
+
+        // Buffered: simulate the tunnel.rs accumulator — partial on each
+        // chunk until the terminator arrives, then complete.
+        let mut acc = Vec::new();
+        acc.extend_from_slice(chunk_a);
+        assert!(inject_headers(&acc, email, ts, key)
+            .unwrap_err()
+            .contains("Partial HTTP request"));
+        acc.extend_from_slice(chunk_b);
+        assert!(inject_headers(&acc, email, ts, key)
+            .unwrap_err()
+            .contains("Partial HTTP request"));
+        acc.extend_from_slice(chunk_c);
+        assert!(inject_headers(&acc, email, ts, key)
+            .unwrap_err()
+            .contains("Partial HTTP request"));
+        acc.extend_from_slice(chunk_d);
+        let buffered_out = inject_headers(&acc, email, ts, key).expect("complete must inject");
+
+        // The two paths MUST produce byte-identical rewrites — the gateway
+        // forwarding either one yields the same signed request upstream.
+        assert_eq!(
+            single_out, buffered_out,
+            "reassembled-from-chunks output must match single-shot output"
+        );
     }
 }

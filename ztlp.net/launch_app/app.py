@@ -680,6 +680,21 @@ class LaunchApp:
             os.makedirs(os.path.join(instance_dir, "gateway_keys"), exist_ok=True)
             # Generate a temporary identity for the gateway if one doesn't exist
             key_path = os.path.join(instance_dir, "gateway_keys", "identity.json")
+            if not os.path.exists(key_path):
+                import json
+                with open(key_path, "w") as kf:
+                    # Write an empty marker so the container `sh -c` initialization loop works correctly, 
+                    # even if Python doesn't have the binary installed to actually build the key keys
+                    json.dump({"node_id":"", "static_private_key":"", "static_public_key":""}, kf)
+                try:
+                    subprocess.run(
+                        ["ztlp", "keygen", "--output", key_path, "-y"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                except Exception as e:
+                    os.remove(key_path)
 
             ns_server_docker_host = LAUNCH_NS_SERVER.split(":")[0]
             # For dev, assume NS is on the same machine on docker bridge or host IP. 
@@ -733,7 +748,7 @@ class LaunchApp:
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
                 # If key doesn't exist, this shell command writes it first 
-                f"    command: [\"sh\", \"-c\", \"[ -f /data/keys/identity.json ] || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service {service}\"]\n"
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json -y && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service {service}\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"
@@ -741,7 +756,7 @@ class LaunchApp:
                 f"    container_name: \"ztlp-ns-reg-{slug}\"\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
-                f"    command: [\"sh\", \"-c\", \"while [ ! -f /data/keys/identity.json ]; do sleep 1; done; exec ztlp ns register {service} --type svc --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
+                f"    command: [\"sh\", \"-c\", \"while [ ! -s /data/keys/identity.json ] || grep -q '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json; do sleep 1; done; exec ztlp ns register {service} --type svc --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
                 "\n"
                 "volumes:\n"
                 f"  bootstrap_{slug}_data:\n"

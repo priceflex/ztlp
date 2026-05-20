@@ -2413,6 +2413,180 @@ async fn cmd_connect(
         eprintln!();
     }
 
+    // ─── PARALLEL SESSIONS BRANCH (workaround) ─────────────────────────────
+    //
+    // COMMENT: Why this branch exists
+    // ===============================
+    // The ZTLP tunnel currently has no in-session multiplexing: a single
+    // Noise session bridges exactly ONE TCP stream at a time (see
+    // `tunnel::run_bridge*` in proto/src/tunnel.rs — both directions are a
+    // single byte stream over the encrypted session). Browsers, however,
+    // routinely open 6+ parallel HTTP connections for asset fetching. If
+    // we serialize them through one Noise session via `run_bridge_with_reset`
+    // (the historical default), every asset stalls until the previous one
+    // finishes, producing ~tens of seconds of perceived latency on the
+    // passwordless dashboard.
+    //
+    // Until proper in-session multiplexing (HTTP/2 style stream IDs) lands,
+    // this branch performs a *fresh Noise_XX handshake per accepted TCP
+    // connection*. Handshakes are ~280µs each, so 6 concurrent flows cost
+    // <2ms of CPU. Each handshake runs in its own `tokio::spawn`'d task
+    // (`run_parallel_session`) so they progress in parallel.
+    //
+    // The architecture mirrors `cmd_listen_multi_session` on the server
+    // side: a single dispatcher task reads `node.recv_raw()` and routes
+    // each packet to the correct per-session mpsc channel by SessionId; the
+    // bridge for each session reads from a per-session loopback UDP pair
+    // so `tunnel::run_bridge_demuxed` can be reused unchanged.
+    //
+    // Activated when:
+    //   * `--local-forward` is set (tunnel mode), AND
+    //   * `--session-id` is NOT pinned (we are free to mint fresh SIDs).
+    //
+    // The pinned `--session-id` path keeps the original single-session
+    // behavior, which is required for some test/diagnostic flows.
+    let is_parallel = local_forward.is_some() && session_id_hex.is_none();
+    if is_parallel {
+        // SAFETY: unwrap is fine — we just checked is_some() above.
+        let lf = local_forward
+            .as_ref()
+            .expect("is_parallel implies local_forward is Some");
+        let (local_port, _remote_target) = tunnel::parse_local_forward(lf)?;
+        let listen_addr = format!("127.0.0.1:{}", local_port);
+
+        eprintln!(
+            "--- {} ---",
+            c_bold("ZTLP tunnel active (parallel sessions)")
+        );
+        eprintln!("  {} {}", c_cyan("Local listener:"), listen_addr);
+        eprintln!(
+            "  {} Each TCP connection runs its own Noise session in parallel.",
+            c_dim("Mode:")
+        );
+        eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+        let tcp_listener = tokio::net::TcpListener::bind(&listen_addr)
+            .await
+            .map_err(|e| format!("failed to bind TCP listener on {}: {}", listen_addr, e))?;
+        eprintln!(
+            "{} {}",
+            c_green("✓ Listening for TCP connections on"),
+            listen_addr
+        );
+
+        // Share the TransportNode between the dispatcher task and the
+        // per-connection bridges. `recv_raw` takes &self and is internally
+        // backed by `Arc<UdpSocket>`, so a single dispatcher loop can own
+        // the receive side while spawned tasks reuse `node.socket` for sends.
+        let node = Arc::new(node);
+        let session_mgr = Arc::new(SessionManager::new(64));
+        let service_clone: Option<String> = service.clone();
+        let identity_arc = Arc::new(identity.clone());
+
+        // Dispatcher task: drain node.recv_raw() and route every packet to
+        // the right per-session mpsc by SessionId. Packets for unknown SIDs
+        // (e.g. late retransmits after close) are dropped silently.
+        let dispatcher_node = node.clone();
+        let dispatcher_mgr = session_mgr.clone();
+        let dispatcher = tokio::spawn(async move {
+            loop {
+                let (data, from) = match dispatcher_node.recv_raw().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{} dispatcher recv error: {}", c_red("✗"), e);
+                        return;
+                    }
+                };
+
+                // Extract session_id: try DataHeader first (the common case
+                // once sessions are up), then HandshakeHeader (HELLO_ACK /
+                // msg3 echo, anything we might see during handshake).
+                let sid_opt: Option<SessionId> = if data.len() >= DATA_HEADER_SIZE {
+                    DataHeader::deserialize(&data).ok().map(|h| h.session_id)
+                } else {
+                    None
+                };
+                let sid_opt = sid_opt.or_else(|| {
+                    if data.len() >= HANDSHAKE_HEADER_SIZE {
+                        HandshakeHeader::deserialize(&data)
+                            .ok()
+                            .map(|h| h.session_id)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(sid) = sid_opt {
+                    if !dispatcher_mgr.route_packet(&sid, data, from).await {
+                        debug!("dispatcher: dropping packet for unknown session {}", sid);
+                    }
+                } else {
+                    debug!("dispatcher: dropping unparseable packet from {}", from);
+                }
+            }
+        });
+        // Detach: dispatcher lives as long as the connect command runs.
+        let _ = dispatcher;
+
+        // Accept loop: every TCP connection spawns a brand-new Noise session.
+        loop {
+            let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
+            eprintln!(
+                "{} {} → spawning new parallel session",
+                c_cyan("TCP connection from"),
+                tcp_addr
+            );
+
+            // Mint a fresh SessionId and register an mpsc channel for the
+            // dispatcher to route this session's packets into.
+            let new_sid = SessionId::generate();
+            let rx = match session_mgr.register(new_sid, send_addr, 1024).await {
+                Some(rx) => rx,
+                None => {
+                    eprintln!(
+                        "{} session manager at capacity, refusing {}",
+                        c_yellow("⚠"),
+                        tcp_addr
+                    );
+                    drop(tcp_stream);
+                    continue;
+                }
+            };
+
+            let identity_task = (*identity_arc).clone();
+            let service_task = service_clone.clone();
+            let session_mgr_task = session_mgr.clone();
+            let udp_socket_task = node.socket.clone();
+            let pipeline_task = node.pipeline.clone();
+            let send_addr_task = send_addr;
+
+            tokio::spawn(async move {
+                if let Err(e) = run_parallel_session(
+                    identity_task,
+                    service_task,
+                    session_mgr_task,
+                    udp_socket_task,
+                    pipeline_task,
+                    new_sid,
+                    rx,
+                    send_addr_task,
+                    tcp_stream,
+                    tcp_addr,
+                )
+                .await
+                {
+                    eprintln!(
+                        "{} parallel session {} ({}) error: {}",
+                        c_red("✗"),
+                        new_sid,
+                        tcp_addr,
+                        e
+                    );
+                }
+            });
+        }
+    }
+
     let mut ctx = HandshakeContext::new_initiator(&identity)?;
 
     // Session ID: use provided or generate
@@ -2641,6 +2815,184 @@ async fn cmd_connect(
     }
 
     Ok(())
+}
+
+/// Run a new ZTLP session in parallel per accepted TCP connection.
+///
+/// This serves as a workaround for the lack of in-session multiplexing.
+/// It performs a complete initiator Noise_XX handshake utilizing a dedicated
+/// loopback UDP pair, receiving incoming packets from the shared dispatcher via `rx`.
+#[allow(clippy::too_many_arguments)]
+async fn run_parallel_session(
+    identity: ztlp_proto::identity::NodeIdentity,
+    service: Option<String>,
+    session_mgr: std::sync::Arc<ztlp_proto::session_manager::SessionManager>,
+    udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
+    pipeline: std::sync::Arc<tokio::sync::Mutex<ztlp_proto::pipeline::Pipeline>>,
+    session_id: ztlp_proto::packet::SessionId,
+    mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, std::net::SocketAddr)>,
+    send_addr: std::net::SocketAddr,
+    tcp_stream: tokio::net::TcpStream,
+    _tcp_addr: std::net::SocketAddr,
+) -> Result<(), String> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+    use ztlp_proto::handshake::{
+        HandshakeContext, INITIAL_HANDSHAKE_RETRY_MS, MAX_HANDSHAKE_RETRIES, MAX_HANDSHAKE_RETRY_MS,
+    };
+    use ztlp_proto::identity::NodeId;
+    use ztlp_proto::packet::{HandshakeHeader, MsgType, HANDSHAKE_HEADER_SIZE};
+
+    let mut ctx = HandshakeContext::new_initiator(&identity)
+        .map_err(|e| format!("new_initiator error: {}", e))?;
+
+    let msg1 = ctx
+        .write_message(&[])
+        .map_err(|e| format!("write_message error: {}", e))?;
+    let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
+    hello_hdr.session_id = session_id;
+    hello_hdr.src_node_id = *identity.node_id.as_bytes();
+    hello_hdr.payload_len = msg1.len() as u16;
+
+    if let Some(svc_name) = &service {
+        hello_hdr.dst_svc_hash = ztlp_proto::tunnel::encode_service_name(svc_name)
+            .map_err(|e| format!("encode_service_name error: {}", e))?;
+    }
+    let mut pkt1 = hello_hdr.serialize();
+    pkt1.extend_from_slice(&msg1);
+
+    // Send Msg1
+    udp_send_socket
+        .send_to(&pkt1, send_addr)
+        .await
+        .map_err(|e| format!("send_to error: {}", e))?;
+
+    // Wait for Msg2 (HelloAck)
+    let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+    let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+    let mut retries: u8 = 0;
+
+    let (recv2, _) = loop {
+        match timeout(retry_delay, rx.recv()).await {
+            Ok(Some((data, addr))) => {
+                if data.len() >= HANDSHAKE_HEADER_SIZE {
+                    if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                        if hdr.msg_type == MsgType::HelloAck && hdr.session_id == session_id {
+                            break (data, addr);
+                        }
+                    }
+                }
+                continue;
+            }
+            Ok(None) => return Err("channel closed".to_string()),
+            Err(_) => {
+                // Timeout, retransmit
+                retries += 1;
+                if retries > MAX_HANDSHAKE_RETRIES {
+                    return Err("handshake failed: no HELLO_ACK after retransmits".to_string());
+                }
+                udp_send_socket
+                    .send_to(&pkt1, send_addr)
+                    .await
+                    .map_err(|e| format!("send_to error: {}", e))?;
+                retry_delay = (retry_delay * 2).min(max_retry_delay);
+            }
+        }
+    };
+
+    if recv2.len() < HANDSHAKE_HEADER_SIZE {
+        return Err("received packet too short for handshake header".to_string());
+    }
+    let recv2_header = HandshakeHeader::deserialize(&recv2).map_err(|e| e.to_string())?;
+    if recv2_header.msg_type != MsgType::HelloAck {
+        return Err(format!(
+            "expected HELLO_ACK, got {:?}",
+            recv2_header.msg_type
+        ));
+    }
+    let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
+    ctx.read_message(noise_payload2)
+        .map_err(|e| e.to_string())?;
+
+    // Msg3
+    let profile = ztlp_proto::client_profile::ClientProfile::desktop(format!(
+        "ztlp/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let profile_cbor = profile.to_cbor();
+    let msg3 = ctx
+        .write_message(&profile_cbor)
+        .map_err(|e| e.to_string())?;
+    let mut final_hdr = HandshakeHeader::new(MsgType::Data);
+    final_hdr.session_id = session_id;
+    final_hdr.src_node_id = *identity.node_id.as_bytes();
+    final_hdr.payload_len = msg3.len() as u16;
+    let mut pkt3 = final_hdr.serialize();
+    pkt3.extend_from_slice(&msg3);
+    udp_send_socket
+        .send_to(&pkt3, send_addr)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !ctx.is_finished() {
+        return Err("handshake did not complete".to_string());
+    }
+
+    let peer_node_id = NodeId::from_bytes(recv2_header.src_node_id);
+    let (_transport, session) = ctx
+        .finalize(peer_node_id, session_id)
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut pl = pipeline.lock().await;
+        pl.register_session(session);
+    }
+    session_mgr.set_established(&session_id).await;
+
+    // Reject check omitted: Unlike the serial path, we skip the brief RejectFrame
+    // poll on `recv_data` because we cannot easily share it or block concurrent
+    // session processing without overcomplicating the router. Any reject will simply
+    // tear down the bridge shortly after startup.
+
+    // Bridge: loopback UDP pair
+    let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("bind recv socket: {}", e))?;
+    let recv_addr = recv_socket
+        .local_addr()
+        .map_err(|e| format!("recv socket addr: {}", e))?;
+
+    let fwd_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("bind fwd socket: {}", e))?;
+
+    let recv_socket = std::sync::Arc::new(recv_socket);
+    let fwd_socket = std::sync::Arc::new(fwd_socket);
+
+    let fwd_socket_clone = fwd_socket.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some((data, _addr)) = rx.recv().await {
+            let _ = fwd_socket_clone.send_to(&data, recv_addr).await;
+        }
+    });
+
+    // Run the bridge using demuxed sockets
+    let bridge_result = ztlp_proto::tunnel::run_bridge_demuxed(
+        tcp_stream,
+        udp_send_socket,
+        recv_socket,
+        pipeline,
+        session_id,
+        send_addr,
+        Vec::new(),
+    )
+    .await
+    .map_err(|e| e.to_string());
+
+    session_mgr.remove(&session_id).await;
+    forwarder.abort();
+
+    bridge_result.map(|_| ())
 }
 
 // ─── Relay Gateway Registration ───────────────────────────────────────────

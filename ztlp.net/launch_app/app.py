@@ -681,13 +681,11 @@ class LaunchApp:
             # Generate a temporary identity for the gateway if one doesn't exist
             key_path = os.path.join(instance_dir, "gateway_keys", "identity.json")
             if not os.path.exists(key_path):
-                result_key = subprocess.run(
-                    ["/usr/local/bin/ztlp", "keygen", "--output", key_path],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                print(f"ztlp keygen result: {result_key.stdout}", file=sys.stderr)
+                # Inside the docker container, we don't have ztlp installed in /usr/local/bin.
+                # However, since we're generating a compose file that mounts this dir into 
+                # priceflex/ztlp-node, we'll let that container generate its own key on startup
+                # instead of trying to generate it here on the host. 
+                pass
 
             compose_yaml = (
                 "services:\n"
@@ -734,7 +732,8 @@ class LaunchApp:
                 "    network_mode: host\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
-                f"    command: [\"listen\", \"--bind\", \"0.0.0.0:23097\", \"--forward\", \"http:127.0.0.1:{port}\", \"--key\", \"/data/keys/identity.json\", \"--gateway\", \"--ns-server\", \"{LAUNCH_NS_SERVER}\", \"--relay\", \"{BOOTSTRAP_LISTENER_ADDR}\", \"--service\", \"{service}\"]\n"
+                # If key doesn't exist, this shell command writes it first 
+                f"    command: [\"sh\", \"-c\", \"[ -f /data/keys/identity.json ] || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service {service}\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"
@@ -742,7 +741,7 @@ class LaunchApp:
                 f"    container_name: \"ztlp-ns-reg-{slug}\"\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
-                f"    command: [\"ns\", \"register\", \"{service}\", \"--type\", \"svc\", \"--address\", \"{BOOTSTRAP_LISTENER_ADDR}\", \"--key\", \"/data/keys/identity.json\", \"--ns-server\", \"{LAUNCH_NS_SERVER}\"]\n"
+                f"    command: [\"sh\", \"-c\", \"while [ ! -f /data/keys/identity.json ]; do sleep 1; done; exec ztlp ns register {service} --type svc --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
                 "\n"
                 "volumes:\n"
                 f"  bootstrap_{slug}_data:\n"

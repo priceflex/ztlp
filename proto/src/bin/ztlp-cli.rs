@@ -6542,13 +6542,13 @@ fn write_config_file(
 
 identity = {key_path}
 ns_server = {ns_server}
-relay = {relay_str}
+{relay_str}
 zone = {zone}
 "#,
         zone_comment = zone,
         key_path = toml_string(&key_path.display().to_string()),
         ns_server = toml_string(ns_server),
-        relay_str = relay_str,
+        relay_str = if relay_str == "[]" { "".to_string() } else { format!("relay = {}", relay_str) },
         zone = toml_string(zone),
     );
 

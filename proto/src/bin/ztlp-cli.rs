@@ -2818,24 +2818,47 @@ async fn cmd_listen(
                 std::collections::HashMap::new();
             for entry in admin_pubkey_email {
                 let mut parts = entry.splitn(2, '=');
-                let hex = parts
+                let hex_str = parts
                     .next()
                     .ok_or_else(|| format!("invalid --admin-pubkey-email '{}'", entry))?
                     .trim();
-                let email = parts.next().ok_or_else(|| {
-                    format!(
-                        "invalid --admin-pubkey-email '{}' (expected HEX=EMAIL)",
-                        entry
-                    )
-                })?;
-                if hex.is_empty() || email.is_empty() {
+                let email = parts
+                    .next()
+                    .ok_or_else(|| {
+                        format!(
+                            "invalid --admin-pubkey-email '{}' (expected HEX=EMAIL)",
+                            entry
+                        )
+                    })?
+                    .trim();
+                if hex_str.is_empty() || email.is_empty() {
                     return Err(format!(
                         "invalid --admin-pubkey-email '{}' (HEX and EMAIL must be non-empty)",
                         entry
                     )
                     .into());
                 }
-                map.insert(hex.to_lowercase(), email.to_string());
+                // Validate the LHS decodes as a 32-byte X25519 public key so a
+                // typo / wrong-length pubkey is caught at startup rather than
+                // silently never matching `remote_static_hex()` (which would
+                // look like the gateway "just won't inject headers" with no
+                // error). hex::decode tolerates mixed case; we lowercase for
+                // the map key to match remote_static_hex() output convention.
+                let decoded = hex::decode(hex_str).map_err(|_| {
+                    format!(
+                        "invalid --admin-pubkey-email '{}' (HEX must be valid hex characters)",
+                        entry
+                    )
+                })?;
+                if decoded.len() != 32 {
+                    return Err(format!(
+                        "invalid --admin-pubkey-email '{}' (HEX must be a 32-byte X25519 public key, got {} bytes)",
+                        entry,
+                        decoded.len()
+                    )
+                    .into());
+                }
+                map.insert(hex_str.to_lowercase(), email.to_string());
             }
             if map.is_empty() {
                 eprintln!(

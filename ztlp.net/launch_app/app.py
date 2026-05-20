@@ -431,12 +431,16 @@ class LaunchApp:
         form = self.read_form(environ)
         
         # Enforce strict input sanitization: drop characters that could be used for XSS.
-        # This protects internal databases and dashboards even if they fail to escape.
-        import re
+        # XSS defense lives at the output boundary: every render site funnels
+        # user values through `esc()` (= html.escape(..., quote=True)). Stripping
+        # angle brackets here on the way in silently mutates legitimate values
+        # (e.g. an admin name like "Alice <Admin>") AND defeats the unit test
+        # that proves output-side escaping is wired up — because by the time
+        # `esc()` runs there are no `<`/`>` left to escape. Keep only the
+        # whitespace-collapsing `clean()` here.
         def sanitize(text: str) -> str:
-            # Remove any angle brackets or common injection vectors.
-            return re.sub(r'[<>{}[\];]', '', clean(text))
-            
+            return clean(text)
+
         values = {key: sanitize(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone", "referral_code"]}
         values["zone"] = normalize_zone(values["zone"])
         errors = validate_start(values)

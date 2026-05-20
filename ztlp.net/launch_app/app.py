@@ -248,6 +248,8 @@ class LaunchApp:
                 response = self.handle_claim(environ)
             elif method == "POST" and path == "/claim/launch":
                 response = self.handle_claim_launch(environ)
+            elif method == "POST" and path == "/api/admin-pubkey":
+                response = self.handle_admin_pubkey(environ)
             elif method == "GET" and path == "/downloads":
                 response = self.render_downloads(environ)
             elif method == "GET" and path == "/downloads/manifest.json":
@@ -613,11 +615,7 @@ class LaunchApp:
         import traceback
         try:
             org_name = row["organization_name"] or ""
-            slug_raw = "".join(c if c.isalnum() else "-" for c in org_name.lower())
-            # Collapse repeated '-' and strip leading/trailing.
-            while "--" in slug_raw:
-                slug_raw = slug_raw.replace("--", "-")
-            slug = slug_raw.strip("-")
+            slug = self._slug_for_row(row)
             if not slug:
                 print("_provision_zone_dockers: empty slug, skipping", file=sys.stderr)
                 return None
@@ -626,11 +624,7 @@ class LaunchApp:
             digest_prefix = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:6]
             port = base_port + (int(digest_prefix, 16) % 900)
 
-            instance_root = os.environ.get(
-                "LAUNCH_INSTANCE_ROOT",
-                os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "instances")),
-            )
-            instance_dir = os.path.join(instance_root, slug)
+            instance_dir = self._instance_dir_for_slug(slug)
             os.makedirs(instance_dir, exist_ok=True)
 
             image = os.environ.get("LAUNCH_BOOTSTRAP_IMAGE", "priceflex/ztlp-bootstrap:latest")
@@ -681,6 +675,12 @@ class LaunchApp:
                 # so passwordless auth stays OFF until an operator deliberately
                 # binds an enrolled device's pubkey here. Until then Rails sees
                 # unsigned traffic and falls back to its normal password form.
+                #
+                # To flip on passwordless auth without SSH, POST to
+                # /api/admin-pubkey with token=<claim_token>&pubkey_hex=<64hex>
+                # — the handler rewrites this line and runs
+                # `docker compose up -d --force-recreate gateway` so the new
+                # value takes effect immediately. See handle_admin_pubkey.
                 "ZTLP_ADMIN_PUBKEY_HEX=",
             ]
             with open(os.path.join(instance_dir, "instance.env"), "w", encoding="utf-8") as fh:
@@ -755,6 +755,15 @@ class LaunchApp:
                 # sign X-ZTLP-* headers. Without this, signatures would be
                 # generated under a different key than Rails verifies and every
                 # request would 401.
+                #
+                # File-permissions note: secrets.env is chmod 600 and owned by
+                # the Launch process user. That's compatible with this env_file
+                # mount because docker-compose v2 reads env_file from disk in
+                # the CLI process (run by the same user that wrote it) and
+                # injects the parsed KEY=VALUE pairs into the container env at
+                # start time — the container itself never sees the file. So the
+                # gateway container does NOT need read perms on secrets.env;
+                # only the user invoking `docker compose up` does.
                 "    env_file:\n"
                 "      - secrets.env\n"
                 "      - instance.env\n"
@@ -894,6 +903,137 @@ class LaunchApp:
             )
         with self.connect() as conn:
             return conn.execute("SELECT * FROM onboarding_requests WHERE id = ?", (row["id"],)).fetchone()
+
+    def handle_admin_pubkey(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
+        """Bind (or rebind) the admin's Noise static pubkey for passwordless gateway auth.
+
+        Auth: holder of the original claim_token. The token was issued at /start
+        time, shown once to the admin who provisioned the tenant, and stored in
+        the DB only as an HMAC digest. Anyone with the raw token already has
+        full control of this tenant (they used it to claim it), so re-using it
+        as the auth credential for this endpoint does not widen the trust
+        boundary.
+
+        Side effects on success:
+          1. Rewrites the ZTLP_ADMIN_PUBKEY_HEX line in <instance_dir>/instance.env.
+          2. Runs `docker compose up -d --force-recreate gateway` in the
+             instance dir so the new env var is picked up — without this the
+             running gateway keeps using whatever it loaded at last start.
+
+        Body (application/x-www-form-urlencoded):
+          token=<claim_token>&pubkey_hex=<64 hex chars>
+
+        Returns JSON:
+          200 {"status":"ok","slug":"...","applied":true}
+          400 {"error":"<reason>"}
+          401 {"error":"invalid or expired token"}
+          404 {"error":"instance not provisioned yet"}
+          500 {"error":"docker recreate failed","detail":"..."}
+        """
+        import json
+        import re
+        import sys
+        import subprocess
+
+        def err(status: HTTPStatus, msg: str, **extra) -> Tuple[HTTPStatus, str, str]:
+            payload = {"error": msg, **extra}
+            return (status, "application/json; charset=utf-8", json.dumps(payload))
+
+        form = self.read_form(environ)
+        token = form.get("token", [""])[0].strip()
+        pubkey_hex = form.get("pubkey_hex", [""])[0].strip().lower()
+
+        if not token:
+            return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
+        # Mirror the Rust gateway's --admin-pubkey-email validation: must be
+        # exactly 64 lowercase hex chars (32-byte X25519 public key). Reject
+        # early so the admin gets a clear error instead of a silent "gateway
+        # still asks for a password" after the recreate.
+        if not re.fullmatch(r"[0-9a-f]{64}", pubkey_hex):
+            return err(
+                HTTPStatus.BAD_REQUEST,
+                "pubkey_hex must be exactly 64 lowercase hex characters (32-byte X25519 public key)",
+            )
+
+        row = self.find_by_token(token)
+        if not row:
+            return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
+        if parse_iso(row["claim_expires_at"]) < self.now():
+            # Unclaimed expired tokens are clearly invalid. Claimed-then-expired
+            # tokens are also rejected: once claimed, the admin should be using
+            # the tenant's own UI, not Launch endpoints, to manage state.
+            if not row["claimed_at"]:
+                return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
+
+        slug = self._slug_for_row(row)
+        if not slug:
+            return err(HTTPStatus.BAD_REQUEST, "tenant has no derivable slug (empty organization name)")
+
+        instance_dir = self._instance_dir_for_slug(slug)
+        instance_env_path = os.path.join(instance_dir, "instance.env")
+        if not os.path.isfile(instance_env_path):
+            return err(
+                HTTPStatus.NOT_FOUND,
+                "instance not provisioned yet — visit the claim link first",
+            )
+
+        # Rewrite ZTLP_ADMIN_PUBKEY_HEX in-place. Preserve all other lines
+        # exactly so we don't disturb other operator-set keys.
+        try:
+            with open(instance_env_path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+            new_lines = []
+            saw_key = False
+            for line in lines:
+                if line.startswith("ZTLP_ADMIN_PUBKEY_HEX="):
+                    new_lines.append(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}\n")
+                    saw_key = True
+                else:
+                    new_lines.append(line)
+            if not saw_key:
+                # Older instances provisioned before this key existed — append.
+                if new_lines and not new_lines[-1].endswith("\n"):
+                    new_lines[-1] += "\n"
+                new_lines.append(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}\n")
+            with open(instance_env_path, "w", encoding="utf-8") as fh:
+                fh.writelines(new_lines)
+        except OSError as exc:
+            return err(HTTPStatus.INTERNAL_SERVER_ERROR, "could not update instance.env", detail=str(exc))
+
+        # Re-create the gateway container so the new env var is picked up.
+        # --force-recreate is required: `up -d` alone is a no-op when the
+        # image+config hash is unchanged and a new env_file value alone does
+        # not bust that hash for already-running containers.
+        try:
+            result = subprocess.run(
+                ["docker", "compose", "up", "-d", "--force-recreate", "gateway"],
+                cwd=instance_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return err(HTTPStatus.INTERNAL_SERVER_ERROR, "docker recreate failed", detail=str(exc))
+
+        if result.returncode != 0:
+            # Print to stderr so operators can correlate with the response.
+            print(
+                f"handle_admin_pubkey: docker compose up failed for {slug} "
+                f"(rc={result.returncode}) stderr={result.stderr!r}",
+                file=sys.stderr,
+            )
+            return err(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "docker recreate failed",
+                detail=result.stderr.strip() or f"exit code {result.returncode}",
+            )
+
+        return (
+            HTTPStatus.OK,
+            "application/json; charset=utf-8",
+            json.dumps({"status": "ok", "slug": slug, "applied": True}),
+        )
 
     def render_downloads(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         cards = []
@@ -1147,6 +1287,26 @@ class LaunchApp:
 
     def token_digest(self, token: str) -> str:
         return hmac.new(self.token_secret, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _slug_for_row(self, row: sqlite3.Row) -> str:
+        """Derive the deterministic instance slug from a request row.
+
+        Same algorithm as _provision_zone_dockers — extracted into a helper so
+        post-claim endpoints (e.g. POST /api/admin-pubkey) can locate the
+        instance directory without re-implementing the rules.
+        """
+        org_name = row["organization_name"] or ""
+        slug_raw = "".join(c if c.isalnum() else "-" for c in org_name.lower())
+        while "--" in slug_raw:
+            slug_raw = slug_raw.replace("--", "-")
+        return slug_raw.strip("-")
+
+    def _instance_dir_for_slug(self, slug: str) -> str:
+        instance_root = os.environ.get(
+            "LAUNCH_INSTANCE_ROOT",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "instances")),
+        )
+        return os.path.join(instance_root, slug)
 
     def find_by_token(self, token: str) -> Optional[sqlite3.Row]:
         digest = self.token_digest(token)

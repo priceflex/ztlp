@@ -686,15 +686,6 @@ class LaunchApp:
                     # Write an empty marker so the container `sh -c` initialization loop works correctly, 
                     # even if Python doesn't have the binary installed to actually build the key keys
                     json.dump({"node_id":"", "static_private_key":"", "static_public_key":""}, kf)
-                try:
-                    subprocess.run(
-                        ["ztlp", "keygen", "--output", key_path, "-y"],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                except Exception as e:
-                    os.remove(key_path)
 
             ns_server_docker_host = LAUNCH_NS_SERVER.split(":")[0]
             # For dev, assume NS is on the same machine on docker bridge or host IP. 

@@ -149,8 +149,13 @@ fn update_channel_accepts_prerelease() {
 #[test]
 fn update_config_default_values() {
     let config = UpdateConfig::default();
-    // Should parse from CARGO_PKG_VERSION — keep this in sync with proto/Cargo.toml.
-    assert_eq!(config.current_version, SemVer::new(0, 26, 0));
+    // current_version is parsed from CARGO_PKG_VERSION at build time. We
+    // derive the expected value the same way so this test stays in sync
+    // with proto/Cargo.toml automatically — the previous hard-coded
+    // SemVer::new(0, 26, 0) silently rotted on every version bump.
+    let expected = SemVer::parse(env!("CARGO_PKG_VERSION"))
+        .expect("CARGO_PKG_VERSION must be a valid semver string");
+    assert_eq!(config.current_version, expected);
     assert_eq!(config.channel, UpdateChannel::Stable);
     assert!(config.release_url.contains("github.com"));
     assert!(config.release_url.contains("priceflex/ztlp"));

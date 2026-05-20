@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -227,6 +227,79 @@ pub struct ResetWaitResult {
 
 /// Keepalive interval — send a heartbeat ping if idle this long.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+// ─── HTTP header injection (passwordless admin auth) ────────────────────────
+//
+// When configured, the listener rewrites the FIRST decrypted HTTP request of
+// each TCP bridge to inject signed X-ZTLP-* identity headers. Subsequent bytes
+// on the same TCP connection flow through untouched. The signature is computed
+// over the canonical (lowercased, sorted, "\n"-joined) form of the three
+// injected headers and verified upstream by the Ruby/Elixir HeaderVerifier.
+
+/// Configuration for HTTP identity-header injection on tunnel bridges.
+///
+/// Built once per listener startup and shared (immutably) across all bridges.
+/// The `admin_pubkey_to_email` map keys are the lowercased hex of the peer's
+/// Noise static public key (from `HandshakeContext::remote_static_hex()`).
+#[derive(Clone, Default)]
+pub struct HttpInjectionConfig {
+    pub enabled: bool,
+    pub hmac_secret: String,
+    pub admin_pubkey_to_email: std::collections::HashMap<String, String>,
+}
+
+impl HttpInjectionConfig {
+    /// Look up the admin email for a peer's Noise static-key hex, normalising
+    /// case so callers don't have to.
+    pub fn lookup_email(&self, peer_pubkey_hex: &str) -> Option<&str> {
+        if !self.enabled {
+            return None;
+        }
+        let lc = peer_pubkey_hex.to_lowercase();
+        self.admin_pubkey_to_email.get(&lc).map(|s| s.as_str())
+    }
+}
+
+/// Per-bridge state for tracking whether the first HTTP request has been
+/// rewritten. Once `done` is true, all subsequent plaintext is forwarded
+/// untouched.
+struct HttpInjectionState {
+    config: Arc<HttpInjectionConfig>,
+    peer_email: String,
+    done: bool,
+}
+
+/// Format `SystemTime::now()` as a UTC ISO-8601 / RFC-3339 second-precision
+/// timestamp (e.g. `2026-05-20T12:34:56Z`). Used as the value for the injected
+/// `X-ZTLP-Timestamp` header; the Ruby/Elixir verifier parses this exact form.
+fn iso8601_utc_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Civil time conversion (Howard Hinnant's algorithm, public domain).
+    let days = (secs / 86_400) as i64;
+    let rem = (secs % 86_400) as u32;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+
+    // Shift epoch so that day 0 == 0000-03-01 (March 1).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, minute, second
+    )
+}
 
 // ─── Lazy Connect ───────────────────────────────────────────────────────────
 
@@ -437,6 +510,7 @@ pub async fn run_bridge(
         peer_addr,
         false,
         Vec::new(),
+        None,
     )
     .await
 }
@@ -458,6 +532,7 @@ pub async fn run_bridge_with_reset(
         peer_addr,
         true,
         Vec::new(),
+        None,
     )
     .await
 }
@@ -481,6 +556,7 @@ pub async fn run_bridge_with_buffered(
         peer_addr,
         false,
         buffered_packets,
+        None,
     )
     .await
 }
@@ -504,6 +580,62 @@ pub async fn run_bridge_demuxed(
         peer_addr,
         false,
         buffered_packets,
+        None,
+    )
+    .await
+}
+
+/// Like [`run_bridge_demuxed`] but additionally rewrites the FIRST HTTP
+/// request on the inbound (UDP→TCP) side to inject signed `X-ZTLP-*` admin
+/// identity headers when the peer's Noise static key matches an admin entry.
+///
+/// `peer_pubkey_hex` is the lowercase hex of the responder-observed Noise
+/// remote static key (`HandshakeContext::remote_static_hex()`). If it does
+/// not appear in `config.admin_pubkey_to_email`, no rewrite happens and bytes
+/// pass through verbatim (so the upstream app can fall back to its normal
+/// login flow).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_bridge_demuxed_with_http_injection(
+    tcp_stream: TcpStream,
+    udp_send_socket: Arc<UdpSocket>,
+    udp_recv_socket: Arc<UdpSocket>,
+    pipeline: Arc<Mutex<Pipeline>>,
+    session_id: SessionId,
+    peer_addr: SocketAddr,
+    buffered_packets: Vec<Vec<u8>>,
+    http_injection_config: Arc<HttpInjectionConfig>,
+    peer_pubkey_hex: Option<String>,
+) -> Result<BridgeOutcome, Box<dyn std::error::Error>> {
+    let injection_state = match peer_pubkey_hex
+        .as_deref()
+        .and_then(|hex| http_injection_config.lookup_email(hex).map(str::to_owned))
+    {
+        Some(email) => {
+            info!(
+                "http injection ENABLED for session {} peer_pubkey={} as admin {}",
+                session_id,
+                peer_pubkey_hex.as_deref().unwrap_or("?"),
+                email
+            );
+            Some(HttpInjectionState {
+                config: http_injection_config,
+                peer_email: email,
+                done: false,
+            })
+        }
+        None => None,
+    };
+
+    run_bridge_inner(
+        tcp_stream,
+        udp_send_socket,
+        Some(udp_recv_socket),
+        pipeline,
+        session_id,
+        peer_addr,
+        false,
+        buffered_packets,
+        injection_state,
     )
     .await
 }
@@ -528,6 +660,7 @@ where
         peer_addr,
         false,
         Vec::new(),
+        None,
     )
     .await
 }
@@ -574,6 +707,7 @@ async fn run_bridge_inner<S>(
     peer_addr: SocketAddr,
     send_initial_reset: bool,
     prefetched_packets: Vec<Vec<u8>>,
+    mut http_injection: Option<HttpInjectionState>,
 ) -> Result<BridgeOutcome, Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -660,6 +794,11 @@ where
     // Skip the immediate first tick.
     keepalive_tick.tick().await;
 
+    // Set by handle_incoming_packet if the HTTP injector fails on the first
+    // request — we then MUST drop the connection rather than forward
+    // unsigned bytes upstream (security model).
+    let mut injection_failed = false;
+
     loop {
         // Drain prefetched packets first (from wait_for_first_data).
         if let Some(pkt) = prefetched_iter.next() {
@@ -672,10 +811,19 @@ where
                 &mut reset_received,
                 &mut peer_fin,
                 &mut recv_window,
+                http_injection.as_mut(),
+                &mut injection_failed,
             )
             .await
             {
                 debug!("prefetched packet handling error: {}", e);
+            }
+            if injection_failed {
+                warn!(
+                    "http injection failed on session {} — dropping connection",
+                    session_id
+                );
+                break;
             }
             if reset_received {
                 break;
@@ -750,8 +898,17 @@ where
                             &mut reset_received,
                             &mut peer_fin,
                             &mut recv_window,
+                            http_injection.as_mut(),
+                            &mut injection_failed,
                         ).await {
                             debug!("incoming packet error: {}", e);
+                        }
+                        if injection_failed {
+                            warn!(
+                                "http injection failed on session {} — dropping connection",
+                                session_id
+                            );
+                            break;
                         }
                         if reset_received {
                             break;
@@ -796,6 +953,12 @@ where
 
 /// Decrypt an incoming UDP packet and write any resulting TCP bytes.
 /// Sets flags on RESET / FIN. Replay/admission is done by Pipeline::process.
+///
+/// When `http_injection` is `Some` and `done == false`, the FIRST contiguous
+/// payload delivered out of the reassembly window is rewritten by
+/// `http_injector::inject_headers` before being written to TCP. If the
+/// injector returns Err (partial request, malformed HTTP, etc.) the
+/// `injection_failed` flag is set and the caller drops the connection.
 #[allow(clippy::too_many_arguments)]
 async fn handle_incoming_packet<W>(
     pkt: &[u8],
@@ -806,6 +969,8 @@ async fn handle_incoming_packet<W>(
     reset_received: &mut bool,
     peer_fin: &mut bool,
     recv_window: &mut crate::ReceiveWindow,
+    mut http_injection: Option<&mut HttpInjectionState>,
+    injection_failed: &mut bool,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -856,6 +1021,42 @@ where
             let ordered_payloads = recv_window.insert(data_seq, payload.to_vec());
 
             for p in ordered_payloads {
+                // HTTP header-injection hook — runs ONCE per TCP bridge,
+                // on the first decrypted plaintext chunk only. After it
+                // runs (success OR failure), `done` flips and all
+                // subsequent bytes flow through untouched.
+                if let Some(state) = http_injection.as_deref_mut() {
+                    if !state.done {
+                        let ts = iso8601_utc_now();
+                        match crate::http_injector::inject_headers(
+                            p.as_slice(),
+                            &state.peer_email,
+                            &ts,
+                            state.config.hmac_secret.as_bytes(),
+                        ) {
+                            Ok(rewritten) => {
+                                state.done = true;
+                                info!(
+                                    "http injection: rewrote first request for {} ({} → {} bytes)",
+                                    state.peer_email,
+                                    p.len(),
+                                    rewritten.len()
+                                );
+                                tcp_writer.write_all(&rewritten).await?;
+                                continue;
+                            }
+                            Err(e) => {
+                                state.done = true;
+                                *injection_failed = true;
+                                warn!(
+                                    "http injection: parse failed for {} ({}). Dropping connection.",
+                                    state.peer_email, e
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 tcp_writer.write_all(p.as_slice()).await?;
             }
         }
@@ -1596,6 +1797,7 @@ mod tests {
                 pretend_peer_addr, // <-- the "real" peer, NOT recv_addr
                 false,
                 Vec::new(),
+                None,
             )
             .await
             .map_err(|e| e.to_string());
@@ -1689,6 +1891,7 @@ mod tests {
                 client_addr,
                 false,
                 Vec::new(),
+                None,
             )
             .await
             .map_err(|e| e.to_string());

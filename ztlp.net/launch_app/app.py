@@ -431,12 +431,16 @@ class LaunchApp:
         form = self.read_form(environ)
         
         # Enforce strict input sanitization: drop characters that could be used for XSS.
-        # This protects internal databases and dashboards even if they fail to escape.
-        import re
+        # XSS defense lives at the output boundary: every render site funnels
+        # user values through `esc()` (= html.escape(..., quote=True)). Stripping
+        # angle brackets here on the way in silently mutates legitimate values
+        # (e.g. an admin name like "Alice <Admin>") AND defeats the unit test
+        # that proves output-side escaping is wired up — because by the time
+        # `esc()` runs there are no `<`/`>` left to escape. Keep only the
+        # whitespace-collapsing `clean()` here.
         def sanitize(text: str) -> str:
-            # Remove any angle brackets or common injection vectors.
-            return re.sub(r'[<>{}[\];]', '', clean(text))
-            
+            return clean(text)
+
         values = {key: sanitize(form.get(key, [""])[0]) for key in ["organization_name", "admin_name", "admin_email", "zone", "referral_code"]}
         values["zone"] = normalize_zone(values["zone"])
         errors = validate_start(values)
@@ -671,6 +675,13 @@ class LaunchApp:
                 f"ZTLP_ZONE={zone}",
                 f"ZTLP_PRIVATE_PORT={port}",
                 f"ZTLP_CREATED_AT={created_at}",
+                # ZTLP_ADMIN_PUBKEY_HEX: the admin's Noise static public key
+                # (hex). Initially empty — the gateway compose command only
+                # emits `--admin-pubkey-email HEX=EMAIL` when this is non-empty,
+                # so passwordless auth stays OFF until an operator deliberately
+                # binds an enrolled device's pubkey here. Until then Rails sees
+                # unsigned traffic and falls back to its normal password form.
+                "ZTLP_ADMIN_PUBKEY_HEX=",
             ]
             with open(os.path.join(instance_dir, "instance.env"), "w", encoding="utf-8") as fh:
                 fh.write("\n".join(env_lines) + "\n")
@@ -738,13 +749,35 @@ class LaunchApp:
                 "    network_mode: host\n"
                 "    volumes:\n"
                 "      - ./gateway_keys:/data/keys\n"
+                # Read the per-instance HMAC secret + (optional) admin pubkey
+                # hex from secrets.env / instance.env so the same value used by
+                # Rails (ZTLP_GATEWAY_HEADER_SECRET) is what the gateway uses to
+                # sign X-ZTLP-* headers. Without this, signatures would be
+                # generated under a different key than Rails verifies and every
+                # request would 401.
+                "    env_file:\n"
+                "      - secrets.env\n"
+                "      - instance.env\n"
                 # If key doesn't exist, this shell command writes it first.
                 # `ztlp listen` v0.26 CLI: --service-name (NOT --service) is the
                 # short label registered with the relay (max 16 bytes, padded).
                 # We deliberately use a short slug-derived name to stay under
                 # the 16-byte cap; the user-facing SVC record (bootstrap.<zone>)
                 # is registered separately by the register_ns sidecar below.
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]}\"]\n"
+                # HTTP header injection: when ZTLP_GATEWAY_HEADER_SECRET is set
+                # (always true under Launch — see secrets.env above) the gateway
+                # strips inbound X-ZTLP-* spoofing attempts and injects
+                # authoritative `X-ZTLP-Authenticated/Admin-Email/Timestamp/
+                # Signature` headers on the first HTTP request of every TCP
+                # connection. Rails (`Ztlp::HeaderVerifier`) verifies the
+                # signature with the same secret. When ZTLP_ADMIN_PUBKEY_HEX is
+                # empty (default until an admin enrolls a device through ZTLP),
+                # no `--admin-pubkey-email` flag is rendered and the gateway
+                # passes traffic through unmodified — Rails then falls back to
+                # the password login form. Operators set this var in
+                # instance.env after the admin's device is enrolled to flip on
+                # passwordless auth without rebuilding the image.
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && grep -vq '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:23097 --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --header-hmac-secret \\\"$ZTLP_GATEWAY_HEADER_SECRET\\\" $([ -n \\\"$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $ZTLP_ADMIN_PUBKEY_HEX=$ZTLP_ADMIN_EMAIL\\\")\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"
@@ -1272,3 +1305,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

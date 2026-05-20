@@ -1054,6 +1054,18 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         # (positional NAME and `--type svc` were removed).
         self.assertIn("ns register --name bootstrap.acme.ztlp --zone acme.ztlp", compose_text)
         self.assertNotIn("--type svc", compose_text)
+        # Regression (PR #5 / #6 / #8): env-file-sourced vars referenced in
+        # the gateway `command:` MUST be written as `$$VAR` (escaped) so
+        # docker-compose passes them through verbatim and the in-container
+        # `sh -c` expands them from env_file at run time. A single `$VAR`
+        # makes compose-cli substitute from the HOST process env at parse
+        # time — usually empty — yielding `--header-hmac-secret ""` and a
+        # crash-loop. Live triage 2026-05-20 cost ~2h. See
+        # ztlp-net-launch SKILL pitfall #17.
+        self.assertIn("--header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\"", compose_text)
+        self.assertNotIn("--header-hmac-secret \\\"$ZTLP_GATEWAY_HEADER_SECRET\\\"", compose_text)
+        self.assertIn("$$ZTLP_ADMIN_PUBKEY_HEX", compose_text)
+        self.assertIn("$$ZTLP_ADMIN_EMAIL", compose_text)
         # subprocess.run should have been invoked with `docker compose up -d`.
         self.assertTrue(self._calls, "expected subprocess.run to have been called")
         last = self._calls[-1]

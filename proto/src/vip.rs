@@ -36,8 +36,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::packet::SessionId;
-use crate::send_controller::SendController;
+
 use crate::transport::TransportNode;
+use crate::send_controller::SendController;
 
 /// Swappable tunnel session state.
 ///

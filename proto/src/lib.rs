@@ -79,7 +79,7 @@ pub mod ack_socket;
 #[cfg(feature = "tokio-runtime")]
 pub mod batch;
 #[cfg(feature = "tokio-runtime")]
-pub mod congestion;
+
 #[cfg(feature = "tokio-runtime")]
 pub mod dns;
 #[cfg(feature = "tokio-runtime")]
@@ -92,7 +92,7 @@ pub mod mobile;
 pub mod nat;
 #[cfg(feature = "tokio-runtime")]
 #[allow(unsafe_code)]
-pub mod pacing;
+
 #[cfg(feature = "tokio-runtime")]
 pub mod policy;
 #[cfg(feature = "tokio-runtime")]
@@ -100,7 +100,7 @@ pub mod punch;
 #[cfg(feature = "tokio-runtime")]
 pub mod relay;
 #[cfg(feature = "tokio-runtime")]
-pub mod send_controller;
+
 #[cfg(feature = "tokio-runtime")]
 pub mod session_manager;
 #[cfg(feature = "tokio-runtime")]
@@ -108,10 +108,12 @@ pub mod transport;
 #[cfg(feature = "tokio-runtime")]
 pub mod tunnel;
 #[cfg(feature = "tokio-runtime")]
-pub mod vip;
-
+pub mod send_controller;
 pub mod recv_window;
 pub use recv_window::ReceiveWindow;
+
+#[cfg(feature = "tokio-runtime")]
+pub mod vip;
 
 // ─── Experimental QUIC transport (Phase 0 scaffold) ─────────────────────
 //

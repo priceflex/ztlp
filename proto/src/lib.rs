@@ -48,6 +48,7 @@ pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod handshake;
+pub mod http_injector;
 pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;

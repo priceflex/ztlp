@@ -681,16 +681,11 @@ class LaunchApp:
             # Generate a temporary identity for the gateway if one doesn't exist
             key_path = os.path.join(instance_dir, "gateway_keys", "identity.json")
             if not os.path.exists(key_path):
-                try:
-                    result_key = subprocess.run(
-                        ["ztlp", "keygen", "--output", key_path],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    print(f"ztlp keygen result: {result_key.stdout}", file=sys.stderr)
-                except Exception as e:
-                    print(f"ztlp keygen error: {e}", file=sys.stderr)
+                # Inside the docker container, we don't have ztlp installed in /usr/local/bin.
+                # However, since we're generating a compose file that mounts this dir into 
+                # priceflex/ztlp-node, we'll let that container generate its own key on startup
+                # instead of trying to generate it here on the host. 
+                pass
 
             ns_server_docker_host = LAUNCH_NS_SERVER.split(":")[0]
             # For dev, assume NS is on the same machine on docker bridge or host IP. 

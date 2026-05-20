@@ -6676,6 +6676,38 @@ async fn setup_join(
                     eprintln!("  View your identity: {} status --identity", c_cyan("ztlp"));
                     eprintln!("  Config file:        {}", config_path.display());
                     eprintln!();
+
+                    // Surface the public key for passwordless gateway-auth setup.
+                    // ztlp.net's claim page (and any tenant admin panel) needs
+                    // this 64-char hex string to bind the device to an admin
+                    // identity. Without it, the gateway has no admin pubkeys
+                    // to match against and the bootstrap UI falls back to its
+                    // password form. The secret half NEVER leaves identity.json
+                    // on disk — only the public half is printed here.
+                    let pubkey_hex = hex::encode(identity.static_public_key.as_slice());
+                    eprintln!(
+                        "  {}",
+                        c_bold("── Enable passwordless sign-in (optional) ─────")
+                    );
+                    eprintln!();
+                    eprintln!(
+                        "  Paste this {} on your zone's claim page to enable",
+                        c_cyan("public key")
+                    );
+                    eprintln!("  passwordless Bootstrap sign-in from this device:");
+                    eprintln!();
+                    eprintln!("      {}", c_bold(&pubkey_hex));
+                    eprintln!();
+                    eprintln!(
+                        "  {} Only the public half is shown. The private key stays",
+                        c_dim("ℹ")
+                    );
+                    eprintln!(
+                        "  {}  in {} on this machine (chmod 600).",
+                        c_dim(" "),
+                        key_path.display()
+                    );
+                    eprintln!();
                 }
                 [0x08, 0x01] => {
                     return Err("enrollment failed: token expired".into());

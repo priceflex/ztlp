@@ -148,9 +148,12 @@ class LaunchAppTest(unittest.TestCase):
         )
         token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
 
-        status, _headers, claim_body = self.request("GET", f"/claim?token={token}")
+        # New flow: GET /claim on an unclaimed token returns the confirm form
+        # (no provisioning, no "Status: claimed"). The user must POST
+        # /claim/launch (optionally with a pubkey) to actually claim + provision.
+        status, _headers, claim_body = self.post_form("/claim/launch", {"token": token, "pubkey_hex": ""})
         self.assertEqual(HTTPStatus.OK, status)
-        self.assertIn("Status: claimed", claim_body)
+        self.assertIn("Status:", claim_body)
         self.assertIn("bootstrap.example.ztlp", claim_body)
         self.assertIn("ztlp://enroll/", claim_body)
         self.assertIn("ztlp setup --token", claim_body)
@@ -159,12 +162,18 @@ class LaunchAppTest(unittest.TestCase):
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
-        self.assertNotIn(token, claim_body)
+        # Note: render_claim_page now embeds the claim token in a hidden form
+        # field so the admin can re-bind a device pubkey from the same page,
+        # so we intentionally do NOT assert the token is absent here — the
+        # security invariant being protected is "no admin URL / login path
+        # is exposed", which is checked above.
 
         conn = sqlite3.connect(self.db_path)
         row = conn.execute("SELECT status, claimed_at, enrollment_token_uri, bootstrap_service_name, ns_server FROM onboarding_requests").fetchone()
         conn.close()
-        self.assertEqual("claimed", row[0])
+        # POST /claim/launch transitions the row to launch_requested in one
+        # shot (claim + provision happen together in the new flow).
+        self.assertEqual("launch_requested", row[0])
         self.assertEqual("2026-01-02T03:04:05+00:00", row[1])
         self.assertTrue(row[2].startswith("ztlp://enroll/"))
         self.assertNotEqual(token, row[2])
@@ -183,12 +192,11 @@ class LaunchAppTest(unittest.TestCase):
         )
         token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
 
-        status, _headers, rejected = self.post_form("/claim/launch", {"token": token})
-        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
-        self.assertIn("must be confirmed first", rejected)
-
-        self.request("GET", f"/claim?token={token}")
-        status, _headers, launch_body = self.post_form("/claim/launch", {"token": token})
+        # New flow: POST /claim/launch is the single endpoint that claims +
+        # provisions in one shot. No prior /claim GET is required. The
+        # response must never expose the bootstrap admin URL or login path
+        # (the original security concern of this test).
+        status, _headers, launch_body = self.post_form("/claim/launch", {"token": token, "pubkey_hex": ""})
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Status: launch_requested", launch_body)
         self.assertIn("bootstrap.launch.ztlp", launch_body)
@@ -644,9 +652,11 @@ class LaunchAppTest(unittest.TestCase):
 
             status, _h, claim_body = self.request("GET", f"/claim?token={token}")
             self.assertEqual(HTTPStatus.OK, status)
-            self.assertIn(f"bootstrap.{zone}", claim_body)
+            # First GET shows the confirm form (no service name yet);
+            # actual provisioning happens on POST /claim/launch below.
+            self.assertIn("Confirm your claim", claim_body)
 
-            status, _h, launch_body = self.post_form("/claim/launch", {"token": token})
+            status, _h, launch_body = self.post_form("/claim/launch", {"token": token, "pubkey_hex": ""})
             self.assertEqual(HTTPStatus.OK, status)
             self.assertIn("Status: launch_requested", launch_body)
             self.assertIn(f"bootstrap.{zone}", launch_body)
@@ -678,12 +688,14 @@ class LaunchAppTest(unittest.TestCase):
     # ── /api/admin-pubkey ────────────────────────────────────────────
 
     def _claim_token_for(self, org_name, zone):
-        """Provision a tenant via /start + /claim and return the claim token.
+        """Provision a tenant via /start + /claim/launch and return the claim token.
 
-        Both /start (compose generation) and /claim (which calls
-        _provision_zone_dockers + docker compose up) run their `docker compose`
-        invocation through the fake subprocess.run in setUp, so this is pure
-        Python + a populated instance dir on disk.
+        In the new claim-confirm-then-provision flow, GET /claim only renders
+        the confirmation form; the actual provisioning (instance dir +
+        instance.env + docker compose up) happens on POST /claim/launch.
+        All `docker compose` invocations run through the fake subprocess.run
+        installed in setUp, so this is pure Python + a populated instance dir
+        on disk.
         """
         _status, _headers, body = self.post_form(
             "/start",
@@ -695,8 +707,9 @@ class LaunchAppTest(unittest.TestCase):
             },
         )
         token = parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
-        # Hit /claim to actually provision the instance dir + instance.env.
-        self.request("GET", f"/claim?token={token}")
+        # POST /claim/launch with an empty pubkey to claim + provision the
+        # instance dir + instance.env in one shot.
+        self.post_form("/claim/launch", {"token": token, "pubkey_hex": ""})
         return token
 
     def test_admin_pubkey_rejects_missing_token(self):
@@ -809,9 +822,9 @@ class LaunchAppTest(unittest.TestCase):
 
     def test_admin_pubkey_returns_404_when_instance_not_provisioned(self):
         # /start creates the request row but does NOT provision the instance —
-        # provisioning happens on the first GET /claim. If the admin POSTs to
-        # /api/admin-pubkey BEFORE clicking the claim link, there is no
-        # instance.env to write into.
+        # provisioning happens on POST /claim/launch (the confirm-then-provision
+        # step). If the admin POSTs to /api/admin-pubkey BEFORE completing
+        # the claim flow, there is no instance.env to write into.
         _status, _headers, body = self.post_form(
             "/start",
             {
@@ -830,6 +843,95 @@ class LaunchAppTest(unittest.TestCase):
         )
         self.assertEqual(HTTPStatus.NOT_FOUND, status)
         self.assertIn("not provisioned", body)
+
+    # ── New claim-confirm-then-provision flow ─────────────────────────
+
+    def _start_and_get_token(self, *, org="Confirm Co", zone="confirm.ztlp", email="confirm@example.com"):
+        """POST /start with the given fields and return the minted claim token."""
+        _status, _headers, body = self.post_form(
+            "/start",
+            {
+                "organization_name": org,
+                "admin_name": "Confirm Admin",
+                "admin_email": email,
+                "zone": zone,
+            },
+        )
+        return parse_qs(urlparse(self.extract_claim_link(body)).query)["token"][0]
+
+    def test_claim_first_visit_shows_confirm_form_not_status_page(self):
+        token = self._start_and_get_token(org="Confirm Co", zone="confirm.ztlp", email="c1@example.com")
+
+        status, _headers, body = self.request("GET", f"/claim?token={token}")
+        self.assertEqual(HTTPStatus.OK, status)
+        # The confirm form must be the body (NOT the status page).
+        self.assertIn("Confirm your claim", body)
+        self.assertIn('name="pubkey_hex"', body)
+        # And we must NOT have transitioned the row to claimed/provisioned.
+        self.assertNotIn("Status: claimed", body)
+        self.assertNotIn("Status: launch_requested", body)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT status, claimed_at FROM onboarding_requests"
+        ).fetchone()
+        conn.close()
+        self.assertEqual("requested", row[0])
+        self.assertIsNone(row[1])
+
+    def test_claim_launch_with_valid_pubkey_writes_admin_pubkey_to_instance_env(self):
+        token = self._start_and_get_token(org="Pubkey Bake Co", zone="pubkey-bake.ztlp", email="bake@example.com")
+        good_pubkey = "ab" * 32  # 64 lowercase hex chars
+
+        status, _headers, body = self.post_form(
+            "/claim/launch", {"token": token, "pubkey_hex": good_pubkey}
+        )
+        self.assertEqual(HTTPStatus.OK, status, msg=body[:400])
+        self.assertIn("Status: launch_requested", body)
+
+        # The pubkey must have been baked into the freshly-provisioned
+        # instance.env (no post-provision force-recreate dance required).
+        instance_env = os.path.join(
+            self.instance_root.name, "pubkey-bake-co", "instance.env"
+        )
+        self.assertTrue(
+            os.path.isfile(instance_env),
+            f"instance.env not created at {instance_env}",
+        )
+        with open(instance_env, "r", encoding="utf-8") as fh:
+            env_text = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={good_pubkey}", env_text)
+        # Only one ZTLP_ADMIN_PUBKEY_HEX line should be present.
+        self.assertEqual(1, env_text.count("ZTLP_ADMIN_PUBKEY_HEX="))
+
+    def test_claim_launch_with_bad_pubkey_returns_400_and_does_not_provision(self):
+        token = self._start_and_get_token(org="Bad Pubkey Co", zone="bad-pubkey.ztlp", email="bad@example.com")
+
+        status, _headers, body = self.post_form(
+            "/claim/launch", {"token": token, "pubkey_hex": "notvalidhex"}
+        )
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("64 lowercase hex", body)
+        # The confirm form should be re-rendered so the admin can correct
+        # their paste.
+        self.assertIn("Confirm your claim", body)
+
+        # No instance dir should have been created — provisioning is gated
+        # behind a valid (or empty) pubkey.
+        instance_dir = os.path.join(self.instance_root.name, "bad-pubkey-co")
+        self.assertFalse(
+            os.path.isdir(instance_dir),
+            f"instance dir {instance_dir} should not exist after a 400",
+        )
+
+        # And the DB row must still be in 'requested' state.
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT status, claimed_at FROM onboarding_requests"
+        ).fetchone()
+        conn.close()
+        self.assertEqual("requested", row[0])
+        self.assertIsNone(row[1])
 
     def extract_claim_link(self, body):
         marker = "http://testserver/claim?token="

@@ -13,7 +13,7 @@ Comprehensive operations guide for deploying, configuring, monitoring, and maint
 | **ztlp-gateway** | TCP bridge (ZTLP ↔ legacy backend services) | 23097/udp | 9102 |
 | **ztlp** (CLI) | Command-line tool for keygen, connect, inspect, etc. | — | — |
 
-> **See also:** [GETTING-STARTED.md](../GETTING-STARTED.md) · [DOCKER.md](../DOCKER.md) · [ARCHITECTURE.md](../ARCHITECTURE.md) · [CLI.md](../CLI.md) · [THREAT-MODEL.md](../THREAT-MODEL.md)
+> **See also:** [GETTING-STARTED.md](#get-started) · [DOCKER.md](#docker-docs) · [ARCHITECTURE.md](#architecture) · [CLI.md](#cli-docs) · [THREAT-MODEL.md](#threat-model)
 
 ---
 
@@ -132,7 +132,7 @@ sudo systemctl enable --now ztlp-gateway
 
 ### Docker Compose Deployment
 
-See [DOCKER.md](../DOCKER.md) for full reference.
+See [DOCKER.md](#docker-docs) for full reference.
 
 ```bash
 git clone https://github.com/priceflex/ztlp.git

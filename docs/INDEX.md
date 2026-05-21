@@ -7,89 +7,89 @@ Auto-generated documentation index. Last updated: 2026-04-10 07:55 UTC
 Core documentation organized by topic.
 
 ### Architecture & Design
-- [ARCHITECTURE.md](ARCHITECTURE.md) — System architecture overview
-- [THREAT-MODEL.md](THREAT-MODEL.md) — Security threat analysis
-- [NEBULA-ANALYSIS.md](NEBULA-ANALYSIS.md) — Nebula comparison and analysis
+- [ARCHITECTURE.md](#architecture) — System architecture overview
+- [THREAT-MODEL.md](#threat-model) — Security threat analysis
+- [GitHub: NEBULA-ANALYSIS.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/NEBULA-ANALYSIS.md) — Nebula comparison and analysis
 
 ### Protocol & Cryptography
-- [CREDENTIAL-RENEWAL.md](CREDENTIAL-RENEWAL.md) — Credential lifecycle and rotation
-- [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) — Key management system
-- [SIGNING-ORACLE.md](SIGNING-ORACLE.md) — Signing oracle implementation
-- [PQ-MIGRATION.md](PQ-MIGRATION.md) — Post-quantum migration plan
-- [IDENTITY-HEADERS.md](IDENTITY-HEADERS.md) — Identity header specification
-- [MONOTONIC-DATA-SEQ.md](MONOTONIC-DATA-SEQ.md) — Monotonic data sequences
-- [MTLS-SETUP.md](MTLS-SETUP.md) — Mutual TLS configuration
+- [CREDENTIAL-RENEWAL.md](#credential-docs) — Credential lifecycle and rotation
+- [KEY-MANAGEMENT.md](#key-management) — Key management system
+- [SIGNING-ORACLE.md](https://github.com/priceflex/ztlp/blob/main/docs/SIGNING-ORACLE.md) — Signing oracle implementation
+- [PQ-MIGRATION.md](https://github.com/priceflex/ztlp/blob/main/docs/PQ-MIGRATION.md) — Post-quantum migration plan
+- [GitHub: IDENTITY-HEADERS.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/IDENTITY-HEADERS.md) — Identity header specification
+- [MONOTONIC-DATA-SEQ.md](https://github.com/priceflex/ztlp/blob/main/docs/MONOTONIC-DATA-SEQ.md) — Monotonic data sequences
+- [GitHub: MTLS-SETUP.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/MTLS-SETUP.md) — Mutual TLS configuration
 
 ### Identity & Authentication
-- [SPEC-USER-AUTH.md](SPEC-USER-AUTH.md) — User authentication specification
-- [PASSWORDLESS.md](PASSWORDLESS.md) — Passwordless authentication flow
-- [UNIFIED-AUDIT.md](UNIFIED-AUDIT.md) — Unified audit logging
+- [SPEC-USER-AUTH.md](https://github.com/priceflex/ztlp/blob/main/docs/SPEC-USER-AUTH.md) — User authentication specification
+- [GitHub: PASSWORDLESS.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/PASSWORDLESS.md) — Passwordless authentication flow
+- [UNIFIED-AUDIT.md](https://github.com/priceflex/ztlp/blob/main/docs/UNIFIED-AUDIT.md) — Unified audit logging
 
 ### Security
-- [FIREWALL.md](FIREWALL.md) — Firewall rules and configuration
-- [TLS.md](TLS.md) — TLS implementation details
-- [INTERNAL-CA.md](INTERNAL-CA.md) — Internal certificate authority
-- [NS-SECURITY-HARDENING.md](NS-SECURITY-HARDENING.md) — Name service security
+- [FIREWALL.md](https://github.com/priceflex/ztlp/blob/main/docs/FIREWALL.md) — Firewall rules and configuration
+- [GitHub: TLS.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/TLS.md) — TLS implementation details
+- [GitHub: INTERNAL-CA.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/INTERNAL-CA.md) — Internal certificate authority
+- [NS-SECURITY-HARDENING.md](https://github.com/priceflex/ztlp/blob/main/docs/NS-SECURITY-HARDENING.md) — Name service security
 
 ### Development
-- [GOOD-FIRST-ISSUES.md](GOOD-FIRST-ISSUES.md) — Beginner-friendly issues
-- [PERF-PLAN.md](PERF-PLAN.md) — Performance improvement plans
-- [GAP-ANALYSIS.md](GAP-ANALYSIS.md) — Feature gap analysis
+- [GOOD-FIRST-ISSUES.md](https://github.com/priceflex/ztlp/blob/main/docs/GOOD-FIRST-ISSUES.md) — Beginner-friendly issues
+- [PERF-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/PERF-PLAN.md) — Performance improvement plans
+- [GAP-ANALYSIS.md](https://github.com/priceflex/ztlp/blob/main/docs/GAP-ANALYSIS.md) — Feature gap analysis
 
 ### iOS & Mobile
-- [IOS-MEMORY-OPTIMIZATION.md](IOS-MEMORY-OPTIMIZATION.md) — iOS memory optimization
-- [IOS-RELAY-ARCHITECTURE.md](IOS-RELAY-ARCHITECTURE.md) — iOS relay architecture
-- [CLIENT-TYPE-DETECTION.md](CLIENT-TYPE-DETECTION.md) — Client type detection
-- [CLIENT-TYPE-DETECTION-PLAN.md](CLIENT-TYPE-DETECTION-PLAN.md) — Client detection implementation plan
+- [IOS-MEMORY-OPTIMIZATION.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-MEMORY-OPTIMIZATION.md) — iOS memory optimization
+- [IOS-RELAY-ARCHITECTURE.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-RELAY-ARCHITECTURE.md) — iOS relay architecture
+- [CLIENT-TYPE-DETECTION.md](https://github.com/priceflex/ztlp/blob/main/docs/CLIENT-TYPE-DETECTION.md) — Client type detection
+- [CLIENT-TYPE-DETECTION-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/CLIENT-TYPE-DETECTION-PLAN.md) — Client detection implementation plan
 
 ### Session Notes
-- [IOS-SESSION3-STATUS.md](IOS-SESSION3-STATUS.md)
-- [IOS-SESSION4-STATUS.md](IOS-SESSION4-STATUS.md)
-- [IOS-SESSION5-STATUS.md](IOS-SESSION5-STATUS.md)
-- [IOS-SESSION5B-STATUS.md](IOS-SESSION5B-STATUS.md)
-- [IOS-SESSION5C-STATUS.md](IOS-SESSION5C-STATUS.md)
-- [SESSION-6-SUMMARY.md](SESSION-6-SUMMARY.md)
-- [SESSION-7-SUMMARY.md](SESSION-7-SUMMARY.md)
-- [SESSION-8-DESKTOP-TESTING.md](SESSION-8-DESKTOP-TESTING.md)
-- [SESSION-10-IOS-VAULTWARDEN-PLAN.md](SESSION-10-IOS-VAULTWARDEN-PLAN.md)
-- [SESSION-11-IOS-NS-MEMORY-AUDIT.md](SESSION-11-IOS-NS-MEMORY-AUDIT.md)
-- [SESSION-12-LINUX-NE-SIMULATION-HANDOFF.md](SESSION-12-LINUX-NE-SIMULATION-HANDOFF.md)
+- [IOS-SESSION3-STATUS.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-SESSION3-STATUS.md)
+- [IOS-SESSION4-STATUS.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-SESSION4-STATUS.md)
+- [IOS-SESSION5-STATUS.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-SESSION5-STATUS.md)
+- [IOS-SESSION5B-STATUS.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-SESSION5B-STATUS.md)
+- [IOS-SESSION5C-STATUS.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-SESSION5C-STATUS.md)
+- [SESSION-6-SUMMARY.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-6-SUMMARY.md)
+- [SESSION-7-SUMMARY.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-7-SUMMARY.md)
+- [SESSION-8-DESKTOP-TESTING.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-8-DESKTOP-TESTING.md)
+- [SESSION-10-IOS-VAULTWARDEN-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-10-IOS-VAULTWARDEN-PLAN.md)
+- [SESSION-11-IOS-NS-MEMORY-AUDIT.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-11-IOS-NS-MEMORY-AUDIT.md)
+- [SESSION-12-LINUX-NE-SIMULATION-HANDOFF.md](https://github.com/priceflex/ztlp/blob/main/docs/SESSION-12-LINUX-NE-SIMULATION-HANDOFF.md)
 
 ### Planning & Roadmap
-- [ROADMAP.md](ROADMAP.md) — Project roadmap (root)
-- [PRODUCTION-LAUNCH-PLAN.md](PRODUCTION-LAUNCH-PLAN.md) — Production launch checklist
-- [RELAY-VIP-ARCHITECTURE.md](RELAY-VIP-ARCHITECTURE.md) — Relay-side VIP architecture
-- [IOS-RELAY-VIP-IMPLEMENTATION-CHECKLIST.md](IOS-RELAY-VIP-IMPLEMENTATION-CHECKLIST.md)
+- [ROADMAP.md](https://github.com/priceflex/ztlp/blob/main/docs/ROADMAP.md) — Project roadmap (root)
+- [PRODUCTION-LAUNCH-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/PRODUCTION-LAUNCH-PLAN.md) — Production launch checklist
+- [RELAY-VIP-ARCHITECTURE.md](https://github.com/priceflex/ztlp/blob/main/docs/RELAY-VIP-ARCHITECTURE.md) — Relay-side VIP architecture
+- [IOS-RELAY-VIP-IMPLEMENTATION-CHECKLIST.md](https://github.com/priceflex/ztlp/blob/main/docs/IOS-RELAY-VIP-IMPLEMENTATION-CHECKLIST.md)
 
 ### Operations & Deployment
-- [OPS-RUNBOOK.md](OPS-RUNBOOK.md) — Operations runbook
-- [LINUX-NE-SIMULATION-PLAN.md](LINUX-NE-SIMULATION-PLAN.md) — Linux NE simulation plan
+- [OPS-RUNBOOK.md](#ops-runbook) — Operations runbook
+- [LINUX-NE-SIMULATION-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/LINUX-NE-SIMULATION-PLAN.md) — Linux NE simulation plan
 
 ### Feature Documentation
-- [SPEED-FIX-PLAN.md](SPEED-FIX-PLAN.md) — iOS throughput fix plan
-- [HANDSHAKE-RETRANSMIT-TASK.md](HANDSHAKE-RETRANSMIT-TASK.md) — Handshake retransmission
-- [IDENTITY-AND-GROUPS-TASK.md](IDENTITY-AND-GROUPS-TASK.md) — Identity and groups
-- [FEATURE-USER-IDENTITY.md](FEATURE-USER-IDENTITY.md) — User identity feature
-- [SPEC-PEER-DISCOVERY.md](SPEC-PEER-DISCOVERY.md) — Peer discovery specification
-- [TLS-TERMINATION.md](TLS-TERMINATION.md) — TLS termination details
+- [SPEED-FIX-PLAN.md](https://github.com/priceflex/ztlp/blob/main/docs/SPEED-FIX-PLAN.md) — iOS throughput fix plan
+- [HANDSHAKE-RETRANSMIT-TASK.md](https://github.com/priceflex/ztlp/blob/main/docs/HANDSHAKE-RETRANSMIT-TASK.md) — Handshake retransmission
+- [IDENTITY-AND-GROUPS-TASK.md](https://github.com/priceflex/ztlp/blob/main/docs/IDENTITY-AND-GROUPS-TASK.md) — Identity and groups
+- [FEATURE-USER-IDENTITY.md](https://github.com/priceflex/ztlp/blob/main/docs/FEATURE-USER-IDENTITY.md) — User identity feature
+- [SPEC-PEER-DISCOVERY.md](https://github.com/priceflex/ztlp/blob/main/docs/SPEC-PEER-DISCOVERY.md) — Peer discovery specification
+- [TLS-TERMINATION.md](https://github.com/priceflex/ztlp/blob/main/docs/TLS-TERMINATION.md) — TLS termination details
 
 ### Agent & Automation
-- [ADVANCED-CC-TASK.md](ADVANCED-CC-TASK.md) — Advanced agent tasks
-- [AGENT-DESIGN.md](AGENT-DESIGN.md) — Agent design specification
+- [ADVANCED-CC-TASK.md](https://github.com/priceflex/ztlp/blob/main/docs/ADVANCED-CC-TASK.md) — Advanced agent tasks
+- [AGENT-DESIGN.md](https://github.com/priceflex/ztlp/blob/main/docs/AGENT-DESIGN.md) — Agent design specification
 
 ### Reference
-- [CLI.md](CLI.md) — CLI documentation
-- [CLI-REF.md](CLI-REF.md) — CLI reference
-- [IDENTITY.md](IDENTITY.md) — Identity documentation
-- [GO-SDK.md](GO-SDK.md) — Go SDK documentation
-- [NEBULA-ANALYSIS.md](NEBULA-ANALYSIS.md) — Nebula analysis
-- [PROTOTYPE.md](PROTOTYPE.md) — Prototype notes
-- [DEPLOYMENT.md](DEPLOYMENT.md) — Deployment guide
-- [DOCKER.md](DOCKER.md) — Docker configuration
-- [STRESS-TEST-REPORT.md](STRESS-TEST-REPORT.md) — Stress test results
-- [TODO.md](TODO.md) — TODO list
-- [TUNING-LOG.md](TUNING-LOG.md) — Tuning log
-- [USE-CASES.md](USE-CASES.md) — Use cases
+- [CLI.md](https://github.com/priceflex/ztlp/blob/main/docs/CLI.md) — CLI documentation
+- [CLI-REF.md](https://github.com/priceflex/ztlp/blob/main/docs/CLI-REF.md) — CLI reference
+- [IDENTITY.md](https://github.com/priceflex/ztlp/blob/main/docs/IDENTITY.md) — Identity documentation
+- [GO-SDK.md](https://github.com/priceflex/ztlp/blob/main/docs/GO-SDK.md) — Go SDK documentation
+- [GitHub: NEBULA-ANALYSIS.md](https://github.com/priceflex/ztlp/blob/main/docs/https://github.com/priceflex/ztlp/blob/main/docs/NEBULA-ANALYSIS.md) — Nebula analysis
+- [PROTOTYPE.md](https://github.com/priceflex/ztlp/blob/main/docs/PROTOTYPE.md) — Prototype notes
+- [DEPLOYMENT.md](https://github.com/priceflex/ztlp/blob/main/docs/DEPLOYMENT.md) — Deployment guide
+- [DOCKER.md](https://github.com/priceflex/ztlp/blob/main/docs/DOCKER.md) — Docker configuration
+- [STRESS-TEST-REPORT.md](https://github.com/priceflex/ztlp/blob/main/docs/STRESS-TEST-REPORT.md) — Stress test results
+- [TODO.md](https://github.com/priceflex/ztlp/blob/main/docs/TODO.md) — TODO list
+- [TUNING-LOG.md](https://github.com/priceflex/ztlp/blob/main/docs/TUNING-LOG.md) — Tuning log
+- [USE-CASES.md](https://github.com/priceflex/ztlp/blob/main/docs/USE-CASES.md) — Use cases
 
 ## Component Documentation
 

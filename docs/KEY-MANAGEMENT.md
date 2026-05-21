@@ -4,7 +4,7 @@ Comprehensive guide to managing cryptographic keys and secrets across all ZTLP c
 
 **Audience:** Operations engineers managing ZTLP infrastructure and security teams auditing key practices.
 
-> **See also:** [OPS-RUNBOOK.md](OPS-RUNBOOK.md) · [THREAT-MODEL.md](../THREAT-MODEL.md) · [ARCHITECTURE.md](../ARCHITECTURE.md)
+> **See also:** [Ops Runbook](#ops-runbook) · [THREAT-MODEL.md](#threat-model) · [ARCHITECTURE.md](#architecture)
 
 ---
 
@@ -166,7 +166,7 @@ ZTLP supports automated certificate renewal via the RENEW wire protocol
 the NodeID and Ed25519 key, only issuing a fresh certificate with a new
 serial number and extended validity period.
 
-> **Full design:** [CREDENTIAL-RENEWAL.md](CREDENTIAL-RENEWAL.md) covers
+> **Full design:** [Credential Lifecycle](#credential-docs) covers
 > the wire protocol, node agent, bootstrap server integration, failure
 > modes, and monitoring.
 
@@ -225,7 +225,7 @@ ztlp ns revoke \
 ztlp ping 127.0.0.1:23095 --key ~/.ztlp/identity.json
 ```
 
-> ⚠️ **Identity rotation breaks all active sessions.** Clients connected with the old key must re-handshake. In a production environment, drain the node first (see [OPS-RUNBOOK.md § Graceful Drain](OPS-RUNBOOK.md#graceful-drain-sigusr1)).
+> ⚠️ **Identity rotation breaks all active sessions.** Clients connected with the old key must re-handshake. In a production environment, drain the node first (see [Graceful Drain (Ops Runbook)](#ops-runbook)).
 
 ### 2.6 Revocation
 
@@ -786,7 +786,7 @@ Each component will know the public keys of its authorized peers. Authentication
 
 Even before component auth is implemented:
 
-- **Network segmentation** — Only allow ZTLP service traffic between authorized hosts (firewall rules per [OPS-RUNBOOK.md § Firewall](OPS-RUNBOOK.md#required-ports-and-firewall-rules))
+- **Network segmentation** — Only allow ZTLP service traffic between authorized hosts (firewall rules per [Firewall Rules (Ops Runbook)](#ops-runbook))
 - **systemd hardening** — Already in place (see service files)
 - **Erlang cookie isolation** — Each component already has its own cookie
 

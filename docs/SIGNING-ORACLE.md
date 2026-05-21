@@ -3,7 +3,7 @@
 **Status:** Draft Specification v0.1  
 **Author:** Steven Price, Tech Rockstar Academy  
 **Date:** 2026-03-24  
-**Relates to:** [INTERNAL-CA.md](INTERNAL-CA.md) · [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) · [TLS.md](TLS.md)
+**Relates to:** [GitHub: INTERNAL-CA.md](https://github.com/priceflex/ztlp/blob/main/docs/INTERNAL-CA.md) · [KEY-MANAGEMENT.md](#key-management) · [GitHub: TLS.md](https://github.com/priceflex/ztlp/blob/main/docs/TLS.md)
 
 ---
 

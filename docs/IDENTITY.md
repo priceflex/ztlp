@@ -613,5 +613,5 @@ The identity model is fully backward compatible with existing ZTLP deployments:
 
 ---
 
-*For the complete deployment guide, see [DEPLOYMENT.md](DEPLOYMENT.md).*  
-*For credential lifecycle details, see [docs/CREDENTIAL-RENEWAL.md](docs/CREDENTIAL-RENEWAL.md).*
+*For the complete deployment guide, see [Deployment Guide](#deployment).*  
+*For credential lifecycle details, see [Link to #credential-docs](#credential-docs).*

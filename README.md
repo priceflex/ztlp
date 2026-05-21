@@ -66,9 +66,16 @@ Use of the ZTLP name and brand is subject to our trademark guidelines.
 View the full documentation — including quick start guides, architecture deep dive, component guides, deployment instructions, and API reference — by opening `docs/index.html` in your browser, or visit [docs.ztlp.org](https://docs.ztlp.org) (coming soon).
 
 Additional documentation:
-- **[DEPLOYMENT.md](/docs/DEPLOYMENT.md)** — Comprehensive deployment guide covering Docker, federation, monitoring, and production hardening.
-- **[IDENTITY.md](/docs/IDENTITY.md)** — Detailed design document for the v0.9.0 identity model (DEVICE, USER, GROUP records and group-based policy).
-- **[docs/RELAY-VIP-ARCHITECTURE.md](/docs/RELAY-VIP-ARCHITECTURE.md)** — iOS-first relay-side VIP architecture: move VIP TCP termination off the iPhone Network Extension and onto relay servers to recover 5-8 MB of NE memory.
+- **[Get Started](#get-started)** — Quick start guide and 5-minute demo
+- **[Identity Model](#identity-docs)** — DEVICE, USER, GROUP records with role-based access and group-based policy
+- **[Deploy](#deployment)** — Full production deployment for MSPs with Docker Compose
+
+Additional documentation:
+- **[CLI Guide](#cli-docs)** — Full command reference and usage guide
+- **[Docker Setup](#docker-docs)** — Docker Compose patterns for running ZTLP services
+- **[Credential Lifecycle](#credential-docs)** — Key rotation, credential renewal, and revocation
+- **[Relay VIP](#relay-vip)** — iOS-first relay-side VIP architecture for memory-constrained clients
+- **[Ops Runbook](#ops-runbook)** — Production operations guide
 
 ## Table of Contents
 

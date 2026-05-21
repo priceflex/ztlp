@@ -8,7 +8,7 @@ This directory contains the deploy component of the ZTLP project.
 
 ## Quick Start
 
-See the [main README](../README.md) for project-level setup instructions.
+See the [main README](https://github.com/priceflex/ztlp/blob/main/../README.md for project-level setup instructions.
 For component-specific documentation, check the [docs directory](../docs/).
 
 ## Structure

@@ -1248,7 +1248,7 @@ tokens and session keys are ephemeral:
 - **Session keys** are negotiated per-connection via Noise_XX (perfect forward secrecy)
 - **Zone signing keys** should be rotated every 90 days with `ztlp admin rotate-zone-key`
 
-See [docs/CREDENTIAL-RENEWAL.md](docs/CREDENTIAL-RENEWAL.md) for the
+See [Credential Lifecycle](#credential-docs) for the
 complete credential lifecycle reference.
 
 ---
@@ -1762,6 +1762,6 @@ services:
 
 ---
 
-*For the complete identity model reference, see [IDENTITY.md](/docs/IDENTITY.md).*  
-*For credential lifecycle details, see [docs/CREDENTIAL-RENEWAL.md](docs/CREDENTIAL-RENEWAL.md).*  
-*For the demo walkthrough, see [demo/README.md](demo/README.md).*
+*For the complete identity model reference, see [Identity Model](#identity-docs).*  
+*For credential lifecycle details, see [Credential Lifecycle](#credential-docs).*  
+*For the demo walkthrough, see [Full Stack Demo](#fullstack).*

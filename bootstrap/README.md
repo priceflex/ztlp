@@ -76,7 +76,7 @@ AuditLog + Alert (all actions tracked, status change alerts)
 | Gateway | ztlp-gateway | 23098/tcp, 9102/tcp (metrics) | — (is the gateway) |
 
 > **Note:** Relay uses a different sidecar port (23099) than NS (23098) to avoid
-> HELLO routing ambiguity. See [docs/ZTLP-TUNNEL-ARCHITECTURE.md](docs/ZTLP-TUNNEL-ARCHITECTURE.md)
+> HELLO routing ambiguity. See [docs/ZTLP-TUNNEL-ARCHITECTURE.md](https://github.com/priceflex/ztlp/blob/main/docs/ZTLP-TUNNEL-ARCHITECTURE.md
 > for the full explanation.
 
 ## Tests

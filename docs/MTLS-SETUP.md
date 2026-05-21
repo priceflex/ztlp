@@ -191,7 +191,7 @@ ztlp status
 
 ## See Also
 
-- [TLS Architecture](TLS.md)
-- [Internal CA](INTERNAL-CA.md)
-- [Identity Headers](IDENTITY-HEADERS.md)
-- [Passwordless Auth](PASSWORDLESS.md)
+- [GitHub: TLS Architecture](https://github.com/priceflex/ztlp/blob/main/docs/TLS.md)
+- [GitHub: Internal CA](https://github.com/priceflex/ztlp/blob/main/docs/INTERNAL-CA.md)
+- [GitHub: Identity Headers](https://github.com/priceflex/ztlp/blob/main/docs/IDENTITY-HEADERS.md)
+- [GitHub: Passwordless Auth](https://github.com/priceflex/ztlp/blob/main/docs/PASSWORDLESS.md)

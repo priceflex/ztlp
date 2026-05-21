@@ -32,7 +32,7 @@ pre-v0.9.0 behavior) and skip the identity model acts.
 ./full-stack-demo.sh --cleanup    # Remove containers
 ```
 
-Requires only Docker. See [`fullstack/README.md`](../fullstack/README.md) for architecture and details.
+Requires only Docker. See [`fullstack/README.md`](https://github.com/priceflex/ztlp/blob/main/fullstack/README.md for architecture and details.
 
 ---
 

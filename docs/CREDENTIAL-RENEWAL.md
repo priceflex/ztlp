@@ -6,8 +6,8 @@ and enrollment tokens.
 
 **Audience:** Protocol implementors, bootstrap server developers, operators.
 
-> **See also:** [KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) ·
-> [OPS-RUNBOOK.md](OPS-RUNBOOK.md) · [README.md (§16.2.1)](../README.md)
+> **See also:** [KEY-MANAGEMENT.md](#key-management) ·
+> [OPS-RUNBOOK.md](#ops-runbook) · [Specification](#spec)
 
 ---
 

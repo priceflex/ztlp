@@ -155,6 +155,6 @@ ztlp admin cert-revoke --serial ABC123 --reason key-compromise
 
 ## See Also
 
-- [TLS Architecture](TLS.md)
-- [mTLS Setup](MTLS-SETUP.md)
-- [Passwordless Auth](PASSWORDLESS.md)
+- [GitHub: TLS Architecture](https://github.com/priceflex/ztlp/blob/main/docs/TLS.md)
+- [GitHub: mTLS Setup](https://github.com/priceflex/ztlp/blob/main/docs/MTLS-SETUP.md)
+- [GitHub: Passwordless Auth](https://github.com/priceflex/ztlp/blob/main/docs/PASSWORDLESS.md)

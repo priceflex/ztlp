@@ -197,7 +197,7 @@ Key concepts:
 - **Revocation cascade** — revoking a user automatically blocks all their devices
 - **Self-registration** — USER and DEVICE support self-registration; GROUP requires zone authority
 
-See [IDENTITY.md](/docs/IDENTITY.md) for the full design document.
+See [Identity Model](#identity-docs) for the full design document.
 
 ## What's Next?
 
@@ -211,6 +211,6 @@ You've seen the basics — identity generation, authenticated connections, relay
 
 ## Real-World Examples
 
-### [Zero-Trust Password Manager](examples/vaultwarden/README.md)
+### [Zero-Trust Password Manager](#vaultwarden)
 
 Run Vaultwarden (self-hosted Bitwarden) behind ZTLP with zero exposed ports. Access your passwords from iOS, macOS, Windows, and Linux — all through encrypted ZTLP tunnels with cryptographic device identity. Includes Docker Compose, group-based policy, and step-by-step setup for all platforms.

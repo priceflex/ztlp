@@ -10,8 +10,8 @@ feature, this guide will help you get oriented and productive.
 **Quick links:**
 - [GitHub Issues](https://github.com/priceflex/ztlp/issues) — report bugs, request features
 - [Good First Issues](https://github.com/priceflex/ztlp/labels/good%20first%20issue) — great starting points
-- [Architecture Overview](docs/ARCHITECTURE.md) — deep dive into how the system works
-- [Code of Conduct](CODE_OF_CONDUCT.md) — be kind, be constructive
+- [Architecture](#architecture) — deep dive into how the system works
+- [Code of Conduct](https://github.com/priceflex/ztlp/blob/main/CODE_OF_CONDUCT.md) — be kind, be constructive
 
 ---
 
@@ -111,7 +111,7 @@ graph TD
 6. **Gateway** terminates sessions, enforces per-service access policy, bridges to TCP backends
 7. **eBPF/XDP** handles Layer 1 filtering in kernel space at line rate
 
-For a deeper dive, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For a deeper dive, see [Architecture](#architecture).
 
 ---
 
@@ -657,7 +657,7 @@ on GitHub. These are specifically chosen to be:
 If you're new to the project, start with a documentation or testing issue. They're a
 great way to learn the codebase while making a real contribution.
 
-See also [docs/GOOD-FIRST-ISSUES.md](docs/GOOD-FIRST-ISSUES.md) for detailed descriptions
+See also [Good First Issues](https://github.com/priceflex/ztlp/blob/main/docs/GOOD-FIRST-ISSUES.md) for detailed descriptions
 of starter issues with file pointers and acceptance criteria.
 
 ---
@@ -691,7 +691,7 @@ of starter issues with file pointers and acceptance criteria.
 
 1. Push your branch to your fork
 2. Open a pull request against `main`
-3. Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md):
+3. Fill out the [Pull Request Template](https://github.com/priceflex/ztlp/blob/main/.github/PULL_REQUEST_TEMPLATE.md):
    - Summary of the change
    - Link to the related issue
    - Which components are affected
@@ -762,7 +762,7 @@ project or its author without prior written permission.
 ## Code of Conduct
 
 We are committed to providing a friendly, safe, and welcoming environment for
-all contributors. Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+all contributors. Please read and follow our [Code of Conduct](https://github.com/priceflex/ztlp/blob/main/CODE_OF_CONDUCT.md).
 
 In short: be respectful, be constructive, be kind. We're all here to build
 something useful.

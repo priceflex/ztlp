@@ -191,7 +191,7 @@ All TLS activity is logged to the gateway audit log:
 
 ## See Also
 
-- [Identity Headers](IDENTITY-HEADERS.md) — header reference and HMAC verification
-- [Passwordless Auth](PASSWORDLESS.md) — backend integration guide
-- [Internal CA](INTERNAL-CA.md) — CA architecture and key management
-- [mTLS Setup](MTLS-SETUP.md) — client authentication setup
+- [GitHub: Identity Headers](https://github.com/priceflex/ztlp/blob/main/docs/IDENTITY-HEADERS.md) — header reference and HMAC verification
+- [GitHub: Passwordless Auth](https://github.com/priceflex/ztlp/blob/main/docs/PASSWORDLESS.md) — backend integration guide
+- [GitHub: Internal CA](https://github.com/priceflex/ztlp/blob/main/docs/INTERNAL-CA.md) — CA architecture and key management
+- [GitHub: mTLS Setup](https://github.com/priceflex/ztlp/blob/main/docs/MTLS-SETUP.md) — client authentication setup

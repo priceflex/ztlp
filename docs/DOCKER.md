@@ -26,7 +26,7 @@ docker compose -f docker-compose-full-stack.yml down -v
 
 **Performance (Docker bridge):** 81.5 MB/s peak (50MB SCP), 0.58ms handshake
 
-See [`fullstack/README.md`](fullstack/README.md) for architecture details, container IPs, environment variables, and troubleshooting.
+See [`fullstack/README.md`](#fullstack) for architecture details, container IPs, environment variables, and troubleshooting.
 
 ## Prerequisites
 

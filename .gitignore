@@ -49,3 +49,7 @@ v30-telemetry-evidence.log
 
 # Hermes Agent local state (plans, logs, scratch)
 .hermes/
+
+# Test tenant private keys
+tenants/test-ztlp/root_key.json
+tenants/*/root_key.json

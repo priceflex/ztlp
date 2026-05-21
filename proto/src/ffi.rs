@@ -2774,7 +2774,7 @@ pub extern "C" fn ztlp_dns_stop(client: *mut ZtlpClient) -> i32 {
 ///
 /// Queries the NS server for a SVC record matching `service_name` (e.g.,
 /// "beta.techrockstars.ztlp"). On success, returns a heap-allocated C string
-/// containing the resolved address (e.g., "10.42.42.112:23098"). The caller
+/// containing the resolved address (e.g., "INTERNAL_IP:PORT"). The caller
 /// must free the string with `ztlp_string_free`.
 ///
 /// Returns NULL on failure (check `ztlp_last_error` for details).

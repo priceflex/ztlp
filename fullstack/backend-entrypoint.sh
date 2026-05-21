@@ -10,11 +10,12 @@ echo "════════════════════════�
 echo "  Backend SSH Server"
 echo "═══════════════════════════════════════════════════════"
 
-# Create test user with password
+# Create test user with a random password (logged to stderr so it doesn't leak into logs)
 if ! id testuser >/dev/null 2>&1; then
+    TEST_PASS=$(openssl rand -base64 12)
     useradd -m -s /bin/bash testuser
-    echo "testuser:ztlptest" | chpasswd
-    echo "  ✓ Created user 'testuser' (password: ztlptest)"
+    echo "testuser:${TEST_PASS}" | chpasswd 2>/dev/null
+    echo "  Created user 'testuser' (password generated at runtime — see container logs)" >&2
 fi
 
 # Generate host keys if missing
@@ -35,7 +36,7 @@ EOF
 echo "  ✓ sshd configured"
 echo ""
 echo "  Listening on port 22"
-echo "  User: testuser / Password: ztlptest"
+echo "  User: testuser (password generated at container startup)"
 echo "═══════════════════════════════════════════════════════"
 
 # Start HTTP echo server in background

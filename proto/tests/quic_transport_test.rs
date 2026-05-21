@@ -2,9 +2,7 @@
 
 #![cfg(feature = "quic-transport")]
 
-use ztlp_proto::quic_transport::{
-    QuicEndpointConfig, QuicTransportError, SansIoConnection, ZTLP_ALPN,
-};
+use ztlp_proto::quic_transport::{QuicEndpointConfig, SansIoConnection, ZTLP_ALPN};
 
 #[test]
 fn alpn_constant_is_reachable_from_integration_test() {
@@ -109,10 +107,12 @@ async fn noise_handshake_over_quic_stream_zero() {
 
 #[test]
 fn sans_io_path_compiles_without_tokio() {
-    let err = SansIoConnection::new(QuicEndpointConfig::default()).unwrap_err();
-    let QuicTransportError::NotImplemented { phase, what } = err else {
-        panic!("expected NotImplemented")
-    };
-    assert_eq!(phase, 4);
-    assert!(what.contains("SansIoConnection"));
+    // Phase 4 placeholder: SansIoConnection::new currently returns Ok with
+    // an empty inner. iOS FFI will populate it later. This test exists to
+    // guarantee the sans-io type compiles in the test crate without pulling
+    // tokio in. Once the real init lands (Phase 5), this test should assert
+    // on observable state of the returned connection.
+    let conn = SansIoConnection::new(QuicEndpointConfig::default())
+        .expect("SansIoConnection placeholder should construct cleanly");
+    assert!(conn.inner.is_none(), "Phase 4 placeholder has no inner conn");
 }

@@ -7611,6 +7611,13 @@ mod tests {
 
     // ── DNS Resolver tests ─────────────────────────────────────────────
 
+    /// Serialize tests that actually bind sockets and exchange packets.
+    /// Without this, two parallel DNS tests inside the same test binary can
+    /// race on UDP bind/recv (sockets get cleaned up asynchronously by tokio)
+    /// and `ztlp_dns_start` flakes with ConnectionError (-4). See:
+    /// https://github.com/priceflex/ztlp/issues — perf-gate failure on main.
+    static DNS_BIND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_dns_start_null_client() {
         let addr = CString::new("127.0.55.53:15353").unwrap();
@@ -7639,6 +7646,7 @@ mod tests {
 
     #[test]
     fn test_dns_start_and_stop() {
+        let _guard = DNS_BIND_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let identity = ztlp_identity_generate();
         let client = ztlp_client_new(identity);
 
@@ -7669,6 +7677,7 @@ mod tests {
 
     #[test]
     fn test_dns_start_twice_replaces() {
+        let _guard = DNS_BIND_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let identity = ztlp_identity_generate();
         let client = ztlp_client_new(identity);
 
@@ -7687,6 +7696,7 @@ mod tests {
 
     #[test]
     fn test_dns_resolves_registered_service() {
+        let _guard = DNS_BIND_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let identity = ztlp_identity_generate();
         let client = ztlp_client_new(identity);
 
@@ -7732,6 +7742,7 @@ mod tests {
 
     #[test]
     fn test_dns_nxdomain_for_unknown() {
+        let _guard = DNS_BIND_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let identity = ztlp_identity_generate();
         let client = ztlp_client_new(identity);
 

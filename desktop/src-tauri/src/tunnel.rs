@@ -1,6 +1,7 @@
 use crate::state::{ConnectionState, ConnectionStatus, EnrollResult, TrafficStats};
 fn get_daemon_cmd() -> std::process::Command {
-    let cmd = if cfg!(target_os = "windows") {
+    #[allow(unused_mut)]
+    let mut cmd = if cfg!(target_os = "windows") {
         std::process::Command::new("ztlp.exe")
     } else {
         std::process::Command::new("ztlp")

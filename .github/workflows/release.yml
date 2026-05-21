@@ -280,11 +280,16 @@ jobs:
   # ── Publish GitHub Release ────────────────────────────────────
   release:
     name: Publish Release
-    # Note: 'desktop' intentionally omitted from `needs` — Tauri builds can
-    # fail (env/toolchain churn) without blocking the release of the Rust
-    # CLI, Elixir OTP releases, and eBPF source. Desktop artifacts are
-    # still attached when available (see Collect step's `|| true` guards).
-    needs: [rust, elixir, ebpf]
+    # Desktop is included in `needs` so its artifacts are present, but with
+    # `if: always() && needs.rust.result == 'success' && needs.elixir.result == 'success' && needs.ebpf.result == 'success'`
+    # the release still publishes even if Desktop (Tauri) fails — desktop
+    # installers are best-effort, Rust CLI + Elixir + eBPF are required.
+    needs: [rust, elixir, ebpf, desktop]
+    if: |
+      always() &&
+      needs.rust.result == 'success' &&
+      needs.elixir.result == 'success' &&
+      needs.ebpf.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

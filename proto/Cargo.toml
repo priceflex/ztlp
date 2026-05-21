@@ -1,7 +1,7 @@
 [package]
 name = "ztlp-proto"
 version = "0.28.0"
-edition = "2021"
+edition = "2024"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"
 # All bins require the tokio-runtime feature. Disable autodiscovery so we can
@@ -107,82 +107,7 @@ strip = true
 opt-level = 3      # optimize for speed (default for desktop/server)
 # panic = "unwind" is the default — allows catch_unwind and RAII cleanup
 
-[[bin]]
-name = "ztlp-node"
-path = "src/bin/ztlp-node.rs"
-required-features = ["tokio-runtime"]
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
-[[bin]]
-name = "ztlp-demo"
-path = "src/bin/ztlp-demo.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-relay-demo"
-path = "src/bin/ztlp-relay-demo.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-bench"
-path = "src/bin/ztlp-bench.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp"
-path = "src/bin/ztlp-cli.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-inspect"
-path = "src/bin/ztlp-inspect.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-load"
-path = "src/bin/ztlp-load.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-fuzz"
-path = "src/bin/ztlp-fuzz.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-handshake-interop"
-path = "src/bin/ztlp-handshake-interop.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-pipeline-interop"
-path = "src/bin/ztlp-pipeline-interop.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-ns-interop"
-path = "src/bin/ztlp-ns-interop.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-gateway-e2e"
-path = "src/bin/ztlp-gateway-e2e.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-edge-cases"
-path = "src/bin/ztlp-edge-cases.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-rat-interop"
-path = "src/bin/ztlp-rat-interop.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-throughput"
-path = "src/bin/ztlp-throughput.rs"
-required-features = ["tokio-runtime"]
-
-[[bin]]
-name = "ztlp-interop-test"
-path = "src/bin/ztlp-interop-test.rs"
-required-features = ["tokio-runtime"]

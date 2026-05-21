@@ -66,9 +66,9 @@ Use of the ZTLP name and brand is subject to our trademark guidelines.
 View the full documentation — including quick start guides, architecture deep dive, component guides, deployment instructions, and API reference — by opening `docs/index.html` in your browser, or visit [docs.ztlp.org](https://docs.ztlp.org) (coming soon).
 
 Additional documentation:
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** — Comprehensive deployment guide covering Docker, federation, monitoring, and production hardening.
-- **[IDENTITY.md](IDENTITY.md)** — Detailed design document for the v0.9.0 identity model (DEVICE, USER, GROUP records and group-based policy).
-- **[docs/RELAY-VIP-ARCHITECTURE.md](docs/RELAY-VIP-ARCHITECTURE.md)** — iOS-first relay-side VIP architecture: move VIP TCP termination off the iPhone Network Extension and onto relay servers to recover 5-8 MB of NE memory.
+- **[DEPLOYMENT.md](/docs/DEPLOYMENT.md)** — Comprehensive deployment guide covering Docker, federation, monitoring, and production hardening.
+- **[IDENTITY.md](/docs/IDENTITY.md)** — Detailed design document for the v0.9.0 identity model (DEVICE, USER, GROUP records and group-based policy).
+- **[docs/RELAY-VIP-ARCHITECTURE.md](/docs/RELAY-VIP-ARCHITECTURE.md)** — iOS-first relay-side VIP architecture: move VIP TCP termination off the iPhone Network Extension and onto relay servers to recover 5-8 MB of NE memory.
 
 ## Table of Contents
 

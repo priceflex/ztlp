@@ -900,8 +900,8 @@ examples/vaultwarden/
 
 ## What's Next?
 
-- **[Getting Started with ZTLP](../../GETTING-STARTED.md)** — The 5-minute ZTLP demo
-- **[Deployment Guide](../../DEPLOYMENT.md)** — Full production deployment for MSPs
-- **[CLI Reference](../../CLI.md)** — Every `ztlp` subcommand documented
-- **[Architecture](../../ARCHITECTURE.md)** — How the three-layer pipeline and relay mesh work
+- **[Getting Started with ZTLP](/docs/GETTING-STARTED.md)** — The 5-minute ZTLP demo
+- **[Deployment Guide](/docs/DEPLOYMENT.md)** — Full production deployment for MSPs
+- **[CLI Reference](/docs/CLI.md)** — Every `ztlp` subcommand documented
+- **[Architecture](/docs/ARCHITECTURE.md)** — How the three-layer pipeline and relay mesh work
 - **[GitHub Repository](https://github.com/priceflex/ztlp)** — Source code, issues, and discussions

@@ -197,7 +197,7 @@ Key concepts:
 - **Revocation cascade** — revoking a user automatically blocks all their devices
 - **Self-registration** — USER and DEVICE support self-registration; GROUP requires zone authority
 
-See [IDENTITY.md](IDENTITY.md) for the full design document.
+See [IDENTITY.md](/docs/IDENTITY.md) for the full design document.
 
 ## What's Next?
 

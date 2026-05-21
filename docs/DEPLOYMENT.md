@@ -1762,6 +1762,6 @@ services:
 
 ---
 
-*For the complete identity model reference, see [IDENTITY.md](IDENTITY.md).*  
+*For the complete identity model reference, see [IDENTITY.md](/docs/IDENTITY.md).*  
 *For credential lifecycle details, see [docs/CREDENTIAL-RENEWAL.md](docs/CREDENTIAL-RENEWAL.md).*  
 *For the demo walkthrough, see [demo/README.md](demo/README.md).*

@@ -819,7 +819,24 @@ class LaunchApp:
                 # the password login form. Operators set this var in
                 # instance.env after the admin's device is enrolled to flip on
                 # passwordless auth without rebuilding the image.
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward http:127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
+                #
+                # **`--forward 127.0.0.1:{port}` (unnamed default service):**
+                # We deliberately use the unnamed/default forward form instead
+                # of `--forward http:127.0.0.1:{port}`. Reason: the on-wire
+                # `dst_svc_hash` (Option C) is one field that the relay uses
+                # to pick which gateway to forward HELLO to AND the gateway
+                # uses to pick which backend to bridge into. With a per-tenant
+                # `--service-name gw-{slug}`, the CLI client sets
+                # `dst_svc_hash = SHA256("gw-{slug}")` so the relay routes to
+                # the right tenant — but then the same hash has to resolve to
+                # a backend name on the gateway side, which a NAMED forward
+                # like `http:...` can't satisfy. The single-default-service
+                # fallback in ServiceRegistry::resolve (see tunnel.rs) routes
+                # any unrecognized hash to the sole DEFAULT_SERVICE entry,
+                # so the gateway accepts the tenant-routed HELLO and bridges
+                # to Bootstrap. Verified end-to-end with `ztlp connect` +
+                # passwordless autologin on 2026-05-21.
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward 127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"

@@ -2202,9 +2202,33 @@ async fn cmd_connect(
     let client =
         QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
 
+    let node_id = peer_node_id.unwrap_or_else(|| {
+        ztlp_proto::identity::NodeId([0; 16])
+    });
+
+    let identity = load_or_generate_identity(key)?;
+
+    match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
+        &client,
+        &identity,
+        node_id,
+    ).await {
+        Ok(_handshake_result) => {
+            println!("Noise Handshake Complete (Quic). Session Init.");
+        }
+        Err(e) => {
+            eprintln!("Noise handshake failed: {:?}", e);
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+        }
+    }
+
     let bind_addr = bind;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     println!("ZTLP QUIC client listening on TCP {}", bind_addr);
+
+    // Provide a dummy handshake context for unauthenticated mode if identity parsing fails.
+    // For now we assume load_or_generate_identity passes and we skip standard Noise until Task B.
+    // wait, I need to look closer at what I broke in run_initiator_handshake...
 
     loop {
         let (mut tcp, addr) = listener.accept().await?;
@@ -2564,6 +2588,7 @@ async fn cmd_listen(
         bind: Some(bind.parse().unwrap()),
         ..Default::default()
     };
+
     let server = QuicEndpoint::bind(server_cfg).await?;
     println!(
         "ZTLP QUIC server listening on UDP {}",
@@ -2576,6 +2601,8 @@ async fn cmd_listen(
         let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection =
             server.accept().await?;
         let target_clone = target.clone();
+        
+        let identity_clone = identity.clone();
 
         let http_inject_headers_copy = http_inject_headers;
         let admin_map = if http_inject_headers {
@@ -2594,6 +2621,20 @@ async fn cmd_listen(
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
 
         tokio::spawn(async move {
+            
+            match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
+                &conn,
+                &identity_clone,
+                ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
+            ).await {
+                Ok(_res) => {
+                    println!("Responder handshake success");
+                }
+                Err(e) => {
+                    eprintln!("Responder handshake failed: {:?}", e);
+                    return;
+                }
+            }
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
                     let mut tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();

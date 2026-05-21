@@ -114,5 +114,8 @@ fn sans_io_path_compiles_without_tokio() {
     // on observable state of the returned connection.
     let conn = SansIoConnection::new(QuicEndpointConfig::default())
         .expect("SansIoConnection placeholder should construct cleanly");
-    assert!(conn.inner.is_none(), "Phase 4 placeholder has no inner conn");
+    assert!(
+        conn.inner.is_none(),
+        "Phase 4 placeholder has no inner conn"
+    );
 }

@@ -508,11 +508,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bridge path: {:?}", args.path);
     println!(
         "Instrumentation: {}",
-        if tunnel::bridge_instrumentation_enabled() {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        if false { "enabled" } else { "disabled" }
     );
     println!();
 

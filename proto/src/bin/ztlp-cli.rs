@@ -2197,11 +2197,13 @@ async fn cmd_connect(
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
+    let peer_addr: std::net::SocketAddr = target
+        .parse()
+        .map_err(|e| format!("invalid target: {}", e))?;
+    let client =
+        QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
 
-    use ztlp_proto::quic_transport::{QuicEndpointConfig, tokio_endpoint::QuicEndpoint};
-    let peer_addr: std::net::SocketAddr = target.parse().map_err(|e| format!("invalid target: {}", e))?;
-    let client = QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
-    
     let bind_addr = bind;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     println!("ZTLP QUIC client listening on TCP {}", bind_addr);
@@ -2219,7 +2221,6 @@ async fn cmd_connect(
             );
         });
     }
-
 }
 
 /// Run a new ZTLP session in parallel per accepted TCP connection.
@@ -2559,22 +2560,25 @@ async fn cmd_listen(
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
-    use ztlp_proto::quic_transport::{QuicEndpointConfig, tokio_endpoint::QuicEndpoint};
-    
     let server_cfg = QuicEndpointConfig {
         bind: Some(bind.parse().unwrap()),
         ..Default::default()
     };
     let server = QuicEndpoint::bind(server_cfg).await?;
-    println!("ZTLP QUIC server listening on UDP {}", server.inner.local_addr().unwrap());
-    
+    println!(
+        "ZTLP QUIC server listening on UDP {}",
+        server.inner.local_addr().unwrap()
+    );
+
     let target = forward[0].clone();
 
     loop {
-        let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection = server.accept().await?;
+        let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection =
+            server.accept().await?;
         let target_clone = target.clone();
-        
+
         let http_inject_headers_copy = http_inject_headers;
         let admin_map = if http_inject_headers {
             let mut map = std::collections::HashMap::new();
@@ -2590,27 +2594,32 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
-        
+
         tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
                     let mut tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
                     let (mut t_read, mut t_write) = tcp.into_split();
-                    
+
                     let hmac = hmac_secret.clone();
                     let map = admin_map.clone();
-                    
+
                     tokio::spawn(async move {
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                        
+
                         if http_inject_headers_copy {
                             let mut buf = vec![0u8; 65536];
-                        if let Ok(Some(n)) = q_recv.read(&mut buf).await {
+                            if let Ok(Some(n)) = q_recv.read(&mut buf).await {
                                 let mut injected = false;
                                 if let Some((_, email)) = map.iter().next() {
                                     let ts = "2026-05-20T12:00:00Z";
                                     let slice = &buf[..n];
-                                    let rewrite_result = ztlp_proto::http_injector::inject_headers(slice, email, ts, hmac.as_bytes());
+                                    let rewrite_result = ztlp_proto::http_injector::inject_headers(
+                                        slice,
+                                        email,
+                                        ts,
+                                        hmac.as_bytes(),
+                                    );
                                     if let Ok(rewritten) = rewrite_result {
                                         let _ = t_write.write_all(&rewritten).await;
                                         injected = true;
@@ -2633,7 +2642,6 @@ async fn cmd_listen(
             }
         });
     }
-
 }
 
 /// Multi-session listener: handles concurrent ZTLP sessions.
@@ -2654,9 +2662,7 @@ async fn cmd_listen_multi_session(
     max_sessions: usize,
     http_injection: Arc<tunnel::HttpInjectionConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     Ok(())
-
 }
 
 /// Complete a Noise_XX handshake just to send a REJECT frame.

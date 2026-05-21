@@ -1,6 +1,6 @@
 [package]
 name = "ztlp-proto"
-version = "0.28.3"
+version = "0.28.4"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"
@@ -8,6 +8,11 @@ license = "MIT"
 # opt every bin in explicitly via required-features (keeps `cargo test
 # --no-default-features --features ios-sync` working for the Linux harness).
 autobins = false
+# bench/quic_multistream.rs needs criterion + async_tokio dev-deps that
+# haven't been wired up yet. Disable autodiscovery so `cargo build
+# --all-targets` (CI gate) doesn't trip over the orphaned bench file.
+# Re-enable (or add a `[[bench]]` entry) once the dev-deps land.
+autobenches = false
 
 [lib]
 name = "ztlp_proto"
@@ -18,7 +23,7 @@ crate-type = ["lib", "staticlib"]
 #   cbindgen --config cbindgen.toml --output include/ztlp.h
 
 [features]
-default = ["tokio-runtime"]
+default = ["tokio-runtime", "quic-transport"]
 tokio-runtime = [
     "dep:tokio",
     "dep:tokio-rustls",
@@ -32,15 +37,25 @@ tokio-runtime = [
 ]
 diag = []
 ios-sync = []  # Builds without tokio — for iOS Network Extension
-# Experimental QUIC transport (replaces hand-rolled UDP reliability). OFF by
-# default — pulls in quinn (tokio-backed) + quinn-proto (sans-io) + rustls.
-# Gated so the existing tree keeps building and shipping while the QUIC pivot
-# is being developed in parallel. See docs/architecture/quic-noise-handshake.md.
+# Experimental QUIC transport (replaces hand-rolled UDP reliability). Enabled
+# by default for desktop/server builds so the shipped `ztlp` CLI exposes the
+# QUIC proxy subcommands. Disable with `--no-default-features --features
+# tokio-runtime` (or `ios-sync`) when building the iOS Network Extension or
+# any other context that needs a lean tree without quinn/rcgen pulled in.
+# See docs/architecture/quic-noise-handshake.md.
+quic-transport = []
 
-[[bench]]
-name = "quic_multistream"
-path = "bench/quic_multistream.rs"
-harness = false
+# NOTE: `quic_multistream` criterion bench was added in PR #11 (Phase 5) but
+# never wired up criterion as a dev-dependency, so `cargo build --all-targets`
+# fails CI. Disabled here pending a proper dev-deps + async_tokio feature
+# addition. The source file has been renamed to
+# `bench/quic_multistream.rs.disabled` to keep `autobenches` discovery quiet.
+# Restore by renaming back and uncommenting this block once criterion is in
+# dev-dependencies.
+# [[bench]]
+# name = "quic_multistream"
+# path = "bench/quic_multistream.rs"
+# harness = false
 
 [dependencies]
 # --- Always included (sync core + crypto) ---

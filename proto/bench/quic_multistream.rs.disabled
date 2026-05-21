@@ -1,17 +1,17 @@
 #![cfg(feature = "quic-transport")]
 #![allow(unused_imports)]
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use ztlp_proto::quic_transport::{QuicEndpointConfig, tokio_endpoint::QuicEndpoint};
+use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
 async fn setup_endpoint() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let server_cfg = QuicEndpointConfig {
         bind: Some("127.0.0.1:0".parse().unwrap()),
         ..Default::default()
     };
-    
+
     let server = QuicEndpoint::bind(server_cfg).await.unwrap();
     let server_addr = server.inner.local_addr().unwrap();
 
@@ -19,17 +19,21 @@ async fn setup_endpoint() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>)
         // Run forever, accepting connections and echoing stream data
         loop {
             let conn_res = server.accept().await;
-            if conn_res.is_err() { break; }
+            if conn_res.is_err() {
+                break;
+            }
             let conn = conn_res.unwrap();
-            
+
             tokio::spawn(async move {
                 loop {
                     let bi_res = conn.accept_bi().await;
-                    if bi_res.is_err() { break; }
+                    if bi_res.is_err() {
+                        break;
+                    }
                     let (mut send, mut recv) = bi_res.unwrap();
-                    
+
                     tokio::spawn(async move {
-                        // Very simple echo or sink loop. For the bench we'll act as a sink 
+                        // Very simple echo or sink loop. For the bench we'll act as a sink
                         // that occasionally ACKs or just reads it all then replies.
                         // Actually, let's just make it a bulk receiver and small replier
                         // to simulate the Turbo.js fetch.
@@ -37,8 +41,8 @@ async fn setup_endpoint() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>)
                         loop {
                             match recv.read(&mut buf).await {
                                 Ok(Some(n)) => {
-                                    // Received n bytes. 
-                                },
+                                    // Received n bytes.
+                                }
                                 Ok(None) => break, // EOF
                                 Err(_) => break,
                             }
@@ -57,19 +61,25 @@ async fn setup_endpoint() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>)
 
 pub fn parallel_streams_benchmark(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    
+
     let (server_addr, server_task) = rt.block_on(setup_endpoint());
-    let client = rt.block_on(QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, "localhost")).unwrap();
+    let client = rt
+        .block_on(QuicEndpoint::connect(
+            QuicEndpointConfig::default(),
+            server_addr,
+            "localhost",
+        ))
+        .unwrap();
 
     let mut group = c.benchmark_group("quic_multistream");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(5));
-    
+
     // Testing the "Turbo.min.js deadlock" scenario:
     // 105KB payload over 8 parallel streams
     let payload_size = 105 * 1024;
     let num_streams = 8;
-    
+
     group.throughput(Throughput::Bytes((payload_size * num_streams) as u64));
     group.bench_function("105KB_x8_streams", |b| {
         b.to_async(&rt).iter(|| {
@@ -78,11 +88,11 @@ pub fn parallel_streams_benchmark(c: &mut Criterion) {
                 let mut client_tasks = vec![];
                 for _ in 0..num_streams {
                     let conn_clone = client.clone();
-                    let payload = vec![0xABu8; payload_size]; 
-                    
+                    let payload = vec![0xABu8; payload_size];
+
                     client_tasks.push(tokio::spawn(async move {
                         let (mut send, mut recv) = conn_clone.open_bi().await.unwrap();
-                        
+
                         // Push full payload
                         send.write_all(&payload).await.unwrap();
                         send.finish().unwrap(); // Close send side to signal EOF to server
@@ -99,7 +109,7 @@ pub fn parallel_streams_benchmark(c: &mut Criterion) {
             }
         });
     });
-    
+
     group.finish();
     server_task.abort();
 }

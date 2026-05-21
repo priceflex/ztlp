@@ -14,5 +14,3 @@ The stall is a fundamental architectural conflict between the `main` branch Rust
 We cannot fix the `run_fullstack_multistream.py` bench script for >64 KiB sizes without either:
 A. Reverting the Nebula pivot on the Rust CLI client (`ztlp connect`).
 B. Embedding a user-space TCP stack (like `smoltcp` or `ShadowSocks` layered protocol) inside `ztlp connect`.
-
-The testbed is functional and network paths are verified. The blocker is entirely that the benchmark tool exercises a proxy client over a datagram-only protocol lacking reliability.

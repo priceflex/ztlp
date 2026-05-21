@@ -12,7 +12,12 @@
 //!
 //! See `docs/plans/nebula-pivot-audit/01-rust-proto.md` §DELETE-ENTIRELY.
 
-#![allow(dead_code, unused_variables, non_snake_case, clippy::upper_case_acronyms)]
+#![allow(
+    dead_code,
+    unused_variables,
+    non_snake_case,
+    clippy::upper_case_acronyms
+)]
 
 use std::time::Duration;
 

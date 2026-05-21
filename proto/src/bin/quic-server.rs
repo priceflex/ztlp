@@ -1,7 +1,7 @@
 #![cfg(feature = "quic-transport")]
 
 use tokio::runtime::Runtime;
-use ztlp_proto::quic_transport::{QuicEndpointConfig, tokio_endpoint::QuicEndpoint};
+use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
 fn main() {
     let rt = Runtime::new().unwrap();
@@ -9,7 +9,7 @@ fn main() {
         bind: Some("0.0.0.0:23097".parse().unwrap()),
         ..Default::default()
     };
-    
+
     let server = rt.block_on(QuicEndpoint::bind(server_cfg)).unwrap();
     println!("Server listening on {}", server.inner.local_addr().unwrap());
 
@@ -23,7 +23,7 @@ fn main() {
                             let mut buf = vec![0u8; 65536];
                             loop {
                                 match recv.read(&mut buf).await {
-                                    Ok(Some(_)) => {},
+                                    Ok(Some(_)) => {}
                                     Ok(None) | Err(_) => break,
                                 }
                             }

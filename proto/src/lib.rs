@@ -48,6 +48,7 @@ pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod handshake;
+pub mod http_injector;
 pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
@@ -65,10 +66,10 @@ pub mod rekey;
 pub mod relay_pool;
 pub mod roaming;
 // Nebula-pivot R1: real module deleted; `session_health.rs` is a tiny stub shim for ffi.rs.
-#[cfg(feature = "ios-sync")]
-pub mod session_health;
 pub mod security;
 pub mod session;
+#[cfg(feature = "ios-sync")]
+pub mod session_health;
 pub mod stats;
 pub mod updater;
 

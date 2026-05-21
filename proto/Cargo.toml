@@ -1,6 +1,6 @@
 [package]
 name = "ztlp-proto"
-version = "0.27.2"
+version = "0.28.3"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"
@@ -32,6 +32,15 @@ tokio-runtime = [
 ]
 diag = []
 ios-sync = []  # Builds without tokio — for iOS Network Extension
+# Experimental QUIC transport (replaces hand-rolled UDP reliability). OFF by
+# default — pulls in quinn (tokio-backed) + quinn-proto (sans-io) + rustls.
+# Gated so the existing tree keeps building and shipping while the QUIC pivot
+# is being developed in parallel. See docs/architecture/quic-noise-handshake.md.
+
+[[bench]]
+name = "quic_multistream"
+path = "bench/quic_multistream.rs"
+harness = false
 
 [dependencies]
 # --- Always included (sync core + crypto) ---
@@ -68,6 +77,25 @@ qr2term = { version = "0.3", optional = true }
 dirs = { version = "5", optional = true }
 httparse = "1.10.1"
 hmac = "0.12"
+
+# --- Optional: QUIC transport (gated behind `quic-transport` feature) ---
+# Why optional: the QUIC pivot is in-progress (see hermes_session_handoff.md
+# Task A). Keeping these gated means default builds — including the iOS
+# Network Extension's `ios-sync` profile — stay lean and unchanged while
+# the new transport is wired up.
+# - `quinn`       : tokio-backed QUIC endpoint for Gateway/Relay.
+# - `quinn-proto` : sans-io state machine; used by iOS NE (no tokio, <15MB).
+# - `rustls`      : TLS provider required by quinn (we still tunnel Noise
+#                   inside the QUIC stream for Ed25519 identity binding).
+quinn = { version = "0.11.9" }
+quinn-proto = { version = "0.11.14" }
+rustls = { version = "0.23.40" }
+# Self-signed cert generator. Needed only for the tokio-backed server endpoint
+# because rustls/quinn always require a server certificate even though we pin
+# identity via the Noise XX prologue tunneled over stream 0 (so the X.509
+# layer is effectively ignored). Gated behind `quic-transport` to keep the
+# default + ios-sync builds lean.
+rcgen = { version = "0.13" }
 
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.
@@ -157,3 +185,13 @@ required-features = ["tokio-runtime"]
 name = "ztlp-interop-test"
 path = "src/bin/ztlp-interop-test.rs"
 required-features = ["tokio-runtime"]
+
+[[bin]]
+name = "quic-server"
+path = "src/bin/quic-server.rs"
+required-features = ["quic-transport", "tokio-runtime"]
+
+[[bin]]
+name = "quic-client"
+path = "src/bin/quic-client.rs"
+required-features = ["quic-transport", "tokio-runtime"]

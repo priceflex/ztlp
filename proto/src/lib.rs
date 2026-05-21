@@ -48,7 +48,6 @@ pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod handshake;
-pub mod http_injector;
 pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
@@ -65,12 +64,16 @@ pub mod reject;
 pub mod rekey;
 pub mod relay_pool;
 pub mod roaming;
-pub mod security;
-pub mod session;
+// Nebula-pivot R1: real module deleted; `session_health.rs` is a tiny stub shim for ffi.rs.
 #[cfg(feature = "ios-sync")]
 pub mod session_health;
+pub mod security;
+pub mod session;
 pub mod stats;
 pub mod updater;
+
+#[cfg(feature = "quic-transport")]
+pub mod quic_transport;
 
 // ── Tokio-runtime modules (gated out of iOS NE builds) ────────────────
 #[cfg(feature = "tokio-runtime")]
@@ -78,6 +81,8 @@ pub mod updater;
 pub mod ack_socket;
 #[cfg(feature = "tokio-runtime")]
 pub mod batch;
+// Nebula-pivot R1: real module deleted; `congestion.rs` is a tiny stub shim kept
+// only so the 120+ call sites in tunnel.rs continue to type-check until R3 deletes them.
 #[cfg(feature = "tokio-runtime")]
 pub mod congestion;
 #[cfg(feature = "tokio-runtime")]
@@ -90,8 +95,8 @@ pub mod gso;
 pub mod mobile;
 #[cfg(feature = "tokio-runtime")]
 pub mod nat;
+// Nebula-pivot R1: real module deleted; `pacing.rs` is a tiny stub shim.
 #[cfg(feature = "tokio-runtime")]
-#[allow(unsafe_code)]
 pub mod pacing;
 #[cfg(feature = "tokio-runtime")]
 pub mod policy;
@@ -99,6 +104,7 @@ pub mod policy;
 pub mod punch;
 #[cfg(feature = "tokio-runtime")]
 pub mod relay;
+// Nebula-pivot R1: real module deleted; `send_controller.rs` is a tiny stub shim for vip.rs.
 #[cfg(feature = "tokio-runtime")]
 pub mod send_controller;
 #[cfg(feature = "tokio-runtime")]
@@ -109,6 +115,3 @@ pub mod transport;
 pub mod tunnel;
 #[cfg(feature = "tokio-runtime")]
 pub mod vip;
-
-pub mod recv_window;
-pub use recv_window::ReceiveWindow;

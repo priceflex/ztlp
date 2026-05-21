@@ -3943,7 +3943,11 @@ pub extern "C" fn ztlp_ios_tunnel_engine_free(engine: *mut ZtlpIosTunnelEngine) 
 /// Opaque handle for a MuxEngine.
 #[cfg(feature = "ios-sync")]
 pub struct ZtlpMuxEngine {
-    pub(crate) inner: std::sync::Mutex<crate::mux::MuxEngine>,
+    // Phase 4 stub: hold the quinn SansIoConnection logic or a dummy
+    #[cfg(feature = "quic-transport")]
+    pub(crate) inner: Option<crate::quic_transport::SansIoConnection>,
+    #[cfg(not(feature = "quic-transport"))]
+    pub(crate) inner: std::sync::Mutex<i32>,
 }
 
 #[cfg(feature = "ios-sync")]
@@ -3951,7 +3955,10 @@ pub struct ZtlpMuxEngine {
 pub extern "C" fn ztlp_mux_new() -> *mut ZtlpMuxEngine {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let engine = ZtlpMuxEngine {
-            inner: std::sync::Mutex::new(crate::mux::MuxEngine::new()),
+            #[cfg(feature = "quic-transport")]
+            inner: None,
+            #[cfg(not(feature = "quic-transport"))]
+            inner: std::sync::Mutex::new(0),
         };
         Box::into_raw(Box::new(engine))
     }));
@@ -3975,90 +3982,28 @@ pub extern "C" fn ztlp_mux_free(engine: *mut ZtlpMuxEngine) {
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_enqueue_data(
-    engine: *mut ZtlpMuxEngine,
-    stream_id: u32,
-    data: *const u8,
-    len: usize,
+    _engine: *mut ZtlpMuxEngine,
+    _stream_id: u32,
+    _data: *const u8,
+    _len: usize,
 ) -> i32 {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        if engine.is_null() || data.is_null() || len == 0 {
-            set_last_error("invalid argument to ztlp_mux_enqueue_data");
-            return ZtlpResult::InvalidArgument as i32;
-        }
-        let engine = unsafe { &*engine };
-        let payload = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-        let mut guard = match engine.inner.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                set_last_error("mux poisoned");
-                return ZtlpResult::InternalError as i32;
-            }
-        };
-        guard.enqueue_outbound(crate::mux::OutboundItem::Data { stream_id, payload });
-        ZtlpResult::Ok as i32
-    }));
-    result.unwrap_or_else(|_| {
-        set_last_error("panic in ztlp_mux_enqueue_data");
-        ZtlpResult::InternalError as i32
-    })
+    return ZtlpResult::Ok as i32; // TODO(nebula-pivot-R4) delete later
 }
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_enqueue_open(
-    engine: *mut ZtlpMuxEngine,
-    stream_id: u32,
-    service: *const c_char,
+    _engine: *mut ZtlpMuxEngine,
+    _stream_id: u32,
+    _service: *const c_char,
 ) -> i32 {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        if engine.is_null() || service.is_null() {
-            set_last_error("invalid argument to ztlp_mux_enqueue_open");
-            return ZtlpResult::InvalidArgument as i32;
-        }
-        let service_str = match unsafe { CStr::from_ptr(service) }.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                set_last_error("service name is not valid utf-8");
-                return ZtlpResult::InvalidArgument as i32;
-            }
-        };
-        let engine = unsafe { &*engine };
-        let mut guard = match engine.inner.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                set_last_error("mux poisoned");
-                return ZtlpResult::InternalError as i32;
-            }
-        };
-        guard.enqueue_outbound(crate::mux::OutboundItem::Open {
-            stream_id,
-            service: service_str,
-        });
-        ZtlpResult::Ok as i32
-    }));
-    result.unwrap_or_else(|_| {
-        set_last_error("panic in ztlp_mux_enqueue_open");
-        ZtlpResult::InternalError as i32
-    })
+    return ZtlpResult::Ok as i32; // TODO(nebula-pivot-R4) delete later
 }
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_enqueue_close(engine: *mut ZtlpMuxEngine, stream_id: u32) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return ZtlpResult::InvalidArgument as i32;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return ZtlpResult::InternalError as i32;
-        }
-    };
-    guard.enqueue_outbound(crate::mux::OutboundItem::Close { stream_id });
-    ZtlpResult::Ok as i32
+pub extern "C" fn ztlp_mux_enqueue_close(_engine: *mut ZtlpMuxEngine, _stream_id: u32) -> i32 {
+    return ZtlpResult::Ok as i32; // TODO(nebula-pivot-R4) delete later
 }
 
 /// Delivery callback for `ztlp_mux_take_send_bytes` and `_retransmit_bytes`.
@@ -4071,51 +4016,16 @@ pub type ZtlpMuxFrameCallback = extern "C" fn(user_data: *mut c_void, frame: *co
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
 pub extern "C" fn ztlp_mux_take_send_bytes(
-    engine: *mut ZtlpMuxEngine,
-    callback: Option<ZtlpMuxFrameCallback>,
-    user_data: *mut c_void,
+    _engine: *mut ZtlpMuxEngine,
+    _callback: Option<ZtlpMuxFrameCallback>,
+    _user_data: *mut c_void,
 ) -> i32 {
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        if engine.is_null() {
-            set_last_error("engine is null");
-            return -(ZtlpResult::InvalidArgument as i32);
-        }
-        let cb = match callback {
-            Some(c) => c,
-            None => {
-                set_last_error("callback is null");
-                return -(ZtlpResult::InvalidArgument as i32);
-            }
-        };
-        let engine = unsafe { &*engine };
-        let mut guard = match engine.inner.lock() {
-            Ok(g) => g,
-            Err(_) => {
-                set_last_error("mux poisoned");
-                return -(ZtlpResult::InternalError as i32);
-            }
-        };
-        let now = std::time::Instant::now();
-        let frames = guard.take_send_bytes(now);
-        let count = frames.len() as i32;
-        // Drop the lock before invoking user callbacks — the callback may
-        // call back into the mux.
-        drop(guard);
-        for bytes in frames {
-            cb(user_data, bytes.as_ptr(), bytes.len());
-        }
-        count
-    }));
-    result.unwrap_or_else(|_| {
-        set_last_error("panic in ztlp_mux_take_send_bytes");
-        -(ZtlpResult::InternalError as i32)
-    })
+    return 0; // TODO(nebula-pivot-R4) delete later
 }
 
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_tick_retransmit(engine: *mut ZtlpMuxEngine) -> i32 {
-    // TODO(nebula-pivot-R4): delete this FFI fn
+pub extern "C" fn ztlp_mux_tick_retransmit(_engine: *mut ZtlpMuxEngine) -> i32 {
     0
 }
 
@@ -4143,21 +4053,8 @@ pub extern "C" fn ztlp_mux_on_ack(engine: *mut ZtlpMuxEngine, cumulative: u64, r
 /// advances the cumulative ACK the engine advertises back to the peer.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_on_data_received(engine: *mut ZtlpMuxEngine, data_seq: u64) -> i32 {
-    if engine.is_null() {
-        set_last_error("engine is null");
-        return ZtlpResult::InvalidArgument as i32;
-    }
-    let engine = unsafe { &*engine };
-    let mut guard = match engine.inner.lock() {
-        Ok(g) => g,
-        Err(_) => {
-            set_last_error("mux poisoned");
-            return ZtlpResult::InternalError as i32;
-        }
-    };
-    guard.on_data_received(data_seq);
-    ZtlpResult::Ok as i32
+pub extern "C" fn ztlp_mux_on_data_received(_engine: *mut ZtlpMuxEngine, _data_seq: u64) -> i32 {
+    return ZtlpResult::Ok as i32; // TODO(nebula-pivot-R4) delete later
 }
 
 /// Mark that utun saw outbound demand just now. Drives the post-demand
@@ -4217,12 +4114,8 @@ pub extern "C" fn ztlp_mux_advertised_rwnd(engine: *mut ZtlpMuxEngine) -> i32 {
 /// Current cumulative ACK we'd advertise to the peer.
 #[cfg(feature = "ios-sync")]
 #[no_mangle]
-pub extern "C" fn ztlp_mux_cumulative_ack(engine: *mut ZtlpMuxEngine) -> u64 {
-    if engine.is_null() {
-        return 0;
-    }
-    let engine = unsafe { &*engine };
-    engine.inner.lock().map(|g| g.cumulative_ack()).unwrap_or(0)
+pub extern "C" fn ztlp_mux_cumulative_ack(_engine: *mut ZtlpMuxEngine) -> u64 {
+    0 // TODO(nebula-pivot-R4) delete later
 }
 
 /// Inflight count — for diagnostics and the health snapshot.

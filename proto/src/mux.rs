@@ -888,7 +888,8 @@ impl MuxEngine {
                 return (self.advertised_window_bytes, self.autotune_reason);
             }
         };
-        self.autotune_target_kb = ((target_bytes + 1023) / 1024).min(u16::MAX as u32) as u16;
+        self.autotune_target_kb =
+            ((target_bytes + 1023) / 1024).min(u16::MAX as u32) as u16;
 
         let current = self.advertised_window_bytes;
         let min_bytes = self.autotune_min_kb as u32 * ACK_V2_WINDOW_UNIT_BYTES;
@@ -905,7 +906,8 @@ impl MuxEngine {
         } else {
             // Healthy: require N consecutive healthy ticks before widening.
             self.autotune_healthy_ticks = self.autotune_healthy_ticks.saturating_add(1);
-            let may_widen = self.autotune_healthy_ticks >= AUTOTUNE_WIDEN_TICKS_NEEDED;
+            let may_widen =
+                self.autotune_healthy_ticks >= AUTOTUNE_WIDEN_TICKS_NEEDED;
             let new_bytes = if target_bytes > current {
                 // Want to grow. Gate on healthy-tick count.
                 if may_widen {
@@ -977,7 +979,10 @@ impl MuxEngine {
         // Pressure-ish reasons force autotune into clamp-down mode too.
         let pressure = matches!(
             v1_reason,
-            "pressure" | "pressure_cooldown" | "browser_replay_backoff" | "no_progress"
+            "pressure"
+                | "pressure_cooldown"
+                | "browser_replay_backoff"
+                | "no_progress"
         );
         // Autotune mutates `advertised_window_bytes` when V2 is active.
         // In V1-only sessions it's a no-op ("v1_legacy" reason) — the
@@ -1054,8 +1059,7 @@ impl MuxEngine {
             .last_outbound_demand_at
             .map(|t| now.duration_since(t))
             .unwrap_or(Duration::from_secs(3600));
-        let active_or_recent =
-            signals.has_active_flows || outbound_demand_age < Duration::from_secs(3);
+        let active_or_recent = signals.has_active_flows || outbound_demand_age < Duration::from_secs(3);
         let making_progress = signals.high_seq_advanced || stats.outbound == 0;
 
         if !(active_or_recent && making_progress) {
@@ -1123,10 +1127,14 @@ impl MuxEngine {
                 break;
             };
             let (frame, data_seq_for_inflight) = match item {
-                OutboundItem::Open { stream_id, service } => {
-                    (MuxFrame::Open { stream_id, service }, None)
-                }
-                OutboundItem::Close { stream_id } => (MuxFrame::Close { stream_id }, None),
+                OutboundItem::Open { stream_id, service } => (
+                    MuxFrame::Open { stream_id, service },
+                    None,
+                ),
+                OutboundItem::Close { stream_id } => (
+                    MuxFrame::Close { stream_id },
+                    None,
+                ),
                 OutboundItem::Probe { nonce } => (MuxFrame::Ping { nonce }, None),
                 OutboundItem::Data { stream_id, payload } => {
                     let seq = self.next_send_data_seq;
@@ -1640,9 +1648,7 @@ mod tests {
         for f in [
             MuxFrame::Close { stream_id: 12 },
             MuxFrame::Fin { stream_id: 13 },
-            MuxFrame::Ping {
-                nonce: 0xDEAD_BEEF_CAFE_BABE,
-            },
+            MuxFrame::Ping { nonce: 0xDEAD_BEEF_CAFE_BABE },
             MuxFrame::Pong { nonce: 1 },
         ] {
             assert_eq!(roundtrip(f.clone()), f);
@@ -2286,7 +2292,11 @@ mod tests {
         let mut m = MuxEngine::new();
         let t0 = Instant::now();
         for seq in 1..=5u64 {
-            m.observe_sent(t0 + Duration::from_millis(seq as u64), seq, 500);
+            m.observe_sent(
+                t0 + Duration::from_millis(seq as u64),
+                seq,
+                500,
+            );
         }
         assert_eq!(m.shadow_inflight_len(), 5);
         m.observe_ack_cumulative(t0 + Duration::from_millis(50), 3);
@@ -2308,7 +2318,10 @@ mod tests {
         m.observe_sent(t0 + Duration::from_millis(100), 7, 1000);
         m.observe_ack_cumulative(t0 + Duration::from_millis(150), 7);
         let snap = m.rtt_goodput_snapshot(t0 + Duration::from_millis(150));
-        assert_eq!(snap.samples_total, 0, "retransmitted seq excluded by Karn");
+        assert_eq!(
+            snap.samples_total, 0,
+            "retransmitted seq excluded by Karn"
+        );
         assert!(snap.goodput_bps > 0, "goodput still counted");
     }
 
@@ -2409,7 +2422,10 @@ mod tests {
         m.note_peer_sent_v2();
         // note_peer_sent_v2 bumps only if DEFAULT > current — we set 32
         // KB explicitly (> 16 KB default), so the explicit setting wins.
-        assert_eq!(m.advertised_window_bytes(), 32 * ACK_V2_WINDOW_UNIT_BYTES);
+        assert_eq!(
+            m.advertised_window_bytes(),
+            32 * ACK_V2_WINDOW_UNIT_BYTES
+        );
     }
 
     #[test]

@@ -82,11 +82,14 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
+use sha2::{Digest, Sha256};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/// Maximum service name length (must fit in 16-byte DstSvcID field).
-pub const MAX_SERVICE_NAME_LEN: usize = 16;
+/// Maximum service name length (DNS-class limit). The 16-byte DstSvcID field
+/// holds the truncated SHA-256 of the name, so any reasonable input length
+/// is accepted — this cap prevents accidentally hashing megabytes of garbage.
+pub const MAX_SERVICE_NAME_LEN: usize = 253;
 
 /// The default service name used when no name is specified.
 pub const DEFAULT_SERVICE: &str = "_default";
@@ -3072,22 +3075,28 @@ impl ServiceRegistry {
     }
 }
 
-/// Encode a service name into a 16-byte DstSvcID field.
+/// Encode a service name into a 16-byte DstSvcID (now an opaque hash, not
+/// raw ASCII per v0.26 Option C).
 ///
-/// Pads with zeros if shorter than 16 bytes.
-/// Returns an error if the name is too long.
+/// Canonicalization: lowercase + strip trailing dots, then truncated
+/// SHA-256 to the first 16 bytes. Identical to the FFI path
+/// (`proto/src/ffi.rs`) and Elixir gateway's `Packet.service_hash/1`.
 pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    let bytes = name.as_bytes();
-    if bytes.len() > MAX_SERVICE_NAME_LEN {
+    let lower = name.to_ascii_lowercase();
+    let canon = lower.trim_end_matches('.');
+    if canon.len() > MAX_SERVICE_NAME_LEN {
         return Err(format!(
             "service name '{}' too long ({} bytes, max {})",
-            name,
-            bytes.len(),
+            canon,
+            canon.len(),
             MAX_SERVICE_NAME_LEN
         ));
     }
+    let mut h = Sha256::new();
+    h.update(canon.as_bytes());
+    let out = h.finalize();
     let mut buf = [0u8; 16];
-    buf[..bytes.len()].copy_from_slice(bytes);
+    buf.copy_from_slice(&out[..16]);
     Ok(buf)
 }
 
@@ -3434,7 +3443,7 @@ mod tests {
 
     #[test]
     fn test_parse_forward_arg_name_too_long() {
-        let long_name = "a".repeat(17);
+        let long_name = "a".repeat(254);
         let arg = format!("{}:127.0.0.1:22", long_name);
         assert!(parse_forward_arg(&arg).is_err());
     }
@@ -3519,20 +3528,29 @@ mod tests {
 
     #[test]
     fn test_encode_service_name() {
+        // SHA-256("ssh")[0:16] — hashed output, not zero-padded ASCII
         let buf = encode_service_name("ssh").unwrap();
-        assert_eq!(&buf[..3], b"ssh");
-        assert_eq!(&buf[3..], &[0u8; 13]);
+        assert_eq!(buf, [0x7f, 0x5a, 0x55, 0xcf, 0x3f, 0x88, 0xbe, 0x93,
+                         0x6f, 0xb9, 0x44, 0x02, 0x49, 0xcb, 0x44, 0x9f]);
 
-        let buf = encode_service_name("rdp").unwrap();
-        assert_eq!(&buf[..3], b"rdp");
+        // Case-insensitive: "SSH" → same hash as "ssh"
+        assert_eq!(encode_service_name("SSH").unwrap(), buf);
 
-        // Exactly 16 bytes
-        let name16 = "a".repeat(16);
-        let buf = encode_service_name(&name16).unwrap();
-        assert_eq!(&buf, name16.as_bytes());
+        // Trailing dot stripped: "ssh." → same hash as "ssh"
+        assert_eq!(encode_service_name("ssh.").unwrap(), buf);
 
-        // Too long
-        let name17 = "a".repeat(17);
+        // Long names are accepted (SHA-256 handles any length)
+        let long_name = "a".repeat(200);
+        let buf_long = encode_service_name(&long_name).unwrap();
+        assert_eq!(buf_long.len(), 16);
+        assert_ne!(buf_long, buf); // different input → different hash
+
+        // Max allowed (253 chars) works
+        let max_name = "a".repeat(253);
+        assert!(encode_service_name(&max_name).is_ok());
+
+        // Too long (>253) fails
+        let name17 = "a".repeat(254);
         assert!(encode_service_name(&name17).is_err());
     }
 

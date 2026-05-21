@@ -4589,3 +4589,25 @@ mod tests {
         );
     }
 }
+
+#[derive(Clone, Default)]
+pub struct HttpInjectionConfig {
+    pub enabled: bool,
+    pub hmac_secret: String,
+    pub admin_pubkey_to_email: std::collections::HashMap<String, String>,
+}
+
+pub async fn run_bridge_demuxed_with_http_injection(
+    _tcp_stream: tokio::net::TcpStream,
+    _udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
+    _recv_socket: std::sync::Arc<tokio::net::UdpSocket>,
+    _pipeline: std::sync::Arc<tokio::sync::Mutex<crate::pipeline::Pipeline>>,
+    _session_id: crate::packet::SessionId,
+    _send_addr: std::net::SocketAddr,
+    _initial_packets: Vec<crate::packet::ZtlpPacket>,
+    _http_injection: std::sync::Arc<HttpInjectionConfig>,
+    _peer_pubkey_hex: Option<String>,
+) -> Result<crate::tunnel::BridgeOutcome, String> {
+    // Stub implementation to fix compilation
+    Ok(crate::tunnel::BridgeOutcome::Closed)
+}

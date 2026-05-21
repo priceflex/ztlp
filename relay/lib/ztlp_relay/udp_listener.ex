@@ -104,16 +104,27 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   @impl true
-  def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
+  def handle_info({:udp, socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
 
-    # Check for GATEWAY_REGISTER packet before the pipeline
-    case data do
-      <<0x5A, 0x37, 0x0A, rest::binary>> ->
-        handle_gateway_register(rest, sender)
+    # First attempt to route known data flows dynamically
+    is_data_forwarded = case :ets.lookup(:ztlp_forwarded_sessions, sender) do
+      [{^sender, peer_b, _session_id}] ->
+        :gen_udp.send(socket, elem(peer_b, 0), elem(peer_b, 1), data)
+        ZtlpRelay.Stats.increment(:forwarded)
+        true
+      [] -> false
+    end
 
-      _ ->
-        handle_packet(data, sender, state)
+    if not is_data_forwarded do
+      # L1 validation
+      case data do
+        <<0x5A, 0x37, 0x0A, rest::binary>> ->
+          handle_gateway_register(rest, sender)
+
+        _ ->
+          handle_packet(data, sender, state)
+      end
     end
 
     {:noreply, state}

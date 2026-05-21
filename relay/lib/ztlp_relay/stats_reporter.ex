@@ -61,7 +61,7 @@ defmodule ZtlpRelay.StatsReporter do
     uptime = System.monotonic_time(:second) - :persistent_term.get({__MODULE__, :start_time}, 0)
 
     # Count active sessions
-    sessions = case :ets.info(:ztlp_sessions, :size) do
+    sessions = case :ets.info(:ztlp_session_registry, :size) do
       :undefined -> 0
       n when is_integer(n) -> n
     end

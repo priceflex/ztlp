@@ -2198,9 +2198,7 @@ async fn cmd_connect(
     relay_probe_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
-    let peer_addr: std::net::SocketAddr = target
-        .parse()
-        .map_err(|e| format!("invalid target: {}", e))?;
+    let (peer_addr, mut peer_node_id) = resolve_target(target, ns_server).await?;
     let client =
         QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
 

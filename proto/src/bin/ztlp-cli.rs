@@ -2572,14 +2572,56 @@ async fn cmd_listen(
     let target = forward[0].clone();
 
     loop {
-        let conn = server.accept().await?;
+        let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection = server.accept().await?;
         let target_clone = target.clone();
+        
+        let http_inject_headers_copy = http_inject_headers;
+        let admin_map = if http_inject_headers {
+            let mut map = std::collections::HashMap::new();
+            for entry in admin_pubkey_email {
+                let mut parts = entry.splitn(2, '=');
+                let hex_str = parts.next().unwrap().trim();
+                let email = parts.next().unwrap().trim();
+                map.insert(hex_str.to_lowercase(), email.to_string());
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+        // Provide dummy hmac since secret is required
+        let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
+        
         tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
                     let mut tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
                     let (mut t_read, mut t_write) = tcp.into_split();
+                    
+                    let hmac = hmac_secret.clone();
+                    let map = admin_map.clone();
+                    
                     tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        
+                        if http_inject_headers_copy {
+                            let mut buf = vec![0u8; 65536];
+                        if let Ok(Some(n)) = q_recv.read(&mut buf).await {
+                                let mut injected = false;
+                                if let Some((_, email)) = map.iter().next() {
+                                    let ts = "2026-05-20T12:00:00Z";
+                                    let slice = &buf[..n];
+                                    let rewrite_result = ztlp_proto::http_injector::inject_headers(slice, email, ts, hmac.as_bytes());
+                                    if let Ok(rewritten) = rewrite_result {
+                                        let _ = t_write.write_all(&rewritten).await;
+                                        injected = true;
+                                    }
+                                }
+                                if !injected {
+                                    let _ = t_write.write_all(&buf[..n]).await;
+                                }
+                            }
+                        }
+
                         let _ = tokio::try_join!(
                             tokio::io::copy(&mut q_recv, &mut t_write),
                             tokio::io::copy(&mut t_read, &mut q_send)

@@ -63,6 +63,12 @@ defmodule ZtlpRelay.Application do
     children = base_children ++ mesh_children ++ gateway_children ++ vip_children ++ [ZtlpRelay.UdpListener]
 
     opts = [strategy: :one_for_one, name: ZtlpRelay.Supervisor]
+    
+    # Initialize stats and necessary ETS tables on application start
+    if :ets.info(:ztlp_forwarded_sessions, :name) == :undefined do
+      :ets.new(:ztlp_forwarded_sessions, [:named_table, :public, :set, read_concurrency: true])
+    end
+    
     Supervisor.start_link(children, opts)
   end
 end

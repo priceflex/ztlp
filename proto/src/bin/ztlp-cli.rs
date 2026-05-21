@@ -3237,21 +3237,11 @@ async fn cmd_listen(
         if let Ok(target) = r_addr.parse::<std::net::SocketAddr>() {
             println!("Enabling QUIC gateway registration for relay: {}", target);
             
-            // Re-bind the QUIC endpoint address on an equivalent pure UDP tokio socket exclusively for relay ping beacons
-            // If the bind port 0 is generated due to dynamic `quinn::Endpoint` configuration without bind args,
-            // we mirror it to properly register identical `{IP:PORT}` paths against the NS
-            let b_addr = server.inner.local_addr().unwrap(); 
-            
-            // To emulate correct packet injection (UDP source mapping) the QuicEndpoint requires an underlying shared socket.
             // Due to rustc Quinn ownership encapsulation, the safest cross-platform fallback is to spawn 
             // the beacon emitter directly via Quinn's datagram out-of-band methods or mirror the port 
-            // Given Quinn v0.10 we can't extract Arc<std::net::UdpSocket> directly so we just bind a new socket 
-            // for relay communication alone and instruct the relay to accept it as the gateway address. 
-            // However, the relay identifies gateways based on sender UDP tuple. Thus, if gateways use 
-            // distinct dynamic source ports for registration versus datagram transport, routing fails!
-            // BUT WAIT — if the QuicEndpoint is bound to `b_addr`, we cannot easily Re-bind UDP `b_addr` 
-            // natively across all O/S (requires SO_REUSEPORT which `tokio::net::UdpSocket::bind` does not enable by default).
-            // SO we must modify how Quinn binds, OR pass a pre-bound std::net::UdpSocket to `QuicEndpoint::new()`.
+            // BUT WAIT — if we don't send the GATEWAY_REGISTER from the SAME source socket as Quinn,
+            // the relay uses the IP:PORT tuple to route returning client packets.
+            // A separate socket binds a new ephemeral port!
             eprintln!("WARNING: QUIC automatic Relay Gateway Registration is not fully implemented in v0.28.5");
         } else {
             eprintln!("Invalid relay address format: {}", r_addr);

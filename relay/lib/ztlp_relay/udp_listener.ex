@@ -108,12 +108,12 @@ defmodule ZtlpRelay.UdpListener do
     sender = {src_ip, src_port}
 
     # First attempt to route known data flows dynamically
-    is_data_forwarded = case :ets.lookup(:ztlp_forwarded_sessions, sender) do
-      [{^sender, peer_b, _session_id}] ->
-        :gen_udp.send(socket, elem(peer_b, 0), elem(peer_b, 1), data)
-        ZtlpRelay.Stats.increment(:forwarded)
-        true
-      [] -> false
+    is_data_forwarded = case :ets.info(:ztlp_forwarded_sessions, :name) do
+      :undefined -> false
+      _ -> case :ets.lookup(:ztlp_forwarded_sessions, sender) do
+        [{^sender, peer_b, _}] -> :gen_udp.send(socket, elem(peer_b, 0), elem(peer_b, 1), data); ZtlpRelay.Stats.increment(:forwarded); true
+        [] -> false
+      end
     end
 
     if not is_data_forwarded do

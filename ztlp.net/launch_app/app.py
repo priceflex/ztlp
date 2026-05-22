@@ -952,9 +952,18 @@ class LaunchApp:
     def render_claim_page(self, row: sqlite3.Row, token: str = "", note: str = "") -> str:
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         ns_server = row["ns_server"] or LAUNCH_NS_SERVER
-        enrollment_token = row["enrollment_token_uri"] or ""
-        enrollment_command = f"ztlp setup --token \"{enrollment_token}\" -y" if enrollment_token else "Claim this request to generate enrollment instructions."
-        connect_command = f"ztlp connect {service} --ns-server {ns_server} --service http -L 18080:127.0.0.1:3000"
+        # Mirror the gateway-side `--service-name gw-{slug[:11]}` registration
+        # used in _provision_zone_dockers so the displayed Connect command
+        # actually routes to THIS tenant's gateway. Hardcoding `--service http`
+        # caused the relay's pick_gateway_for_service to round-robin across
+        # all tenants when no service matched, sometimes landing on the wrong
+        # gateway and skipping autologin.
+        slug = self._slug_for_row(row)
+        gw_service = f"gw-{slug[:11]}" if slug else "gw-bootstrap"
+        connect_command = (
+            f"ztlp connect {service} --ns-server {ns_server} "
+            f"--service {gw_service} -L 18080:127.0.0.1:3000"
+        )
         note_html = f"<p class='notice'>{esc(note)}</p>" if note else ""
         body = f"""
         <p class="eyebrow">Claim status</p>
@@ -967,7 +976,6 @@ class LaunchApp:
           <dt>NS server</dt><dd><code>{esc(ns_server)}</code></dd>
           <dt>Enrollment status</dt><dd>{esc(row['enrollment_status'] or 'pending')}</dd>
           <dt>Enrollment expires</dt><dd>{esc(row['enrollment_expires_at'] or '')}</dd>
-          <dt>Setup command</dt><dd><code>{esc(enrollment_command)}</code></dd>
           <dt>ZTLP service</dt><dd><code>{esc(service)}</code></dd>
           <dt>Connect command</dt><dd><code>{esc(connect_command)}</code></dd>
         </dl>

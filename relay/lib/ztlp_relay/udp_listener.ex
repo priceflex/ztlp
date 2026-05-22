@@ -142,7 +142,9 @@ defmodule ZtlpRelay.UdpListener do
            :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
         case :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}) do
           [{{:client_map, ^sender}, {gw_ip, gw_port}}] ->
-            # Forward client → mapped gateway
+            # Forward client → mapped gateway. We deliberately do NOT inspect
+            # the payload here — the whole point of the QUIC bypass is that
+            # the relay forwards opaque QUIC bytes without parsing them.
             :gen_udp.send(socket, gw_ip, gw_port, data)
             true
 
@@ -150,19 +152,47 @@ defmodule ZtlpRelay.UdpListener do
             # No client mapping. Check if `sender` is a registered gateway
             # returning traffic to a known client. We look up the reverse
             # mapping ({:client_map, _} -> sender) to find the client peer.
-            case :ets.match_object(
-                   :ztlp_forwarded_quic_tuples,
-                   {{:client_map, :_}, sender}
-                 ) do
-              [{{:client_map, client_addr}, ^sender} | _] ->
-                {c_ip, c_port} = client_addr
-                :gen_udp.send(socket, c_ip, c_port, data)
-                true
+            #
+            # CRITICAL: We must NEVER reverse-forward ZTLP control frames
+            # (GATEWAY_REGISTER 0x5A 0x37 0x06, CLIENT_ROUTE 0x5A 0x37 0x0B,
+            # etc.) because those packets are addressed TO the relay itself.
+            # If we naively forward them based on the gateway's 5-tuple
+            # matching some stale `{:client_map, _}` entry, the gateway's
+            # registration heartbeat gets stolen and the gateway tombstones
+            # out of the relay's state after one TTL. This was a v0.29.0
+            # regression — fixed in v0.29.1 by gating the reverse forward
+            # on the data NOT starting with a known control-frame magic.
+            #
+            # The bytes are filtered, not just the gw-class — any future
+            # frame type that uses the 0x5A 0x37 prefix is automatically
+            # protected.
+            is_ztlp_control_frame =
+              case data do
+                <<0x5A, 0x37, _type, _rest::binary>> -> true
+                _ -> false
+              end
 
-              _ ->
-                # Sender is neither a mapped client nor a gateway with an
-                # active client. Fall through to legacy L1 validation.
+            cond do
+              is_ztlp_control_frame ->
+                # Fall through to legacy classifier so handle_gateway_register/
+                # handle_client_route can do their thing.
                 false
+
+              true ->
+                case :ets.match_object(
+                       :ztlp_forwarded_quic_tuples,
+                       {{:client_map, :_}, sender}
+                     ) do
+                  [{{:client_map, client_addr}, ^sender} | _] ->
+                    {c_ip, c_port} = client_addr
+                    :gen_udp.send(socket, c_ip, c_port, data)
+                    true
+
+                  _ ->
+                    # Sender is neither a mapped client nor a gateway with an
+                    # active client. Fall through to legacy L1 validation.
+                    false
+                end
             end
         end
       else

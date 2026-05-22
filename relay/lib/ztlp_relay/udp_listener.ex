@@ -37,6 +37,15 @@ defmodule ZtlpRelay.UdpListener do
     VipTcpTerminator
   }
 
+  # v0.29.3: how often the GenServer sweeps stale `{:client_map, ...}` entries
+  # out of `:ztlp_forwarded_quic_tuples`. Entries older than @client_route_ttl_ms
+  # are deleted on each tick. The TTL itself is long enough to cover steady-state
+  # tunnels through a periodic-keepalive QUIC config (see proto/src/quic_transport.rs);
+  # tunnels with fresh traffic are not touched because `do_install_client_route`
+  # refreshes the `inserted_at` whenever a new CLIENT_ROUTE arrives.
+  @client_route_sweep_interval_ms 60_000
+  @client_route_ttl_ms 300_000
+
   @type state :: %{
           socket: :gen_udp.socket() | nil,
           port: non_neg_integer(),
@@ -85,6 +94,12 @@ defmodule ZtlpRelay.UdpListener do
         if mesh_enabled do
           Logger.info("ZTLP Relay mesh mode enabled")
         end
+
+        # v0.29.3: kick off the periodic stale-client-map sweeper. We send the
+        # first tick after the full interval (not immediately) so test harnesses
+        # that don't care about the sweeper aren't surprised by a sweep fire
+        # during setup.
+        Process.send_after(self(), :sweep_client_routes, @client_route_sweep_interval_ms)
 
         {:ok, %{socket: socket, port: actual_port, mesh_enabled: mesh_enabled}}
 
@@ -141,10 +156,32 @@ defmodule ZtlpRelay.UdpListener do
       if not is_data_forwarded and
            :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
         case :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}) do
-          [{{:client_map, ^sender}, {gw_ip, gw_port}}] ->
+          [{{:client_map, ^sender}, {{gw_ip, gw_port}, _inserted_at}}] ->
             # Forward client → mapped gateway. We deliberately do NOT inspect
             # the payload here — the whole point of the QUIC bypass is that
             # the relay forwards opaque QUIC bytes without parsing them.
+            #
+            # v0.29.3: refresh `inserted_at` on every forwarded packet so the
+            # periodic sweeper doesn't evict a long-lived active tunnel. ETS
+            # `:set` `:ets.update_element` is atomic and cheap; this is the
+            # idiomatic "touch" pattern.
+            now_ms = System.monotonic_time(:millisecond)
+
+            :ets.update_element(
+              :ztlp_forwarded_quic_tuples,
+              {:client_map, sender},
+              {2, {{gw_ip, gw_port}, now_ms}}
+            )
+
+            :gen_udp.send(socket, gw_ip, gw_port, data)
+            true
+
+          # v0.29.2 compat shim: in-flight entries written under the
+          # pre-v0.29.3 schema (`gw_addr` directly, without `inserted_at`)
+          # are still honoured for one TTL window after upgrade so we do
+          # not break live tunnels on relay restart. New inserts always
+          # use the tagged shape; the sweeper will GC the old ones.
+          [{{:client_map, ^sender}, {gw_ip, gw_port}}] when is_tuple({gw_ip, gw_port}) ->
             :gen_udp.send(socket, gw_ip, gw_port, data)
             true
 
@@ -179,12 +216,63 @@ defmodule ZtlpRelay.UdpListener do
                 false
 
               true ->
-                case :ets.match_object(
-                       :ztlp_forwarded_quic_tuples,
-                       {{:client_map, :_}, sender}
-                     ) do
-                  [{{:client_map, client_addr}, ^sender} | _] ->
-                    {c_ip, c_port} = client_addr
+                # v0.29.3: when multiple client_map entries point at the same
+                # gateway 5-tuple (which happens whenever the same client host
+                # has connected before from a different ephemeral UDP port —
+                # the old entries don't auto-clean), we MUST pick the most
+                # recently installed one. ETS `:set` `match_object` returns
+                # entries in arbitrary hash-bucket order, so the naive `[head|_]`
+                # pattern routes gateway-→-client responses to dead ephemeral
+                # ports under load. Symptom: QUIC handshake completes on the
+                # gateway side but never converges on the client (the response
+                # was misrouted), so the user sees "error: connection error:
+                # timed out" right after "CLIENT_ROUTE sent". See v0.29.3
+                # release notes and `hermes_session_handoff.md` for the full
+                # diagnosis.
+                matches =
+                  :ets.match_object(
+                    :ztlp_forwarded_quic_tuples,
+                    {{:client_map, :"$1"}, {sender, :"$2"}}
+                  )
+
+                pick =
+                  matches
+                  |> Enum.reduce(nil, fn
+                    {{:client_map, client_addr}, {^sender, inserted_at}}, nil ->
+                      {client_addr, inserted_at}
+
+                    {{:client_map, client_addr}, {^sender, inserted_at}},
+                    {_, best_at} = best
+                    when inserted_at > best_at ->
+                      {client_addr, inserted_at}
+
+                    _, best ->
+                      best
+                  end)
+
+                # Legacy schema fallback (entries without inserted_at) — same
+                # tail-pick behaviour as before so unupgraded entries still
+                # route, but ONLY when no tagged entry is present.
+                pick =
+                  case pick do
+                    nil ->
+                      case :ets.match_object(
+                             :ztlp_forwarded_quic_tuples,
+                             {{:client_map, :_}, sender}
+                           ) do
+                        [{{:client_map, client_addr}, ^sender} | _] ->
+                          {client_addr, 0}
+
+                        _ ->
+                          nil
+                      end
+
+                    other ->
+                      other
+                  end
+
+                case pick do
+                  {{c_ip, c_port}, _inserted_at} ->
                     :gen_udp.send(socket, c_ip, c_port, data)
                     true
 
@@ -214,6 +302,39 @@ defmodule ZtlpRelay.UdpListener do
       end
     end
 
+    {:noreply, state}
+  end
+
+  def handle_info(:sweep_client_routes, state) do
+    # v0.29.3: drop `{:client_map, _}` entries that haven't been refreshed by a
+    # fresh CLIENT_ROUTE within @client_route_ttl_ms. Tunnels with active
+    # traffic don't need a refresh — QUIC keepalives (see quic_transport.rs)
+    # keep the path warm, and `do_install_client_route` updates `inserted_at`
+    # whenever the client reconnects. This sweep only catches genuinely-dead
+    # entries from old ephemeral source ports that the OS abandoned.
+    swept =
+      if :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
+        cutoff = System.monotonic_time(:millisecond) - @client_route_ttl_ms
+
+        :ets.select_delete(
+          :ztlp_forwarded_quic_tuples,
+          [
+            {
+              {{:client_map, :"$1"}, {:"$2", :"$3"}},
+              [{:<, :"$3", cutoff}],
+              [true]
+            }
+          ]
+        )
+      else
+        0
+      end
+
+    if swept > 0 do
+      Logger.info("[UdpListener] swept #{swept} stale client_map entries")
+    end
+
+    Process.send_after(self(), :sweep_client_routes, @client_route_sweep_interval_ms)
     {:noreply, state}
   end
 
@@ -398,15 +519,55 @@ defmodule ZtlpRelay.UdpListener do
           {:ok, gateway_addr} ->
             ensure_quic_tuple_table()
 
+            # v0.29.3: clean up stale entries from the SAME client source IP
+            # pointing to the SAME gateway BEFORE inserting the new mapping.
+            # Reason: every `ztlp connect` from the same host opens a fresh
+            # ephemeral UDP socket (OS-chosen port), so the previous run's
+            # `{:client_map, {ip, old_port}}` entry never gets reused. Left
+            # in place, the reverse-forward (gateway→client) `match_object`
+            # returns multiple entries in arbitrary ETS hash-bucket order
+            # and the [head|_] pick routes responses to dead ports — the
+            # exact handshake-flakiness signature seen in v0.29.0..v0.29.2.
+            #
+            # We only purge entries that share BOTH the client IP AND the
+            # target gateway address. We do NOT purge entries from the
+            # same IP pointing to a DIFFERENT gateway — the same host can
+            # legitimately have concurrent tunnels to multiple tenants.
+            {client_ip, _client_port} = sender
+
+            stale_matches =
+              :ets.match_object(
+                :ztlp_forwarded_quic_tuples,
+                {{:client_map, {client_ip, :_}}, {gateway_addr, :_}}
+              )
+
+            stale_count =
+              Enum.reduce(stale_matches, 0, fn
+                {{:client_map, ^sender}, _}, acc ->
+                  # Don't delete the entry we're about to overwrite — let
+                  # the :ets.insert below replace it atomically.
+                  acc
+
+                {{:client_map, other_client}, _}, acc ->
+                  :ets.delete(
+                    :ztlp_forwarded_quic_tuples,
+                    {:client_map, other_client}
+                  )
+
+                  acc + 1
+              end)
+
+            inserted_at = System.monotonic_time(:millisecond)
+
             :ets.insert(
               :ztlp_forwarded_quic_tuples,
-              {{:client_map, sender}, gateway_addr}
+              {{:client_map, sender}, {gateway_addr, inserted_at}}
             )
 
             Logger.info(
               "[UdpListener] CLIENT_ROUTE accepted: client=#{inspect(sender)} " <>
                 "service=#{service_name} gateway=#{inspect(gateway_addr)} " <>
-                "node_id=#{Base.encode16(node_id)}"
+                "node_id=#{Base.encode16(node_id)} purged_stale=#{stale_count}"
             )
 
             :ok

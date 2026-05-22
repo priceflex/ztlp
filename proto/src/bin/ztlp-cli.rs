@@ -2998,7 +2998,25 @@ async fn cmd_connect(
         println!("Accepted connection from {}", addr);
         let client_clone = client.clone();
         tokio::spawn(async move {
-            let (mut q_send, mut q_recv) = client_clone.open_bi().await.unwrap();
+            // open_bi can fail with Connection("timed out") if the underlying
+            // QUIC tunnel has died (e.g. the gateway dropped us, the relay's
+            // 5-tuple map evicted, or a long idle without keepalives). We must
+            // NOT .unwrap() here — the listener task is still running and will
+            // happily accept fresh TCP connections, but each one would crash
+            // a worker thread. Log the reason and exit the per-connection task
+            // cleanly so the listener stays usable when the user reconnects.
+            let (mut q_send, mut q_recv) = match client_clone.open_bi().await {
+                Ok(streams) => streams,
+                Err(e) => {
+                    eprintln!(
+                        "✗ failed to open QUIC stream from {}: {:?}; \
+                         the underlying tunnel is likely dead. \
+                         Stop and re-run `ztlp connect` to re-establish.",
+                        addr, e
+                    );
+                    return;
+                }
+            };
             let (mut t_read, mut t_write) = tcp.into_split();
             let mut read_buf = vec![0u8; 65000];
             loop {
@@ -3631,7 +3649,20 @@ async fn cmd_listen(
     };
     loop {
         let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection =
-            server.accept().await?;
+            match server.accept().await {
+                Ok(c) => c,
+                Err(e) => {
+                    // A failed/timed-out INCOMING handshake must NOT kill the
+                    // gateway. Quinn's `incoming.await?` (inside QuicEndpoint::accept)
+                    // returns Err on every client that gives up mid-handshake,
+                    // and the original code propagated that to main() via `?` ,
+                    // which exited the process and Docker crash-looped us. Log
+                    // and accept the next connection. This is the v0.29.2
+                    // gateway-side fix for the test-org-2 crash loop.
+                    eprintln!("✗ QUIC accept failed (continuing to accept next): {:?}", e);
+                    continue;
+                }
+            };
         let service_registry_clone = service_registry.clone();
 
         let identity_clone = identity.clone();
@@ -3664,11 +3695,19 @@ async fn cmd_listen(
                     (res.0.session, res.1)
                 }
                 Err(e) => {
-                    eprintln!("Responder handshake failed: {:?}", e);
-                    return Err(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    )));
+                    // A single failed handshake (timeout, malformed Noise,
+                    // client disconnect mid-msg3, etc.) must NEVER take down
+                    // the whole gateway process — Docker would restart us in
+                    // a crash loop and every other tenant tunnel would drop.
+                    // Log the reason and accept the next connection. This is
+                    // the v0.29.x bugfix for the test-org-2 crash loop where
+                    // an idle QUIC connection's "timed out" Err propagated up
+                    // through cmd_listen, killing the binary.
+                    eprintln!(
+                        "✗ Responder handshake failed (continuing to accept next): {:?}",
+                        e
+                    );
+                    continue;
                 }
             };
 

@@ -117,7 +117,8 @@ defmodule ZtlpRelay.GatewayForwarder do
   Prefers dynamic gateways registered for this service; falls back to
   static gateways if no dynamic match. Returns :error if none available.
   """
-  @spec pick_gateway_for_service(String.t()) :: {:ok, {:inet.ip_address(), non_neg_integer()}} | :error
+  @spec pick_gateway_for_service(String.t()) ::
+          {:ok, {:inet.ip_address(), non_neg_integer()}} | :error
   def pick_gateway_for_service(service_name) do
     GenServer.call(__MODULE__, {:pick_gateway_for_service, service_name})
   end
@@ -281,9 +282,15 @@ defmodule ZtlpRelay.GatewayForwarder do
 
       # Setup NAT 5-tuple table for transparent 0.0.0.0 bypass via the Elixir relay.
       if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
-        :ets.new(:ztlp_forwarded_quic_tuples, [:named_table, :public, :set, read_concurrency: true, write_concurrency: true])
+        :ets.new(:ztlp_forwarded_quic_tuples, [
+          :named_table,
+          :public,
+          :set,
+          read_concurrency: true,
+          write_concurrency: true
+        ])
       end
-      
+
       # Indexing tuples explicitly bound exclusively to registered gateways natively.
       :ets.insert(:ztlp_forwarded_quic_tuples, {:gateway_addr, address})
 
@@ -385,6 +392,22 @@ defmodule ZtlpRelay.GatewayForwarder do
     #
     # See `proto/src/tunnel.rs::encode_service_name` and
     # `gateway/lib/ztlp_gateway/packet.ex::service_hash/1`.
+    #
+    # v0.29.4 STRICT-ROUTING: when the caller passes an explicit non-zero
+    # service intent (real hash OR real name) and NO registered gateway
+    # matches, we return `:error` directly instead of round-robining over
+    # all other registered tenants. The pre-v0.29.4 fallback was a silent
+    # cross-tenant route footgun — a CLI asking for `gw-test-org-2` could
+    # land on `gw-hermese2e-1779353410` and render the wrong tenant's
+    # Bootstrap UI when the gateway-index happened to point that way.
+    #
+    # The all-zero 16-byte hash (no-service-preference sentinel) keeps the
+    # legacy round-robin fallback. `forward_hello_to_gateway` in
+    # `udp_listener.ex` already short-circuits nil/<<0::128>> through
+    # `pick_gateway/0`, but we honor it here too for direct internal
+    # callers that pass us the sentinel by mistake.
+    all_zero_hash? = service_name == <<0::128>>
+
     matches_service =
       case service_name do
         <<hash::binary-size(16)>> when bit_size(hash) == 128 ->
@@ -406,31 +429,44 @@ defmodule ZtlpRelay.GatewayForwarder do
 
     case service_gateways do
       [] ->
-        # No dynamic gateway for this specific service — fall back to ANY available gateway.
-        # First try static gateways, then try ALL dynamic gateways regardless of service name.
-        # This prevents phone sessions from falling into half-open mode when the service name
-        # doesn't exactly match a registered gateway service.
-        all_fallback =
-          case state.gateways do
+        # No live gateway registered for the requested service.
+        #
+        # If the caller passed the all-zero "no preference" sentinel, keep
+        # the legacy round-robin fallback (back-compat for pre-Option-C
+        # clients and any direct internal caller using the sentinel).
+        #
+        # Otherwise — explicit service hash or name with no match — we
+        # return `:error` and let the call site surface the failure.
+        # The QUIC CLIENT_ROUTE path in `udp_listener.ex` already logs
+        # `"rejected: no gateway registered for service=..."` on `:error`;
+        # the HELLO `forward_hello_to_gateway` path drops into a half-open
+        # session that the client times out on.
+        if all_zero_hash? do
+          all_fallback =
+            case state.gateways do
+              [] ->
+                state.dynamic_gateways
+                |> Enum.filter(fn gw -> gw.expires_at > now end)
+                |> Enum.map(fn gw -> gw.address end)
+                |> Enum.uniq()
+
+              static ->
+                static
+            end
+
+          case all_fallback do
             [] ->
-              # No static gateways — try all dynamic gateways regardless of service
-              state.dynamic_gateways
-              |> Enum.filter(fn gw -> gw.expires_at > now end)
-              |> Enum.map(fn gw -> gw.address end)
-              |> Enum.uniq()
+              {:reply, :error, state}
 
-            static ->
-              static
+            _ ->
+              index = rem(state.gateway_index, length(all_fallback))
+              gateway = Enum.at(all_fallback, index)
+              {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
           end
-
-        case all_fallback do
-          [] ->
-            {:reply, :error, state}
-
-          _ ->
-            index = rem(state.gateway_index, length(all_fallback))
-            gateway = Enum.at(all_fallback, index)
-            {:reply, {:ok, gateway}, %{state | gateway_index: index + 1}}
+        else
+          # Strict path: explicit service requested, no match → :error.
+          # Do NOT silently route to a different tenant.
+          {:reply, :error, state}
         end
 
       _ ->
@@ -447,8 +483,7 @@ defmodule ZtlpRelay.GatewayForwarder do
   def handle_call(:enabled?, _from, state) do
     now = System.monotonic_time(:second)
 
-    has_dynamic =
-      Enum.any?(state.dynamic_gateways, fn gw -> gw.expires_at > now end)
+    has_dynamic = Enum.any?(state.dynamic_gateways, fn gw -> gw.expires_at > now end)
 
     {:reply, state.gateways != [] or has_dynamic, state}
   end
@@ -509,9 +544,7 @@ defmodule ZtlpRelay.GatewayForwarder do
       Enum.split_with(state.dynamic_gateways, fn gw -> gw.expires_at > now_s end)
 
     if expired != [] do
-      Logger.info(
-        "[GatewayForwarder] Expired #{length(expired)} dynamic gateway registration(s)"
-      )
+      Logger.info("[GatewayForwarder] Expired #{length(expired)} dynamic gateway registration(s)")
     end
 
     Process.send_after(self(), :cleanup, 60_000)

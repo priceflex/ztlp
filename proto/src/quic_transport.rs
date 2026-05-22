@@ -132,6 +132,18 @@ pub struct QuicEndpointConfig {
     pub bind: Option<std::net::SocketAddr>,
     /// ALPN values to advertise. Defaults to `[ZTLP_ALPN]`.
     pub alpn: Vec<Vec<u8>>,
+    /// Optional override for Quinn's `max_idle_timeout`. v0.29.3 sets a
+    /// 60s default on both client and server so a brief packet-loss window
+    /// or a relay-side ETS GC tick doesn't immediately tear down a tunnel.
+    /// Quinn's own default is 30s; the ZTLP relay's α-path adds an extra
+    /// RTT + UDP loss surface, so we want headroom.
+    pub max_idle_timeout_ms: Option<u32>,
+    /// Optional override for Quinn's `keep_alive_interval`. v0.29.3 sets a
+    /// 15s default so an idle tunnel still emits keepalive packets through
+    /// the relay (which both refreshes the relay's `{:client_map, ...}`
+    /// inserted_at and prevents the gateway from dropping the connection
+    /// on idle).
+    pub keep_alive_interval_ms: Option<u32>,
 }
 
 impl Default for QuicEndpointConfig {
@@ -139,6 +151,14 @@ impl Default for QuicEndpointConfig {
         Self {
             bind: None,
             alpn: vec![ZTLP_ALPN.to_vec()],
+            // 60s idle timeout — long enough to survive a relay sweeper tick
+            // (60s) plus jitter, short enough that a truly-dead client doesn't
+            // hold a gateway slot forever.
+            max_idle_timeout_ms: Some(60_000),
+            // 15s keepalive — well under the 60s idle timeout. Picks up after
+            // any natural traffic gap (e.g. user-initiated curl through the
+            // local-forward) without flooding the relay.
+            keep_alive_interval_ms: Some(15_000),
         }
     }
 }
@@ -275,9 +295,23 @@ pub mod tokio_endpoint {
                 })?;
 
             server_crypto.alpn_protocols = cfg.alpn.clone();
-            let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
                 quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
             ));
+
+            // v0.29.3: apply the idle-timeout / keepalive transport tuning so
+            // gateway-side tunnels survive a 60s relay-sweeper tick and don't
+            // get torn down by Quinn defaults under the relay's added RTT.
+            // See QuicEndpointConfig field docs.
+            let mut transport_config = quinn::TransportConfig::default();
+            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
+                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
+            }
+            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
+                transport_config
+                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
+            }
+            server_config.transport_config(Arc::new(transport_config));
 
             // Quinn requires the socket be non-blocking for the tokio runtime.
             std_socket.set_nonblocking(true)?;
@@ -308,9 +342,21 @@ pub mod tokio_endpoint {
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
-            let client_config = quinn::ClientConfig::new(Arc::new(
+            let mut client_config = quinn::ClientConfig::new(Arc::new(
                 quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap(),
             ));
+
+            // v0.29.3: matching transport tuning for the client side. See
+            // QuicEndpointConfig field docs for rationale.
+            let mut transport_config = quinn::TransportConfig::default();
+            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
+                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
+            }
+            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
+                transport_config
+                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
+            }
+            client_config.transport_config(Arc::new(transport_config));
 
             std_socket.set_nonblocking(true)?;
             let mut endpoint = quinn::Endpoint::new(
@@ -337,9 +383,21 @@ pub mod tokio_endpoint {
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
-            let client_config = quinn::ClientConfig::new(Arc::new(
+            let mut client_config = quinn::ClientConfig::new(Arc::new(
                 quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap(),
             ));
+
+            // v0.29.3: matching transport tuning for the OS-socket-managed
+            // client path.
+            let mut transport_config = quinn::TransportConfig::default();
+            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
+                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
+            }
+            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
+                transport_config
+                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
+            }
+            client_config.transport_config(Arc::new(transport_config));
 
             let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
             let mut endpoint = quinn::Endpoint::client(bind_addr)?;
@@ -546,6 +604,37 @@ mod tests {
         let cfg = QuicEndpointConfig::default();
         assert_eq!(cfg.alpn, vec![ZTLP_ALPN.to_vec()]);
         assert!(cfg.bind.is_none());
+    }
+
+    /// v0.29.3 regression: the default transport-config knobs MUST set both
+    /// a max_idle_timeout and a keep_alive_interval so:
+    ///   - relayed QUIC tunnels survive a ~60s sweeper tick + jitter,
+    ///   - and idle tunnels emit keepalives that refresh the relay's
+    ///     `{:client_map, ...}` mapping. Removing either field would
+    ///     reopen the v0.29.0..v0.29.2 handshake-flakiness window.
+    #[test]
+    fn default_config_has_quinn_transport_tuning() {
+        let cfg = QuicEndpointConfig::default();
+        assert_eq!(
+            cfg.max_idle_timeout_ms,
+            Some(60_000),
+            "max_idle_timeout regression — see v0.29.3 release notes"
+        );
+        assert_eq!(
+            cfg.keep_alive_interval_ms,
+            Some(15_000),
+            "keep_alive_interval regression — see v0.29.3 release notes"
+        );
+        // keepalive must be strictly less than idle timeout; otherwise the
+        // peer's idle clock can fire between two keepalives and the tunnel
+        // tears down prematurely.
+        match (cfg.keep_alive_interval_ms, cfg.max_idle_timeout_ms) {
+            (Some(ka), Some(idle)) => assert!(
+                ka < idle,
+                "keep_alive_interval ({ka}ms) must be < max_idle_timeout ({idle}ms)"
+            ),
+            _ => unreachable!("we just asserted both fields are Some above"),
+        }
     }
 
     #[test]

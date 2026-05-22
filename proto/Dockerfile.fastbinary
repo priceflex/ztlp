@@ -1,0 +1,29 @@
+# Fast Dockerfile that wraps a pre-built ztlp binary into the runtime image.
+# Use ONLY when you've already built `target/release/ztlp` locally and just need
+# to package + ship it. Falls back to the same debian:bookworm-slim runtime
+# layer as the canonical Dockerfile so the resulting image is drop-in
+# compatible with priceflex/ztlp-node:hermes-quic-routing.
+#
+# Build context MUST be the proto/ directory so target/release/ztlp resolves.
+#
+# Build:
+#   cd proto && docker build --no-cache -f Dockerfile.fastbinary \
+#     -t priceflex/ztlp-node:v0.29.2 .
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --create-home ztlp
+
+# Copy the pre-built release binary from the build context. The host MUST have
+# already run `cargo build --release --bin ztlp` before invoking this Dockerfile.
+COPY target/release/ztlp /usr/local/bin/ztlp
+RUN chmod +x /usr/local/bin/ztlp
+
+# Match the canonical Dockerfile's runtime conventions:
+# - root user (the ztlp.net launch app's /data/keys volume needs arbitrary-UID write)
+# - no ENTRYPOINT (launch_app overrides with `sh -c "<ztlp listen ...>"`)
+WORKDIR /home/ztlp

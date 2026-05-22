@@ -4,7 +4,7 @@ defmodule ZtlpRelay.MixProject do
   def project do
     [
       app: :ztlp_relay,
-      version: "0.29.1",
+      version: "0.29.3",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

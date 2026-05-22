@@ -176,6 +176,9 @@ defmodule ZtlpRelay.UdpListener do
         <<0x5A, 0x37, 0x0A, rest::binary>> ->
           handle_gateway_register(rest, sender)
 
+        <<0x5A, 0x37, 0x0B, rest::binary>> ->
+          handle_client_route(rest, sender, state)
+
         _ ->
           handle_packet(data, sender, state)
       end
@@ -269,6 +272,139 @@ defmodule ZtlpRelay.UdpListener do
       _pid ->
         GatewayForwarder.register_dynamic_gateway(sender, node_id, service_name, ttl)
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # CLIENT_ROUTE — α-relay routing setup (FRAME_CLIENT_ROUTE / 0x5A 0x37 0x0B)
+  # ---------------------------------------------------------------------------
+  #
+  # Sent by a QUIC client BEFORE its first QUIC INITIAL packet so the relay
+  # can install `{:client_map, sender} -> gateway_addr` in
+  # `:ztlp_forwarded_quic_tuples`. Subsequent UDP from the same 5-tuple is
+  # then transparently echoed to the registered gateway by the QUIC fast
+  # bypass branch in `handle_info/2` above.
+  #
+  # Wire format (after 0x5A 0x37 0x0B magic+type already stripped):
+  #   [16 node_id][1 svc_len][svc_len service][8 timestamp][32 hmac]
+  #
+  # The HMAC scheme mirrors GATEWAY_REGISTER so the same shared secret in
+  # `Config.registration_secret/0` covers both frames. In dev mode (nil
+  # secret), the HMAC field is ignored and routing is accepted unverified.
+  defp handle_client_route(
+         <<node_id::binary-size(16), svc_len::8, rest::binary>>,
+         sender,
+         _state
+       )
+       when svc_len > 0 and svc_len <= 63 do
+    case rest do
+      <<service_name::binary-size(svc_len), timestamp::64-signed,
+        hmac::binary-size(32)>> ->
+        process_client_route(sender, node_id, service_name, timestamp, hmac)
+
+      _ ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: malformed payload"
+        )
+    end
+  end
+
+  defp handle_client_route(_data, sender, _state) do
+    Logger.warning(
+      "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: malformed header (svc_len out of range)"
+    )
+  end
+
+  defp process_client_route(sender, node_id, service_name, timestamp, hmac) do
+    case Config.registration_secret() do
+      nil ->
+        # Dev mode — accept without HMAC verification, but still gate on
+        # service-name lookup to keep the routing surface conservative.
+        Logger.debug(
+          "[UdpListener] Accepting unverified CLIENT_ROUTE from #{inspect(sender)} " <>
+            "service=#{service_name}"
+        )
+
+        do_install_client_route(sender, node_id, service_name)
+
+      secret ->
+        signed =
+          <<0x0B, node_id::binary, byte_size(service_name)::8, service_name::binary,
+            timestamp::64-signed>>
+
+        expected_hmac = :crypto.mac(:hmac, :sha256, secret, signed)
+
+        if secure_compare(expected_hmac, hmac) do
+          now = System.system_time(:second)
+
+          # Same 300-second window as GATEWAY_REGISTER. CLIENT_ROUTE is one-shot
+          # (per-connection), so a tighter window would be safer in production —
+          # leaving it consistent for now, revisit when CLIENT_ROUTE replay
+          # protection becomes a separate hardening pass.
+          if abs(now - timestamp) <= 300 do
+            do_install_client_route(sender, node_id, service_name)
+          else
+            Logger.warning(
+              "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: timestamp too old " <>
+                "(delta=#{now - timestamp}s)"
+            )
+          end
+        else
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: invalid HMAC"
+          )
+        end
+    end
+  end
+
+  defp do_install_client_route(sender, node_id, service_name) do
+    case GenServer.whereis(GatewayForwarder) do
+      nil ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} but GatewayForwarder not running"
+        )
+
+      _pid ->
+        case GatewayForwarder.pick_gateway_for_service(service_name) do
+          {:ok, gateway_addr} ->
+            ensure_quic_tuple_table()
+
+            :ets.insert(
+              :ztlp_forwarded_quic_tuples,
+              {{:client_map, sender}, gateway_addr}
+            )
+
+            Logger.info(
+              "[UdpListener] CLIENT_ROUTE accepted: client=#{inspect(sender)} " <>
+                "service=#{service_name} gateway=#{inspect(gateway_addr)} " <>
+                "node_id=#{Base.encode16(node_id)}"
+            )
+
+            :ok
+
+          :error ->
+            Logger.warning(
+              "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: " <>
+                "no gateway registered for service=#{service_name}"
+            )
+        end
+    end
+  end
+
+  # The QUIC tuple table is normally created on first GATEWAY_REGISTER. If a
+  # CLIENT_ROUTE arrives before any gateway has registered, this guard makes
+  # the relay tolerant of either ordering.
+  defp ensure_quic_tuple_table do
+    if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
+      :ets.new(:ztlp_forwarded_quic_tuples, [
+        :named_table,
+        :public,
+        :set,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+    end
+
+    :ok
   end
 
   # ---------------------------------------------------------------------------

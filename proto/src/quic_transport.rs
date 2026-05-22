@@ -295,6 +295,36 @@ pub mod tokio_endpoint {
             })
         }
 
+                pub async fn connect_with_socket(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+            std_socket: std::net::UdpSocket,
+        ) -> Result<QuicConnection, QuicTransportError> {
+            ensure_crypto();
+            let mut client_crypto = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+                .with_no_client_auth();
+
+            client_crypto.alpn_protocols = cfg.alpn.clone();
+            let client_config = quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap(),
+            ));
+
+            std_socket.set_nonblocking(true)?;
+            let mut endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                std_socket,
+                Arc::new(quinn::TokioRuntime),
+            )?;
+            endpoint.set_default_client_config(client_config);
+
+            let conn = endpoint.connect(remote, server_name)?.await?;
+            Ok(QuicConnection { inner: conn })
+        }
+
         pub async fn connect(
             cfg: QuicEndpointConfig,
             remote: SocketAddr,
@@ -389,11 +419,13 @@ pub mod noise_stream {
         conn: &QuicConnection,
         identity: &NodeIdentity,
         responder_id: NodeId,
+        service_hash: [u8; 16],
     ) -> Result<HandshakeResult, QuicTransportError> {
         let (mut send, mut recv) = conn.open_bi().await?;
         let mut ctx = HandshakeContext::new_initiator(identity)?;
 
         let msg1 = ctx.write_message(&[])?;
+        send.write_all(&service_hash).await?;
         write_ztlp_frame(&mut send, &msg1).await?;
 
         let mut sid_buf = [0u8; 12];
@@ -422,10 +454,12 @@ pub mod noise_stream {
         conn: &QuicConnection,
         identity: &NodeIdentity,
         initiator_id: NodeId,
-    ) -> Result<HandshakeResult, QuicTransportError> {
+    ) -> Result<(HandshakeResult, [u8; 16]), QuicTransportError> {
         let (mut send, mut recv) = conn.accept_bi().await?;
         let mut ctx = HandshakeContext::new_responder(identity)?;
 
+        let mut service_hash = [0u8; 16];
+        recv.read_exact(&mut service_hash).await?;
         let msg1 = read_ztlp_frame(&mut recv).await?;
         ctx.read_message(&msg1)?;
 
@@ -442,10 +476,10 @@ pub mod noise_stream {
         
         let _ = send.finish();
 
-        Ok(HandshakeResult {
+        Ok((HandshakeResult {
             session: resp_sess,
             session_id,
-        })
+        }, service_hash))
     }
 }
 

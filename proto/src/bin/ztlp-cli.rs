@@ -2861,15 +2861,61 @@ async fn cmd_connect(
     // QUIC mode
 
         use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
-        let (peer_addr, mut peer_node_id) = resolve_target(target, ns_server).await?;
-        let client =
-            QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
-
+        let (peer_addr, peer_node_id) = resolve_target(target, ns_server).await?;
+        
         let node_id = peer_node_id.unwrap_or_else(|| {
             ztlp_proto::identity::NodeId([0; 16])
         });
-
         let identity = load_or_generate_identity(key)?;
+
+        // PUNCH RELAY: Create explicitly bound UDP socket
+        let std_socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket for QUIC signaling");
+        
+        // 1. Setup a DUMMY ZTLP HELLO to configure the Relay's 5-Tuple map (Option α setup)
+        {
+            let ephemeral_ident = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+            let mut ctx = ztlp_proto::handshake::HandshakeContext::new_initiator(&ephemeral_ident).unwrap();
+            let node_id = identity.node_id;
+            let msg1 = ctx.write_message(&[]).unwrap();
+            
+            // Build the Service Hash safely matching Option C
+            let service_hash_internal = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(service.as_deref().unwrap_or("").as_bytes());
+                let output = hasher.finalize();
+                let mut h = [0u8; 16];
+                h.copy_from_slice(&output[..16]);
+                h
+            };
+            
+            let mut packet = vec![];
+            packet.extend_from_slice(&[0x5A, 0x37]); // MAGIC
+            packet.push(0x01); // PacketType::Handshake
+            packet.extend_from_slice(&[0x10, 0x14]); // version & hdr_len
+            packet.extend_from_slice(&[0x00, 0x00]); // flags
+            packet.push(0x01); // msg_type: Hello
+            packet.push(0x00); // padding
+            packet.extend_from_slice(&[0x00, 0x01]); // crypto_suite
+            packet.extend_from_slice(&[0x00, 0x00]); // key_id
+            let session_id = ztlp_proto::packet::SessionId::generate();
+            packet.extend_from_slice(session_id.as_bytes()); // 12 bytes session_id
+            packet.extend_from_slice(&[0u8; 8]); // seq
+            packet.extend_from_slice(&[0u8; 8]); // timestamp
+            packet.extend_from_slice(&identity.node_id.0); // src_node_id
+            packet.extend_from_slice(&node_id.0); // dst_svc_hash (NodeID routing for relay)
+            packet.extend_from_slice(&msg1); // Handshake Payload
+            
+            // Blast the RELAY to establish UDP state
+            let _ = std_socket.send_to(&packet, peer_addr);
+            println!("QUIC Init: Signaled relay {} with dummy UDP HELLO", peer_addr);
+        }
+
+        // Delay briefly to allow Relay to process the HELLO and install 5-tuple
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let client =
+            QuicEndpoint::connect_with_socket(QuicEndpointConfig::default(), peer_addr, "localhost", std_socket).await?;
 
 
 
@@ -2886,10 +2932,20 @@ async fn cmd_connect(
         let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
         println!("ZTLP QUIC client listening on TCP {}", listener.local_addr()?);
 
+        let service_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(service.as_deref().unwrap_or("").as_bytes());
+            let output = hasher.finalize();
+            let mut h = [0u8; 16];
+            h.copy_from_slice(&output[..16]);
+            h
+        };
         let session = match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
             &client,
             &identity,
             node_id,
+            service_hash,
         ).await {
             Ok(handshake_result) => {
                 println!("Noise Handshake Complete (Quic). Session Init.");
@@ -3332,6 +3388,7 @@ async fn cmd_listen(
         server.inner.local_addr().unwrap()
     );
 
+    let cfw = forward.to_vec();
     let identity = load_or_generate_identity(key)?;
 
     if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
@@ -3439,7 +3496,7 @@ async fn cmd_listen(
         ).await {
             Ok(res) => {
                 println!("Responder handshake success");
-                res.session
+                res.0.session
             }
             Err(e) => {
                 eprintln!("Responder handshake failed: {:?}", e);

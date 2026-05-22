@@ -108,15 +108,40 @@ defmodule ZtlpRelay.UdpListener do
     sender = {src_ip, src_port}
 
     # First attempt to route known data flows dynamically
-    is_data_forwarded = case :ets.info(:ztlp_forwarded_sessions, :name) do
-      :undefined -> false
-      _ -> case :ets.lookup(:ztlp_forwarded_sessions, sender) do
-        [{^sender, peer_b, _}] -> :gen_udp.send(socket, elem(peer_b, 0), elem(peer_b, 1), data); ZtlpRelay.Stats.increment(:forwarded); true
-        [] -> false
-      end
+    is_data_forwarded = GatewayForwarder.lookup_by_peer(sender)
+        |> case do
+            {:ok, _session_id, other_peer} ->
+                :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
+                ZtlpRelay.Stats.increment(:forwarded)
+                true
+            :error ->
+                false
+        end
+
+    # Evaluate QUIC fast 5-tuple bypass for unregistered ZTLP packets routing inside the relay bounds.
+    is_quic_forwarded = if not is_data_forwarded and :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
+        # Determine whether sender is mapped or gateway acts as target
+        case :ets.lookup(:ztlp_forwarded_quic_tuples, sender) do
+            [{^sender, gateway_addr}] ->
+                :gen_udp.send(socket, elem(gateway_addr, 0), elem(gateway_addr, 1), data)
+                true
+            [] ->
+                case :ets.lookup(:ztlp_forwarded_quic_tuples, :gateway_addr) do
+                    [{:gateway_addr, gateway_addr}] when sender == gateway_addr ->
+                        false # Gateway replies fallback into client proxy directly over mapped sessions
+                    [{:gateway_addr, gateway_addr}] ->
+                        # Identify new UDP Client 5-Tuple map securely, forward transparently.
+                        :ets.insert(:ztlp_forwarded_quic_tuples, {sender, gateway_addr})
+                        :gen_udp.send(socket, elem(gateway_addr, 0), elem(gateway_addr, 1), data)
+                        true
+                    _ -> false
+                end
+        end
+    else
+        false
     end
 
-    if not is_data_forwarded do
+    if not is_data_forwarded and not is_quic_forwarded do
       # L1 validation
       case data do
         <<0x5A, 0x37, 0x0A, rest::binary>> ->

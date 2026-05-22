@@ -262,6 +262,14 @@ defmodule ZtlpRelay.GatewayForwarder do
         expires_at: expires_at
       }
 
+      # Setup NAT 5-tuple table for transparent 0.0.0.0 bypass via the Elixir relay.
+      if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
+        :ets.new(:ztlp_forwarded_quic_tuples, [:named_table, :public, :set, read_concurrency: true, write_concurrency: true])
+      end
+      
+      # Indexing tuples explicitly bound exclusively to registered gateways natively.
+      :ets.insert(:ztlp_forwarded_quic_tuples, {:gateway_addr, address})
+
       Logger.info(
         "[GatewayForwarder] Registered dynamic gateway #{Base.encode16(node_id)} " <>
           "service=#{service_name} addr=#{inspect(address)} ttl=#{ttl}s"

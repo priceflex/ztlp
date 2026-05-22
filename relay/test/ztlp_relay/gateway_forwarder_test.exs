@@ -128,11 +128,20 @@ defmodule ZtlpRelay.GatewayForwarderTest do
       assert {:ok, ^gateway_addr} = GatewayForwarder.pick_gateway_for_service(service_name)
     end
 
-    test "pick_gateway_for_service/1 with a 16-byte hash that does not match any registered service falls back instead of selecting the wrong gateway by accident" do
-      # Negative case: when no registered gateway matches the wire hash,
-      # the function falls back to the existing round-robin/static-gateway
-      # path. We assert the function returns a gateway (any gateway, since
-      # there are some registered) but does NOT crash on the hash input.
+    test "pick_gateway_for_service/1 with a 16-byte hash that does not match any registered service returns :error and does NOT silently round-robin to a different tenant" do
+      # SECURITY-CRITICAL: when the caller passes an explicit service hash
+      # (i.e. they want gw-tenant-X, not just any gateway), the relay MUST
+      # NOT silently fall back to whichever other tenant happens to be next
+      # in the round-robin index. That was the v0.29.0..v0.29.2 footgun:
+      # a client asking for gw-test-org-2 could be silently routed to
+      # gw-hermese2e-1779353410 and see the WRONG TENANT's Bootstrap UI.
+      #
+      # Strict-routing contract:
+      #   * explicit non-zero service hash with NO match  → :error
+      #   * empty / all-zero service hash                 → fall back to
+      #     `pick_gateway/0` round-robin (unchanged behavior)
+      #
+      # This test pins the strict path for non-matching hashes.
 
       node_id_a = :crypto.strong_rand_bytes(16)
       node_id_b = :crypto.strong_rand_bytes(16)
@@ -149,9 +158,54 @@ defmodule ZtlpRelay.GatewayForwarderTest do
         |> :binary.part(0, 16)
 
       result = GatewayForwarder.pick_gateway_for_service(hash)
-      # Must not crash. Falls back to round-robin over all dynamic gateways
-      # (matching pre-existing behavior for unrecognized service strings).
-      assert match?({:ok, _}, result) or result == :error
+
+      # MUST be :error. Returning {:ok, gw_a} or {:ok, gw_b} would mean a
+      # silent cross-tenant route — exactly the bug Task #2 of the v0.29.3
+      # handoff was filed to prevent.
+      assert result == :error,
+             "pick_gateway_for_service/1 with an unknown service hash must return :error, " <>
+               "not silently round-robin to a different tenant. Got: #{inspect(result)}"
+    end
+
+    test "pick_gateway_for_service/1 with an unknown service NAME (string form) also returns :error" do
+      # Same strict contract for the legacy string-name caller path.
+      # Internal Elixir callers that still pass a name string instead of a
+      # hash get the same hard-error semantics — no surprise round-robin.
+
+      node_id = :crypto.strong_rand_bytes(16)
+      gw = {{10, 0, 77, 1}, 23097}
+
+      GatewayForwarder.register_dynamic_gateway(gw, node_id, "gw-real-tenant", 60)
+      Process.sleep(20)
+
+      result = GatewayForwarder.pick_gateway_for_service("gw-does-not-exist")
+
+      assert result == :error,
+             "pick_gateway_for_service/1 with an unknown service name must return :error. " <>
+               "Got: #{inspect(result)}"
+    end
+
+    test "pick_gateway_for_service/1 with an all-zero (no-preference) hash falls back to round-robin" do
+      # Backwards-compat sanity: the all-zero 16-byte hash is the
+      # \"no service preference\" sentinel (see `forward_hello_to_gateway`
+      # in `udp_listener.ex` — it routes nil and <<0::128>> through
+      # `pick_gateway/0`, never through `pick_gateway_for_service/1`).
+      #
+      # If a caller does pass us the all-zero hash directly, treat it as
+      # the same \"any gateway\" intent rather than the strict-error path,
+      # so the legacy semantics still hold for pre-Option-C clients.
+
+      node_id = :crypto.strong_rand_bytes(16)
+      gw = {{10, 0, 66, 1}, 23097}
+
+      GatewayForwarder.register_dynamic_gateway(gw, node_id, "gw-some-tenant", 60)
+      Process.sleep(20)
+
+      result = GatewayForwarder.pick_gateway_for_service(<<0::128>>)
+
+      assert match?({:ok, _}, result),
+             "all-zero hash should fall back to round-robin, not strict-error. " <>
+               "Got: #{inspect(result)}"
     end
 
     test "update_client/2 rewrites the peer index so old client address is no longer routable" do

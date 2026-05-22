@@ -118,42 +118,57 @@ defmodule ZtlpRelay.UdpListener do
                 false
         end
 
-    # Evaluate QUIC fast 5-tuple bypass for unregistered ZTLP packets routing inside the relay bounds.
-    is_quic_forwarded = if not is_data_forwarded and :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
-        # For Phase D QUIC routing we extract the ALPN SNI routing block manually here to bind dynamically.
-        # However, for pure fallback during E2E verification we temporarily just broadcast unregistered tuples to all active QUIC gateways securely since our E2E scale is isolated.
-        # Determine whether sender is already mapped.
+    # ------------------------------------------------------------------
+    # QUIC fast 5-tuple bypass — STRICTLY gated.
+    #
+    # This path only fires when an explicit `{:client_map, sender}`
+    # mapping already exists in `:ztlp_forwarded_quic_tuples`. There is
+    # NO fallback "guess the gateway" branch and NO ALPN-byte regex
+    # parsing — those approaches were tried and rejected because they
+    # mangled legacy Noise-UDP traffic (commit 548fc64 regression).
+    #
+    # The mapping is installed by a future ZTLP control frame
+    # (FRAME_CLIENT_ROUTE) that the client sends BEFORE its first QUIC
+    # INITIAL packet. Until that frame is implemented, this block is
+    # effectively dormant for client→gateway flow but still handles
+    # gateway→client return traffic for any pre-existing mapping.
+    #
+    # Ordering: this runs BEFORE legacy L1 validation (handle_packet/3),
+    # so it MUST be conservative — any false positive here will
+    # silently drop legitimate Noise-UDP packets.
+    # ------------------------------------------------------------------
+    is_quic_forwarded =
+      if not is_data_forwarded and
+           :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
         case :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}) do
-            [{{:client_map, ^sender}, {gw_ip, gw_port}}] ->
-                :gen_udp.send(socket, gw_ip, gw_port, data)
+          [{{:client_map, ^sender}, {gw_ip, gw_port}}] ->
+            # Forward client → mapped gateway
+            :gen_udp.send(socket, gw_ip, gw_port, data)
+            true
+
+          [] ->
+            # No client mapping. Check if `sender` is a registered gateway
+            # returning traffic to a known client. We look up the reverse
+            # mapping ({:client_map, _} -> sender) to find the client peer.
+            case :ets.match_object(
+                   :ztlp_forwarded_quic_tuples,
+                   {{:client_map, :_}, sender}
+                 ) do
+              [{{:client_map, client_addr}, ^sender} | _] ->
+                {c_ip, c_port} = client_addr
+                :gen_udp.send(socket, c_ip, c_port, data)
                 true
-            [] ->
-                 # Check if sender IS a gateway
-                 # Find the mapping of gateway returning traffic. We assume all active QUIC connections establish 1:1 NAT bindings here for E2E speed checks.
-                 is_gw = :ets.select(:ztlp_forwarded_quic_tuples, [{{:_, :"$1"}, [{:==, :"$1", sender}], [true]}]) != []
-                 if is_gw do
-                     # Gateway returning traffic — Check if there is a client mapping targeting this gateway
-                     case :ets.select(:ztlp_forwarded_quic_tuples, [{{{:client_map, :"$1"}, sender}, [], [:"$1"]}]) do
-                         [client_addr | _] ->
-                             :gen_udp.send(socket, elem(client_addr, 0), elem(client_addr, 1), data)
-                             true
-                         [] ->
-                             false
-                     end
-                 else
-                     # Pick the first raw gateway for E2E tunneling
-                     case :ets.tab2list(:ztlp_forwarded_quic_tuples) |> Enum.reject(fn {k, _v} -> is_tuple(k) end) do
-                         [{_service_name, gateway_addr} | _] ->
-                             :ets.insert(:ztlp_forwarded_quic_tuples, {{:client_map, sender}, gateway_addr})
-                             :gen_udp.send(socket, elem(gateway_addr, 0), elem(gateway_addr, 1), data)
-                             true
-                         _ -> false
-                     end
-                 end
+
+              _ ->
+                # Sender is neither a mapped client nor a gateway with an
+                # active client. Fall through to legacy L1 validation.
+                false
+            end
         end
-    else
+      else
         false
-    end
+      end
+
 
     if not is_data_forwarded and not is_quic_forwarded do
       # L1 validation

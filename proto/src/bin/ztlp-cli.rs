@@ -3290,7 +3290,7 @@ fn spawn_relay_registration(
         loop {
             tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
 
-            let ts = SystemTime::now()
+            let ts = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
@@ -3420,7 +3420,7 @@ async fn cmd_listen(
 
                 // Send initial registration immediately so the relay can
                 // route inbound HELLOs before any client tries to connect.
-                let ts = SystemTime::now()
+                let ts = std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
@@ -3444,7 +3444,7 @@ async fn cmd_listen(
                 // Periodic re-registration loop on the SAME shared socket.
                 loop {
                     tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
-                    let ts = SystemTime::now()
+                    let ts = std::time::SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
@@ -3534,9 +3534,11 @@ async fn cmd_listen(
                             if let Ok(frame) = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
                                 let mut injected = false;
                                 if let Some((_, email)) = map.iter().next() {
-                                    let now = std::time::SystemTime::now();
-                                    let dt = chrono::DateTime::<chrono::Utc>::from(now);
-                                    let ts = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                                    // Ensure exact ISO8601 formatting since chronos produces dynamic timestamps correctly now
+                                    let now = SystemTime::now();
+                                    let ts = chrono::DateTime::<chrono::Utc>::from(now)
+                                        .format("%Y-%m-%dT%H:%M:%SZ")
+                                        .to_string();
                                     let slice = &frame[..];
                                     let rewrite_result = ztlp_proto::http_injector::inject_headers(
                                         slice,
@@ -5442,7 +5444,7 @@ async fn cmd_ping(
         ping_hdr.packet_seq = seq as u64;
         ping_hdr.src_node_id = [0u8; 16]; // anonymous ping
                                           // Embed timestamp in the payload for RTT measurement
-        let now_ms = SystemTime::now()
+        let now_ms = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
@@ -8401,7 +8403,7 @@ fn generate_signing_key() -> ed25519_dalek::SigningKey {
 }
 
 fn utc_timestamp_iso() -> String {
-    let secs = SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
@@ -8419,7 +8421,7 @@ fn utc_timestamp_iso() -> String {
 }
 
 fn utc_timestamp_compact() -> String {
-    let secs = SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
@@ -8437,7 +8439,7 @@ fn utc_timestamp_compact() -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
@@ -10383,7 +10385,7 @@ mod tests {
         path.push(format!(
             "ztlp-config-test-{}-{}.toml",
             std::process::id(),
-            SystemTime::now()
+            std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()

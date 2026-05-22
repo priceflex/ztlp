@@ -200,6 +200,23 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   # GenServer callbacks
 
+  @doc """
+  Compute the 16-byte truncated SHA-256 of a canonicalised service name.
+
+  Mirrors `proto/src/tunnel.rs::encode_service_name` and
+  `gateway/lib/ztlp_gateway/packet.ex::service_hash/1` so the relay can
+  resolve incoming HELLO `dst_svc_hash` bytes back to the registered
+  gateway's `service_name` string. Canonicalisation: ASCII lowercase +
+  trailing-dot strip, then SHA-256, then take the first 16 bytes.
+
+  Public so test code can pin the wire encoding without re-implementing it.
+  """
+  @spec service_hash(String.t()) :: <<_::128>>
+  def service_hash(name) when is_binary(name) do
+    canon = name |> String.downcase() |> String.trim_trailing(".")
+    :crypto.hash(:sha256, canon) |> :binary.part(0, 16)
+  end
+
   @impl true
   def init(_opts) do
     gateways = Config.gateway_addresses()
@@ -355,10 +372,35 @@ defmodule ZtlpRelay.GatewayForwarder do
   def handle_call({:pick_gateway_for_service, service_name}, _from, state) do
     now = System.monotonic_time(:second)
 
+    # Wire-decoupling Option C: callers may pass either
+    #   * a String — the canonical service name (legacy, still supported), or
+    #   * a 16-byte binary — the truncated SHA-256 hash of the canonical
+    #     service name (the on-wire `dst_svc_hash`, what `forward_hello_to_gateway`
+    #     receives directly from the HELLO packet).
+    #
+    # Match against registered gateways by re-hashing each registration's
+    # `service_name` string and comparing 16-byte hashes when the caller
+    # passed a hash, or by direct string comparison when the caller passed
+    # a name.
+    #
+    # See `proto/src/tunnel.rs::encode_service_name` and
+    # `gateway/lib/ztlp_gateway/packet.ex::service_hash/1`.
+    matches_service =
+      case service_name do
+        <<hash::binary-size(16)>> when bit_size(hash) == 128 ->
+          fn gw -> service_hash(gw.service_name) == hash end
+
+        name when is_binary(name) ->
+          fn gw -> gw.service_name == name end
+
+        _ ->
+          fn _gw -> false end
+      end
+
     # Find dynamic gateways registered for this specific service
     service_gateways =
       state.dynamic_gateways
-      |> Enum.filter(fn gw -> gw.expires_at > now and gw.service_name == service_name end)
+      |> Enum.filter(fn gw -> gw.expires_at > now and matches_service.(gw) end)
       |> Enum.map(fn gw -> gw.address end)
       |> Enum.uniq()
 

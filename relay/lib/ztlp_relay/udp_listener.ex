@@ -720,20 +720,27 @@ defmodule ZtlpRelay.UdpListener do
 
   # Forward a HELLO to a configured gateway.
   defp forward_hello_to_gateway(session_id, data, client_addr, parsed, state) do
-    # Extract service name from HELLO dst_svc_id (16 bytes, zero-padded)
-    service_name =
-      case Map.get(parsed, :dst_svc_id) do
-        nil -> nil
-        <<0::128>> -> nil
-        svc_raw ->
-          svc_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
-      end
+    # Wire-decoupling Option C: `dst_svc_id` is now a 16-byte truncated
+    # SHA-256 of the canonicalised service name — NOT zero-padded ASCII.
+    # We pass the raw 16 bytes through to `pick_gateway_for_service/1`,
+    # which hashes each registered gateway's `service_name` and matches
+    # by hash. The all-zero special case still means "no service preference,
+    # round-robin any gateway" (back-compat with pre-Option-C clients and
+    # the legacy CLI path that doesn't set the field).
+    #
+    # This was previously decoded as `bin_to_list |> take_while != 0 |> to_string`
+    # which never matched a registered service NAME against a hashed value
+    # — every HELLO fell through to the round-robin fallback and landed on
+    # whichever gateway happened to be next in the list (~6/7 wrong with 7
+    # tenants registered).
+    dst_svc_id = Map.get(parsed, :dst_svc_id)
 
     pick_result =
-      case service_name do
+      case dst_svc_id do
         nil -> GatewayForwarder.pick_gateway()
-        "" -> GatewayForwarder.pick_gateway()
-        svc -> GatewayForwarder.pick_gateway_for_service(svc)
+        <<0::128>> -> GatewayForwarder.pick_gateway()
+        <<hash::binary-size(16)>> -> GatewayForwarder.pick_gateway_for_service(hash)
+        _ -> GatewayForwarder.pick_gateway()
       end
 
     case pick_result do

@@ -3463,13 +3463,17 @@ async fn cmd_listen(
             eprintln!("Invalid relay address format: {}", r_addr);
         }
     }
-
-    let target = forward[0].clone();
-
+    let service_registry = match ztlp_proto::tunnel::ServiceRegistry::from_forward_args(forward) {
+        Ok(reg) => std::sync::Arc::new(reg),
+        Err(e) => {
+            eprintln!("Failed to parse --forward arguments: {}", e);
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)));
+        }
+    };
     loop {
         let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection =
             server.accept().await?;
-        let target_clone = target.clone();
+        let service_registry_clone = service_registry.clone();
         
         let identity_clone = identity.clone();
 
@@ -3488,21 +3492,32 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
-
-        let session = match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
+        let (session, service_hash_bytes) = match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
             &conn,
             &identity_clone,
             ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
         ).await {
             Ok(res) => {
                 println!("Responder handshake success");
-                res.0.session
+                (res.0.session, res.1)
             }
             Err(e) => {
                 eprintln!("Responder handshake failed: {:?}", e);
                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
             }
         };
+        
+        let target_clone = match service_registry_clone.resolve(&service_hash_bytes) {
+            Some((name, addr)) => {
+                println!("Resolved service hash to backend {} at {}", name, addr);
+                addr.to_string()
+            }
+            None => {
+                eprintln!("Rejecting QUIC stream: service hash {:?} not mapped to any known backend.", service_hash_bytes);
+                continue;
+            }
+        };
+
         tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {

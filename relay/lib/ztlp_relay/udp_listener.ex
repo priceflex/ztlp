@@ -242,7 +242,7 @@ defmodule ZtlpRelay.UdpListener do
                       {client_addr, inserted_at}
 
                     {{:client_map, client_addr}, {^sender, inserted_at}},
-                    {_, best_at} = best
+                    {_, best_at} = _best
                     when inserted_at > best_at ->
                       {client_addr, inserted_at}
 

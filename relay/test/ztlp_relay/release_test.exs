@@ -27,6 +27,52 @@ defmodule ZtlpRelay.ReleaseTest do
     end
   end
 
+  describe "version reporting (regression pin)" do
+    # These tests exist because of a v0.29.4 release defect:
+    # the git tag `v0.29.4` was cut without bumping `relay/mix.exs`,
+    # so a relay container built from the tag reports
+    # `Application.spec(:ztlp_relay, :vsn) == '0.29.3'`.
+    # Health checks and on-call diagnostics rely on this value
+    # matching the deployed tag, so we pin it here to prevent
+    # the same drift on future tags.
+
+    test "mix.exs version is a parseable semver string" do
+      version = ZtlpRelay.MixProject.project()[:version]
+      assert is_binary(version), "project version must be a string"
+
+      assert Regex.match?(~r/^\d+\.\d+\.\d+(-[A-Za-z0-9.+-]+)?$/, version),
+             "version #{inspect(version)} must look like MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-PRE"
+    end
+
+    test "runtime-reported vsn matches mix.exs version (no drift between tag and OTP release)" do
+      # `Application.spec/2` reads the value the OTP release was compiled with.
+      # If `mix.exs` was bumped but the release was rebuilt from a stale .app
+      # cache, this catches it. More importantly, it catches the inverse:
+      # someone tagging a new git version without touching mix.exs.
+      declared = ZtlpRelay.MixProject.project()[:version]
+      runtime = to_string(Application.spec(:ztlp_relay, :vsn))
+
+      assert declared == runtime,
+             """
+             relay/mix.exs declares version #{inspect(declared)} but the loaded
+             :ztlp_relay application reports vsn=#{inspect(runtime)}.
+             This drift means `docker exec ztlp-relay /app/bin/ztlp_relay rpc
+             'Application.spec(:ztlp_relay, :vsn)'` will lie about which tag
+             is actually running. Either re-run `mix compile` after the bump,
+             or update mix.exs to match the intended release.
+             """
+    end
+
+    test "mix.exs version is at least 0.29.4 (v0.29.4 strict-routing tag)" do
+      # Floor guard: prevents an accidental down-bump that would make
+      # the relay misreport itself as an older, missing-the-strict-routing-fix
+      # version. The handoff has the full story (search for "v0.29.4 strict-routing").
+      declared = ZtlpRelay.MixProject.project()[:version]
+      assert Version.compare(declared, "0.29.4") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.29.4 strict-routing tag"
+    end
+  end
+
   describe "runtime config" do
     test "runtime.exs exists" do
       runtime_path = Path.join([__DIR__, "..", "..", "config", "runtime.exs"])

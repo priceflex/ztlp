@@ -155,10 +155,16 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Status:", claim_body)
         self.assertIn("bootstrap.example.ztlp", claim_body)
-        self.assertIn("ztlp://enroll/", claim_body)
-        self.assertIn("ztlp setup --token", claim_body)
+        # v0.29.1: the Setup command (ztlp setup --token ztlp://enroll/...) was
+        # moved off the claim status page (it was shown on the prior enrollment
+        # page already). The enrollment_token_uri is still stored in the DB —
+        # asserted on `row[2]` below — it's just not displayed twice.
+        self.assertNotIn("ztlp setup --token", claim_body)
+        self.assertNotIn("ztlp://enroll/", claim_body)
         self.assertIn("34.219.38.89:23096", claim_body)
-        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096", claim_body)
+        # v0.29.1: connect command now uses --service gw-{slug[:11]} so the
+        # relay actually routes to this tenant's gateway instead of round-robining.
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --service gw-example-org", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
@@ -200,8 +206,14 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.OK, status)
         self.assertIn("Status: launch_requested", launch_body)
         self.assertIn("bootstrap.launch.ztlp", launch_body)
-        self.assertIn("ztlp://enroll/", launch_body)
-        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096", launch_body)
+        # v0.29.1: setup command moved off the claim status page; the
+        # enrollment_token_uri must still be persisted in the DB (asserted
+        # below via the SQL row) but should not be displayed here.
+        self.assertNotIn("ztlp://enroll/", launch_body)
+        # v0.29.1: connect command now uses --service gw-{slug[:11]}.
+        # Tenant "Launch Co" slugifies to "launch-co" so the gateway service
+        # is gw-launch-co.
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --service gw-launch-co", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
 

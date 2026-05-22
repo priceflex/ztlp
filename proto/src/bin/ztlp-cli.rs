@@ -219,6 +219,9 @@ enum Commands {
         /// NS server address for name resolution (host:port)
         #[arg(long)]
         ns_server: Option<String>,
+        /// Use QUIC transport instead of ZTLP reliable UDP
+        #[arg(long)]
+        quic: bool,
 
         /// Specific session ID to use (hex)
         #[arg(short, long)]
@@ -292,6 +295,9 @@ enum Commands {
         /// Run as a mini-gateway (accept multiple connections)
         #[arg(long)]
         gateway: bool,
+        /// Use QUIC transport instead of ZTLP reliable UDP
+        #[arg(long)]
+        quic: bool,
 
         /// Forward to local TCP services after session established.
         /// Use NAME:HOST:PORT for named services, or HOST:PORT for default.
@@ -2179,6 +2185,7 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 #[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
+    quic: bool,
     target: &str,
     key: &Option<PathBuf>,
     relay: &Option<String>,
@@ -2204,6 +2211,13 @@ async fn cmd_connect(
 
         // Resolve target: raw ip:port or ZTLP-NS name
         let (peer_addr, _resolved_node_id) = resolve_target(target, ns_server).await?;
+        // Capture the resolved gateway NodeID as raw bytes so per-session
+        // HELLOs can stamp it into dst_svc_hash for strict tenant-isolated
+        // relay routing. NodeId::zero() (default for direct ip:port
+        // targets without NS) signals "no routing override".
+        let peer_node_id_for_routing: [u8; 16] = _resolved_node_id
+            .map(|n| *n.as_bytes())
+            .unwrap_or([0u8; 16]);
 
         let mut send_addr = if let Some(relay_str) = relay {
             relay_str
@@ -2570,6 +2584,17 @@ async fn cmd_connect(
 
                 let identity_task = (*identity_arc).clone();
                 let service_task = service_clone.clone();
+                // Pass the NS-resolved gateway NodeID so the relay can
+                // route by exact node_id match (strict tenant isolation).
+                // Empty NodeId (0u128) means "no NS lookup" — leave the
+                // dst_svc_hash field alone so the legacy service-name
+                // path keeps working for direct ip:port targets.
+                let dst_routing_override_task: Option<[u8; 16]> =
+                    if peer_node_id_for_routing != [0u8; 16] {
+                        Some(peer_node_id_for_routing)
+                    } else {
+                        None
+                    };
                 let session_mgr_task = session_mgr.clone();
                 let udp_socket_task = node.socket.clone();
                 let pipeline_task = node.pipeline.clone();
@@ -2579,6 +2604,7 @@ async fn cmd_connect(
                     if let Err(e) = run_parallel_session(
                         identity_task,
                         service_task,
+                        dst_routing_override_task,
                         session_mgr_task,
                         udp_socket_task,
                         pipeline_task,
@@ -2845,25 +2871,35 @@ async fn cmd_connect(
 
         let identity = load_or_generate_identity(key)?;
 
-        match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
+
+
+        let local_port = if let Some(lf) = local_forward {
+            lf.split(':').next().unwrap_or("0")
+        } else {
+            "0"
+        };
+        let bind_addr = if local_port == "0" {
+            bind.to_string()
+        } else {
+            format!("127.0.0.1:{}", local_port)
+        };
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+        println!("ZTLP QUIC client listening on TCP {}", listener.local_addr()?);
+
+        let session = match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
             &client,
             &identity,
             node_id,
         ).await {
-            Ok(_handshake_result) => {
+            Ok(handshake_result) => {
                 println!("Noise Handshake Complete (Quic). Session Init.");
+                handshake_result.session
             }
             Err(e) => {
                 eprintln!("Noise handshake failed: {:?}", e);
                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
             }
-        }
-
-        let bind_addr = bind;
-        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-        println!("ZTLP QUIC client listening on TCP {}", bind_addr);
-
-        // dummy comment for formatting
+        };
 
         loop {
             let (mut tcp, addr) = listener.accept().await?;
@@ -2872,10 +2908,34 @@ async fn cmd_connect(
             tokio::spawn(async move {
                 let (mut q_send, mut q_recv) = client_clone.open_bi().await.unwrap();
                 let (mut t_read, mut t_write) = tcp.into_split();
-                let _ = tokio::try_join!(
-                    tokio::io::copy(&mut t_read, &mut q_send),
-                    tokio::io::copy(&mut q_recv, &mut t_write)
-                );
+                        let mut read_buf = vec![0u8; 65000];
+                        loop {
+                            tokio::select! {
+                                res = tokio::io::AsyncReadExt::read(&mut t_read, &mut read_buf) => {
+                                    match res {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            println!("TCP->QUIC Read {} bytes", n);
+                                            if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
+                                                println!("TCP->QUIC Write Error");
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
+                                    match res {
+                                        Ok(frame) => {
+                                            if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
             });
         }
 
@@ -2890,6 +2950,7 @@ async fn cmd_connect(
 async fn run_parallel_session(
     identity: ztlp_proto::identity::NodeIdentity,
     service: Option<String>,
+    dst_routing_override: Option<[u8; 16]>,
     session_mgr: std::sync::Arc<ztlp_proto::session_manager::SessionManager>,
     udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
     pipeline: std::sync::Arc<tokio::sync::Mutex<ztlp_proto::pipeline::Pipeline>>,
@@ -2921,6 +2982,14 @@ async fn run_parallel_session(
     if let Some(svc_name) = &service {
         hello_hdr.dst_svc_hash = ztlp_proto::tunnel::encode_service_name(svc_name)
             .map_err(|e| format!("encode_service_name error: {}", e))?;
+    }
+    // dst_routing_override takes precedence over a service name. It carries
+    // the NS-resolved target gateway NodeID so the relay can route to the
+    // correct tenant gateway by exact node_id match instead of falling
+    // back to round-robin across all registered gateways (which violates
+    // tenant isolation when multiple tenants share the relay).
+    if let Some(node_id_bytes) = dst_routing_override {
+        hello_hdr.dst_svc_hash = node_id_bytes;
     }
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
@@ -3217,6 +3286,7 @@ async fn cmd_listen(
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
+    quic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -3225,61 +3295,110 @@ async fn cmd_listen(
         ..Default::default()
     };
 
-    let server = QuicEndpoint::bind(server_cfg).await?;
+    // Pre-bind the std UDP socket so we can send GATEWAY_REGISTER packets to
+    // the relay from the SAME (ip, port) that Quinn will then listen on.
+    //
+    // Why this matters:
+    // The ZTLP relay maps a gateway by the (src_ip, src_port) of its
+    // GATEWAY_REGISTER packet, then forwards client HELLOs to that same
+    // (src_ip, src_port). If we register from a different socket than the
+    // QUIC listener (the old "dummy_socket" workaround did exactly this),
+    // the relay forwards client traffic to a dead socket and handshakes
+    // time out. By pre-binding the std::net::UdpSocket and using
+    // `try_clone()` to send registration packets, the kernel-level UDP
+    // socket is shared between the registration sender and Quinn's
+    // receiver, guaranteeing both share the same source address.
+    let bind_addr: std::net::SocketAddr = bind.parse().expect("invalid bind address");
+    let std_socket = std::net::UdpSocket::bind(bind_addr)
+        .map_err(|e| format!("failed to bind UDP socket on {}: {}", bind_addr, e))?;
+    let local_addr = std_socket.local_addr().expect("socket has local_addr");
+    // Clone the fd for relay-registration use BEFORE we move the socket
+    // into Quinn. Both fds reference the same kernel socket — outbound
+    // packets share the (ip, port), inbound is delivered to whichever fd
+    // is reading (Quinn).
+    let register_socket: Option<std::net::UdpSocket> = if relay_addr.is_some() {
+        Some(
+            std_socket
+                .try_clone()
+                .map_err(|e| format!("UdpSocket::try_clone failed: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let server = QuicEndpoint::bind_with_socket(server_cfg, std_socket)?;
     println!(
         "ZTLP QUIC server listening on UDP {}",
         server.inner.local_addr().unwrap()
     );
 
     let identity = load_or_generate_identity(key)?;
-    
-    if let Some(r_addr) = relay_addr {
+
+    if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
         if let Ok(target) = r_addr.parse::<std::net::SocketAddr>() {
-            println!("Enabling QUIC gateway registration for relay: {}", target);
-            
-            // To emulate correct packet injection (UDP source mapping) the QuicEndpoint requires an underlying shared socket.
-            let host_addr = server.inner.local_addr().unwrap();
-            eprintln!("WARNING: QUIC automatic Relay Gateway Registration is out-of-band on Quinn. Relay address mapping disabled dynamically.");
-            
+            println!(
+                "Enabling QUIC gateway registration for relay: {} (src={})",
+                target, local_addr
+            );
+
+            // Convert the cloned std socket to a tokio non-blocking socket so
+            // we can use it inside async code. Both this socket and Quinn's
+            // socket point at the same kernel-level UDP socket, so the relay
+            // sees a single (ip, port) for both registration packets and
+            // QUIC traffic.
+            reg_sock.set_nonblocking(true).ok();
+            let tokio_sock = match tokio::net::UdpSocket::from_std(reg_sock) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("failed to convert registration socket to tokio: {}", e);
+                    return Err(Box::new(e));
+                }
+            };
+
             let identity_c = identity.clone();
             let svc = service_name.to_string();
             tokio::spawn(async move {
                 let relay_addr = target;
                 let node_id = identity_c.node_id.0;
-                
-                // The issue here is that Quinn's underlying UdpSocket can't be shared. 
-                // Creating a new socket works IF the relay allowed different endpoints, but it routes
-                // returning UDP datagrams perfectly to the matching port!
-                // To bridge this we must pass Quinn a pre-bound Tokio UDP socket explicitly OR use a dedicated socket. 
-                // For now, let's establish a separate socket and accept manual relay routing via external Docker NAT configs matching `host_addr` exactly.
-                let dummy_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
 
-                // Send initial registration
+                // Send initial registration immediately so the relay can
+                // route inbound HELLOs before any client tries to connect.
                 let ts = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
                 let pkt = build_gateway_register_packet(&node_id, &svc, ts);
 
-                if let Err(e) = dummy_socket.send_to(&pkt, relay_addr).await {
-                    eprintln!("Initial relay registry send error: {}", e);
+                match tokio_sock.send_to(&pkt, relay_addr).await {
+                    Ok(n) => {
+                        debug!("gateway registration sent to {} ({} bytes)", relay_addr, n);
+                        eprintln!(
+                            "{} gateway registered with {} (service: {})",
+                            c_green("✓"),
+                            relay_addr,
+                            svc
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Initial relay registration send error: {}", e);
+                    }
                 }
 
-                // Loop and refresh
-                let mut interval = tokio::time::interval(RELAY_REREGISTER_INTERVAL);
-                interval.tick().await; 
-                
+                // Periodic re-registration loop on the SAME shared socket.
                 loop {
-                    interval.tick().await;
+                    tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
                     let ts = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
                     let pkt = build_gateway_register_packet(&node_id, &svc, ts);
-                    if let Err(e) = dummy_socket.send_to(&pkt, relay_addr).await {
-                        eprintln!("background relay reregistration failed: {}", e);
-                    } else {
-                        debug!("gateway reregistration sent to {}", relay_addr);
+                    match tokio_sock.send_to(&pkt, relay_addr).await {
+                        Ok(_) => {
+                            debug!("gateway reregistration sent to {}", relay_addr);
+                        }
+                        Err(e) => {
+                            eprintln!("background relay reregistration failed: {}", e);
+                        }
                     }
                 }
             });
@@ -3313,21 +3432,21 @@ async fn cmd_listen(
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
 
-        tokio::spawn(async move {
-            
-            match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
-                &conn,
-                &identity_clone,
-                ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
-            ).await {
-                Ok(_res) => {
-                    println!("Responder handshake success");
-                }
-                Err(e) => {
-                    eprintln!("Responder handshake failed: {:?}", e);
-                    return;
-                }
+        let session = match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
+            &conn,
+            &identity_clone,
+            ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
+        ).await {
+            Ok(res) => {
+                println!("Responder handshake success");
+                res.session
             }
+            Err(e) => {
+                eprintln!("Responder handshake failed: {:?}", e);
+                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+            }
+        };
+        tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
                     let mut tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
@@ -3340,16 +3459,17 @@ async fn cmd_listen(
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
                         if http_inject_headers_copy {
-                            let mut buf = vec![0u8; 65536];
-                            if let Ok(Some(n)) = q_recv.read(&mut buf).await {
+                            if let Ok(frame) = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
                                 let mut injected = false;
                                 if let Some((_, email)) = map.iter().next() {
-                                    let ts = "2026-05-20T12:00:00Z";
-                                    let slice = &buf[..n];
+                                    let now = std::time::SystemTime::now();
+                                    let dt = chrono::DateTime::<chrono::Utc>::from(now);
+                                    let ts = dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                                    let slice = &frame[..];
                                     let rewrite_result = ztlp_proto::http_injector::inject_headers(
                                         slice,
                                         email,
-                                        ts,
+                                        &ts,
                                         hmac.as_bytes(),
                                     );
                                     if let Ok(rewritten) = rewrite_result {
@@ -3358,15 +3478,43 @@ async fn cmd_listen(
                                     }
                                 }
                                 if !injected {
-                                    let _ = t_write.write_all(&buf[..n]).await;
+                                    let _ = t_write.write_all(&frame[..]).await;
                                 }
+                            } else {
+                                return;
                             }
                         }
 
-                        let _ = tokio::try_join!(
-                            tokio::io::copy(&mut q_recv, &mut t_write),
-                            tokio::io::copy(&mut t_read, &mut q_send)
-                        );
+                        let mut read_buf = vec![0u8; 65000];
+                        loop {
+                            tokio::select! {
+                                res = t_read.read(&mut read_buf) => {
+                                    match res {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            println!("TCP->QUIC Read {} bytes", n);
+                                            if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
+                                                println!("TCP->QUIC Write Error");
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
+                                    match res {
+                                        Ok(frame) => {
+                                            println!("QUIC->TCP Read {} bytes", frame.len());
+                                            if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
+                                                println!("QUIC->TCP Write Error");
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
                     });
                 } else {
                     break;
@@ -9843,8 +9991,10 @@ async fn main() {
             punch_timeout,
             relay_pool,
             relay_probe_interval,
+            quic,
         } => {
             cmd_connect(
+                *quic,
                 target,
                 key,
                 relay,
@@ -9881,6 +10031,7 @@ async fn main() {
             http_inject_headers,
             header_hmac_secret,
             admin_pubkey_email,
+            quic,
         } => {
             cmd_listen(
                 bind,
@@ -9897,6 +10048,7 @@ async fn main() {
                 *http_inject_headers,
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
+                *quic,
             )
             .await
         }

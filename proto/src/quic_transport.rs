@@ -242,6 +242,29 @@ pub mod tokio_endpoint {
 
     impl QuicEndpoint {
         pub async fn bind(cfg: QuicEndpointConfig) -> Result<Self, QuicTransportError> {
+            let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let std_socket = std::net::UdpSocket::bind(bind_addr)?;
+            Self::bind_with_socket(cfg, std_socket)
+        }
+
+        /// Bind a QUIC server using a caller-supplied `std::net::UdpSocket`.
+        ///
+        /// This lets the caller pre-bind the socket so it can do things on
+        /// the underlying datagram socket (e.g. send a non-QUIC
+        /// GATEWAY_REGISTER packet to a ZTLP relay) *before* handing
+        /// ownership to Quinn. Pair with `try_clone()` on the original
+        /// `std::net::UdpSocket` if you need to keep using the socket
+        /// afterwards (the kernel socket is shared between both fds, so
+        /// outbound packets all originate from the same `(ip, port)` —
+        /// which is exactly what the relay's GATEWAY_REGISTER address
+        /// mapping needs to match the gateway's QUIC listener).
+        ///
+        /// The supplied socket is automatically put into non-blocking mode
+        /// for Quinn's tokio runtime.
+        pub fn bind_with_socket(
+            cfg: QuicEndpointConfig,
+            std_socket: std::net::UdpSocket,
+        ) -> Result<Self, QuicTransportError> {
             ensure_crypto();
             let (certs, key) = generate_self_signed();
             let mut server_crypto = rustls::ServerConfig::builder()
@@ -256,8 +279,15 @@ pub mod tokio_endpoint {
                 quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
             ));
 
-            let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-            let endpoint = quinn::Endpoint::server(server_config, bind_addr)?;
+            // Quinn requires the socket be non-blocking for the tokio runtime.
+            std_socket.set_nonblocking(true)?;
+
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(server_config),
+                std_socket,
+                Arc::new(quinn::TokioRuntime),
+            )?;
 
             Ok(Self {
                 _cfg: cfg,
@@ -312,7 +342,7 @@ pub mod noise_stream {
     pub const STREAM0_MAGIC_V1: u8 = super::STREAM0_MAGIC_V1;
     const MAX_FRAME_SIZE: usize = 65536;
 
-    pub async fn read_noise_frame(
+    pub async fn read_ztlp_frame(
         recv: &mut quinn::RecvStream,
     ) -> Result<Vec<u8>, QuicTransportError> {
         let mut magic = [0u8; 1];
@@ -337,7 +367,7 @@ pub mod noise_stream {
         Ok(payload)
     }
 
-    pub async fn write_noise_frame(
+    pub async fn write_ztlp_frame(
         send: &mut quinn::SendStream,
         payload: &[u8],
     ) -> Result<(), QuicTransportError> {
@@ -364,20 +394,27 @@ pub mod noise_stream {
         let mut ctx = HandshakeContext::new_initiator(identity)?;
 
         let msg1 = ctx.write_message(&[])?;
-        write_noise_frame(&mut send, &msg1).await?;
+        write_ztlp_frame(&mut send, &msg1).await?;
 
-        let msg2 = read_noise_frame(&mut recv).await?;
+        let mut sid_buf = [0u8; 12];
+        recv.read_exact(&mut sid_buf).await?;
+        let session_id = crate::packet::SessionId(sid_buf);
+
+        let msg2 = read_ztlp_frame(&mut recv).await?;
         ctx.read_message(&msg2)?;
 
         let msg3 = ctx.write_message(&[])?;
-        write_noise_frame(&mut send, &msg3).await?;
+        write_ztlp_frame(&mut send, &msg3).await?;
 
-        let session_id = crate::packet::SessionId::generate();
         let (_, init_sess) = ctx.finalize(responder_id, session_id)?;
 
+        // Close our send side of stream-0 since handhshake is done
+        // and we will multiplex data onto separate bi-streams mapped 1:1 to TCP connections
+        let _ = send.finish();
+
         Ok(HandshakeResult {
-            initiator_session: init_sess.clone(),
-            responder_session: init_sess, // Placeholder
+            session: init_sess,
+            session_id,
         })
     }
 
@@ -389,21 +426,25 @@ pub mod noise_stream {
         let (mut send, mut recv) = conn.accept_bi().await?;
         let mut ctx = HandshakeContext::new_responder(identity)?;
 
-        let msg1 = read_noise_frame(&mut recv).await?;
+        let msg1 = read_ztlp_frame(&mut recv).await?;
         ctx.read_message(&msg1)?;
 
-        let msg2 = ctx.write_message(&[])?;
-        write_noise_frame(&mut send, &msg2).await?;
+        let session_id = crate::packet::SessionId::generate();
+        send.write_all(session_id.as_bytes()).await?;
 
-        let msg3 = read_noise_frame(&mut recv).await?;
+        let msg2 = ctx.write_message(&[])?;
+        write_ztlp_frame(&mut send, &msg2).await?;
+
+        let msg3 = read_ztlp_frame(&mut recv).await?;
         ctx.read_message(&msg3)?;
 
-        let session_id = crate::packet::SessionId::generate();
         let (_, resp_sess) = ctx.finalize(initiator_id, session_id)?;
+        
+        let _ = send.finish();
 
         Ok(HandshakeResult {
-            initiator_session: resp_sess.clone(), // Placeholder
-            responder_session: resp_sess,
+            session: resp_sess,
+            session_id,
         })
     }
 }

@@ -426,8 +426,8 @@ pub fn build_handshake_packet(
 
 /// Result of a completed handshake — the session state for both sides.
 pub struct HandshakeResult {
-    pub initiator_session: SessionState,
-    pub responder_session: SessionState,
+    pub session: SessionState,
+    pub session_id: crate::packet::SessionId,
 }
 
 /// Perform a complete Noise_XX handshake in-process (no network).
@@ -470,8 +470,8 @@ pub fn perform_handshake(
         responder.finalize(initiator_identity.node_id, session_id)?;
 
     Ok(HandshakeResult {
-        initiator_session: init_session,
-        responder_session: resp_session,
+        session: init_session,
+        session_id,
     })
 }
 

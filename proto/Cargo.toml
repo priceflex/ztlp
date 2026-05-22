@@ -111,6 +111,7 @@ rustls = { version = "0.23.40" }
 # layer is effectively ignored). Gated behind `quic-transport` to keep the
 # default + ios-sync builds lean.
 rcgen = { version = "0.13" }
+chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.

@@ -3205,6 +3205,33 @@ const GATEWAY_REGISTER_TYPE: u8 = 0x0A;
 const RELAY_REGISTER_TTL: u32 = 60; // seconds — relay expires registration after TTL
 const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(10); // refresh at half-TTL
 
+// ─── CLIENT_ROUTE Frame (α-relay routing) ─────────────────────────────────
+//
+// FRAME_CLIENT_ROUTE is sent by a QUIC client BEFORE its first QUIC INITIAL
+// packet, on the same UDP socket, to tell the relay which registered service
+// (gateway) it wants its subsequent QUIC traffic forwarded to.  The relay
+// records `{:client_map, sender} -> gateway_addr` in
+// `:ztlp_forwarded_quic_tuples` and then transparently echoes UDP between
+// the two 5-tuples — Quinn's encrypted INITIAL never has to be parsed.
+//
+// Wire format:
+//   magic:       0x5A37          (2 bytes, big-endian)
+//   type:        0x0B            (1 byte — CLIENT_ROUTE)
+//   node_id:     16 bytes        (client's NodeID — for ACL / audit)
+//   svc_len:     1 byte          (length of `service`, 1..=63)
+//   service:     svc_len bytes   (UTF-8, lowercase canonical service name)
+//   timestamp:   8 bytes         (big-endian i64 unix seconds — replay window)
+//   hmac:        32 bytes        (HMAC-SHA256 over [type..timestamp];
+//                                 zeroed in dev mode if no shared secret)
+//
+// Total: 2 + 1 + 16 + 1 + N + 8 + 32 = 60 + N bytes (N = svc_len)
+//
+// The HMAC scheme intentionally mirrors GATEWAY_REGISTER so the relay can
+// reuse `Config.registration_secret/0` and existing HMAC plumbing.
+const CLIENT_ROUTE_MAGIC: [u8; 2] = [0x5A, 0x37];
+const CLIENT_ROUTE_TYPE: u8 = 0x0B;
+const CLIENT_ROUTE_MAX_SVC_LEN: usize = 63;
+
 /// Build a GATEWAY_REGISTER packet.
 ///
 /// The HMAC is zeroed (dev-mode). In production the relay may require
@@ -3246,6 +3273,100 @@ fn build_gateway_register_packet(
     packet.extend_from_slice(&signed_payload);
     packet.extend_from_slice(&hmac);
     packet
+}
+
+/// Build a CLIENT_ROUTE packet (FRAME_CLIENT_ROUTE).
+///
+/// See the wire-format comment block above the `CLIENT_ROUTE_*` constants.
+/// `secret` is `None` in dev mode (zeroed HMAC); `Some(&[u8])` in production
+/// to keyed HMAC-SHA256 over the same byte range the relay validates.
+///
+/// Returns `Err` if `service_name` is empty or longer than
+/// `CLIENT_ROUTE_MAX_SVC_LEN` bytes (UTF-8 byte length, not char count).
+fn build_client_route_packet(
+    node_id: &[u8; 16],
+    service_name: &str,
+    timestamp: i64,
+    secret: Option<&[u8]>,
+) -> Result<Vec<u8>, &'static str> {
+    let svc_bytes = service_name.as_bytes();
+    if svc_bytes.is_empty() {
+        return Err("service_name must not be empty");
+    }
+    if svc_bytes.len() > CLIENT_ROUTE_MAX_SVC_LEN {
+        return Err("service_name exceeds CLIENT_ROUTE_MAX_SVC_LEN");
+    }
+
+    // Build the byte range that HMAC covers:
+    //   [type | node_id | svc_len | service | timestamp]
+    let svc_len = svc_bytes.len() as u8;
+    let mut signed = Vec::with_capacity(1 + 16 + 1 + svc_bytes.len() + 8);
+    signed.push(CLIENT_ROUTE_TYPE);
+    signed.extend_from_slice(node_id);
+    signed.push(svc_len);
+    signed.extend_from_slice(svc_bytes);
+    signed.extend_from_slice(&timestamp.to_be_bytes());
+
+    let hmac: [u8; 32] = match secret {
+        None => [0u8; 32],
+        Some(key) => {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+                .map_err(|_| "invalid HMAC key length")?;
+            mac.update(&signed);
+            let out = mac.finalize().into_bytes();
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&out);
+            h
+        }
+    };
+
+    let mut packet = Vec::with_capacity(2 + signed.len() + 32);
+    packet.extend_from_slice(&CLIENT_ROUTE_MAGIC);
+    packet.extend_from_slice(&signed);
+    packet.extend_from_slice(&hmac);
+    Ok(packet)
+}
+
+/// Parse a CLIENT_ROUTE packet, returning `(node_id, service_name, timestamp,
+/// hmac_bytes, signed_range)`. Used by tests and by any in-process verifier.
+///
+/// Returns `Err` if magic/type don't match, the buffer is short, or `svc_len`
+/// is outside `1..=CLIENT_ROUTE_MAX_SVC_LEN`.
+#[cfg(test)]
+fn parse_client_route_packet(
+    packet: &[u8],
+) -> Result<([u8; 16], String, i64, [u8; 32]), &'static str> {
+    // 2 magic + 1 type + 16 node_id + 1 svc_len + 1+ svc + 8 ts + 32 hmac = min 61
+    if packet.len() < 61 {
+        return Err("packet too short");
+    }
+    if packet[0..2] != CLIENT_ROUTE_MAGIC {
+        return Err("bad magic");
+    }
+    if packet[2] != CLIENT_ROUTE_TYPE {
+        return Err("bad type");
+    }
+    let mut node_id = [0u8; 16];
+    node_id.copy_from_slice(&packet[3..19]);
+    let svc_len = packet[19] as usize;
+    if svc_len == 0 || svc_len > CLIENT_ROUTE_MAX_SVC_LEN {
+        return Err("svc_len out of range");
+    }
+    let svc_end = 20 + svc_len;
+    if packet.len() < svc_end + 8 + 32 {
+        return Err("packet truncated");
+    }
+    let service = std::str::from_utf8(&packet[20..svc_end])
+        .map_err(|_| "service is not valid UTF-8")?
+        .to_string();
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&packet[svc_end..svc_end + 8]);
+    let timestamp = i64::from_be_bytes(ts_bytes);
+    let mut hmac = [0u8; 32];
+    hmac.copy_from_slice(&packet[svc_end + 8..svc_end + 8 + 32]);
+    Ok((node_id, service, timestamp, hmac))
 }
 
 /// Spawn a background task that sends an initial GATEWAY_REGISTER packet to the
@@ -10455,5 +10576,109 @@ mod tests {
         let record = sample_ns_record(10);
 
         print_ns_record(&record, "bootstrap.trs-remote-test.ztlp").unwrap();
+    }
+
+    // ─── FRAME_CLIENT_ROUTE tests ──────────────────────────────────────
+
+    #[test]
+    fn client_route_packet_roundtrip_dev_mode() {
+        // Dev mode: no shared secret → HMAC is zeroed.
+        let node_id = [0xABu8; 16];
+        let svc = "gw-hermese2e-1";
+        let ts: i64 = 1_716_339_600;
+
+        let pkt = build_client_route_packet(&node_id, svc, ts, None)
+            .expect("build should succeed for valid inputs");
+
+        // Wire layout: 2 magic + 1 type + 16 node_id + 1 svc_len + N svc + 8 ts + 32 hmac
+        assert_eq!(pkt.len(), 2 + 1 + 16 + 1 + svc.len() + 8 + 32);
+        assert_eq!(&pkt[0..2], &[0x5A, 0x37]);
+        assert_eq!(pkt[2], 0x0B);
+
+        let (parsed_node_id, parsed_svc, parsed_ts, parsed_hmac) =
+            parse_client_route_packet(&pkt).expect("parse should succeed");
+        assert_eq!(parsed_node_id, node_id);
+        assert_eq!(parsed_svc, svc);
+        assert_eq!(parsed_ts, ts);
+        assert_eq!(parsed_hmac, [0u8; 32]); // dev mode: HMAC zeroed
+    }
+
+    #[test]
+    fn client_route_packet_hmac_is_set_with_secret() {
+        let node_id = [0x01u8; 16];
+        let svc = "gw-test";
+        let ts: i64 = 1_716_339_999;
+        let secret = b"shared-zone-secret";
+
+        let pkt = build_client_route_packet(&node_id, svc, ts, Some(secret))
+            .expect("build should succeed");
+        let (_, _, _, hmac_bytes) = parse_client_route_packet(&pkt).unwrap();
+        // Real HMAC is non-zero (probabilistically certain).
+        assert_ne!(hmac_bytes, [0u8; 32]);
+
+        // Recompute the HMAC and verify it matches what the relay would expect.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut signed = Vec::new();
+        signed.push(0x0Bu8);
+        signed.extend_from_slice(&node_id);
+        signed.push(svc.len() as u8);
+        signed.extend_from_slice(svc.as_bytes());
+        signed.extend_from_slice(&ts.to_be_bytes());
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).unwrap();
+        mac.update(&signed);
+        let expected = mac.finalize().into_bytes();
+        assert_eq!(hmac_bytes.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn client_route_rejects_empty_service_name() {
+        let node_id = [0u8; 16];
+        let err = build_client_route_packet(&node_id, "", 0, None).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn client_route_rejects_oversized_service_name() {
+        let node_id = [0u8; 16];
+        let too_long = "a".repeat(CLIENT_ROUTE_MAX_SVC_LEN + 1);
+        let err = build_client_route_packet(&node_id, &too_long, 0, None).unwrap_err();
+        assert!(err.contains("MAX_SVC_LEN"));
+    }
+
+    #[test]
+    fn client_route_parse_rejects_bad_magic() {
+        let mut pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        pkt[0] = 0x00;
+        let err = parse_client_route_packet(&pkt).unwrap_err();
+        assert_eq!(err, "bad magic");
+    }
+
+    #[test]
+    fn client_route_parse_rejects_bad_type() {
+        let mut pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        pkt[2] = 0x0A; // GATEWAY_REGISTER, not CLIENT_ROUTE
+        let err = parse_client_route_packet(&pkt).unwrap_err();
+        assert_eq!(err, "bad type");
+    }
+
+    #[test]
+    fn client_route_parse_rejects_truncated_packet() {
+        let pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        let truncated = &pkt[..pkt.len() - 5];
+        let err = parse_client_route_packet(truncated).unwrap_err();
+        // Could be "packet too short" or "packet truncated" depending on where
+        // the truncation lands; both are acceptable.
+        assert!(err.contains("short") || err.contains("truncated"));
+    }
+
+    #[test]
+    fn client_route_max_length_service_name_succeeds() {
+        let node_id = [0u8; 16];
+        let max_svc = "g".repeat(CLIENT_ROUTE_MAX_SVC_LEN);
+        let pkt = build_client_route_packet(&node_id, &max_svc, 0, None)
+            .expect("max-length service name should be accepted");
+        let (_, parsed_svc, _, _) = parse_client_route_packet(&pkt).unwrap();
+        assert_eq!(parsed_svc, max_svc);
     }
 }

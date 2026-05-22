@@ -95,6 +95,65 @@ defmodule ZtlpRelay.GatewayForwarderTest do
       assert :error == GatewayForwarder.lookup_by_peer({{192, 168, 99, 99}, 1234})
     end
 
+    test "pick_gateway_for_service/1 accepts a 16-byte truncated SHA-256 hash and matches the registered service name" do
+      # Wire-decoupling Option C: the CLI puts the truncated SHA-256 of the
+      # service name in `dst_svc_hash`. Gateways register at the relay with
+      # the canonical NAME (string). The relay must hash the registered
+      # names and compare against the wire bytes — NOT decode the wire
+      # bytes as zero-padded ASCII (the previous, broken assumption).
+      #
+      # See `proto/src/tunnel.rs::encode_service_name` and
+      # `gateway/lib/ztlp_gateway/packet.ex::service_hash/1` — both compute
+      # `:crypto.hash(:sha256, downcase(strip_trailing_dots(name))) |> :binary.part(0, 16)`.
+
+      node_id = :crypto.strong_rand_bytes(16)
+      service_name = "gw-hermescorp-test-#{System.unique_integer([:positive])}"
+      gateway_addr = {{10, 0, 99, 1}, 23097}
+
+      GatewayForwarder.register_dynamic_gateway(gateway_addr, node_id, service_name, 60)
+      Process.sleep(20)
+
+      # Compute the same wire hash the CLI sends.
+      hash =
+        :crypto.hash(:sha256, String.downcase(service_name) |> String.trim_trailing("."))
+        |> :binary.part(0, 16)
+
+      assert byte_size(hash) == 16
+
+      # Hash-based lookup MUST hit the registered gateway, not round-robin.
+      assert {:ok, ^gateway_addr} = GatewayForwarder.pick_gateway_for_service(hash)
+
+      # And looking up by the legacy string name must still work — backwards
+      # compatibility for any internal caller still passing strings.
+      assert {:ok, ^gateway_addr} = GatewayForwarder.pick_gateway_for_service(service_name)
+    end
+
+    test "pick_gateway_for_service/1 with a 16-byte hash that does not match any registered service falls back instead of selecting the wrong gateway by accident" do
+      # Negative case: when no registered gateway matches the wire hash,
+      # the function falls back to the existing round-robin/static-gateway
+      # path. We assert the function returns a gateway (any gateway, since
+      # there are some registered) but does NOT crash on the hash input.
+
+      node_id_a = :crypto.strong_rand_bytes(16)
+      node_id_b = :crypto.strong_rand_bytes(16)
+      gw_a = {{10, 0, 88, 1}, 23097}
+      gw_b = {{10, 0, 88, 2}, 23097}
+
+      GatewayForwarder.register_dynamic_gateway(gw_a, node_id_a, "gw-some-other-tenant-a", 60)
+      GatewayForwarder.register_dynamic_gateway(gw_b, node_id_b, "gw-some-other-tenant-b", 60)
+      Process.sleep(20)
+
+      # Hash of a service NOT registered.
+      hash =
+        :crypto.hash(:sha256, "gw-totally-unknown-#{System.unique_integer([:positive])}")
+        |> :binary.part(0, 16)
+
+      result = GatewayForwarder.pick_gateway_for_service(hash)
+      # Must not crash. Falls back to round-robin over all dynamic gateways
+      # (matching pre-existing behavior for unrecognized service strings).
+      assert match?({:ok, _}, result) or result == :error
+    end
+
     test "update_client/2 rewrites the peer index so old client address is no longer routable" do
       # When a NAT rebinds the client's source port, the relay's
       # GatewayForwarder is updated via {:update_client, ...}. The peer

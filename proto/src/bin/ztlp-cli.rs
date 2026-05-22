@@ -219,6 +219,9 @@ enum Commands {
         /// NS server address for name resolution (host:port)
         #[arg(long)]
         ns_server: Option<String>,
+        /// Use QUIC transport instead of ZTLP reliable UDP
+        #[arg(long)]
+        quic: bool,
 
         /// Specific session ID to use (hex)
         #[arg(short, long)]
@@ -292,6 +295,9 @@ enum Commands {
         /// Run as a mini-gateway (accept multiple connections)
         #[arg(long)]
         gateway: bool,
+        /// Use QUIC transport instead of ZTLP reliable UDP
+        #[arg(long)]
+        quic: bool,
 
         /// Forward to local TCP services after session established.
         /// Use NAME:HOST:PORT for named services, or HOST:PORT for default.
@@ -2179,6 +2185,7 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 #[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
+    quic: bool,
     target: &str,
     key: &Option<PathBuf>,
     relay: &Option<String>,
@@ -2197,16 +2204,794 @@ async fn cmd_connect(
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
-    let peer_addr: std::net::SocketAddr = target
-        .parse()
-        .map_err(|e| format!("invalid target: {}", e))?;
-    let client =
-        QuicEndpoint::connect(QuicEndpointConfig::default(), peer_addr, "localhost").await?;
+    if relay.is_some() {
+        // Legacy UDP fallback for NAT traversal / relays
 
-    let bind_addr = bind;
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    println!("ZTLP QUIC client listening on TCP {}", bind_addr);
+        let identity = load_or_generate_identity(key)?;
+
+        // Resolve target: raw ip:port or ZTLP-NS name
+        let (peer_addr, _resolved_node_id) = resolve_target(target, ns_server).await?;
+        // Capture the resolved gateway NodeID as raw bytes so per-session
+        // HELLOs can stamp it into dst_svc_hash for strict tenant-isolated
+        // relay routing. NodeId::zero() (default for direct ip:port
+        // targets without NS) signals "no routing override".
+        let peer_node_id_for_routing: [u8; 16] = _resolved_node_id
+            .map(|n| *n.as_bytes())
+            .unwrap_or([0u8; 16]);
+
+        let mut send_addr = if let Some(relay_str) = relay {
+            relay_str
+                .parse()
+                .map_err(|e| format!("invalid relay address '{}': {}", relay_str, e))?
+        } else {
+            peer_addr
+        };
+
+        // Initialize relay pool if --relay-pool is enabled or multiple relays are available
+        let _relay_pool = if relay_pool_enabled || relay.is_some() {
+            let pool_config = RelayPoolConfig {
+                probe_interval: relay_probe_interval,
+                failover_enabled: relay.is_none() || relay_pool_enabled, // failover off when pinned
+                pinned_relay: if relay.is_some() && !relay_pool_enabled {
+                    Some(send_addr)
+                } else {
+                    None
+                },
+                ns_server: ns_server.clone(),
+                zone: None,
+                gateway_region: String::new(),
+            };
+            let mut pool = RelayPool::new(pool_config);
+            pool.add_relay(send_addr);
+
+            // If relay_pool is explicitly enabled, we'd query NS for more relays
+            // For now, add the configured relay as the pool's single entry
+            if relay_pool_enabled {
+                eprintln!("{}", c_dim("Relay pool: enabled"));
+                eprintln!("  {} {}", c_cyan("Primary relay:"), send_addr);
+                eprintln!("  {} {:?}", c_cyan("Probe interval:"), relay_probe_interval);
+            }
+
+            Some(FailoverOrchestrator::new(pool))
+        } else {
+            None
+        };
+
+        // Bind transport
+        let node = TransportNode::bind(bind).await?;
+        eprintln!("{} {}", c_cyan("Bound to:"), node.local_addr);
+        eprintln!("{} {}", c_cyan("Connecting to:"), peer_addr);
+        if send_addr != peer_addr {
+            eprintln!("{} {}", c_cyan("Via relay:"), send_addr);
+        }
+
+        // NAT traversal (if --nat-assist)
+        if nat_assist {
+            eprintln!(
+                "\n{}",
+                c_dim("NAT traversal enabled — discovering public endpoint...")
+            );
+
+            // Parse optional STUN server
+            let stun_servers: Vec<SocketAddr> = if let Some(s) = stun_server {
+                vec![s
+                    .parse()
+                    .map_err(|e| format!("invalid --stun-server '{}': {}", s, e))?]
+            } else {
+                Vec::new() // will use defaults
+            };
+
+            if let Some(relay_str) = relay {
+                let relay_addr: SocketAddr = relay_str
+                    .parse()
+                    .map_err(|e| format!("--nat-assist requires a valid --relay address: {}", e))?;
+
+                let config = nat::HolePunchConfig {
+                    stun_servers,
+                    relay_addr,
+                    local_socket: node.socket.clone(),
+                    identity: identity.clone(),
+                    peer_node_id: _resolved_node_id.unwrap_or_else(NodeId::zero),
+                    timeout: Duration::from_secs(30),
+                    punch_attempts: 10,
+                    punch_interval: Duration::from_millis(200),
+                };
+
+                match nat::establish_connection(config).await {
+                    Ok(nat::ConnectionResult::Direct {
+                        peer_addr: direct_addr,
+                    }) => {
+                        eprintln!(
+                            "{} Direct connection via hole punch to {}",
+                            c_green("✓"),
+                            direct_addr
+                        );
+                        // Update send_addr to the direct address instead of relay
+                        // (Note: the handshake still needs to happen, but data goes direct)
+                    }
+                    Ok(nat::ConnectionResult::Relayed { relay_addr: _ }) => {
+                        if no_relay_fallback {
+                            return Err(
+                                "hole punch failed and --no-relay-fallback was specified".into()
+                            );
+                        }
+                        eprintln!("{} Falling back to relay mode", c_yellow("⚠"));
+                    }
+                    Err(e) => {
+                        if no_relay_fallback {
+                            return Err(format!("NAT traversal failed: {}", e).into());
+                        }
+                        eprintln!(
+                            "{} NAT traversal failed: {} — continuing with relay",
+                            c_yellow("⚠"),
+                            e
+                        );
+                    }
+                }
+            } else {
+                // No relay specified — just do STUN discovery for info
+                let stun_timeout = Duration::from_secs(3);
+                for server_str in stun_servers
+                    .iter()
+                    .map(|s| s.to_string())
+                    .chain(nat::DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()))
+                {
+                    if let Ok(addr) = server_str.parse::<SocketAddr>() {
+                        match nat::StunClient::discover_endpoint(&node.socket, addr, stun_timeout)
+                            .await
+                        {
+                            Ok(endpoint) => {
+                                eprintln!(
+                                    "  {} Public endpoint: {} (NAT: {:?})",
+                                    c_green("✓"),
+                                    endpoint.address,
+                                    endpoint.nat_type
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                debug!("STUN {} failed: {}", server_str, e);
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!();
+        }
+
+        // NS-coordinated hole punching (if --punch)
+        if punch_enabled {
+            let ns_addr_str = ns_server.as_deref().ok_or("--punch requires --ns-server")?;
+            let ns_addr: SocketAddr = ns_addr_str
+                .parse()
+                .map_err(|e| format!("invalid --ns-server '{}': {}", ns_addr_str, e))?;
+
+            let peer_node_id = _resolved_node_id.unwrap_or_else(NodeId::zero);
+
+            eprintln!(
+                "\n{}",
+                c_dim("Hole punching enabled — coordinating via NS...")
+            );
+
+            let mut punch_config = punch::PunchConfig::default();
+            if let Some(d) = punch_delay {
+                punch_config.punch_delay = *d;
+            }
+            if let Some(t) = punch_timeout {
+                punch_config.punch_timeout = *t;
+            }
+
+            let our_endpoints: Vec<SocketAddr> = vec![node.local_addr];
+
+            match punch::execute_punch(
+                &node.socket,
+                ns_addr,
+                &identity.node_id,
+                &peer_node_id,
+                &our_endpoints,
+                &punch_config,
+            )
+            .await
+            {
+                Ok(punch::PunchResult::Success {
+                    peer_addr: punched_addr,
+                }) => {
+                    eprintln!(
+                        "{} Direct connection via hole punch to {}",
+                        c_green("✓"),
+                        punched_addr
+                    );
+                    send_addr = punched_addr;
+                }
+                Ok(punch::PunchResult::TimedOut) => {
+                    if no_relay_fallback {
+                        return Err(
+                            "hole punch timed out and --no-relay-fallback was specified".into()
+                        );
+                    }
+                    eprintln!(
+                        "{} Hole punch timed out — {}",
+                        c_yellow("⚠"),
+                        if relay.is_some() {
+                            "falling back to relay"
+                        } else {
+                            "continuing with direct connection attempt"
+                        }
+                    );
+                }
+                Err(e) => {
+                    if no_relay_fallback {
+                        return Err(format!("punch failed: {}", e).into());
+                    }
+                    eprintln!(
+                        "{} Punch failed: {} — continuing with fallback",
+                        c_yellow("⚠"),
+                        e
+                    );
+                }
+            }
+            eprintln!();
+        }
+
+        // ─── PARALLEL SESSIONS BRANCH (workaround) ─────────────────────────────
+        //
+        // COMMENT: Why this branch exists
+        // ===============================
+        // The ZTLP tunnel currently has no in-session multiplexing: a single
+        // Noise session bridges exactly ONE TCP stream at a time (see
+        // `tunnel::run_bridge*` in proto/src/tunnel.rs — both directions are a
+        // single byte stream over the encrypted session). Browsers, however,
+        // routinely open 6+ parallel HTTP connections for asset fetching. If
+        // we serialize them through one Noise session via `run_bridge_with_reset`
+        // (the historical default), every asset stalls until the previous one
+        // finishes, producing ~tens of seconds of perceived latency on the
+        // passwordless dashboard.
+        //
+        // Until proper in-session multiplexing (HTTP/2 style stream IDs) lands,
+        // this branch performs a *fresh Noise_XX handshake per accepted TCP
+        // connection*. Handshakes are ~280µs each, so 6 concurrent flows cost
+        // <2ms of CPU. Each handshake runs in its own `tokio::spawn`'d task
+        // (`run_parallel_session`) so they progress in parallel.
+        //
+        // The architecture mirrors `cmd_listen_multi_session` on the server
+        // side: a single dispatcher task reads `node.recv_raw()` and routes
+        // each packet to the correct per-session mpsc channel by SessionId; the
+        // bridge for each session reads from a per-session loopback UDP pair
+        // so `tunnel::run_bridge_demuxed` can be reused unchanged.
+        //
+        // Activated when:
+        //   * `--local-forward` is set (tunnel mode), AND
+        //   * `--session-id` is NOT pinned (we are free to mint fresh SIDs).
+        //
+        // The pinned `--session-id` path keeps the original single-session
+        // behavior, which is required for some test/diagnostic flows.
+        let is_parallel = local_forward.is_some() && session_id_hex.is_none();
+        if is_parallel {
+            // SAFETY: unwrap is fine — we just checked is_some() above.
+            let lf = local_forward
+                .as_ref()
+                .expect("is_parallel implies local_forward is Some");
+            let (local_port, _remote_target) = tunnel::parse_local_forward(lf)?;
+            let listen_addr = format!("127.0.0.1:{}", local_port);
+
+            eprintln!(
+                "--- {} ---",
+                c_bold("ZTLP tunnel active (parallel sessions)")
+            );
+            eprintln!("  {} {}", c_cyan("Local listener:"), listen_addr);
+            eprintln!(
+                "  {} Each TCP connection runs its own Noise session in parallel.",
+                c_dim("Mode:")
+            );
+            eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+            let tcp_listener = tokio::net::TcpListener::bind(&listen_addr)
+                .await
+                .map_err(|e| format!("failed to bind TCP listener on {}: {}", listen_addr, e))?;
+            eprintln!(
+                "{} {}",
+                c_green("✓ Listening for TCP connections on"),
+                listen_addr
+            );
+
+            // Share the TransportNode between the dispatcher task and the
+            // per-connection bridges. `recv_raw` takes &self and is internally
+            // backed by `Arc<UdpSocket>`, so a single dispatcher loop can own
+            // the receive side while spawned tasks reuse `node.socket` for sends.
+            let node = Arc::new(node);
+            let session_mgr = Arc::new(SessionManager::new(64));
+            let service_clone: Option<String> = service.clone();
+            let identity_arc = Arc::new(identity.clone());
+
+            // Dispatcher task: drain node.recv_raw() and route every packet to
+            // the right per-session mpsc by SessionId. Packets for unknown SIDs
+            // (e.g. late retransmits after close) are dropped silently.
+            let dispatcher_node = node.clone();
+            let dispatcher_mgr = session_mgr.clone();
+            let dispatcher = tokio::spawn(async move {
+                loop {
+                    let (data, from) = match dispatcher_node.recv_raw().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("{} dispatcher recv error: {}", c_red("✗"), e);
+                            return;
+                        }
+                    };
+                    // Extract session_id by discriminating header type via msg_type.
+                    // HandshakeHeader and DataHeader have DIFFERENT layouts —
+                    // session_id is at offset 11 in HandshakeHeader (after
+                    // magic+ver+flags+msg_type+crypto+key_id) but at offset 6 in
+                    // DataHeader (after magic+ver+flags). So we MUST identify the
+                    // packet type before extracting the session_id.
+                    //
+                    // We try HandshakeHeader first: if the parse succeeds AND
+                    // msg_type is a handshake type (Hello, HelloAck), use the
+                    // handshake-shaped session_id. Otherwise, fall back to
+                    // DataHeader parsing (which is what every encrypted data
+                    // packet uses, including the msg3 final handshake confirmation
+                    // which is sent as MsgType::Data).
+                    let sid_opt: Option<SessionId> = if data.len() >= HANDSHAKE_HEADER_SIZE {
+                        match HandshakeHeader::deserialize(&data) {
+                            Ok(hdr)
+                                if matches!(hdr.msg_type, MsgType::Hello | MsgType::HelloAck) =>
+                            {
+                                Some(hdr.session_id)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let sid_opt = sid_opt.or_else(|| {
+                        if data.len() >= DATA_HEADER_SIZE {
+                            DataHeader::deserialize(&data).ok().map(|h| h.session_id)
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some(sid) = sid_opt {
+                        if !dispatcher_mgr.route_packet(&sid, data, from).await {
+                            debug!("dispatcher: dropping packet for unknown session {}", sid);
+                        }
+                    } else {
+                        debug!("dispatcher: dropping unparseable packet from {}", from);
+                    }
+                }
+            });
+            // Detach: dispatcher lives as long as the connect command runs.
+            let _ = dispatcher;
+
+            // Accept loop: every TCP connection spawns a brand-new Noise session.
+            loop {
+                let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
+                eprintln!(
+                    "{} {} → spawning new parallel session",
+                    c_cyan("TCP connection from"),
+                    tcp_addr
+                );
+
+                // Mint a fresh SessionId and register an mpsc channel for the
+                // dispatcher to route this session's packets into.
+                let new_sid = SessionId::generate();
+                let rx = match session_mgr.register(new_sid, send_addr, 1024).await {
+                    Some(rx) => rx,
+                    None => {
+                        eprintln!(
+                            "{} session manager at capacity, refusing {}",
+                            c_yellow("⚠"),
+                            tcp_addr
+                        );
+                        drop(tcp_stream);
+                        continue;
+                    }
+                };
+
+                let identity_task = (*identity_arc).clone();
+                let service_task = service_clone.clone();
+                // Pass the NS-resolved gateway NodeID so the relay can
+                // route by exact node_id match (strict tenant isolation).
+                // Empty NodeId (0u128) means "no NS lookup" — leave the
+                // dst_svc_hash field alone so the legacy service-name
+                // path keeps working for direct ip:port targets.
+                let dst_routing_override_task: Option<[u8; 16]> =
+                    if peer_node_id_for_routing != [0u8; 16] {
+                        Some(peer_node_id_for_routing)
+                    } else {
+                        None
+                    };
+                let session_mgr_task = session_mgr.clone();
+                let udp_socket_task = node.socket.clone();
+                let pipeline_task = node.pipeline.clone();
+                let send_addr_task = send_addr;
+
+                tokio::spawn(async move {
+                    if let Err(e) = run_parallel_session(
+                        identity_task,
+                        service_task,
+                        dst_routing_override_task,
+                        session_mgr_task,
+                        udp_socket_task,
+                        pipeline_task,
+                        new_sid,
+                        rx,
+                        send_addr_task,
+                        tcp_stream,
+                        tcp_addr,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "{} parallel session {} ({}) error: {}",
+                            c_red("✗"),
+                            new_sid,
+                            tcp_addr,
+                            e
+                        );
+                    }
+                });
+            }
+        }
+
+        let mut ctx = HandshakeContext::new_initiator(&identity)?;
+
+        // Session ID: use provided or generate
+        let session_id = if let Some(hex_str) = session_id_hex {
+            let bytes = hex::decode(hex_str)?;
+            if bytes.len() != 12 {
+                return Err(format!(
+                    "session ID must be 12 bytes (24 hex chars), got {}",
+                    bytes.len()
+                )
+                .into());
+            }
+            let mut sid = [0u8; 12];
+            sid.copy_from_slice(&bytes);
+            SessionId(sid)
+        } else {
+            SessionId::generate()
+        };
+
+        let start_time = Instant::now();
+
+        // Message 1: HELLO (with retransmit on timeout)
+        eprintln!("\n{}", c_dim("→ Sending HELLO (message 1/3)..."));
+        let msg1 = ctx.write_message(&[])?;
+        let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
+        hello_hdr.session_id = session_id;
+        hello_hdr.src_node_id = *identity.node_id.as_bytes();
+        hello_hdr.payload_len = msg1.len() as u16;
+        // Set DstSvcID if a service is requested
+        if let Some(svc_name) = service {
+            hello_hdr.dst_svc_hash = tunnel::encode_service_name(svc_name)?;
+            eprintln!("  {} {}", c_cyan("Service:"), svc_name);
+        }
+        let mut pkt1 = hello_hdr.serialize();
+        pkt1.extend_from_slice(&msg1);
+        node.send_raw(&pkt1, send_addr).await?;
+
+        // Message 2: receive HELLO_ACK (with retransmit of HELLO on timeout)
+        eprintln!("{}", c_dim("← Waiting for HELLO_ACK (message 2/3)..."));
+        let mut retry_delay = Duration::from_millis(INITIAL_HANDSHAKE_RETRY_MS);
+        let max_retry_delay = Duration::from_millis(MAX_HANDSHAKE_RETRY_MS);
+        let mut retries: u8 = 0;
+
+        let (recv2, _from2) = loop {
+            match timeout(retry_delay, node.recv_raw()).await {
+                Ok(Ok((data, addr))) => {
+                    if data.len() >= HANDSHAKE_HEADER_SIZE {
+                        if let Ok(hdr) = HandshakeHeader::deserialize(&data) {
+                            if hdr.msg_type == MsgType::HelloAck && hdr.session_id == session_id {
+                                break (data, addr);
+                            }
+                        }
+                    }
+                    // Not a HELLO_ACK for our session — ignore and keep waiting
+                    continue;
+                }
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    // Timeout — retransmit HELLO
+                    retries += 1;
+                    if retries > MAX_HANDSHAKE_RETRIES {
+                        return Err("handshake failed: no HELLO_ACK after retransmits".into());
+                    }
+                    debug!(
+                        "handshake: retransmitting HELLO (attempt {}/{})",
+                        retries, MAX_HANDSHAKE_RETRIES
+                    );
+                    eprintln!(
+                        "  {} retransmitting HELLO ({}/{})",
+                        c_yellow("⟳"),
+                        retries,
+                        MAX_HANDSHAKE_RETRIES
+                    );
+                    node.send_raw(&pkt1, send_addr).await?; // exact same bytes
+                    retry_delay = (retry_delay * 2).min(max_retry_delay);
+                }
+            }
+        };
+
+        if recv2.len() < HANDSHAKE_HEADER_SIZE {
+            return Err("received packet too short for handshake header".into());
+        }
+        let recv2_header = HandshakeHeader::deserialize(&recv2)?;
+        if recv2_header.msg_type != MsgType::HelloAck {
+            return Err(format!("expected HELLO_ACK, got {:?}", recv2_header.msg_type).into());
+        }
+
+        let noise_payload2 = &recv2[HANDSHAKE_HEADER_SIZE..];
+        ctx.read_message(noise_payload2)?;
+
+        // Message 3: final confirmation with ClientProfile (for CC selection)
+        eprintln!("{}", c_dim("→ Sending final confirmation (message 3/3)..."));
+        let profile = ztlp_proto::client_profile::ClientProfile::desktop(format!(
+            "ztlp/{}",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let profile_cbor = profile.to_cbor();
+        let msg3 = ctx.write_message(&profile_cbor)?;
+        let mut final_hdr = HandshakeHeader::new(MsgType::Data);
+        final_hdr.session_id = session_id;
+        final_hdr.src_node_id = *identity.node_id.as_bytes();
+        final_hdr.payload_len = msg3.len() as u16;
+        let mut pkt3 = final_hdr.serialize();
+        pkt3.extend_from_slice(&msg3);
+        node.send_raw(&pkt3, send_addr).await?;
+
+        // Finalize — handshake should be complete after sending msg3
+        if !ctx.is_finished() {
+            return Err("handshake did not complete".into());
+        }
+
+        let handshake_time = start_time.elapsed();
+        let peer_node_id = NodeId::from_bytes(recv2_header.src_node_id);
+        let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
+
+        // Register session
+        let session_id = session.session_id;
+        {
+            let mut pipeline = node.pipeline.lock().await;
+            pipeline.register_session(session);
+        }
+
+        eprintln!("\n{}", c_green("✓ Handshake complete!"));
+        eprintln!("  {} {}", c_cyan("Remote NodeID:"), peer_node_id);
+        eprintln!("  {} {}", c_cyan("Session ID:"), session_id);
+        eprintln!(
+            "  {} {:.2}ms",
+            c_cyan("Handshake latency:"),
+            handshake_time.as_secs_f64() * 1000.0
+        );
+
+        // Brief check for server REJECT frame (e.g. policy denial).
+        // The server sends REJECT *after* the handshake completes, so we
+        // poll for a short window before declaring the tunnel active.
+        {
+            let reject_deadline = tokio::time::sleep(std::time::Duration::from_millis(500));
+            tokio::pin!(reject_deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut reject_deadline => break, // no reject received — proceed
+                    result = node.recv_data() => {
+                        match result {
+                            Ok(Some((plaintext, _from))) => {
+                                if RejectFrame::is_reject(&plaintext) {
+                                    if let Some(reject) = RejectFrame::decode(&plaintext) {
+                                        eprintln!(
+                                            "\n{} {}",
+                                            c_red("✗ Server rejected:"),
+                                            reject.message
+                                        );
+                                        return Err(format!(
+                                            "access denied: {} ({})",
+                                            reject.message, reject.reason
+                                        ).into());
+                                    }
+                                }
+                                // Non-reject data — ignore during this window
+                            }
+                            Ok(None) => {} // dropped by pipeline
+                            Err(_) => break, // socket error — proceed
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!();
+
+        // Branch: tunnel mode or interactive mode
+        if let Some(lf) = local_forward {
+            let (local_port, _remote_target) = tunnel::parse_local_forward(lf)?;
+            let listen_addr = format!("127.0.0.1:{}", local_port);
+
+            eprintln!("--- {} ---", c_bold("ZTLP tunnel active"));
+            eprintln!("  {} {}", c_cyan("Local listener:"), listen_addr);
+            eprintln!(
+                "  {} Connect your TCP client to {}",
+                c_cyan("Usage:"),
+                listen_addr
+            );
+            eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
+
+            let tcp_listener = tokio::net::TcpListener::bind(&listen_addr)
+                .await
+                .map_err(|e| format!("failed to bind TCP listener on {}: {}", listen_addr, e))?;
+
+            eprintln!(
+                "{} {}",
+                c_green("✓ Listening for TCP connections on"),
+                listen_addr
+            );
+
+            let mut first_connection = true;
+            loop {
+                let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
+                eprintln!("{} {} → tunnel", c_cyan("TCP connection from"), tcp_addr);
+
+                let udp = node.socket.clone();
+                let pipeline = node.pipeline.clone();
+
+                // For subsequent TCP connections (not the first), send a RESET
+                // frame so the remote listener knows to open a new backend
+                // connection and reset its reassembly state.
+                let result = if first_connection {
+                    first_connection = false;
+                    tunnel::run_bridge(tcp_stream, udp, pipeline, session_id, send_addr).await
+                } else {
+                    tunnel::run_bridge_with_reset(tcp_stream, udp, pipeline, session_id, send_addr)
+                        .await
+                };
+
+                match result {
+                    Ok(_outcome) => {
+                        eprintln!("{} {}", c_dim("TCP connection closed:"), tcp_addr);
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", c_red("✗ tunnel error:"), e);
+                    }
+                }
+            }
+        } else {
+            eprintln!("--- {} ---", c_bold("ZTLP encrypted session active"));
+            eprintln!("Type a message and press Enter to send. Ctrl+C to exit.\n");
+
+            // Interactive data loop
+            interactive_data_loop(&node, session_id, send_addr).await?;
+        }
+
+        return Ok(());
+    }
+
+    // QUIC mode
+
+    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
+    let (peer_addr, peer_node_id) = resolve_target(target, ns_server).await?;
+
+    let node_id = peer_node_id.unwrap_or_else(|| ztlp_proto::identity::NodeId([0; 16]));
+    let identity = load_or_generate_identity(key)?;
+
+    // Bind a UDP socket Quinn will reuse for the QUIC connection.
+    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .expect("Failed to bind UDP socket for QUIC signaling");
+
+    // ─── α-relay routing setup (FRAME_CLIENT_ROUTE) ──────────────────
+    //
+    // When a service name is supplied, send a single CLIENT_ROUTE frame
+    // to the peer BEFORE the first QUIC INITIAL on the same UDP socket.
+    // The relay treats this as a routing hint, looks up the registered
+    // gateway for `service`, and installs `{:client_map, sender} ->
+    // gateway_addr` in `:ztlp_forwarded_quic_tuples`. All subsequent UDP
+    // from this 5-tuple is then transparently echoed to that gateway —
+    // Quinn's encrypted INITIAL never has to be parsed by the relay.
+    //
+    // β-direct (no relay between client and gateway) ignores the frame
+    // safely: a real gateway sees an unrecognized magic+type triple and
+    // drops it at L1, with no impact on the subsequent QUIC handshake.
+    // So sending CLIENT_ROUTE unconditionally when `--service` is set is
+    // the right default, even when the caller doesn't know whether the
+    // peer is a relay or a gateway.
+    //
+    // Replaces the rejected dummy-Noise-UDP-HELLO hack (see prior
+    // session handoff Decisions #3); validated by the relay's
+    // CLIENT_ROUTE unit tests in `relay/test/.../udp_listener_test.exs`.
+    if let Some(svc_name) = service.as_deref() {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Dev-mode HMAC (None) — production should plumb the zone secret
+        // through here, mirroring the relay's `Config.registration_secret/0`.
+        match build_client_route_packet(&identity.node_id.0, svc_name, ts, None) {
+            Ok(pkt) => match std_socket.send_to(&pkt, peer_addr) {
+                Ok(n) => {
+                    eprintln!(
+                        "{} CLIENT_ROUTE sent to {} ({} bytes, service={})",
+                        c_dim("→"),
+                        peer_addr,
+                        n,
+                        svc_name
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} failed to send CLIENT_ROUTE to {}: {}",
+                        c_red("✗"),
+                        peer_addr,
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "{} could not build CLIENT_ROUTE for service '{}': {}",
+                    c_red("✗"),
+                    svc_name,
+                    e
+                );
+            }
+        }
+
+        // Brief delay to let the relay install the 5-tuple before Quinn's
+        // first INITIAL races down the same socket. 50ms is well above
+        // typical GenServer→ETS latency on the relay path.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let client = QuicEndpoint::connect_with_socket(
+        QuicEndpointConfig::default(),
+        peer_addr,
+        "localhost",
+        std_socket,
+    )
+    .await?;
+
+    let local_port = if let Some(lf) = local_forward {
+        lf.split(':').next().unwrap_or("0")
+    } else {
+        "0"
+    };
+    let bind_addr = if local_port == "0" {
+        bind.to_string()
+    } else {
+        format!("127.0.0.1:{}", local_port)
+    };
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    println!(
+        "ZTLP QUIC client listening on TCP {}",
+        listener.local_addr()?
+    );
+
+    let service_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(service.as_deref().unwrap_or("").as_bytes());
+        let output = hasher.finalize();
+        let mut h = [0u8; 16];
+        h.copy_from_slice(&output[..16]);
+        h
+    };
+    let session = match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
+        &client,
+        &identity,
+        node_id,
+        service_hash,
+    )
+    .await
+    {
+        Ok(handshake_result) => {
+            println!("Noise Handshake Complete (Quic). Session Init.");
+            handshake_result.session
+        }
+        Err(e) => {
+            eprintln!("Noise handshake failed: {:?}", e);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )));
+        }
+    };
 
     loop {
         let (mut tcp, addr) = listener.accept().await?;
@@ -2215,10 +3000,34 @@ async fn cmd_connect(
         tokio::spawn(async move {
             let (mut q_send, mut q_recv) = client_clone.open_bi().await.unwrap();
             let (mut t_read, mut t_write) = tcp.into_split();
-            let _ = tokio::try_join!(
-                tokio::io::copy(&mut t_read, &mut q_send),
-                tokio::io::copy(&mut q_recv, &mut t_write)
-            );
+            let mut read_buf = vec![0u8; 65000];
+            loop {
+                tokio::select! {
+                    res = tokio::io::AsyncReadExt::read(&mut t_read, &mut read_buf) => {
+                        match res {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                println!("TCP->QUIC Read {} bytes", n);
+                                if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
+                                    println!("TCP->QUIC Write Error");
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
+                        match res {
+                            Ok(frame) => {
+                                if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
         });
     }
 }
@@ -2232,6 +3041,7 @@ async fn cmd_connect(
 async fn run_parallel_session(
     identity: ztlp_proto::identity::NodeIdentity,
     service: Option<String>,
+    dst_routing_override: Option<[u8; 16]>,
     session_mgr: std::sync::Arc<ztlp_proto::session_manager::SessionManager>,
     udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
     pipeline: std::sync::Arc<tokio::sync::Mutex<ztlp_proto::pipeline::Pipeline>>,
@@ -2263,6 +3073,14 @@ async fn run_parallel_session(
     if let Some(svc_name) = &service {
         hello_hdr.dst_svc_hash = ztlp_proto::tunnel::encode_service_name(svc_name)
             .map_err(|e| format!("encode_service_name error: {}", e))?;
+    }
+    // dst_routing_override takes precedence over a service name. It carries
+    // the NS-resolved target gateway NodeID so the relay can route to the
+    // correct tenant gateway by exact node_id match instead of falling
+    // back to round-robin across all registered gateways (which violates
+    // tenant isolation when multiple tenants share the relay).
+    if let Some(node_id_bytes) = dst_routing_override {
+        hello_hdr.dst_svc_hash = node_id_bytes;
     }
     let mut pkt1 = hello_hdr.serialize();
     pkt1.extend_from_slice(&msg1);
@@ -2422,6 +3240,33 @@ const GATEWAY_REGISTER_TYPE: u8 = 0x0A;
 const RELAY_REGISTER_TTL: u32 = 60; // seconds — relay expires registration after TTL
 const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(10); // refresh at half-TTL
 
+// ─── CLIENT_ROUTE Frame (α-relay routing) ─────────────────────────────────
+//
+// FRAME_CLIENT_ROUTE is sent by a QUIC client BEFORE its first QUIC INITIAL
+// packet, on the same UDP socket, to tell the relay which registered service
+// (gateway) it wants its subsequent QUIC traffic forwarded to.  The relay
+// records `{:client_map, sender} -> gateway_addr` in
+// `:ztlp_forwarded_quic_tuples` and then transparently echoes UDP between
+// the two 5-tuples — Quinn's encrypted INITIAL never has to be parsed.
+//
+// Wire format:
+//   magic:       0x5A37          (2 bytes, big-endian)
+//   type:        0x0B            (1 byte — CLIENT_ROUTE)
+//   node_id:     16 bytes        (client's NodeID — for ACL / audit)
+//   svc_len:     1 byte          (length of `service`, 1..=63)
+//   service:     svc_len bytes   (UTF-8, lowercase canonical service name)
+//   timestamp:   8 bytes         (big-endian i64 unix seconds — replay window)
+//   hmac:        32 bytes        (HMAC-SHA256 over [type..timestamp];
+//                                 zeroed in dev mode if no shared secret)
+//
+// Total: 2 + 1 + 16 + 1 + N + 8 + 32 = 60 + N bytes (N = svc_len)
+//
+// The HMAC scheme intentionally mirrors GATEWAY_REGISTER so the relay can
+// reuse `Config.registration_secret/0` and existing HMAC plumbing.
+const CLIENT_ROUTE_MAGIC: [u8; 2] = [0x5A, 0x37];
+const CLIENT_ROUTE_TYPE: u8 = 0x0B;
+const CLIENT_ROUTE_MAX_SVC_LEN: usize = 63;
+
 /// Build a GATEWAY_REGISTER packet.
 ///
 /// The HMAC is zeroed (dev-mode). In production the relay may require
@@ -2463,6 +3308,100 @@ fn build_gateway_register_packet(
     packet.extend_from_slice(&signed_payload);
     packet.extend_from_slice(&hmac);
     packet
+}
+
+/// Build a CLIENT_ROUTE packet (FRAME_CLIENT_ROUTE).
+///
+/// See the wire-format comment block above the `CLIENT_ROUTE_*` constants.
+/// `secret` is `None` in dev mode (zeroed HMAC); `Some(&[u8])` in production
+/// to keyed HMAC-SHA256 over the same byte range the relay validates.
+///
+/// Returns `Err` if `service_name` is empty or longer than
+/// `CLIENT_ROUTE_MAX_SVC_LEN` bytes (UTF-8 byte length, not char count).
+fn build_client_route_packet(
+    node_id: &[u8; 16],
+    service_name: &str,
+    timestamp: i64,
+    secret: Option<&[u8]>,
+) -> Result<Vec<u8>, &'static str> {
+    let svc_bytes = service_name.as_bytes();
+    if svc_bytes.is_empty() {
+        return Err("service_name must not be empty");
+    }
+    if svc_bytes.len() > CLIENT_ROUTE_MAX_SVC_LEN {
+        return Err("service_name exceeds CLIENT_ROUTE_MAX_SVC_LEN");
+    }
+
+    // Build the byte range that HMAC covers:
+    //   [type | node_id | svc_len | service | timestamp]
+    let svc_len = svc_bytes.len() as u8;
+    let mut signed = Vec::with_capacity(1 + 16 + 1 + svc_bytes.len() + 8);
+    signed.push(CLIENT_ROUTE_TYPE);
+    signed.extend_from_slice(node_id);
+    signed.push(svc_len);
+    signed.extend_from_slice(svc_bytes);
+    signed.extend_from_slice(&timestamp.to_be_bytes());
+
+    let hmac: [u8; 32] = match secret {
+        None => [0u8; 32],
+        Some(key) => {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+                .map_err(|_| "invalid HMAC key length")?;
+            mac.update(&signed);
+            let out = mac.finalize().into_bytes();
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&out);
+            h
+        }
+    };
+
+    let mut packet = Vec::with_capacity(2 + signed.len() + 32);
+    packet.extend_from_slice(&CLIENT_ROUTE_MAGIC);
+    packet.extend_from_slice(&signed);
+    packet.extend_from_slice(&hmac);
+    Ok(packet)
+}
+
+/// Parse a CLIENT_ROUTE packet, returning `(node_id, service_name, timestamp,
+/// hmac_bytes, signed_range)`. Used by tests and by any in-process verifier.
+///
+/// Returns `Err` if magic/type don't match, the buffer is short, or `svc_len`
+/// is outside `1..=CLIENT_ROUTE_MAX_SVC_LEN`.
+#[cfg(test)]
+fn parse_client_route_packet(
+    packet: &[u8],
+) -> Result<([u8; 16], String, i64, [u8; 32]), &'static str> {
+    // 2 magic + 1 type + 16 node_id + 1 svc_len + 1+ svc + 8 ts + 32 hmac = min 61
+    if packet.len() < 61 {
+        return Err("packet too short");
+    }
+    if packet[0..2] != CLIENT_ROUTE_MAGIC {
+        return Err("bad magic");
+    }
+    if packet[2] != CLIENT_ROUTE_TYPE {
+        return Err("bad type");
+    }
+    let mut node_id = [0u8; 16];
+    node_id.copy_from_slice(&packet[3..19]);
+    let svc_len = packet[19] as usize;
+    if svc_len == 0 || svc_len > CLIENT_ROUTE_MAX_SVC_LEN {
+        return Err("svc_len out of range");
+    }
+    let svc_end = 20 + svc_len;
+    if packet.len() < svc_end + 8 + 32 {
+        return Err("packet truncated");
+    }
+    let service = std::str::from_utf8(&packet[20..svc_end])
+        .map_err(|_| "service is not valid UTF-8")?
+        .to_string();
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&packet[svc_end..svc_end + 8]);
+    let timestamp = i64::from_be_bytes(ts_bytes);
+    let mut hmac = [0u8; 32];
+    hmac.copy_from_slice(&packet[svc_end + 8..svc_end + 8 + 32]);
+    Ok((node_id, service, timestamp, hmac))
 }
 
 /// Spawn a background task that sends an initial GATEWAY_REGISTER packet to the
@@ -2507,7 +3446,7 @@ fn spawn_relay_registration(
         loop {
             tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
 
-            let ts = SystemTime::now()
+            let ts = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
@@ -2559,6 +3498,7 @@ async fn cmd_listen(
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
+    quic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -2566,18 +3506,135 @@ async fn cmd_listen(
         bind: Some(bind.parse().unwrap()),
         ..Default::default()
     };
-    let server = QuicEndpoint::bind(server_cfg).await?;
+
+    // Pre-bind the std UDP socket so we can send GATEWAY_REGISTER packets to
+    // the relay from the SAME (ip, port) that Quinn will then listen on.
+    //
+    // Why this matters:
+    // The ZTLP relay maps a gateway by the (src_ip, src_port) of its
+    // GATEWAY_REGISTER packet, then forwards client HELLOs to that same
+    // (src_ip, src_port). If we register from a different socket than the
+    // QUIC listener (the old "dummy_socket" workaround did exactly this),
+    // the relay forwards client traffic to a dead socket and handshakes
+    // time out. By pre-binding the std::net::UdpSocket and using
+    // `try_clone()` to send registration packets, the kernel-level UDP
+    // socket is shared between the registration sender and Quinn's
+    // receiver, guaranteeing both share the same source address.
+    let bind_addr: std::net::SocketAddr = bind.parse().expect("invalid bind address");
+    let std_socket = std::net::UdpSocket::bind(bind_addr)
+        .map_err(|e| format!("failed to bind UDP socket on {}: {}", bind_addr, e))?;
+    let local_addr = std_socket.local_addr().expect("socket has local_addr");
+    // Clone the fd for relay-registration use BEFORE we move the socket
+    // into Quinn. Both fds reference the same kernel socket — outbound
+    // packets share the (ip, port), inbound is delivered to whichever fd
+    // is reading (Quinn).
+    let register_socket: Option<std::net::UdpSocket> = if relay_addr.is_some() {
+        Some(
+            std_socket
+                .try_clone()
+                .map_err(|e| format!("UdpSocket::try_clone failed: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let server = QuicEndpoint::bind_with_socket(server_cfg, std_socket)?;
     println!(
         "ZTLP QUIC server listening on UDP {}",
         server.inner.local_addr().unwrap()
     );
 
-    let target = forward[0].clone();
+    let cfw = forward.to_vec();
+    let identity = load_or_generate_identity(key)?;
 
+    if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
+        if let Ok(target) = r_addr.parse::<std::net::SocketAddr>() {
+            println!(
+                "Enabling QUIC gateway registration for relay: {} (src={})",
+                target, local_addr
+            );
+
+            // Convert the cloned std socket to a tokio non-blocking socket so
+            // we can use it inside async code. Both this socket and Quinn's
+            // socket point at the same kernel-level UDP socket, so the relay
+            // sees a single (ip, port) for both registration packets and
+            // QUIC traffic.
+            reg_sock.set_nonblocking(true).ok();
+            let tokio_sock = match tokio::net::UdpSocket::from_std(reg_sock) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("failed to convert registration socket to tokio: {}", e);
+                    return Err(Box::new(e));
+                }
+            };
+
+            let identity_c = identity.clone();
+            let svc = service_name.to_string();
+            tokio::spawn(async move {
+                let relay_addr = target;
+                let node_id = identity_c.node_id.0;
+
+                // Send initial registration immediately so the relay can
+                // route inbound HELLOs before any client tries to connect.
+                let ts = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let pkt = build_gateway_register_packet(&node_id, &svc, ts);
+
+                match tokio_sock.send_to(&pkt, relay_addr).await {
+                    Ok(n) => {
+                        debug!("gateway registration sent to {} ({} bytes)", relay_addr, n);
+                        eprintln!(
+                            "{} gateway registered with {} (service: {})",
+                            c_green("✓"),
+                            relay_addr,
+                            svc
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Initial relay registration send error: {}", e);
+                    }
+                }
+
+                // Periodic re-registration loop on the SAME shared socket.
+                loop {
+                    tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let pkt = build_gateway_register_packet(&node_id, &svc, ts);
+                    match tokio_sock.send_to(&pkt, relay_addr).await {
+                        Ok(_) => {
+                            debug!("gateway reregistration sent to {}", relay_addr);
+                        }
+                        Err(e) => {
+                            eprintln!("background relay reregistration failed: {}", e);
+                        }
+                    }
+                }
+            });
+        } else {
+            eprintln!("Invalid relay address format: {}", r_addr);
+        }
+    }
+    let service_registry = match ztlp_proto::tunnel::ServiceRegistry::from_forward_args(forward) {
+        Ok(reg) => std::sync::Arc::new(reg),
+        Err(e) => {
+            eprintln!("Failed to parse --forward arguments: {}", e);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                e,
+            )));
+        }
+    };
     loop {
         let conn: ztlp_proto::quic_transport::tokio_endpoint::QuicConnection =
             server.accept().await?;
-        let target_clone = target.clone();
+        let service_registry_clone = service_registry.clone();
+
+        let identity_clone = identity.clone();
 
         let http_inject_headers_copy = http_inject_headers;
         let admin_map = if http_inject_headers {
@@ -2594,6 +3651,40 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
+        let (session, service_hash_bytes) =
+            match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
+                &conn,
+                &identity_clone,
+                ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
+            )
+            .await
+            {
+                Ok(res) => {
+                    println!("Responder handshake success");
+                    (res.0.session, res.1)
+                }
+                Err(e) => {
+                    eprintln!("Responder handshake failed: {:?}", e);
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )));
+                }
+            };
+
+        let target_clone = match service_registry_clone.resolve(&service_hash_bytes) {
+            Some((name, addr)) => {
+                println!("Resolved service hash to backend {} at {}", name, addr);
+                addr.to_string()
+            }
+            None => {
+                eprintln!(
+                    "Rejecting QUIC stream: service hash {:?} not mapped to any known backend.",
+                    service_hash_bytes
+                );
+                continue;
+            }
+        };
 
         tokio::spawn(async move {
             loop {
@@ -2608,16 +3699,24 @@ async fn cmd_listen(
                         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
                         if http_inject_headers_copy {
-                            let mut buf = vec![0u8; 65536];
-                            if let Ok(Some(n)) = q_recv.read(&mut buf).await {
+                            if let Ok(frame) =
+                                ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(
+                                    &mut q_recv,
+                                )
+                                .await
+                            {
                                 let mut injected = false;
                                 if let Some((_, email)) = map.iter().next() {
-                                    let ts = "2026-05-20T12:00:00Z";
-                                    let slice = &buf[..n];
+                                    // Ensure exact ISO8601 formatting since chronos produces dynamic timestamps correctly now
+                                    let now = SystemTime::now();
+                                    let ts = chrono::DateTime::<chrono::Utc>::from(now)
+                                        .format("%Y-%m-%dT%H:%M:%SZ")
+                                        .to_string();
+                                    let slice = &frame[..];
                                     let rewrite_result = ztlp_proto::http_injector::inject_headers(
                                         slice,
                                         email,
-                                        ts,
+                                        &ts,
                                         hmac.as_bytes(),
                                     );
                                     if let Ok(rewritten) = rewrite_result {
@@ -2626,15 +3725,43 @@ async fn cmd_listen(
                                     }
                                 }
                                 if !injected {
-                                    let _ = t_write.write_all(&buf[..n]).await;
+                                    let _ = t_write.write_all(&frame[..]).await;
                                 }
+                            } else {
+                                return;
                             }
                         }
 
-                        let _ = tokio::try_join!(
-                            tokio::io::copy(&mut q_recv, &mut t_write),
-                            tokio::io::copy(&mut t_read, &mut q_send)
-                        );
+                        let mut read_buf = vec![0u8; 65000];
+                        loop {
+                            tokio::select! {
+                                res = t_read.read(&mut read_buf) => {
+                                    match res {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            println!("TCP->QUIC Read {} bytes", n);
+                                            if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
+                                                println!("TCP->QUIC Write Error");
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
+                                    match res {
+                                        Ok(frame) => {
+                                            println!("QUIC->TCP Read {} bytes", frame.len());
+                                            if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
+                                                println!("QUIC->TCP Write Error");
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
                     });
                 } else {
                     break;
@@ -4490,7 +5617,7 @@ async fn cmd_ping(
         ping_hdr.packet_seq = seq as u64;
         ping_hdr.src_node_id = [0u8; 16]; // anonymous ping
                                           // Embed timestamp in the payload for RTT measurement
-        let now_ms = SystemTime::now()
+        let now_ms = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
@@ -7449,7 +8576,7 @@ fn generate_signing_key() -> ed25519_dalek::SigningKey {
 }
 
 fn utc_timestamp_iso() -> String {
-    let secs = SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
@@ -7467,7 +8594,7 @@ fn utc_timestamp_iso() -> String {
 }
 
 fn utc_timestamp_compact() -> String {
-    let secs = SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
@@ -7485,7 +8612,7 @@ fn utc_timestamp_compact() -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
@@ -9111,8 +10238,10 @@ async fn main() {
             punch_timeout,
             relay_pool,
             relay_probe_interval,
+            quic,
         } => {
             cmd_connect(
+                *quic,
                 target,
                 key,
                 relay,
@@ -9149,6 +10278,7 @@ async fn main() {
             http_inject_headers,
             header_hmac_secret,
             admin_pubkey_email,
+            quic,
         } => {
             cmd_listen(
                 bind,
@@ -9165,6 +10295,7 @@ async fn main() {
                 *http_inject_headers,
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
+                *quic,
             )
             .await
         }
@@ -9427,7 +10558,7 @@ mod tests {
         path.push(format!(
             "ztlp-config-test-{}-{}.toml",
             std::process::id(),
-            SystemTime::now()
+            std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
@@ -9497,5 +10628,109 @@ mod tests {
         let record = sample_ns_record(10);
 
         print_ns_record(&record, "bootstrap.trs-remote-test.ztlp").unwrap();
+    }
+
+    // ─── FRAME_CLIENT_ROUTE tests ──────────────────────────────────────
+
+    #[test]
+    fn client_route_packet_roundtrip_dev_mode() {
+        // Dev mode: no shared secret → HMAC is zeroed.
+        let node_id = [0xABu8; 16];
+        let svc = "gw-hermese2e-1";
+        let ts: i64 = 1_716_339_600;
+
+        let pkt = build_client_route_packet(&node_id, svc, ts, None)
+            .expect("build should succeed for valid inputs");
+
+        // Wire layout: 2 magic + 1 type + 16 node_id + 1 svc_len + N svc + 8 ts + 32 hmac
+        assert_eq!(pkt.len(), 2 + 1 + 16 + 1 + svc.len() + 8 + 32);
+        assert_eq!(&pkt[0..2], &[0x5A, 0x37]);
+        assert_eq!(pkt[2], 0x0B);
+
+        let (parsed_node_id, parsed_svc, parsed_ts, parsed_hmac) =
+            parse_client_route_packet(&pkt).expect("parse should succeed");
+        assert_eq!(parsed_node_id, node_id);
+        assert_eq!(parsed_svc, svc);
+        assert_eq!(parsed_ts, ts);
+        assert_eq!(parsed_hmac, [0u8; 32]); // dev mode: HMAC zeroed
+    }
+
+    #[test]
+    fn client_route_packet_hmac_is_set_with_secret() {
+        let node_id = [0x01u8; 16];
+        let svc = "gw-test";
+        let ts: i64 = 1_716_339_999;
+        let secret = b"shared-zone-secret";
+
+        let pkt = build_client_route_packet(&node_id, svc, ts, Some(secret))
+            .expect("build should succeed");
+        let (_, _, _, hmac_bytes) = parse_client_route_packet(&pkt).unwrap();
+        // Real HMAC is non-zero (probabilistically certain).
+        assert_ne!(hmac_bytes, [0u8; 32]);
+
+        // Recompute the HMAC and verify it matches what the relay would expect.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut signed = Vec::new();
+        signed.push(0x0Bu8);
+        signed.extend_from_slice(&node_id);
+        signed.push(svc.len() as u8);
+        signed.extend_from_slice(svc.as_bytes());
+        signed.extend_from_slice(&ts.to_be_bytes());
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).unwrap();
+        mac.update(&signed);
+        let expected = mac.finalize().into_bytes();
+        assert_eq!(hmac_bytes.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn client_route_rejects_empty_service_name() {
+        let node_id = [0u8; 16];
+        let err = build_client_route_packet(&node_id, "", 0, None).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn client_route_rejects_oversized_service_name() {
+        let node_id = [0u8; 16];
+        let too_long = "a".repeat(CLIENT_ROUTE_MAX_SVC_LEN + 1);
+        let err = build_client_route_packet(&node_id, &too_long, 0, None).unwrap_err();
+        assert!(err.contains("MAX_SVC_LEN"));
+    }
+
+    #[test]
+    fn client_route_parse_rejects_bad_magic() {
+        let mut pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        pkt[0] = 0x00;
+        let err = parse_client_route_packet(&pkt).unwrap_err();
+        assert_eq!(err, "bad magic");
+    }
+
+    #[test]
+    fn client_route_parse_rejects_bad_type() {
+        let mut pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        pkt[2] = 0x0A; // GATEWAY_REGISTER, not CLIENT_ROUTE
+        let err = parse_client_route_packet(&pkt).unwrap_err();
+        assert_eq!(err, "bad type");
+    }
+
+    #[test]
+    fn client_route_parse_rejects_truncated_packet() {
+        let pkt = build_client_route_packet(&[0u8; 16], "gw-x", 0, None).unwrap();
+        let truncated = &pkt[..pkt.len() - 5];
+        let err = parse_client_route_packet(truncated).unwrap_err();
+        // Could be "packet too short" or "packet truncated" depending on where
+        // the truncation lands; both are acceptable.
+        assert!(err.contains("short") || err.contains("truncated"));
+    }
+
+    #[test]
+    fn client_route_max_length_service_name_succeeds() {
+        let node_id = [0u8; 16];
+        let max_svc = "g".repeat(CLIENT_ROUTE_MAX_SVC_LEN);
+        let pkt = build_client_route_packet(&node_id, &max_svc, 0, None)
+            .expect("max-length service name should be accepted");
+        let (_, parsed_svc, _, _) = parse_client_route_packet(&pkt).unwrap();
+        assert_eq!(parsed_svc, max_svc);
     }
 }

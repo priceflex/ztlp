@@ -82,11 +82,14 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
+use sha2::{Digest, Sha256};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/// Maximum service name length (must fit in 16-byte DstSvcID field).
-pub const MAX_SERVICE_NAME_LEN: usize = 16;
+/// Maximum service name length (DNS-class limit). The 16-byte DstSvcID field
+/// holds the truncated SHA-256 of the name, so any reasonable input length
+/// is accepted — this cap prevents accidentally hashing megabytes of garbage.
+pub const MAX_SERVICE_NAME_LEN: usize = 253;
 
 /// The default service name used when no name is specified.
 pub const DEFAULT_SERVICE: &str = "_default";
@@ -3014,9 +3017,19 @@ async fn send_sack(
 /// - `--forward ssh:127.0.0.1:22` → named service "ssh"
 /// - `--forward 127.0.0.1:22` → unnamed default service
 /// - Multiple `--forward` flags → multi-service listener
+///
+/// Option C wire decoupling: the on-wire `dst_svc_hash` is the
+/// truncated SHA-256 of the service name (see `encode_service_name`),
+/// NOT the zero-padded ASCII bytes. To make `resolve()` cheap and
+/// avoid hashing on every HELLO, we precompute a `hash_to_name`
+/// map at build time and walk that on lookup.
 #[derive(Debug, Clone)]
 pub struct ServiceRegistry {
     pub services: HashMap<String, SocketAddr>,
+    /// Reverse index: 16-byte service hash → canonical service name.
+    /// Populated by `from_forward_args` so `resolve()` is O(1) and
+    /// stays in sync with the encode side without re-hashing per call.
+    hash_to_name: HashMap<[u8; 16], String>,
 }
 
 impl ServiceRegistry {
@@ -3027,38 +3040,77 @@ impl ServiceRegistry {
     /// - `HOST:PORT` — the default (unnamed) service
     pub fn from_forward_args(args: &[String]) -> Result<Self, String> {
         let mut services = HashMap::new();
+        let mut hash_to_name = HashMap::new();
 
         for arg in args {
             let (name, addr) = parse_forward_arg(arg)?;
             if services.contains_key(&name) {
                 return Err(format!("duplicate service name '{}'", name));
             }
+            // Index by truncated-SHA256 hash (Option C wire encoding)
+            // so HELLO `dst_svc_hash` lookups are direct. Falls back
+            // gracefully — if encode_service_name ever rejects a name
+            // here, we surface it now rather than at first HELLO.
+            let hash = encode_service_name(&name)?;
+            hash_to_name.insert(hash, name.clone());
             services.insert(name, addr);
         }
 
-        Ok(Self { services })
+        Ok(Self {
+            services,
+            hash_to_name,
+        })
     }
 
     /// Look up a service by the DstSvcID bytes from the handshake header.
     ///
-    /// If the DstSvcID is all zeros, returns the default service.
-    /// Otherwise, trims trailing zeros and looks up by name.
+    /// Option C semantics: the 16-byte value is an opaque SHA-256
+    /// truncation of the service name. We do an O(1) hash-table lookup
+    /// against the precomputed `hash_to_name` index built at registry
+    /// construction. The all-zero special case (`[0u8; 16]`) is
+    /// preserved as an alias for the canonical default service so
+    /// pre-Option-C clients (and tests that hard-code `[0; 16]`) still
+    /// reach the unnamed `--forward HOST:PORT` backend.
+    ///
+    /// Single-default-service fallback: when the registry contains
+    /// exactly ONE entry and that entry is the unnamed default service,
+    /// any unrecognized hash routes to it rather than rejecting. This
+    /// matches v0.27.x behavior and is what makes single-tenant
+    /// gateways usable without forcing every client to know the
+    /// service name. Multi-service registries (e.g. ssh + http on the
+    /// same listener) still reject unknown hashes — operators that
+    /// want strict routing get strict routing.
     pub fn resolve(&self, dst_svc_id: &[u8; 16]) -> Option<(&str, SocketAddr)> {
-        let name = if dst_svc_id == &[0u8; 16] {
-            DEFAULT_SERVICE.to_string()
-        } else {
-            // Trim trailing null bytes to get the service name
-            let end = dst_svc_id
-                .iter()
-                .rposition(|&b| b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            String::from_utf8_lossy(&dst_svc_id[..end]).to_string()
-        };
+        // All-zero DstSvcID still routes to the unnamed default
+        // service, for back-compat with clients that haven't migrated
+        // to the SHA-256-hashed encoding yet.
+        if dst_svc_id == &[0u8; 16] {
+            return self
+                .services
+                .get_key_value(DEFAULT_SERVICE)
+                .map(|(k, addr)| (k.as_str(), *addr));
+        }
 
-        self.services
-            .get_key_value(&name)
-            .map(|(key, addr)| (key.as_str(), *addr))
+        if let Some(name) = self.hash_to_name.get(dst_svc_id) {
+            return self
+                .services
+                .get_key_value(name)
+                .map(|(key, addr)| (key.as_str(), *addr));
+        }
+
+        // Single-default-service fallback (matches v0.27.x). If the
+        // registry holds exactly one entry AND that entry is the
+        // canonical default service, route any unrecognized hash to
+        // it. Otherwise reject so multi-service deployments don't
+        // accidentally cross-route.
+        if self.services.len() == 1 && self.services.contains_key(DEFAULT_SERVICE) {
+            return self
+                .services
+                .get_key_value(DEFAULT_SERVICE)
+                .map(|(k, addr)| (k.as_str(), *addr));
+        }
+
+        None
     }
 
     /// Check if this registry has any services.
@@ -3072,22 +3124,28 @@ impl ServiceRegistry {
     }
 }
 
-/// Encode a service name into a 16-byte DstSvcID field.
+/// Encode a service name into a 16-byte DstSvcID (now an opaque hash, not
+/// raw ASCII per v0.26 Option C).
 ///
-/// Pads with zeros if shorter than 16 bytes.
-/// Returns an error if the name is too long.
+/// Canonicalization: lowercase + strip trailing dots, then truncated
+/// SHA-256 to the first 16 bytes. Identical to the FFI path
+/// (`proto/src/ffi.rs`) and Elixir gateway's `Packet.service_hash/1`.
 pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
-    let bytes = name.as_bytes();
-    if bytes.len() > MAX_SERVICE_NAME_LEN {
+    let lower = name.to_ascii_lowercase();
+    let canon = lower.trim_end_matches('.');
+    if canon.len() > MAX_SERVICE_NAME_LEN {
         return Err(format!(
             "service name '{}' too long ({} bytes, max {})",
-            name,
-            bytes.len(),
+            canon,
+            canon.len(),
             MAX_SERVICE_NAME_LEN
         ));
     }
+    let mut h = Sha256::new();
+    h.update(canon.as_bytes());
+    let out = h.finalize();
     let mut buf = [0u8; 16];
-    buf[..bytes.len()].copy_from_slice(bytes);
+    buf.copy_from_slice(&out[..16]);
     Ok(buf)
 }
 
@@ -3434,7 +3492,7 @@ mod tests {
 
     #[test]
     fn test_parse_forward_arg_name_too_long() {
-        let long_name = "a".repeat(17);
+        let long_name = "a".repeat(254);
         let arg = format!("{}:127.0.0.1:22", long_name);
         assert!(parse_forward_arg(&arg).is_err());
     }
@@ -3495,44 +3553,103 @@ mod tests {
         ])
         .unwrap();
 
-        let mut svc_id = [0u8; 16];
-        svc_id[..3].copy_from_slice(b"ssh");
-        let (name, addr) = reg.resolve(&svc_id).unwrap();
+        // Option C: dst_svc_id is the SHA-256 hash of the name, not ASCII.
+        let ssh_hash = encode_service_name("ssh").unwrap();
+        let (name, addr) = reg.resolve(&ssh_hash).unwrap();
         assert_eq!(name, "ssh");
         assert_eq!(addr.port(), 22);
 
-        let mut svc_id2 = [0u8; 16];
-        svc_id2[..3].copy_from_slice(b"rdp");
-        let (name, addr) = reg.resolve(&svc_id2).unwrap();
+        let rdp_hash = encode_service_name("rdp").unwrap();
+        let (name, addr) = reg.resolve(&rdp_hash).unwrap();
         assert_eq!(name, "rdp");
         assert_eq!(addr.port(), 3389);
     }
 
     #[test]
     fn test_resolve_unknown_service() {
-        let reg = ServiceRegistry::from_forward_args(&["ssh:127.0.0.1:22".to_string()]).unwrap();
+        // Multi-service registry (no default) rejects unknown hashes
+        // — strict routing for multi-tenant safety.
+        let reg = ServiceRegistry::from_forward_args(&[
+            "ssh:127.0.0.1:22".to_string(),
+            "rdp:127.0.0.1:3389".to_string(),
+        ])
+        .unwrap();
 
-        let mut svc_id = [0u8; 16];
-        svc_id[..5].copy_from_slice(b"mysql");
-        assert!(reg.resolve(&svc_id).is_none());
+        let mysql_hash = encode_service_name("mysql").unwrap();
+        assert!(reg.resolve(&mysql_hash).is_none());
+    }
+
+    #[test]
+    fn test_resolve_single_default_accepts_any_hash() {
+        // Single unnamed --forward HOST:PORT entry: any unrecognized
+        // hash routes to the default. This matches v0.27.x behavior
+        // and lets a single-tenant gateway accept clients regardless
+        // of how they encoded the service name.
+        let reg = ServiceRegistry::from_forward_args(&[
+            "127.0.0.1:39023".to_string(), // default service
+        ])
+        .unwrap();
+
+        // Hash for a name the gateway has never heard of — falls through.
+        let random_hash = encode_service_name("http").unwrap();
+        let (name, addr) = reg.resolve(&random_hash).unwrap();
+        assert_eq!(name, DEFAULT_SERVICE);
+        assert_eq!(addr.port(), 39023);
+
+        // Another unrelated hash — also falls through.
+        let another = encode_service_name("vault").unwrap();
+        let (name, _) = reg.resolve(&another).unwrap();
+        assert_eq!(name, DEFAULT_SERVICE);
+    }
+
+    #[test]
+    fn test_resolve_single_named_service_no_fallback() {
+        // A single NAMED service (e.g. --forward http:127.0.0.1:39023)
+        // is NOT the default service, so unknown hashes must reject.
+        // This guards against accidentally routing arbitrary clients
+        // through a tenant-named single service.
+        let reg =
+            ServiceRegistry::from_forward_args(&["http:127.0.0.1:39023".to_string()]).unwrap();
+
+        // Exact match still works.
+        let http_hash = encode_service_name("http").unwrap();
+        assert!(reg.resolve(&http_hash).is_some());
+
+        // Unrelated name does NOT fall through.
+        let other_hash = encode_service_name("ssh").unwrap();
+        assert!(reg.resolve(&other_hash).is_none());
     }
 
     #[test]
     fn test_encode_service_name() {
+        // SHA-256("ssh")[0:16] — hashed output, not zero-padded ASCII
         let buf = encode_service_name("ssh").unwrap();
-        assert_eq!(&buf[..3], b"ssh");
-        assert_eq!(&buf[3..], &[0u8; 13]);
+        assert_eq!(
+            buf,
+            [
+                0x7f, 0x5a, 0x55, 0xcf, 0x3f, 0x88, 0xbe, 0x93, 0x6f, 0xb9, 0x44, 0x02, 0x49, 0xcb,
+                0x44, 0x9f
+            ]
+        );
 
-        let buf = encode_service_name("rdp").unwrap();
-        assert_eq!(&buf[..3], b"rdp");
+        // Case-insensitive: "SSH" → same hash as "ssh"
+        assert_eq!(encode_service_name("SSH").unwrap(), buf);
 
-        // Exactly 16 bytes
-        let name16 = "a".repeat(16);
-        let buf = encode_service_name(&name16).unwrap();
-        assert_eq!(&buf, name16.as_bytes());
+        // Trailing dot stripped: "ssh." → same hash as "ssh"
+        assert_eq!(encode_service_name("ssh.").unwrap(), buf);
 
-        // Too long
-        let name17 = "a".repeat(17);
+        // Long names are accepted (SHA-256 handles any length)
+        let long_name = "a".repeat(200);
+        let buf_long = encode_service_name(&long_name).unwrap();
+        assert_eq!(buf_long.len(), 16);
+        assert_ne!(buf_long, buf); // different input → different hash
+
+        // Max allowed (253 chars) works
+        let max_name = "a".repeat(253);
+        assert!(encode_service_name(&max_name).is_ok());
+
+        // Too long (>253) fails
+        let name17 = "a".repeat(254);
         assert!(encode_service_name(&name17).is_err());
     }
 

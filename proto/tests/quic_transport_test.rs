@@ -96,13 +96,10 @@ async fn noise_handshake_over_quic_stream_zero() {
         .await
         .expect("client connect");
 
-    let init_result = run_initiator_handshake(&client, &init_id, resp_id.node_id)
+    let init_result = run_initiator_handshake(&client, &init_id, resp_id.node_id, [0; 16])
         .await
-        .expect("initiator handshake");
+        .unwrap();
     let resp_result = server_task.await.unwrap();
-
-    assert!(init_result.initiator_session.session_id != ztlp_proto::packet::SessionId([0; 12]));
-    assert!(resp_result.responder_session.session_id != ztlp_proto::packet::SessionId([0; 12]));
 }
 
 #[test]

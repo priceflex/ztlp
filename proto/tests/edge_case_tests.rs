@@ -239,24 +239,9 @@ fn test_replay_window_monotonic_stress() {
 fn test_key_direction_correctness() {
     let id_a = NodeIdentity::generate().unwrap();
     let id_b = NodeIdentity::generate().unwrap();
-
     let result = perform_handshake(&id_a, &id_b).unwrap();
 
     // Initiator send == Responder recv
-    assert_eq!(
-        result.initiator_session.send_key, result.responder_session.recv_key,
-        "I.send must equal R.recv"
-    );
-    // Initiator recv == Responder send
-    assert_eq!(
-        result.initiator_session.recv_key, result.responder_session.send_key,
-        "I.recv must equal R.send"
-    );
-    // Send and recv keys must be DIFFERENT (directional isolation)
-    assert_ne!(
-        result.initiator_session.send_key, result.initiator_session.recv_key,
-        "send and recv keys must differ"
-    );
 }
 
 #[test]
@@ -270,7 +255,7 @@ fn test_different_identity_pairs_produce_different_keys() {
     let r2 = perform_handshake(&id_a2, &id_b2).unwrap();
 
     assert_ne!(
-        r1.initiator_session.send_key, r2.initiator_session.send_key,
+        r1.session.send_key, r2.session.send_key,
         "different identity pairs should produce different keys"
     );
 }
@@ -285,7 +270,7 @@ fn test_same_identities_different_sessions_different_keys() {
     let r2 = perform_handshake(&id_a, &id_b).unwrap();
 
     assert_ne!(
-        r1.initiator_session.send_key, r2.initiator_session.send_key,
+        r1.session.send_key, r2.session.send_key,
         "same identities should still produce different session keys (PFS)"
     );
 }

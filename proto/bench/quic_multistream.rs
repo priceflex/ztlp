@@ -1,0 +1,108 @@
+#![cfg(feature = "quic-transport")]
+#![allow(unused_imports)]
+
+use criterion::{criterion_group, criterion_main, Criterion, Throughput, BenchmarkId};
+use std::time::Duration;
+use tokio::runtime::Runtime;
+use ztlp_proto::quic_transport::{QuicEndpointConfig, tokio_endpoint::QuicEndpoint};
+
+async fn setup_endpoint() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let server_cfg = QuicEndpointConfig {
+        bind: Some("127.0.0.1:0".parse().unwrap()),
+        ..Default::default()
+    };
+    
+    let server = QuicEndpoint::bind(server_cfg).await.unwrap();
+    let server_addr = server.inner.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        // Run forever, accepting connections and echoing stream data
+        loop {
+            let conn_res = server.accept().await;
+            if conn_res.is_err() { break; }
+            let conn = conn_res.unwrap();
+            
+            tokio::spawn(async move {
+                loop {
+                    let bi_res = conn.accept_bi().await;
+                    if bi_res.is_err() { break; }
+                    let (mut send, mut recv) = bi_res.unwrap();
+                    
+                    tokio::spawn(async move {
+                        // Very simple echo or sink loop. For the bench we'll act as a sink 
+                        // that occasionally ACKs or just reads it all then replies.
+                        // Actually, let's just make it a bulk receiver and small replier
+                        // to simulate the Turbo.js fetch.
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            match recv.read(&mut buf).await {
+                                Ok(Some(n)) => {
+                                    // Received n bytes. 
+                                },
+                                Ok(None) => break, // EOF
+                                Err(_) => break,
+                            }
+                        }
+                        // Send small ACK when stream closes from client side
+                        let _ = send.write_all(b"ACK").await;
+                        let _ = send.finish();
+                    });
+                }
+            });
+        }
+    });
+
+    (server_addr, server_task)
+}
+
+pub fn parallel_streams_benchmark(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    
+    let (server_addr, server_task) = rt.block_on(setup_endpoint());
+    let client = rt.block_on(QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, "localhost")).unwrap();
+
+    let mut group = c.benchmark_group("quic_multistream");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    
+    // Testing the "Turbo.min.js deadlock" scenario:
+    // 105KB payload over 8 parallel streams
+    let payload_size = 105 * 1024;
+    let num_streams = 8;
+    
+    group.throughput(Throughput::Bytes((payload_size * num_streams) as u64));
+    group.bench_function("105KB_x8_streams", |b| {
+        b.to_async(&rt).iter(|| {
+            let client = client.clone();
+            async move {
+                let mut client_tasks = vec![];
+                for _ in 0..num_streams {
+                    let conn_clone = client.clone();
+                    let payload = vec![0xABu8; payload_size]; 
+                    
+                    client_tasks.push(tokio::spawn(async move {
+                        let (mut send, mut recv) = conn_clone.open_bi().await.unwrap();
+                        
+                        // Push full payload
+                        send.write_all(&payload).await.unwrap();
+                        send.finish().unwrap(); // Close send side to signal EOF to server
+
+                        // Wait for server ACK
+                        let mut buf = vec![0u8; 16];
+                        let _ = recv.read(&mut buf).await;
+                    }));
+                }
+
+                for t in client_tasks {
+                    let _ = t.await;
+                }
+            }
+        });
+    });
+    
+    group.finish();
+    server_task.abort();
+}
+
+criterion_group!(benches, parallel_streams_benchmark);
+criterion_main!(benches);

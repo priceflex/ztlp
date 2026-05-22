@@ -7,7 +7,7 @@
 # ─────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build ──────────────────────────────────────────
-FROM rust:1.78-slim-bookworm AS builder
+FROM rust:1.89-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -66,8 +66,16 @@ COPY --from=builder /build/target/release/ztlp-load /usr/local/bin/
 COPY --from=builder /build/target/release/ztlp-fuzz /usr/local/bin/
 COPY --from=builder /build/target/release/ztlp-throughput /usr/local/bin/
 
-USER ztlp
+# NOTE: do NOT switch to USER ztlp here. The ztlp.net launch app's
+# bind-mounted /data/keys volume is owned by an arbitrary host UID
+# (varies per provisioner). The prior v0.27.x image ran as root for
+# this reason; staying as root preserves write access without forcing
+# every provisioner to chown gateway_keys.
 WORKDIR /home/ztlp
 
-# Client initiates connections — no ports exposed by default
-ENTRYPOINT ["ztlp"]
+# Client initiates connections — no ports exposed by default.
+# NOTE: do NOT set ENTRYPOINT here. The ztlp.net launch app's
+# docker-compose template starts the gateway with
+#   command: ["sh", "-c", "<one-liner with ztlp listen ...>"]
+# so the container must default to a shell, not `ztlp`.
+CMD ["bash"]

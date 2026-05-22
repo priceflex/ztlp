@@ -104,16 +104,84 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   @impl true
-  def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
+  def handle_info({:udp, socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
 
-    # Check for GATEWAY_REGISTER packet before the pipeline
-    case data do
-      <<0x5A, 0x37, 0x0A, rest::binary>> ->
-        handle_gateway_register(rest, sender)
+    # First attempt to route known data flows dynamically
+    is_data_forwarded = GatewayForwarder.lookup_by_peer(sender)
+        |> case do
+            {:ok, _session_id, other_peer} ->
+                :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
+                ZtlpRelay.Stats.increment(:forwarded)
+                true
+            :error ->
+                false
+        end
 
-      _ ->
-        handle_packet(data, sender, state)
+    # ------------------------------------------------------------------
+    # QUIC fast 5-tuple bypass — STRICTLY gated.
+    #
+    # This path only fires when an explicit `{:client_map, sender}`
+    # mapping already exists in `:ztlp_forwarded_quic_tuples`. There is
+    # NO fallback "guess the gateway" branch and NO ALPN-byte regex
+    # parsing — those approaches were tried and rejected because they
+    # mangled legacy Noise-UDP traffic (commit 548fc64 regression).
+    #
+    # The mapping is installed by a future ZTLP control frame
+    # (FRAME_CLIENT_ROUTE) that the client sends BEFORE its first QUIC
+    # INITIAL packet. Until that frame is implemented, this block is
+    # effectively dormant for client→gateway flow but still handles
+    # gateway→client return traffic for any pre-existing mapping.
+    #
+    # Ordering: this runs BEFORE legacy L1 validation (handle_packet/3),
+    # so it MUST be conservative — any false positive here will
+    # silently drop legitimate Noise-UDP packets.
+    # ------------------------------------------------------------------
+    is_quic_forwarded =
+      if not is_data_forwarded and
+           :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do
+        case :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}) do
+          [{{:client_map, ^sender}, {gw_ip, gw_port}}] ->
+            # Forward client → mapped gateway
+            :gen_udp.send(socket, gw_ip, gw_port, data)
+            true
+
+          [] ->
+            # No client mapping. Check if `sender` is a registered gateway
+            # returning traffic to a known client. We look up the reverse
+            # mapping ({:client_map, _} -> sender) to find the client peer.
+            case :ets.match_object(
+                   :ztlp_forwarded_quic_tuples,
+                   {{:client_map, :_}, sender}
+                 ) do
+              [{{:client_map, client_addr}, ^sender} | _] ->
+                {c_ip, c_port} = client_addr
+                :gen_udp.send(socket, c_ip, c_port, data)
+                true
+
+              _ ->
+                # Sender is neither a mapped client nor a gateway with an
+                # active client. Fall through to legacy L1 validation.
+                false
+            end
+        end
+      else
+        false
+      end
+
+
+    if not is_data_forwarded and not is_quic_forwarded do
+      # L1 validation
+      case data do
+        <<0x5A, 0x37, 0x0A, rest::binary>> ->
+          handle_gateway_register(rest, sender)
+
+        <<0x5A, 0x37, 0x0B, rest::binary>> ->
+          handle_client_route(rest, sender, state)
+
+        _ ->
+          handle_packet(data, sender, state)
+      end
     end
 
     {:noreply, state}
@@ -204,6 +272,139 @@ defmodule ZtlpRelay.UdpListener do
       _pid ->
         GatewayForwarder.register_dynamic_gateway(sender, node_id, service_name, ttl)
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # CLIENT_ROUTE — α-relay routing setup (FRAME_CLIENT_ROUTE / 0x5A 0x37 0x0B)
+  # ---------------------------------------------------------------------------
+  #
+  # Sent by a QUIC client BEFORE its first QUIC INITIAL packet so the relay
+  # can install `{:client_map, sender} -> gateway_addr` in
+  # `:ztlp_forwarded_quic_tuples`. Subsequent UDP from the same 5-tuple is
+  # then transparently echoed to the registered gateway by the QUIC fast
+  # bypass branch in `handle_info/2` above.
+  #
+  # Wire format (after 0x5A 0x37 0x0B magic+type already stripped):
+  #   [16 node_id][1 svc_len][svc_len service][8 timestamp][32 hmac]
+  #
+  # The HMAC scheme mirrors GATEWAY_REGISTER so the same shared secret in
+  # `Config.registration_secret/0` covers both frames. In dev mode (nil
+  # secret), the HMAC field is ignored and routing is accepted unverified.
+  defp handle_client_route(
+         <<node_id::binary-size(16), svc_len::8, rest::binary>>,
+         sender,
+         _state
+       )
+       when svc_len > 0 and svc_len <= 63 do
+    case rest do
+      <<service_name::binary-size(svc_len), timestamp::64-signed,
+        hmac::binary-size(32)>> ->
+        process_client_route(sender, node_id, service_name, timestamp, hmac)
+
+      _ ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: malformed payload"
+        )
+    end
+  end
+
+  defp handle_client_route(_data, sender, _state) do
+    Logger.warning(
+      "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: malformed header (svc_len out of range)"
+    )
+  end
+
+  defp process_client_route(sender, node_id, service_name, timestamp, hmac) do
+    case Config.registration_secret() do
+      nil ->
+        # Dev mode — accept without HMAC verification, but still gate on
+        # service-name lookup to keep the routing surface conservative.
+        Logger.debug(
+          "[UdpListener] Accepting unverified CLIENT_ROUTE from #{inspect(sender)} " <>
+            "service=#{service_name}"
+        )
+
+        do_install_client_route(sender, node_id, service_name)
+
+      secret ->
+        signed =
+          <<0x0B, node_id::binary, byte_size(service_name)::8, service_name::binary,
+            timestamp::64-signed>>
+
+        expected_hmac = :crypto.mac(:hmac, :sha256, secret, signed)
+
+        if secure_compare(expected_hmac, hmac) do
+          now = System.system_time(:second)
+
+          # Same 300-second window as GATEWAY_REGISTER. CLIENT_ROUTE is one-shot
+          # (per-connection), so a tighter window would be safer in production —
+          # leaving it consistent for now, revisit when CLIENT_ROUTE replay
+          # protection becomes a separate hardening pass.
+          if abs(now - timestamp) <= 300 do
+            do_install_client_route(sender, node_id, service_name)
+          else
+            Logger.warning(
+              "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: timestamp too old " <>
+                "(delta=#{now - timestamp}s)"
+            )
+          end
+        else
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: invalid HMAC"
+          )
+        end
+    end
+  end
+
+  defp do_install_client_route(sender, node_id, service_name) do
+    case GenServer.whereis(GatewayForwarder) do
+      nil ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} but GatewayForwarder not running"
+        )
+
+      _pid ->
+        case GatewayForwarder.pick_gateway_for_service(service_name) do
+          {:ok, gateway_addr} ->
+            ensure_quic_tuple_table()
+
+            :ets.insert(
+              :ztlp_forwarded_quic_tuples,
+              {{:client_map, sender}, gateway_addr}
+            )
+
+            Logger.info(
+              "[UdpListener] CLIENT_ROUTE accepted: client=#{inspect(sender)} " <>
+                "service=#{service_name} gateway=#{inspect(gateway_addr)} " <>
+                "node_id=#{Base.encode16(node_id)}"
+            )
+
+            :ok
+
+          :error ->
+            Logger.warning(
+              "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: " <>
+                "no gateway registered for service=#{service_name}"
+            )
+        end
+    end
+  end
+
+  # The QUIC tuple table is normally created on first GATEWAY_REGISTER. If a
+  # CLIENT_ROUTE arrives before any gateway has registered, this guard makes
+  # the relay tolerant of either ordering.
+  defp ensure_quic_tuple_table do
+    if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
+      :ets.new(:ztlp_forwarded_quic_tuples, [
+        :named_table,
+        :public,
+        :set,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
+    end
+
+    :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -655,20 +856,27 @@ defmodule ZtlpRelay.UdpListener do
 
   # Forward a HELLO to a configured gateway.
   defp forward_hello_to_gateway(session_id, data, client_addr, parsed, state) do
-    # Extract service name from HELLO dst_svc_id (16 bytes, zero-padded)
-    service_name =
-      case Map.get(parsed, :dst_svc_id) do
-        nil -> nil
-        <<0::128>> -> nil
-        svc_raw ->
-          svc_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
-      end
+    # Wire-decoupling Option C: `dst_svc_id` is now a 16-byte truncated
+    # SHA-256 of the canonicalised service name — NOT zero-padded ASCII.
+    # We pass the raw 16 bytes through to `pick_gateway_for_service/1`,
+    # which hashes each registered gateway's `service_name` and matches
+    # by hash. The all-zero special case still means "no service preference,
+    # round-robin any gateway" (back-compat with pre-Option-C clients and
+    # the legacy CLI path that doesn't set the field).
+    #
+    # This was previously decoded as `bin_to_list |> take_while != 0 |> to_string`
+    # which never matched a registered service NAME against a hashed value
+    # — every HELLO fell through to the round-robin fallback and landed on
+    # whichever gateway happened to be next in the list (~6/7 wrong with 7
+    # tenants registered).
+    dst_svc_id = Map.get(parsed, :dst_svc_id)
 
     pick_result =
-      case service_name do
+      case dst_svc_id do
         nil -> GatewayForwarder.pick_gateway()
-        "" -> GatewayForwarder.pick_gateway()
-        svc -> GatewayForwarder.pick_gateway_for_service(svc)
+        <<0::128>> -> GatewayForwarder.pick_gateway()
+        <<hash::binary-size(16)>> -> GatewayForwarder.pick_gateway_for_service(hash)
+        _ -> GatewayForwarder.pick_gateway()
       end
 
     case pick_result do

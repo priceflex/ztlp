@@ -2862,57 +2862,79 @@ async fn cmd_connect(
 
         use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
         let (peer_addr, peer_node_id) = resolve_target(target, ns_server).await?;
-        
+
         let node_id = peer_node_id.unwrap_or_else(|| {
             ztlp_proto::identity::NodeId([0; 16])
         });
         let identity = load_or_generate_identity(key)?;
 
-        // PUNCH RELAY: Create explicitly bound UDP socket
-        let std_socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket for QUIC signaling");
-        
-        // 1. Setup a DUMMY ZTLP HELLO to configure the Relay's 5-Tuple map (Option α setup)
-        {
-            let ephemeral_ident = ztlp_proto::identity::NodeIdentity::generate().unwrap();
-            let mut ctx = ztlp_proto::handshake::HandshakeContext::new_initiator(&ephemeral_ident).unwrap();
-            let node_id = identity.node_id;
-            let msg1 = ctx.write_message(&[]).unwrap();
-            
-            // Build the Service Hash safely matching Option C
-            let service_hash_internal = {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(service.as_deref().unwrap_or("").as_bytes());
-                let output = hasher.finalize();
-                let mut h = [0u8; 16];
-                h.copy_from_slice(&output[..16]);
-                h
-            };
-            
-            let mut packet = vec![];
-            packet.extend_from_slice(&[0x5A, 0x37]); // MAGIC
-            packet.push(0x01); // PacketType::Handshake
-            packet.extend_from_slice(&[0x10, 0x14]); // version & hdr_len
-            packet.extend_from_slice(&[0x00, 0x00]); // flags
-            packet.push(0x01); // msg_type: Hello
-            packet.push(0x00); // padding
-            packet.extend_from_slice(&[0x00, 0x01]); // crypto_suite
-            packet.extend_from_slice(&[0x00, 0x00]); // key_id
-            let session_id = ztlp_proto::packet::SessionId::generate();
-            packet.extend_from_slice(session_id.as_bytes()); // 12 bytes session_id
-            packet.extend_from_slice(&[0u8; 8]); // seq
-            packet.extend_from_slice(&[0u8; 8]); // timestamp
-            packet.extend_from_slice(&identity.node_id.0); // src_node_id
-            packet.extend_from_slice(&node_id.0); // dst_svc_hash (NodeID routing for relay)
-            packet.extend_from_slice(&msg1); // Handshake Payload
-            
-            // Blast the RELAY to establish UDP state
-            let _ = std_socket.send_to(&packet, peer_addr);
-            println!("QUIC Init: Signaled relay {} with dummy UDP HELLO", peer_addr);
-        }
+        // Bind a UDP socket Quinn will reuse for the QUIC connection.
+        let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .expect("Failed to bind UDP socket for QUIC signaling");
 
-        // Delay briefly to allow Relay to process the HELLO and install 5-tuple
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // ─── α-relay routing setup (FRAME_CLIENT_ROUTE) ──────────────────
+        //
+        // When a service name is supplied, send a single CLIENT_ROUTE frame
+        // to the peer BEFORE the first QUIC INITIAL on the same UDP socket.
+        // The relay treats this as a routing hint, looks up the registered
+        // gateway for `service`, and installs `{:client_map, sender} ->
+        // gateway_addr` in `:ztlp_forwarded_quic_tuples`. All subsequent UDP
+        // from this 5-tuple is then transparently echoed to that gateway —
+        // Quinn's encrypted INITIAL never has to be parsed by the relay.
+        //
+        // β-direct (no relay between client and gateway) ignores the frame
+        // safely: a real gateway sees an unrecognized magic+type triple and
+        // drops it at L1, with no impact on the subsequent QUIC handshake.
+        // So sending CLIENT_ROUTE unconditionally when `--service` is set is
+        // the right default, even when the caller doesn't know whether the
+        // peer is a relay or a gateway.
+        //
+        // Replaces the rejected dummy-Noise-UDP-HELLO hack (see prior
+        // session handoff Decisions #3); validated by the relay's
+        // CLIENT_ROUTE unit tests in `relay/test/.../udp_listener_test.exs`.
+        if let Some(svc_name) = service.as_deref() {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            // Dev-mode HMAC (None) — production should plumb the zone secret
+            // through here, mirroring the relay's `Config.registration_secret/0`.
+            match build_client_route_packet(&identity.node_id.0, svc_name, ts, None) {
+                Ok(pkt) => match std_socket.send_to(&pkt, peer_addr) {
+                    Ok(n) => {
+                        eprintln!(
+                            "{} CLIENT_ROUTE sent to {} ({} bytes, service={})",
+                            c_dim("→"),
+                            peer_addr,
+                            n,
+                            svc_name
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to send CLIENT_ROUTE to {}: {}",
+                            c_red("✗"),
+                            peer_addr,
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "{} could not build CLIENT_ROUTE for service '{}': {}",
+                        c_red("✗"),
+                        svc_name,
+                        e
+                    );
+                }
+            }
+
+            // Brief delay to let the relay install the 5-tuple before Quinn's
+            // first INITIAL races down the same socket. 50ms is well above
+            // typical GenServer→ETS latency on the relay path.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         let client =
             QuicEndpoint::connect_with_socket(QuicEndpointConfig::default(), peer_addr, "localhost", std_socket).await?;

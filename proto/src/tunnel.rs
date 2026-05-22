@@ -3056,7 +3056,10 @@ impl ServiceRegistry {
             services.insert(name, addr);
         }
 
-        Ok(Self { services, hash_to_name })
+        Ok(Self {
+            services,
+            hash_to_name,
+        })
     }
 
     /// Look up a service by the DstSvcID bytes from the handshake header.
@@ -3605,10 +3608,8 @@ mod tests {
         // is NOT the default service, so unknown hashes must reject.
         // This guards against accidentally routing arbitrary clients
         // through a tenant-named single service.
-        let reg = ServiceRegistry::from_forward_args(&[
-            "http:127.0.0.1:39023".to_string(),
-        ])
-        .unwrap();
+        let reg =
+            ServiceRegistry::from_forward_args(&["http:127.0.0.1:39023".to_string()]).unwrap();
 
         // Exact match still works.
         let http_hash = encode_service_name("http").unwrap();
@@ -3623,8 +3624,13 @@ mod tests {
     fn test_encode_service_name() {
         // SHA-256("ssh")[0:16] — hashed output, not zero-padded ASCII
         let buf = encode_service_name("ssh").unwrap();
-        assert_eq!(buf, [0x7f, 0x5a, 0x55, 0xcf, 0x3f, 0x88, 0xbe, 0x93,
-                         0x6f, 0xb9, 0x44, 0x02, 0x49, 0xcb, 0x44, 0x9f]);
+        assert_eq!(
+            buf,
+            [
+                0x7f, 0x5a, 0x55, 0xcf, 0x3f, 0x88, 0xbe, 0x93, 0x6f, 0xb9, 0x44, 0x02, 0x49, 0xcb,
+                0x44, 0x9f
+            ]
+        );
 
         // Case-insensitive: "SSH" → same hash as "ssh"
         assert_eq!(encode_service_name("SSH").unwrap(), buf);

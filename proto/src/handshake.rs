@@ -426,7 +426,15 @@ pub fn build_handshake_packet(
 
 /// Result of a completed handshake — the session state for both sides.
 pub struct HandshakeResult {
+    /// Initiator-side session (kept as `session` for backwards compat with callers
+    /// that grabbed just one side after the in-process handshake).
     pub session: SessionState,
+    /// Initiator-side session (alias for `session`). Exposes the same data under
+    /// the more descriptive name used by integration tests asserting both halves.
+    pub initiator_session: SessionState,
+    /// Responder-side session — required for tests that assert keys agree on
+    /// both ends (initiator.send_key == responder.recv_key etc.).
+    pub responder_session: SessionState,
     pub session_id: crate::packet::SessionId,
 }
 
@@ -470,7 +478,9 @@ pub fn perform_handshake(
         responder.finalize(initiator_identity.node_id, session_id)?;
 
     Ok(HandshakeResult {
-        session: init_session,
+        session: init_session.clone(),
+        initiator_session: init_session,
+        responder_session: resp_session,
         session_id,
     })
 }

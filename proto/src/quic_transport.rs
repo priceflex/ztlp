@@ -295,7 +295,7 @@ pub mod tokio_endpoint {
             })
         }
 
-                pub async fn connect_with_socket(
+        pub async fn connect_with_socket(
             cfg: QuicEndpointConfig,
             remote: SocketAddr,
             server_name: &str,
@@ -445,7 +445,12 @@ pub mod noise_stream {
         let _ = send.finish();
 
         Ok(HandshakeResult {
-            session: init_sess,
+            session: init_sess.clone(),
+            // In a network handshake we only hold the local side's session.
+            // Populate both alias fields with it so the struct stays exhaustive;
+            // QUIC callers only read `.session` / `.session_id`.
+            initiator_session: init_sess.clone(),
+            responder_session: init_sess,
             session_id,
         })
     }
@@ -473,13 +478,18 @@ pub mod noise_stream {
         ctx.read_message(&msg3)?;
 
         let (_, resp_sess) = ctx.finalize(initiator_id, session_id)?;
-        
+
         let _ = send.finish();
 
-        Ok((HandshakeResult {
-            session: resp_sess,
-            session_id,
-        }, service_hash))
+        Ok((
+            HandshakeResult {
+                session: resp_sess.clone(),
+                initiator_session: resp_sess.clone(),
+                responder_session: resp_sess,
+                session_id,
+            },
+            service_hash,
+        ))
     }
 }
 

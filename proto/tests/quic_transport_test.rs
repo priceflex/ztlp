@@ -100,7 +100,6 @@ async fn noise_handshake_over_quic_stream_zero() {
         .await
         .unwrap();
     let resp_result = server_task.await.unwrap();
-
 }
 
 #[test]

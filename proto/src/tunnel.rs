@@ -1509,7 +1509,7 @@ where
                 };
                 let remaining_chunks = num_chunks - chunk_idx;
                 let (effective_window, paced) = {
-                    let mut cc = congestion_sender.lock().await;
+                    let cc = congestion_sender.lock().await;
                     let ew = cc.effective_window();
                     let paced = cc.paced_send_count(remaining_chunks);
                     (ew, paced)

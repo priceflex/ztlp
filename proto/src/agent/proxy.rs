@@ -63,6 +63,12 @@ use super::domain_map::DomainMapper;
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Handshake timeout.
+///
+/// Currently unused — placeholder for a future agent-side handshake
+/// step that mirrors `proto/src/bin/ztlp-cli.rs::HANDSHAKE_TIMEOUT`.
+/// Kept rather than deleted so the value stays consistent if/when the
+/// agent grows its own handshake wrapper.
+#[allow(dead_code)]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Short post-handshake window to surface server-side REJECT frames.

@@ -1134,6 +1134,13 @@ fn process_recv_packet(
 }
 
 #[cfg(feature = "tokio-runtime")]
+// `unused_assignments` is allowed here because three diagnostic counters
+// (`diag_packets_decrypted`, `diag_acks_sent`, `diag_lock_contention_us`)
+// are only consumed inside `diag_log!` / `trace_info!`, which are no-op
+// macros under `not(feature = "diag")`. The increments still happen at
+// runtime, but rustc sees the assignments as never-read in that build
+// mode. See the counter declarations below for the full rationale.
+#[allow(unused_assignments)]
 async fn recv_loop(
     transport: Arc<TransportNode>,
     bytes_received: Arc<AtomicU64>,
@@ -1196,12 +1203,23 @@ async fn recv_loop(
     // ── iOS diagnostic counters ──
     // Track packet flow metrics for diagnosing iOS performance issues.
     // Logged periodically (every 100 packets or 5 seconds) to TunnelLogger.
+    //
+    // NOTE: Several of these counters are only read from inside the `diag_log!`
+    // and `trace_info!` macros, which expand to no-ops when the `diag` feature
+    // is disabled. In that build mode rustc correctly flags the assignments as
+    // unused. The counters are intentionally kept (a) so the iOS NE diag build
+    // sees consistent telemetry, and (b) because the cost of three `u64 += 1`
+    // per packet is negligible. The `#[allow]` is narrowly scoped to just the
+    // three counters that are unused under `not(feature = "diag")`.
     let mut diag_packets_received: u64 = 0;
+    #[allow(unused_assignments, unused_variables)]
     let mut diag_packets_decrypted: u64 = 0;
+    #[allow(unused_assignments, unused_variables)]
     let mut diag_acks_sent: u64 = 0;
     let mut diag_reassembly_buf_peak: usize = 0;
     let mut diag_ooo_peak: usize = 0;
     let mut diag_last_report: std::time::Instant = std::time::Instant::now();
+    #[allow(unused_assignments, unused_variables)]
     let mut diag_lock_contention_us: u64 = 0;
     const DIAG_REPORT_INTERVAL_MS: u128 = 5000; // report every 5 seconds
     const DIAG_REPORT_PACKET_INTERVAL: u64 = 200; // or every 200 packets

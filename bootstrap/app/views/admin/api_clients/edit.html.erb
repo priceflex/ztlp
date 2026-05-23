@@ -1,0 +1,8 @@
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-gray-900">Edit API Client</h1>
+  <p class="mt-1 text-sm text-gray-500"><code class="font-mono"><%= @api_client.zone %> / <%= @api_client.name %></code></p>
+</div>
+
+<div class="bg-white shadow rounded-lg p-6">
+  <%= render "form", api_client: @api_client %>
+</div>

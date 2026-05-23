@@ -30,7 +30,10 @@ class SshProvisionerTest < ActiveSupport::TestCase
     machine = machines(:gateway1)
     provisioner = SshProvisioner.new(machine)
     config = provisioner.send(:generate_config, "gateway")
-    assert_includes config, "ZTLP_GATEWAY_PORT=23098"
+    # The gateway listens on UDP 23097 (matches gateway/config/config.exs and
+    # gateway/config/runtime.exs default). The legacy 23098 value here predated
+    # the gateway becoming a pure UDP service.
+    assert_includes config, "ZTLP_GATEWAY_PORT=23097"
     assert_includes config, "ZTLP_GATEWAY_LOG_FORMAT=json"
   end
 
@@ -79,7 +82,9 @@ class SshProvisionerTest < ActiveSupport::TestCase
     assert_equal 23095, SshProvisioner::ZTLP_PORTS["relay"][:udp]
     assert_equal 23096, SshProvisioner::ZTLP_PORTS["relay"][:mesh]
     assert_equal 9101, SshProvisioner::ZTLP_PORTS["relay"][:metrics]
-    assert_equal 23098, SshProvisioner::ZTLP_PORTS["gateway"][:tcp]
+    # Gateway is UDP-only (no TCP control plane). Matches gateway/config/config.exs
+    # default of 23097 and runtime.exs ZTLP_GATEWAY_PORT default.
+    assert_equal 23097, SshProvisioner::ZTLP_PORTS["gateway"][:udp]
     assert_equal 9102, SshProvisioner::ZTLP_PORTS["gateway"][:metrics]
   end
 
@@ -287,7 +292,10 @@ class SshProvisionerTest < ActiveSupport::TestCase
   # ── Gateway sidecar ────────────────────────────────────────
 
   test "GATEWAY_SIDECAR_PORT is defined" do
-    assert_equal 23098, SshProvisioner::GATEWAY_SIDECAR_PORT
+    # Gateway sidecar listens on UDP 23097 — same as the standalone gateway
+    # default. Distinct from the relay-machine sidecar port (23099) which
+    # exists only to let the relay disambiguate its local-vs-remote gateways.
+    assert_equal 23097, SshProvisioner::GATEWAY_SIDECAR_PORT
   end
 
   test "GATEWAY_SIDECAR_RELAY_PORT is defined and different from default" do

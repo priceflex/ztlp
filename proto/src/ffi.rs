@@ -1859,7 +1859,12 @@ async fn recv_loop(
                             > DIAG_REPORT_INTERVAL_MS
                     {
                         let elapsed_ms = now_diag.duration_since(diag_last_report).as_millis();
-                        let _pps = if elapsed_ms > 0 {
+                        // `pps` and the other diag counters are only consumed
+                        // inside `diag_log!` / `trace_info!`, which expand to a
+                        // no-op under `not(feature = "diag")`. Suppress the
+                        // resulting unused_variables warning in that build.
+                        #[cfg_attr(not(feature = "diag"), allow(unused_variables))]
+                        let pps = if elapsed_ms > 0 {
                             diag_packets_received as u128 * 1000 / elapsed_ms
                         } else {
                             0
@@ -5740,7 +5745,12 @@ fn do_connect_sync(
     socket
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|e| format!("set_read_timeout: {}", e))?;
-    let _local_addr = socket
+    // `local_addr` is only consumed inside `diag_log!`, which expands to a
+    // no-op under `not(feature = "diag")`. We still hold the binding so the
+    // `socket.local_addr()` call runs (and surfaces errors); the
+    // `#[cfg_attr]` suppresses the unused_variables warning in non-diag builds.
+    #[cfg_attr(not(feature = "diag"), allow(unused_variables))]
+    let local_addr = socket
         .local_addr()
         .map_err(|e| format!("local_addr: {}", e))?;
     diag_log!(

@@ -12,7 +12,7 @@ defmodule ZtlpGateway.MixProject do
       # versions (relay, gateway, ns, proto) agree. The release_test.exs
       # "version reporting (regression pin)" block floors this at 0.29.4
       # to prevent silent down-drift going forward.
-      version: "0.29.5",
+      version: "0.29.6",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

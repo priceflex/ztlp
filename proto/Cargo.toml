@@ -1,10 +1,11 @@
 [package]
 name = "ztlp-proto"
 # Bumped 0.29.3 → 0.29.4 in PR #14 to align with the v0.29.4 strict-routing
-# git tag (PR #12) and the relay's mix.exs (PR #13). See
-# tests/version_pin_test.rs for the regression floor that catches future
-# drift, and ~/hermes_session_handoff.md "Known Problems #6" for context.
-version = "0.29.4"
+# git tag (PR #12) and the relay's mix.exs (PR #13). Bumped 0.29.4 → 0.29.5
+# in PR #15 to cut a clean v0.29.5 tag where the git tag and all four
+# declared versions agree. See tests/version_pin_test.rs for the regression
+# floor that catches future drift.
+version = "0.29.5"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

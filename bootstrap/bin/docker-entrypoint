@@ -57,4 +57,19 @@ if [ -n "$ZTLP_BOOTSTRAP_ADMIN_EMAIL" ]; then
   "
 fi
 
+# BS-PR-4: auto-create the Network row matching the zone the launch app
+# provisioned us with, so the dashboard shows the network immediately
+# without the operator having to click through a "create network"
+# wizard. Idempotent — second boot onwards is a no-op. Failures are
+# logged but do NOT block container start (Rails app should still come
+# up so the operator can fix things via the UI).
+./bin/rails ztlp:network:ensure_from_env || \
+  echo "[entrypoint] WARN: ztlp:network:ensure_from_env failed; continuing boot"
+
+# BS-PR-4: log whether the NS server (ZTLP_NS_SERVER) is reachable on
+# UDP. Diagnostic only — bootstrap stays up either way. The result is
+# visible in `docker logs ztlp-bootstrap-<slug>`.
+./bin/rails ztlp:network:check_ns_reachability || \
+  echo "[entrypoint] WARN: ztlp:network:check_ns_reachability failed; continuing boot"
+
 exec "${@}"

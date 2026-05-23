@@ -27,8 +27,6 @@
 
 #![deny(clippy::unwrap_used)]
 
-use blake2::digest::Mac;
-use blake2::Blake2sMac256;
 use rand::RngCore;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -462,28 +460,24 @@ fn read_len_prefixed_string(data: &[u8], pos: &mut usize) -> Result<String, Stri
 
 // ── HMAC-BLAKE2s ────────────────────────────────────────────────────
 
-/// Compute HMAC-BLAKE2s-256 using the `blake2` crate's keyed MAC mode.
+/// Compute HMAC-BLAKE2s-256 per RFC 2104.
 ///
-/// This is a proper HMAC construction per RFC 2104, matching the relay's
-/// `AdmissionToken.hmac_blake2s/2` implementation in Elixir.
+/// **CRITICAL:** This is the standard HMAC construction (with ipad/opad), NOT
+/// BLAKE2s's native keyed-hash mode. The Elixir NS at `ZtlpNs.Enrollment.hmac_blake2s/2`
+/// uses RFC 2104 HMAC, so any deviation here breaks token verification across
+/// the Rust/Elixir boundary.
+///
+/// Historical bug: prior to the v0.30.0 fix this function used BLAKE2s keyed
+/// mode (`Blake2sMac256::new_from_slice(key)`), which produces a *different*
+/// 32-byte MAC from RFC 2104 HMAC even though both are "BLAKE2s with a key".
+/// Tokens minted by the buggy Rust side were silently rejected by NS with the
+/// uninformative `0x08 0x03` "invalid token" wire error. See PR adding this
+/// comment for the full diagnosis.
+///
+/// Delegates to `admission::hmac_blake2s` which already had the correct
+/// RFC 2104 implementation and is byte-compatible with the Elixir relay.
 pub fn hmac_blake2s(key: &[u8], data: &[u8]) -> [u8; 32] {
-    // BLAKE2s supports keyed mode natively (up to 32-byte key).
-    // For keys > 32 bytes, hash the key first.
-    let effective_key = if key.len() > 32 {
-        use blake2::digest::Digest;
-        let hash = blake2::Blake2s256::digest(key);
-        hash.to_vec()
-    } else {
-        key.to_vec()
-    };
-
-    let mut mac =
-        Blake2sMac256::new_from_slice(&effective_key).expect("BLAKE2s accepts keys up to 32 bytes");
-    mac.update(data);
-    let result = mac.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result.into_bytes());
-    out
+    crate::admission::hmac_blake2s(key, data)
 }
 
 /// Constant-time comparison to prevent timing attacks.

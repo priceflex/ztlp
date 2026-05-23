@@ -167,6 +167,50 @@ config :ztlp_relay,
   max_sessions: 10_000            # Maximum concurrent sessions
 ```
 
+### Per-zone HMAC authentication
+
+Gateway dynamic registration and client routing are HMAC-SHA256 signed.
+The relay supports a **per-zone secret map** so multiple tenants can
+share one relay process while remaining cryptographically isolated. The
+full design lives in [`../docs/per_zone_hmac_design.md`](../docs/per_zone_hmac_design.md).
+
+**Operator quick reference:**
+
+```bash
+# 1. Mode selector — default is `dev` (accept unverified). For
+#    multi-tenant production set `prod` (reject unsigned/unmapped).
+export ZTLP_RELAY_HMAC_MODE=prod   # one of: dev | staging | prod
+
+# 2. Per-zone secrets — one env var per zone. First entry = signing
+#    key; additional comma-separated entries = grace keys for rotation.
+export ZTLP_HMAC_SECRET_ACME="$(openssl rand -hex 32)"
+export ZTLP_HMAC_SECRET_TECH_ROCKSTARS_ZTLP="primary,grace"
+
+# 3. Legacy single-secret fallback — still honored but deprecated.
+#    Emits a per-call WARN log in staging and ERROR in prod.
+export ZTLP_RELAY_REGISTRATION_SECRET="legacy-value"
+```
+
+Zone names are slugified into env-var suffixes:
+
+| Zone           | Env-var suffix         |
+|----------------|------------------------|
+| `acme`         | `ZTLP_HMAC_SECRET_ACME`|
+| `acme.ztlp`    | `ZTLP_HMAC_SECRET_ACME_ZTLP`|
+
+V1 frames (current wire format) derive the zone from the gateway's
+service name by stripping the `gw-` prefix (e.g., `gw-acme` → `acme`).
+V2 frames will carry an explicit zone field; that wire change is
+queued for a follow-up PR.
+
+**Mode policy matrix:**
+
+| Mode    | No secret configured | Wrong-zone HMAC | Matching HMAC |
+|---------|---------------------|-----------------|---------------|
+| dev     | accept (debug log)  | reject (warn)   | accept        |
+| staging | accept (warn log)   | reject (warn)   | accept        |
+| prod    | **reject (error)**  | **reject (warn)** | accept      |
+
 ## Relay Mesh
 
 The relay supports multi-relay mesh networking via consistent hashing and

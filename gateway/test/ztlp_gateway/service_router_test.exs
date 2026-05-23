@@ -38,6 +38,41 @@ defmodule ZtlpGateway.ServiceRouterTest do
       refute Map.has_key?(result, "bad_entry")
     end
 
+    test "parse_backend_config defaults protocol to :tcp when prefix is omitted" do
+      # Backward-compatibility: existing operator configs must keep working.
+      # Any entry without a "udp/" or "tcp/" prefix on the host segment is
+      # treated as TCP, matching pre-feature behavior.
+      result = ServiceRouter.parse_backend_config("web:10.0.0.1:3000")
+      assert %{"web" => [%Backend{host: "10.0.0.1", port: 3000, protocol: :tcp}]} = result
+    end
+
+    test "parse_backend_config recognizes the 'udp/' prefix on the host segment" do
+      # Wire format: service:udp/host:port → UDP backend.
+      # The "udp/" sentinel is stripped from the host before storage.
+      result = ServiceRouter.parse_backend_config("dns:udp/8.8.8.8:53")
+      assert %{"dns" => [%Backend{host: "8.8.8.8", port: 53, protocol: :udp}]} = result
+    end
+
+    test "parse_backend_config recognizes the 'tcp/' prefix as an explicit TCP marker" do
+      # Allow explicit "tcp/" for operators who want to be unambiguous.
+      result = ServiceRouter.parse_backend_config("ssh:tcp/127.0.0.1:22")
+      assert %{"ssh" => [%Backend{host: "127.0.0.1", port: 22, protocol: :tcp}]} = result
+    end
+
+    test "parse_backend_config supports mixed TCP and UDP services in one config string" do
+      # The real-world multi-service case: SSH/TCP + MySQL/TCP + DNS/UDP behind one gateway.
+      result =
+        ServiceRouter.parse_backend_config(
+          "ssh:127.0.0.1:22,mysql:127.0.0.1:3306,dns:udp/8.8.8.8:53"
+        )
+
+      assert %{
+               "ssh" => [%Backend{host: "127.0.0.1", port: 22, protocol: :tcp}],
+               "mysql" => [%Backend{host: "127.0.0.1", port: 3306, protocol: :tcp}],
+               "dns" => [%Backend{host: "8.8.8.8", port: 53, protocol: :udp}]
+             } = result
+    end
+
     test "parse_backend_config handles non-binary input" do
       assert %{} = ServiceRouter.parse_backend_config(nil)
     end

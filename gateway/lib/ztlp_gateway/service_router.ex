@@ -35,7 +35,13 @@ defmodule ZtlpGateway.ServiceRouter do
       :max_conns,
       :current_conns,
       :healthy,
-      :last_check
+      :last_check,
+      # Transport protocol used to reach this backend service.
+      # :tcp (default) routes through ZtlpGateway.Backend (the existing TCP
+      # connector). :udp routes through ZtlpGateway.UdpBackend (request-
+      # response UDP, Model A). Future protocols can be added here as new
+      # atoms — the Session dispatcher branches on this field.
+      protocol: :tcp
     ]
   end
 
@@ -339,11 +345,19 @@ defmodule ZtlpGateway.ServiceRouter do
     |> Enum.map(&String.trim/1)
     |> Enum.filter(&(&1 != ""))
     |> Enum.reduce(%{}, fn entry, acc ->
-      case String.split(entry, ":") do
-        [service, host, port] ->
+      case String.split(entry, ":", parts: 3) do
+        [service, host_segment, port] ->
+          # The host segment may carry an optional protocol prefix:
+          #   "127.0.0.1"        → TCP backend at 127.0.0.1 (default)
+          #   "tcp/127.0.0.1"    → TCP backend at 127.0.0.1 (explicit)
+          #   "udp/8.8.8.8"      → UDP backend at 8.8.8.8 (request-response)
+          # Any future protocol simply adds a new sentinel here.
+          {protocol, host} = parse_host_protocol(host_segment)
+
           backend = %Backend{
             host: host,
             port: String.to_integer(port),
+            protocol: protocol,
             weight: 100,
             max_conns: 100,
             current_conns: 0,
@@ -361,6 +375,25 @@ defmodule ZtlpGateway.ServiceRouter do
   end
 
   def parse_backend_config(_), do: %{}
+
+  # Splits an "[<proto>/]<host>" segment into `{protocol_atom, host_string}`.
+  # Unknown prefixes default to :tcp and log a warning — operators should
+  # know they fat-fingered the config rather than silently dropping the
+  # whole entry.
+  defp parse_host_protocol(host_segment) do
+    case String.split(host_segment, "/", parts: 2) do
+      ["udp", host] -> {:udp, host}
+      ["tcp", host] -> {:tcp, host}
+      [host] -> {:tcp, host}
+      [unknown_proto, host] ->
+        Logger.warning(
+          "[ServiceRouter] Unknown backend protocol #{inspect(unknown_proto)}; " <>
+            "defaulting to :tcp. Valid prefixes are 'tcp/' and 'udp/'."
+        )
+
+        {:tcp, host}
+    end
+  end
 
   defp backend_config do
     System.get_env("ZTLP_GATEWAY_BACKENDS") || ""

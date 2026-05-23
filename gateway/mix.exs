@@ -7,13 +7,12 @@ defmodule ZtlpGateway.MixProject do
     [
       app: :ztlp_gateway,
       # Bumped 0.24.0 → 0.29.4 in PR #14 to close the version-string drift
-      # that PR #13 fixed for the relay. The gateway had been pinned at
-      # 0.24.0 for five minor versions while the rest of the stack moved on,
-      # so `Application.spec(:ztlp_gateway, :vsn)` was lying about which tag
-      # was actually deployed. The release_test.exs "version reporting
-      # (regression pin)" block now floors this at 0.29.4 to prevent silent
-      # down-drift going forward.
-      version: "0.29.4",
+      # that PR #13 fixed for the relay. Bumped 0.29.4 → 0.29.5 in PR #15 to
+      # cut a clean v0.29.5 tag where the git tag and all four declared
+      # versions (relay, gateway, ns, proto) agree. The release_test.exs
+      # "version reporting (regression pin)" block floors this at 0.29.4
+      # to prevent silent down-drift going forward.
+      version: "0.29.5",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

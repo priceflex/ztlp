@@ -4,7 +4,12 @@ defmodule ZtlpRelay.MixProject do
   def project do
     [
       app: :ztlp_relay,
-      version: "0.29.4",
+      # Bumped 0.29.4 → 0.29.5 in PR #15 to cut a clean v0.29.5 tag where
+      # the git tag and all four declared versions (relay, gateway, ns,
+      # proto) agree. v0.29.4 was tagged BEFORE PR #13/#14 bumped mix.exs
+      # files, so containers built from the v0.29.4 tag misreport their
+      # runtime vsn. v0.29.5 fixes that drift by tagging AFTER the bumps.
+      version: "0.29.5",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

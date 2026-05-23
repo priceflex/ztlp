@@ -1116,6 +1116,126 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(instance_dir, "instance.env")))
         self.assertTrue(os.path.isfile(os.path.join(instance_dir, "docker-compose.yml")))
 
+    def test_provision_emits_compose_yaml_with_no_duplicate_keys(self):
+        """
+        Regression for BUG-2 (E2E walkthrough 2026-05-23): an earlier
+        edit emitted `ORG_NAME:` twice in the bootstrap service's
+        `environment:` block (once at the canonical position around
+        line 747, once again ~15 lines later under the BS-PR-4 comment).
+        Docker Compose's YAML parser rejects mappings with duplicate
+        keys, so every tenant created via the Launch flow had a
+        provisioning failure that was invisible to existing tests —
+        none of them did duplicate-key detection on the compose file.
+
+        Implementation note: the Launch app is intentionally stdlib-only
+        (see `.github/workflows/ztlp-net-tests.yml` — "Launch app is
+        intentionally stdlib-only — no pip install needed"), so we
+        cannot depend on PyYAML in test code either. We parse the
+        generated compose file with a small stdlib block-scanner
+        specialised to the layout `_provision_zone_dockers` emits:
+
+            services:
+              <service>:
+                <key>:
+                ...
+                environment:
+                  KEY: "value"
+                  ...
+                volumes:        # or any sibling key at the same indent
+
+        We walk the file line-by-line, track which service we're in,
+        and for each service's `environment:` block we record every
+        `KEY:` we see (skipping comments and blank lines). Any KEY
+        that appears more than once inside the same service's
+        environment block is reported as a BUG-2-style duplicate.
+
+        Failure on this test means a future edit re-introduced
+        BUG-2-style duplicate keys in the generated compose YAML.
+        """
+        from collections import defaultdict
+
+        row = self._create_row(org="Acme Corp", zone="acme.ztlp")
+        result = self.app._provision_zone_dockers(row)
+        self.assertIsNotNone(result)
+        compose_path = os.path.join(result["instance_dir"], "docker-compose.yml")
+        with open(compose_path) as fh:
+            compose_text = fh.read()
+
+        def _indent(line):
+            return len(line) - len(line.lstrip(" "))
+
+        # service_name -> { env_key: occurrence_count }
+        env_keys_by_service = defaultdict(lambda: defaultdict(int))
+
+        current_service = None
+        SERVICE_INDENT = 2   # LaunchApp emits services at indent 2
+        ENV_KEY_INDENT = 6   # environment KEY: at indent 6
+        in_env = False
+
+        for raw_line in compose_text.splitlines():
+            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                continue
+            ind = _indent(raw_line)
+            stripped = raw_line.strip()
+
+            # New service: `  bootstrap:` style at indent 2.
+            if ind == SERVICE_INDENT and stripped.endswith(":"):
+                # Make sure the colon is the value-separator, not part
+                # of a quoted scalar (we don't emit quoted service names).
+                name = stripped[:-1].strip()
+                if name and ":" not in name:
+                    current_service = name
+                    in_env = False
+                    continue
+
+            if current_service is None:
+                continue
+
+            # Leaving the services block entirely (back to column 0).
+            if ind == 0:
+                current_service = None
+                in_env = False
+                continue
+
+            # Enter environment: block for current service.
+            if ind == SERVICE_INDENT + 2 and stripped == "environment:":
+                in_env = True
+                continue
+
+            # Sibling service-property (volumes:, restart:, command:, ports:)
+            # ends the env block.
+            if in_env and ind <= SERVICE_INDENT + 2:
+                in_env = False
+                # Fall through — this line is a sibling, not a key.
+
+            if in_env and ind == ENV_KEY_INDENT and ":" in stripped:
+                key = stripped.split(":", 1)[0].strip()
+                if key and not key.startswith("-"):
+                    env_keys_by_service[current_service][key] += 1
+
+        # Report any duplicates.
+        duplicates = {
+            svc: sorted(k for k, count in keys.items() if count > 1)
+            for svc, keys in env_keys_by_service.items()
+        }
+        duplicates = {svc: keys for svc, keys in duplicates.items() if keys}
+
+        self.assertEqual(
+            {}, duplicates,
+            "generated docker-compose.yml has duplicate environment keys "
+            f"(BUG-2 regression): {dict(duplicates)!r}. docker compose "
+            "will refuse to parse this compose file. See "
+            "~/hermes_session_handoff.md Task B for context."
+        )
+
+        # Sanity-check: ORG_NAME must appear exactly once in bootstrap's
+        # environment block (the BS-PR-4 contract; BUG-2 made it twice).
+        self.assertEqual(
+            1, env_keys_by_service.get("bootstrap", {}).get("ORG_NAME", 0),
+            "bootstrap service must have exactly one ORG_NAME env key "
+            "(BS-PR-4 contract; BUG-2 regression check)"
+        )
+
 
 class AbsoluteUrlTest(unittest.TestCase):
     def setUp(self):

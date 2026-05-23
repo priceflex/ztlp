@@ -356,42 +356,79 @@ defmodule ZtlpRelay.UdpListener do
 
   # Handle a GATEWAY_REGISTER packet (magic + 0x0A already stripped).
   # Format after magic+type: [16 node_id][16 service_name][4 TTL][8 timestamp][32 HMAC]
+  #
+  # HMAC verification flows through `ZtlpRelay.HmacSecrets`, which
+  # implements the per-zone secret table layered over the legacy
+  # single-secret fallback. For V1 frames (this handler), the zone id
+  # is derived from the service_name by stripping the `gw-` prefix
+  # — operators running per-zone secrets should migrate to V2 frames
+  # (type byte `0x0E`) once that wire change lands. Until then a
+  # deprecation warning is emitted when a per-zone secret path is hit
+  # via V1.
+  #
+  # See `docs/per_zone_hmac_design.md` for the full design.
   defp handle_gateway_register(
          <<node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
            timestamp::64, hmac::binary-size(32)>>,
          sender
        ) do
     service_name = service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+    zone_id = derive_zone_from_service(service_name)
+    signed_data = <<0x0A, node_id::binary, service_raw::binary, ttl::32, timestamp::64>>
 
-    # Verify HMAC if a shared secret is configured
-    case Config.registration_secret() do
-      nil ->
-        # Dev mode — accept without verification
-        Logger.debug("[UdpListener] Accepting unverified GATEWAY_REGISTER from #{inspect(sender)}")
+    case ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed_data, hmac) do
+      {:ok, :primary} ->
+        log_v1_deprecation_if_zone_keyed(zone_id, sender)
+        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+
+      {:ok, :grace} ->
+        log_v1_deprecation_if_zone_keyed(zone_id, sender)
+        Logger.info(
+          "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} verified " <>
+            "with grace key — sender should upgrade to current primary key."
+        )
+
+        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+
+      {:ok, :legacy} ->
+        Logger.warning(
+          "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} accepted via " <>
+            "legacy ZTLP_RELAY_REGISTRATION_SECRET. Migrate to per-zone secret " <>
+            "ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)}."
+        )
+
+        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+
+      {:ok, :unverified_dev} ->
+        Logger.debug(
+          "[UdpListener] Accepting unverified GATEWAY_REGISTER from #{inspect(sender)} (mode=dev)"
+        )
+
         do_register_gateway(sender, node_id, service_name, ttl)
 
-      secret ->
-        # Build the message that was signed: type + node_id + service + ttl + timestamp
-        signed_data = <<0x0A, node_id::binary, service_raw::binary, ttl::32, timestamp::64>>
-        expected_hmac = :crypto.mac(:hmac, :sha256, secret, signed_data)
+      {:ok, :unverified_staging} ->
+        Logger.warning(
+          "[UdpListener] [STAGING] Accepting unverified GATEWAY_REGISTER from " <>
+            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} — " <>
+            "configure ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "before promoting to prod."
+        )
 
-        if secure_compare(expected_hmac, hmac) do
-          # Verify timestamp is within 5 minutes
-          now = System.system_time(:second)
+        do_register_gateway(sender, node_id, service_name, ttl)
 
-          if abs(now - timestamp) <= 300 do
-            do_register_gateway(sender, node_id, service_name, ttl)
-          else
-            Logger.warning(
-              "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: timestamp too old " <>
-                "(delta=#{now - timestamp}s)"
-            )
-          end
-        else
-          Logger.warning(
-            "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: invalid HMAC"
-          )
-        end
+      {:error, :bad_hmac} ->
+        Logger.warning(
+          "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: invalid HMAC " <>
+            "(zone=#{zone_id})"
+        )
+
+      {:error, :no_secret_configured_prod} ->
+        Logger.error(
+          "[UdpListener] [PROD] GATEWAY_REGISTER from #{inspect(sender)} REJECTED: " <>
+            "no secret configured for zone=#{zone_id}. " <>
+            "Set ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "and restart, or downgrade ZTLP_RELAY_HMAC_MODE to staging/dev."
+        )
     end
   end
 
@@ -400,17 +437,38 @@ defmodule ZtlpRelay.UdpListener do
     Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER from #{inspect(sender)}")
   end
 
-  # Constant-time binary comparison to prevent timing attacks on HMAC verification.
-  defp secure_compare(a, b) when byte_size(a) == byte_size(b) do
-    a_bytes = :binary.bin_to_list(a)
-    b_bytes = :binary.bin_to_list(b)
+  # Derive the per-zone key id from a V1 service_name. V1 frames don't
+  # carry an explicit zone field, so we use the service-name convention:
+  # `gw-<zone>` → `<zone>`. Services that don't match the convention
+  # use their full service_name as the zone id, which means each such
+  # service gets its own slot in the per-zone secret table.
+  defp derive_zone_from_service("gw-" <> rest), do: rest
+  defp derive_zone_from_service(other), do: other
 
-    Enum.zip(a_bytes, b_bytes)
-    |> Enum.reduce(0, fn {x, y}, acc -> Bitwise.bor(acc, Bitwise.bxor(x, y)) end)
-    |> Kernel.==(0)
+  # Only log the V1 deprecation when the verification used a per-zone
+  # key (legacy + dev/staging unverified paths don't trigger this).
+  defp log_v1_deprecation_if_zone_keyed(zone_id, sender) do
+    if ZtlpRelay.HmacSecrets.verifying_secrets(zone_id) != [] do
+      Logger.info(
+        "[UdpListener] V1 GATEWAY_REGISTER from #{inspect(sender)} verified " <>
+          "against per-zone key for zone=#{zone_id}. Migrate sender to V2 " <>
+          "frame (type 0x0E) once available — see docs/per_zone_hmac_design.md."
+      )
+    end
   end
 
-  defp secure_compare(_a, _b), do: false
+  defp guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp) do
+    now = System.system_time(:second)
+
+    if abs(now - timestamp) <= 300 do
+      do_register_gateway(sender, node_id, service_name, ttl)
+    else
+      Logger.warning(
+        "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} rejected: timestamp too old " <>
+          "(delta=#{now - timestamp}s)"
+      )
+    end
+  end
 
   defp do_register_gateway(sender, node_id, service_name, ttl) do
     # Ensure GatewayForwarder is running
@@ -466,44 +524,68 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   defp process_client_route(sender, node_id, service_name, timestamp, hmac) do
-    case Config.registration_secret() do
-      nil ->
-        # Dev mode — accept without HMAC verification, but still gate on
-        # service-name lookup to keep the routing surface conservative.
+    zone_id = derive_zone_from_service(service_name)
+
+    signed =
+      <<0x0B, node_id::binary, byte_size(service_name)::8, service_name::binary,
+        timestamp::64-signed>>
+
+    case ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed, hmac) do
+      {:ok, class} when class in [:primary, :grace, :legacy] ->
+        if class == :legacy do
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} accepted via " <>
+              "legacy ZTLP_RELAY_REGISTRATION_SECRET. Migrate to per-zone " <>
+              "secret ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)}."
+          )
+        end
+
+        # Same 300-second window as GATEWAY_REGISTER. CLIENT_ROUTE is one-shot
+        # (per-connection), so a tighter window would be safer in production —
+        # leaving it consistent for now, revisit when CLIENT_ROUTE replay
+        # protection becomes a separate hardening pass.
+        now = System.system_time(:second)
+
+        if abs(now - timestamp) <= 300 do
+          do_install_client_route(sender, node_id, service_name)
+        else
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: timestamp too old " <>
+              "(delta=#{now - timestamp}s)"
+          )
+        end
+
+      {:ok, :unverified_dev} ->
         Logger.debug(
           "[UdpListener] Accepting unverified CLIENT_ROUTE from #{inspect(sender)} " <>
-            "service=#{service_name}"
+            "service=#{service_name} (mode=dev)"
         )
 
         do_install_client_route(sender, node_id, service_name)
 
-      secret ->
-        signed =
-          <<0x0B, node_id::binary, byte_size(service_name)::8, service_name::binary,
-            timestamp::64-signed>>
+      {:ok, :unverified_staging} ->
+        Logger.warning(
+          "[UdpListener] [STAGING] Accepting unverified CLIENT_ROUTE from " <>
+            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} — " <>
+            "configure ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "before promoting to prod."
+        )
 
-        expected_hmac = :crypto.mac(:hmac, :sha256, secret, signed)
+        do_install_client_route(sender, node_id, service_name)
 
-        if secure_compare(expected_hmac, hmac) do
-          now = System.system_time(:second)
+      {:error, :bad_hmac} ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: invalid HMAC " <>
+            "(zone=#{zone_id})"
+        )
 
-          # Same 300-second window as GATEWAY_REGISTER. CLIENT_ROUTE is one-shot
-          # (per-connection), so a tighter window would be safer in production —
-          # leaving it consistent for now, revisit when CLIENT_ROUTE replay
-          # protection becomes a separate hardening pass.
-          if abs(now - timestamp) <= 300 do
-            do_install_client_route(sender, node_id, service_name)
-          else
-            Logger.warning(
-              "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: timestamp too old " <>
-                "(delta=#{now - timestamp}s)"
-            )
-          end
-        else
-          Logger.warning(
-            "[UdpListener] CLIENT_ROUTE from #{inspect(sender)} rejected: invalid HMAC"
-          )
-        end
+      {:error, :no_secret_configured_prod} ->
+        Logger.error(
+          "[UdpListener] [PROD] CLIENT_ROUTE from #{inspect(sender)} REJECTED: " <>
+            "no secret configured for zone=#{zone_id}. " <>
+            "Set ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "and restart, or downgrade ZTLP_RELAY_HMAC_MODE to staging/dev."
+        )
     end
   end
 

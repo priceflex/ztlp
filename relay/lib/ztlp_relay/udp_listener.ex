@@ -123,15 +123,17 @@ defmodule ZtlpRelay.UdpListener do
     sender = {src_ip, src_port}
 
     # First attempt to route known data flows dynamically
-    is_data_forwarded = GatewayForwarder.lookup_by_peer(sender)
-        |> case do
-            {:ok, _session_id, other_peer} ->
-                :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
-                ZtlpRelay.Stats.increment(:forwarded)
-                true
-            :error ->
-                false
-        end
+    is_data_forwarded =
+      GatewayForwarder.lookup_by_peer(sender)
+      |> case do
+        {:ok, _session_id, other_peer} ->
+          :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
+          ZtlpRelay.Stats.increment(:forwarded)
+          true
+
+        :error ->
+          false
+      end
 
     # ------------------------------------------------------------------
     # QUIC fast 5-tuple bypass — STRICTLY gated.
@@ -241,8 +243,7 @@ defmodule ZtlpRelay.UdpListener do
                     {{:client_map, client_addr}, {^sender, inserted_at}}, nil ->
                       {client_addr, inserted_at}
 
-                    {{:client_map, client_addr}, {^sender, inserted_at}},
-                    {_, best_at} = _best
+                    {{:client_map, client_addr}, {^sender, inserted_at}}, {_, best_at} = _best
                     when inserted_at > best_at ->
                       {client_addr, inserted_at}
 
@@ -287,7 +288,6 @@ defmodule ZtlpRelay.UdpListener do
         false
       end
 
-
     if not is_data_forwarded and not is_quic_forwarded do
       # L1 validation
       case data do
@@ -296,6 +296,19 @@ defmodule ZtlpRelay.UdpListener do
 
         <<0x5A, 0x37, 0x0B, rest::binary>> ->
           handle_client_route(rest, sender, state)
+
+        # V2 wire frames (Task #2 Phase 1.5) — carry an explicit zone_id
+        # field so per-zone HMAC verification doesn't rely on the V1
+        # `gw-<zone>` service-name convention. See
+        # `docs/per_zone_hmac_design.md` § "Wire format" for the byte
+        # layout. Operators running per-zone secrets should migrate
+        # senders to these frames; V1 frames remain accepted indefinitely
+        # via the legacy/service-name-derived zone path.
+        <<0x5A, 0x37, 0x0E, rest::binary>> ->
+          handle_gateway_register_v2(rest, sender)
+
+        <<0x5A, 0x37, 0x0F, rest::binary>> ->
+          handle_client_route_v2(rest, sender, state)
 
         _ ->
           handle_packet(data, sender, state)
@@ -368,11 +381,13 @@ defmodule ZtlpRelay.UdpListener do
   #
   # See `docs/per_zone_hmac_design.md` for the full design.
   defp handle_gateway_register(
-         <<node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
-           timestamp::64, hmac::binary-size(32)>>,
+         <<node_id::binary-size(16), service_raw::binary-size(16), ttl::32, timestamp::64,
+           hmac::binary-size(32)>>,
          sender
        ) do
-    service_name = service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+    service_name =
+      service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+
     zone_id = derive_zone_from_service(service_name)
     signed_data = <<0x0A, node_id::binary, service_raw::binary, ttl::32, timestamp::64>>
 
@@ -383,6 +398,7 @@ defmodule ZtlpRelay.UdpListener do
 
       {:ok, :grace} ->
         log_v1_deprecation_if_zone_keyed(zone_id, sender)
+
         Logger.info(
           "[UdpListener] GATEWAY_REGISTER from #{inspect(sender)} verified " <>
             "with grace key — sender should upgrade to current primary key."
@@ -484,6 +500,146 @@ defmodule ZtlpRelay.UdpListener do
   end
 
   # ---------------------------------------------------------------------------
+  # GATEWAY_REGISTER_V2 (FRAME_GATEWAY_REGISTER_V2 / 0x5A 0x37 0x0E)
+  # ---------------------------------------------------------------------------
+  #
+  # Wire format (after `0x5A 0x37 0x0E` magic+type already stripped):
+  #
+  #   [1  zone_len]
+  #   [zone_len  zone_id]              (1..=63 bytes, RFC1035 DNS label)
+  #   [16 node_id]
+  #   [16 service_padded]              (zero-padded ASCII, matches V1 layout)
+  #   [4  ttl]                         (big-endian u32)
+  #   [8  timestamp]                   (big-endian unix seconds)
+  #   [32 hmac]                        (HMAC-SHA256)
+  #
+  # Signed material (what HMAC-SHA256 is computed over):
+  #
+  #   0x0E || zone_len (1B) || zone_id || node_id || service_padded
+  #        || ttl (4B) || timestamp (8B)
+  #
+  # The wire magic (`0x5A 0x37`) is intentionally NOT part of the signed
+  # material — it's a framing concern, not a payload concern. The HMAC
+  # field itself is also excluded. This mirrors the V1 spec but with the
+  # `zone_id` field included explicitly so per-zone secret lookup no
+  # longer depends on the `gw-<zone>` service-name convention.
+  #
+  # See `docs/per_zone_hmac_design.md` § "Wire format" for the canonical
+  # spec and rationale.
+  defp handle_gateway_register_v2(
+         <<zone_len::8, rest::binary>>,
+         sender
+       )
+       when zone_len >= 1 and zone_len <= 63 do
+    case rest do
+      <<zone_id::binary-size(zone_len), node_id::binary-size(16), service_raw::binary-size(16),
+        ttl::32, timestamp::64, hmac::binary-size(32)>> ->
+        service_name =
+          service_raw
+          |> :binary.bin_to_list()
+          |> Enum.take_while(&(&1 != 0))
+          |> to_string()
+
+        signed_data =
+          <<0x0E, zone_len::8, zone_id::binary, node_id::binary, service_raw::binary, ttl::32,
+            timestamp::64>>
+
+        verify_gateway_register_v2(
+          sender,
+          zone_id,
+          node_id,
+          service_name,
+          ttl,
+          timestamp,
+          signed_data,
+          hmac
+        )
+
+      _ ->
+        Logger.warning(
+          "[UdpListener] Malformed GATEWAY_REGISTER_V2 from #{inspect(sender)} " <>
+            "(zone_len=#{zone_len}, body too short)"
+        )
+    end
+  end
+
+  defp handle_gateway_register_v2(_data, sender) do
+    Logger.warning(
+      "[UdpListener] Malformed GATEWAY_REGISTER_V2 from #{inspect(sender)} " <>
+        "(zone_len out of range 1..63)"
+    )
+  end
+
+  defp verify_gateway_register_v2(
+         sender,
+         zone_id,
+         node_id,
+         service_name,
+         ttl,
+         timestamp,
+         signed_data,
+         hmac
+       ) do
+    case ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed_data, hmac) do
+      {:ok, class} when class in [:primary, :grace] ->
+        if class == :grace do
+          Logger.info(
+            "[UdpListener] GATEWAY_REGISTER_V2 from #{inspect(sender)} verified " <>
+              "with grace key (zone=#{zone_id}) — sender should upgrade to current primary key."
+          )
+        end
+
+        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+
+      {:ok, :legacy} ->
+        # V2 frames carry an explicit zone_id; falling back to the legacy
+        # single secret is supported during migration but emits a louder
+        # warning than V1 because the operator clearly intended per-zone
+        # auth (or they would still be sending V1).
+        Logger.warning(
+          "[UdpListener] GATEWAY_REGISTER_V2 from #{inspect(sender)} zone=#{zone_id} " <>
+            "accepted via legacy ZTLP_RELAY_REGISTRATION_SECRET. Configure " <>
+            "ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "and remove the legacy fallback."
+        )
+
+        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+
+      {:ok, :unverified_dev} ->
+        Logger.debug(
+          "[UdpListener] Accepting unverified GATEWAY_REGISTER_V2 from #{inspect(sender)} " <>
+            "zone=#{zone_id} (mode=dev)"
+        )
+
+        do_register_gateway(sender, node_id, service_name, ttl)
+
+      {:ok, :unverified_staging} ->
+        Logger.warning(
+          "[UdpListener] [STAGING] Accepting unverified GATEWAY_REGISTER_V2 from " <>
+            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} — " <>
+            "configure ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "before promoting to prod."
+        )
+
+        do_register_gateway(sender, node_id, service_name, ttl)
+
+      {:error, :bad_hmac} ->
+        Logger.warning(
+          "[UdpListener] GATEWAY_REGISTER_V2 from #{inspect(sender)} rejected: " <>
+            "invalid HMAC (zone=#{zone_id})"
+        )
+
+      {:error, :no_secret_configured_prod} ->
+        Logger.error(
+          "[UdpListener] [PROD] GATEWAY_REGISTER_V2 from #{inspect(sender)} REJECTED: " <>
+            "no secret configured for zone=#{zone_id}. " <>
+            "Set ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "and restart, or downgrade ZTLP_RELAY_HMAC_MODE to staging/dev."
+        )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # CLIENT_ROUTE — α-relay routing setup (FRAME_CLIENT_ROUTE / 0x5A 0x37 0x0B)
   # ---------------------------------------------------------------------------
   #
@@ -506,8 +662,7 @@ defmodule ZtlpRelay.UdpListener do
        )
        when svc_len > 0 and svc_len <= 63 do
     case rest do
-      <<service_name::binary-size(svc_len), timestamp::64-signed,
-        hmac::binary-size(32)>> ->
+      <<service_name::binary-size(svc_len), timestamp::64-signed, hmac::binary-size(32)>> ->
         process_client_route(sender, node_id, service_name, timestamp, hmac)
 
       _ ->
@@ -663,6 +818,139 @@ defmodule ZtlpRelay.UdpListener do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # CLIENT_ROUTE_V2 (FRAME_CLIENT_ROUTE_V2 / 0x5A 0x37 0x0F)
+  # ---------------------------------------------------------------------------
+  #
+  # Wire format (after `0x5A 0x37 0x0F` magic+type already stripped):
+  #
+  #   [1  zone_len]
+  #   [zone_len  zone_id]              (1..=63 bytes, RFC1035 DNS label)
+  #   [16 node_id]
+  #   [1  svc_len]
+  #   [svc_len  service_name]          (1..=63 bytes, length-prefixed)
+  #   [8  timestamp]                   (big-endian unix seconds, signed)
+  #   [32 hmac]                        (HMAC-SHA256)
+  #
+  # Signed material:
+  #
+  #   0x0F || zone_len (1B) || zone_id || node_id || svc_len (1B)
+  #        || service_name || timestamp (8B)
+  #
+  # Same exclusion rules as GATEWAY_REGISTER_V2: wire magic and the HMAC
+  # field itself are NOT part of the signed material.
+  defp handle_client_route_v2(
+         <<zone_len::8, rest::binary>>,
+         sender,
+         _state
+       )
+       when zone_len >= 1 and zone_len <= 63 do
+    case rest do
+      <<zone_id::binary-size(zone_len), node_id::binary-size(16), svc_len::8, rest2::binary>>
+      when svc_len >= 1 and svc_len <= 63 ->
+        case rest2 do
+          <<service_name::binary-size(svc_len), timestamp::64-signed, hmac::binary-size(32)>> ->
+            signed_data =
+              <<0x0F, zone_len::8, zone_id::binary, node_id::binary, svc_len::8,
+                service_name::binary, timestamp::64-signed>>
+
+            process_client_route_v2(
+              sender,
+              zone_id,
+              node_id,
+              service_name,
+              timestamp,
+              signed_data,
+              hmac
+            )
+
+          _ ->
+            Logger.warning(
+              "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
+                "malformed payload (svc_len=#{svc_len})"
+            )
+        end
+
+      _ ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
+            "malformed header (zone_len=#{zone_len}, svc_len out of range or body short)"
+        )
+    end
+  end
+
+  defp handle_client_route_v2(_data, sender, _state) do
+    Logger.warning(
+      "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
+        "malformed header (zone_len out of range 1..63)"
+    )
+  end
+
+  defp process_client_route_v2(
+         sender,
+         zone_id,
+         node_id,
+         service_name,
+         timestamp,
+         signed_data,
+         hmac
+       ) do
+    case ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed_data, hmac) do
+      {:ok, class} when class in [:primary, :grace, :legacy] ->
+        if class == :legacy do
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} zone=#{zone_id} " <>
+              "accepted via legacy ZTLP_RELAY_REGISTRATION_SECRET. Configure " <>
+              "ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+              "and remove the legacy fallback."
+          )
+        end
+
+        now = System.system_time(:second)
+
+        if abs(now - timestamp) <= 300 do
+          do_install_client_route(sender, node_id, service_name)
+        else
+          Logger.warning(
+            "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
+              "timestamp too old (delta=#{now - timestamp}s)"
+          )
+        end
+
+      {:ok, :unverified_dev} ->
+        Logger.debug(
+          "[UdpListener] Accepting unverified CLIENT_ROUTE_V2 from #{inspect(sender)} " <>
+            "service=#{service_name} zone=#{zone_id} (mode=dev)"
+        )
+
+        do_install_client_route(sender, node_id, service_name)
+
+      {:ok, :unverified_staging} ->
+        Logger.warning(
+          "[UdpListener] [STAGING] Accepting unverified CLIENT_ROUTE_V2 from " <>
+            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} — " <>
+            "configure ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "before promoting to prod."
+        )
+
+        do_install_client_route(sender, node_id, service_name)
+
+      {:error, :bad_hmac} ->
+        Logger.warning(
+          "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
+            "invalid HMAC (zone=#{zone_id})"
+        )
+
+      {:error, :no_secret_configured_prod} ->
+        Logger.error(
+          "[UdpListener] [PROD] CLIENT_ROUTE_V2 from #{inspect(sender)} REJECTED: " <>
+            "no secret configured for zone=#{zone_id}. " <>
+            "Set ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
+            "and restart, or downgrade ZTLP_RELAY_HMAC_MODE to staging/dev."
+        )
+    end
+  end
+
   # The QUIC tuple table is normally created on first GATEWAY_REGISTER. If a
   # CLIENT_ROUTE arrives before any gateway has registered, this guard makes
   # the relay tolerant of either ordering.
@@ -715,7 +1003,10 @@ defmodule ZtlpRelay.UdpListener do
                 :ok
 
               :error ->
-                Logger.debug("Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}")
+                Logger.debug(
+                  "Dropped packet from #{inspect(sender)} at layer #{layer}: #{reason}"
+                )
+
                 :ok
             end
         end
@@ -873,11 +1164,15 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
 
               {:error, _} ->
-                Logger.debug("Received HELLO from #{inspect(sender)} but session already established")
+                Logger.debug(
+                  "Received HELLO from #{inspect(sender)} but session already established"
+                )
             end
 
           true ->
-            Logger.debug("Received HELLO from unknown peer #{inspect(sender)} on existing session")
+            Logger.debug(
+              "Received HELLO from unknown peer #{inspect(sender)} on existing session"
+            )
         end
 
       :error ->
@@ -935,7 +1230,9 @@ defmodule ZtlpRelay.UdpListener do
                 Stats.increment(:forwarded)
 
               {:error, _} ->
-                Logger.debug("Received HELLO_ACK from #{inspect(sender)} but session not half-open")
+                Logger.debug(
+                  "Received HELLO_ACK from #{inspect(sender)} but session not half-open"
+                )
             end
 
           true ->
@@ -1008,6 +1305,7 @@ defmodule ZtlpRelay.UdpListener do
                       "Session-ID routed (GW-fwd): #{Base.encode16(session_id)} " <>
                         "from #{inspect(sender)} -> forwarding to gateway"
                     )
+
                     {dest_ip, dest_port} = gateway_addr
                     :gen_udp.send(state.socket, dest_ip, dest_port, data)
                     Stats.increment(:forwarded)
@@ -1023,7 +1321,10 @@ defmodule ZtlpRelay.UdpListener do
             if state.mesh_enabled do
               mesh_route_packet(session_id, data, sender, state)
             else
-              Logger.debug("No session found for #{Base.encode16(session_id)} from #{inspect(sender)}")
+              Logger.debug(
+                "No session found for #{Base.encode16(session_id)} from #{inspect(sender)}"
+              )
+
               :ok
             end
         end
@@ -1066,9 +1367,7 @@ defmodule ZtlpRelay.UdpListener do
 
       # peer_a sent but peer_b not yet known
       sender == peer_a and peer_b == nil ->
-        Logger.debug(
-          "Packet from peer_a but peer_b unknown — dropping"
-        )
+        Logger.debug("Packet from peer_a but peer_b unknown — dropping")
 
         :ok
 
@@ -1081,15 +1380,14 @@ defmodule ZtlpRelay.UdpListener do
   defp handle_unknown_sender(data, sender, peer_a, peer_b, pid, state) do
     {sender_ip, sender_port} = sender
     {peer_b_ip, peer_b_port} = peer_b
-    _ = peer_b_ip  # used in gateway migration detection
+    # used in gateway migration detection
+    _ = peer_b_ip
     gateway_ips = GatewayForwarder.known_gateway_ips()
     same_port = sender_port == peer_b_port
 
     cond do
       sender_ip in gateway_ips and same_port ->
-        Logger.info(
-          "Gateway address migration: peer_b #{inspect(peer_b)} -> #{inspect(sender)}"
-        )
+        Logger.info("Gateway address migration: peer_b #{inspect(peer_b)} -> #{inspect(sender)}")
 
         if is_pid(pid), do: Session.update_peer_b(pid, sender)
         SessionRegistry.update_peer_b(state.session_id, sender)
@@ -1100,9 +1398,7 @@ defmodule ZtlpRelay.UdpListener do
         if is_pid(pid), do: Session.forward(pid)
 
       sender_ip not in gateway_ips ->
-        Logger.debug(
-          "Session-ID routed: from #{inspect(sender)} -> forwarding to gateway"
-        )
+        Logger.debug("Session-ID routed: from #{inspect(sender)} -> forwarding to gateway")
 
         {dest_ip, dest_port} = peer_b
         :gen_udp.send(state.socket, dest_ip, dest_port, data)

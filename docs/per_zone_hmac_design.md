@@ -246,12 +246,25 @@ running per-zone secrets MUST move to V2 frames within one release
 cycle; V1 with per-zone secrets emits a deprecation WARN on every
 verification.
 
-### V2 frame handler (Phase 1.5)
+### V2 frame handler (Phase 1.5 — LANDED in v0.29.6)
 
-Phase 1 of this design lands the `HmacSecrets` module and the V1
-fallback path only. The wire format additions (V2 type bytes `0x0E` /
-`0x0F` in both relay listener and gateway registrar) ship in a
-follow-up commit so the V1 fallback can be exercised in staging first.
+Phase 1 of this design landed the `HmacSecrets` module and the V1
+fallback path (PR #20, merged 2026-05-23).
+
+Phase 1.5 ships the V2 wire-format additions on the **relay side**:
+type bytes `0x0E` (`GATEWAY_REGISTER_V2`) and `0x0F` (`CLIENT_ROUTE_V2`)
+are now dispatched by `ZtlpRelay.UdpListener.handle_info/2` to dedicated
+`handle_gateway_register_v2/2` and `handle_client_route_v2/3` clauses.
+
+Both V2 handlers parse the explicit `zone_id` field directly out of the
+frame and pass it to `HmacSecrets.verify_with_policy/3` — no
+service-name-derived synthetic zone. The V1 deprecation logger is no
+longer emitted because the sender is already on V2.
+
+Phase 2 (gateway-side V2 signing) is queued. Until it lands, V2 frames
+will only arrive from test traffic; production gateways still emit V1
+frames and the relay continues to accept those via the legacy/
+service-name-derived path (no regression).
 
 ---
 

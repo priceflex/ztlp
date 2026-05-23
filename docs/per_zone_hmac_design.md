@@ -246,25 +246,37 @@ running per-zone secrets MUST move to V2 frames within one release
 cycle; V1 with per-zone secrets emits a deprecation WARN on every
 verification.
 
-### V2 frame handler (Phase 1.5 — LANDED in v0.29.6)
+### V2 frame handler (Phase 1.5 — LANDED in v0.29.6 / PR #21) + V2 signer (Phase 2 — LANDED in v0.29.6)
 
 Phase 1 of this design landed the `HmacSecrets` module and the V1
 fallback path (PR #20, merged 2026-05-23).
 
-Phase 1.5 ships the V2 wire-format additions on the **relay side**:
-type bytes `0x0E` (`GATEWAY_REGISTER_V2`) and `0x0F` (`CLIENT_ROUTE_V2`)
-are now dispatched by `ZtlpRelay.UdpListener.handle_info/2` to dedicated
-`handle_gateway_register_v2/2` and `handle_client_route_v2/3` clauses.
+Phase 1.5 shipped the V2 wire-format additions on the **relay side**
+(PR #21, merged 2026-05-23): type bytes `0x0E`
+(`GATEWAY_REGISTER_V2`) and `0x0F` (`CLIENT_ROUTE_V2`) are now
+dispatched by `ZtlpRelay.UdpListener.handle_info/2` to dedicated
+`handle_gateway_register_v2/2` and `handle_client_route_v2/3`
+clauses. Both V2 handlers parse the explicit `zone_id` field
+directly out of the frame and pass it to
+`HmacSecrets.verify_with_policy/3` — no service-name-derived
+synthetic zone.
 
-Both V2 handlers parse the explicit `zone_id` field directly out of the
-frame and pass it to `HmacSecrets.verify_with_policy/3` — no
-service-name-derived synthetic zone. The V1 deprecation logger is no
-longer emitted because the sender is already on V2.
+Phase 2 ships the V2 signer on the **gateway side**:
+`ZtlpGateway.HmacSecrets` (signer-only subset of the relay's module)
+reads per-zone secrets from `ZTLP_HMAC_SECRET_<UPCASE_ZONE>`, and
+`ZtlpGateway.RelayRegistrar` emits V2 frames when
+`ZTLP_GATEWAY_USE_V2_FRAMES=true` AND a per-zone secret is
+configured for the service's derived zone. With the flag off (the
+default), V1 emission is byte-identical to v0.29.5. With the flag
+on but no per-zone secret for a given service, the registrar falls
+back to V1 emission for that service with a loud WARN — so a
+half-provisioned multi-service gateway doesn't go dark during a
+partial Phase 3 rollout.
 
-Phase 2 (gateway-side V2 signing) is queued. Until it lands, V2 frames
-will only arrive from test traffic; production gateways still emit V1
-frames and the relay continues to accept those via the legacy/
-service-name-derived path (no regression).
+The zone derivation rule on the gateway side mirrors the relay's V1
+derivation (`"gw-" <> rest` → `rest`, else service_name unchanged),
+so V1 and V2 frames look up the same `ZTLP_HMAC_SECRET_<ZONE>`
+slot for a given service.
 
 ---
 

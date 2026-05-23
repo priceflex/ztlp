@@ -5,7 +5,7 @@ name = "ztlp-proto"
 # in PR #15 to cut a clean v0.29.5 tag where the git tag and all four
 # declared versions agree. See tests/version_pin_test.rs for the regression
 # floor that catches future drift.
-version = "0.29.6"
+version = "0.30.0"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

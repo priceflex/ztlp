@@ -1078,6 +1078,14 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         self.assertNotIn("--header-hmac-secret \\\"$ZTLP_GATEWAY_HEADER_SECRET\\\"", compose_text)
         self.assertIn("$$ZTLP_ADMIN_PUBKEY_HEX", compose_text)
         self.assertIn("$$ZTLP_ADMIN_EMAIL", compose_text)
+        # BS-PR-4: the bootstrap container needs ZTLP_NS_SERVER + ORG_NAME
+        # so its boot-time auto-network + NS-reachability tasks have the
+        # data they need. Both are injected via the `environment:` block on
+        # the bootstrap service.
+        self.assertIn("ZTLP_NS_SERVER:", compose_text,
+                      "BS-PR-4: bootstrap container must receive ZTLP_NS_SERVER")
+        self.assertIn('ORG_NAME: "Acme Corp"', compose_text,
+                      "BS-PR-4: bootstrap container must receive ORG_NAME for Network row display")
         # subprocess.run should have been invoked with `docker compose up -d`.
         self.assertTrue(self._calls, "expected subprocess.run to have been called")
         last = self._calls[-1]

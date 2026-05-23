@@ -748,6 +748,19 @@ class LaunchApp:
                 f"      ADMIN_EMAIL: \"{admin_email}\"\n"
                 f"      ADMIN_NAME: \"{admin_name}\"\n"
                 f"      ZONE: \"{zone}\"\n"
+                # BS-PR-4: tell the bootstrap container where to find
+                # the NS so its boot-time UDP reachability diagnostic
+                # logs a useful status line. The bootstrap container
+                # uses LAUNCH_NS_SERVER (the address the launch app
+                # itself uses to register tenants); this is the same
+                # endpoint the tenant gateway is configured against.
+                f"      ZTLP_NS_SERVER: \"{LAUNCH_NS_SERVER}\"\n"
+                # BS-PR-4: pass ORG_NAME explicitly so the auto-created
+                # Network row uses a human-readable display name.
+                # `ZONE` alone produces `Network acme.ztlp`; with
+                # ORG_NAME we get `Acme Inc` (or whatever the tenant
+                # typed during ztlp.net signup).
+                f"      ORG_NAME: \"{org_name}\"\n"
                 "      # The bootstrap entrypoint reads ZTLP_BOOTSTRAP_ADMIN_EMAIL\n"
                 "      # to auto-promote the registering admin to super_admin on\n"
                 "      # first start. The matching ZTLP_BOOTSTRAP_ADMIN_PASSWORD is\n"

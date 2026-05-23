@@ -147,6 +147,14 @@ Rails.application.routes.draw do
     post "events", to: "status#event", as: :events
     get  "benchmarks", to: "benchmarks#index", as: :benchmarks
     post "benchmarks", to: "benchmarks#create", as: :create_benchmark
+
+    # ZTLP-secured v1 API surface (BS-PR-2). Every action under this
+    # namespace runs `Api::V1::BaseController#authenticate_ztlp_request!`
+    # — see `app/services/ztlp/api_authenticator.rb` for the header
+    # contract. No API keys; auth is per-zone HMAC.
+    namespace :v1 do
+      get "health", to: "health#show", as: :health
+    end
   end
 
   # Documentation

@@ -1,0 +1,6 @@
+z2ls_acme:
+  name: "z2ls.acme"
+  zone: "acme.ztlp"
+  active: true
+  notes: "Z2LS for the acme tenant — BS-PR-2 test fixture"
+  created_by_admin_user_id: 1

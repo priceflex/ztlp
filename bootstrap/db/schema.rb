@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_05_09_000000) do
+ActiveRecord::Schema[7.1].define(version: 2026_05_23_060000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -44,6 +44,20 @@ ActiveRecord::Schema[7.1].define(version: 2026_05_09_000000) do
     t.index ["network_id"], name: "index_alerts_on_network_id"
     t.index ["resolved_at"], name: "index_alerts_on_resolved_at"
     t.index ["severity"], name: "index_alerts_on_severity"
+  end
+
+  create_table "api_clients", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "zone", null: false
+    t.binary "ed25519_pubkey"
+    t.text "notes"
+    t.boolean "active", default: true, null: false
+    t.integer "created_by_admin_user_id"
+    t.datetime "last_used_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["active"], name: "index_api_clients_on_active"
+    t.index ["zone", "name"], name: "index_api_clients_on_zone_and_name", unique: true
   end
 
   create_table "audit_logs", force: :cascade do |t|

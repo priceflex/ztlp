@@ -393,7 +393,7 @@ class SshProvisioner
 
     when "gateway"
       lines = [
-        "ZTLP_GATEWAY_PORT=#{ZTLP_PORTS['gateway'][:tcp]}",
+        "ZTLP_GATEWAY_PORT=#{ZTLP_PORTS['gateway'][:udp]}",
         "ZTLP_GATEWAY_LOG_FORMAT=json",
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['gateway'][:metrics]}"
       ]

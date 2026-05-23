@@ -755,12 +755,11 @@ class LaunchApp:
                 # itself uses to register tenants); this is the same
                 # endpoint the tenant gateway is configured against.
                 f"      ZTLP_NS_SERVER: \"{LAUNCH_NS_SERVER}\"\n"
-                # BS-PR-4: pass ORG_NAME explicitly so the auto-created
-                # Network row uses a human-readable display name.
-                # `ZONE` alone produces `Network acme.ztlp`; with
-                # ORG_NAME we get `Acme Inc` (or whatever the tenant
-                # typed during ztlp.net signup).
-                f"      ORG_NAME: \"{org_name}\"\n"
+                # BS-PR-4 NOTE: ORG_NAME is emitted above (line ~747); it is
+                # consumed by Bootstrap's auto-created Network row to produce
+                # a human-readable display name (e.g. "Acme Inc" instead of
+                # "Network acme.ztlp"). Do NOT duplicate it here — docker
+                # compose rejects compose files with duplicate mapping keys.
                 "      # The bootstrap entrypoint reads ZTLP_BOOTSTRAP_ADMIN_EMAIL\n"
                 "      # to auto-promote the registering admin to super_admin on\n"
                 "      # first start. The matching ZTLP_BOOTSTRAP_ADMIN_PASSWORD is\n"

@@ -272,8 +272,26 @@ defmodule ZtlpGateway.TlsPhase2Test do
   end
 
   describe "end-to-end: HTTP header injection" do
-    @tag :flaky
+    # NOTE: tests in this describe block authenticate with a client cert, so they
+    # go through PolicyEngine.authorize?/2 (TlsSession.check_policy/1). Without
+    # an explicit "localhost" rule, authorize? falls back to "default" and
+    # returns false, the session is rejected with :policy_denied, and the
+    # backend's :gen_tcp.accept/2 times out at 15s producing a confusing
+    # `MatchError {:error, :timeout}` at the spawn_link line.
+    #
+    # This bug was latent for months because the full suite happened to run
+    # other tests earlier that left a permissive "localhost" rule in the
+    # PolicyEngine ETS table (e.g. tls_phase2_test.exs:430, :472, :766) — at
+    # seed 1 those leaked rules made the test pass; at seed 55290 the ordering
+    # ran this test first and it failed deterministically. Running this single
+    # test in isolation always failed.
+    #
+    # Fix: each test that uses client certs in identity mode MUST insert its own
+    # "localhost" policy rule. Tests are responsible for their own preconditions.
     test "injects identity headers for mTLS connections in identity mode", %{pki: pki} do
+      # Allow the test node to reach "localhost" — required because identity
+      # mode runs PolicyEngine.authorize?/2 with the client's identity.
+      PolicyEngine.put_rule("localhost", :all)
       # Start a backend that captures the received data
       parent = self()
 

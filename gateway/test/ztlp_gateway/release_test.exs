@@ -27,6 +27,58 @@ defmodule ZtlpGateway.ReleaseTest do
     end
   end
 
+  describe "version reporting (regression pin)" do
+    # These tests mirror the regression pins added to relay/test/.../release_test.exs
+    # in PR #13. The relay defect that motivated them — git tag cut without
+    # bumping mix.exs, so `Application.spec(_, :vsn)` lied at runtime — is
+    # structurally possible in every Elixir component in this repo. Gateway
+    # is one of those components; it stayed pinned at 0.24.0 for five minor
+    # versions while the rest of the stack moved on, which is exactly the kind
+    # of silent drift these tests are designed to surface.
+    #
+    # See also: ns/test/ztlp_ns/release_test.exs (sibling block), and the
+    # "Known Problems #6 / Open Question #1" entries in hermes_session_handoff.md.
+
+    test "mix.exs version is a parseable semver string" do
+      version = ZtlpGateway.MixProject.project()[:version]
+      assert is_binary(version), "project version must be a string"
+
+      assert Regex.match?(~r/^\d+\.\d+\.\d+(-[A-Za-z0-9.+-]+)?$/, version),
+             "version #{inspect(version)} must look like MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-PRE"
+    end
+
+    test "runtime-reported vsn matches mix.exs version (no drift between tag and OTP release)" do
+      # `Application.spec/2` reads the value the OTP release was compiled with.
+      # Mismatch == the .app file is stale, OR mix.exs was bumped without a
+      # recompile, OR (the case PR #13 caught) a git tag was cut without
+      # touching mix.exs. Any of those make `docker exec ... rpc
+      # 'Application.spec(:ztlp_gateway, :vsn)'` lie about which tag is live.
+      declared = ZtlpGateway.MixProject.project()[:version]
+      runtime = to_string(Application.spec(:ztlp_gateway, :vsn))
+
+      assert declared == runtime,
+             """
+             gateway/mix.exs declares version #{inspect(declared)} but the loaded
+             :ztlp_gateway application reports vsn=#{inspect(runtime)}.
+             This drift means runtime health checks will misreport the deployed
+             version. Either re-run `mix compile` after the bump, or update
+             mix.exs to match the intended release.
+             """
+    end
+
+    test "mix.exs version is at least 0.29.4 (v0.29.4 strict-routing tag)" do
+      # Floor guard: prevents an accidental down-bump that would make the
+      # gateway misreport itself as one of the pre-v0.29.4 versions where
+      # the relay's strict-routing fix is absent. Using Version.compare
+      # (rather than asserting a literal string) means this test does NOT
+      # need maintenance on every routine version bump — it only fails on
+      # a down-bump below the 0.29.4 floor.
+      declared = ZtlpGateway.MixProject.project()[:version]
+      assert Version.compare(declared, "0.29.4") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.29.4 strict-routing tag"
+    end
+  end
+
   describe "runtime config" do
     test "runtime.exs exists" do
       runtime_path = Path.join([__DIR__, "..", "..", "config", "runtime.exs"])

@@ -89,4 +89,31 @@ class Api::EnrollmentControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :unprocessable_entity
   end
+
+  # BS-PR-1 regression pin: the "Z2LS issues a single-use token, device A
+  # enrolls, device B tries the same token" sequence MUST end with B
+  # rejected. Steve's brief: "After successful enrollment, the token is
+  # consumed and cannot be reused."
+  test "confirm a second device on a now-exhausted token returns 422" do
+    @token.update!(max_uses: 1, current_uses: 0, status: "active")
+
+    # Device A enrolls successfully.
+    post api_enrollment_confirm_path, params: {
+      token_id: @token.token_id,
+      node_id: "aaaaaaaaaaaaaaaa",
+      name: "device-a.office.acme.ztlp"
+    }
+    assert_response :success
+
+    # Device B attempts to reuse the same token — must be rejected.
+    post api_enrollment_confirm_path, params: {
+      token_id: @token.token_id,
+      node_id: "bbbbbbbbbbbbbbbb",
+      name: "device-b.office.acme.ztlp"
+    }
+    assert_response :unprocessable_entity
+
+    # And device B must NOT exist as an enrolled device.
+    assert_nil @token.network.ztlp_devices.find_by(node_id: "bbbbbbbbbbbbbbbb")
+  end
 end

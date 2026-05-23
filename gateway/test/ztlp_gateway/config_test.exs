@@ -44,6 +44,63 @@ defmodule ZtlpGateway.ConfigTest do
     after
       System.delete_env("ZTLP_GATEWAY_BACKENDS")
     end
+
+    # ── Protocol prefix on backend host (Option-1 wire format) ──────────────
+    # Tests the v0.30 addition that lets operators specify per-backend
+    # transport protocol in the existing colon-separated env var. Format is
+    # "service:[<proto>/]<host>:<port>" where <proto> is "tcp" (default) or
+    # "udp". This is the on-the-wire counterpart of ServiceRouter.Backend's
+    # new :protocol field — see service_router_test.exs for the model tests.
+
+    test "absent prefix defaults to :tcp (backward compatibility)" do
+      System.put_env("ZTLP_GATEWAY_BACKENDS", "web:127.0.0.1:8080")
+      [b] = Config.get(:backends)
+      assert b.protocol == :tcp
+      assert b.host == ~c"127.0.0.1"
+      assert b.port == 8080
+    after
+      System.delete_env("ZTLP_GATEWAY_BACKENDS")
+    end
+
+    test "'udp/' prefix is parsed and stripped from the host" do
+      System.put_env("ZTLP_GATEWAY_BACKENDS", "dns:udp/8.8.8.8:53")
+      [b] = Config.get(:backends)
+      assert b.protocol == :udp
+      assert b.host == ~c"8.8.8.8"
+      assert b.port == 53
+    after
+      System.delete_env("ZTLP_GATEWAY_BACKENDS")
+    end
+
+    test "explicit 'tcp/' prefix is parsed and stripped from the host" do
+      System.put_env("ZTLP_GATEWAY_BACKENDS", "ssh:tcp/10.0.0.1:22")
+      [b] = Config.get(:backends)
+      assert b.protocol == :tcp
+      assert b.host == ~c"10.0.0.1"
+      assert b.port == 22
+    after
+      System.delete_env("ZTLP_GATEWAY_BACKENDS")
+    end
+
+    test "mixed protocols in one env var" do
+      # Real-world multi-service case from bootstrap/docs/multi_service_gateway.md.
+      System.put_env(
+        "ZTLP_GATEWAY_BACKENDS",
+        "ssh:127.0.0.1:22,mysql:127.0.0.1:3306,dns:udp/8.8.8.8:53"
+      )
+
+      backends = Config.get(:backends)
+
+      ssh = Enum.find(backends, &(&1.name == "ssh"))
+      mysql = Enum.find(backends, &(&1.name == "mysql"))
+      dns = Enum.find(backends, &(&1.name == "dns"))
+
+      assert ssh.protocol == :tcp and ssh.port == 22
+      assert mysql.protocol == :tcp and mysql.port == 3306
+      assert dns.protocol == :udp and dns.host == ~c"8.8.8.8" and dns.port == 53
+    after
+      System.delete_env("ZTLP_GATEWAY_BACKENDS")
+    end
   end
 
   describe "get(:policies) with env var" do

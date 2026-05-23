@@ -60,8 +60,19 @@ defmodule ZtlpGateway.Config do
         |> String.split(",", trim: true)
         |> Enum.map(fn entry ->
           case String.split(entry, ":", parts: 3) do
-            [name, host, port] ->
-              %{name: name, host: String.to_charlist(host), port: String.to_integer(port)}
+            [name, host_segment, port] ->
+              # Optional protocol prefix on the host:
+              #   "127.0.0.1"        → :tcp (default, backward-compatible)
+              #   "tcp/127.0.0.1"    → :tcp (explicit)
+              #   "udp/8.8.8.8"      → :udp (ZtlpGateway.UdpBackend, Model A)
+              {protocol, host} = parse_host_protocol(host_segment)
+
+              %{
+                name: name,
+                host: String.to_charlist(host),
+                port: String.to_integer(port),
+                protocol: protocol
+              }
 
             _ ->
               nil
@@ -439,6 +450,20 @@ defmodule ZtlpGateway.Config do
           _ ->
             nil
         end
+    end
+  end
+
+  # Splits an optional "<proto>/<host>" prefix off a backend host segment.
+  # Mirrors `ZtlpGateway.ServiceRouter.parse_host_protocol/1` (the two parsers
+  # were kept separate because they produce different data shapes — this one
+  # builds plain maps for Application config consumption, while ServiceRouter
+  # builds %Backend{} structs). Unknown prefixes default to :tcp.
+  defp parse_host_protocol(host_segment) do
+    case String.split(host_segment, "/", parts: 2) do
+      ["udp", host] -> {:udp, host}
+      ["tcp", host] -> {:tcp, host}
+      [host] -> {:tcp, host}
+      [_unknown_proto, host] -> {:tcp, host}
     end
   end
 

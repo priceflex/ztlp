@@ -73,10 +73,14 @@ mix run --no-halt
 # UDP listen port
 config :ztlp_gateway, :port, 23097
 
-# Backend services
+# Backend services. Default protocol is TCP. UDP backends need a
+# `:protocol` field set to `:udp` (or, in the env-var form, the host
+# segment must carry the `udp/` prefix — see
+# `bootstrap/docs/multi_service_gateway.md` for the full runbook).
 config :ztlp_gateway, :backends, [
   %{name: "web", host: {127, 0, 0, 1}, port: 8080},
-  %{name: "ssh", host: {127, 0, 0, 1}, port: 22}
+  %{name: "ssh", host: {127, 0, 0, 1}, port: 22},
+  %{name: "dns", host: {8, 8, 8, 8},   port: 53, protocol: :udp}
 ]
 
 # Access policies

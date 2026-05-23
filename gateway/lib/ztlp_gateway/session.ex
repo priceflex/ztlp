@@ -411,6 +411,7 @@ defmodule ZtlpGateway.Session do
     SessionRegistry,
     Backend,
     BackendPool,
+    UdpBackend,
     PolicyEngine,
     Identity,
     AuditLog,
@@ -681,6 +682,11 @@ defmodule ZtlpGateway.Session do
         stream_queue_chunks: %{},
         # Backend address for legacy reconnection on idle-close
         backend_addr: nil,
+        # Backend transport protocol (`:tcp` or `:udp`). Set when the backend
+        # is first launched from the configured backend map; used by the
+        # legacy-reconnect path so a UDP service does not silently re-launch
+        # over TCP after an idle close.
+        backend_protocol: :tcp,
         # Stream multiplexing: %{stream_id => %{backend_pid: pid}}
         # When populated, the session is in multiplexed mode.
         streams: %{},
@@ -1541,10 +1547,10 @@ defmodule ZtlpGateway.Session do
             # Try to resolve the backend service name before policy check
             backends = Config.get(:backends)
             case find_backend(backends, state.service) do
-              {:ok, %{name: resolved_name, host: host, port: port}} ->
+              {:ok, %{name: resolved_name, host: host, port: port} = backend_map} ->
                 # Policy check — is this identity allowed to access the service?
                 if PolicyEngine.authorize?(identity, resolved_name) do
-                  case Backend.start_link({host, port, self()}) do
+                  case start_backend_for(backend_map, self()) do
                     {:ok, backend_pid} ->
                       Stats.handshake_ok()
 
@@ -1567,6 +1573,13 @@ defmodule ZtlpGateway.Session do
                           r2i_key: keys.r2i_key,
                           backend_pid: backend_pid,
                           backend_addr: {host, port, self()},
+                          # Carry the negotiated protocol on the state so the
+                          # legacy-reconnect path (handle_data / line ~2057) can
+                          # re-launch the same kind of backend if vaultwarden
+                          # or another idle-closer drops the connection. Default
+                          # remains :tcp for any state initialized without this
+                          # field (older clauses + tests).
+                          backend_protocol: Map.get(backend_map, :protocol, :tcp),
                           pending_packets: [],
                           rekey_timer_ref: rekey_timer_ref,
                           client_profile: client_profile,
@@ -2050,10 +2063,18 @@ defmodule ZtlpGateway.Session do
         state =
           if is_nil(state.backend_pid) and byte_size(payload) > 0 and not state.draining do
             Logger.debug(
-              "[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)}"
+              "[Session] Legacy backend nil, reconnecting to #{inspect(state.backend_addr)} " <>
+                "(#{state.backend_protocol})"
             )
 
-            case Backend.start_link(state.backend_addr) do
+            # Reconstruct a minimal backend_map so the dispatcher can re-launch
+            # the right kind of connector. `backend_addr` carries {host, port,
+            # owner_when_first_launched} — we re-use host+port and pass the
+            # current self() so the new backend reports back to us.
+            {host, port, _old_owner} = state.backend_addr
+            reconnect_map = %{host: host, port: port, protocol: state.backend_protocol}
+
+            case start_backend_for(reconnect_map, self()) do
               {:ok, pid} ->
                 Logger.debug("[Session] Legacy backend reconnected: #{inspect(pid)}")
                 %{state | backend_pid: pid}
@@ -2349,7 +2370,7 @@ defmodule ZtlpGateway.Session do
     )
 
     if state.backend_pid && Process.alive?(state.backend_pid) do
-      Backend.close(state.backend_pid)
+      close_backend_pid(state.backend_pid, state.backend_protocol)
     end
 
     # Cancel any pending retransmit/pacing timers
@@ -2358,8 +2379,8 @@ defmodule ZtlpGateway.Session do
     backends = Config.get(:backends)
 
     case find_backend(backends, state.service) do
-      {:ok, %{host: host, port: port}} ->
-        case Backend.start_link({host, port, self()}) do
+      {:ok, %{} = backend_map} ->
+        case start_backend_for(backend_map, self()) do
           {:ok, new_pid} ->
             # Reset all send state for new stream, including congestion control
             retransmit_ref =
@@ -2369,6 +2390,7 @@ defmodule ZtlpGateway.Session do
              %{
                state
                | backend_pid: new_pid,
+                 backend_protocol: Map.get(backend_map, :protocol, :tcp),
                  send_data_seq: 0,
                  send_queue: :queue.new(),
                  send_buffer: %{},
@@ -3185,6 +3207,49 @@ defmodule ZtlpGateway.Session do
       [] -> :ok
     end
   end
+
+  @doc """
+  Start the right backend connector for the given backend map.
+
+  Looks at the `:protocol` field on the backend map (as produced by
+  `ZtlpGateway.Config.get(:backends)` / `find_backend/2`) and dispatches:
+
+    * `:tcp` (or missing — backward-compat default) → `ZtlpGateway.Backend`
+    * `:udp` → `ZtlpGateway.UdpBackend`
+    * anything else → `{:error, :unsupported_protocol}` (fail fast — never
+      silently route over a protocol the operator did not configure)
+
+  Returns whatever the underlying `start_link/1` returned (`{:ok, pid}` or
+  `{:error, reason}`).
+
+  ## Why public
+
+  Exposed (rather than `defp`) so we can pin protocol-selection behaviour
+  with a focused unit test (`session_backend_dispatch_test.exs`) without
+  having to drive a full Noise handshake through a Listener fixture.
+  """
+  @spec start_backend_for(map(), pid()) :: {:ok, pid()} | {:error, term()}
+  def start_backend_for(%{host: host, port: port} = backend_map, owner) when is_pid(owner) do
+    case Map.get(backend_map, :protocol, :tcp) do
+      :tcp -> Backend.start_link({host, port, owner})
+      :udp -> UdpBackend.start_link({host, port, owner})
+      _other -> {:error, :unsupported_protocol}
+    end
+  end
+
+  @doc """
+  Close a backend pid in a protocol-aware way.
+
+  Mirrors `start_backend_for/2`: TCP backends are closed via
+  `ZtlpGateway.Backend.close/1`, UDP backends via
+  `ZtlpGateway.UdpBackend.close/1`. The two `close/1` functions are
+  both fire-and-forget `GenServer.cast`s, so calling the wrong one on a
+  pid would be a silent no-op rather than a crash — but we still want
+  to be precise so the right monitored-DOWN cleanup runs.
+  """
+  @spec close_backend_pid(pid(), :tcp | :udp) :: :ok
+  def close_backend_pid(pid, :udp) when is_pid(pid), do: UdpBackend.close(pid)
+  def close_backend_pid(pid, _protocol) when is_pid(pid), do: Backend.close(pid)
 
   # Option C: `service` is the 16-byte routing hash extracted from the HELLO
   # packet's `dst_svc_hash` field. We resolve it by comparing against

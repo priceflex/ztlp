@@ -55,6 +55,14 @@ jobs:
       - name: Build all binaries
         run: cargo build --all-targets
 
+      - name: Build with diag feature (compile gate)
+        # Guards against the class of bug where `diag_log!` (a no-op macro
+        # under the default build) hides typos / out-of-scope references
+        # that only fail to compile when `--features diag` is on. This step
+        # builds the library + binaries with the feature enabled; if the
+        # diag-only code paths don't compile, CI fails here.
+        run: cargo build --all-targets --features diag
+
       - name: Run tests
         run: cargo test --lib --verbose
 

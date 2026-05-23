@@ -47,6 +47,7 @@
                 <%= link_to "📖 Docs", docs_path, class: nav_link_class(docs_path) %>
               <% if current_admin&.super_admin? %>
                 <%= link_to "👤 Admin Users", admin_users_path, class: nav_link_class(admin_users_path) %>
+                <%= link_to "🔑 API Clients", admin_api_clients_path, class: nav_link_class(admin_api_clients_path) %>
               <% end %>
               </div>
             </div>

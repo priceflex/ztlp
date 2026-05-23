@@ -1,0 +1,13 @@
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-gray-900">New API Client</h1>
+  <p class="mt-1 text-sm text-gray-500">
+    Authorize a system to call the ZTLP-secured Bootstrap API. The
+    HMAC secret itself lives in the per-zone secret store
+    (<code class="font-mono">ZTLP_HMAC_SECRET_&lt;ZONE&gt;</code>) shared with the
+    relay/gateway — this row is just the (zone, name) allowlist entry.
+  </p>
+</div>
+
+<div class="bg-white shadow rounded-lg p-6">
+  <%= render "form", api_client: @api_client %>
+</div>

@@ -1,0 +1,75 @@
+<div class="sm:flex sm:items-center sm:justify-between mb-6">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Device Communication Grants</h1>
+    <p class="mt-1 text-sm text-gray-500">
+      Network: <%= link_to @network.name, network_path(@network), class: "text-ztlp-600 hover:text-ztlp-900" %>
+      (<code class="font-mono text-xs"><%= @network.zone %></code>)
+    </p>
+    <p class="mt-2 text-sm text-gray-500">
+      Grants are <strong>directional</strong> — <code>A → B</code> is independent of <code>B → A</code>.
+      Both directions are needed if devices should initiate to each other.
+    </p>
+  </div>
+  <div class="mt-4 sm:mt-0">
+    <%= link_to new_network_device_communication_grant_path(@network),
+          class: "inline-flex items-center rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-700" do %>
+      <span class="mr-1">+</span> New Grant
+    <% end %>
+  </div>
+</div>
+
+<div class="bg-white shadow rounded-lg overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source device</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"></th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Target device</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Granted</th>
+        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="bg-white divide-y divide-gray-200">
+      <% if @grants.any? %>
+        <% @grants.each do |grant| %>
+          <tr class="<%= 'opacity-60' if grant.revoked? %>">
+            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><%= grant.source_device.name %></td>
+            <td class="px-2 py-4 whitespace-nowrap text-center text-gray-400">→</td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900"><%= grant.target_device.name %></td>
+            <td class="px-6 py-4 whitespace-nowrap">
+              <% if grant.active? %>
+                <span class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">Active</span>
+              <% else %>
+                <span class="inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700">
+                  Revoked <%= time_ago_in_words(grant.revoked_at) %> ago
+                </span>
+              <% end %>
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+              <%= time_ago_in_words(grant.granted_at) %> ago
+            </td>
+            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+              <% if grant.active? %>
+                <%= button_to "Revoke",
+                      revoke_network_device_communication_grant_path(@network, grant),
+                      method: :post,
+                      class: "text-yellow-700 hover:text-yellow-900 bg-transparent border-0 p-0 underline cursor-pointer",
+                      form: { data: { turbo_confirm: "Revoke this grant?" }, class: "inline-block" } %>
+              <% end %>
+              <%= button_to "Delete",
+                    network_device_communication_grant_path(@network, grant),
+                    method: :delete,
+                    class: "ml-3 text-red-700 hover:text-red-900 bg-transparent border-0 p-0 underline cursor-pointer",
+                    form: { data: { turbo_confirm: "Permanently delete this grant (audit trail will lose this row)?" }, class: "inline-block" } %>
+            </td>
+          </tr>
+        <% end %>
+      <% else %>
+        <tr><td colspan="6" class="px-6 py-12 text-center text-sm text-gray-500">
+          No grants yet. Click <strong>+ New Grant</strong> to allow one device to initiate communication to another.
+        </td></tr>
+      <% end %>
+    </tbody>
+  </table>
+</div>

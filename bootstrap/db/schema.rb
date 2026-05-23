@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_05_23_060000) do
+ActiveRecord::Schema[7.1].define(version: 2026_05_23_080000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -163,6 +163,21 @@ ActiveRecord::Schema[7.1].define(version: 2026_05_23_060000) do
     t.index ["machine_id", "component"], name: "index_deployments_on_machine_id_and_component"
     t.index ["machine_id"], name: "index_deployments_on_machine_id"
     t.index ["status"], name: "index_deployments_on_status"
+  end
+
+  create_table "device_communication_grants", force: :cascade do |t|
+    t.integer "source_device_id", null: false
+    t.integer "target_device_id", null: false
+    t.integer "granted_by_admin_user_id"
+    t.datetime "granted_at", null: false
+    t.datetime "revoked_at"
+    t.text "notes"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["revoked_at"], name: "index_device_communication_grants_on_revoked_at"
+    t.index ["source_device_id", "target_device_id"], name: "idx_dcg_unique_pair", unique: true
+    t.index ["source_device_id"], name: "index_device_communication_grants_on_source_device_id"
+    t.index ["target_device_id"], name: "index_device_communication_grants_on_target_device_id"
   end
 
   create_table "device_heartbeats", force: :cascade do |t|
@@ -418,6 +433,8 @@ ActiveRecord::Schema[7.1].define(version: 2026_05_23_060000) do
   add_foreign_key "benchmarks", "ztlp_devices"
   add_foreign_key "certificates", "networks"
   add_foreign_key "deployments", "machines"
+  add_foreign_key "device_communication_grants", "ztlp_devices", column: "source_device_id"
+  add_foreign_key "device_communication_grants", "ztlp_devices", column: "target_device_id"
   add_foreign_key "enrollment_tokens", "networks"
   add_foreign_key "enrollment_tokens", "ztlp_users"
   add_foreign_key "group_memberships", "ztlp_groups"

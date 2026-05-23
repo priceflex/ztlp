@@ -13,6 +13,14 @@ Rails.application.routes.draw do
         post :unlock
       end
     end
+
+    # BS-PR-5: surface the BS-PR-2 api_clients table in the admin UI
+    resources :api_clients, except: [:show] do
+      member do
+        post :deactivate
+        post :reactivate
+      end
+    end
   end
 
   resources :networks do
@@ -60,6 +68,14 @@ Rails.application.routes.draw do
       end
     end
     resources :ztlp_devices, path: "devices", only: [:index, :show, :destroy]
+
+    # BS-PR-5: device-to-device communication permissions
+    resources :device_communication_grants, path: "device_grants", only: %i[index new create destroy] do
+      member do
+        post :revoke
+      end
+    end
+
     resources :ztlp_groups, path: "groups" do
       member do
         post :add_member

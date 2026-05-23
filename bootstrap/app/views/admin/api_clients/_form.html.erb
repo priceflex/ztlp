@@ -1,0 +1,59 @@
+<%= form_with model: api_client, url: (api_client.persisted? ? admin_api_client_path(api_client) : admin_api_clients_path), local: true do |f| %>
+  <% if api_client.errors.any? %>
+    <div class="rounded-md bg-red-50 p-4 mb-4">
+      <div class="text-sm text-red-700">
+        <p class="font-medium"><%= pluralize(api_client.errors.count, "error") %> prevented save:</p>
+        <ul class="list-disc pl-5 mt-2">
+          <% api_client.errors.full_messages.each do |msg| %>
+            <li><%= msg %></li>
+          <% end %>
+        </ul>
+      </div>
+    </div>
+  <% end %>
+
+  <div class="space-y-4">
+    <div>
+      <%= f.label :zone, class: "block text-sm font-medium text-gray-700" %>
+      <%= f.text_field :zone,
+            placeholder: "acme.ztlp",
+            class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm font-mono" %>
+      <p class="mt-1 text-xs text-gray-500">
+        The ZTLP zone-id the client signs against. Must match an existing
+        zone with a configured <code class="bg-gray-100 px-1 rounded">ZTLP_HMAC_SECRET_&lt;ZONE&gt;</code> env var.
+      </p>
+    </div>
+
+    <div>
+      <%= f.label :name, "Client name", class: "block text-sm font-medium text-gray-700" %>
+      <%= f.text_field :name,
+            placeholder: "z2ls.acme",
+            class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm font-mono" %>
+      <p class="mt-1 text-xs text-gray-500">
+        Unique within the zone. The caller sends this as the
+        <code class="bg-gray-100 px-1 rounded">X-ZTLP-Client</code> header.
+      </p>
+    </div>
+
+    <div>
+      <%= f.label :notes, class: "block text-sm font-medium text-gray-700" %>
+      <%= f.text_area :notes, rows: 3,
+            placeholder: "Z2LS production instance — owner: ops@techrockstars.com",
+            class: "mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-ztlp-500 focus:ring-ztlp-500 sm:text-sm" %>
+    </div>
+
+    <% if api_client.persisted? %>
+      <div class="flex items-center">
+        <%= f.check_box :active,
+              class: "h-4 w-4 rounded border-gray-300 text-ztlp-600 focus:ring-ztlp-500" %>
+        <%= f.label :active, "Active (uncheck to deactivate this client)", class: "ml-2 text-sm text-gray-700" %>
+      </div>
+    <% end %>
+  </div>
+
+  <div class="mt-6 flex items-center justify-end space-x-3">
+    <%= link_to "Cancel", admin_api_clients_path, class: "text-sm text-gray-600 hover:text-gray-900" %>
+    <%= f.submit (api_client.persisted? ? "Update API Client" : "Create API Client"),
+          class: "inline-flex items-center rounded-md bg-ztlp-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-ztlp-700" %>
+  </div>
+<% end %>

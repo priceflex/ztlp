@@ -1,6 +1,13 @@
+z2ls_office:
+  name: "z2ls.office"
+  zone: "office.acme.ztlp"
+  active: true
+  notes: "Z2LS for the office network — BS-PR-2/3 test fixture"
+  created_by_admin_user_id: 1
+
 z2ls_acme:
   name: "z2ls.acme"
   zone: "acme.ztlp"
   active: true
-  notes: "Z2LS for the acme tenant — BS-PR-2 test fixture"
+  notes: "Z2LS for the acme tenant — BS-PR-2 test fixture (no provisioned network)"
   created_by_admin_user_id: 1

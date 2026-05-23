@@ -160,6 +160,74 @@ Common reasons (server log only):
 - `no_zone_secret` — `ZTLP_HMAC_SECRET_<UPCASE_ZONE>` is not set on the bootstrap host
 - `bad_signature` — HMAC mismatch (the most common forgery class)
 
+### `POST /api/v1/enrollment_tokens` — Z2LS enrollment endpoint (BS-PR-3)
+
+Mint a single-use enrollment token for a new device. The token is
+valid for 24 hours, can be redeemed exactly once, and is bound to
+the authenticated client's zone.
+
+**Request:**
+
+```http
+POST /api/v1/enrollment_tokens HTTP/1.1
+Content-Type: application/json
+X-ZTLP-Zone: office.acme.ztlp
+X-ZTLP-Client: z2ls.office
+X-ZTLP-Timestamp: 1700000000
+X-ZTLP-Signature: <hex>
+
+{
+  "computer_name": "alice-laptop",
+  "metadata": { "os": "macOS 14.5", "user": "alice" }
+}
+```
+
+- `computer_name` (string, required) — RFC1035-shape DNS label.
+  Accepts a hostname (`alice-laptop`) or a fully-qualified
+  `hostname.zone` form. Lower-case alphanumeric plus hyphens, with
+  optional dotted segments. Max 253 bytes.
+- `metadata` (object, optional) — opaque JSON. Stored on the
+  EnrollmentToken's `notes` field as a stringified blob so future
+  payload fields don't require schema changes.
+
+**Success (201 Created):**
+
+```json
+{
+  "enrollment_token":       "ztlp://enroll/?zone=office.acme.ztlp&ns=10.0.1.10:23096&token=ab12cd34ef567890&expires=1700086400",
+  "token_id":               "ab12cd34ef567890",
+  "expiration_datetime":    "2026-05-24T07:18:54Z",
+  "token_lifetime_seconds": 86400,
+  "status":                 "issued",
+  "message":                "Token issued; valid for 24h, single use."
+}
+```
+
+The caller hands `enrollment_token` to the device that's enrolling.
+The device passes it to `ztlp setup --token "<uri>"`. After
+successful enrollment the token transitions `active → exhausted`
+(see `bootstrap/docs/enrollment_token_lifecycle.md`); the same
+URI cannot be used to enroll a second device.
+
+**Failure responses:**
+
+| Status | When                                                              |
+|--------|-------------------------------------------------------------------|
+| 401    | Auth headers missing / bad / expired (see auth contract above)    |
+| 422    | `computer_name` missing, empty, malformed, or > 253 bytes         |
+| 503    | The auth'd client's zone has no Network row provisioned yet       |
+
+The 422 response body is `{"status":"error","message":"<reason>"}`.
+
+**Cross-tenant safety:** the controller looks up the Network row by
+`current_api_client.zone` — there's no way for a Z2LS authenticated
+as zone A to put `"zone": "B"` in the body and mint a token for B.
+The authenticated client's zone is the only thing that matters.
+
+**Audit:** every issuance writes an `api.v1.enrollment_token.issued`
+audit log row with the api_client name, computer_name, token_id, and
+zone. Useful for "who issued this token?" forensics.
+
 ## Endpoints
 
 ### `GET /api/v1/health`

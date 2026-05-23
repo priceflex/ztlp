@@ -153,7 +153,8 @@ Rails.application.routes.draw do
     # — see `app/services/ztlp/api_authenticator.rb` for the header
     # contract. No API keys; auth is per-zone HMAC.
     namespace :v1 do
-      get "health", to: "health#show", as: :health
+      get  "health", to: "health#show", as: :health
+      post "enrollment_tokens", to: "enrollment_tokens#create", as: :enrollment_tokens
     end
   end
 

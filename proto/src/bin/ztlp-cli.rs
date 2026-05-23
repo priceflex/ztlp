@@ -32,7 +32,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -61,6 +61,10 @@ use ztlp_proto::tunnel;
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const ZTLP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Used by the multi-session listener path (`cmd_listen_multi_session` and
+/// helpers below). That path is currently a stub — see the `#[allow(dead_code)]`
+/// annotations on `cmd_listen_multi_session` and friends below.
+#[allow(dead_code)]
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -2040,6 +2044,10 @@ async fn ns_query(
 /// Look up a record by public key (query type 0x05) and extract the name.
 /// Used for NS reverse lookup: given a peer's X25519 pubkey hex, find their
 /// registered ZTLP-NS name for policy evaluation.
+///
+/// Called from `handle_new_session` in the multi-session listener path
+/// (currently a stub — see `cmd_listen_multi_session` below).
+#[allow(dead_code)]
 async fn ns_pubkey_lookup(
     pubkey_hex: &str,
     ns_server: &str,
@@ -2100,10 +2108,17 @@ async fn ns_pubkey_lookup(
 use ztlp_proto::policy::NsResolver;
 
 /// Real NS resolver that queries a ZTLP-NS server over UDP.
+///
+/// Constructed only by `handle_new_session` (currently a stub — see
+/// `cmd_listen_multi_session` below). The struct and its impls are kept
+/// because they're the obvious wire-up for the multi-session listener
+/// path when that path is implemented.
+#[allow(dead_code)]
 struct UdpNsResolver {
     ns_server: String,
 }
 
+#[allow(dead_code)]
 impl UdpNsResolver {
     fn new(ns_server: &str) -> Self {
         Self {
@@ -2185,7 +2200,7 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 #[allow(clippy::too_many_arguments)]
 async fn cmd_connect(
-    quic: bool,
+    _quic: bool,
     target: &str,
     key: &Option<PathBuf>,
     relay: &Option<String>,
@@ -2972,7 +2987,7 @@ async fn cmd_connect(
         h.copy_from_slice(&output[..16]);
         h
     };
-    let session = match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
+    let _session = match ztlp_proto::quic_transport::noise_stream::run_initiator_handshake(
         &client,
         &identity,
         node_id,
@@ -2994,7 +3009,7 @@ async fn cmd_connect(
     };
 
     loop {
-        let (mut tcp, addr) = listener.accept().await?;
+        let (tcp, addr) = listener.accept().await?;
         println!("Accepted connection from {}", addr);
         let client_clone = client.clone();
         tokio::spawn(async move {
@@ -3430,6 +3445,7 @@ fn parse_client_route_packet(
 ///
 /// This uses the node's bound UDP socket so the source port matches the
 /// listener — the relay uses the sender address for forwarding.
+#[allow(dead_code)]
 fn spawn_relay_registration(
     node: &TransportNode,
     identity: &NodeIdentity,
@@ -3506,17 +3522,17 @@ async fn cmd_listen(
     key: &Option<PathBuf>,
     _gateway_mode: bool,
     forward: &[String],
-    policy_path: &Option<PathBuf>,
-    ns_server: &Option<String>,
-    stun_server: &Option<String>,
-    nat_assist: bool,
-    max_sessions: usize,
+    _policy_path: &Option<PathBuf>,
+    _ns_server: &Option<String>,
+    _stun_server: &Option<String>,
+    _nat_assist: bool,
+    _max_sessions: usize,
     relay_addr: Option<&str>,
     service_name: &str,
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
-    quic: bool,
+    _quic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -3562,7 +3578,7 @@ async fn cmd_listen(
         server.inner.local_addr().unwrap()
     );
 
-    let cfw = forward.to_vec();
+    let _cfw = forward.to_vec();
     let identity = load_or_generate_identity(key)?;
 
     if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
@@ -3682,7 +3698,7 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
-        let (session, service_hash_bytes) =
+        let (_session, service_hash_bytes) =
             match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
                 &conn,
                 &identity_clone,
@@ -3728,7 +3744,7 @@ async fn cmd_listen(
         tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
-                    let mut tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
+                    let tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
                     let (mut t_read, mut t_write) = tcp.into_split();
 
                     let hmac = hmac_secret.clone();
@@ -3819,14 +3835,15 @@ async fn cmd_listen(
 /// 4. Enforces max_sessions with REJECT(CAPACITY_FULL)
 /// 5. Cleans up half-open and idle sessions
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn cmd_listen_multi_session(
-    node: &TransportNode,
-    identity: &NodeIdentity,
-    forward: &[String],
-    policy: &PolicyEngine,
-    ns_server: &Option<String>,
-    max_sessions: usize,
-    http_injection: Arc<tunnel::HttpInjectionConfig>,
+    _node: &TransportNode,
+    _identity: &NodeIdentity,
+    _forward: &[String],
+    _policy: &PolicyEngine,
+    _ns_server: &Option<String>,
+    _max_sessions: usize,
+    _http_injection: Arc<tunnel::HttpInjectionConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
@@ -3835,6 +3852,7 @@ async fn cmd_listen_multi_session(
 ///
 /// Used when we need to reject a client (e.g., capacity full) but still
 /// need an encrypted channel to send the rejection reason.
+#[allow(dead_code)]
 async fn complete_handshake_for_reject(
     node: &TransportNode,
     identity: &NodeIdentity,
@@ -3887,6 +3905,7 @@ async fn complete_handshake_for_reject(
 
 /// Handle a new incoming session: handshake, policy check, spawn bridge task.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_new_session(
     node: &TransportNode,
     identity: &NodeIdentity,
@@ -4146,6 +4165,7 @@ async fn handle_new_session(
 /// a new TCP connection on the same ZTLP session. This reads from the dedicated
 /// recv socket (which receives from the forwarder) and returns true if a RESET
 /// frame is detected.
+#[allow(dead_code)]
 async fn wait_for_reset_on_socket(
     recv_socket: &tokio::net::UdpSocket,
     pipeline: &Mutex<Pipeline>,
@@ -4223,6 +4243,7 @@ async fn wait_for_reset_on_socket(
 ///
 /// Returns `String` errors (not `Box<dyn Error>`) so the future is `Send`.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn run_session_bridge(
     udp_send_socket: Arc<UdpSocket>,
     pipeline: Arc<Mutex<Pipeline>>,
@@ -4368,6 +4389,7 @@ async fn run_session_bridge(
 /// If the client opens another TCP connection on the same ZTLP session, it
 /// will send a RESET frame first. This function waits for that frame and
 /// returns `true` if a RESET is received, or `false` if the timeout expires.
+#[allow(dead_code)]
 async fn wait_for_reset_buffered(
     node: &TransportNode,
     session_id: SessionId,

@@ -214,6 +214,106 @@ mod tests {
         );
     }
 
+    /// BDD: Z2LS client-auth headers (X-ZTLP-Client-*) MUST survive the
+    /// admin-header strip-and-inject pass. They carry the per-zone HMAC
+    /// auth contract verified by `Ztlp::ApiAuthenticator` in Rails, and
+    /// the gateway has no business rewriting them — its job for these
+    /// requests is to pass them through verbatim. The admin-auth header
+    /// set (X-ZTLP-Authenticated / X-ZTLP-Admin-Email / X-ZTLP-Timestamp /
+    /// X-ZTLP-Signature) lives under a non-prefixed namespace and is
+    /// gateway-injected; the client-auth set lives under the prefixed
+    /// `X-ZTLP-Client-*` namespace and is client-injected. The two paths
+    /// are disjoint by construction so a client cannot smuggle an admin
+    /// header by shadowing it.
+    ///
+    /// Reference: docs/per_zone_hmac_design.md + bootstrap/app/services/ztlp/api_authenticator.rb
+    #[test]
+    fn test_x_ztlp_client_headers_survive_strip() {
+        let raw_req = b"GET /api/v1/whoami HTTP/1.1\r\n\
+                        Host: bootstrap.hermes-sandbox.ztlp\r\n\
+                        X-ZTLP-Client-Zone: hermes-sandbox.ztlp\r\n\
+                        X-ZTLP-Client-Name: z2ls.hermes-sandbox\r\n\
+                        X-ZTLP-Client-Timestamp: 1748159999\r\n\
+                        X-ZTLP-Client-Signature: deadbeefcafef00d\r\n\
+                        X-ZTLP-Fake: should-be-stripped\r\n\
+                        \r\n";
+        let email = "admin@example.com";
+        let timestamp = "2026-05-24T08:00:00Z";
+        let hmac_key = b"shared-tenant-secret";
+
+        let modified = inject_headers(raw_req, email, timestamp, hmac_key).unwrap();
+        let s = String::from_utf8(modified).unwrap();
+
+        // Client-auth headers MUST pass through verbatim.
+        assert!(
+            s.contains("X-ZTLP-Client-Zone: hermes-sandbox.ztlp\r\n"),
+            "X-ZTLP-Client-Zone stripped — Z2LS auth path broken. Got:\n{}",
+            s
+        );
+        assert!(
+            s.contains("X-ZTLP-Client-Name: z2ls.hermes-sandbox\r\n"),
+            "X-ZTLP-Client-Name stripped — Z2LS auth path broken. Got:\n{}",
+            s
+        );
+        assert!(
+            s.contains("X-ZTLP-Client-Timestamp: 1748159999\r\n"),
+            "X-ZTLP-Client-Timestamp stripped — Z2LS auth path broken. Got:\n{}",
+            s
+        );
+        assert!(
+            s.contains("X-ZTLP-Client-Signature: deadbeefcafef00d\r\n"),
+            "X-ZTLP-Client-Signature stripped — Z2LS auth path broken. Got:\n{}",
+            s
+        );
+
+        // Non-client-prefixed faked headers must still be stripped — the strip
+        // policy MUST stay strict for the admin-auth namespace.
+        assert!(
+            !s.contains("X-ZTLP-Fake"),
+            "X-ZTLP-Fake survived strip — admin-namespace defense broken"
+        );
+
+        // Gateway-injected admin headers must still be present (so admin
+        // requests via the same gateway still work).
+        assert!(s.contains("X-ZTLP-Authenticated: 1"));
+        assert!(s.contains("X-ZTLP-Admin-Email: admin@example.com"));
+        assert!(s.contains("X-ZTLP-Timestamp: 2026-05-24T08:00:00Z"));
+        assert!(s.contains("X-ZTLP-Signature: "));
+    }
+
+    /// BDD: a client MUST NOT be able to forge an admin header by giving
+    /// it the X-ZTLP-Client- prefix that matches case-insensitively to an
+    /// admin header name. The allowlist applies to the prefix only; an
+    /// attempted `X-ZTLP-Client-Authenticated: 1` from the client wire
+    /// should pass through (the gateway has no business rewriting it),
+    /// but the Rails `ApplicationController` admin-auth path reads
+    /// `X-ZTLP-Authenticated`, not `X-ZTLP-Client-Authenticated`. So the
+    /// header arriving at Rails is harmless — only the un-prefixed
+    /// admin namespace can elevate. This test pins the prefix-only
+    /// allowlist semantics so a future "case-insensitive shadowing"
+    /// regression in the strip filter would be caught.
+    #[test]
+    fn test_client_prefix_cannot_shadow_admin_header() {
+        let raw_req = b"GET /admin HTTP/1.1\r\n\
+                        Host: bootstrap.example.ztlp\r\n\
+                        X-ZTLP-Client-Authenticated: 1\r\n\
+                        X-ZTLP-Authenticated: forged-by-client\r\n\
+                        \r\n";
+        let modified =
+            inject_headers(raw_req, "admin@example.com", "2026-05-24T08:00:00Z", b"k").unwrap();
+        let s = String::from_utf8(modified).unwrap();
+
+        // The un-prefixed admin header MUST be stripped — forged-by-client
+        // value gone; replaced with the gateway's injected "1".
+        assert!(!s.contains("forged-by-client"));
+        // The gateway-injected canonical admin header is present (and only
+        // once).
+        assert_eq!(s.matches("X-ZTLP-Authenticated: 1\r\n").count(), 1);
+        // The prefixed-but-misleadingly-named client header passes through
+        // — harmless because Rails admin-auth reads the un-prefixed name.
+        assert!(s.contains("X-ZTLP-Client-Authenticated: 1\r\n"));
+    }
+
     /// BDD: when a complete request is reassembled from multiple chunks,
     /// the injector produces the same output as if the request had
     /// arrived in one piece. Locks the "buffer-and-retry" semantics that

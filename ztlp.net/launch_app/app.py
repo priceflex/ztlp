@@ -51,10 +51,17 @@ LAUNCH_POW_DIFFICULTY_BITS = int(os.environ.get("LAUNCH_POW_DIFFICULTY_BITS", "2
 LAUNCH_POW_TTL_SECONDS = int(os.environ.get("LAUNCH_POW_TTL_SECONDS", "600"))
 LAUNCH_REQUIRE_POW_DEFAULT = os.environ.get("LAUNCH_REQUIRE_POW", "1") not in ("0", "false", "False", "no", "off")
 
-# Pre-shared referral codes that bypass POW and rate limiting.
-# Comma-separated list of uppercase codes. Empty = none accepted.
+# Pre-shared referral codes. By default a valid referral code is REQUIRED to
+# onboard — flip LAUNCH_REFERRAL_REQUIRED=0 to fall back to the older
+# "optional code, POW + rate limit gate the rest" behaviour (only used in
+# dev/test). Codes are stored as uppercase; submitted codes are uppercased
+# before comparison. Comma-separated list. Operators can rotate codes by
+# editing the env var on the Launch container — no rebuild required.
 LAUNCH_REFERRAL_CODES = set(
-    c.strip() for c in os.environ.get("LAUNCH_REFERRAL_CODES", "").split(",") if c.strip()
+    c.strip().upper() for c in os.environ.get("LAUNCH_REFERRAL_CODES", "").split(",") if c.strip()
+)
+LAUNCH_REFERRAL_REQUIRED_DEFAULT = os.environ.get("LAUNCH_REFERRAL_REQUIRED", "1") not in (
+    "0", "false", "False", "no", "off",
 )
 
 DOWNLOAD_ASSETS = [
@@ -196,6 +203,8 @@ class LaunchApp:
         pow_difficulty_bits: int = LAUNCH_POW_DIFFICULTY_BITS,
         pow_ttl_seconds: int = LAUNCH_POW_TTL_SECONDS,
         require_pow: bool = LAUNCH_REQUIRE_POW_DEFAULT,
+        referral_codes: Optional[Iterable[str]] = None,
+        referrals_required: bool = LAUNCH_REFERRAL_REQUIRED_DEFAULT,
     ) -> None:
         self.db_path = db_path
         self.environment = (environment or "development").lower()
@@ -209,6 +218,14 @@ class LaunchApp:
         self.pow_difficulty_bits = int(pow_difficulty_bits)
         self.pow_ttl_seconds = int(pow_ttl_seconds)
         self.require_pow = bool(require_pow)
+        # Referral gating. Codes are stored uppercase. None == fall back to the
+        # module-level LAUNCH_REFERRAL_CODES env-derived set so production
+        # behaviour stays env-driven; tests pass an explicit iterable.
+        if referral_codes is None:
+            self.referral_codes = set(LAUNCH_REFERRAL_CODES)
+        else:
+            self.referral_codes = {c.strip().upper() for c in referral_codes if c and c.strip()}
+        self.referrals_required = bool(referrals_required)
         self.ensure_schema()
 
     def __call__(self, environ: dict, start_response: Callable) -> Iterable[bytes]:
@@ -419,7 +436,7 @@ class LaunchApp:
           <label>Admin name <input name="admin_name" required maxlength="200" value="{esc(values.get('admin_name', ''))}"></label>
           <label>Admin email <input type="email" name="admin_email" required maxlength="320" value="{esc(values.get('admin_email', ''))}"></label>
           <label>Zone <input name="zone" required maxlength="253" placeholder="acme.ztlp" value="{esc(values.get('zone', ''))}"></label>
-          <label>Referral code (optional — speeds up onboarding) <input name="referral_code" maxlength="64" placeholder="e.g. ZTLP-E2E-2026" value="{esc(values.get('referral_code', ''))}"></label>
+          <label>Referral code (required — ask Steve for a code) <input name="referral_code" maxlength="64" required placeholder="e.g. ZTLP-BETA-2026" value="{esc(values.get('referral_code', ''))}"></label>
           {pow_html}
           {noscript_html}
           <button type="submit">Create onboarding request</button>
@@ -450,7 +467,19 @@ class LaunchApp:
             return self.render_start_form(errors, values)
 
         referral_code = values.get("referral_code", "").strip().upper()
-        has_valid_referral = bool(LAUNCH_REFERRAL_CODES and referral_code in LAUNCH_REFERRAL_CODES)
+        has_valid_referral = bool(self.referral_codes and referral_code in self.referral_codes)
+
+        # Referral gate: when referrals are required, reject the request before
+        # any POW/rate-limit work happens so abusers can't fish for valid
+        # codes by side-channel timing. Two distinct error messages so the
+        # operator can tell "user forgot the code" apart from "user typed a
+        # wrong / revoked code" in support tickets.
+        if self.referrals_required and not has_valid_referral:
+            if not referral_code:
+                err = "Referral code is required. Ask Steve for a code."
+            else:
+                err = "That referral code is not recognized. Ask Steve for a current code."
+            return self.render_start_form([err], values)
 
         # Skip POW and rate limiting when a valid referral code is provided
         if not has_valid_referral:
@@ -755,6 +784,14 @@ class LaunchApp:
                 # itself uses to register tenants); this is the same
                 # endpoint the tenant gateway is configured against.
                 f"      ZTLP_NS_SERVER: \"{LAUNCH_NS_SERVER}\"\n"
+                # v0.30.2: shared production NS+Relay addresses the bootstrap
+                # uses to auto-seed Machine rows on first boot, so token-mint
+                # works on the operator's first dashboard click. Bootstrap's
+                # Ztlp::EnsureSharedMachines service falls back to ZTLP_NS_SERVER
+                # if ZTLP_SHARED_NS_ADDR is missing — these are belt-and-
+                # suspenders so the env shape is explicit.
+                f"      ZTLP_SHARED_NS_ADDR: \"{LAUNCH_NS_SERVER}\"\n"
+                f"      ZTLP_SHARED_RELAY_ADDR: \"{BOOTSTRAP_LISTENER_ADDR}\"\n"
                 # BS-PR-4 NOTE: ORG_NAME is emitted above (line ~747); it is
                 # consumed by Bootstrap's auto-created Network row to produce
                 # a human-readable display name (e.g. "Acme Inc" instead of

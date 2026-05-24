@@ -35,6 +35,11 @@ class LaunchAppTest(unittest.TestCase):
             token_secret="test-secret",
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
             require_pow=False,
+            # Tests pre-date the required-referral gate. Keep the gate off by
+            # default so existing POW / rate-limit / claim tests still drive
+            # the flow without supplying a code. The dedicated
+            # ReferralCodeTest class exercises the gate explicitly.
+            referrals_required=False,
         )
 
     def tearDown(self):
@@ -436,6 +441,7 @@ class LaunchAppTest(unittest.TestCase):
             email_rate_limit_per_hour=5,
             ip_rate_limit_per_hour=10_000,
             require_pow=False,
+            referrals_required=False,
         )
         self.app = app
         for i in range(5):
@@ -453,6 +459,7 @@ class LaunchAppTest(unittest.TestCase):
             email_rate_limit_per_hour=10_000,
             ip_rate_limit_per_hour=20,
             require_pow=False,
+            referrals_required=False,
         )
         self.app = app
         for i in range(20):
@@ -471,6 +478,7 @@ class LaunchAppTest(unittest.TestCase):
             email_rate_limit_per_hour=2,
             ip_rate_limit_per_hour=10_000,
             require_pow=False,
+            referrals_required=False,
         )
         self.app = app
         for i in range(2):
@@ -492,6 +500,7 @@ class LaunchAppTest(unittest.TestCase):
             email_rate_limit_per_hour=10_000,
             ip_rate_limit_per_hour=2,
             require_pow=False,
+            referrals_required=False,
         )
         self.app = app
         headers_base = {
@@ -543,6 +552,7 @@ class LaunchAppTest(unittest.TestCase):
             pow_difficulty_bits=difficulty_bits,
             pow_ttl_seconds=pow_ttl_seconds,
             require_pow=True,
+            referrals_required=False,
         )
 
     def _extract_pow_fields(self, body):
@@ -966,6 +976,11 @@ class ProvisionZoneDockersTest(unittest.TestCase):
             token_secret="test-secret",
             now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
             require_pow=False,
+            # Tests pre-date the required-referral gate. Keep the gate off by
+            # default so existing POW / rate-limit / claim tests still drive
+            # the flow without supplying a code. The dedicated
+            # ReferralCodeTest class exercises the gate explicitly.
+            referrals_required=False,
         )
         # Save and stub subprocess.run inside launch_app.app.
         import launch_app.app as launch_module
@@ -1287,6 +1302,133 @@ class AbsoluteUrlTest(unittest.TestCase):
         }
         result = self.app.absolute_url(environ, "/foo")
         self.assertEqual("http://localhost:8080/foo", result)
+
+
+class ReferralCodeTest(unittest.TestCase):
+    """Required-referral-code gate on POST /start.
+
+    Pinned behaviour (2026-05-24):
+      * `referrals_required=True` AND a valid code in `referral_codes`
+        → request proceeds to provisioning.
+      * `referrals_required=True` AND empty code → 400 with a "required" error.
+      * `referrals_required=True` AND unknown code → 400 with a "not recognized" error.
+      * `referrals_required=False` (legacy/dev mode) → empty code falls through
+        to POW + rate-limit gate; the existing LaunchAppTest covers that path.
+
+    Codes are uppercased on both sides; "steve-2026" and "STEVE-2026" are
+    treated as the same code.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "launch.sqlite3")
+        self.instance_root = tempfile.TemporaryDirectory()
+        self._orig_instance_root = os.environ.get("LAUNCH_INSTANCE_ROOT")
+        os.environ["LAUNCH_INSTANCE_ROOT"] = self.instance_root.name
+        import subprocess as _subprocess
+        self._subprocess = _subprocess
+        self._real_subprocess_run = _subprocess.run
+
+        def _fake_run(cmd, *args, **kwargs):
+            return _subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        _subprocess.run = _fake_run
+
+    def tearDown(self):
+        self._subprocess.run = self._real_subprocess_run
+        if self._orig_instance_root is None:
+            os.environ.pop("LAUNCH_INSTANCE_ROOT", None)
+        else:
+            os.environ["LAUNCH_INSTANCE_ROOT"] = self._orig_instance_root
+        self.instance_root.cleanup()
+        self.tmpdir.cleanup()
+
+    def _make_app(self, *, referrals_required, referral_codes):
+        return LaunchApp(
+            db_path=self.db_path,
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            require_pow=False,
+            referrals_required=referrals_required,
+            referral_codes=referral_codes,
+        )
+
+    def _post_start(self, app, *, referral_code, organization_name="Acme Corp",
+                    admin_email="ada@example.com", zone="acme.ztlp"):
+        body = urlencode({
+            "organization_name": organization_name,
+            "admin_name": "Ada Admin",
+            "admin_email": admin_email,
+            "zone": zone,
+            "referral_code": referral_code,
+        }).encode("utf-8")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/start",
+            "QUERY_STRING": "",
+            "SERVER_NAME": "testserver",
+            "SERVER_PORT": "80",
+            "wsgi.url_scheme": "http",
+            "wsgi.input": io.BytesIO(body),
+            "wsgi.errors": io.StringIO(),
+            "wsgi.multithread": False,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+            "CONTENT_LENGTH": str(len(body)),
+            "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        }
+        captured = {}
+
+        def start_response(status, response_headers, exc_info=None):
+            captured["status"] = status
+            captured["headers"] = dict(response_headers)
+
+        response_body = b"".join(app(environ, start_response)).decode("utf-8")
+        return int(captured["status"].split()[0]), response_body
+
+    def test_required_gate_rejects_missing_code(self):
+        app = self._make_app(referrals_required=True, referral_codes=["STEVE-2026"])
+        status, body = self._post_start(app, referral_code="")
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("Referral code is required", body)
+
+    def test_required_gate_rejects_unknown_code(self):
+        app = self._make_app(referrals_required=True, referral_codes=["STEVE-2026"])
+        status, body = self._post_start(app, referral_code="WRONG-CODE")
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("not recognized", body)
+
+    def test_required_gate_accepts_known_code(self):
+        app = self._make_app(referrals_required=True, referral_codes=["STEVE-2026"])
+        status, body = self._post_start(app, referral_code="STEVE-2026")
+        self.assertEqual(HTTPStatus.CREATED, status)
+        self.assertIn("Claim link", body)
+
+    def test_required_gate_normalizes_code_case_insensitively(self):
+        # Operators configure codes uppercase; users may type lowercase.
+        # Both directions must match.
+        app = self._make_app(referrals_required=True, referral_codes=["steve-2026"])
+        status, body = self._post_start(app, referral_code="STEVE-2026")
+        self.assertEqual(HTTPStatus.CREATED, status)
+        status2, body2 = self._post_start(app, referral_code="steve-2026", zone="acme2.ztlp", admin_email="ada2@example.com")
+        self.assertEqual(HTTPStatus.CREATED, status2)
+
+    def test_required_gate_with_empty_codes_set_rejects_everything(self):
+        # Misconfiguration safety net: LAUNCH_REFERRAL_REQUIRED=1 with
+        # LAUNCH_REFERRAL_CODES="" means NO ONE can onboard. This is the
+        # intended fail-closed behaviour (better than fail-open).
+        app = self._make_app(referrals_required=True, referral_codes=[])
+        status, body = self._post_start(app, referral_code="ANYTHING")
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        self.assertIn("not recognized", body)
+
+    def test_legacy_mode_allows_empty_code(self):
+        # Backwards-compat: with referrals_required=False, an empty code is
+        # fine (POW + rate-limit gate the request instead). This is the
+        # mode existing LaunchAppTest tests run in.
+        app = self._make_app(referrals_required=False, referral_codes=[])
+        status, body = self._post_start(app, referral_code="")
+        self.assertEqual(HTTPStatus.CREATED, status)
 
 
 if __name__ == "__main__":

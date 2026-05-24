@@ -66,6 +66,15 @@ fi
 ./bin/rails ztlp:network:ensure_from_env || \
   echo "[entrypoint] WARN: ztlp:network:ensure_from_env failed; continuing boot"
 
+# v0.30.2: auto-seed the per-tenant Network with the shared production
+# NS+Relay machine rows. Token-mint requires at least one NS machine row;
+# without this every tenant's first dashboard click on "Generate
+# enrollment token" fails with "Network must have at least one NS
+# machine". Idempotent — repeat boots are a no-op. Failures are logged
+# but do NOT block container start.
+./bin/rails ztlp:network:ensure_shared_machines || \
+  echo "[entrypoint] WARN: ztlp:network:ensure_shared_machines failed; continuing boot"
+
 # BS-PR-4: log whether the NS server (ZTLP_NS_SERVER) is reachable on
 # UDP. Diagnostic only — bootstrap stays up either way. The result is
 # visible in `docker logs ztlp-bootstrap-<slug>`.

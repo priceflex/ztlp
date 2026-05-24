@@ -172,6 +172,16 @@ Rails.application.routes.draw do
       get  "health", to: "health#show", as: :health
       post "enrollment_tokens", to: "enrollment_tokens#create", as: :enrollment_tokens
     end
+
+    # Gateway-auth API surface (Option C, 2026-05-23). The same
+    # functionality as `api/v1/` but authenticated via the per-tenant
+    # ZTLP gateway's injected admin-identity headers — see
+    # `Api::Admin::EnrollmentTokensController` for the threat model
+    # and `bootstrap/docs/z2ls_gateway_auth_runbook.md` for the
+    # caller-facing contract.
+    namespace :admin do
+      post "enrollment_tokens", to: "enrollment_tokens#create", as: :enrollment_tokens
+    end
   end
 
   # Documentation

@@ -63,13 +63,14 @@ defmodule ZtlpRelay.ReleaseTest do
              """
     end
 
-    test "mix.exs version is at least 0.29.4 (v0.29.4 strict-routing tag)" do
+    test "mix.exs version is at least 0.30.3 (v0.30.3 Z2LS gateway-auth tag)" do
       # Floor guard: prevents an accidental down-bump that would make
-      # the relay misreport itself as an older, missing-the-strict-routing-fix
-      # version. The handoff has the full story (search for "v0.29.4 strict-routing").
+      # the relay misreport itself as one of the pre-v0.30.3 versions.
+      # Ratcheted 0.29.4 → 0.30.3 in PR release/v0.30.3 after the v0.30.3
+      # tag was cut from a5993ee (PR #40 — Z2LS gateway-auth enrollment API).
       declared = ZtlpRelay.MixProject.project()[:version]
-      assert Version.compare(declared, "0.29.4") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.29.4 strict-routing tag"
+      assert Version.compare(declared, "0.30.3") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.30.3 Z2LS gateway-auth tag"
     end
   end
 

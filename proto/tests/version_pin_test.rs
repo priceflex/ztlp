@@ -36,7 +36,13 @@ use ztlp_proto::updater::SemVer;
 /// Minimum semver any future commit on this crate is required to declare.
 /// Bump this floor only when the project's release-management policy explicitly
 /// says pre-`MINIMUM_VERSION` builds are no longer supported.
-const MINIMUM_VERSION: &str = "0.29.4";
+///
+/// Ratcheted 0.29.4 → 0.30.3 in PR <release/v0.30.3> after the v0.30.3 git
+/// tag was cut from `a5993ee` (PR #40 — Z2LS gateway-auth enrollment API).
+/// The v0.30.0..0.30.2 range produced Docker images and a git tag but did
+/// not have a coordinated four-component manifest bump; v0.30.3 closes
+/// that drift the same way PR #14 closed the post-v0.29.4 drift.
+const MINIMUM_VERSION: &str = "0.30.3";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

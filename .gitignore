@@ -53,3 +53,4 @@ v30-telemetry-evidence.log
 # Test tenant private keys
 tenants/test-ztlp/root_key.json
 tenants/*/root_key.json
+.ssh/

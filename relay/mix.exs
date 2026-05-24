@@ -9,7 +9,9 @@ defmodule ZtlpRelay.MixProject do
       # proto) agree. v0.29.4 was tagged BEFORE PR #13/#14 bumped mix.exs
       # files, so containers built from the v0.29.4 tag misreport their
       # runtime vsn. v0.29.5 fixes that drift by tagging AFTER the bumps.
-      version: "0.30.0",
+      # Bumped 0.30.0 → 0.30.3 in PR release/v0.30.3 after the v0.30.3 git
+      # tag was cut from a5993ee (PR #40 — Z2LS gateway-auth enrollment API).
+      version: "0.30.3",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

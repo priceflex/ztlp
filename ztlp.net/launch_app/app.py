@@ -162,6 +162,32 @@ def validate_zone(zone: str) -> list[str]:
     return unique
 
 
+def _slugify_zone_for_env_var(zone: str) -> str:
+    """Map a ZTLP zone name to its ZTLP_HMAC_SECRET_<SUFFIX> env var suffix.
+
+    Mirrors the slugification rule used by:
+      - bootstrap/app/services/ztlp/api_authenticator.rb#slugify_zone
+      - relay/lib/ztlp_relay/hmac_secrets.ex#slugify_zone
+      - gateway/lib/ztlp_gateway/hmac_secrets.ex#slugify_zone
+      - docs/per_zone_hmac_design.md (Zone secret storage section)
+
+    Rule:
+      1. Upper-case the input.
+      2. Replace every run of non-[A-Z0-9] characters with a single underscore.
+      3. Strip leading/trailing underscores.
+
+    Examples:
+      ""                    -> ""
+      "acme"                -> "ACME"
+      "acme.ztlp"           -> "ACME_ZTLP"
+      "hermes-sandbox.ztlp" -> "HERMES_SANDBOX_ZTLP"
+      "tech-rockstars.ztlp" -> "TECH_ROCKSTARS_ZTLP"
+      "..acme.."            -> "ACME"
+    """
+    s = re.sub(r"[^A-Z0-9]+", "_", (zone or "").upper())
+    return s.strip("_")
+
+
 def has_leading_zero_bits(digest: bytes, bits: int) -> bool:
     """True when the first `bits` bits of `digest` (MSB-first) are all zero."""
     if bits <= 0:
@@ -693,6 +719,26 @@ class LaunchApp:
                 # Reuse existing secrets — never rotate on re-provision.
                 pass
             else:
+                # Per-zone HMAC secret for the ZTLP v2 wire-frame contract.
+                # Bootstrap's Ztlp::ApiAuthenticator (Z2LS API auth), the
+                # relay's V2 GATEWAY_REGISTER validation, and the gateway's
+                # outbound register-frame signing all read the SAME env var:
+                #
+                #   ZTLP_HMAC_SECRET_<UPCASE_SLUGIFIED_ZONE>
+                #
+                # First entry is the primary signing key; comma-separated
+                # additional entries are grace keys honored on verify only
+                # (see docs/per_zone_hmac_design.md rotation procedure).
+                #
+                # Generated once at provision time and pinned in secrets.env.
+                # Rotation happens via a separate code path (admin UI / CLI),
+                # never silently on re-provision.
+                hmac_zone_suffix = _slugify_zone_for_env_var(zone)
+                per_zone_hmac_line = (
+                    f"ZTLP_HMAC_SECRET_{hmac_zone_suffix}={secrets.token_hex(32)}\n"
+                    if hmac_zone_suffix
+                    else ""
+                )
                 with open(secrets_env_path, "w", encoding="utf-8") as fh:
                     fh.write(
                         f"SECRET_KEY_BASE={secrets.token_hex(64)}\n"
@@ -704,6 +750,14 @@ class LaunchApp:
                         # (which verifies them via Ztlp::HeaderVerifier). Forged
                         # headers from any other source are rejected.
                         f"ZTLP_GATEWAY_HEADER_SECRET={secrets.token_hex(32)}\n"
+                        # Per-zone wire-frame HMAC secret (Blocker #1 fix,
+                        # 2026-05-24). Env var name is computed above via
+                        # _slugify_zone_for_env_var(zone). If the zone slug
+                        # is empty (defensive — should never happen at
+                        # provision time), this line is empty and Z2LS API
+                        # calls will fall back to the existing
+                        # no_zone_secret failure path.
+                        f"{per_zone_hmac_line}"
                     )
                 # Best-effort chmod — fine if we're already non-root.
                 try:

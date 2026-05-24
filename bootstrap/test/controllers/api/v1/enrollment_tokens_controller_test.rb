@@ -222,10 +222,10 @@ class Api::V1::EnrollmentTokensControllerTest < ActionDispatch::IntegrationTest
          params: raw,
          headers: {
            "Content-Type"     => "application/json",
-           "X-ZTLP-Zone"      => zone,
-           "X-ZTLP-Client"    => client,
-           "X-ZTLP-Timestamp" => ts.to_s,
-           "X-ZTLP-Signature" => sig
+           "X-ZTLP-Client-Zone"      => zone,
+           "X-ZTLP-Client-Name"      => client,
+           "X-ZTLP-Client-Timestamp" => ts.to_s,
+           "X-ZTLP-Client-Signature" => sig
          }
   end
 end

@@ -55,11 +55,11 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
 
   # ── Failure paths ───────────────────────────────────────────────
 
-  test "missing X-ZTLP-Signature returns 401" do
+  test "missing X-ZTLP-Client-Signature returns 401" do
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => ZONE,
-      "X-ZTLP-Client"    => CLIENT,
-      "X-ZTLP-Timestamp" => Time.current.to_i.to_s
+      "X-ZTLP-Client-Zone"      => ZONE,
+      "X-ZTLP-Client-Name"      => CLIENT,
+      "X-ZTLP-Client-Timestamp" => Time.current.to_i.to_s
       # no signature
     }
     assert_response :unauthorized
@@ -72,10 +72,10 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
   test "bad signature returns 401" do
     ts = Time.current.to_i.to_s
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => ZONE,
-      "X-ZTLP-Client"    => CLIENT,
-      "X-ZTLP-Timestamp" => ts,
-      "X-ZTLP-Signature" => "f" * 64
+      "X-ZTLP-Client-Zone"      => ZONE,
+      "X-ZTLP-Client-Name"      => CLIENT,
+      "X-ZTLP-Client-Timestamp" => ts,
+      "X-ZTLP-Client-Signature" => "f" * 64
     }
     assert_response :unauthorized
   end
@@ -95,20 +95,20 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     )
 
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => ZONE,
-      "X-ZTLP-Client"    => CLIENT,
-      "X-ZTLP-Timestamp" => old_ts.to_s,
-      "X-ZTLP-Signature" => sig
+      "X-ZTLP-Client-Zone"      => ZONE,
+      "X-ZTLP-Client-Name"      => CLIENT,
+      "X-ZTLP-Client-Timestamp" => old_ts.to_s,
+      "X-ZTLP-Client-Signature" => sig
     }
     assert_response :unauthorized
   end
 
   test "non-integer timestamp returns 401" do
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => ZONE,
-      "X-ZTLP-Client"    => CLIENT,
-      "X-ZTLP-Timestamp" => "not-a-number",
-      "X-ZTLP-Signature" => "f" * 64
+      "X-ZTLP-Client-Zone"      => ZONE,
+      "X-ZTLP-Client-Name"      => CLIENT,
+      "X-ZTLP-Client-Timestamp" => "not-a-number",
+      "X-ZTLP-Client-Signature" => "f" * 64
     }
     assert_response :unauthorized
   end
@@ -126,10 +126,10 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     )
 
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => ZONE,
-      "X-ZTLP-Client"    => "ghost.acme",
-      "X-ZTLP-Timestamp" => ts.to_s,
-      "X-ZTLP-Signature" => sig
+      "X-ZTLP-Client-Zone"      => ZONE,
+      "X-ZTLP-Client-Name"      => "ghost.acme",
+      "X-ZTLP-Client-Timestamp" => ts.to_s,
+      "X-ZTLP-Client-Signature" => sig
     }
     assert_response :unauthorized
   end
@@ -162,10 +162,10 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     )
 
     get "/api/v1/health", headers: {
-      "X-ZTLP-Zone"      => "evil.ztlp",
-      "X-ZTLP-Client"    => CLIENT,
-      "X-ZTLP-Timestamp" => ts.to_s,
-      "X-ZTLP-Signature" => sig
+      "X-ZTLP-Client-Zone"      => "evil.ztlp",
+      "X-ZTLP-Client-Name"      => CLIENT,
+      "X-ZTLP-Client-Timestamp" => ts.to_s,
+      "X-ZTLP-Client-Signature" => sig
     }
     assert_response :unauthorized
   end
@@ -173,10 +173,10 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
   test "failure writes an api.v1.auth.failure audit log entry" do
     assert_difference -> { AuditLog.where(action: "api.v1.auth.failure").count }, 1 do
       get "/api/v1/health", headers: {
-        "X-ZTLP-Zone"      => ZONE,
-        "X-ZTLP-Client"    => CLIENT,
-        "X-ZTLP-Timestamp" => Time.current.to_i.to_s,
-        "X-ZTLP-Signature" => "f" * 64
+        "X-ZTLP-Client-Zone"      => ZONE,
+        "X-ZTLP-Client-Name"      => CLIENT,
+        "X-ZTLP-Client-Timestamp" => Time.current.to_i.to_s,
+        "X-ZTLP-Client-Signature" => "f" * 64
       }
     end
     assert_response :unauthorized
@@ -203,10 +203,10 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     )
 
     get path, headers: {
-      "X-ZTLP-Zone"      => zone,
-      "X-ZTLP-Client"    => client,
-      "X-ZTLP-Timestamp" => ts.to_s,
-      "X-ZTLP-Signature" => sig
+      "X-ZTLP-Client-Zone"      => zone,
+      "X-ZTLP-Client-Name"      => client,
+      "X-ZTLP-Client-Timestamp" => ts.to_s,
+      "X-ZTLP-Client-Signature" => sig
     }
   end
 end

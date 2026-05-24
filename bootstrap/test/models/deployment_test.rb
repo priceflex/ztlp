@@ -52,4 +52,46 @@ class DeploymentTest < ActiveSupport::TestCase
     assert Deployment.successful.all?(&:success?)
     assert Deployment.failed.all?(&:failed?)
   end
+
+  # --- Phase C: "skipped" status -----------------------------------------
+  #
+  # Added in 2026-05-24 Phase C. `Deployment#status` now accepts "skipped"
+  # as a valid terminal state. Used by `DeployComponentJob` when the
+  # target machine is `Machine#shared?` (auto-seeded shared production
+  # NS/Relay rows): we don't SSH into them, but we still want a row in
+  # the deployments table so the dashboard timeline shows "skipped —
+  # shared infrastructure" instead of a misleading "pending forever".
+
+  test "status inclusion accepts pending/running/success/failed/skipped" do
+    %w[pending running success failed skipped].each do |s|
+      d = machines(:ns1).deployments.build(component: "ns", status: s)
+      assert d.valid?, "expected status=#{s.inspect} to be valid: #{d.errors.full_messages.join(', ')}"
+    end
+  end
+
+  test "VALID_STATUSES constant exposes the set for callers (jobs, dashboards)" do
+    assert_equal %w[pending running success failed skipped], Deployment::VALID_STATUSES
+  end
+
+  test "skipped? predicate is true only when status == 'skipped'" do
+    d = machines(:ns1).deployments.create!(
+      component: "ns", status: "skipped",
+      docker_image: "priceflex/ztlp-ns:latest"
+    )
+    assert d.skipped?
+    refute d.success?
+    refute d.failed?
+  end
+
+  test "skipped scope returns only deployments with status='skipped'" do
+    machine = machines(:ns1)
+    machine.deployments.create!(component: "ns", status: "success",
+                                docker_image: "priceflex/ztlp-ns:latest")
+    skipped = machine.deployments.create!(component: "relay", status: "skipped",
+                                          docker_image: "priceflex/ztlp-relay:latest")
+
+    skipped_set = Deployment.skipped
+    assert_includes skipped_set, skipped
+    assert(skipped_set.all? { |d| d.status == "skipped" })
+  end
 end

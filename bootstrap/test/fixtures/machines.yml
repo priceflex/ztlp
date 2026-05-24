@@ -42,3 +42,29 @@ multi_role:
   ssh_private_key_ciphertext: fake-key-data
   roles: ns,relay
   status: pending
+
+# Auto-seeded "shared production" NS row, marker is `ssh_user="unmanaged"`
+# (matches Machine::SHARED_SSH_USER). Lives in a dedicated `shared_infra`
+# network so it doesn't collide with the row that
+# `MachinesControllerSharedGuardTest` builds in the :office network at
+# the same hostname/IP during its own `setup`.
+shared_ns:
+  network: shared_infra
+  hostname: primary-ns
+  ip_address: 35.91.88.177
+  ssh_port: 22
+  ssh_user: unmanaged
+  ssh_auth_method: agent
+  roles: ns
+  status: ready
+
+# Auto-seeded "shared production" Relay row. Same `unmanaged` marker.
+shared_relay:
+  network: shared_infra
+  hostname: primary-relay
+  ip_address: 34.218.240.106
+  ssh_port: 22
+  ssh_user: unmanaged
+  ssh_auth_method: agent
+  roles: relay
+  status: ready

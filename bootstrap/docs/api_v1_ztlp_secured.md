@@ -1,5 +1,19 @@
 # Bootstrap API — v1 (ZTLP-secured)
 
+> **⚠️ Preferred path: gateway-auth (`/api/admin/`).** In
+> Launch-provisioned topology the per-tenant ZTLP gateway runs with
+> `--http-inject-headers`, which strips all inbound `X-ZTLP-*`
+> headers — including this API's signing headers — before they
+> reach Rails. New Z2LS↔ZTLP integrations should use the gateway-auth
+> contract documented in
+> [`z2ls_gateway_auth_runbook.md`](./z2ls_gateway_auth_runbook.md)
+> (`POST /api/admin/enrollment_tokens`). That path is no-HMAC,
+> no-CSRF, and authenticated by the ZTLP device identity itself.
+>
+> This document remains the contract of record for the HMAC v1 API.
+> The HMAC controller is still wired up and works in test, dev, and
+> any deployment that does NOT sit behind a header-injecting gateway.
+
 This document is the contract for callers of the ZTLP Bootstrap
 `Api::V1` namespace. Every endpoint under `/api/v1/...` requires the
 ZTLP-secured headers described below — there are **no API keys**.

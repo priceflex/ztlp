@@ -1,5 +1,20 @@
 # Z2LS → ZTLP Bootstrap Enrollment Runbook
 
+> **⚠️ NOTE — read first.** This runbook describes the HMAC path
+> (`POST /api/v1/enrollment_tokens`). In current Launch-provisioned
+> topology the per-tenant ZTLP gateway is started with
+> `--http-inject-headers`, which **strips all inbound `X-ZTLP-*`
+> headers** — including the HMAC API's `X-ZTLP-Zone`,
+> `X-ZTLP-Client`, `X-ZTLP-Timestamp`, and `X-ZTLP-Signature`
+> headers — before they reach Rails. **The HMAC contract therefore
+> does not work end-to-end through a Launch-provisioned gateway.**
+>
+> New integrations should use the gateway-auth path documented in
+> [`z2ls_gateway_auth_runbook.md`](./z2ls_gateway_auth_runbook.md)
+> (`POST /api/admin/enrollment_tokens`). This document is kept as
+> historical/secondary reference for the underlying signing contract
+> and for any future direct-Rails-without-gateway deployments.
+
 End-to-end guide for integrating a Z2LS (or any trusted system) with
 ZTLP Bootstrap to mint single-use enrollment tokens for new devices.
 This document walks through:

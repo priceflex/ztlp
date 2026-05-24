@@ -1107,6 +1107,82 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         self.assertEqual(["docker", "compose", "up", "-d"], last["cmd"])
         self.assertEqual(instance_dir, last["cwd"])
 
+    def test_provision_writes_per_zone_hmac_secret_to_secrets_env(self):
+        """Regression for Blocker #1 (Hermes Sandbox onboarding, 2026-05-24):
+        Launch must emit ZTLP_HMAC_SECRET_<UPCASE_SLUGIFIED_ZONE> into
+        secrets.env at provision time so Z2LS API calls authenticate
+        instead of 401ing with `no_zone_secret`. The slug rule MUST
+        match bootstrap/app/services/ztlp/api_authenticator.rb#slugify_zone
+        and relay/lib/ztlp_relay/hmac_secrets.ex#slugify_zone exactly.
+        """
+        # "hermes-sandbox.ztlp" -> "HERMES_SANDBOX_ZTLP" per the rule in
+        # docs/per_zone_hmac_design.md (upper, non-alnum runs collapse to _,
+        # trim leading/trailing _).
+        row = self._create_row(org="Hermes Sandbox", zone="hermes-sandbox.ztlp")
+        result = self.app._provision_zone_dockers(row)
+        self.assertIsNotNone(result)
+        secrets_path = os.path.join(result["instance_dir"], "secrets.env")
+        self.assertTrue(os.path.isfile(secrets_path),
+                        f"secrets.env not written at {secrets_path}")
+        with open(secrets_path) as fh:
+            secrets_text = fh.read()
+        expected_var = "ZTLP_HMAC_SECRET_HERMES_SANDBOX_ZTLP"
+        self.assertIn(
+            f"{expected_var}=",
+            secrets_text,
+            f"missing {expected_var}= in secrets.env:\n{secrets_text}",
+        )
+        # Extract the value and assert it's a 64-char lowercase hex
+        # (32 raw bytes, generated via secrets.token_hex(32)).
+        value = None
+        for line in secrets_text.splitlines():
+            if line.startswith(f"{expected_var}="):
+                value = line.split("=", 1)[1].strip()
+                break
+        self.assertIsNotNone(value, "could not extract value")
+        self.assertEqual(64, len(value),
+                         f"expected 64 hex chars, got {len(value)}: {value!r}")
+        self.assertTrue(all(c in "0123456789abcdef" for c in value),
+                        f"expected lowercase hex, got {value!r}")
+
+    def test_provision_does_not_rotate_per_zone_hmac_on_reprovision(self):
+        """Re-provisioning a tenant (e.g. after a Launch restart) MUST NOT
+        rotate the existing per-zone HMAC secret — the secret is a stable
+        credential shared with Z2LS clients, and silent rotation would
+        break every in-flight client. The existing `if os.path.exists`
+        guard on secrets.env handles this; this test locks the contract.
+        """
+        row = self._create_row(org="Reprov Org", zone="reprov.ztlp")
+        result_a = self.app._provision_zone_dockers(row)
+        with open(os.path.join(result_a["instance_dir"], "secrets.env")) as fh:
+            text_a = fh.read()
+        # Re-provision with the same row — must read the same secret back.
+        result_b = self.app._provision_zone_dockers(row)
+        with open(os.path.join(result_b["instance_dir"], "secrets.env")) as fh:
+            text_b = fh.read()
+        self.assertEqual(text_a, text_b,
+                         "secrets.env changed on reprovision — secret rotation must be explicit")
+
+    def test_provision_gateway_service_inherits_secrets_env(self):
+        """V2 GATEWAY_REGISTER frames are signed with the per-zone HMAC
+        secret; the gateway container needs to see the same env var
+        bootstrap does. Compose already mounts secrets.env on the
+        gateway service via `env_file` — lock that in so a future
+        refactor doesn't silently drop it.
+        """
+        row = self._create_row(org="GW Env Org", zone="gw-env.ztlp")
+        result = self.app._provision_zone_dockers(row)
+        compose_path = os.path.join(result["instance_dir"], "docker-compose.yml")
+        with open(compose_path) as fh:
+            compose_text = fh.read()
+        # Find the gateway service block (everything from "gateway:" to
+        # the next top-level service or EOF).
+        self.assertIn("gateway:", compose_text)
+        gateway_section = compose_text.split("gateway:", 1)[1]
+        # The whole gateway block must reference secrets.env via env_file.
+        self.assertIn("env_file:", gateway_section)
+        self.assertIn("secrets.env", gateway_section)
+
     def test_provision_handles_docker_compose_failure_without_raising(self):
         # Replace stub with one that returns a non-zero rc.
         import subprocess as _subprocess

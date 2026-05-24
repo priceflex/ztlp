@@ -339,9 +339,38 @@ enum Commands {
         relay: Option<String>,
 
         /// Service name to register with the relay (default: "ztlp-gateway").
-        /// Only used when --relay is set. Padded to 16 bytes in the packet.
+        /// Only used when --relay is set. Padded to 16 bytes in the V1 packet.
+        ///
+        /// For V2 packets the routing key is derived from `--zone` instead;
+        /// this field is still emitted on the wire for V1 backwards compatibility
+        /// but no longer determines routing on the relay side.
         #[arg(long, default_value = "ztlp-gateway")]
         service_name: String,
+
+        /// Zone identifier for collision-safe V2 GATEWAY_REGISTER emission.
+        ///
+        /// When set, the listener emits BOTH V1 (`0x0A`) and V2 (`0x0E`)
+        /// register packets in parallel. The V2 packet carries `zone` as a
+        /// length-prefixed field and the relay routes by `gw:<zone>` instead
+        /// of the truncated `gw-<org_slug>` from V1. This prevents
+        /// cross-tenant slug collisions on shared relays.
+        ///
+        /// Must be 1..=63 bytes (DNS-label limit). When omitted, only V1
+        /// packets are emitted — strict backwards-compat behavior.
+        ///
+        /// See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
+        #[arg(long)]
+        zone: Option<String>,
+
+        /// Env-var name to read the per-zone HMAC secret from for V2 frame
+        /// signing. Defaults to `ZTLP_HMAC_SECRET_<UPPER_ZONE>` matching the
+        /// relay-side convention in `ZtlpRelay.HmacSecrets`.
+        ///
+        /// Only used when `--zone` is set. If the env var is unset, V2
+        /// emission is skipped (the relay will fall back to V1 routing for
+        /// this gateway) and a warning is logged once at startup.
+        #[arg(long)]
+        zone_hmac_secret_env: Option<String>,
 
         /// Enable HTTP X-ZTLP-* header injection for passwordless admin auth.
         ///
@@ -3632,6 +3661,8 @@ async fn cmd_listen(
     _max_sessions: usize,
     relay_addr: Option<&str>,
     service_name: &str,
+    zone: Option<&str>,
+    zone_hmac_secret_env: Option<&str>,
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
@@ -3691,6 +3722,54 @@ async fn cmd_listen(
                 target, local_addr
             );
 
+            // ─── V2 zone-keyed registration setup ──────────────────────
+            //
+            // When --zone is set we emit BOTH V1 (0x0A) and V2 (0x0E) frames
+            // each registration tick. V2 carries the zone explicitly so the
+            // relay can route by `gw:<zone>` and avoid cross-tenant slug
+            // collisions (see docs/plans/2026-05-24-zone-keyed-gateway-
+            // register-IMPL.md).
+            //
+            // The V2 frame is HMAC-signed with a per-zone secret. We look
+            // it up from the env var name passed via --zone-hmac-secret-env,
+            // defaulting to the relay-side convention
+            // `ZTLP_HMAC_SECRET_<UPPER_ZONE_SLUG>` (matches
+            // ZtlpRelay.HmacSecrets.slugify_zone).
+            //
+            // If --zone is set but the secret can't be loaded, we log once
+            // at WARN and proceed V1-only. The relay's HMAC-mode policy
+            // decides whether it still accepts unverified V2 frames in
+            // staging/dev environments.
+            let v2_config: Option<(String, Vec<u8>)> = match zone {
+                Some(z) if !z.is_empty() => {
+                    let env_name = zone_hmac_secret_env
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| {
+                            // Mirror Elixir's slugify_zone: uppercase,
+                            // non-alphanumeric -> underscore.
+                            let slug: String = z
+                                .chars()
+                                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                                .collect();
+                            format!("ZTLP_HMAC_SECRET_{}", slug)
+                        });
+                    match std::env::var(&env_name) {
+                        Ok(s) if !s.is_empty() => Some((z.to_string(), s.into_bytes())),
+                        _ => {
+                            eprintln!(
+                                "{} --zone={} set but {} is empty or unset; emitting V1 frames only. \
+                                 (The relay may still accept V2 in staging/dev mode.)",
+                                c_yellow("⚠"),
+                                z,
+                                env_name
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+
             // Convert the cloned std socket to a tokio non-blocking socket so
             // we can use it inside async code. Both this socket and Quinn's
             // socket point at the same kernel-level UDP socket, so the relay
@@ -3722,19 +3801,54 @@ async fn cmd_listen(
                 match tokio_sock.send_to(&pkt, relay_addr).await {
                     Ok(n) => {
                         debug!("gateway registration sent to {} ({} bytes)", relay_addr, n);
-                        eprintln!(
-                            "{} gateway registered with {} (service: {})",
-                            c_green("✓"),
-                            relay_addr,
-                            svc
-                        );
+                        match &v2_config {
+                            Some((z, _)) => eprintln!(
+                                "{} gateway registered with {} (V1 service={}, V2 zone={})",
+                                c_green("✓"),
+                                relay_addr,
+                                svc,
+                                z
+                            ),
+                            None => eprintln!(
+                                "{} gateway registered with {} (service: {})",
+                                c_green("✓"),
+                                relay_addr,
+                                svc
+                            ),
+                        }
                     }
                     Err(e) => {
                         eprintln!("Initial relay registration send error: {}", e);
                     }
                 }
 
+                // Emit initial V2 packet immediately after V1 (the v1 emit
+                // is above; this fires the v2 if configured).
+                if let Some((z, secret)) = &v2_config {
+                    match build_gateway_register_v2_packet(
+                        &node_id,
+                        z,
+                        &svc,
+                        RELAY_REGISTER_TTL,
+                        ts,
+                        secret,
+                    ) {
+                        Ok(p) => {
+                            if let Err(e) = tokio_sock.send_to(&p, relay_addr).await {
+                                eprintln!("Initial V2 registration send error: {}", e);
+                            } else {
+                                debug!(
+                                    "V2 gateway registration sent to {} (zone={})",
+                                    relay_addr, z
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("Initial V2 packet build error: {}", e),
+                    }
+                }
+
                 // Periodic re-registration loop on the SAME shared socket.
+                // Emits V1 every tick, and V2 alongside V1 when v2_config is Some.
                 loop {
                     tokio::time::sleep(RELAY_REREGISTER_INTERVAL).await;
                     let ts = std::time::SystemTime::now()
@@ -3748,6 +3862,23 @@ async fn cmd_listen(
                         }
                         Err(e) => {
                             eprintln!("background relay reregistration failed: {}", e);
+                        }
+                    }
+                    if let Some((z, secret)) = &v2_config {
+                        match build_gateway_register_v2_packet(
+                            &node_id,
+                            z,
+                            &svc,
+                            RELAY_REGISTER_TTL,
+                            ts,
+                            secret,
+                        ) {
+                            Ok(p) => {
+                                if let Err(e) = tokio_sock.send_to(&p, relay_addr).await {
+                                    eprintln!("background V2 reregistration failed: {}", e);
+                                }
+                            }
+                            Err(e) => eprintln!("V2 packet build error: {}", e),
                         }
                     }
                 }
@@ -10439,6 +10570,8 @@ async fn main() {
             max_sessions,
             relay,
             service_name,
+            zone,
+            zone_hmac_secret_env,
             http_inject_headers,
             header_hmac_secret,
             admin_pubkey_email,
@@ -10456,6 +10589,8 @@ async fn main() {
                 *max_sessions,
                 relay.as_deref(),
                 service_name,
+                zone.as_deref(),
+                zone_hmac_secret_env.as_deref(),
                 *http_inject_headers,
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,

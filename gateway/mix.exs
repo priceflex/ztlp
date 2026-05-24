@@ -9,10 +9,12 @@ defmodule ZtlpGateway.MixProject do
       # Bumped 0.24.0 → 0.29.4 in PR #14 to close the version-string drift
       # that PR #13 fixed for the relay. Bumped 0.29.4 → 0.29.5 in PR #15 to
       # cut a clean v0.29.5 tag where the git tag and all four declared
-      # versions (relay, gateway, ns, proto) agree. The release_test.exs
-      # "version reporting (regression pin)" block floors this at 0.29.4
+      # versions (relay, gateway, ns, proto) agree. Bumped 0.30.0 → 0.30.3
+      # in PR release/v0.30.3 after the v0.30.3 git tag was cut from a5993ee
+      # (PR #40 — Z2LS gateway-auth enrollment API). The release_test.exs
+      # "version reporting (regression pin)" block floors this at 0.30.3
       # to prevent silent down-drift going forward.
-      version: "0.30.0",
+      version: "0.30.3",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

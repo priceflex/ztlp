@@ -67,6 +67,16 @@ module Api
 
       MAX_COMPUTER_NAME_LENGTH = 253  # RFC1035 fully-qualified limit
 
+      # Phase A — username payload field. ZtlpUser.name is
+      # network-scoped-unique; the regex below is intentionally
+      # narrower than computer_name (no dots) since usernames are an
+      # identity primitive and we don't want them looking like a
+      # FQDN. Lowercase letters/digits/hyphens/underscores/dots
+      # (dot only for `user@domain.tld`-style email-derived names —
+      # rare but Google-Workspace IdP sync hands them out).
+      USERNAME_REGEX = /\A[a-z0-9][a-z0-9._-]{0,62}\z/i.freeze
+      MAX_USERNAME_LENGTH = 63
+
       def create
         computer_name = params[:computer_name].to_s.strip
 
@@ -86,6 +96,25 @@ module Api
           )
         end
 
+        # Phase A — optional `username` payload field. When present,
+        # mints a USER-target token; when absent, mints a DEVICE-target
+        # token. Either way, target_kind + target_label are stamped on
+        # the EnrollmentToken row.
+        username = params[:username].to_s.strip.presence
+        if username
+          if username.length > MAX_USERNAME_LENGTH
+            return render_validation_error(
+              "username exceeds maximum length (#{MAX_USERNAME_LENGTH})"
+            )
+          end
+
+          unless username.match?(USERNAME_REGEX)
+            return render_validation_error(
+              "username must be a valid identifier (lowercase letters/digits/hyphens/underscores/dots)"
+            )
+          end
+        end
+
         network = Network.find_by(zone: current_api_client.zone)
 
         unless network
@@ -100,6 +129,22 @@ module Api
           )
         end
 
+        # Resolve the target principal. The lookup-or-create happens
+        # BEFORE TokenGenerator runs so we can hand it the AR object
+        # and the right target_kind/target_label.
+        if username
+          ztlp_user = network.ztlp_users.find_or_create_by!(name: username) do |u|
+            u.role   ||= "user"
+            u.status ||= "active"
+          end
+          target_kind  = "user"
+          target_label = username
+        else
+          ztlp_user    = nil
+          target_kind  = "device"
+          target_label = computer_name
+        end
+
         # Single-use, 24h default. The 24h default is enforced by
         # EnrollmentToken#set_default_expires_at (BS-PR-1) — TokenGenerator
         # passes through `expires_in:` explicitly so we set it here as
@@ -107,7 +152,10 @@ module Api
         token = TokenGenerator.new(network).generate!(
           max_uses: 1,
           expires_in: EnrollmentToken::DEFAULT_LIFETIME,
-          notes: build_notes(computer_name, params[:metadata])
+          notes: build_notes(computer_name, params[:metadata]),
+          target_kind: target_kind,
+          target_label: target_label,
+          ztlp_user: ztlp_user
         )
 
         AuditLog.record(
@@ -118,7 +166,9 @@ module Api
             computer_name: computer_name,
             zone: network.zone,
             issued_by_api_client: current_api_client.name,
-            expires_at: token.expires_at.iso8601
+            expires_at: token.expires_at.iso8601,
+            target_kind: target_kind,
+            target_label: target_label
           },
           ip_address: request.remote_ip
         )

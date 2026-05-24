@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_05_23_080000) do
+ActiveRecord::Schema[7.1].define(version: 2026_05_25_000000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -211,7 +211,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_05_23_080000) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.integer "ztlp_user_id"
+    t.string "target_kind"
+    t.string "target_label"
     t.index ["network_id", "status"], name: "index_enrollment_tokens_on_network_id_and_status"
+    t.index ["network_id", "target_kind", "target_label"], name: "index_enrollment_tokens_on_network_target"
     t.index ["network_id"], name: "index_enrollment_tokens_on_network_id"
     t.index ["status"], name: "index_enrollment_tokens_on_status"
     t.index ["token_id"], name: "index_enrollment_tokens_on_token_id", unique: true

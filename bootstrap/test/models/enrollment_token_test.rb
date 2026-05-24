@@ -339,4 +339,92 @@ class EnrollmentTokenTest < ActiveSupport::TestCase
       refute token.revoke!
     end
   end
+
+  # ── Phase A: target_kind / target_label ─────────────────────────
+  #
+  # Added 2026-05-25 (Phase A). Bind enrollment tokens to a principal
+  # (device OR user) on mint, so dashboard tokens carry "who/what is
+  # this for" instead of being loose. Schema migration added two
+  # NULLABLE columns + a composite index; the controller layer is
+  # what enforces presence on the dashboard path.
+
+  test "TARGET_KINDS constant lists the two supported kinds" do
+    assert_equal %w[device user], EnrollmentToken::TARGET_KINDS
+  end
+
+  test "target_kind accepts 'device'" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active",
+      target_kind: "device",
+      target_label: "alice-laptop"
+    )
+    assert token.valid?, token.errors.full_messages.join(", ")
+  end
+
+  test "target_kind accepts 'user'" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active",
+      target_kind: "user",
+      target_label: "alice"
+    )
+    assert token.valid?, token.errors.full_messages.join(", ")
+  end
+
+  test "target_kind nil is accepted (legacy / API tokens without explicit principal)" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active"
+    )
+    assert token.valid?, token.errors.full_messages.join(", ")
+    assert_nil token.target_kind
+    assert_nil token.target_label
+  end
+
+  test "unknown target_kind is rejected" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active",
+      target_kind: "machine",  # not in TARGET_KINDS
+      target_label: "x"
+    )
+    refute token.valid?
+    assert_includes token.errors[:target_kind].join, "is not included in the list"
+  end
+
+  test "target_kind without target_label is rejected" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active",
+      target_kind: "device"
+    )
+    refute token.valid?
+    assert_includes token.errors[:target_label].join, "can't be blank"
+  end
+
+  test "target_label without target_kind is rejected (avoid orphan label)" do
+    token = EnrollmentToken.new(
+      network: networks(:office),
+      max_uses: 1, status: "active",
+      target_label: "alice-laptop"
+    )
+    refute token.valid?
+    assert_includes token.errors[:target_kind].join, "can't be blank"
+  end
+
+  test "device_target? and user_target? predicates" do
+    device_token = EnrollmentToken.new(target_kind: "device", target_label: "x")
+    user_token   = EnrollmentToken.new(target_kind: "user",   target_label: "x")
+    legacy       = EnrollmentToken.new
+
+    assert device_token.device_target?
+    refute device_token.user_target?
+
+    assert user_token.user_target?
+    refute user_token.device_target?
+
+    refute legacy.device_target?
+    refute legacy.user_target?
+  end
 end

@@ -14,8 +14,41 @@ class TokenGenerator
     @network = network
   end
 
-  # Generate a new enrollment token
-  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil, ztlp_user_id: nil)
+  # Generate a new enrollment token.
+  #
+  # Kwargs:
+  #
+  #   expires_in:    Lifetime (ActiveSupport::Duration). Defaults to 24h.
+  #   max_uses:      Single-use (1) by default; can be bumped for kiosk
+  #                  flows.
+  #   roles:         Comma-joined into `allowed_roles` for legacy callers
+  #                  (Steve's RBAC scaffolding pre-dates this method's
+  #                  birth).
+  #   notes:         Free-form. Used as the human-readable label in the
+  #                  dashboard's token index.
+  #   ztlp_user_id:  Sets the FK on the token directly (legacy / API
+  #                  callers).
+  #
+  # Phase A additions (2026-05-25):
+  #
+  #   target_kind:   "device" | "user" — binds the token to a principal.
+  #                  Both columns are NULLABLE; legacy callers that
+  #                  don't pass either keep working unchanged.
+  #   target_label:  Either the computer_name (when target_kind="device")
+  #                  or the username (when target_kind="user"). The
+  #                  username is denormalized from `ztlp_user.name`
+  #                  so the label survives a ZtlpUser rename.
+  #   ztlp_user:     Convenience kwarg — when present, ALSO sets the FK
+  #                  (`ztlp_user_id`) from the AR object. Mutually
+  #                  exclusive with `ztlp_user_id:` (caller picks one).
+  #
+  # Model-level validation enforces the paired-presence invariant
+  # (you can't have a target_label without a target_kind), and
+  # `ActiveRecord::RecordInvalid` propagates up if the caller hands us
+  # an inconsistent pair.
+  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil,
+                ztlp_user_id: nil, ztlp_user: nil,
+                target_kind: nil, target_label: nil)
     ns_machine = @network.ns_machines.first
     relay_machine = @network.relay_machines.first
 
@@ -53,15 +86,23 @@ class TokenGenerator
       use_path: true
     )
 
+    # Resolve the FK. `ztlp_user:` (AR object) takes precedence over
+    # the bare `ztlp_user_id:` integer for ergonomic Phase-A callers,
+    # but if both are nil we leave the column untouched (legacy API
+    # callers).
+    resolved_user_id = ztlp_user&.id || ztlp_user_id
+
     enrollment_token = @network.enrollment_tokens.create!(
       token_id: token_id,
       token_uri: token_uri,
       qr_svg: qr_svg,
       max_uses: max_uses,
       expires_at: expires_at,
-      ztlp_user_id: ztlp_user_id,
+      ztlp_user_id: resolved_user_id,
       allowed_roles: Array(roles).join(","),
-      notes: notes
+      notes: notes,
+      target_kind: target_kind,
+      target_label: target_label
     )
 
     AuditLog.record(
@@ -71,8 +112,10 @@ class TokenGenerator
         network: @network.name,
         zone: @network.zone,
         max_uses: max_uses,
-        expires_at: expires_at.iso8601
-      }
+        expires_at: expires_at.iso8601,
+        target_kind: target_kind,
+        target_label: target_label
+      }.compact
     )
 
     enrollment_token

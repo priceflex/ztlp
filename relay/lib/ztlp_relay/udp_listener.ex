@@ -453,11 +453,15 @@ defmodule ZtlpRelay.UdpListener do
     Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER from #{inspect(sender)}")
   end
 
-  # Derive the per-zone key id from a V1 service_name. V1 frames don't
-  # carry an explicit zone field, so we use the service-name convention:
-  # `gw-<zone>` → `<zone>`. Services that don't match the convention
-  # use their full service_name as the zone id, which means each such
-  # service gets its own slot in the per-zone secret table.
+  # Derive the per-zone key id from a service_name. V1 frames don't carry
+  # an explicit zone field, so we use the service-name convention:
+  # `gw-<zone>` → `<zone>`. V2-style `gw:<zone>` is also recognized (used
+  # when a client supplies the new collision-safe routing key in a
+  # CLIENT_ROUTE frame; see docs/plans/2026-05-24-zone-keyed-gateway-
+  # register-IMPL.md). Services that don't match either convention use
+  # their full service_name as the zone id, which means each such service
+  # gets its own slot in the per-zone secret table.
+  defp derive_zone_from_service("gw:" <> rest), do: rest
   defp derive_zone_from_service("gw-" <> rest), do: rest
   defp derive_zone_from_service(other), do: other
 
@@ -580,6 +584,16 @@ defmodule ZtlpRelay.UdpListener do
          signed_data,
          hmac
        ) do
+    # Routing key for V2 registrations is `gw:<zone_id>`, NOT the legacy
+    # 16-byte truncated `service_name` field. This is the whole point of
+    # V2: routing by zone prevents cross-tenant slug collisions (e.g.
+    # "Tech Rockstars" and "Tech Rockstars Test" both truncating to
+    # "gw-tech-rockst" in V1). The gateway continues to emit V1 frames
+    # in parallel for back-compat — V1 routes by service_name as before.
+    #
+    # See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
+    v2_routing_key = "gw:" <> zone_id
+
     case ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed_data, hmac) do
       {:ok, class} when class in [:primary, :grace] ->
         if class == :grace do
@@ -589,7 +603,7 @@ defmodule ZtlpRelay.UdpListener do
           )
         end
 
-        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+        guard_timestamp_then_register(sender, node_id, v2_routing_key, ttl, timestamp)
 
       {:ok, :legacy} ->
         # V2 frames carry an explicit zone_id; falling back to the legacy
@@ -603,25 +617,26 @@ defmodule ZtlpRelay.UdpListener do
             "and remove the legacy fallback."
         )
 
-        guard_timestamp_then_register(sender, node_id, service_name, ttl, timestamp)
+        guard_timestamp_then_register(sender, node_id, v2_routing_key, ttl, timestamp)
 
       {:ok, :unverified_dev} ->
         Logger.debug(
           "[UdpListener] Accepting unverified GATEWAY_REGISTER_V2 from #{inspect(sender)} " <>
-            "zone=#{zone_id} (mode=dev)"
+            "zone=#{zone_id} (mode=dev) routing_key=#{v2_routing_key}"
         )
 
-        do_register_gateway(sender, node_id, service_name, ttl)
+        do_register_gateway(sender, node_id, v2_routing_key, ttl)
 
       {:ok, :unverified_staging} ->
         Logger.warning(
           "[UdpListener] [STAGING] Accepting unverified GATEWAY_REGISTER_V2 from " <>
-            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} — " <>
+            "#{inspect(sender)} service=#{service_name} zone=#{zone_id} " <>
+            "routing_key=#{v2_routing_key} — " <>
             "configure ZTLP_HMAC_SECRET_#{ZtlpRelay.HmacSecrets.slugify_zone(zone_id)} " <>
             "before promoting to prod."
         )
 
-        do_register_gateway(sender, node_id, service_name, ttl)
+        do_register_gateway(sender, node_id, v2_routing_key, ttl)
 
       {:error, :bad_hmac} ->
         Logger.warning(

@@ -141,6 +141,65 @@ defmodule ZtlpRelay.V2WireFramesTest do
       assert Enum.find(dynamic, fn gw -> gw.node_id == node_id end) != nil
     end
 
+    test "V2 registration is routable under gw:<zone_id> (collision-safe routing key)" do
+      # This locks down the C-prime / v0.30.5 routing-key change. A V2
+      # register MUST land in the routing table under "gw:<zone_id>" so
+      # clients asking for the new collision-safe slug can reach it
+      # — REGARDLESS of what V1 service_name field the gateway also sent
+      # on the wire (which is determined by the operator's
+      # --service-name flag and may collide across tenants).
+      #
+      # See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md
+      # §"Step 4 — Switch relay routing key to gw:<zone_id> for V2".
+      System.put_env("ZTLP_RELAY_HMAC_MODE", "prod")
+      zone_id = "techrockstars.ztlp"
+      secret = :crypto.strong_rand_bytes(32)
+      System.put_env("ZTLP_HMAC_SECRET_TECHROCKSTARS_ZTLP", Base.encode16(secret))
+      System.delete_env("ZTLP_RELAY_REGISTRATION_SECRET")
+
+      # Gateway sends V1 service_name = "gw-tech-rockst" (the legacy
+      # truncated org slug) but zone_id = full canonical zone. After
+      # acceptance the dynamic-gateway entry's service_name should be
+      # the V2 routing key "gw:techrockstars.ztlp", NOT "gw-tech-rockst".
+      node_id = send_gateway_register_v2(zone_id, "gw-tech-rockst", secret)
+
+      dynamic = GatewayForwarder.dynamic_gateways()
+      gw = Enum.find(dynamic, fn entry -> entry.node_id == node_id end)
+      assert gw != nil, "V2 register should produce a dynamic_gateways entry"
+
+      assert gw.service_name == "gw:techrockstars.ztlp",
+             "V2 routing key must be 'gw:<zone>'; got: #{inspect(gw.service_name)}"
+    end
+
+    test "two tenants colliding under V1 truncation are independently routable under V2" do
+      # Regression for the headline production bug this PR fixes:
+      # `Tech Rockstars` and `Tech Rockstars Test` both slugify to
+      # `gw-tech-rockst` under V1. Under V2 they live at distinct
+      # routing keys and the relay can route to either independently.
+      System.put_env("ZTLP_RELAY_HMAC_MODE", "prod")
+      tr_secret = :crypto.strong_rand_bytes(32)
+      tr_test_secret = :crypto.strong_rand_bytes(32)
+      System.put_env("ZTLP_HMAC_SECRET_TECHROCKSTARS_ZTLP", Base.encode16(tr_secret))
+      System.put_env("ZTLP_HMAC_SECRET_TEST_ZTLP", Base.encode16(tr_test_secret))
+      System.delete_env("ZTLP_RELAY_REGISTRATION_SECRET")
+
+      # Both tenants — same V1 truncated service_name, different zones.
+      node_tr = send_gateway_register_v2("techrockstars.ztlp", "gw-tech-rockst", tr_secret)
+      node_tr_test = send_gateway_register_v2("test.ztlp", "gw-tech-rockst", tr_test_secret)
+
+      dynamic = GatewayForwarder.dynamic_gateways()
+      gw_tr = Enum.find(dynamic, fn entry -> entry.node_id == node_tr end)
+      gw_tr_test = Enum.find(dynamic, fn entry -> entry.node_id == node_tr_test end)
+
+      assert gw_tr != nil, "techrockstars.ztlp gateway should be registered"
+      assert gw_tr_test != nil, "test.ztlp gateway should be registered"
+
+      assert gw_tr.service_name == "gw:techrockstars.ztlp"
+      assert gw_tr_test.service_name == "gw:test.ztlp"
+      refute gw_tr.service_name == gw_tr_test.service_name,
+             "Two zones MUST have distinct V2 routing keys"
+    end
+
     test "prod mode + secret for zone A signing for zone B REJECTS (cross-tenant hijack)" do
       System.put_env("ZTLP_RELAY_HMAC_MODE", "prod")
       acme_secret = :crypto.strong_rand_bytes(32)

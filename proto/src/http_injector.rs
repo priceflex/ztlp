@@ -41,8 +41,17 @@ pub fn inject_headers(
 
     for h in req.headers {
         let name_lower = h.name.to_lowercase();
-        // Drop any faked ZTLP headers injected by malicious client
-        if name_lower.starts_with("x-ztlp-") {
+        // ZTLP namespace policy:
+        //   x-ztlp-client-*  → client-injected Z2LS auth headers; PASS
+        //                       THROUGH verbatim (Bootstrap's
+        //                       Ztlp::ApiAuthenticator verifies them
+        //                       with a per-zone HMAC).
+        //   x-ztlp-*  (other) → admin-auth namespace owned by the
+        //                       gateway; STRIP so a malicious client
+        //                       cannot forge an admin header. The
+        //                       gateway re-injects the canonical admin
+        //                       set below.
+        if name_lower.starts_with("x-ztlp-") && !name_lower.starts_with("x-ztlp-client-") {
             continue;
         }
 

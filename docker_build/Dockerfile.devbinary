@@ -1,0 +1,23 @@
+# Quick rebuild path: drop a host-built ztlp binary into the runtime image
+# instead of recompiling inside Docker. Used for fast iteration during
+# debugging — the cargo cache inside the multi-stage builder doesn't
+# always invalidate cleanly on small source edits.
+#
+# Build (from repo root, after `cargo build --release --bin ztlp`):
+#   docker build -t priceflex/ztlp-node:latest -f proto/Dockerfile.devbinary proto
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --create-home ztlp
+
+# Inject the freshly-built binary directly. Matches `priceflex/ztlp-node:latest`
+# layout used by the ztlp.net launch-app compose template: ztlp on PATH, no
+# ENTRYPOINT (the compose command starts with `sh -c "..."`).
+COPY ztlp /usr/local/bin/ztlp
+
+WORKDIR /home/ztlp
+CMD ["bash"]

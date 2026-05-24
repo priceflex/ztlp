@@ -885,7 +885,7 @@ class LaunchApp:
                 # so the gateway accepts the tenant-routed HELLO and bridges
                 # to Bootstrap. Verified end-to-end with `ztlp connect` +
                 # passwordless autologin on 2026-05-21.
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward 127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --http-inject-headers --quic --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward 127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --zone {zone} --http-inject-headers --quic --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
                 "  register_ns:\n"
@@ -1001,14 +1001,16 @@ class LaunchApp:
     def render_claim_page(self, row: sqlite3.Row, token: str = "", note: str = "") -> str:
         service = row["bootstrap_service_name"] or f"bootstrap.{row['zone']}"
         ns_server = row["ns_server"] or LAUNCH_NS_SERVER
-        # Mirror the gateway-side `--service-name gw-{slug[:11]}` registration
-        # used in _provision_zone_dockers so the displayed Connect command
-        # actually routes to THIS tenant's gateway. Hardcoding `--service http`
-        # caused the relay's pick_gateway_for_service to round-robin across
-        # all tenants when no service matched, sometimes landing on the wrong
-        # gateway and skipping autologin.
+        # The displayed Connect command uses the V2 routing key `gw:<zone>`
+        # so clients land on the right tenant's gateway even when V1 slug
+        # truncation would collide (e.g. "Tech Rockstars" vs "Tech
+        # Rockstars Test" — both V1-truncate to gw-tech-rockst). The
+        # gateway also emits V1 frames for back-compat; if a client still
+        # uses the V1 slug, the relay's V1 routing path catches it.
+        # See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
+        zone = row["zone"] or ""
         slug = self._slug_for_row(row)
-        gw_service = f"gw-{slug[:11]}" if slug else "gw-bootstrap"
+        gw_service = f"gw:{zone}" if zone else (f"gw-{slug[:11]}" if slug else "gw-bootstrap")
         connect_command = (
             f"ztlp connect {service} --ns-server {ns_server} "
             f"--service {gw_service} -L 18080:127.0.0.1:3000"

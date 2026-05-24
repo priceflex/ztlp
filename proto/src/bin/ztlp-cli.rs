@@ -3270,6 +3270,12 @@ async fn run_parallel_session(
 /// and then parses the remaining fields.
 const GATEWAY_REGISTER_MAGIC: [u8; 2] = [0x5A, 0x37];
 const GATEWAY_REGISTER_TYPE: u8 = 0x0A;
+/// V2 GATEWAY_REGISTER frame type — carries an explicit `zone_id` length-prefixed
+/// field so the relay can route by zone (not by truncated org-slug). Introduced
+/// for cross-tenant collision safety; see docs/plans/2026-05-24-zone-keyed-
+/// gateway-register-IMPL.md and the original Elixir impl at
+/// gateway/lib/ztlp_gateway/relay_registrar.ex.
+const GATEWAY_REGISTER_V2_TYPE: u8 = 0x0E;
 const RELAY_REGISTER_TTL: u32 = 60; // seconds — relay expires registration after TTL
 const RELAY_REREGISTER_INTERVAL: Duration = Duration::from_secs(10); // refresh at half-TTL
 
@@ -3341,6 +3347,103 @@ fn build_gateway_register_packet(
     packet.extend_from_slice(&signed_payload);
     packet.extend_from_slice(&hmac);
     packet
+}
+
+/// Build a GATEWAY_REGISTER_V2 packet (type byte `0x0E`) for collision-safe
+/// zone-keyed relay routing.
+///
+/// # Wire format
+///
+/// ```text
+///   magic:           0x5A37          (2 bytes, big-endian)
+///   type:            0x0E            (1 byte)
+///   zone_len:        1 byte          (length of zone_id, 1..=63)
+///   zone_id:         zone_len bytes  (UTF-8, e.g. "techrockstars.ztlp")
+///   node_id:         16 bytes
+///   service_padded:  16 bytes        (zero-padded ASCII — mirrors V1 layout
+///                                     for relay-side parser compatibility)
+///   ttl:             4 bytes         (big-endian u32)
+///   timestamp:       8 bytes         (big-endian i64 unix seconds)
+///   hmac:            32 bytes        (HMAC-SHA256)
+/// ```
+///
+/// # Signed material
+///
+/// The HMAC covers the bytes
+/// `[0x0E, zone_len, zone_id, node_id, service_padded, ttl, timestamp]`.
+/// The wire magic and the HMAC field itself are NOT signed. This matches the
+/// relay-side parser in `relay/lib/ztlp_relay/udp_listener.ex` (the
+/// `handle_gateway_register_v2/2` handler).
+///
+/// # Errors
+///
+/// Returns `Err` if `zone_id` length is outside `1..=63` bytes. Returns `Err`
+/// if `secret` is provided but has a length the HMAC implementation refuses
+/// (any non-zero length is fine for HMAC-SHA256, so this is a defensive
+/// path).
+///
+/// # Compatibility with V1
+///
+/// V2 is additive — gateways send both V1 (`0x0A`) and V2 (`0x0E`) frames
+/// in parallel during the migration window. Relays accept both. New clients
+/// reach the V2-registered gateway via the routing key `gw:<zone_id>`; old
+/// clients still reach the V1-registered gateway via the legacy
+/// `gw-<truncated_org_slug>` key.
+fn build_gateway_register_v2_packet(
+    node_id: &[u8; 16],
+    zone_id: &str,
+    service_name: &str,
+    ttl: u32,
+    timestamp: i64,
+    secret: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let zone_bytes = zone_id.as_bytes();
+    if zone_bytes.is_empty() {
+        return Err("zone_id must not be empty");
+    }
+    if zone_bytes.len() > 63 {
+        return Err("zone_id length must not exceed 63 bytes");
+    }
+
+    // Service name padded to exactly 16 bytes (truncate-or-zero-pad). The
+    // V2 wire keeps this field for forward-compat with the V1 parser; the
+    // ROUTING key on the relay side is derived from zone_id, not this
+    // field, per design in `gateway_forwarder.ex`.
+    let mut service_padded = [0u8; 16];
+    let name_bytes = service_name.as_bytes();
+    let copy_len = name_bytes.len().min(16);
+    service_padded[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    let zone_len = zone_bytes.len() as u8;
+
+    // Build the signed material:
+    //   [type | zone_len | zone_id | node_id | service_padded | ttl | timestamp]
+    let mut signed = Vec::with_capacity(1 + 1 + zone_bytes.len() + 16 + 16 + 4 + 8);
+    signed.push(GATEWAY_REGISTER_V2_TYPE);
+    signed.push(zone_len);
+    signed.extend_from_slice(zone_bytes);
+    signed.extend_from_slice(node_id);
+    signed.extend_from_slice(&service_padded);
+    signed.extend_from_slice(&ttl.to_be_bytes());
+    signed.extend_from_slice(&timestamp.to_be_bytes());
+
+    let hmac: [u8; 32] = {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            <Hmac<Sha256> as Mac>::new_from_slice(secret).map_err(|_| "invalid HMAC key length")?;
+        mac.update(&signed);
+        let out = mac.finalize().into_bytes();
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&out);
+        h
+    };
+
+    let mut packet = Vec::with_capacity(2 + signed.len() + 32);
+    packet.extend_from_slice(&GATEWAY_REGISTER_MAGIC);
+    packet.extend_from_slice(&signed);
+    packet.extend_from_slice(&hmac);
+    Ok(packet)
 }
 
 /// Build a CLIENT_ROUTE packet (FRAME_CLIENT_ROUTE).
@@ -10793,5 +10896,137 @@ mod tests {
             .expect("max-length service name should be accepted");
         let (_, parsed_svc, _, _) = parse_client_route_packet(&pkt).unwrap();
         assert_eq!(parsed_svc, max_svc);
+    }
+
+    // ─── FRAME_GATEWAY_REGISTER_V2 tests ───────────────────────────────
+    //
+    // Golden vectors verified against the Elixir reference implementation
+    // (gateway/lib/ztlp_gateway/relay_registrar.ex) on 2026-05-24:
+    //
+    //   node_id     = 0x42 * 16
+    //   zone_id     = "acme"            (4 bytes)
+    //   service     = "gw-acme"
+    //   ttl         = 60
+    //   timestamp   = 1_700_000_000
+    //   secret      = 0x77 * 32
+    //
+    // signed_hex  = 0e0461636d654242424242424242424242424242424267772d61636d6500
+    //               00000000000000000000003c000000006553f100
+    // hmac_hex    = 73bce1cc6e265e0452bfa9c0460b8858d398732115b2af6a07c6cfa651d59859
+    // packet_hex  = 5a370e0461636d654242424242424242424242424242424267772d61636d65
+    //               00000000000000000000000000003c000000006553f100
+    //               73bce1cc6e265e0452bfa9c0460b8858d398732115b2af6a07c6cfa651d59859
+    // packet_len  = 84
+
+    #[test]
+    fn gateway_register_v2_packet_matches_elixir_golden_vector() {
+        let node_id = [0x42u8; 16];
+        let secret = [0x77u8; 32];
+        let pkt = build_gateway_register_v2_packet(
+            &node_id,
+            "acme",
+            "gw-acme",
+            60,
+            1_700_000_000,
+            &secret,
+        )
+        .expect("V2 builder should accept canonical inputs");
+
+        let expected_hex = "5a370e0461636d65\
+                            4242424242424242424242424242424267772d61636d65000000000000000000\
+                            0000003c000000006553f100\
+                            73bce1cc6e265e0452bfa9c0460b8858d398732115b2af6a07c6cfa651d59859";
+        let expected = hex::decode(expected_hex).expect("test vector should be valid hex");
+        assert_eq!(pkt, expected, "V2 packet must byte-match Elixir reference");
+        assert_eq!(pkt.len(), 84);
+    }
+
+    #[test]
+    fn gateway_register_v2_rejects_empty_zone() {
+        let node_id = [0u8; 16];
+        let secret = [0u8; 32];
+        let err = build_gateway_register_v2_packet(&node_id, "", "gw-acme", 60, 0, &secret)
+            .expect_err("empty zone_id must be rejected");
+        assert!(err.contains("empty"), "got: {}", err);
+    }
+
+    #[test]
+    fn gateway_register_v2_rejects_zone_too_long() {
+        let node_id = [0u8; 16];
+        let secret = [0u8; 32];
+        // 64 bytes — one over the 63 limit
+        let too_long = "a".repeat(64);
+        let err =
+            build_gateway_register_v2_packet(&node_id, &too_long, "gw-acme", 60, 0, &secret)
+                .expect_err("64-byte zone_id must be rejected");
+        assert!(err.contains("63 bytes"), "got: {}", err);
+    }
+
+    #[test]
+    fn gateway_register_v2_accepts_max_length_zone() {
+        let node_id = [0u8; 16];
+        let secret = [0u8; 32];
+        // Exactly 63 bytes — the maximum allowed
+        let max_zone = "z".repeat(63);
+        let pkt = build_gateway_register_v2_packet(&node_id, &max_zone, "gw-x", 60, 0, &secret)
+            .expect("63-byte zone_id should be accepted");
+        // 2 magic + 1 type + 1 zone_len + 63 zone + 16 node_id + 16 service
+        // + 4 ttl + 8 ts + 32 hmac = 143 bytes
+        assert_eq!(pkt.len(), 143);
+        // zone_len byte is at offset 3 (after magic + type)
+        assert_eq!(pkt[3], 63);
+    }
+
+    #[test]
+    fn gateway_register_v2_truncates_long_service_name_like_v1() {
+        // service_name is padded/truncated to exactly 16 bytes for parser
+        // compatibility with the V1 wire layout. Routing on the relay side
+        // uses zone_id, not service_name, so this is purely a wire-layout
+        // concern, but we want to be sure the builder doesn't refuse long
+        // names.
+        let node_id = [0u8; 16];
+        let secret = [0u8; 32];
+        let pkt = build_gateway_register_v2_packet(
+            &node_id,
+            "acme",
+            "this-service-name-is-much-longer-than-sixteen-bytes",
+            60,
+            0,
+            &secret,
+        )
+        .expect("long service names should be truncated, not rejected");
+        // Service field lives at offset:
+        //   2 magic + 1 type + 1 zone_len + 4 zone + 16 node_id = 24
+        // and runs for 16 bytes.
+        let service_field = &pkt[24..40];
+        assert_eq!(&service_field[..16], b"this-service-nam");
+    }
+
+    #[test]
+    fn gateway_register_v2_hmac_changes_when_secret_changes() {
+        let node_id = [0u8; 16];
+        let pkt_a = build_gateway_register_v2_packet(
+            &node_id,
+            "acme",
+            "gw-acme",
+            60,
+            1_700_000_000,
+            b"secret-a-12345678901234567890123",
+        )
+        .unwrap();
+        let pkt_b = build_gateway_register_v2_packet(
+            &node_id,
+            "acme",
+            "gw-acme",
+            60,
+            1_700_000_000,
+            b"secret-b-12345678901234567890123",
+        )
+        .unwrap();
+        // Pre-HMAC bytes (everything but the trailing 32) must match;
+        // HMAC bytes must differ.
+        let pre_hmac = pkt_a.len() - 32;
+        assert_eq!(&pkt_a[..pre_hmac], &pkt_b[..pre_hmac]);
+        assert_ne!(&pkt_a[pre_hmac..], &pkt_b[pre_hmac..]);
     }
 }

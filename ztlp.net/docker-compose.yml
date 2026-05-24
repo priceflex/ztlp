@@ -21,8 +21,12 @@ services:
       LAUNCH_DEFAULT_ZONE_SUFFIX: ${LAUNCH_DEFAULT_ZONE_SUFFIX:-ztlp}
       # Onboarding policy (POW + referral codes). Sourcing these from .env so
       # operators can rotate referral codes without rebuilding the image.
+      # LAUNCH_REFERRAL_REQUIRED defaults to 1 — every onboarding MUST present
+      # a valid code from LAUNCH_REFERRAL_CODES. Flip to 0 for legacy dev mode
+      # where empty code falls through to POW + rate-limit gating.
       LAUNCH_REQUIRE_POW: ${LAUNCH_REQUIRE_POW:-1}
       LAUNCH_REFERRAL_CODES: ${LAUNCH_REFERRAL_CODES:-}
+      LAUNCH_REFERRAL_REQUIRED: ${LAUNCH_REFERRAL_REQUIRED:-1}
       LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET:-ztlp-launch-dev-secret-change-me}
       # ZTLP infrastructure addresses — these MUST be passed through to the
       # container; otherwise the launch app falls back to the build-time

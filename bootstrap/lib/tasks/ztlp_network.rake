@@ -31,5 +31,13 @@ namespace :ztlp do
            "host=#{result.host.inspect} port=#{result.port.inspect} " \
            "message=#{result.message.inspect}"
     end
+
+    desc "Auto-seed the per-tenant Network with shared production NS+Relay Machine rows so token-mint works on first boot (idempotent)"
+    task ensure_shared_machines: :environment do
+      result = Ztlp::EnsureSharedMachines.call_safely
+      machine_summary = Array(result.machines).map { |m| "#{m.hostname}@#{m.ip_address}/#{m.roles}" }.join(",")
+      puts "[ztlp:network:ensure_shared_machines] status=#{result.status} " \
+           "machines=[#{machine_summary}] message=#{result.message.inspect}"
+    end
   end
 end

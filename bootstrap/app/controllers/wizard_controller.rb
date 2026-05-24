@@ -67,6 +67,20 @@ class WizardController < ApplicationController
   # Step 2: Remove a machine
   def remove_machine
     machine = @network.machines.find(params[:machine_id])
+    # Don't let an operator wizard-delete the shared production NS/Relay
+    # rows seeded by Ztlp::EnsureSharedMachines. The token-mint endpoint
+    # reads `network.ns_machines.first` — deleting the seeded NS row
+    # breaks every future enrollment for this tenant.
+    if machine.shared?
+      respond_to do |format|
+        format.turbo_stream { head :forbidden }
+        format.html do
+          redirect_to wizard_machines_path,
+            alert: "#{machine.hostname} is shared production infrastructure managed by ztlp.net and cannot be removed."
+        end
+      end
+      return
+    end
     hostname = machine.hostname
     machine.destroy
 

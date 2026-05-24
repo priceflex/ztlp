@@ -1,6 +1,12 @@
 class MachinesController < ApplicationController
   before_action :set_network
   before_action :set_machine, only: [:show, :edit, :update, :destroy, :provision, :test_connection, :health_check, :check_ztlp_tunnel]
+  # Block destructive / SSH-driven actions on shared-infrastructure machines
+  # (auto-seeded by Ztlp::EnsureSharedMachines for the production NS+Relay).
+  # `update` is allowed so operators can still rename / add notes; the role
+  # and IP are immutable through this controller anyway because the form
+  # path renders read-only fields for shared machines (see views).
+  before_action :block_if_shared, only: [:destroy, :provision, :test_connection]
 
   def index
     @machines = @network.machines.includes(:deployments)
@@ -139,6 +145,19 @@ class MachinesController < ApplicationController
 
   def set_machine
     @machine = @network.machines.find(params[:id])
+  end
+
+  # Guard against destroy / SSH-provision / SSH-test against the
+  # shared production NS + Relay machine rows. Token-mint depends on
+  # `network.ns_machines.first` — deleting the seeded NS row would
+  # break enrollment for the entire tenant. SSH-provisioning the
+  # shared infrastructure from a tenant container is also nonsensical
+  # (no SSH key, no permission).
+  def block_if_shared
+    return unless @machine&.shared?
+
+    redirect_to network_machine_path(@network, @machine),
+      alert: "#{@machine.hostname} is shared production infrastructure managed by ztlp.net and cannot be removed or re-provisioned from this dashboard. Deleting it would break enrollment for this network."
   end
 
   def machine_params

@@ -24,6 +24,17 @@ class Machine < ApplicationRecord
 
   VALID_ROLES = %w[ns relay gateway].freeze
 
+  # Marker for machines auto-seeded by Ztlp::EnsureSharedMachines (the
+  # shared production NS + Relay every tenant Network gets on first boot).
+  # Match against the literal `ssh_user` value rather than a column flag
+  # to avoid a schema migration. Operators never manually set ssh_user
+  # to "unmanaged" — the new-machine form defaults to "root".
+  SHARED_SSH_USER = "unmanaged"
+
+  def shared?
+    ssh_user == SHARED_SSH_USER
+  end
+
   def role_list
     roles.split(",").map(&:strip).reject(&:empty?)
   end

@@ -67,4 +67,70 @@ class TokenGeneratorTest < ActiveSupport::TestCase
   test "cli_available? returns false when CLI not found" do
     assert_not @generator.cli_available?  # ztlp not installed in test env
   end
+
+  # ── Phase A: target_kind / target_label round-trip ──────────────
+  #
+  # The generator is the single chokepoint for token creation; both
+  # the dashboard controller (`TokensController#create`) and the
+  # Z2LS API (`Api::V1::EnrollmentTokensController`) call it. Pin the
+  # round-trip so future refactors can't silently drop the kwargs.
+
+  test "generates a device-target token when target_kind: 'device' + target_label:" do
+    token = @generator.generate!(target_kind: "device", target_label: "alice-laptop")
+
+    assert token.persisted?
+    assert_equal "device", token.target_kind
+    assert_equal "alice-laptop", token.target_label
+    assert token.device_target?
+    refute token.user_target?
+    assert_nil token.ztlp_user_id
+  end
+
+  test "generates a user-target token when target_kind: 'user' + ztlp_user:" do
+    user = ztlp_users(:alice)
+    token = @generator.generate!(
+      target_kind: "user",
+      target_label: user.name,
+      ztlp_user: user
+    )
+
+    assert_equal "user", token.target_kind
+    assert_equal user.name, token.target_label
+    assert_equal user.id, token.ztlp_user_id
+    assert token.user_target?
+  end
+
+  test "back-compat: legacy callers (no target kwargs) keep working" do
+    token = @generator.generate!(notes: "legacy mint, no principal")
+
+    assert token.persisted?
+    assert_nil token.target_kind
+    assert_nil token.target_label
+    assert_equal "legacy mint, no principal", token.notes
+  end
+
+  test "ztlp_user kwarg sets ztlp_user_id (back-compat with API v1)" do
+    user = ztlp_users(:bob)
+    token = @generator.generate!(ztlp_user: user)
+
+    assert_equal user.id, token.ztlp_user_id
+  end
+
+  test "rejects target_kind without target_label (model validation propagates)" do
+    assert_raises(ActiveRecord::RecordInvalid) do
+      @generator.generate!(target_kind: "device")
+    end
+  end
+
+  test "rejects target_label without target_kind (model validation propagates)" do
+    assert_raises(ActiveRecord::RecordInvalid) do
+      @generator.generate!(target_label: "alice-laptop")
+    end
+  end
+
+  test "rejects unknown target_kind (model validation propagates)" do
+    assert_raises(ActiveRecord::RecordInvalid) do
+      @generator.generate!(target_kind: "machine", target_label: "x")
+    end
+  end
 end

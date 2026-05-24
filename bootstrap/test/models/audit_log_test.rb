@@ -41,4 +41,50 @@ class AuditLogTest < ActiveSupport::TestCase
     assert AuditLog.recent.first.created_at >= AuditLog.recent.last.created_at
     assert AuditLog.failures.all? { |l| l.status == "failure" }
   end
+
+  # --- Phase C: "skipped" status -----------------------------------------
+  #
+  # Added in 2026-05-24 Phase C. `AuditLog#status` now accepts "skipped"
+  # so a job legitimately skipping work on a shared production Machine
+  # row (`Machine#shared?` → `Ztlp::EnsureSharedMachines` seed) can still
+  # leave a forensic-grade audit trail without forcing the entry into the
+  # misleading `"failure"` bucket.
+
+  test "status inclusion accepts the documented set of states" do
+    %w[success failure skipped].each do |s|
+      log = AuditLog.new(action: "test.action", status: s)
+      assert log.valid?, "expected status=#{s.inspect} to be valid: #{log.errors.full_messages.join(', ')}"
+    end
+  end
+
+  test "status inclusion rejects unknown values" do
+    log = AuditLog.new(action: "test.action", status: "indeterminate")
+    refute log.valid?
+    assert_includes log.errors[:status].join, "is not included in the list"
+  end
+
+  test "VALID_STATUSES constant matches validator" do
+    assert_equal %w[success failure skipped], AuditLog::VALID_STATUSES
+  end
+
+  test ".record(status: 'skipped') writes a row with the given status" do
+    log = AuditLog.record(
+      action: "deploy",
+      status: "skipped",
+      details: { reason: "shared_infrastructure" }
+    )
+    assert_equal "skipped", log.status
+    assert_equal "deploy", log.action
+    assert_match(/shared_infrastructure/, log.details)
+  end
+
+  test "skips scope returns only rows with status='skipped'" do
+    AuditLog.record(action: "deploy", status: "success")
+    skipped = AuditLog.record(action: "deploy", status: "skipped",
+                              details: { reason: "shared_infrastructure" })
+
+    skips = AuditLog.skips
+    assert_includes skips, skipped
+    assert(skips.all? { |l| l.status == "skipped" })
+  end
 end

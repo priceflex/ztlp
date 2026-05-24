@@ -193,6 +193,79 @@ class Api::V1::EnrollmentTokensControllerTest < ActionDispatch::IntegrationTest
     assert_response :unauthorized
   end
 
+  # ── Phase A: target_kind / target_label backfill ────────────────
+  #
+  # Pre-Phase-A behaviour: API call with `computer_name` mints an
+  # un-bound token (`target_kind=nil`). That was fine when only Z2LS
+  # called us, but now the dashboard distinguishes device-bound and
+  # user-bound tokens, and the same column is used in both surfaces.
+  #
+  # Backfill on the API side too:
+  #   * `computer_name` only        → target_kind="device", target_label=computer_name
+  #   * `computer_name` + `username` → target_kind="user",  target_label=username,
+  #                                    ztlp_user_id lookup-or-created.
+  #
+  # Cross-tenant safety is automatic: the controller looks up the
+  # Network via `current_api_client.zone`, and the inline-created
+  # ZtlpUser is scoped to that network.
+
+  test "creates a device-target token when only computer_name is sent (backfill)" do
+    post_signed(body: { computer_name: "alice-laptop" })
+    assert_response :created
+
+    body = JSON.parse(response.body)
+    token = EnrollmentToken.find_by(token_id: body["token_id"])
+
+    assert_equal "device", token.target_kind
+    assert_equal "alice-laptop", token.target_label
+    assert_nil token.ztlp_user_id
+  end
+
+  test "creates a user-target token when username is included in payload" do
+    post_signed(body: {
+      computer_name: "alice-laptop",
+      username: "alice"
+    })
+    assert_response :created
+
+    body = JSON.parse(response.body)
+    token = EnrollmentToken.find_by(token_id: body["token_id"])
+
+    assert_equal "user", token.target_kind
+    assert_equal "alice", token.target_label
+    assert_not_nil token.ztlp_user_id
+
+    user = ZtlpUser.find(token.ztlp_user_id)
+    assert_equal "alice", user.name
+    assert_equal @network, user.network
+  end
+
+  test "username path lookups existing ZtlpUser instead of duplicating" do
+    existing = ztlp_users(:alice)  # already in :office network
+
+    post_signed(body: {
+      computer_name: "alice-laptop",
+      username: existing.name
+    })
+    assert_response :created
+
+    body = JSON.parse(response.body)
+    token = EnrollmentToken.find_by(token_id: body["token_id"])
+
+    assert_equal existing.id, token.ztlp_user_id,
+                 "must reuse existing ZtlpUser, not create a duplicate"
+  end
+
+  test "rejects username with invalid characters (422)" do
+    post_signed(body: {
+      computer_name: "alice-laptop",
+      username: "alice; DROP TABLE users;--"
+    })
+    assert_response :unprocessable_entity
+    body = JSON.parse(response.body)
+    assert_match(/username/i, body["message"])
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────
 
   def post_signed(body:)

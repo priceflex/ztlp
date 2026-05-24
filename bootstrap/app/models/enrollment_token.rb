@@ -32,6 +32,7 @@
 # BS-PR-1) for the design rationale.
 class EnrollmentToken < ApplicationRecord
   belongs_to :network
+  belongs_to :ztlp_user, optional: true
 
   # Default token lifetime per the Z2LS / ZTLP Bootstrap API brief.
   # Single source of truth — every caller that creates an EnrollmentToken
@@ -42,11 +43,26 @@ class EnrollmentToken < ApplicationRecord
   VALID_STATUSES = %w[active exhausted expired revoked].freeze
   TERMINAL_STATUSES = %w[exhausted expired revoked].freeze
 
+  # Phase A — the two principal kinds a freshly-minted token can be
+  # bound to. Both columns are NULLABLE for backward compatibility:
+  # tokens minted before Phase A keep working with both columns nil.
+  # The DASHBOARD controller is where presence is enforced; the model
+  # only pins the inclusion + the device/user paired-presence
+  # invariant (you can't have a target_label without a target_kind,
+  # and vice versa).
+  TARGET_KINDS = %w[device user].freeze
+
   validates :token_id, presence: true, uniqueness: true
   validates :max_uses, numericality: { greater_than: 0 }
   validates :current_uses, numericality: { greater_than_or_equal_to: 0 }
   validates :expires_at, presence: true
   validates :status, inclusion: { in: VALID_STATUSES }
+
+  validates :target_kind, inclusion: { in: TARGET_KINDS }, allow_nil: true
+  # Paired-presence: target_kind and target_label must either BOTH be
+  # set (a bound token) or BOTH be nil (a legacy / unbound token).
+  validates :target_label, presence: true, if: -> { target_kind.present? }
+  validates :target_kind,  presence: true, if: -> { target_label.present? }
 
   scope :active, -> { where(status: "active").where("expires_at > ?", Time.current) }
   scope :usable, -> { active.where("current_uses < max_uses") }
@@ -74,6 +90,16 @@ class EnrollmentToken < ApplicationRecord
 
   def usable?
     status == "active" && !expired? && !exhausted?
+  end
+
+  # Phase A — Predicate helpers for views that need to render
+  # "for device X" vs "for user Y" differently.
+  def device_target?
+    target_kind == "device"
+  end
+
+  def user_target?
+    target_kind == "user"
   end
 
   # Atomically consume one use of the token. Uses an `UPDATE ... WHERE`

@@ -31,8 +31,25 @@ class HealthChecker
     @ssh_tempfiles = []  # Hold references to prevent GC deletion
   end
 
-  # Check all components on this machine and store results
+  # Check all components on this machine and store results.
+  #
+  # Phase C — Shared production NS/Relay machines (auto-seeded by
+  # `Ztlp::EnsureSharedMachines`) are flagged via
+  # `Machine#shared?` / `ssh_user == "unmanaged"`. Operators have no
+  # credentials to SSH into them — by design, they are operated by
+  # Tech Rockstars production. Probing them via the SSH-based health
+  # path is guaranteed to fail and writes a noisy "down" HealthCheck
+  # plus an Alert row per component on every cycle. Both surface in the
+  # dashboard as phantom red pills on infrastructure the operator
+  # cannot remediate.
+  #
+  # Short-circuit to an empty result set so no SSH attempt, no
+  # HealthCheck row, no Alert row, and no Machine-column mutation
+  # occurs for shared rows. Operator-owned (non-shared) machines are
+  # unaffected.
   def check_all
+    return [] if @machine.shared?
+
     results = @machine.role_list.map { |role| check_component(role) }
     cleanup_ssh_tempfiles
     @machine.update!(last_health_check_at: Time.current)
@@ -86,10 +103,27 @@ class HealthChecker
     results
   end
 
-  # Check a single component with full diagnostics
+  # Check a single component with full diagnostics.
+  #
+  # Phase C — Shared production machines (see `Machine#shared?`) are not
+  # SSH-managed from this Bootstrap container; the operator has no key
+  # for the `unmanaged` account. Return a structured `:skipped` Result
+  # so dashboard "Test connection" / per-component health buttons get
+  # an honest answer instead of a misleading `:down` from the failed
+  # SSH attempt. The component name and machine are preserved so the UI
+  # rendering code that expects a Result doesn't blow up.
   def check_component(component)
     config = HEALTH_CHECKS[component]
     raise HealthCheckError, "Unknown component: #{component}" unless config
+
+    if @machine.shared?
+      return Result.new(
+        machine: @machine, component: component, status: "skipped",
+        details: "{}", metrics: {}, container_state: "shared",
+        error_message: "Shared production infrastructure — not SSH-managed by this tenant.",
+        response_time_ms: 0
+      )
+    end
 
     start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     metrics = {}

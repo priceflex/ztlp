@@ -11,6 +11,47 @@ class DeployComponentJob < ApplicationJob
     network = machine.network
     component = deployment.component
 
+    # Phase C — Shared production NS/Relay machines (see
+    # `Machine#shared?` / `Ztlp::EnsureSharedMachines`) are not
+    # SSH-managed by this Bootstrap container. The operator has no key
+    # for the `unmanaged` account and shouldn't be triggering a deploy
+    # against them. `MachinesController` blocks the UI path, but this
+    # is the job-layer second line of defence: any code that reaches
+    # `DeployComponentJob.perform_later(deployment.id)` for a shared
+    # machine short-circuits to a `:skipped` deployment + audit log
+    # without ever attempting SSH and without flipping
+    # `machine.status` to :error.
+    if machine.shared?
+      deployment.update!(
+        status: "skipped",
+        started_at: Time.current,
+        finished_at: Time.current
+      )
+      deployment.append_log(
+        "Skipped: #{machine.hostname} is shared production infrastructure " \
+        "(ssh_user=#{Machine::SHARED_SSH_USER}); deploy is a no-op."
+      )
+      deployment.save
+
+      AuditLog.record(
+        action: "deploy",
+        target: machine,
+        status: "skipped",
+        details: {
+          component: component,
+          machine: machine.hostname,
+          network: network.name,
+          reason: "shared_infrastructure"
+        }
+      )
+
+      broadcast_component_status(
+        network, machine, component, deployment, "skipped",
+        "⏭ #{component} skipped — shared production infrastructure"
+      )
+      return
+    end
+
     deployment.update!(status: "running", started_at: Time.current)
     machine.update!(status: "provisioning")
 

@@ -9,3 +9,11 @@ production:
   name: Production
   zone: prod.acme.ztlp
   status: active
+
+# Dedicated network for Phase C shared-machine fixtures so they don't
+# collide with rows that `MachinesControllerSharedGuardTest` creates
+# at runtime in the :office network at the same hostname/ip.
+shared_infra:
+  name: Shared Infra Test
+  zone: shared.acme.ztlp
+  status: created

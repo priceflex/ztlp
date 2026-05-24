@@ -27,10 +27,10 @@ Every request must include four headers:
 
 | Header              | Meaning                                                |
 |---------------------|--------------------------------------------------------|
-| `X-ZTLP-Zone`       | Zone-id the caller is signing for                      |
-| `X-ZTLP-Client`     | `api_clients.name` — the allowlisted client identifier |
-| `X-ZTLP-Timestamp`  | Unix seconds, integer (must be within ±5 minutes of "now") |
-| `X-ZTLP-Signature`  | Lower-case hex HMAC-SHA256 over the canonical message  |
+| `X-ZTLP-Client-Zone`       | Zone-id the caller is signing for                      |
+| `X-ZTLP-Client-Name`     | `api_clients.name` — the allowlisted client identifier |
+| `X-ZTLP-Client-Timestamp`  | Unix seconds, integer (must be within ±5 minutes of "now") |
+| `X-ZTLP-Client-Signature`  | Lower-case hex HMAC-SHA256 over the canonical message  |
 
 The canonical signed message is six lines, joined with a single LF
 (`\n`) — no trailing newline:
@@ -38,9 +38,9 @@ The canonical signed message is six lines, joined with a single LF
 ```
 <HTTP_METHOD, upper-cased>\n
 <request.fullpath, including query string>\n
-<X-ZTLP-Zone>\n
-<X-ZTLP-Client>\n
-<X-ZTLP-Timestamp>\n
+<X-ZTLP-Client-Zone>\n
+<X-ZTLP-Client-Name>\n
+<X-ZTLP-Client-Timestamp>\n
 SHA256_HEX(<raw request body>)
 ```
 
@@ -80,10 +80,10 @@ BODY_DIGEST=$(printf '%s' "$BODY" | sha256sum | awk '{print $1}')
 MSG=$(printf '%s\n%s\n%s\n%s\n%s\n%s' "$METHOD" "$PATH_" "$ZONE" "$CLIENT" "$TS" "$BODY_DIGEST")
 SIG=$(printf '%s' "$MSG" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $2}')
 
-curl -s -H "X-ZTLP-Zone: $ZONE" \
-        -H "X-ZTLP-Client: $CLIENT" \
-        -H "X-ZTLP-Timestamp: $TS" \
-        -H "X-ZTLP-Signature: $SIG" \
+curl -s -H "X-ZTLP-Client-Zone: $ZONE" \
+        -H "X-ZTLP-Client-Name: $CLIENT" \
+        -H "X-ZTLP-Client-Timestamp: $TS" \
+        -H "X-ZTLP-Client-Signature: $SIG" \
         "https://bootstrap.example/api/v1/health"
 ```
 
@@ -154,7 +154,7 @@ successful forgery faster than one who only sees a flat 401.
 Common reasons (server log only):
 
 - `missing_header` — at least one of the four required headers is absent
-- `bad_timestamp` — `X-ZTLP-Timestamp` is not a valid integer
+- `bad_timestamp` — `X-ZTLP-Client-Timestamp` is not a valid integer
 - `expired_timestamp` — outside the ±5 minute window
 - `unknown_client` — no `(zone, name)` row matched OR the row is inactive
 - `no_zone_secret` — `ZTLP_HMAC_SECRET_<UPCASE_ZONE>` is not set on the bootstrap host
@@ -171,10 +171,10 @@ the authenticated client's zone.
 ```http
 POST /api/v1/enrollment_tokens HTTP/1.1
 Content-Type: application/json
-X-ZTLP-Zone: office.acme.ztlp
-X-ZTLP-Client: z2ls.office
-X-ZTLP-Timestamp: 1700000000
-X-ZTLP-Signature: <hex>
+X-ZTLP-Client-Zone: office.acme.ztlp
+X-ZTLP-Client-Name: z2ls.office
+X-ZTLP-Client-Timestamp: 1700000000
+X-ZTLP-Client-Signature: <hex>
 
 {
   "computer_name": "alice-laptop",

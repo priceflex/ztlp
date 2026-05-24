@@ -11,19 +11,35 @@
 #
 # Caller sets the following request headers:
 #
-#     X-ZTLP-Zone:      <zone-id, e.g. "acme.ztlp">
-#     X-ZTLP-Client:    <api_clients.name, e.g. "z2ls.acme">
-#     X-ZTLP-Timestamp: <unix-seconds, integer>
-#     X-ZTLP-Signature: <hex HMAC-SHA256 over the canonical message>
+#     X-ZTLP-Client-Zone:      <zone-id, e.g. "acme.ztlp">
+#     X-ZTLP-Client-Name:      <api_clients.name, e.g. "z2ls.acme">
+#     X-ZTLP-Client-Timestamp: <unix-seconds, integer>
+#     X-ZTLP-Client-Signature: <hex HMAC-SHA256 over the canonical message>
+#
+# These headers live under the `X-ZTLP-Client-*` namespace, which the
+# upstream ZTLP gateway passes through verbatim. The complementary
+# admin-auth namespace (`X-ZTLP-Authenticated`, `X-ZTLP-Admin-Email`,
+# `X-ZTLP-Timestamp`, `X-ZTLP-Signature`) is gateway-owned: the gateway
+# STRIPS any of those names from incoming requests and re-injects its
+# own values so a malicious client cannot forge admin auth. The two
+# namespaces are disjoint by construction, so there is no collision
+# between admin Timestamp/Signature and client
+# Client-Timestamp/Client-Signature.
 #
 # Canonical signed message (newline-joined):
 #
 #     METHOD\n
 #     PATH\n
-#     X-ZTLP-Zone\n
-#     X-ZTLP-Client\n
-#     X-ZTLP-Timestamp\n
+#     X-ZTLP-Client-Zone\n
+#     X-ZTLP-Client-Name\n
+#     X-ZTLP-Client-Timestamp\n
 #     SHA256_HEX(body)
+#
+# Note: while the header NAMES carry the `Client-` prefix on the wire,
+# the canonical signing string uses the raw values (zone, client name,
+# timestamp, body digest). The string itself does NOT mention the
+# header names. This keeps the canonicalization stable across any
+# future on-wire renaming.
 #
 # `METHOD` is upper-cased. `PATH` is request path + query string
 # (matches `request.fullpath`). `SHA256_HEX(body)` is the lower-case
@@ -81,10 +97,10 @@ module Ztlp
     # for response bodies (don't leak it to the caller — return a
     # generic 401).
     def authenticate
-      zone      = header("X-ZTLP-Zone")
-      client    = header("X-ZTLP-Client")
-      ts_raw    = header("X-ZTLP-Timestamp")
-      provided  = header("X-ZTLP-Signature")
+      zone      = header("X-ZTLP-Client-Zone")
+      client    = header("X-ZTLP-Client-Name")
+      ts_raw    = header("X-ZTLP-Client-Timestamp")
+      provided  = header("X-ZTLP-Client-Signature")
 
       return Result.failure(:missing_header) if [zone, client, ts_raw, provided].any?(&:blank?)
 

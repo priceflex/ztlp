@@ -8,8 +8,8 @@
 # endpoints (BS-PR-3 `POST /api/v1/enrollment_tokens`).
 #
 #   GET /api/v1/health
-#   X-ZTLP-Zone: acme.ztlp
-#   X-ZTLP-Client: z2ls.acme
+#   X-ZTLP-Client-Zone: acme.ztlp
+#   X-ZTLP-Client-Name: z2ls.acme
 #   X-ZTLP-Timestamp: 1700000000
 #   X-ZTLP-Signature: <hex>
 #

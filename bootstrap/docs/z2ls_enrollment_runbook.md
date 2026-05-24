@@ -93,10 +93,10 @@ for the kill-switch workflow.
 Every request to `/api/v1/*` MUST carry four headers:
 
 ```
-X-ZTLP-Zone:      <zone-id, matches your api_clients.zone>
-X-ZTLP-Client:    <api_clients.name>
-X-ZTLP-Timestamp: <unix seconds, integer>
-X-ZTLP-Signature: <lower-case hex HMAC-SHA256 over the canonical message>
+X-ZTLP-Client-Zone:      <zone-id, matches your api_clients.zone>
+X-ZTLP-Client-Name:    <api_clients.name>
+X-ZTLP-Client-Timestamp: <unix seconds, integer>
+X-ZTLP-Client-Signature: <lower-case hex HMAC-SHA256 over the canonical message>
 ```
 
 The canonical signed message is six lines joined with a single LF
@@ -105,9 +105,9 @@ The canonical signed message is six lines joined with a single LF
 ```
 <HTTP_METHOD, upper-cased>\n
 <request path including query string>\n
-<X-ZTLP-Zone>\n
-<X-ZTLP-Client>\n
-<X-ZTLP-Timestamp>\n
+<X-ZTLP-Client-Zone>\n
+<X-ZTLP-Client-Name>\n
+<X-ZTLP-Client-Timestamp>\n
 SHA256_HEX(<raw request body>)
 ```
 
@@ -170,10 +170,10 @@ def request_enrollment_token(*, bootstrap_url, zone, client, secret, computer_na
         data=body,
         headers={
             "Content-Type":     "application/json",
-            "X-ZTLP-Zone":      zone,
-            "X-ZTLP-Client":    client,
-            "X-ZTLP-Timestamp": str(ts),
-            "X-ZTLP-Signature": sig,
+            "X-ZTLP-Client-Zone":      zone,
+            "X-ZTLP-Client-Name":    client,
+            "X-ZTLP-Client-Timestamp": str(ts),
+            "X-ZTLP-Client-Signature": sig,
         },
         timeout=10,
     )
@@ -245,10 +245,10 @@ def request_enrollment_token(bootstrap_url:, zone:, client:, secret:, computer_n
 
   req = Net::HTTP::Post.new(uri.path)
   req["Content-Type"]     = "application/json"
-  req["X-ZTLP-Zone"]      = zone
-  req["X-ZTLP-Client"]    = client
-  req["X-ZTLP-Timestamp"] = ts.to_s
-  req["X-ZTLP-Signature"] = sig
+  req["X-ZTLP-Client-Zone"]      = zone
+  req["X-ZTLP-Client-Name"]    = client
+  req["X-ZTLP-Client-Timestamp"] = ts.to_s
+  req["X-ZTLP-Client-Signature"] = sig
   req.body = body
 
   resp = http.request(req)
@@ -286,10 +286,10 @@ SIG=$(printf '%s' "$MSG" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{pri
 
 curl -s -X POST \
   -H "Content-Type: application/json" \
-  -H "X-ZTLP-Zone: $ZONE" \
-  -H "X-ZTLP-Client: $CLIENT" \
-  -H "X-ZTLP-Timestamp: $TS" \
-  -H "X-ZTLP-Signature: $SIG" \
+  -H "X-ZTLP-Client-Zone: $ZONE" \
+  -H "X-ZTLP-Client-Name: $CLIENT" \
+  -H "X-ZTLP-Client-Timestamp: $TS" \
+  -H "X-ZTLP-Client-Signature: $SIG" \
   --data "$BODY" \
   "https://bootstrap.acme.ztlp$PATH_"
 ```
@@ -319,10 +319,10 @@ Successful request:
 ```http
 POST /api/v1/enrollment_tokens HTTP/1.1
 Content-Type: application/json
-X-ZTLP-Zone: acme.ztlp
-X-ZTLP-Client: z2ls.acme
-X-ZTLP-Timestamp: 1700000000
-X-ZTLP-Signature: <hex>
+X-ZTLP-Client-Zone: acme.ztlp
+X-ZTLP-Client-Name: z2ls.acme
+X-ZTLP-Client-Timestamp: 1700000000
+X-ZTLP-Client-Signature: <hex>
 
 {"computer_name": "alice-laptop", "metadata": {"os": "macOS 14.5"}}
 ```
@@ -462,7 +462,7 @@ Reason codes:
 | Code | Meaning | Fix |
 |---|---|---|
 | `missing_header` | One of the 4 headers is absent | Set every header on the request |
-| `bad_timestamp` | `X-ZTLP-Timestamp` is not a valid integer | Send unix seconds, not ms or ISO8601 |
+| `bad_timestamp` | `X-ZTLP-Client-Timestamp` is not a valid integer | Send unix seconds, not ms or ISO8601 |
 | `expired_timestamp` | Outside ±5 min window | Check your NTP — clock drift kills auth silently |
 | `unknown_client` | `(zone, name)` not in `api_clients` OR `active=false` | Add the row at `/admin/api_clients`, or reactivate |
 | `no_zone_secret` | `ZTLP_HMAC_SECRET_<UPCASE_ZONE>` not set on bootstrap | Set the env var; restart bootstrap if not already loaded |
@@ -491,7 +491,7 @@ Reason codes:
 4. **Method case mismatch.** Sign over `"POST"` (upper-cased), not
    `"post"`. Bootstrap upper-cases server-side.
 
-5. **Timezone confusion.** `X-ZTLP-Timestamp` is unix seconds (UTC,
+5. **Timezone confusion.** `X-ZTLP-Client-Timestamp` is unix seconds (UTC,
    integer). Not ISO8601, not RFC3339, not local time.
 
 6. **Trailing whitespace in env vars.** If the env value has a

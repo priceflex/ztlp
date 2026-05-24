@@ -93,10 +93,10 @@ def request_enrollment_token(
         method="POST",
         headers={
             "Content-Type":     "application/json",
-            "X-ZTLP-Zone":      zone,
-            "X-ZTLP-Client":    client,
-            "X-ZTLP-Timestamp": str(ts),
-            "X-ZTLP-Signature": sig,
+            "X-ZTLP-Client-Zone":      zone,
+            "X-ZTLP-Client-Name":    client,
+            "X-ZTLP-Client-Timestamp": str(ts),
+            "X-ZTLP-Client-Signature": sig,
         },
     )
     try:

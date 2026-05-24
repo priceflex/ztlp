@@ -76,10 +76,10 @@ def request_enrollment_token(bootstrap_url:, zone:, client:, secret:,
 
   req = Net::HTTP::Post.new(uri.path)
   req["Content-Type"]     = "application/json"
-  req["X-ZTLP-Zone"]      = zone
-  req["X-ZTLP-Client"]    = client
-  req["X-ZTLP-Timestamp"] = ts.to_s
-  req["X-ZTLP-Signature"] = sig
+  req["X-ZTLP-Client-Zone"]      = zone
+  req["X-ZTLP-Client-Name"]    = client
+  req["X-ZTLP-Client-Timestamp"] = ts.to_s
+  req["X-ZTLP-Client-Signature"] = sig
   req.body = body
 
   resp = http.request(req)

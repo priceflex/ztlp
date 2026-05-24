@@ -7,8 +7,8 @@
 #
 # Authentication contract (v1, HMAC headers):
 #
-#   1. Caller sends X-ZTLP-Zone, X-ZTLP-Client, X-ZTLP-Timestamp,
-#      X-ZTLP-Signature headers (see `Ztlp::ApiAuthenticator`).
+#   1. Caller sends X-ZTLP-Client-Zone, X-ZTLP-Client-Name, X-ZTLP-Client-Timestamp,
+#      X-ZTLP-Client-Signature headers (see `Ztlp::ApiAuthenticator`).
 #   2. Bootstrap looks up the ApiClient row by (zone, name).
 #   3. If found AND `active`, the HMAC signature is verified against
 #      the per-zone secret (same `ZTLP_HMAC_SECRET_<UPCASE_ZONE>` env

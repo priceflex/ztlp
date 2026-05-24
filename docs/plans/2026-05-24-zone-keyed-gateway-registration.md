@@ -208,15 +208,15 @@ Rejected because the relay is critical for NAT traversal — gateways behind NAT
 
 ---
 
-## Open questions for Steve before implementation
+## Decisions (locked in 2026-05-24 by Steve)
 
-1. **Do you want the legacy `0x0A` path to be deny-by-default in Phase 2 immediately, or kept under an opt-in flag for a longer overlap window?** I lean toward deny-by-default — we have full control of all 18 tenants on the SaaS host plus the Z2LS Windows boxes, so the migration is observable. An optional `ZTLP_RELAY_LEGACY_REGISTER_ALLOW=1` escape hatch covers stragglers without leaving a permanent footgun.
+1. **Legacy `0x0A` path is deny-by-default in Phase 2.** Escape hatch is `ZTLP_RELAY_LEGACY_REGISTER_ALLOW=1` for stragglers. Phase 3 removes the code path entirely one release later.
 
-2. **Should the slug be `gw:<zone>` (colon-separated) or `gw-<zone-with-dots-replaced>`?** Colon is cleaner protocol-wise but breaks anything that assumes service names are URL-safe. Hyphen-flattened (`gw-test-ztlp`) is uglier but more compatible. I prefer colon; happy to flip if you have a downstream consumer in mind.
+2. **Slug format is `gw:<zone>` (colon-separated).** Example: `gw:test.ztlp`. This reserves namespace headroom for future `relay:` / `vip:` prefixes.
 
-3. **CLIENT_ROUTE follow-up — same release or separate?** Same release means one big design landing; separate keeps the change surface area smaller per cargo bump. I'd ship gateway auth in v0.31.0 and CLIENT_ROUTE in v0.31.1 unless you want them together.
+3. **CLIENT_ROUTE auth is split out into v0.31.1.** GATEWAY_REGISTER ships in v0.31.0 alone; we observe real-world deploy behaviour before adding the second wire-format change.
 
-4. **Slug-conflict policy when two valid gateways register the same zone.** Today the relay does load-balancing across all registered entries for a service. In the new world, two gateways for the same zone is *probably* a misconfig (one per tenant), but it could also be intentional HA. Default: log WARN and accept (current behaviour). Make stricter (reject second) only if you want enforced single-gateway-per-zone.
+4. **Two valid gateways registering the same zone: accept-with-WARN.** Preserves legitimate HA / blue-green deploy patterns. Operators see the signal in logs and can investigate if a duplicate registration was unintended.
 
 ---
 

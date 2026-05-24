@@ -9,10 +9,11 @@ defmodule ZtlpNs.MixProject do
       # cut a clean v0.29.5 tag where the git tag and all four declared
       # versions (relay, gateway, ns, proto) agree. Bumped 0.30.0 → 0.30.3
       # in PR release/v0.30.3 after the v0.30.3 git tag was cut from a5993ee
-      # (PR #40 — Z2LS gateway-auth enrollment API). The release_test.exs
-      # "version reporting (regression pin)" block floors this at 0.30.3
-      # to prevent silent down-drift going forward.
-      version: "0.30.3",
+      # (PR #40 — Z2LS gateway-auth enrollment API). Bumped 0.30.3 → 0.30.4
+      # in PR release/v0.30.4 to align manifests with the re-cut v0.30.4
+      # tag. The release_test.exs "version reporting (regression pin)" block
+      # floors this at 0.30.4 to prevent silent down-drift going forward.
+      version: "0.30.4",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

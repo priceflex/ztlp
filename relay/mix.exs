@@ -11,7 +11,9 @@ defmodule ZtlpRelay.MixProject do
       # runtime vsn. v0.29.5 fixes that drift by tagging AFTER the bumps.
       # Bumped 0.30.0 → 0.30.3 in PR release/v0.30.3 after the v0.30.3 git
       # tag was cut from a5993ee (PR #40 — Z2LS gateway-auth enrollment API).
-      version: "0.30.3",
+      # Bumped 0.30.3 → 0.30.4 in PR release/v0.30.4 to align with the
+      # re-cut v0.30.4 tag.
+      version: "0.30.4",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

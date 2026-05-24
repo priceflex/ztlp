@@ -63,14 +63,15 @@ defmodule ZtlpRelay.ReleaseTest do
              """
     end
 
-    test "mix.exs version is at least 0.30.3 (v0.30.3 Z2LS gateway-auth tag)" do
+    test "mix.exs version is at least 0.30.4 (v0.30.4 four-component-aligned tag)" do
       # Floor guard: prevents an accidental down-bump that would make
-      # the relay misreport itself as one of the pre-v0.30.3 versions.
-      # Ratcheted 0.29.4 → 0.30.3 in PR release/v0.30.3 after the v0.30.3
-      # tag was cut from a5993ee (PR #40 — Z2LS gateway-auth enrollment API).
+      # the relay misreport itself as one of the pre-v0.30.4 versions.
+      # Ratcheted 0.30.3 → 0.30.4 in PR release/v0.30.4 to align the floor
+      # with the re-cut v0.30.4 tag (the original v0.30.4 pointed at 6e9d40b,
+      # whose manifests still read 0.30.3 — fixed by this PR's bump).
       declared = ZtlpRelay.MixProject.project()[:version]
-      assert Version.compare(declared, "0.30.3") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.30.3 Z2LS gateway-auth tag"
+      assert Version.compare(declared, "0.30.4") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.30.4 four-component-aligned tag"
     end
   end
 

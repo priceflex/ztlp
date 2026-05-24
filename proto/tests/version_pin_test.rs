@@ -39,10 +39,11 @@ use ztlp_proto::updater::SemVer;
 ///
 /// Ratcheted 0.29.4 → 0.30.3 in PR <release/v0.30.3> after the v0.30.3 git
 /// tag was cut from `a5993ee` (PR #40 — Z2LS gateway-auth enrollment API).
-/// The v0.30.0..0.30.2 range produced Docker images and a git tag but did
-/// not have a coordinated four-component manifest bump; v0.30.3 closes
-/// that drift the same way PR #14 closed the post-v0.29.4 drift.
-const MINIMUM_VERSION: &str = "0.30.3";
+/// Ratcheted 0.30.3 → 0.30.4 in PR <release/v0.30.4> after the original
+/// v0.30.4 tag was found to point at `6e9d40b`, whose manifests still read
+/// 0.30.3. v0.30.4 is being re-cut from the post-bump commit so the tag
+/// and four-component manifests finally agree.
+const MINIMUM_VERSION: &str = "0.30.4";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

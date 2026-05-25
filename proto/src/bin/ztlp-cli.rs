@@ -6849,7 +6849,8 @@ async fn setup_join(
                         // sign-in. Bootstrap (Rails) ignores unknown fields,
                         // so this is safe to send unconditionally.
                         let pubkey_hex = hex::encode(identity.static_public_key.as_slice());
-                        confirm_enrollment(url, &token, &full_name, &identity.node_id, &pubkey_hex).await;
+                        confirm_enrollment(url, &token, &full_name, &identity.node_id, &pubkey_hex)
+                            .await;
                     }
 
                     // Test connectivity

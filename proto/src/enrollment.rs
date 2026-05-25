@@ -261,10 +261,17 @@ impl EnrollmentToken {
 
     /// Parse from Bootstrap-style query-param URI.
     /// Format: ztlp://enroll/?zone=<zone>&ns=<host:port>&relay=<host:port>&token=<hex>&expires=<unix>
+    ///         [&gateway=<host:port>][&callback=<url>][&nonce=<32hex>&mac=<64hex>]
     ///
-    /// NOTE: Tokens in this format lack an HMAC MAC (the Bootstrap app tracks
-    /// validity server-side). The MAC field is zeroed; the NS must accept
-    /// unverified tokens when `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`.
+    /// **Signed form (v0.30.10+):** when `&nonce=` and `&mac=` are present,
+    /// the token's `nonce` and `mac` fields are populated from those params
+    /// instead of being zeroed. This lets the NS verify the token via its
+    /// existing HMAC-BLAKE2s path with `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=true`.
+    ///
+    /// **Legacy form:** without `&nonce=` and `&mac=`, the token has a
+    /// zeroed MAC and zero nonce. The NS must run with
+    /// `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false` to accept it. The Bootstrap
+    /// app tracks token validity server-side in that case.
     fn from_query_param_uri(input: &str) -> Result<Self, String> {
         // Extract query string
         let query = input
@@ -279,6 +286,8 @@ impl EnrollmentToken {
         let mut expires = None;
         let mut gateway_addr = None;
         let mut callback_url = None;
+        let mut nonce_hex: Option<String> = None;
+        let mut mac_hex: Option<String> = None;
 
         for pair in query.split('&') {
             let mut kv = pair.splitn(2, '=');
@@ -297,6 +306,8 @@ impl EnrollmentToken {
                     )
                 }
                 "callback" => callback_url = Some(val.to_string()),
+                "nonce" => nonce_hex = Some(val.to_string()),
+                "mac" => mac_hex = Some(val.to_string()),
                 _ => {} // ignore unknown params
             }
         }
@@ -306,6 +317,23 @@ impl EnrollmentToken {
         let token_id = token_hex.ok_or("missing token parameter")?;
         let expires_at = expires.ok_or("missing expires parameter")?;
 
+        // Decode signed-form params if present. Both must appear together
+        // or neither; one without the other is a malformed URI.
+        let (nonce_bytes, mac_bytes) = match (nonce_hex.as_deref(), mac_hex.as_deref()) {
+            (Some(n), Some(m)) => {
+                let n_bytes = hex_decode_fixed::<16>(n, "nonce")?;
+                let m_bytes = hex_decode_fixed::<32>(m, "mac")?;
+                (n_bytes, m_bytes)
+            }
+            (Some(_), None) => {
+                return Err("URI has &nonce= but no &mac=; signed form requires both".to_string());
+            }
+            (None, Some(_)) => {
+                return Err("URI has &mac= but no &nonce=; signed form requires both".to_string());
+            }
+            (None, None) => ([0u8; 16], [0u8; 32]),
+        };
+
         Ok(EnrollmentToken {
             version: TOKEN_VERSION,
             zone,
@@ -314,8 +342,8 @@ impl EnrollmentToken {
             gateway_addr,
             max_uses: 1,
             expires_at,
-            nonce: [0u8; 16], // No nonce in query-param format
-            mac: [0u8; 32],   // No MAC in query-param format
+            nonce: nonce_bytes,
+            mac: mac_bytes,
             token_id: Some(token_id),
             callback_url,
         })
@@ -435,6 +463,40 @@ fn write_len_prefixed_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     buf.extend_from_slice(bytes);
+}
+
+/// Decode a lowercase hex string into a fixed-size byte array.
+///
+/// Used by `from_query_param_uri` to parse the v0.30.10 `&nonce=` and
+/// `&mac=` URI params. Strict: rejects odd-length input, non-hex chars,
+/// and wrong byte count. The `field` argument is folded into the error
+/// message so misformatted URIs blame the right param.
+fn hex_decode_fixed<const N: usize>(s: &str, field: &str) -> Result<[u8; N], String> {
+    if s.len() != N * 2 {
+        return Err(format!(
+            "{} param must be {} hex chars ({} bytes), got {} chars",
+            field,
+            N * 2,
+            N,
+            s.len()
+        ));
+    }
+    let mut out = [0u8; N];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(chunk[0]).ok_or_else(|| format!("{} param: invalid hex", field))?;
+        let lo = hex_nibble(chunk[1]).ok_or_else(|| format!("{} param: invalid hex", field))?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn read_len_prefixed_string(data: &[u8], pos: &mut usize) -> Result<String, String> {
@@ -929,5 +991,184 @@ mod tests {
         assert!(uri.starts_with("ztlp://enroll/"));
         let parsed = EnrollmentToken::from_base64url(&uri).expect("URI round-trip");
         assert_eq!(parsed.zone, "test.ztlp");
+    }
+
+    // ── v0.30.10: signed query-param URIs (&nonce= &mac=) ──────────────
+    //
+    // Launch issues `ztlp://enroll/?…&nonce=<hex>&mac=<hex>` URIs when
+    // ZTLP_ENROLLMENT_SECRET is configured. The CLI MUST parse these new
+    // params into the EnrollmentToken struct so NS can verify the MAC via
+    // its existing HMAC-BLAKE2s code path.
+    //
+    // Backward compat: when the params are ABSENT, behaviour falls back
+    // to zero nonce + zero MAC (current legacy path).
+
+    #[test]
+    fn test_from_query_param_uri_parses_mac_and_nonce_when_present() {
+        // URI with signed-form trailing params. The MAC value is irrelevant
+        // for parsing — we just need the hex to round-trip through into
+        // the EnrollmentToken.mac field.
+        let uri = "ztlp://enroll/?zone=signed.example.ztlp\
+                   &ns=192.0.2.10:23096\
+                   &token=deadbeef\
+                   &expires=1893456000\
+                   &nonce=00112233445566778899aabbccddeeff\
+                   &mac=f320ecd5c86cd29835b106e9b82d371b3c09650baf13bcb1e0f61b5b0af907a1";
+
+        let parsed = EnrollmentToken::from_base64url(uri).expect("signed URI parses");
+
+        assert_eq!(parsed.zone, "signed.example.ztlp");
+        assert_eq!(parsed.ns_addr, "192.0.2.10:23096");
+
+        // Nonce filled from &nonce=, NOT zeros
+        let expected_nonce: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
+        ];
+        assert_eq!(
+            parsed.nonce, expected_nonce,
+            "nonce must be parsed from &nonce= hex"
+        );
+
+        // MAC filled from &mac=, NOT zeros
+        let mac_hex = parsed
+            .mac
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        assert_eq!(
+            mac_hex, "f320ecd5c86cd29835b106e9b82d371b3c09650baf13bcb1e0f61b5b0af907a1",
+            "mac must be parsed from &mac= hex"
+        );
+    }
+
+    #[test]
+    fn test_from_query_param_uri_zeros_when_absent() {
+        // Legacy URI: no &nonce= or &mac= → struct has zeroed fields,
+        // backward-compatible with NS running REGISTRATION_AUTH=false.
+        let uri = "ztlp://enroll/?zone=legacy.ztlp\
+                   &ns=192.0.2.10:23096\
+                   &token=abc\
+                   &expires=1893456000";
+
+        let parsed = EnrollmentToken::from_base64url(uri).expect("legacy URI parses");
+        assert_eq!(parsed.nonce, [0u8; 16]);
+        assert_eq!(parsed.mac, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_signed_query_param_token_validates_against_secret() {
+        // End-to-end: build a token via Launch's canonical serialization,
+        // compute the HMAC, embed it in a URI, parse it back, validate it.
+        // This is the golden path that NS will execute on every signed
+        // enrollment request.
+        let secret: [u8; 32] = [0xAA; 32];
+
+        // Build the canonical bytes matching Launch's Python serialization.
+        // Exactly the same shape as the golden vector in
+        // ns/test/ztlp_ns/enrollment_test.exs and
+        // ztlp.net/tests/test_launch_app.py.
+        let zone = "golden.example.ztlp";
+        let ns_addr = "192.0.2.10:23096";
+        let relay = "192.0.2.20:23095";
+        let gateway = "192.0.2.30:23097";
+        let nonce: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF,
+        ];
+        let expires_at: u64 = 1_893_456_000;
+
+        let mut buf = Vec::new();
+        buf.push(0x01u8); // version
+        buf.push(0x01u8); // flags (gateway present)
+        buf.extend_from_slice(&(zone.len() as u16).to_be_bytes());
+        buf.extend_from_slice(zone.as_bytes());
+        buf.extend_from_slice(&(ns_addr.len() as u16).to_be_bytes());
+        buf.extend_from_slice(ns_addr.as_bytes());
+        buf.push(1u8); // relay_count
+        buf.extend_from_slice(&(relay.len() as u16).to_be_bytes());
+        buf.extend_from_slice(relay.as_bytes());
+        buf.extend_from_slice(&(gateway.len() as u16).to_be_bytes());
+        buf.extend_from_slice(gateway.as_bytes());
+        buf.extend_from_slice(&1u16.to_be_bytes()); // max_uses
+        buf.extend_from_slice(&expires_at.to_be_bytes());
+        buf.extend_from_slice(&nonce);
+
+        let mac = hmac_blake2s(&secret, &buf);
+        let mac_hex = mac.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+        // Build the URI Launch would produce.
+        let uri = format!(
+            "ztlp://enroll/?zone={}&ns={}&token=abc&expires={}\
+             &relay={}&gateway={}&nonce={}&mac={}",
+            zone,
+            ns_addr,
+            expires_at,
+            relay,
+            gateway,
+            nonce
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
+            mac_hex
+        );
+
+        let parsed = EnrollmentToken::from_base64url(&uri).expect("signed URI parses");
+        // Per the validate() implementation: serialize_without_mac() over
+        // the parsed struct, HMAC-BLAKE2s with the secret, compare to the
+        // mac field. This is the same path NS runs.
+        let result = parsed.validate(&secret);
+        assert!(
+            matches!(result, TokenValidation::Valid),
+            "signed token should validate against the secret, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_signed_query_param_token_rejects_wrong_secret() {
+        // Same URI as above, but validate against a different secret —
+        // must reject with InvalidMac.
+        let signing_secret: [u8; 32] = [0xAA; 32];
+        let wrong_secret: [u8; 32] = [0xBB; 32];
+
+        let zone = "wrong-secret.ztlp";
+        let ns_addr = "192.0.2.10:23096";
+        let nonce: [u8; 16] = [0xAA; 16];
+        let expires_at: u64 = 1_893_456_000;
+
+        let mut buf = Vec::new();
+        buf.push(0x01u8);
+        buf.push(0x00u8); // no gateway
+        buf.extend_from_slice(&(zone.len() as u16).to_be_bytes());
+        buf.extend_from_slice(zone.as_bytes());
+        buf.extend_from_slice(&(ns_addr.len() as u16).to_be_bytes());
+        buf.extend_from_slice(ns_addr.as_bytes());
+        buf.push(0u8); // no relays
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&expires_at.to_be_bytes());
+        buf.extend_from_slice(&nonce);
+
+        let mac = hmac_blake2s(&signing_secret, &buf);
+        let mac_hex = mac.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+        let uri = format!(
+            "ztlp://enroll/?zone={}&ns={}&token=abc&expires={}\
+             &nonce={}&mac={}",
+            zone,
+            ns_addr,
+            expires_at,
+            nonce
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>(),
+            mac_hex
+        );
+
+        let parsed = EnrollmentToken::from_base64url(&uri).expect("URI parses");
+        assert!(
+            matches!(parsed.validate(&wrong_secret), TokenValidation::InvalidMac),
+            "token signed with secret A must NOT validate under secret B"
+        );
     }
 }

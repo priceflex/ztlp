@@ -1,5 +1,6 @@
 import datetime as dt
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -1672,6 +1673,169 @@ class PhaseBCallbackTest(LaunchAppTest):
         ).fetchone()
         conn.close()
         self.assertEqual("redeemed", row[0])
+
+    # ------------------------------------------------------------------
+    # v0.30.12 — auto-bind admin pubkey from the confirm-callback path.
+    #
+    # The CLI's `ztlp setup` now appends `&pubkey_hex=<64hex>` to the
+    # POST it sends to /api/enrollment/confirm. When present and valid,
+    # Launch must:
+    #   1. Rewrite ZTLP_ADMIN_PUBKEY_HEX in the tenant's instance.env
+    #   2. Force-recreate the gateway container so the new env is loaded
+    #   3. Return autobind=applied in the JSON ack
+    #
+    # Behaviour is gated by `first_bind_only=True` so an attacker who
+    # scrapes the URI cannot rebind the admin pubkey after a legit
+    # enrollment. Same pubkey → idempotent no-op; different pubkey →
+    # silently refused with autobind=already_bound.
+    # ------------------------------------------------------------------
+    def test_confirm_with_pubkey_hex_auto_binds_admin_pubkey(self):
+        _uri, token_id = self._start_and_claim()
+        pubkey = "ab" * 32  # 64 lowercase hex
+
+        # /claim/launch already created instance.env with an EMPTY
+        # ZTLP_ADMIN_PUBKEY_HEX line. Sanity-check that pre-state.
+        instance_dirs = [
+            os.path.join(self.instance_root.name, d)
+            for d in os.listdir(self.instance_root.name)
+        ]
+        self.assertEqual(1, len(instance_dirs), "expected exactly one provisioned tenant dir")
+        instance_env = os.path.join(instance_dirs[0], "instance.env")
+        with open(instance_env, "r") as fh:
+            pre = fh.read()
+        self.assertIn("ZTLP_ADMIN_PUBKEY_HEX=", pre)
+        # Pre-state must be empty (or absent) — that's what makes this a
+        # first-bind. Catch any future provisioning regression that
+        # accidentally pre-fills the key.
+        for line in pre.splitlines():
+            if line.startswith("ZTLP_ADMIN_PUBKEY_HEX="):
+                self.assertEqual("", line.split("=", 1)[1],
+                                 "first-bind pre-state requires empty pubkey")
+
+        status, _h, body = self.post_form(
+            "/api/enrollment/confirm",
+            {
+                "token_id": token_id,
+                "node_id": "22" * 32,
+                "name": "admin-laptop",
+                "pubkey_hex": pubkey,
+            },
+        )
+        self.assertEqual(HTTPStatus.OK, status)
+        # JSON ack must surface the autobind result so operators / CI can
+        # tell whether the auto-bind path fired (and if not, why).
+        payload = json.loads(body)
+        self.assertEqual("redeemed", payload["status"])
+        self.assertEqual("applied", payload["autobind"],
+                         f"expected autobind=applied, got {payload}")
+
+        # Post-state: instance.env should now have the pubkey.
+        with open(instance_env, "r") as fh:
+            post = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey}", post)
+
+        # Force-recreate must have been issued. Look for the `docker
+        # compose up -d --force-recreate gateway` call.
+        recreate_calls = [
+            c for c in self._subprocess_calls
+            if isinstance(c["cmd"], list)
+            and "--force-recreate" in c["cmd"]
+            and "gateway" in c["cmd"]
+        ]
+        self.assertTrue(recreate_calls,
+                        f"expected docker compose --force-recreate gateway call, got {self._subprocess_calls}")
+
+    def test_confirm_without_pubkey_hex_skips_autobind(self):
+        # The CLI may omit pubkey_hex (legacy CLI, or non-admin enrollments).
+        # In that case the autobind path must be a no-op and the JSON must
+        # carry autobind=skipped.
+        _uri, token_id = self._start_and_claim()
+        status, _h, body = self.post_form(
+            "/api/enrollment/confirm",
+            {"token_id": token_id, "node_id": "33" * 32, "name": "no-pubkey"},
+        )
+        self.assertEqual(HTTPStatus.OK, status)
+        payload = json.loads(body)
+        self.assertEqual("skipped", payload["autobind"])
+
+    def test_confirm_with_invalid_pubkey_hex_records_invalid(self):
+        # A malformed pubkey must NOT 4xx the confirm (we don't want to
+        # break enrollment over a bad bind). It must record autobind=invalid
+        # so the CLI can warn the operator.
+        _uri, token_id = self._start_and_claim()
+        status, _h, body = self.post_form(
+            "/api/enrollment/confirm",
+            {
+                "token_id": token_id,
+                "node_id": "44" * 32,
+                "name": "bad-pubkey",
+                "pubkey_hex": "not-hex",
+            },
+        )
+        self.assertEqual(HTTPStatus.OK, status)
+        payload = json.loads(body)
+        self.assertEqual("invalid", payload["autobind"])
+
+    def test_confirm_with_same_pubkey_twice_is_idempotent(self):
+        # CLI retries (e.g. transient network) MUST NOT trip the
+        # first-bind gate when the same pubkey is being re-sent. This is
+        # the idempotency carve-out in _apply_admin_pubkey.
+        _uri, token_id = self._start_and_claim()
+        pubkey = "cd" * 32
+        body_form = {
+            "token_id": token_id,
+            "node_id": "55" * 32,
+            "name": "retry-admin",
+            "pubkey_hex": pubkey,
+        }
+        s1, _h1, b1 = self.post_form("/api/enrollment/confirm", body_form)
+        s2, _h2, b2 = self.post_form("/api/enrollment/confirm", body_form)
+        self.assertEqual(HTTPStatus.OK, s1)
+        self.assertEqual(HTTPStatus.OK, s2)
+        self.assertEqual("applied", json.loads(b1)["autobind"])
+        # Second call: pubkey matches the now-bound one → applied (the
+        # helper's idempotency branch returns (True, "") so the endpoint
+        # reports applied, not already_bound. Either is acceptable; we
+        # assert it's NOT an error.)
+        autobind = json.loads(b2)["autobind"]
+        self.assertIn(autobind, ("applied", "already_bound"),
+                      f"second-bind of same pubkey must succeed, got {autobind}")
+
+    def test_confirm_with_different_pubkey_after_first_bind_refuses(self):
+        # First-bind gate: once a non-empty pubkey is in instance.env,
+        # a confirm-callback with a DIFFERENT pubkey must NOT overwrite
+        # it. This is the trust mitigation for an attacker who scrapes
+        # the URI after the legit admin enrolls.
+        _uri, token_id = self._start_and_claim()
+        first = "ee" * 32
+        second = "ff" * 32
+        # First-bind: legit admin
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id,
+            "node_id": "66" * 32,
+            "name": "legit-admin",
+            "pubkey_hex": first,
+        })
+        # Attacker tries to rebind with their own pubkey.
+        status, _h, body = self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id,
+            "node_id": "77" * 32,
+            "name": "attacker",
+            "pubkey_hex": second,
+        })
+        self.assertEqual(HTTPStatus.OK, status)
+        payload = json.loads(body)
+        self.assertEqual("already_bound", payload["autobind"])
+
+        # Verify instance.env still has the LEGIT pubkey.
+        instance_dirs = [
+            os.path.join(self.instance_root.name, d)
+            for d in os.listdir(self.instance_root.name)
+        ]
+        with open(os.path.join(instance_dirs[0], "instance.env"), "r") as fh:
+            env = fh.read()
+        self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={first}", env)
+        self.assertNotIn(f"ZTLP_ADMIN_PUBKEY_HEX={second}", env)
 
 
 class EnrollmentHmacSigningTest(unittest.TestCase):

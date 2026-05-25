@@ -6844,7 +6844,13 @@ async fn setup_join(
 
                     // Confirm enrollment with Bootstrap (best-effort)
                     if let Some(ref url) = token.callback_url {
-                        confirm_enrollment(url, &token, &full_name, &identity.node_id).await;
+                        // v0.30.12: pass the device's Noise static pubkey so
+                        // Launch can auto-bind it for passwordless gateway
+                        // sign-in. Bootstrap (Rails) ignores unknown fields,
+                        // so this is safe to send unconditionally.
+                        let pubkey_hex = hex::encode(identity.static_public_key.as_slice());
+                        confirm_enrollment(url, &token, &full_name, &identity.node_id, &pubkey_hex)
+                            .await;
                     }
 
                     // Test connectivity
@@ -7116,6 +7122,7 @@ async fn confirm_enrollment(
     token: &ztlp_proto::enrollment::EnrollmentToken,
     device_name: &str,
     node_id: &NodeId,
+    pubkey_hex: &str,
 ) {
     let token_id = match &token.token_id {
         Some(id) => id.clone(),
@@ -7125,20 +7132,35 @@ async fn confirm_enrollment(
     // Use curl for HTTPS support (TLS without adding deps). We deliberately
     // do NOT pass `-f` here — Phase B made silent 4xx/5xx the whole problem.
     // We want to see what the Bootstrap actually said.
+    //
+    // v0.30.12 — body now carries `pubkey_hex`. When the callback URL
+    // resolves to Launch, Launch will treat this as an implicit first-bind
+    // of the admin's Noise static pubkey (skips the manual
+    // /api/admin-pubkey + force-recreate dance). When the callback
+    // resolves to Bootstrap (Rails), the field is silently dropped by
+    // strong-params — sending it everywhere is safe and avoids the CLI
+    // needing to know which kind of callback it's hitting.
     let body = format!(
-        "token_id={}&node_id={}&name={}",
-        token_id, node_id, device_name
+        "token_id={}&node_id={}&name={}&pubkey_hex={}",
+        token_id, node_id, device_name, pubkey_hex
     );
 
     let result = tokio::process::Command::new("curl")
         .args([
             "-s",
+            // v0.30.12: bumped from 5s to 60s. With the v0.30.12 server-side
+            // change, /api/enrollment/confirm runs `docker compose up -d
+            // --force-recreate gateway` inline when pubkey_hex is present —
+            // which can take 10-30s. The 5s budget the original Phase B
+            // landed with is fine for the no-op status flip, but reliably
+            // times out the auto-bind path. The endpoint is still
+            // best-effort from the CLI's POV (the device IS enrolled at NS
+            // regardless), so a wider timeout doesn't make us *less*
+            // resilient; it just lets the happy path complete.
             "--max-time",
-            "5",
-            "-o",
-            "/dev/null", // discard body to stderr; HTTP code stays printable
+            "60",
             "-w",
-            "%{http_code}", // print just the status code
+            "\n%{http_code}", // append HTTP code on its own line so we can split body/code
             "-X",
             "POST",
             "-H",
@@ -7153,7 +7175,12 @@ async fn confirm_enrollment(
     match result {
         Ok(output) if output.status.success() => {
             // curl-level success — now check the HTTP status code curl printed.
-            let code_str = String::from_utf8_lossy(&output.stdout);
+            // Format: <response_body>\n<http_code>
+            let combined = String::from_utf8_lossy(&output.stdout);
+            let (response_body, code_str) = match combined.rsplit_once('\n') {
+                Some((body, code)) => (body, code),
+                None => ("", combined.as_ref()),
+            };
             let code: u16 = code_str.trim().parse().unwrap_or(0);
             if (200..300).contains(&code) {
                 eprintln!(
@@ -7161,6 +7188,48 @@ async fn confirm_enrollment(
                     c_green("✓"),
                     code
                 );
+                // v0.30.12: surface the Launch autobind result so operators
+                // can tell whether passwordless dashboard sign-in is wired
+                // up without having to read the gateway env. We do best-
+                // effort JSON parsing — Bootstrap (Rails) returns a redirect
+                // body with no JSON, so we just skip silently if the response
+                // doesn't look like a Launch ack.
+                if let Some(autobind) = extract_json_string_field(response_body, "autobind") {
+                    match autobind.as_str() {
+                        "applied" => {
+                            eprintln!(
+                                "  {} Admin pubkey auto-bound for passwordless dashboard sign-in",
+                                c_green("✓"),
+                            );
+                        }
+                        "already_bound" => {
+                            eprintln!(
+                                "  {} Admin pubkey was already bound on this tenant — skipped (first-bind only)",
+                                c_dim("·"),
+                            );
+                        }
+                        "invalid" => {
+                            eprintln!(
+                                "  {} Launch rejected the device pubkey as invalid — passwordless sign-in not configured",
+                                c_yellow("!"),
+                            );
+                        }
+                        "provisioning_incomplete" => {
+                            eprintln!(
+                                "  {} Tenant gateway not provisioned yet — passwordless sign-in deferred",
+                                c_yellow("!"),
+                            );
+                        }
+                        "skipped" => { /* Legacy server, no message needed. */ }
+                        other => {
+                            eprintln!(
+                                "  {} Launch autobind returned status '{}' — passwordless sign-in may not be active",
+                                c_yellow("!"),
+                                other,
+                            );
+                        }
+                    }
+                }
             } else {
                 // Loud but non-fatal: device IS enrolled in NS, but the dashboard
                 // bookkeeping callback did not stick. Operator can see this.
@@ -7192,6 +7261,28 @@ async fn confirm_enrollment(
             );
         }
     }
+}
+
+/// Tiny JSON string-field extractor for the confirm-callback response.
+///
+/// Avoids pulling in `serde_json` just to read one field from a known-shape
+/// Launch ack like `{"status":"redeemed","name":"admin","autobind":"applied"}`.
+/// Returns None if the body isn't JSON-ish or the field is missing.
+///
+/// Only matches `"field":"value"` — does NOT handle nested objects, escape
+/// sequences, or numeric/bool values. That's intentional: the Launch ack
+/// shape is fixed and tiny, and we explicitly do NOT want to fail
+/// enrollment over a parsing edge case.
+fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\"", field);
+    let start = body.find(&needle)?;
+    let after_key = &body[start + needle.len()..];
+    // Skip whitespace and the colon.
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    // Expect an opening quote.
+    let after_quote = after_colon.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(after_quote[..end].to_string())
 }
 
 /// Build the 0x07 ENROLL request body (without the 0x07 prefix).
@@ -10978,6 +11069,51 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // v0.30.12 — JSON field extraction for the confirm-callback response.
+    // This is a deliberately tiny parser; these tests cover the shapes we
+    // actually see from Launch and ensure we degrade gracefully when the
+    // body isn't a Launch ack (e.g. Bootstrap's Rails redirect HTML).
+    #[test]
+    fn extract_json_string_field_handles_launch_ack() {
+        let body = r#"{"status":"redeemed","name":"admin-laptop","autobind":"applied"}"#;
+        assert_eq!(
+            extract_json_string_field(body, "autobind"),
+            Some("applied".to_string())
+        );
+        assert_eq!(
+            extract_json_string_field(body, "status"),
+            Some("redeemed".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_json_string_field_handles_whitespace() {
+        let body = r#"{ "autobind" : "already_bound" }"#;
+        assert_eq!(
+            extract_json_string_field(body, "autobind"),
+            Some("already_bound".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_json_string_field_returns_none_for_missing_field() {
+        let body = r#"{"status":"redeemed"}"#;
+        assert_eq!(extract_json_string_field(body, "autobind"), None);
+    }
+
+    #[test]
+    fn extract_json_string_field_returns_none_for_non_json_body() {
+        // Bootstrap's Rails redirect renders HTML — must NOT panic or
+        // return a bogus value.
+        let body = "<html><body><h1>302 Found</h1></body></html>";
+        assert_eq!(extract_json_string_field(body, "autobind"), None);
+    }
+
+    #[test]
+    fn extract_json_string_field_returns_none_for_empty_body() {
+        assert_eq!(extract_json_string_field("", "autobind"), None);
+    }
 
     #[test]
     fn toml_string_escapes_windows_paths() {

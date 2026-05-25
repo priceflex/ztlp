@@ -1190,6 +1190,15 @@ class LaunchApp:
         token_id = (form.get("token_id") or [""])[0].strip()
         node_id = (form.get("node_id") or [""])[0].strip()
         name = (form.get("name") or [""])[0].strip()
+        # v0.30.12: optional auto-bind of the admin's Noise static pubkey.
+        # When present and valid, we run the same env-rewrite +
+        # docker-compose-recreate dance as /api/admin-pubkey — but gated by
+        # `first_bind_only` so an attacker who scrapes the URI after a
+        # legitimate enrollment cannot rebind the admin pubkey to their own
+        # device. The first call (legit admin) binds; all subsequent calls
+        # for the same row are no-ops (or silently ignored if the pubkey
+        # differs).
+        pubkey_hex = (form.get("pubkey_hex") or [""])[0].strip().lower()
 
         if not token_id:
             return (
@@ -1206,7 +1215,7 @@ class LaunchApp:
         needle = f"token={token_id}"
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT id, enrollment_status FROM onboarding_requests "
+                "SELECT * FROM onboarding_requests "
                 "WHERE enrollment_token_uri LIKE ? LIMIT 1",
                 (f"%{needle}%",),
             ).fetchone()
@@ -1228,11 +1237,55 @@ class LaunchApp:
                 """,
                 (now_iso, node_id, now_iso, row["id"]),
             )
+
+        # v0.30.12 auto-bind: if the CLI sent a valid pubkey_hex, treat
+        # this confirm call as an implicit first-bind of the admin's Noise
+        # static pubkey. Errors are logged but do NOT fail the confirm —
+        # the device IS enrolled at NS regardless, and the admin can still
+        # POST to /api/admin-pubkey explicitly with the claim_token.
+        import re as _re
+        autobind_status = "skipped"  # skipped | applied | already_bound | invalid | provisioning_incomplete | error
+        autobind_detail = ""
+        if pubkey_hex:
+            if not _re.fullmatch(r"[0-9a-f]{64}", pubkey_hex):
+                autobind_status = "invalid"
+                autobind_detail = "pubkey_hex must be 64 lowercase hex chars"
+            else:
+                slug = self._slug_for_row(row)
+                if not slug:
+                    autobind_status = "error"
+                    autobind_detail = "tenant has no derivable slug"
+                else:
+                    instance_dir = self._instance_dir_for_slug(slug)
+                    if not os.path.isfile(os.path.join(instance_dir, "instance.env")):
+                        autobind_status = "provisioning_incomplete"
+                        autobind_detail = "instance.env not found"
+                    else:
+                        applied, detail = self._apply_admin_pubkey(
+                            instance_dir=instance_dir,
+                            pubkey_hex=pubkey_hex,
+                            first_bind_only=True,
+                        )
+                        if applied:
+                            autobind_status = "applied"
+                        elif detail.startswith("admin pubkey already bound"):
+                            autobind_status = "already_bound"
+                            autobind_detail = detail
+                        else:
+                            autobind_status = "error"
+                            autobind_detail = detail
+
         # Tiny JSON-ish ack so curl users see what happened.
+        import json as _json
         return (
             HTTPStatus.OK,
             "application/json; charset=utf-8",
-            '{"status":"redeemed","name":"' + name.replace('"', '\\"') + '"}\n',
+            _json.dumps({
+                "status": "redeemed",
+                "name": name,
+                "autobind": autobind_status,
+                **({"autobind_detail": autobind_detail} if autobind_detail else {}),
+            }) + "\n",
         )
 
     def handle_admin_pubkey(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
@@ -1308,28 +1361,98 @@ class LaunchApp:
                 "instance not provisioned yet — visit the claim link first",
             )
 
-        # Rewrite ZTLP_ADMIN_PUBKEY_HEX in-place. Preserve all other lines
-        # exactly so we don't disturb other operator-set keys.
+        # Delegate the actual env-rewrite + force-recreate to the shared
+        # helper so this endpoint and the confirm-callback path can't drift.
+        # Explicit endpoint, so first_bind_only=False — operators can rebind
+        # via this endpoint even after a prior bind (token still gates it).
+        applied, detail = self._apply_admin_pubkey(
+            instance_dir=instance_dir,
+            pubkey_hex=pubkey_hex,
+            first_bind_only=False,
+        )
+        if not applied:
+            return err(HTTPStatus.INTERNAL_SERVER_ERROR, "could not bind admin pubkey", detail=detail)
+
+        return (
+            HTTPStatus.OK,
+            "application/json; charset=utf-8",
+            json.dumps({"status": "ok", "slug": slug, "applied": True}),
+        )
+
+    # ------------------------------------------------------------------
+    # _apply_admin_pubkey: shared helper for the two endpoints that can
+    # bind/rebind the admin's Noise static pubkey.
+    #
+    # Called by:
+    #   1. handle_admin_pubkey            — explicit, claim_token-authed
+    #   2. handle_enrollment_confirm      — implicit, piggybacks on the
+    #                                        CLI's post-enrollment callback
+    #
+    # The confirm-callback path passes first_bind_only=True so an attacker
+    # who scrapes the URI cannot rebind the admin pubkey after the legit
+    # admin has already enrolled. The explicit /api/admin-pubkey path
+    # bypasses the first-bind gate because the claim_token in the body is
+    # already a stronger auth signal than the unauthenticated callback.
+    #
+    # Returns (applied: bool, detail: str). detail is empty on success and
+    # a human-readable reason on failure ("already bound", "docker recreate
+    # failed: ...", "could not update instance.env: ...", etc.).
+    # ------------------------------------------------------------------
+    def _apply_admin_pubkey(
+        self,
+        instance_dir: str,
+        pubkey_hex: str,
+        first_bind_only: bool,
+    ) -> Tuple[bool, str]:
+        import subprocess
+        import sys
+
+        instance_env_path = os.path.join(instance_dir, "instance.env")
         try:
             with open(instance_env_path, "r", encoding="utf-8") as fh:
                 lines = fh.readlines()
-            new_lines = []
-            saw_key = False
+        except OSError as exc:
+            return (False, f"could not read instance.env: {exc}")
+
+        # First-bind gate: if a non-empty ZTLP_ADMIN_PUBKEY_HEX is already
+        # present, refuse to overwrite it from the confirm-callback path.
+        # This is the trust mitigation Steve signed off on — the URI is a
+        # one-shot bind credential; subsequent confirms (e.g. an attacker
+        # who scraped it) must not be able to rebind to their own pubkey.
+        if first_bind_only:
+            current = ""
             for line in lines:
                 if line.startswith("ZTLP_ADMIN_PUBKEY_HEX="):
-                    new_lines.append(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}\n")
-                    saw_key = True
-                else:
-                    new_lines.append(line)
-            if not saw_key:
-                # Older instances provisioned before this key existed — append.
-                if new_lines and not new_lines[-1].endswith("\n"):
-                    new_lines[-1] += "\n"
+                    current = line.split("=", 1)[1].strip()
+                    break
+            if current:
+                # Idempotency: if the caller is binding the SAME pubkey,
+                # treat as a no-op success so a CLI retry doesn't print a
+                # scary warning.
+                if current.lower() == pubkey_hex.lower():
+                    return (True, "")
+                return (False, "admin pubkey already bound (first-bind gate)")
+
+        # Rewrite ZTLP_ADMIN_PUBKEY_HEX in-place. Preserve all other lines
+        # exactly so we don't disturb other operator-set keys.
+        new_lines = []
+        saw_key = False
+        for line in lines:
+            if line.startswith("ZTLP_ADMIN_PUBKEY_HEX="):
                 new_lines.append(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}\n")
+                saw_key = True
+            else:
+                new_lines.append(line)
+        if not saw_key:
+            # Older instances provisioned before this key existed — append.
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            new_lines.append(f"ZTLP_ADMIN_PUBKEY_HEX={pubkey_hex}\n")
+        try:
             with open(instance_env_path, "w", encoding="utf-8") as fh:
                 fh.writelines(new_lines)
         except OSError as exc:
-            return err(HTTPStatus.INTERNAL_SERVER_ERROR, "could not update instance.env", detail=str(exc))
+            return (False, f"could not update instance.env: {exc}")
 
         # Re-create the gateway container so the new env var is picked up.
         # --force-recreate is required: `up -d` alone is a no-op when the
@@ -1345,26 +1468,17 @@ class LaunchApp:
                 timeout=60,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return err(HTTPStatus.INTERNAL_SERVER_ERROR, "docker recreate failed", detail=str(exc))
+            return (False, f"docker recreate failed: {exc}")
 
         if result.returncode != 0:
-            # Print to stderr so operators can correlate with the response.
             print(
-                f"handle_admin_pubkey: docker compose up failed for {slug} "
-                f"(rc={result.returncode}) stderr={result.stderr!r}",
+                f"_apply_admin_pubkey: docker compose up failed for "
+                f"{instance_dir} (rc={result.returncode}) stderr={result.stderr!r}",
                 file=sys.stderr,
             )
-            return err(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                "docker recreate failed",
-                detail=result.stderr.strip() or f"exit code {result.returncode}",
-            )
+            return (False, result.stderr.strip() or f"exit code {result.returncode}")
 
-        return (
-            HTTPStatus.OK,
-            "application/json; charset=utf-8",
-            json.dumps({"status": "ok", "slug": slug, "applied": True}),
-        )
+        return (True, "")
 
     def render_downloads(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         cards = []

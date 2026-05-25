@@ -392,15 +392,6 @@ defmodule ZtlpRelay.GatewayForwarder do
     end
   end
 
-  # Returns true when the registered service_name looks like a gateway —
-  # either the V2 zone-keyed form `"gw:<zone>"` or the V1 slug form
-  # `"gw-<slug>"`. Used by `:pick_gateway` (no-preference fallback) to
-  # exclude ad-hoc non-gateway service registrations from the round-robin
-  # pool. See the SECURITY comment in `handle_call(:pick_gateway, ...)`.
-  defp gateway_service?("gw:" <> _), do: true
-  defp gateway_service?("gw-" <> _), do: true
-  defp gateway_service?(_), do: false
-
   def handle_call({:pick_gateway_for_service, service_name}, _from, state) do
     now = System.monotonic_time(:second)
 
@@ -575,4 +566,14 @@ defmodule ZtlpRelay.GatewayForwarder do
     Process.send_after(self(), :cleanup, 60_000)
     {:noreply, %{state | sessions: sessions, dynamic_gateways: active}}
   end
+
+  # Returns true when the registered service_name looks like a gateway —
+  # either the V2 zone-keyed form `"gw:<zone>"` or the V1 slug form
+  # `"gw-<slug>"`. Used by `handle_call(:pick_gateway, ...)` (the
+  # no-preference fallback) to exclude ad-hoc non-gateway service
+  # registrations from the round-robin pool. See the SECURITY comment
+  # in `handle_call(:pick_gateway, ...)`.
+  defp gateway_service?("gw:" <> _), do: true
+  defp gateway_service?("gw-" <> _), do: true
+  defp gateway_service?(_), do: false
 end

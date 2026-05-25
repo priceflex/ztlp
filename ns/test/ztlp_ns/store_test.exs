@@ -197,4 +197,32 @@ defmodule ZtlpNs.StoreTest do
       assert Store.list_revoked() == []
     end
   end
+
+  describe "mnesia_wait_timeout/0" do
+    # Tier 1A fix from the v0.30.4 → v0.30.5 deploy retro: Mnesia
+    # `wait_for_tables` with a 10s timeout crash-looped the NS on a
+    # production restart because disc IO took longer than 10s on the
+    # SaaS host. Bumped to 60s, with this floor guard so a future edit
+    # cannot silently regress it back below safe. See:
+    #   docs/skills/ztlp-prod-deployment/references/
+    #     env-redaction-and-mnesia-restart-pitfalls.md
+    test "is at least 60_000ms (60s) to survive cold-restart disc IO stalls" do
+      assert Store.mnesia_wait_timeout() >= 60_000,
+             """
+             ZtlpNs.Store.mnesia_wait_timeout/0 returned a value below the
+             60_000ms floor. This timeout is consulted on cold restart with
+             disc_copies storage — a value too low can crash-loop the NS
+             when disc IO is slow.
+             """
+    end
+
+    test "returns a positive integer (no nil/string regression)" do
+      # Type guard: any future refactor that swaps the constant for a
+      # config lookup must still return an integer the Mnesia BIF can
+      # consume directly.
+      timeout = Store.mnesia_wait_timeout()
+      assert is_integer(timeout), "timeout must be an integer"
+      assert timeout > 0, "timeout must be positive"
+    end
+  end
 end

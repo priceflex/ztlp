@@ -37,7 +37,27 @@ defmodule ZtlpNs.Store do
   @device_index_table :ztlp_ns_device_index
   @group_index_table :ztlp_ns_group_index
 
+  # Mnesia `wait_for_tables` timeout used during cold restart with
+  # disc_copies storage. The previous 10s value crash-looped the NS on
+  # the v0.30.4 production deploy when SaaS-host disc IO took longer
+  # than 10s to surface the table replicas. 60s is a generous floor that
+  # covers the worst observed disc stall by a wide margin while still
+  # failing fast enough to surface a genuinely broken volume.
+  #
+  # Tested by `test/ztlp_ns/store_test.exs` (`mnesia_wait_timeout/0` is
+  # asserted to be ≥ 60_000ms so a future careless edit cannot regress
+  # below the documented floor).
+  @mnesia_wait_timeout_ms 60_000
+
   # ── Public API ─────────────────────────────────────────────────────
+
+  @doc """
+  Returns the Mnesia `wait_for_tables` timeout in milliseconds, used on
+  cold restart with disc_copies storage. Floor: 60_000ms (60s). See
+  module-level docs and `test/ztlp_ns/store_test.exs` for the rationale.
+  """
+  @spec mnesia_wait_timeout() :: pos_integer()
+  def mnesia_wait_timeout, do: @mnesia_wait_timeout_ms
 
   @spec start_link(any()) :: GenServer.on_start()
   def start_link(_args) do
@@ -448,7 +468,21 @@ defmodule ZtlpNs.Store do
     )
 
     # Wait for tables to be loaded (important on restart with disc_copies)
-    :ok = :mnesia.wait_for_tables([@records_table, @revoked_table, @pubkey_index_table, @device_index_table, @group_index_table], 10_000)
+    # Timeout sourced from @mnesia_wait_timeout_ms (60s, see module head).
+    # Hard-floored at 60s after the v0.30.4 deploy crash-loop where the
+    # previous 10s value timed out under disc IO pressure. Tested by
+    # `test/ztlp_ns/store_test.exs`.
+    :ok =
+      :mnesia.wait_for_tables(
+        [
+          @records_table,
+          @revoked_table,
+          @pubkey_index_table,
+          @device_index_table,
+          @group_index_table
+        ],
+        @mnesia_wait_timeout_ms
+      )
   end
 
   defp create_table(name, opts) do

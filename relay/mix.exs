@@ -13,7 +13,7 @@ defmodule ZtlpRelay.MixProject do
       # tag was cut from a5993ee (PR #40 — Z2LS gateway-auth enrollment API).
       # Bumped 0.30.3 → 0.30.4 in PR release/v0.30.4 to align with the
       # re-cut v0.30.4 tag.
-      version: "0.30.10",
+      version: "0.30.11",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

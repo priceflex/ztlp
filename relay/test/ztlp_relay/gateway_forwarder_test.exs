@@ -308,5 +308,98 @@ defmodule ZtlpRelay.GatewayForwarderTest do
       assert gw_v2 in picks,
              "gw: (V2) prefix excluded from pick_gateway/0; picks: #{inspect(picks)}"
     end
+
+    test "pick_gateway_for_service/1 matches by gateway node_id when client stamps NS-resolved NodeID into dst_svc_hash" do
+      # When the CLI's `cmd_connect` resolves the target via ZTLP-NS and
+      # gets the gateway's NodeID back, it stamps that 16-byte NodeID into
+      # `hello_hdr.dst_svc_hash` (see `proto/src/bin/ztlp-cli.rs` line
+      # 3144-3146, `dst_routing_override`). This OVERRIDES whatever the
+      # `--service` flag stamped, because the NS-resolved NodeID is the
+      # authoritative tenant pin.
+      #
+      # Before this fix, `pick_gateway_for_service/1` matched ONLY by
+      # `SHA-256(gw.service_name)[:16]`. A 16-byte NodeID is never equal
+      # to a service-name hash, so the lookup always returned `:error`
+      # and the HELLO fell into a half-open session that the client
+      # timed out on — making every `ztlp connect bootstrap.<zone>`
+      # appear to "hang" with `handshake failed: no HELLO_ACK after
+      # retransmits`. Observed in production 2026-05-25 end-to-end test.
+      #
+      # Contract: the 16-byte `dst_svc_hash` is matched against BOTH
+      # `SHA-256(service_name)[:16]` (legacy / explicit --service path)
+      # AND `gw.node_id` (NS-resolved NodeID path). Either match returns
+      # the gateway address.
+
+      node_id = :crypto.strong_rand_bytes(16)
+      gateway_addr = {{10, 0, 33, 1}, 23097}
+      service_name = "gw:nodeid-test-zone.ztlp"
+
+      GatewayForwarder.register_dynamic_gateway(gateway_addr, node_id, service_name, 60)
+      Process.sleep(20)
+
+      # The CLI stamps the raw 16-byte node_id into dst_svc_hash when
+      # NS resolution returns a gateway NodeID. The relay must match
+      # this directly against `gw.node_id`.
+      assert {:ok, ^gateway_addr} = GatewayForwarder.pick_gateway_for_service(node_id),
+             "pick_gateway_for_service/1 must match a 16-byte NodeID against gw.node_id, " <>
+               "not just against SHA-256(service_name)"
+    end
+
+    test "pick_gateway_for_service/1 with unknown NodeID still returns :error (no silent round-robin)" do
+      # SECURITY: a NodeID that doesn't match ANY registered gateway must
+      # NOT silently fall back to round-robin. The strict-routing
+      # contract from v0.29.4 still applies — explicit routing intent
+      # with no match = `:error`, never a cross-tenant misroute.
+
+      real_node_id = :crypto.strong_rand_bytes(16)
+      gw = {{10, 0, 22, 1}, 23097}
+      GatewayForwarder.register_dynamic_gateway(gw, real_node_id, "gw:real.ztlp", 60)
+      Process.sleep(20)
+
+      # Generate a NodeID that doesn't match anything registered.
+      unknown_node_id = :crypto.strong_rand_bytes(16)
+      refute unknown_node_id == real_node_id
+
+      result = GatewayForwarder.pick_gateway_for_service(unknown_node_id)
+      assert result == :error,
+             "Unknown NodeID must return :error, not silently round-robin. Got: #{inspect(result)}"
+    end
+
+    test "pick_gateway_for_service/1 NodeID match wins over a coincidental hash collision" do
+      # Edge case: if a tenant's service_name SHA-256 happens to equal
+      # ANOTHER tenant's node_id (cryptographically improbable but
+      # worth pinning), we should prefer the NodeID match — node_id is
+      # the authoritative pin set by NS, service_name is operator
+      # config that could be reused across rebuilds.
+      #
+      # Test setup constructs a NodeID that equals SHA-256(other gw's
+      # service_name)[:16], registers both gateways, looks up by that
+      # bytestring, and asserts the gateway whose `node_id` IS those
+      # bytes is the one picked.
+
+      service_name = "gw:hash-target.ztlp"
+      target_hash =
+        :crypto.hash(:sha256, String.downcase(service_name) |> String.trim_trailing("."))
+        |> :binary.part(0, 16)
+
+      # gw_a: registered under a different service_name but its node_id
+      #       equals target_hash.
+      # gw_b: registered with the colliding service_name, different
+      #       node_id.
+      gw_a = {{10, 0, 11, 1}, 23097}
+      gw_b = {{10, 0, 11, 2}, 23097}
+      node_id_b = :crypto.strong_rand_bytes(16)
+
+      GatewayForwarder.register_dynamic_gateway(gw_a, target_hash, "gw:other-zone.ztlp", 60)
+      GatewayForwarder.register_dynamic_gateway(gw_b, node_id_b, service_name, 60)
+      Process.sleep(20)
+
+      # Lookup with target_hash — matches BOTH:
+      #   - gw_a by node_id (authoritative)
+      #   - gw_b by SHA-256(service_name)[:16]
+      # We want gw_a (the NodeID match).
+      assert {:ok, ^gw_a} = GatewayForwarder.pick_gateway_for_service(target_hash),
+             "NodeID match should win over service-name hash match when both exist"
+    end
   end
 end

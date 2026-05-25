@@ -424,24 +424,73 @@ defmodule ZtlpRelay.GatewayForwarder do
     # callers that pass us the sentinel by mistake.
     all_zero_hash? = service_name == <<0::128>>
 
-    matches_service =
+    # Wire-decoupling Option C + NodeID-pin path (v0.30.10+):
+    #
+    # The 16-byte `dst_svc_hash` from a HELLO can carry one of two
+    # routing intents:
+    #
+    #   1. **NS-resolved NodeID (authoritative tenant pin).** When
+    #      `cmd_connect` in the CLI resolves the target via ZTLP-NS
+    #      and gets the gateway's NodeID back, it stamps that raw
+    #      16-byte NodeID into `dst_svc_hash` (see
+    #      `proto/src/bin/ztlp-cli.rs::cmd_connect`,
+    #      `dst_routing_override`). This OVERRIDES the `--service`
+    #      stamping because the NS NodeID is the canonical tenant pin.
+    #
+    #   2. **SHA-256(service_name)[:16].** Legacy / explicit-only-`--service`
+    #      path used by clients that didn't resolve via NS or that
+    #      pre-date the NodeID-pin code.
+    #
+    # We must match BOTH. NodeID match takes priority because it's the
+    # authoritative pin — a coincidental SHA-256 collision with another
+    # tenant's service_name (cryptographically improbable but pinned
+    # by a regression test) must not steal the route.
+    {nodeid_match_fn, hash_match_fn, name_match_fn} =
       case service_name do
-        <<hash::binary-size(16)>> when bit_size(hash) == 128 ->
-          fn gw -> service_hash(gw.service_name) == hash end
+        <<bin::binary-size(16)>> when bit_size(bin) == 128 ->
+          {
+            fn gw -> gw.node_id == bin end,
+            fn gw -> service_hash(gw.service_name) == bin end,
+            fn _gw -> false end
+          }
 
         name when is_binary(name) ->
-          fn gw -> gw.service_name == name end
+          {
+            fn _gw -> false end,
+            fn _gw -> false end,
+            fn gw -> gw.service_name == name end
+          }
 
         _ ->
-          fn _gw -> false end
+          {fn _gw -> false end, fn _gw -> false end, fn _gw -> false end}
       end
 
-    # Find dynamic gateways registered for this specific service
-    service_gateways =
+    live_gateways =
       state.dynamic_gateways
-      |> Enum.filter(fn gw -> gw.expires_at > now and matches_service.(gw) end)
-      |> Enum.map(fn gw -> gw.address end)
-      |> Enum.uniq()
+      |> Enum.filter(fn gw -> gw.expires_at > now end)
+
+    # Priority-ordered lookup: NodeID match first (authoritative), then
+    # service-name hash, then exact name string. Each tier returns its
+    # unique addresses; we drop to the next tier only if the prior tier
+    # found nothing. This ensures a NodeID match wins over a coincidental
+    # service-name hash collision.
+    service_gateways =
+      case Enum.filter(live_gateways, nodeid_match_fn) do
+        [_ | _] = nodeid_hits ->
+          nodeid_hits |> Enum.map(& &1.address) |> Enum.uniq()
+
+        [] ->
+          case Enum.filter(live_gateways, hash_match_fn) do
+            [_ | _] = hash_hits ->
+              hash_hits |> Enum.map(& &1.address) |> Enum.uniq()
+
+            [] ->
+              live_gateways
+              |> Enum.filter(name_match_fn)
+              |> Enum.map(& &1.address)
+              |> Enum.uniq()
+          end
+      end
 
     case service_gateways do
       [] ->

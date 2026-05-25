@@ -198,10 +198,13 @@ Zone names are slugified into env-var suffixes:
 | `acme`         | `ZTLP_HMAC_SECRET_ACME`|
 | `acme.ztlp`    | `ZTLP_HMAC_SECRET_ACME_ZTLP`|
 
-V1 frames (current wire format) derive the zone from the gateway's
-service name by stripping the `gw-` prefix (e.g., `gw-acme` → `acme`).
-V2 frames will carry an explicit zone field; that wire change is
-queued for a follow-up PR.
+V1 frames derive the zone from the gateway's service name by stripping
+the `gw-` prefix (e.g., `gw-acme` → `acme`). V2 frames carry an explicit
+zone field (1..=63 bytes) on the wire and route under the new
+collision-safe key `gw:<zone>` — see
+`docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md` for the
+v0.30.5 implementation. Gateways emit both V1 and V2 frames in parallel
+during migration; clients can use either slug style.
 
 **Mode policy matrix:**
 

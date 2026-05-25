@@ -167,9 +167,10 @@ class LaunchAppTest(unittest.TestCase):
         self.assertNotIn("ztlp setup --token", claim_body)
         self.assertNotIn("ztlp://enroll/", claim_body)
         self.assertIn("34.219.38.89:23096", claim_body)
-        # v0.29.1: connect command now uses --service gw-{slug[:11]} so the
-        # relay actually routes to this tenant's gateway instead of round-robining.
-        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --service gw-example-org", claim_body)
+        # v0.30.5: connect command uses the V2 routing key `gw:<zone>` so the
+        # relay routes by zone (collision-safe) instead of by V1 truncated org
+        # slug. See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --service gw:example.ztlp", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
@@ -215,10 +216,10 @@ class LaunchAppTest(unittest.TestCase):
         # enrollment_token_uri must still be persisted in the DB (asserted
         # below via the SQL row) but should not be displayed here.
         self.assertNotIn("ztlp://enroll/", launch_body)
-        # v0.29.1: connect command now uses --service gw-{slug[:11]}.
-        # Tenant "Launch Co" slugifies to "launch-co" so the gateway service
-        # is gw-launch-co.
-        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --service gw-launch-co", launch_body)
+        # v0.30.5: connect command uses the V2 routing key `gw:<zone>`
+        # so the relay routes by zone (collision-safe). Tenant "Launch Co"
+        # has zone "launch.ztlp" so the gateway service is "gw:launch.ztlp".
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --service gw:launch.ztlp", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
 
@@ -1072,6 +1073,11 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         # SVC record (long FQDN) is registered separately via `ns register`.
         self.assertIn("--service-name gw-acme-corp", compose_text)
         self.assertNotIn("--service bootstrap", compose_text)
+        # v0.30.5: gateway also emits V2 (0x0E) GATEWAY_REGISTER frames
+        # carrying the explicit zone, so the relay routes by `gw:<zone>`
+        # instead of the V1 truncated slug. See
+        # docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
+        self.assertIn("--zone acme.ztlp", compose_text)
         # Regression: `ztlp keygen` v0.26 does NOT accept -y (no interactive
         # prompt exists for keygen). Earlier compose generation copy-pasted
         # `-y` from `ztlp setup` and the gateway sidecar crash-looped.

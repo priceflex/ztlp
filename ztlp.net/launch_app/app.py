@@ -267,6 +267,13 @@ class LaunchApp:
                 response = self.handle_claim_launch(environ)
             elif method == "POST" and path == "/api/admin-pubkey":
                 response = self.handle_admin_pubkey(environ)
+            elif method == "POST" and path == "/api/enrollment/confirm":
+                # v0.30.9 Phase B (Launch side): the CLI's confirm_enrollment
+                # curls back here with token_id+node_id+name after a successful
+                # `ztlp setup`. We flip the onboarding row's
+                # enrollment_status to 'redeemed' so the dashboard reflects the
+                # device pickup instead of waiting on TokenReconciler.
+                response = self.handle_enrollment_confirm(environ)
             elif method == "GET" and path == "/downloads":
                 response = self.render_downloads(environ)
             elif method == "GET" and path == "/downloads/manifest.json":
@@ -350,6 +357,12 @@ class LaunchApp:
                 "bootstrap_service_name": "TEXT",
                 "ns_server": "TEXT",
                 "bootstrap_listener_addr": "TEXT",
+                # v0.30.9 Phase B: track when the CLI calls back to confirm
+                # token redemption. These were added in the Launch-side
+                # Phase B patch — see handle_enrollment_confirm() and the
+                # PhaseBCallbackTest suite for the spec.
+                "enrollment_redeemed_at": "TEXT",
+                "enrollment_redeemed_node_id": "TEXT",
             }.items():
                 if column not in existing:
                     conn.execute(f"ALTER TABLE onboarding_requests ADD COLUMN {column} {ddl}")
@@ -577,9 +590,9 @@ class LaunchApp:
         # — same behavior as before so users can revisit the page to
         # copy commands.
         if not row["claimed_at"]:
-            return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_confirm(row, token))
+            return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_confirm(row, token, environ=environ))
 
-        row = self.ensure_enrollment_metadata(row)
+        row = self.ensure_enrollment_metadata(row, environ)
         return (HTTPStatus.OK, "text/html; charset=utf-8", self.render_claim_page(row, token=token))
 
     def handle_claim_launch(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
@@ -606,6 +619,7 @@ class LaunchApp:
                     row, token,
                     error="Public key must be exactly 64 lowercase hex characters (32-byte X25519 key).",
                     submitted_pubkey=pubkey_hex,
+                    environ=environ,
                 ),
             )
 
@@ -627,7 +641,7 @@ class LaunchApp:
         row = self.find_by_token(token)
         if not row:
             return self.invalid_token()
-        row = self.ensure_enrollment_metadata(row)
+        row = self.ensure_enrollment_metadata(row, environ)
 
         import sys
         try:
@@ -936,6 +950,7 @@ class LaunchApp:
         token: str,
         error: str = "",
         submitted_pubkey: str = "",
+        environ: Optional[dict] = None,
     ) -> str:
         """Pre-provision confirmation page.
 
@@ -949,7 +964,7 @@ class LaunchApp:
         re-renders this page after rejecting a malformed pubkey paste, so
         the user doesn't lose their input.
         """
-        row = self.ensure_enrollment_metadata(row)
+        row = self.ensure_enrollment_metadata(row, environ)
         enrollment_token = row["enrollment_token_uri"] or ""
         enrollment_command = (
             f"ztlp setup --token \"{enrollment_token}\" -y"
@@ -1041,12 +1056,57 @@ class LaunchApp:
         """
         return self.page("Claim status", body)
 
-    def ensure_enrollment_metadata(self, row: sqlite3.Row) -> sqlite3.Row:
+    def _public_url(self, environ: Optional[dict]) -> str:
+        """Derive this Launch's externally-reachable base URL from the WSGI environ.
+
+        v0.30.9 Phase B (Launch side): mirrors the Rails-side fix shipped in
+        v0.30.8 (Bootstrap), where ``request.base_url`` was used to derive
+        the callback URL embedded in minted enrollment tokens. We pull
+        ``HTTP_HOST`` + ``wsgi.url_scheme`` from the inbound request — both
+        are populated by every WSGI server (gunicorn, the std-lib
+        ``wsgiref`` runner used in tests, etc.). The advantage over a
+        static ``LAUNCH_PUBLIC_URL`` env var is that the same code path
+        works in dev (``http://localhost:8080``), behind ngrok
+        (``https://<random>.ngrok-free.app``), and in prod
+        (``https://www.ztlp.net``) without any config changes.
+
+        Returns ``""`` (empty) if either the scheme or the host header is
+        missing — callers treat that as "no callback URL" and omit
+        ``&callback=`` from the minted URI (legacy v0.30.8 behaviour).
+        """
+        if not environ:
+            return ""
+        # Honour X-Forwarded-Proto first — ngrok / Cloudflare / ALB terminate
+        # TLS upstream and forward plain HTTP to the container, so the bare
+        # ``wsgi.url_scheme`` is wrong in those topologies. The forwarded
+        # header reflects what the *client* spoke. Fall back to the WSGI
+        # scheme (correct for direct connections, dev, and tests).
+        scheme = (
+            environ.get("HTTP_X_FORWARDED_PROTO")
+            or environ.get("wsgi.url_scheme")
+            or "https"
+        ).split(",")[0].strip().lower()
+        host = environ.get("HTTP_HOST") or ""
+        if not host:
+            return ""
+        return f"{scheme}://{host}"
+
+    def ensure_enrollment_metadata(
+        self,
+        row: sqlite3.Row,
+        environ: Optional[dict] = None,
+    ) -> sqlite3.Row:
         if row["enrollment_token_uri"] and row["bootstrap_service_name"] and row["ns_server"]:
             return row
         now = self.now().replace(microsecond=0)
         expires = now + dt.timedelta(seconds=LAUNCH_ENROLLMENT_TTL_SECONDS)
         service = f"bootstrap.{row['zone']}"
+        # v0.30.9 Phase B: derive the callback URL from the inbound request
+        # so the minted token URI carries `&callback=<public_url>/api/enrollment/confirm`.
+        # The CLI's confirm_enrollment() will POST there after a successful
+        # `ztlp setup`, flipping the row's enrollment_status to 'redeemed'.
+        public_url = self._public_url(environ)
+        callback_url = f"{public_url}/api/enrollment/confirm" if public_url else ""
         token_uri = generate_enrollment_token_uri(
             zone=row["zone"],
             ns_server=LAUNCH_NS_SERVER,
@@ -1054,7 +1114,7 @@ class LaunchApp:
             secret_hex=LAUNCH_ENROLLMENT_SECRET_HEX,
             relay_addr=LAUNCH_RELAY_ADDR,
             gateway_addr=LAUNCH_GATEWAY_ADDR,
-            callback_url="",
+            callback_url=callback_url,
         )
         with self.connect() as conn:
             conn.execute(
@@ -1082,6 +1142,91 @@ class LaunchApp:
             )
         with self.connect() as conn:
             return conn.execute("SELECT * FROM onboarding_requests WHERE id = ?", (row["id"],)).fetchone()
+
+    def handle_enrollment_confirm(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
+        """v0.30.9 Phase B — record CLI confirmation of admin enrollment.
+
+        Called by ``ztlp setup`` (via ``confirm_enrollment`` in proto/src/bin/
+        ztlp-cli.rs) after the CLI successfully enrolls the device against NS.
+        The CLI POSTs ``token_id``, ``node_id``, and ``name`` as an
+        ``application/x-www-form-urlencoded`` body.
+
+        Side effects on a known token_id:
+          1. Stamps ``enrollment_redeemed_at`` with current UTC time.
+          2. Stamps ``enrollment_redeemed_node_id`` with the device's NodeId.
+          3. Flips ``enrollment_status`` from ``ready`` (or anything else) to
+             ``redeemed``. This is what the dashboard / operator views read.
+
+        Idempotency: a repeat call for the same ``token_id`` updates the
+        timestamp + node_id (so a re-enroll attempt is observable) but
+        leaves the status as ``redeemed``. Always returns 200 — the CLI
+        treats anything ≥ 400 as a loud warning, so we reserve those for
+        true errors (unknown token, malformed body).
+
+        Why this exists: the URI that Launch mints embeds
+        ``&callback=<launch_public_url>/api/enrollment/confirm`` so the
+        CLI can call back here. Pre-v0.30.9 this URL was hard-coded to
+        empty, and the CLI silently skipped the callback. See
+        PhaseBCallbackTest for the spec, and the v0.30.8 commit 464cd61
+        for the analogous Rails-side fix in Bootstrap.
+
+        Auth: none. The CLI doesn't have a session here — it just curls
+        with the token_id. We do NOT trust the body for anything more
+        than book-keeping; we only flip a status flag. The actual
+        enrollment authorization happens at NS, not here. Worst case
+        an attacker scrapes the URI from the claim page (already a
+        one-shot, gated by referral code) and POSTs a false confirm —
+        the result is a row that reads "redeemed" without a real device
+        behind it. Not a privilege escalation; just a noisy status row.
+        """
+        form = self.read_form(environ)
+        token_id = (form.get("token_id") or [""])[0].strip()
+        node_id = (form.get("node_id") or [""])[0].strip()
+        name = (form.get("name") or [""])[0].strip()
+
+        if not token_id:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                "missing token_id\n",
+            )
+
+        # Look up by the token_id that the URI's `&token=` param embeds.
+        # We persist the full URI in enrollment_token_uri, so we match by
+        # substring. The URI shape is canonical (see _build_token_uri),
+        # so this is unambiguous in practice — but we still LIMIT 1 to
+        # keep behaviour deterministic if two rows ever collide.
+        needle = f"token={token_id}"
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, enrollment_status FROM onboarding_requests "
+                "WHERE enrollment_token_uri LIKE ? LIMIT 1",
+                (f"%{needle}%",),
+            ).fetchone()
+            if not row:
+                return (
+                    HTTPStatus.NOT_FOUND,
+                    "text/plain; charset=utf-8",
+                    "no onboarding row matches that token_id\n",
+                )
+            now_iso = self.now().replace(microsecond=0).isoformat()
+            conn.execute(
+                """
+                UPDATE onboarding_requests
+                SET enrollment_status = 'redeemed',
+                    enrollment_redeemed_at = ?,
+                    enrollment_redeemed_node_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso, node_id, now_iso, row["id"]),
+            )
+        # Tiny JSON-ish ack so curl users see what happened.
+        return (
+            HTTPStatus.OK,
+            "application/json; charset=utf-8",
+            '{"status":"redeemed","name":"' + name.replace('"', '\\"') + '"}\n',
+        )
 
     def handle_admin_pubkey(self, environ: dict) -> Tuple[HTTPStatus, str, str]:
         """Bind (or rebind) the admin's Noise static pubkey for passwordless gateway auth.

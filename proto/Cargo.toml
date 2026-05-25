@@ -9,7 +9,7 @@ name = "ztlp-proto"
 # align manifests with the re-cut v0.30.4 tag (the original v0.30.4
 # pointed at 6e9d40b, whose manifests still read 0.30.3). See
 # tests/version_pin_test.rs for the regression floor.
-version = "0.30.6"
+version = "0.30.7"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

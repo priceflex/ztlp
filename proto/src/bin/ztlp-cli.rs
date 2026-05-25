@@ -3378,6 +3378,108 @@ fn build_gateway_register_packet(
     packet
 }
 
+/// V2 zone-keyed gateway registration configuration helper.
+///
+/// Encapsulates the "should we emit V2 frames, and if so with what
+/// HMAC key?" decision in a pure, testable function. Pulled out of
+/// `cmd_listen` after the v0.30.5 fleet deploy retro revealed that
+/// the inline version silently disabled V2 routing whenever the
+/// per-zone HMAC secret env var wasn't set (12 of 19 tenants needed
+/// manual operator action to flip on V2; see Tier 4 / Known Problem
+/// #21 in `hermes_session_handoff.md`).
+///
+/// # Decision matrix
+///
+/// | `zone` arg          | `zone_hmac_secret_env` arg | env var value     | Returns                  |
+/// |---------------------|----------------------------|-------------------|--------------------------|
+/// | `None`              | (any)                      | (any)             | `None` (no V2 emission)  |
+/// | `Some("")`          | (any)                      | (any)             | `None` (no V2 emission)  |
+/// | `Some("zone")`      | `Some("VAR")`              | `"value"`         | `Some(("zone", b"value"))` |
+/// | `Some("zone")`      | `Some("VAR")`              | unset OR `""`     | `Some(("zone", vec![]))` ← key fix |
+/// | `Some("zone")`      | `None` (use default)       | `"value"`         | `Some(("zone", b"value"))` |
+/// | `Some("zone")`      | `None` (use default)       | unset OR `""`     | `Some(("zone", vec![]))` ← key fix |
+///
+/// # Why empty-secret still emits V2
+///
+/// Pre-v0.30.7 the gateway returned `None` for the empty-secret case,
+/// silently falling back to V1-only. This meant operators had to set
+/// `ZTLP_HMAC_SECRET_<SLUG>` on every tenant container just to get
+/// the collision-safe V2 routing key in the relay's routing table —
+/// even when the relay was in `:dev` mode and didn't actually need a
+/// real HMAC.
+///
+/// Post-v0.30.7 the gateway emits V2 with whatever secret bytes the
+/// env provides (including zero bytes). The relay's HMAC mode
+/// (`:dev` / `:staging` / `:prod`, controlled via
+/// `ZTLP_RELAY_HMAC_MODE`) decides whether to accept the frame:
+///
+/// - `:dev`     → accept as `:unverified_dev`, route by `gw:<zone>`
+/// - `:staging` → accept as `:unverified_staging`, route by `gw:<zone>`,
+///                emit `ztlp_relay.hmac.unverified_accepted` telemetry
+/// - `:prod`    → reject unsigned/badly-signed frames
+///
+/// This puts the enforcement decision at the right layer: the relay,
+/// which is the security boundary, not the gateway, which is the
+/// thing being authenticated.
+///
+/// # Slugify rule
+///
+/// When `zone_hmac_secret_env` is `None`, the env var name is derived
+/// from the zone using the same rule the Elixir
+/// `ZtlpRelay.HmacSecrets.slugify_zone/1` applies:
+///
+/// - ASCII alphanumeric characters → uppercased
+/// - every other character → `_`
+/// - prefix with `ZTLP_HMAC_SECRET_`
+///
+/// e.g. `tech-rockstars.com` → `ZTLP_HMAC_SECRET_TECH_ROCKSTARS_COM`.
+///
+/// Keep this rule byte-for-byte identical to the relay's; if they
+/// drift, V2 frames will route correctly but the relay won't be able
+/// to verify HMACs in `:prod` mode (or will verify the wrong ones).
+fn resolve_v2_config(
+    zone: Option<&str>,
+    zone_hmac_secret_env: Option<&str>,
+) -> Option<(String, Vec<u8>)> {
+    // No zone, or empty zone → no V2 emission. Both cases collapse to
+    // None so the call site has a single branch.
+    let zone_str = match zone {
+        Some(z) if !z.is_empty() => z,
+        _ => return None,
+    };
+
+    // Derive the env var name. If the caller passed one explicitly,
+    // use it verbatim. Otherwise apply the slugify rule that mirrors
+    // the relay's HmacSecrets.slugify_zone/1.
+    let env_name: String = match zone_hmac_secret_env {
+        Some(name) => name.to_string(),
+        None => {
+            let slug: String = zone_str
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("ZTLP_HMAC_SECRET_{}", slug)
+        }
+    };
+
+    // Look up the secret. Missing OR empty-string both collapse to
+    // an empty Vec — the key fix vs. pre-v0.30.7 behavior, which
+    // returned None for both.
+    let secret_bytes: Vec<u8> = match std::env::var(&env_name) {
+        Ok(s) => s.into_bytes(), // includes the case where s.is_empty()
+        Err(_) => Vec::new(),
+    };
+
+    Some((zone_str.to_string(), secret_bytes))
+}
+
+
 /// Build a GATEWAY_REGISTER_V2 packet (type byte `0x0E`) for collision-safe
 /// zone-keyed relay routing.
 ///
@@ -3730,52 +3832,29 @@ async fn cmd_listen(
             // collisions (see docs/plans/2026-05-24-zone-keyed-gateway-
             // register-IMPL.md).
             //
-            // The V2 frame is HMAC-signed with a per-zone secret. We look
-            // it up from the env var name passed via --zone-hmac-secret-env,
-            // defaulting to the relay-side convention
-            // `ZTLP_HMAC_SECRET_<UPPER_ZONE_SLUG>` (matches
-            // ZtlpRelay.HmacSecrets.slugify_zone).
-            //
-            // If --zone is set but the secret can't be loaded, we log once
-            // at WARN and proceed V1-only. The relay's HMAC-mode policy
-            // decides whether it still accepts unverified V2 frames in
-            // staging/dev environments.
-            let v2_config: Option<(String, Vec<u8>)> = match zone {
-                Some(z) if !z.is_empty() => {
-                    let env_name =
-                        zone_hmac_secret_env
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                // Mirror Elixir's slugify_zone: uppercase,
-                                // non-alphanumeric -> underscore.
-                                let slug: String = z
-                                    .chars()
-                                    .map(|c| {
-                                        if c.is_ascii_alphanumeric() {
-                                            c.to_ascii_uppercase()
-                                        } else {
-                                            '_'
-                                        }
-                                    })
-                                    .collect();
-                                format!("ZTLP_HMAC_SECRET_{}", slug)
-                            });
-                    match std::env::var(&env_name) {
-                        Ok(s) if !s.is_empty() => Some((z.to_string(), s.into_bytes())),
-                        _ => {
-                            eprintln!(
-                                "{} --zone={} set but {} is empty or unset; emitting V1 frames only. \
-                                 (The relay may still accept V2 in staging/dev mode.)",
-                                c_yellow("⚠"),
-                                z,
-                                env_name
-                            );
-                            None
-                        }
-                    }
+            // The decision logic lives in `resolve_v2_config` (pure,
+            // tested). Key behavior: if --zone is set but the per-zone
+            // HMAC secret env var is missing/empty, we STILL emit V2
+            // (with a zero-byte HMAC). The relay's HMAC mode decides
+            // whether to accept the frame; the gateway must not silently
+            // fall back to V1-only just because a secret wasn't set.
+            // Pre-v0.30.7 the gateway silently disabled V2 in that case,
+            // forcing 12 of 19 tenants to need manual secret injection
+            // during the v0.30.5 fleet deploy.
+            let v2_config = resolve_v2_config(zone.as_deref(), zone_hmac_secret_env.as_deref());
+            if let Some((z, secret)) = &v2_config {
+                if secret.is_empty() {
+                    eprintln!(
+                        "{} --zone={} set but per-zone HMAC secret is empty/unset; \
+                         emitting V2 with a zero-byte HMAC. The relay's HMAC mode \
+                         (ZTLP_RELAY_HMAC_MODE=dev/staging/prod) decides whether \
+                         to accept it. Set ZTLP_HMAC_SECRET_<SLUG> to enable \
+                         verified V2 emission.",
+                        c_yellow("⚠"),
+                        z
+                    );
                 }
-                _ => None,
-            };
+            }
 
             // Convert the cloned std socket to a tokio non-blocking socket so
             // we can use it inside async code. Both this socket and Quinn's
@@ -11169,5 +11248,139 @@ mod tests {
         let pre_hmac = pkt_a.len() - 32;
         assert_eq!(&pkt_a[..pre_hmac], &pkt_b[..pre_hmac]);
         assert_ne!(&pkt_a[pre_hmac..], &pkt_b[pre_hmac..]);
+    }
+
+    // ─── resolve_v2_config tests ──────────────────────────────────────
+    //
+    // Behavior pinned here: when `--zone` is set but the per-zone HMAC
+    // secret env var is missing or empty, we MUST still emit V2 frames
+    // (with a zero-byte HMAC). The relay's HMAC mode (:dev / :staging
+    // / :prod) decides whether to accept them; the gateway must not
+    // silently fall back to V1-only just because a secret wasn't set
+    // by the operator.
+    //
+    // Pre-v0.30.7 behavior: empty secret → V2 silently disabled (bug
+    // that bit the v0.30.5 fleet deploy where 12 of 19 tenants needed
+    // manual HMAC secret injection just to flip on V2 routing).
+    //
+    // Post-v0.30.7 behavior: empty secret → V2 emitted with empty key.
+    // The relay's dev mode (production default) routes the frame
+    // correctly by `gw:<zone>`. Production hardening to "require real
+    // HMAC" happens at the relay by setting ZTLP_RELAY_HMAC_MODE=prod
+    // and provisioning per-zone secrets there.
+
+    /// `resolve_v2_config` returns `None` when --zone is unset. Pure
+    /// V1-only path — used by legacy / unzoned deployments.
+    #[test]
+    fn resolve_v2_config_returns_none_when_zone_is_none() {
+        let cfg = resolve_v2_config(None, None);
+        assert!(cfg.is_none(), "no zone -> no V2 config");
+    }
+
+    /// Empty zone string is treated identically to no zone — the
+    /// V2 builder would reject it anyway, and we want a single
+    /// "no V2" code path on the caller's side.
+    #[test]
+    fn resolve_v2_config_returns_none_when_zone_is_empty_string() {
+        let cfg = resolve_v2_config(Some(""), None);
+        assert!(cfg.is_none(), "empty zone -> no V2 config");
+    }
+
+    /// Zone set, default env name resolves a real secret → returns
+    /// `Some((zone, secret_bytes))`. Verified-V2 happy path.
+    #[test]
+    fn resolve_v2_config_with_zone_and_secret_returns_secret_bytes() {
+        // Use a uniquely-named env var so test parallelism can't race.
+        let var = "ZTLP_HMAC_SECRET_RESOLVECFG_TEST_ALPHA";
+        // SAFETY: tests run with the proto test runner; the var name is
+        // unique to this test so cross-test interference is impossible.
+        std::env::set_var(var, "real-hmac-secret-bytes");
+        let cfg = resolve_v2_config(Some("resolvecfg-test-alpha"), Some(var));
+        std::env::remove_var(var);
+
+        let (zone, secret) = cfg.expect("zone+secret should yield Some");
+        assert_eq!(zone, "resolvecfg-test-alpha");
+        assert_eq!(secret, b"real-hmac-secret-bytes");
+    }
+
+    /// THE FIX: zone set but env var unset → still emit V2 (with
+    /// zero-byte HMAC). Pre-fix behavior was to return `None` here,
+    /// silently disabling V2 routing for any tenant whose secret env
+    /// wasn't provisioned.
+    #[test]
+    fn resolve_v2_config_with_zone_but_missing_secret_returns_empty_secret() {
+        // Use a uniquely-named env var that we know is NOT set.
+        let var = "ZTLP_HMAC_SECRET_RESOLVECFG_TEST_BETA_NEVER_SET";
+        // Make sure it's actually unset (no env pollution from prior tests)
+        std::env::remove_var(var);
+
+        let cfg = resolve_v2_config(Some("resolvecfg-test-beta"), Some(var));
+        let (zone, secret) = cfg.expect(
+            "zone set must yield Some even when secret env is missing — \
+             V2 emission is required for routing correctness; HMAC \
+             enforcement happens at the relay, not the gateway",
+        );
+        assert_eq!(zone, "resolvecfg-test-beta");
+        assert!(
+            secret.is_empty(),
+            "secret bytes should be empty (zero-byte HMAC) when env unset; got {} bytes",
+            secret.len()
+        );
+    }
+
+    /// Same as above but for the empty-string env var case (operator
+    /// set the var to "" rather than leaving it unset — same outcome).
+    #[test]
+    fn resolve_v2_config_with_zone_but_empty_secret_returns_empty_secret() {
+        let var = "ZTLP_HMAC_SECRET_RESOLVECFG_TEST_GAMMA";
+        std::env::set_var(var, "");
+        let cfg = resolve_v2_config(Some("resolvecfg-test-gamma"), Some(var));
+        std::env::remove_var(var);
+
+        let (zone, secret) = cfg
+            .expect("zone set with empty-string secret must still yield Some");
+        assert_eq!(zone, "resolvecfg-test-gamma");
+        assert!(secret.is_empty(), "empty-string secret -> empty bytes");
+    }
+
+    /// Default env-name path: when no explicit `zone_hmac_secret_env`
+    /// is given, the helper must derive the var name from the zone via
+    /// the slugify rule (`ZTLP_HMAC_SECRET_<UPPER_SLUG>`) and look that
+    /// up. This is the convention the relay's HmacSecrets module also
+    /// uses, so the gateway and relay agree on the env var name.
+    #[test]
+    fn resolve_v2_config_default_env_name_derives_from_zone_slug() {
+        // techrockstars.com -> ZTLP_HMAC_SECRET_TECHROCKSTARS_COM
+        let var = "ZTLP_HMAC_SECRET_TECHROCKSTARS_COM_RESOLVECFG_TEST";
+        std::env::set_var(var, "secret-for-tr");
+        // We can't easily test the actual default slug without polluting
+        // the env, so instead we test: passing the slugified name
+        // explicitly returns the same value the default-path WOULD
+        // return. The slugify logic itself is covered separately.
+        let cfg = resolve_v2_config(Some("techrockstars.com"), Some(var));
+        std::env::remove_var(var);
+
+        let (_, secret) = cfg.expect("zone+secret should yield Some");
+        assert_eq!(secret, b"secret-for-tr");
+    }
+
+    /// The slugify rule itself: ASCII alphanumerics uppercase, every
+    /// other byte → underscore. This is the same rule the Elixir
+    /// `ZtlpRelay.HmacSecrets.slugify_zone/1` applies — keep them in
+    /// lockstep or registrations break.
+    #[test]
+    fn resolve_v2_config_slugify_matches_relay_convention() {
+        // Pick a zone with a mix of chars: dots, dashes, mixed case
+        // tech-rockstars.com  ->  TECH_ROCKSTARS_COM
+        // The env var we set must match what the helper derives.
+        let var = "ZTLP_HMAC_SECRET_TECH_ROCKSTARS_COM";
+        std::env::set_var(var, "tr-secret");
+        let cfg = resolve_v2_config(Some("tech-rockstars.com"), None);
+        std::env::remove_var(var);
+
+        let (zone, secret) =
+            cfg.expect("default-env-name path should resolve via slugified var");
+        assert_eq!(zone, "tech-rockstars.com");
+        assert_eq!(secret, b"tr-secret");
     }
 }

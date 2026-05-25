@@ -1003,21 +1003,21 @@ mod tests {
     #[test]
     fn test_percent_decode_handles_callback_url_encoded_chars() {
         assert_eq!(
-            percent_decode("https%3A//www.ztlp.net/api/enrollment/confirm").unwrap(),
+            percent_decode("https%3A//www.ztlp.net/api/enrollment/confirm").expect("decode"),
             "https://www.ztlp.net/api/enrollment/confirm"
         );
         // Mixed encoded + literal slashes (Launch's actual output shape).
         assert_eq!(
-            percent_decode("https%3A%2F%2Fwww.ztlp.net%2Fapi%2Fconfirm").unwrap(),
+            percent_decode("https%3A%2F%2Fwww.ztlp.net%2Fapi%2Fconfirm").expect("decode"),
             "https://www.ztlp.net/api/confirm"
         );
         // Plain ASCII passes through untouched.
         assert_eq!(
-            percent_decode("https://plain.example.com/").unwrap(),
+            percent_decode("https://plain.example.com/").expect("decode"),
             "https://plain.example.com/"
         );
         // Empty string is valid.
-        assert_eq!(percent_decode("").unwrap(), "");
+        assert_eq!(percent_decode("").expect("decode"), "");
     }
 
     #[test]
@@ -1036,8 +1036,8 @@ mod tests {
         // ZTLP URIs are query-param-style but per RFC 3986 they do not
         // treat `+` as space (that's HTML form encoding, RFC 1866). Both
         // Launch and Bootstrap emit literal `%20`, never `+`.
-        assert_eq!(percent_decode("foo+bar").unwrap(), "foo+bar");
-        assert_eq!(percent_decode("foo%20bar").unwrap(), "foo bar");
+        assert_eq!(percent_decode("foo+bar").expect("decode"), "foo+bar");
+        assert_eq!(percent_decode("foo%20bar").expect("decode"), "foo bar");
     }
 
     #[test]

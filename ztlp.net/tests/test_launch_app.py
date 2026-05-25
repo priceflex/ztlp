@@ -1674,5 +1674,246 @@ class PhaseBCallbackTest(LaunchAppTest):
         self.assertEqual("redeemed", row[0])
 
 
+class EnrollmentHmacSigningTest(unittest.TestCase):
+    """v0.30.10 — HMAC-BLAKE2s signing of enrollment-token query-param URIs.
+
+    Closes the NS-1 architectural gap: prior to this change, Launch issued
+    URIs with no MAC, so NS had to run with REGISTRATION_AUTH=false (accept
+    anything). Now Launch optionally signs every URI with the shared
+    ``ZTLP_ENROLLMENT_SECRET`` so NS can enforce signed registrations.
+
+    The signing path is **opt-in by env**: if ``ZTLP_ENROLLMENT_SECRET`` is
+    unset, URIs are emitted in the legacy unsigned form (zero nonce, no
+    MAC). When set to a 64-hex-char value, URIs include ``&nonce=`` and
+    ``&mac=`` params.
+
+    The MAC covers the **canonical binary serialization** of the
+    EnrollmentToken (matching ``serialize_without_mac()`` in
+    ``proto/src/enrollment.rs``) — NOT the URI string itself. This lets the
+    NS reuse its existing binary-token verification path with zero new
+    verification logic.
+    """
+
+    # 32-byte test secret (NOT the placeholder; this is a deterministic
+    # test value used only inside the test process).
+    TEST_SECRET_HEX = "a" * 64
+    TEST_SECRET_BYTES = bytes.fromhex(TEST_SECRET_HEX)
+
+    def setUp(self):
+        # Snapshot env so each test can mutate freely.
+        self._saved_env = os.environ.get("ZTLP_ENROLLMENT_SECRET")
+        if "ZTLP_ENROLLMENT_SECRET" in os.environ:
+            del os.environ["ZTLP_ENROLLMENT_SECRET"]
+
+    def tearDown(self):
+        if self._saved_env is None:
+            os.environ.pop("ZTLP_ENROLLMENT_SECRET", None)
+        else:
+            os.environ["ZTLP_ENROLLMENT_SECRET"] = self._saved_env
+
+    def _call(self, **overrides):
+        """Invoke generate_enrollment_token_uri with sensible defaults."""
+        from launch_app.app import generate_enrollment_token_uri
+        kwargs = dict(
+            zone="signed.example.ztlp",
+            ns_server="ns.example.com:23096",
+            expires_at=dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc),
+            secret_hex="deadbeef",  # legacy unused param; kept for API stability
+        )
+        kwargs.update(overrides)
+        return generate_enrollment_token_uri(**kwargs)
+
+    def _parse(self, uri):
+        """Parse a ztlp://enroll/?… URI to a {key: value} dict.
+
+        Note: relay/gateway can repeat in the protocol; we keep the LAST
+        instance in tests since we never set multiple in these cases.
+        """
+        # Strip the scheme prefix; urlparse on a custom scheme works but
+        # query-string parsing is awkward, so do it manually.
+        self.assertTrue(uri.startswith("ztlp://enroll/?"))
+        qs = uri.split("?", 1)[1]
+        out = {}
+        for pair in qs.split("&"):
+            k, _, v = pair.partition("=")
+            out[k] = v
+        return out
+
+    # ── Test 1: legacy unsigned path preserved ─────────────────────────
+    def test_uri_omits_mac_when_no_secret(self):
+        """Without ZTLP_ENROLLMENT_SECRET, URI is the legacy unsigned form.
+
+        Regression guard: do not break existing deployments that run with
+        ``REGISTRATION_AUTH=false`` while operators migrate.
+        """
+        uri = self._call()
+        parsed = self._parse(uri)
+        self.assertNotIn("mac", parsed)
+        self.assertNotIn("nonce", parsed)
+        # Required legacy params still present.
+        self.assertEqual(parsed["zone"], "signed.example.ztlp")
+        self.assertIn("token", parsed)
+        self.assertIn("expires", parsed)
+
+    # ── Test 2: signed path emits nonce + mac ──────────────────────────
+    def test_uri_includes_mac_when_secret_set(self):
+        """With secret set, URI carries both ``nonce`` (32 hex) and ``mac`` (64 hex)."""
+        os.environ["ZTLP_ENROLLMENT_SECRET"] = self.TEST_SECRET_HEX
+        uri = self._call()
+        parsed = self._parse(uri)
+        self.assertIn("nonce", parsed)
+        self.assertIn("mac", parsed)
+        self.assertEqual(len(parsed["nonce"]), 32, "nonce must be 16 bytes hex-encoded")
+        self.assertEqual(len(parsed["mac"]), 64, "mac must be 32 bytes hex-encoded")
+        # Both must be valid hex.
+        bytes.fromhex(parsed["nonce"])
+        bytes.fromhex(parsed["mac"])
+
+    # ── Test 3: MAC is HMAC-BLAKE2s over the canonical binary form ─────
+    def test_mac_matches_hmac_blake2s_over_canonical_serialization(self):
+        """The MAC must match HMAC-BLAKE2s(secret, serialize_without_mac()).
+
+        Canonical serialization matches ``proto/src/enrollment.rs::serialize_without_mac``:
+
+            version u8 = 0x01
+            flags u8   = 0x01 if gateway else 0x00
+            zone     : u16-len-prefixed UTF-8
+            ns_addr  : u16-len-prefixed UTF-8
+            relay_count u8
+            (relay_addr : u16-len-prefixed UTF-8) * relay_count
+            gateway_addr : u16-len-prefixed UTF-8  (only if flags & 0x01)
+            max_uses u16  (always 1 for query-param tokens)
+            expires_at u64 BE
+            nonce [16]
+
+        Verifying parity here keeps Launch byte-compatible with the Rust
+        CLI's parse + the NS's verify.
+        """
+        import hashlib
+        import hmac as _hmac
+        os.environ["ZTLP_ENROLLMENT_SECRET"] = self.TEST_SECRET_HEX
+
+        uri = self._call(
+            zone="signed.example.ztlp",
+            ns_server="ns.example.com:23096",
+            expires_at=dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc),
+        )
+        parsed = self._parse(uri)
+        nonce = bytes.fromhex(parsed["nonce"])
+        mac_from_uri = bytes.fromhex(parsed["mac"])
+
+        # Hand-compute the canonical serialization to verify.
+        expires_unix = int(
+            dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+        )
+        zone_b = b"signed.example.ztlp"
+        ns_b = b"ns.example.com:23096"
+        buf = bytearray()
+        buf.append(0x01)  # version
+        buf.append(0x00)  # flags (no gateway)
+        buf += len(zone_b).to_bytes(2, "big") + zone_b
+        buf += len(ns_b).to_bytes(2, "big") + ns_b
+        buf.append(0)  # relay_count = 0
+        buf += (1).to_bytes(2, "big")  # max_uses
+        buf += expires_unix.to_bytes(8, "big")
+        buf += nonce
+
+        expected_mac = _hmac.new(
+            self.TEST_SECRET_BYTES, bytes(buf), hashlib.blake2s
+        ).digest()
+        self.assertEqual(
+            mac_from_uri,
+            expected_mac,
+            "MAC must equal HMAC-BLAKE2s(secret, serialize_without_mac())",
+        )
+
+    # ── Test 4: nonce randomness ───────────────────────────────────────
+    def test_nonce_is_random_per_token(self):
+        """Each call must produce a fresh 16-byte nonce.
+
+        Reusing nonces enables replay even with a valid MAC (NS tracks
+        nonces in ETS for one-shot enforcement on tokens with ``max_uses=1``).
+        """
+        os.environ["ZTLP_ENROLLMENT_SECRET"] = self.TEST_SECRET_HEX
+        nonces = set()
+        for _ in range(10):
+            uri = self._call()
+            nonces.add(self._parse(uri)["nonce"])
+        self.assertEqual(len(nonces), 10, "nonce reused across calls — replay risk")
+
+    # ── Test 5: gateway flag affects canonicalization ──────────────────
+    def test_mac_covers_gateway_addr_when_present(self):
+        """When ``gateway_addr`` is set, the flag byte is 0x01 and the gateway
+        string is included in the canonical serialization. Two URIs with the
+        same params except for ``gateway_addr`` must produce different MACs.
+        """
+        os.environ["ZTLP_ENROLLMENT_SECRET"] = self.TEST_SECRET_HEX
+        # Same nonce path requires re-deriving; just compare MACs from two URIs
+        # with different gateway. Different nonces are expected but if the
+        # gateway weren't in the canonical form, MACs *could* still happen to
+        # match in some malformed implementation. The strongest assertion is:
+        # MAC differs because gateway is part of the canonical form. We
+        # verify by recomputing.
+        uri_no_gw = self._call(gateway_addr="")
+        uri_gw = self._call(gateway_addr="gw.example.com:23097")
+        p1 = self._parse(uri_no_gw)
+        p2 = self._parse(uri_gw)
+        # Different nonces, different MACs — but the assertion is that
+        # the *flags byte* differs and so the canonical bytes differ.
+        # We re-verify both MACs against their own canonical forms.
+        # (This test mostly verifies test_mac_matches stays correct when
+        # gateway is present.)
+        import hashlib, hmac as _hmac
+        expires_unix = int(
+            dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+        )
+
+        def expected(zone, ns, relay, gw, nonce_hex):
+            buf = bytearray()
+            buf.append(0x01)
+            buf.append(0x01 if gw else 0x00)
+            buf += len(zone).to_bytes(2, "big") + zone.encode()
+            buf += len(ns).to_bytes(2, "big") + ns.encode()
+            if relay:
+                buf.append(1)
+                buf += len(relay).to_bytes(2, "big") + relay.encode()
+            else:
+                buf.append(0)
+            if gw:
+                buf += len(gw).to_bytes(2, "big") + gw.encode()
+            buf += (1).to_bytes(2, "big")
+            buf += expires_unix.to_bytes(8, "big")
+            buf += bytes.fromhex(nonce_hex)
+            return _hmac.new(self.TEST_SECRET_BYTES, bytes(buf), hashlib.blake2s).digest()
+
+        self.assertEqual(
+            bytes.fromhex(p2["mac"]),
+            expected(
+                "signed.example.ztlp",
+                "ns.example.com:23096",
+                "",
+                "gw.example.com:23097",
+                p2["nonce"],
+            ),
+            "MAC for gateway URI must match canonical form including gateway",
+        )
+
+    # ── Test 6: placeholder secret rejected loud ───────────────────────
+    def test_placeholder_secret_is_rejected(self):
+        """If the secret is the well-known ``00010203…`` byte-counting
+        placeholder, refuse to mint a token.
+
+        Background: the production ``.env`` was found to contain the
+        sequential-byte placeholder (a copy-paste from a docs example).
+        Without this guard, operators could ship a "signed" URI whose MAC
+        is computed from a publicly-known key, defeating the whole
+        signing scheme. Fail loud, not silently.
+        """
+        os.environ["ZTLP_ENROLLMENT_SECRET"] = bytes(range(32)).hex()
+        with self.assertRaises(ValueError) as ctx:
+            self._call()
+        self.assertIn("placeholder", str(ctx.exception).lower())
+
+
 if __name__ == "__main__":
     unittest.main()

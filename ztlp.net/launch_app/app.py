@@ -37,10 +37,17 @@ RELEASE_TAG = os.environ.get("ZTLP_RELEASE_TAG", "v-before-nebula-collapse")
 RELEASE_BASE_URL = os.environ.get("ZTLP_RELEASE_BASE_URL", f"https://github.com/priceflex/ztlp/releases/download/{RELEASE_TAG}")
 RELEASE_PAGE_URL = os.environ.get("ZTLP_RELEASE_PAGE_URL", f"https://github.com/priceflex/ztlp/releases/tag/{RELEASE_TAG}")
 LAUNCH_NS_SERVER = os.environ.get("ZTLP_NS_SERVER") or "34.219.38.89:23096"
-LAUNCH_ENROLLMENT_SECRET_HEX = os.environ.get(
-    "ZTLP_ENROLLMENT_SECRET",
-    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-)
+# Legacy: this was a module-level cache of the signing secret with a
+# byte-counting placeholder default ("000102…1e1f"). The placeholder
+# leaked into the production .env and made signed-enrollment a no-op:
+# tokens were "signed" with a publicly-known key. v0.30.10 reads the
+# env var lazily inside generate_enrollment_token_uri() and refuses to
+# mint signed tokens against the placeholder. The module-level read is
+# kept for the (now-unused) secret_hex= legacy argument so callers that
+# pass it explicitly don't break, but the default is now an empty
+# string — when the env is unset, Launch emits LEGACY UNSIGNED URIs and
+# NS must run with REGISTRATION_AUTH=false.
+LAUNCH_ENROLLMENT_SECRET_HEX = os.environ.get("ZTLP_ENROLLMENT_SECRET", "")
 LAUNCH_ENROLLMENT_TTL_SECONDS = int(os.environ.get("ZTLP_ENROLLMENT_TTL_SECONDS", "86400"))
 LAUNCH_RELAY_ADDR = os.environ.get("ZTLP_RELAY_ADDR", "")
 LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
@@ -1746,18 +1753,87 @@ def generate_enrollment_token_uri(
 ) -> str:
     """Generate a ztlp://enroll/ URI in the canonical query-param format.
 
-    The canonical format is:
-      ztlp://enroll/?zone=<zone>&ns=<host:port>&relay=<addr>&token=<hex>&expires=<unix>
+    The canonical URI shape is:
+      ztlp://enroll/?zone=<zone>&ns=<host:port>&token=<hex>&expires=<unix>
+                    [&relay=<addr>][&gateway=<addr>][&callback=<url>]
+                    [&nonce=<32hex>&mac=<64hex>]
 
-    This format is parsed directly by `EnrollmentToken::from_query_param_uri`
-    in the Rust binary (enrollment.rs), which accepts it without requiring an
-    HMAC MAC when the NS runs with `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`.
+    The trailing ``nonce`` + ``mac`` are present iff the environment variable
+    ``ZTLP_ENROLLMENT_SECRET`` is set to a 64-hex-char value (32 bytes).
+    When present, the MAC is HMAC-BLAKE2s over the canonical *binary*
+    serialization of the token (matching ``serialize_without_mac()`` in
+    ``proto/src/enrollment.rs``), so the Rust CLI and Elixir NS can verify
+    using their existing binary-token paths with zero new verify logic.
+
+    Without the secret, URIs are emitted in the legacy unsigned form
+    (no ``nonce`` or ``mac``). This keeps existing deployments working
+    while operators migrate. NS must be configured with
+    ``ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false`` to accept unsigned URIs.
+
+    Args:
+        zone: DNS zone for the enrolled device (e.g. ``acme.ztlp``).
+        ns_server: NS UDP listener as ``host:port``.
+        expires_at: Token expiry (UTC).
+        secret_hex: **Legacy unused parameter**, kept for callsite API
+            stability. The actual HMAC key comes from
+            ``ZTLP_ENROLLMENT_SECRET`` env when present. Future PRs may
+            remove this argument once all callers stop passing it.
+        relay_addr: Optional relay address as ``host:port``.
+        gateway_addr: Optional gateway address as ``host:port``. When set,
+            the canonical-form flag byte is 0x01 and the gateway string
+            is part of the MAC input.
+        callback_url: Optional callback URL for redemption confirmation
+            (Phase B). Not part of the MAC (callback is delivery metadata,
+            not auth-critical token content).
+
+    Returns:
+        A canonical ``ztlp://enroll/?…`` URI string.
+
+    Raises:
+        ValueError: If ``ZTLP_ENROLLMENT_SECRET`` is set but is the
+            well-known sequential-byte placeholder ``000102…1e1f``. Fails
+            loud rather than minting tokens with a publicly-known key.
     """
-    import secrets
+    # Generate token_id and nonce. The token_id is the URI-level
+    # identifier used by the Phase B callback to look up the row; the
+    # nonce is the 16-byte replay-prevention field embedded in the
+    # binary token's serialized form.
     expires_unix = int(expires_at.timestamp())
     token_hex = secrets.token_hex(16)
 
-    # Build query string manually to avoid over-encoding colons in host:port values
+    # Resolve the shared signing secret. When set, the placeholder check
+    # below guards against accidentally shipping a publicly-known key.
+    raw_secret = os.environ.get("ZTLP_ENROLLMENT_SECRET", "").strip()
+    signing_key: bytes | None = None
+    if raw_secret:
+        # Reject the well-known byte-counting placeholder
+        # ``000102…1e1f`` (32 sequential bytes) that appears in the
+        # ``.env.example`` doc. Operators must generate a real secret
+        # with e.g. ``openssl rand -hex 32``. We compare on the canonical
+        # lowercase-hex form to catch case-mismatch variants.
+        placeholder_hex = bytes(range(32)).hex()
+        if raw_secret.lower() == placeholder_hex:
+            raise ValueError(
+                "ZTLP_ENROLLMENT_SECRET is set to the byte-counting "
+                "placeholder value (00010203…1e1f). Generate a real "
+                "32-byte secret with `openssl rand -hex 32` and store "
+                "it in the .env file. Refusing to mint a token signed "
+                "with a publicly-known key."
+            )
+        try:
+            signing_key = bytes.fromhex(raw_secret)
+        except ValueError as exc:
+            raise ValueError(
+                "ZTLP_ENROLLMENT_SECRET must be 64 hex chars (32 bytes); "
+                f"got invalid hex: {exc}"
+            ) from exc
+        if len(signing_key) != 32:
+            raise ValueError(
+                "ZTLP_ENROLLMENT_SECRET must decode to exactly 32 bytes; "
+                f"got {len(signing_key)} bytes."
+            )
+
+    # Build query string manually to avoid over-encoding colons in host:port values.
     qs_parts = [
         f"zone={urllib.parse.quote(zone)}",
         f"ns={ns_server}",
@@ -1773,7 +1849,85 @@ def generate_enrollment_token_uri(
     if callback_url:
         qs += f"&callback={urllib.parse.quote(callback_url)}"
 
+    # If a signing secret is configured, append &nonce=<hex>&mac=<hex>.
+    # The MAC covers the binary serialization of the token (NOT the URI
+    # string), so NS can reuse its existing HMAC-BLAKE2s verify path.
+    if signing_key is not None:
+        nonce = secrets.token_bytes(16)
+        canonical = _serialize_enrollment_token_for_signing(
+            zone=zone,
+            ns_addr=ns_server,
+            relay_addrs=[relay_addr] if relay_addr else [],
+            gateway_addr=gateway_addr or None,
+            max_uses=1,
+            expires_at=expires_unix,
+            nonce=nonce,
+        )
+        mac = hmac.new(signing_key, canonical, hashlib.blake2s).digest()
+        qs += f"&nonce={nonce.hex()}&mac={mac.hex()}"
+
     return f"ztlp://enroll/?{qs}"
+
+
+def _serialize_enrollment_token_for_signing(
+    *,
+    zone: str,
+    ns_addr: str,
+    relay_addrs: list[str],
+    gateway_addr: str | None,
+    max_uses: int,
+    expires_at: int,
+    nonce: bytes,
+) -> bytes:
+    """Byte-for-byte port of ``serialize_without_mac()`` from
+    ``proto/src/enrollment.rs``.
+
+    Must produce identical bytes to the Rust implementation so the Rust CLI
+    can parse the URI, reconstruct the binary token, and the NS can verify
+    the MAC using its existing HMAC-BLAKE2s code path.
+
+    Wire format (big-endian):
+
+        version u8     = 0x01
+        flags u8       = 0x01 if gateway_addr else 0x00
+        zone           : u16 length + UTF-8 bytes
+        ns_addr        : u16 length + UTF-8 bytes
+        relay_count u8
+        relay_addr[]   : (u16 length + UTF-8 bytes) * relay_count
+        gateway_addr   : u16 length + UTF-8 bytes  [ONLY when flags & 0x01]
+        max_uses u16
+        expires_at u64
+        nonce          : 16 raw bytes
+
+    The MAC field (32 bytes) is NOT included here — that's the whole point
+    of "without_mac"; it's the input over which the MAC is computed.
+    """
+    buf = bytearray()
+    buf.append(0x01)  # version
+    buf.append(0x01 if gateway_addr else 0x00)  # flags
+
+    def _write_len_prefixed(s: str) -> None:
+        s_bytes = s.encode("utf-8")
+        buf.extend(len(s_bytes).to_bytes(2, "big"))
+        buf.extend(s_bytes)
+
+    _write_len_prefixed(zone)
+    _write_len_prefixed(ns_addr)
+
+    buf.append(len(relay_addrs))
+    for addr in relay_addrs:
+        _write_len_prefixed(addr)
+
+    if gateway_addr:
+        _write_len_prefixed(gateway_addr)
+
+    buf.extend(max_uses.to_bytes(2, "big"))
+    buf.extend(expires_at.to_bytes(8, "big"))
+    if len(nonce) != 16:
+        raise ValueError(f"nonce must be exactly 16 bytes, got {len(nonce)}")
+    buf.extend(nonce)
+
+    return bytes(buf)
 
 
 application = LaunchApp()

@@ -28,7 +28,9 @@ class TokensController < ApplicationController
         expires_in: expires_in,
         max_uses: max_uses,
         roles: roles,
-        notes: notes
+        notes: notes,
+        # Phase B: bootstrap's own public URL → CLI callback path.
+        bootstrap_url: request.base_url
       )
 
       redirect_to network_token_path(@network, @token), notice: "Enrollment token generated!"

@@ -7093,8 +7093,24 @@ enrollment_secret = "{secret_path}"
     Ok(())
 }
 
-/// Confirm enrollment with the Bootstrap app (best-effort, non-blocking).
-/// Sends a POST to the callback URL with the token_id and enrolled device info.
+/// Confirm enrollment with the Bootstrap app.
+///
+/// Phase B: this used to be a `_ = result;`-style best-effort callback that
+/// silently swallowed every failure mode (DNS, TLS, 4xx, 5xx, timeout).
+/// That made the redemption bug invisible — Steve's CLI said "enrolled"
+/// while the Bootstrap dashboard still showed `active` because this
+/// callback either was never sent (callback URL nil) or failed in a way
+/// no operator could see.
+///
+/// New behavior:
+///   * If `callback_url` is missing/empty, do nothing (legacy tokens predate
+///     Phase B and have no callback path; print one diagnostic line).
+///   * Drop `-f` (curl's fail-on-error) so we get the response body on 4xx/5xx.
+///   * On HTTP success, print "Redeemed" line so the operator can see it.
+///   * On HTTP failure, print a *visible* warning with status + body so the
+///     bug — if any — is loud, not silent. Enrollment is still considered
+///     successful at the NS layer (the device IS enrolled in NS), so we do
+///     not return an error; we just warn loudly.
 async fn confirm_enrollment(
     callback_url: &str,
     token: &ztlp_proto::enrollment::EnrollmentToken,
@@ -7106,7 +7122,9 @@ async fn confirm_enrollment(
         None => return,
     };
 
-    // Use curl for HTTPS support (TLS without adding deps)
+    // Use curl for HTTPS support (TLS without adding deps). We deliberately
+    // do NOT pass `-f` here — Phase B made silent 4xx/5xx the whole problem.
+    // We want to see what the Bootstrap actually said.
     let body = format!(
         "token_id={}&node_id={}&name={}",
         token_id, node_id, device_name
@@ -7114,9 +7132,13 @@ async fn confirm_enrollment(
 
     let result = tokio::process::Command::new("curl")
         .args([
-            "-sf",
+            "-s",
             "--max-time",
             "5",
+            "-o",
+            "/dev/null",                       // discard body to stderr; HTTP code stays printable
+            "-w",
+            "%{http_code}",                    // print just the status code
             "-X",
             "POST",
             "-H",
@@ -7130,10 +7152,44 @@ async fn confirm_enrollment(
 
     match result {
         Ok(output) if output.status.success() => {
-            // Silently succeed — Bootstrap has been notified
+            // curl-level success — now check the HTTP status code curl printed.
+            let code_str = String::from_utf8_lossy(&output.stdout);
+            let code: u16 = code_str.trim().parse().unwrap_or(0);
+            if (200..300).contains(&code) {
+                eprintln!(
+                    "  {} Bootstrap confirmed token redemption (HTTP {})",
+                    c_green("✓"),
+                    code
+                );
+            } else {
+                // Loud but non-fatal: device IS enrolled in NS, but the dashboard
+                // bookkeeping callback did not stick. Operator can see this.
+                eprintln!(
+                    "  {} Bootstrap callback returned HTTP {} ({}). The device is enrolled, but the dashboard token may still show 'active' until the next TokenReconciler sweep.",
+                    c_yellow("!"),
+                    code,
+                    callback_url
+                );
+            }
         }
-        _ => {
-            // Best-effort: don't fail enrollment if callback fails
+        Ok(output) => {
+            // curl itself failed (network, DNS, TLS). Loud but non-fatal.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "  {} Bootstrap callback failed to connect to {} (curl exit {}): {}",
+                c_yellow("!"),
+                callback_url,
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            );
+        }
+        Err(e) => {
+            // Couldn't even spawn curl. Almost certainly a packaging bug.
+            eprintln!(
+                "  {} Could not spawn curl for Bootstrap callback: {}",
+                c_yellow("!"),
+                e
+            );
         }
     }
 }

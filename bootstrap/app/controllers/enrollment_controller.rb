@@ -22,7 +22,10 @@ class EnrollmentController < ApplicationController
         expires_in: expires_in,
         max_uses: max_uses,
         roles: roles,
-        notes: notes
+        notes: notes,
+        # Phase B: pass our own URL so the minted token carries a callback
+        # the CLI can POST to after enrollment (flips token to `exhausted`).
+        bootstrap_url: request.base_url
       )
 
       AuditLog.record(

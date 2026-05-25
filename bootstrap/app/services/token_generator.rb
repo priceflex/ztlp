@@ -14,8 +14,29 @@ class TokenGenerator
     @network = network
   end
 
-  # Generate a new enrollment token
-  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil, ztlp_user_id: nil)
+  # Generate a new enrollment token.
+  #
+  # @param expires_in   [ActiveSupport::Duration] how long the token is valid
+  # @param max_uses     [Integer] how many times the token can be redeemed
+  # @param roles        [Array<String>, String, nil] roles to attach
+  # @param notes        [String, nil] free-form operator notes
+  # @param ztlp_user_id [Integer, nil] owner user id (for IdP-bulk enrollment)
+  # @param bootstrap_url [String, nil] the publicly-reachable URL of THIS
+  #   bootstrap instance, used to build the `callback=` query parameter of
+  #   the minted `ztlp://enroll/?...` URI. The CLI reads `callback=` and
+  #   POSTs to `<callback>/api/enrollment/confirm` after a successful
+  #   enrollment, which is what flips the token from `active` to
+  #   `exhausted` and creates the corresponding `ZtlpDevice` row.
+  #
+  #   Resolution order (Phase B fix):
+  #     1. `bootstrap_url:` keyword arg (controller passes `request.base_url`)
+  #     2. `ENV["BOOTSTRAP_URL"]` (legacy env fallback, also used by jobs)
+  #     3. nil — `callback=` is omitted entirely; the operator will need
+  #        to mark the token exhausted manually or wait for TokenReconciler.
+  #
+  #   A trailing `/` on the URL is stripped so we never emit `...//api/...`.
+  def generate!(expires_in: 24.hours, max_uses: 1, roles: nil, notes: nil,
+                ztlp_user_id: nil, bootstrap_url: nil)
     ns_machine = @network.ns_machines.first
     relay_machine = @network.relay_machines.first
 
@@ -28,9 +49,20 @@ class TokenGenerator
     ns_addr = "#{ns_machine.ip_address}:#{SshProvisioner::ZTLP_PORTS['ns'][:udp]}"
     relay_addr = relay_machine ? "#{relay_machine.ip_address}:#{SshProvisioner::ZTLP_PORTS['relay'][:udp]}" : nil
 
-    # Build callback URL for CLI to confirm enrollment usage
-    bootstrap_url = ENV.fetch("BOOTSTRAP_URL", nil)
-    callback_url = bootstrap_url ? "#{bootstrap_url}/api/enrollment/confirm" : nil
+    # ── Phase B redemption fix ────────────────────────────────────────────
+    # Resolve the callback URL the CLI will POST to after enrollment.
+    # Prefer the per-request value (correct for any deployment topology),
+    # fall back to the legacy `BOOTSTRAP_URL` env (which Launch never set
+    # for tenants, which is exactly the bug Phase B addresses). All other
+    # query-param values are URL-encoded too, so the callback value must
+    # be encoded to survive the simple `"#{k}=#{v}"` join below.
+    raw_base = bootstrap_url.presence || ENV["BOOTSTRAP_URL"].presence
+    callback_url =
+      if raw_base
+        normalised = raw_base.sub(%r{/+\z}, "")  # strip any trailing slashes
+        ERB::Util.url_encode("#{normalised}/api/enrollment/confirm")
+      end
+    # ──────────────────────────────────────────────────────────────────────
 
     params = {
       zone: @network.zone,

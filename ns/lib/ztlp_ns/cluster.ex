@@ -287,7 +287,10 @@ defmodule ZtlpNs.Cluster do
       end
     end)
 
-    :mnesia.wait_for_tables(@ns_tables, 10_000)
+    # Use the same 60s floor as ZtlpNs.Store. See store.ex
+    # @mnesia_wait_timeout_ms and test/ztlp_ns/store_test.exs for the
+    # rationale (cold-restart disc-IO crash-loop on v0.30.4 deploy).
+    :mnesia.wait_for_tables(@ns_tables, ZtlpNs.Store.mnesia_wait_timeout())
   end
 
   defp table_opts(:ztlp_ns_records, storage_mode) do

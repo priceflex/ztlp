@@ -1837,6 +1837,207 @@ class PhaseBCallbackTest(LaunchAppTest):
         self.assertIn(f"ZTLP_ADMIN_PUBKEY_HEX={first}", env)
         self.assertNotIn(f"ZTLP_ADMIN_PUBKEY_HEX={second}", env)
 
+    # ------------------------------------------------------------------
+    # v0.30.13 — rate limit on /api/enrollment/confirm + autobind audit.
+    #
+    # Closes issue #55. The v0.30.12 autobind path runs `docker compose
+    # up -d --force-recreate gateway` server-side, so the endpoint is no
+    # longer a cheap status flip. We rate-limit per token_id and write
+    # an audit row on every confirm with a non-empty pubkey_hex so a
+    # legit admin can detect URI-race attempts.
+    # ------------------------------------------------------------------
+    def test_confirm_rate_limit_blocks_excessive_attempts_per_token(self):
+        # Default cap is 10/minute/token_id. The 11th call must 429.
+        _uri, token_id = self._start_and_claim()
+        body = {"token_id": token_id, "node_id": "00" * 32, "name": "spam"}
+        # First 10 are 200.
+        for i in range(10):
+            status, _h, _b = self.post_form("/api/enrollment/confirm", body)
+            self.assertEqual(HTTPStatus.OK, status, f"attempt {i+1} should be 200")
+        # 11th is 429 with a structured JSON body.
+        status, _h, body_429 = self.post_form("/api/enrollment/confirm", body)
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, status)
+        payload = json.loads(body_429)
+        self.assertEqual("rate_limited", payload["error"])
+        self.assertEqual("enrollment_confirm", payload["scope"])
+        self.assertEqual(60, payload["retry_after_seconds"])
+
+    def test_confirm_rate_limit_is_per_token_not_global(self):
+        # Two distinct tenants should each get their own bucket. Tenant A
+        # hammering the endpoint must NOT 429 a totally separate tenant B.
+        _uri_a, token_a = self._start_and_claim()
+        # Need a second tenant — _start_and_claim uses a fixed zone, so
+        # we go around it manually.
+        from launch_app.app import LaunchApp  # noqa: F401 — referenced for clarity
+        # Fire 10 confirms against tenant A to fill its bucket.
+        for _ in range(10):
+            self.post_form("/api/enrollment/confirm", {
+                "token_id": token_a, "node_id": "00" * 32, "name": "a",
+            })
+        # 11th against A is 429.
+        s_blocked, _h, _b = self.post_form("/api/enrollment/confirm", {
+            "token_id": token_a, "node_id": "00" * 32, "name": "a",
+        })
+        self.assertEqual(HTTPStatus.TOO_MANY_REQUESTS, s_blocked)
+        # A confirm against a DIFFERENT, unknown token_id should still
+        # 404 (not 429) — the rate limit is keyed per token_id, and the
+        # 404-vs-429 distinction proves the bucket is isolated.
+        s_other, _h, _b = self.post_form("/api/enrollment/confirm", {
+            "token_id": "deadbeef" * 4,  # different token_id, never used
+            "node_id": "00" * 32,
+            "name": "b",
+        })
+        self.assertEqual(HTTPStatus.NOT_FOUND, s_other,
+                         "different token_id must use a separate rate-limit bucket")
+
+    def test_confirm_rate_limit_disabled_when_zero(self):
+        # Operator override: setting confirm_rate_limit_per_minute=0
+        # disables the gate entirely (escape hatch for ops emergencies).
+        # We rebuild the app with the override since it's a constructor arg.
+        from launch_app.app import LaunchApp
+        unlimited_app = LaunchApp(
+            db_path=os.path.join(self.tmpdir.name, "unlimited.sqlite3"),
+            token_secret="test-secret",
+            now=lambda: dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+            require_pow=False,
+            referrals_required=False,
+            confirm_rate_limit_per_minute=0,
+        )
+        # Drive a /start + /claim against THIS app to get a valid token_id.
+        # Hijack self.app temporarily for the helpers.
+        original_app = self.app
+        original_db = self.db_path
+        self.app = unlimited_app
+        self.db_path = unlimited_app.db_path
+        try:
+            _uri, token_id = self._start_and_claim()
+            # 20 confirms — all must succeed when the limit is disabled.
+            for i in range(20):
+                status, _h, _b = self.post_form("/api/enrollment/confirm", {
+                    "token_id": token_id, "node_id": "00" * 32, "name": f"x{i}",
+                })
+                self.assertEqual(HTTPStatus.OK, status,
+                                 f"attempt {i+1} should succeed when limit=0")
+        finally:
+            self.app = original_app
+            self.db_path = original_db
+
+    def test_confirm_writes_audit_row_on_applied(self):
+        # Every confirm with a non-empty pubkey_hex MUST write a row to
+        # autobind_audit so the legit admin can see what happened. On a
+        # successful first-bind, result='applied'.
+        _uri, token_id = self._start_and_claim()
+        pubkey = "ab" * 32
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id,
+            "node_id": "11" * 32,
+            "name": "admin",
+            "pubkey_hex": pubkey,
+        })
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT token_id, pubkey_hex_short, result FROM autobind_audit WHERE token_id = ?",
+            (token_id,),
+        ).fetchall()
+        conn.close()
+        self.assertEqual(1, len(rows), "exactly one audit row expected")
+        self.assertEqual(token_id, rows[0][0])
+        self.assertEqual(pubkey[:16], rows[0][1])
+        self.assertEqual("applied", rows[0][2])
+
+    def test_confirm_writes_audit_row_on_already_bound_refusal(self):
+        # The audit log MUST capture an attempted rebind by a different
+        # pubkey — that's the URI-race detection signal. Result should
+        # read 'already_bound' on the second call.
+        _uri, token_id = self._start_and_claim()
+        legit = "aa" * 32
+        attacker = "bb" * 32
+        # First-bind by the legit admin.
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id,
+            "node_id": "11" * 32,
+            "name": "legit",
+            "pubkey_hex": legit,
+        })
+        # Attacker attempts to rebind.
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id,
+            "node_id": "22" * 32,
+            "name": "attacker",
+            "pubkey_hex": attacker,
+        })
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT pubkey_hex_short, result FROM autobind_audit "
+            "WHERE token_id = ? ORDER BY occurred_at",
+            (token_id,),
+        ).fetchall()
+        conn.close()
+        self.assertEqual(2, len(rows), "two audit rows expected")
+        self.assertEqual((legit[:16], "applied"), rows[0])
+        self.assertEqual((attacker[:16], "already_bound"), rows[1])
+
+    def test_confirm_without_pubkey_does_not_write_audit(self):
+        # Non-autobind confirms (no pubkey_hex) are book-keeping events,
+        # NOT security events. We deliberately skip the audit write to
+        # keep the table focused on URI-race-relevant entries.
+        _uri, token_id = self._start_and_claim()
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id, "node_id": "33" * 32, "name": "no-pubkey",
+        })
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM autobind_audit WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(0, rows[0],
+                         "audit table should be empty when pubkey_hex was not sent")
+
+    def test_api_audit_endpoint_returns_audit_rows(self):
+        # GET /api/audit/<token_id> returns the rows as JSON so a legit
+        # admin / dashboard can pull them through the Bootstrap tunnel.
+        _uri, token_id = self._start_and_claim()
+        legit = "cc" * 32
+        attacker = "dd" * 32
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id, "node_id": "44" * 32,
+            "name": "legit", "pubkey_hex": legit,
+        })
+        self.post_form("/api/enrollment/confirm", {
+            "token_id": token_id, "node_id": "55" * 32,
+            "name": "attacker", "pubkey_hex": attacker,
+        })
+
+        status, _h, body = self.request("GET", f"/api/audit/{token_id}")
+        self.assertEqual(HTTPStatus.OK, status)
+        payload = json.loads(body)
+        self.assertEqual(token_id, payload["token_id"])
+        self.assertEqual(2, len(payload["rows"]),
+                         f"expected 2 audit rows for {token_id}, got {payload}")
+        # Rows are returned most-recent-first, so [0] is the attacker.
+        self.assertEqual(attacker[:16], payload["rows"][0]["pubkey_hex_short"])
+        self.assertEqual("already_bound", payload["rows"][0]["result"])
+        self.assertEqual(legit[:16], payload["rows"][1]["pubkey_hex_short"])
+        self.assertEqual("applied", payload["rows"][1]["result"])
+
+    def test_api_audit_endpoint_returns_empty_for_unknown_token(self):
+        # No 404 — an unknown token_id just returns an empty rows array.
+        # This is the right shape for the dashboard to render "no attempts
+        # logged" rather than having to differentiate "404" from "0 rows".
+        status, _h, body = self.request("GET", "/api/audit/deadbeef")
+        self.assertEqual(HTTPStatus.OK, status)
+        payload = json.loads(body)
+        self.assertEqual("deadbeef", payload["token_id"])
+        self.assertEqual([], payload["rows"])
+
+    def test_api_audit_endpoint_rejects_missing_token(self):
+        # GET /api/audit/ (no token) is malformed; return 400.
+        status, _h, body = self.request("GET", "/api/audit/")
+        self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+        payload = json.loads(body)
+        self.assertEqual("missing token_id", payload["error"])
+
 
 class EnrollmentHmacSigningTest(unittest.TestCase):
     """v0.30.10 — HMAC-BLAKE2s signing of enrollment-token query-param URIs.

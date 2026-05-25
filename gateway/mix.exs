@@ -15,7 +15,7 @@ defmodule ZtlpGateway.MixProject do
       # in PR release/v0.30.4 to align manifests with the re-cut v0.30.4
       # tag. The release_test.exs "version reporting (regression pin)" block
       # floors this at 0.30.4 to prevent silent down-drift going forward.
-      version: "0.30.7",
+      version: "0.30.8",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

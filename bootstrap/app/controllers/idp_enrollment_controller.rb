@@ -168,7 +168,9 @@ class IdpEnrollmentController < ApplicationController
       max_uses: 1,
       roles: user.role,
       ztlp_user_id: user.id,
-      notes: "Self-service enrollment for #{user.name} (#{user.email}) via #{@idp.name}"
+      notes: "Self-service enrollment for #{user.name} (#{user.email}) via #{@idp.name}",
+      # Phase B: pass IdP-side bootstrap URL into the minted callback.
+      bootstrap_url: request.base_url
     )
   end
 

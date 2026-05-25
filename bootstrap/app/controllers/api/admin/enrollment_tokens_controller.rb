@@ -154,7 +154,9 @@ module Api
         token = TokenGenerator.new(network).generate!(
           max_uses:   max_uses,
           expires_in: expires_in,
-          notes:      build_notes(computer_name, params[:metadata])
+          notes:      build_notes(computer_name, params[:metadata]),
+          # Phase B: admin-API path also needs to mint callback-capable tokens.
+          bootstrap_url: request.base_url
         )
 
         AuditLog.record(

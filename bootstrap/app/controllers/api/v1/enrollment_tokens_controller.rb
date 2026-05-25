@@ -107,7 +107,9 @@ module Api
         token = TokenGenerator.new(network).generate!(
           max_uses: 1,
           expires_in: EnrollmentToken::DEFAULT_LIFETIME,
-          notes: build_notes(computer_name, params[:metadata])
+          notes: build_notes(computer_name, params[:metadata]),
+          # Phase B: v1 API also threads its own URL into the callback.
+          bootstrap_url: request.base_url
         )
 
         AuditLog.record(

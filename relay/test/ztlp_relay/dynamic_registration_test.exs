@@ -76,7 +76,11 @@ defmodule ZtlpRelay.DynamicRegistrationTest do
       node_id = :crypto.strong_rand_bytes(16)
       address = {{10, 0, 0, 99}, 23097}
 
-      GatewayForwarder.register_dynamic_gateway(address, node_id, "test", 60)
+      # Register with a gateway-prefixed service name so the registration
+      # passes the `pick_gateway/0` no-preference filter (added 2026-05-25
+      # to exclude non-gateway service registrations like z2ls-desktop-lrc
+      # from the round-robin pool — see `gateway_forwarder.ex`).
+      GatewayForwarder.register_dynamic_gateway(address, node_id, "gw-test-tenant", 60)
       Process.sleep(10)
 
       # Dynamic gateways are included in pick_gateway — verify we get a valid result

@@ -356,10 +356,26 @@ defmodule ZtlpRelay.GatewayForwarder do
   def handle_call(:pick_gateway, _from, state) do
     now = System.monotonic_time(:second)
 
-    # Combine static gateways with non-expired dynamic gateway addresses
+    # No-preference fallback round-robin used by `forward_hello_to_gateway/5`
+    # in `udp_listener.ex` when the client's HELLO carries no `dst_svc_hash`
+    # (or the all-zero sentinel).
+    #
+    # SECURITY: filter dynamic registrations to **gateway-prefixed** service
+    # names only — `"gw:<zone>"` (V2 zone-keyed form, since v0.30.5) and
+    # `"gw-<slug>"` (V1 legacy slug form). Ad-hoc service registrations like
+    # `"z2ls-desktop-lrc"` registered from developer desktops would otherwise
+    # appear in the round-robin pool and silently misroute tenant traffic to
+    # the wrong endpoint. Observed in production 2026-05-25 when a
+    # `ztlp connect bootstrap.<zone>` with no --service flag landed on a
+    # `z2ls-desktop-lrc` registration at a developer's home IP instead of
+    # the tenant gateway.
+    #
+    # Non-gateway registrations are still reachable via EXPLICIT name/hash
+    # through `pick_gateway_for_service/1` — only the no-preference fallback
+    # excludes them.
     dynamic_addrs =
       state.dynamic_gateways
-      |> Enum.filter(fn gw -> gw.expires_at > now end)
+      |> Enum.filter(fn gw -> gw.expires_at > now and gateway_service?(gw.service_name) end)
       |> Enum.map(fn gw -> gw.address end)
       |> Enum.uniq()
 
@@ -550,4 +566,14 @@ defmodule ZtlpRelay.GatewayForwarder do
     Process.send_after(self(), :cleanup, 60_000)
     {:noreply, %{state | sessions: sessions, dynamic_gateways: active}}
   end
+
+  # Returns true when the registered service_name looks like a gateway —
+  # either the V2 zone-keyed form `"gw:<zone>"` or the V1 slug form
+  # `"gw-<slug>"`. Used by `handle_call(:pick_gateway, ...)` (the
+  # no-preference fallback) to exclude ad-hoc non-gateway service
+  # registrations from the round-robin pool. See the SECURITY comment
+  # in `handle_call(:pick_gateway, ...)`.
+  defp gateway_service?("gw:" <> _), do: true
+  defp gateway_service?("gw-" <> _), do: true
+  defp gateway_service?(_), do: false
 end

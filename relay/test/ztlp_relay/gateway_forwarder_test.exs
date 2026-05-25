@@ -230,5 +230,83 @@ defmodule ZtlpRelay.GatewayForwarderTest do
       # Gateway can still reach the client (now at its new addr)
       assert {:ok, ^session_id, ^new_client} = GatewayForwarder.lookup_by_peer(gateway)
     end
+
+    test "pick_gateway/0 excludes non-gateway-prefixed registrations (z2ls-style services)" do
+      # SECURITY-CRITICAL: pick_gateway/0 is the all-zeros / no-preference
+      # fallback round-robin used by `forward_hello_to_gateway/5` in
+      # `udp_listener.ex` when the client's HELLO carries no
+      # `dst_svc_hash`. It must NOT round-robin over registrations that
+      # aren't gateways at all — e.g. ad-hoc service registrations like
+      # `z2ls-desktop-lrc` registered from a developer's desktop.
+      #
+      # Observed in production 2026-05-25: a `ztlp connect bootstrap.<zone>`
+      # with no --service flag landed on `z2ls-desktop-lrc` at Steve's
+      # home IP (47.180.216.203:20251) instead of the tenant gateway.
+      # The cross-tenant misroute is the bug this test pins.
+      #
+      # Contract: only registrations whose `service_name` starts with
+      # `"gw:"` (V2 zone-keyed form) or `"gw-"` (V1 slug form) are
+      # eligible for the no-preference round-robin. Other services can
+      # still be reached by EXPLICIT name/hash via
+      # `pick_gateway_for_service/1`, but the no-preference fallback
+      # ignores them.
+
+      node_id_gw = :crypto.strong_rand_bytes(16)
+      node_id_z2ls = :crypto.strong_rand_bytes(16)
+      gw_addr = {{10, 0, 55, 1}, 23097}
+      z2ls_addr = {{47, 180, 216, 203}, 20251}
+
+      GatewayForwarder.register_dynamic_gateway(gw_addr, node_id_gw, "gw:my-tenant.ztlp", 60)
+      GatewayForwarder.register_dynamic_gateway(z2ls_addr, node_id_z2ls, "z2ls-desktop-lrc", 60)
+      Process.sleep(20)
+
+      # Repeat the call 10 times — the legacy round-robin would land on
+      # z2ls_addr ~half the time. With the fix, it must NEVER pick z2ls.
+      results =
+        for _ <- 1..10 do
+          {:ok, picked} = GatewayForwarder.pick_gateway()
+          picked
+        end
+
+      refute Enum.any?(results, fn r -> r == z2ls_addr end),
+             "pick_gateway/0 routed to z2ls_addr — cross-tenant route bug regressed. " <>
+               "Picks: #{inspect(results)}"
+    end
+
+    test "pick_gateway/0 accepts both V1 (gw-<slug>) and V2 (gw:<zone>) prefixes" do
+      # Both registration forms emitted by the Rust gateway (in v0.30.5+)
+      # must be eligible for the round-robin fallback. The same gateway
+      # registers under BOTH forms in parallel, so excluding either
+      # would halve the fallback pool.
+      #
+      # NB: this test asserts the FILTER predicate accepts both prefixes,
+      # not a specific round-robin order — the GenServer is shared across
+      # tests in this suite, so other registrations may be present in the
+      # pool. We use unique addresses + repeated picks just to confirm
+      # both shapes get picked at least once over a sufficient sample.
+
+      node_id_v1 = :crypto.strong_rand_bytes(16)
+      node_id_v2 = :crypto.strong_rand_bytes(16)
+      gw_v1 = {{10, 0, 44, 1}, 23097}
+      gw_v2 = {{10, 0, 44, 2}, 23097}
+
+      GatewayForwarder.register_dynamic_gateway(gw_v1, node_id_v1, "gw-legacy-slug", 60)
+      GatewayForwarder.register_dynamic_gateway(gw_v2, node_id_v2, "gw:zone.ztlp", 60)
+      Process.sleep(20)
+
+      # Sample 50 picks — enough to almost certainly hit both new entries
+      # even when other tests have polluted the dynamic gateway pool.
+      picks =
+        for _ <- 1..50 do
+          {:ok, p} = GatewayForwarder.pick_gateway()
+          p
+        end
+
+      assert gw_v1 in picks,
+             "gw- (V1) prefix excluded from pick_gateway/0; picks: #{inspect(picks)}"
+
+      assert gw_v2 in picks,
+             "gw: (V2) prefix excluded from pick_gateway/0; picks: #{inspect(picks)}"
+    end
   end
 end

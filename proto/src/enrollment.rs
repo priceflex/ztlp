@@ -305,7 +305,14 @@ impl EnrollmentToken {
                             .map_err(|_| "invalid expires timestamp".to_string())?,
                     )
                 }
-                "callback" => callback_url = Some(val.to_string()),
+                "callback" => {
+                    // v0.30.9 Launch / Bootstrap percent-encode the URL
+                    // per RFC 3986 (`https://` → `https%3A//`). Without
+                    // decoding here, `confirm_enrollment` curls a literal
+                    // `https%3A//www.…` and gets curl exit 3 ("URL
+                    // malformed"). v0.30.11 fix.
+                    callback_url = Some(percent_decode(val)?);
+                }
                 "nonce" => nonce_hex = Some(val.to_string()),
                 "mac" => mac_hex = Some(val.to_string()),
                 _ => {} // ignore unknown params
@@ -488,6 +495,47 @@ fn hex_decode_fixed<const N: usize>(s: &str, field: &str) -> Result<[u8; N], Str
         out[i] = (hi << 4) | lo;
     }
     Ok(out)
+}
+
+/// Percent-decode a URL query-parameter value.
+///
+/// Decodes `%XX` triples into their byte values; passes everything else
+/// through unchanged. Validates that `%` is always followed by exactly
+/// two hex digits — malformed `%` triggers an error so we don't silently
+/// store a half-decoded callback URL.
+///
+/// Required for the `&callback=` URI param introduced in v0.30.9: the
+/// URL contains `:` and `/` which Launch percent-encodes (`%3A`, `%2F`)
+/// per RFC 3986. Without this, the CLI would `curl https%3A//www.…` —
+/// curl exit 3 ("URL malformed"), Bootstrap callback never fires, and
+/// the Launch dashboard never flips `ready → redeemed`.
+///
+/// Does NOT decode `+` as space (URL-encoded forms use `+`, but query
+/// params do not — Launch and Bootstrap both emit literal `%20`).
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(format!(
+                    "truncated percent-encoding at offset {} in {:?}",
+                    i, input
+                ));
+            }
+            let hi = hex_nibble(bytes[i + 1])
+                .ok_or_else(|| format!("invalid percent-encoding at offset {}", i))?;
+            let lo = hex_nibble(bytes[i + 2])
+                .ok_or_else(|| format!("invalid percent-encoding at offset {}", i))?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|e| format!("percent-decoded value is not valid UTF-8: {}", e))
 }
 
 fn hex_nibble(c: u8) -> Option<u8> {
@@ -939,6 +987,107 @@ mod tests {
         let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&relay=10.0.0.2:23095&gateway=10.0.0.4:23098&token=abcd&expires=9999999999";
         let token = EnrollmentToken::from_base64url(uri).expect("should parse with gateway");
         assert_eq!(token.gateway_addr, Some("10.0.0.4:23098".to_string()));
+    }
+
+    // ── v0.30.11: percent-decode the &callback= URI param ─────────────
+    //
+    // Launch & Bootstrap mint URIs with `&callback=https%3A//www.…/api/...`
+    // per RFC 3986 (the `:` and `/` of the URL must be percent-encoded
+    // inside a query-param value). Before v0.30.11 the CLI stored the
+    // raw `https%3A//www.…` string and curl'd it literally, getting
+    // exit code 3 ("URL malformed") and a "! Bootstrap callback failed
+    // to connect" message. The enrollment still succeeded at the NS
+    // layer, but the Launch dashboard never auto-flipped
+    // `ready → redeemed`. These tests pin the fix.
+
+    #[test]
+    fn test_percent_decode_handles_callback_url_encoded_chars() {
+        assert_eq!(
+            percent_decode("https%3A//www.ztlp.net/api/enrollment/confirm").unwrap(),
+            "https://www.ztlp.net/api/enrollment/confirm"
+        );
+        // Mixed encoded + literal slashes (Launch's actual output shape).
+        assert_eq!(
+            percent_decode("https%3A%2F%2Fwww.ztlp.net%2Fapi%2Fconfirm").unwrap(),
+            "https://www.ztlp.net/api/confirm"
+        );
+        // Plain ASCII passes through untouched.
+        assert_eq!(
+            percent_decode("https://plain.example.com/").unwrap(),
+            "https://plain.example.com/"
+        );
+        // Empty string is valid.
+        assert_eq!(percent_decode("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_percent_decode_rejects_malformed_encoding() {
+        // Truncated `%` (no hex chars after)
+        assert!(percent_decode("foo%").is_err());
+        // Truncated `%X` (one hex char after)
+        assert!(percent_decode("foo%A").is_err());
+        // Non-hex chars after `%`
+        assert!(percent_decode("foo%ZZ").is_err());
+        assert!(percent_decode("foo%XYbar").is_err());
+    }
+
+    #[test]
+    fn test_percent_decode_does_not_treat_plus_as_space() {
+        // ZTLP URIs are query-param-style but per RFC 3986 they do not
+        // treat `+` as space (that's HTML form encoding, RFC 1866). Both
+        // Launch and Bootstrap emit literal `%20`, never `+`.
+        assert_eq!(percent_decode("foo+bar").unwrap(), "foo+bar");
+        assert_eq!(percent_decode("foo%20bar").unwrap(), "foo bar");
+    }
+
+    #[test]
+    fn test_from_query_param_uri_decodes_callback() {
+        // Production-shape URI minted by Launch v0.30.10. The
+        // `https://` MUST come out of `parsed.callback_url` properly
+        // decoded — otherwise `confirm_enrollment` curls a literal
+        // `https%3A//` and fails with curl exit 3.
+        let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&token=abcd&expires=9999999999\
+                   &callback=https%3A//www.ztlp.net/api/enrollment/confirm";
+        let token = EnrollmentToken::from_base64url(uri).expect("should parse");
+
+        assert_eq!(
+            token.callback_url,
+            Some("https://www.ztlp.net/api/enrollment/confirm".to_string()),
+            "callback_url must be percent-decoded from %3A → :"
+        );
+    }
+
+    #[test]
+    fn test_from_query_param_uri_full_v030_10_shape_decodes_callback() {
+        // Exact shape Launch emits in production: callback with %3A,
+        // plus the v0.30.10 signed params &nonce= and &mac=. Pins that
+        // the percent-decode hook doesn't interfere with sig params.
+        let uri = "ztlp://enroll/?zone=hermes-e2e.ztlp\
+                   &ns=35.91.88.177:23096\
+                   &token=a9e6648a95c43a5c4c389720deebfe02\
+                   &expires=1779802154\
+                   &callback=https%3A//www.ztlp.net/api/enrollment/confirm\
+                   &nonce=b41cf2f9015c8360545bba1d3f65a73a\
+                   &mac=38db590efa0ee85134b284e22d0f05b51512bd033a9ac0eea298eb52a1264291";
+        let token = EnrollmentToken::from_base64url(uri).expect("should parse v0.30.10 shape");
+        assert_eq!(
+            token.callback_url.as_deref(),
+            Some("https://www.ztlp.net/api/enrollment/confirm")
+        );
+        // Signed params still round-trip unchanged.
+        assert_ne!(token.nonce, [0u8; 16]);
+        assert_ne!(token.mac, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_from_query_param_uri_malformed_callback_rejected() {
+        // A truncated/garbage `callback` should surface as a parse
+        // error rather than silently storing garbage.
+        let uri = "ztlp://enroll/?zone=test.ztlp&ns=10.0.0.1:23096&token=abcd&expires=9999999999&callback=https%3";
+        assert!(
+            EnrollmentToken::from_base64url(uri).is_err(),
+            "malformed percent-encoding in callback must fail the parse"
+        );
     }
 
     #[test]

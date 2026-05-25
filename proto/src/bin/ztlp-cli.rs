@@ -3742,17 +3742,24 @@ async fn cmd_listen(
             // staging/dev environments.
             let v2_config: Option<(String, Vec<u8>)> = match zone {
                 Some(z) if !z.is_empty() => {
-                    let env_name = zone_hmac_secret_env
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| {
-                            // Mirror Elixir's slugify_zone: uppercase,
-                            // non-alphanumeric -> underscore.
-                            let slug: String = z
-                                .chars()
-                                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-                                .collect();
-                            format!("ZTLP_HMAC_SECRET_{}", slug)
-                        });
+                    let env_name =
+                        zone_hmac_secret_env
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                // Mirror Elixir's slugify_zone: uppercase,
+                                // non-alphanumeric -> underscore.
+                                let slug: String = z
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() {
+                                            c.to_ascii_uppercase()
+                                        } else {
+                                            '_'
+                                        }
+                                    })
+                                    .collect();
+                                format!("ZTLP_HMAC_SECRET_{}", slug)
+                            });
                     match std::env::var(&env_name) {
                         Ok(s) if !s.is_empty() => Some((z.to_string(), s.into_bytes())),
                         _ => {
@@ -11091,9 +11098,8 @@ mod tests {
         let secret = [0u8; 32];
         // 64 bytes — one over the 63 limit
         let too_long = "a".repeat(64);
-        let err =
-            build_gateway_register_v2_packet(&node_id, &too_long, "gw-acme", 60, 0, &secret)
-                .expect_err("64-byte zone_id must be rejected");
+        let err = build_gateway_register_v2_packet(&node_id, &too_long, "gw-acme", 60, 0, &secret)
+            .expect_err("64-byte zone_id must be rejected");
         assert!(err.contains("63 bytes"), "got: {}", err);
     }
 

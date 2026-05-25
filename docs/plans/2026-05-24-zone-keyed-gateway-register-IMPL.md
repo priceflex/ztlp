@@ -4,7 +4,7 @@
 **Target release:** v0.30.5 (patch — preserves both `0x0A` and `0x0E` legacy paths; no wire-format breaking change to the relay's existing parsers)
 **Design source:** `docs/plans/2026-05-24-zone-keyed-gateway-registration.md` (PR #43, merged `c3c78ec`)
 **Author:** Hermes session 2026-05-24 evening (continuing from Steve)
-**Status:** IN PROGRESS
+**Status:** SHIPPED (pending tag + prod deploy)
 
 ---
 

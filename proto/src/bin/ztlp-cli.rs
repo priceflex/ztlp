@@ -3479,7 +3479,6 @@ fn resolve_v2_config(
     Some((zone_str.to_string(), secret_bytes))
 }
 
-
 /// Build a GATEWAY_REGISTER_V2 packet (type byte `0x0E`) for collision-safe
 /// zone-keyed relay routing.
 ///
@@ -11337,8 +11336,7 @@ mod tests {
         let cfg = resolve_v2_config(Some("resolvecfg-test-gamma"), Some(var));
         std::env::remove_var(var);
 
-        let (zone, secret) = cfg
-            .expect("zone set with empty-string secret must still yield Some");
+        let (zone, secret) = cfg.expect("zone set with empty-string secret must still yield Some");
         assert_eq!(zone, "resolvecfg-test-gamma");
         assert!(secret.is_empty(), "empty-string secret -> empty bytes");
     }
@@ -11378,8 +11376,7 @@ mod tests {
         let cfg = resolve_v2_config(Some("tech-rockstars.com"), None);
         std::env::remove_var(var);
 
-        let (zone, secret) =
-            cfg.expect("default-env-name path should resolve via slugified var");
+        let (zone, secret) = cfg.expect("default-env-name path should resolve via slugified var");
         assert_eq!(zone, "tech-rockstars.com");
         assert_eq!(secret, b"tr-secret");
     }

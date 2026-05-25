@@ -1437,5 +1437,242 @@ class ReferralCodeTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.CREATED, status)
 
 
+class PhaseBCallbackTest(LaunchAppTest):
+    """v0.30.9 — Phase B fix on the Launch side.
+
+    Launch-issued *admin* enrollment tokens previously hard-coded
+    ``callback_url=""`` (see app.py:1057 pre-fix), so the CLI's
+    ``confirm_enrollment`` never fired and the token row stayed
+    ``active`` indefinitely until the per-tenant ``TokenReconciler``
+    swept NS. After this fix:
+
+    1. ``ensure_enrollment_metadata`` derives the callback from the
+       request's ``Host`` + ``wsgi.url_scheme`` (analogous to Rails'
+       ``request.base_url`` used in the v0.30.8 Bootstrap-side fix).
+    2. The token URI persisted in ``onboarding_requests.enrollment_token_uri``
+       contains ``&callback=<public_url>/api/enrollment/confirm``.
+    3. A new ``POST /api/enrollment/confirm`` endpoint accepts the CLI's
+       ``token_id=...&node_id=...&name=...`` body, looks up the row by
+       ``token_id`` embedded in the URI, and marks
+       ``enrollment_status='redeemed'`` with a timestamp.
+
+    These tests are the RED spec for that behaviour. They will fail on
+    the v0.30.8 codebase and pass once the v0.30.9 patch lands.
+    """
+
+    def _start_and_claim(self, *, host="www.ztlp.net", scheme="https"):
+        """Drive a full /start -> /claim/launch round-trip and return the token URI + token_id."""
+        # POST /start to mint a claim token
+        status, _h, body = self.post_form(
+            "/start",
+            {
+                "organization_name": "Phase B Co",
+                "admin_name": "Phase Admin",
+                "admin_email": "pb@example.com",
+                "zone": "phaseb.ztlp",
+            },
+        )
+        self.assertEqual(HTTPStatus.CREATED, status)
+        # Extract the claim token from the rendered link
+        # Format: <a href="...claim?token=XYZ">...
+        import re
+        m = re.search(r"token=([A-Za-z0-9_\-]+)", body)
+        self.assertIsNotNone(m, f"claim token not found in body: {body[:500]}")
+        claim_token = m.group(1)
+
+        # POST /claim/launch with the Host header set so we exercise the
+        # public-URL derivation path.
+        body_str = urlencode({"token": claim_token, "pubkey_hex": ""})
+        env_headers = {
+            "HTTP_HOST": host,
+            "wsgi.url_scheme": scheme,
+        }
+        status, headers, body = self.request(
+            "POST",
+            "/claim/launch",
+            body_str,
+            {**env_headers, "CONTENT_TYPE": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(HTTPStatus.OK, status)
+
+        # Read the persisted enrollment_token_uri out of the DB
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT enrollment_token_uri FROM onboarding_requests WHERE zone = ?",
+            ("phaseb.ztlp",),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        uri = row[0]
+        self.assertTrue(uri.startswith("ztlp://enroll/?"))
+        # Pull token_id out of the URI for later confirm calls
+        q = parse_qs(urlparse(uri).query)
+        self.assertIn("token", q, f"token param missing from URI: {uri}")
+        return uri, q["token"][0]
+
+    # ------------------------------------------------------------------
+    # RED 1: the persisted token URI MUST contain a callback param that
+    # points back to *this* Launch's public URL.
+    # ------------------------------------------------------------------
+    def test_enrollment_token_uri_embeds_launch_callback(self):
+        uri, _token_id = self._start_and_claim(host="www.ztlp.net", scheme="https")
+        q = parse_qs(urlparse(uri).query)
+        self.assertIn(
+            "callback",
+            q,
+            "v0.30.9 Phase B: enrollment URI must carry &callback=... so the "
+            "CLI's confirm_enrollment() actually fires; pre-fix the URI was "
+            "minted with callback_url='' hard-coded.",
+        )
+        # Exact URL shape: scheme://host/api/enrollment/confirm
+        self.assertEqual(
+            "https://www.ztlp.net/api/enrollment/confirm",
+            q["callback"][0],
+            "callback should be derived from the inbound request's scheme + Host, "
+            "not from a static env var (matches the Bootstrap-side fix in v0.30.8).",
+        )
+
+    def test_enrollment_token_uri_callback_uses_request_scheme(self):
+        # HTTP (dev) scheme should be reflected, not silently upgraded.
+        uri, _token_id = self._start_and_claim(host="launch.dev.local", scheme="http")
+        q = parse_qs(urlparse(uri).query)
+        self.assertIn("callback", q)
+        self.assertEqual(
+            "http://launch.dev.local/api/enrollment/confirm",
+            q["callback"][0],
+        )
+
+    def test_enrollment_token_uri_callback_honours_x_forwarded_proto(self):
+        # Production reality: ngrok / ALB terminate TLS upstream and forward
+        # plain HTTP into the container, so wsgi.url_scheme is 'http' even
+        # though the client used 'https'. The X-Forwarded-Proto header is
+        # the source of truth in that topology. Without this code path the
+        # CLI would curl http://www.ztlp.net/..., get a 307 redirect to
+        # https://, and (since curl is invoked without -L) report a loud
+        # non-2xx warning to the operator on every enrollment.
+        status, _h, body = self.post_form(
+            "/start",
+            {
+                "organization_name": "Proto Co",
+                "admin_name": "Proto Admin",
+                "admin_email": "proto@example.com",
+                "zone": "proto.ztlp",
+            },
+        )
+        self.assertEqual(HTTPStatus.CREATED, status)
+        import re
+        m = re.search(r"token=([A-Za-z0-9_\-]+)", body)
+        claim_token = m.group(1)
+        # Simulate the ngrok-in-front-of-Launch reality: wsgi.url_scheme=http
+        # but X-Forwarded-Proto=https because the user spoke TLS.
+        status, _h, _body = self.request(
+            "POST",
+            "/claim/launch",
+            urlencode({"token": claim_token, "pubkey_hex": ""}),
+            {
+                "HTTP_HOST": "www.ztlp.net",
+                "wsgi.url_scheme": "http",
+                "HTTP_X_FORWARDED_PROTO": "https",
+                "CONTENT_TYPE": "application/x-www-form-urlencoded",
+            },
+        )
+        self.assertEqual(HTTPStatus.OK, status)
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT enrollment_token_uri FROM onboarding_requests WHERE zone = ?",
+            ("proto.ztlp",),
+        ).fetchone()
+        conn.close()
+        q = parse_qs(urlparse(row[0]).query)
+        self.assertEqual(
+            "https://www.ztlp.net/api/enrollment/confirm",
+            q["callback"][0],
+            "X-Forwarded-Proto=https MUST override wsgi.url_scheme=http so the "
+            "callback URL the CLI curls actually resolves on the first try, "
+            "without relying on a 307 redirect (curl is invoked without -L).",
+        )
+
+    # ------------------------------------------------------------------
+    # RED 2: the /api/enrollment/confirm endpoint MUST exist and MUST
+    # flip the onboarding row's enrollment_status to 'redeemed'.
+    # ------------------------------------------------------------------
+    def test_post_api_enrollment_confirm_marks_redeemed(self):
+        _uri, token_id = self._start_and_claim()
+        # Pre-state: enrollment_status should be 'pending' (or NULL on
+        # older rows; either way it must not be 'redeemed' yet).
+        conn = sqlite3.connect(self.db_path)
+        before = conn.execute(
+            "SELECT enrollment_status FROM onboarding_requests WHERE zone = ?",
+            ("phaseb.ztlp",),
+        ).fetchone()
+        conn.close()
+        self.assertNotEqual("redeemed", (before[0] or "").lower())
+
+        # Simulate the CLI's curl POST: form body with token_id, node_id, name.
+        node_id_hex = "00" * 32  # 64-char hex node-id placeholder
+        status, _headers, body = self.post_form(
+            "/api/enrollment/confirm",
+            {
+                "token_id": token_id,
+                "node_id": node_id_hex,
+                "name": "phaseb-admin-laptop",
+            },
+        )
+        self.assertEqual(
+            HTTPStatus.OK,
+            status,
+            f"expected 200 OK from /api/enrollment/confirm, got {status}: {body[:300]}",
+        )
+
+        # Post-state: row should now reflect redemption.
+        conn = sqlite3.connect(self.db_path)
+        after = conn.execute(
+            "SELECT enrollment_status, enrollment_redeemed_at, enrollment_redeemed_node_id "
+            "FROM onboarding_requests WHERE zone = ?",
+            ("phaseb.ztlp",),
+        ).fetchone()
+        conn.close()
+        self.assertEqual("redeemed", after[0])
+        self.assertIsNotNone(after[1], "enrollment_redeemed_at must be stamped")
+        self.assertEqual(node_id_hex, after[2])
+
+    def test_post_api_enrollment_confirm_unknown_token_returns_404(self):
+        # Unknown token_id must NOT 500 and must NOT silently succeed.
+        # A 404 keeps the API honest for the CLI's loud-warning behaviour.
+        status, _headers, _body = self.post_form(
+            "/api/enrollment/confirm",
+            {
+                "token_id": "deadbeef" * 4,  # 32-char hex, nonexistent
+                "node_id": "00" * 32,
+                "name": "nobody",
+            },
+        )
+        self.assertEqual(HTTPStatus.NOT_FOUND, status)
+
+    def test_post_api_enrollment_confirm_is_idempotent(self):
+        # Calling confirm twice for the same token must not error and must
+        # not flip the row back to pending. The second call is a no-op (or
+        # at most updates the timestamp) but must remain 200 so the CLI
+        # treats it as success.
+        _uri, token_id = self._start_and_claim()
+        body = {
+            "token_id": token_id,
+            "node_id": "11" * 32,
+            "name": "phaseb-admin-laptop",
+        }
+        s1, _h1, _b1 = self.post_form("/api/enrollment/confirm", body)
+        s2, _h2, _b2 = self.post_form("/api/enrollment/confirm", body)
+        self.assertEqual(HTTPStatus.OK, s1)
+        self.assertEqual(HTTPStatus.OK, s2)
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT enrollment_status FROM onboarding_requests WHERE zone = ?",
+            ("phaseb.ztlp",),
+        ).fetchone()
+        conn.close()
+        self.assertEqual("redeemed", row[0])
+
+
 if __name__ == "__main__":
     unittest.main()

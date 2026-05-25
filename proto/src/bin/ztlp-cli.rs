@@ -7230,6 +7230,20 @@ async fn confirm_enrollment(
                         }
                     }
                 }
+            } else if code == 429 {
+                // v0.30.13 (issue #55): Launch rate-limits this endpoint
+                // per token_id. The device IS enrolled at NS — Launch
+                // just refused the bookkeeping callback. Honour the
+                // retry-after hint if Launch returned one; otherwise
+                // default to 60s (the documented bucket window).
+                let retry_after =
+                    extract_json_number_field(response_body, "retry_after_seconds").unwrap_or(60);
+                eprintln!(
+                    "  {} Bootstrap callback rate-limited (HTTP 429). The device is enrolled, but the dashboard \
+                     bookkeeping + admin-pubkey autobind will retry after {}s. Re-run `ztlp setup` if this is unexpected.",
+                    c_yellow("!"),
+                    retry_after,
+                );
             } else {
                 // Loud but non-fatal: device IS enrolled in NS, but the dashboard
                 // bookkeeping callback did not stick. Operator can see this.
@@ -7283,6 +7297,29 @@ fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
     let after_quote = after_colon.strip_prefix('"')?;
     let end = after_quote.find('"')?;
     Some(after_quote[..end].to_string())
+}
+
+/// Tiny JSON number-field extractor for the confirm-callback 429 ack.
+///
+/// Same constraints as `extract_json_string_field` — sibling helper for
+/// the v0.30.13 rate-limit response, which carries:
+/// `{"error":"rate_limited","scope":"enrollment_confirm","retry_after_seconds":60}`.
+///
+/// Returns None if the field is missing, malformed, or non-integer.
+fn extract_json_number_field(body: &str, field: &str) -> Option<u64> {
+    let needle = format!("\"{}\"", field);
+    let start = body.find(&needle)?;
+    let after_key = &body[start + needle.len()..];
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    // Take the leading digit run, stop at the first non-digit (`,`, `}`, etc.).
+    let digits: String = after_colon
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Build the 0x07 ENROLL request body (without the 0x07 prefix).
@@ -11113,6 +11150,40 @@ mod tests {
     #[test]
     fn extract_json_string_field_returns_none_for_empty_body() {
         assert_eq!(extract_json_string_field("", "autobind"), None);
+    }
+
+    // v0.30.13 — number-field extractor sibling for the rate-limit ack.
+    #[test]
+    fn extract_json_number_field_parses_launch_429() {
+        let body =
+            r#"{"error":"rate_limited","scope":"enrollment_confirm","retry_after_seconds":60}"#;
+        assert_eq!(
+            extract_json_number_field(body, "retry_after_seconds"),
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn extract_json_number_field_handles_whitespace_and_trailing_brace() {
+        let body = r#"{ "retry_after_seconds" : 120 }"#;
+        assert_eq!(
+            extract_json_number_field(body, "retry_after_seconds"),
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn extract_json_number_field_returns_none_for_string_value() {
+        // Type-mismatch must NOT panic and must return None — the caller
+        // falls back to a sensible default (60s).
+        let body = r#"{"retry_after_seconds":"sixty"}"#;
+        assert_eq!(extract_json_number_field(body, "retry_after_seconds"), None);
+    }
+
+    #[test]
+    fn extract_json_number_field_returns_none_for_missing_field() {
+        let body = r#"{"error":"rate_limited"}"#;
+        assert_eq!(extract_json_number_field(body, "retry_after_seconds"), None);
     }
 
     #[test]

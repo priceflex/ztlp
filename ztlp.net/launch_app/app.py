@@ -54,6 +54,13 @@ LAUNCH_GATEWAY_ADDR = os.environ.get("ZTLP_GATEWAY_ADDR", "")
 BOOTSTRAP_LISTENER_ADDR = os.environ.get("ZTLP_BOOTSTRAP_LISTENER_ADDR") or "34.218.240.106:23095"
 LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR", "5"))
 LAUNCH_RATE_LIMIT_IP_PER_HOUR = int(os.environ.get("LAUNCH_RATE_LIMIT_IP_PER_HOUR", "20"))
+# v0.30.13: per-token_id rate limit on POST /api/enrollment/confirm. Tracks
+# issue #55 — the v0.30.12 autobind path runs `docker compose up -d
+# --force-recreate` server-side, so the endpoint is no longer a cheap
+# status-flip. 10 confirms/minute/token_id is the documented threshold;
+# legit `ztlp setup` issues exactly 1, so the cap doesn't squeeze the
+# happy path. Set to 0 to disable.
+LAUNCH_CONFIRM_RATE_LIMIT_PER_MINUTE = int(os.environ.get("LAUNCH_CONFIRM_RATE_LIMIT_PER_MINUTE", "10"))
 LAUNCH_POW_DIFFICULTY_BITS = int(os.environ.get("LAUNCH_POW_DIFFICULTY_BITS", "20"))
 LAUNCH_POW_TTL_SECONDS = int(os.environ.get("LAUNCH_POW_TTL_SECONDS", "600"))
 LAUNCH_REQUIRE_POW_DEFAULT = os.environ.get("LAUNCH_REQUIRE_POW", "1") not in ("0", "false", "False", "no", "off")
@@ -207,6 +214,7 @@ class LaunchApp:
         environment: str = DEFAULT_ENVIRONMENT,
         email_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_EMAIL_PER_HOUR,
         ip_rate_limit_per_hour: int = LAUNCH_RATE_LIMIT_IP_PER_HOUR,
+        confirm_rate_limit_per_minute: int = LAUNCH_CONFIRM_RATE_LIMIT_PER_MINUTE,
         pow_difficulty_bits: int = LAUNCH_POW_DIFFICULTY_BITS,
         pow_ttl_seconds: int = LAUNCH_POW_TTL_SECONDS,
         require_pow: bool = LAUNCH_REQUIRE_POW_DEFAULT,
@@ -222,6 +230,7 @@ class LaunchApp:
         self.public_host = public_host
         self.email_rate_limit_per_hour = int(email_rate_limit_per_hour)
         self.ip_rate_limit_per_hour = int(ip_rate_limit_per_hour)
+        self.confirm_rate_limit_per_minute = int(confirm_rate_limit_per_minute)
         self.pow_difficulty_bits = int(pow_difficulty_bits)
         self.pow_ttl_seconds = int(pow_ttl_seconds)
         self.require_pow = bool(require_pow)
@@ -281,6 +290,15 @@ class LaunchApp:
                 # enrollment_status to 'redeemed' so the dashboard reflects the
                 # device pickup instead of waiting on TokenReconciler.
                 response = self.handle_enrollment_confirm(environ)
+            elif method == "GET" and path.startswith("/api/audit/"):
+                # v0.30.13 (issue #55): expose the autobind audit log per
+                # token_id so the legit admin / dashboard can detect a
+                # URI-race attempt. No auth — the token_id is itself a
+                # secret (32-hex), so knowing it implies you held the URI.
+                # The rows only carry a 16-char pubkey prefix, source IP,
+                # and result — enough to spot foreign bind attempts but
+                # not enough to recover the attacker's key material.
+                response = self.handle_audit_query(path)
             elif method == "GET" and path == "/downloads":
                 response = self.render_downloads(environ)
             elif method == "GET" and path == "/downloads/manifest.json":
@@ -384,6 +402,30 @@ class LaunchApp:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_scope_key_time ON rate_limit_attempts(scope, key, occurred_at)")
+            # v0.30.13: audit trail for every admin-pubkey bind attempt.
+            # Tracks issue #55. Written by _apply_admin_pubkey on every
+            # call — applied, refused-by-first-bind, error, anything.
+            # Lets the legit admin see if a foreign pubkey was bound
+            # to their gateway first (i.e. an attacker won the
+            # URI-race). Exposed via GET /api/audit/<token_id>.
+            #
+            # pubkey_hex_short: first 16 chars of the requested pubkey,
+            # plenty to confirm identity without storing the full key
+            # in plaintext audit. Source IP for forensic correlation.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS autobind_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id TEXT NOT NULL,
+                    pubkey_hex_short TEXT NOT NULL,
+                    source_ip TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    occurred_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_autobind_audit_token_time ON autobind_audit(token_id, occurred_at)")
 
     def render_landing(self) -> Tuple[HTTPStatus, str, str]:
         body = """
@@ -1207,6 +1249,41 @@ class LaunchApp:
                 "missing token_id\n",
             )
 
+        # v0.30.13: per-token_id rate limit (issue #55). The legit `ztlp
+        # setup` issues exactly one confirm; anyone hammering the same
+        # token_id is either a buggy retry loop or an attacker trying to
+        # force-recreate the gateway repeatedly. Returns 429 + Retry-After
+        # without recording an autobind audit row — the rate-limit table
+        # is enough forensic signal. The CLI handles 429 gracefully (does
+        # not fail the enrollment).
+        #
+        # Order matches handle_start: record FIRST, then check. With
+        # limit=N, that means calls 1..N pass and call N+1 trips the gate
+        # — even though the helper uses ``count > limit``, the always-
+        # record-first pattern shifts the trigger up by 1. See
+        # ``test_rate_limit_blocks_after_email_threshold`` for the same
+        # idiom.
+        now_dt = self.now()
+        source_ip = self.client_ip(environ)
+        self.record_rate_attempt("enrollment_confirm", token_id, now_dt)
+        if self.rate_limit_exceeded(
+            "enrollment_confirm",
+            token_id,
+            now_dt,
+            self.confirm_rate_limit_per_minute,
+            window=dt.timedelta(minutes=1),
+        ):
+            import json as _json_rl
+            return (
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "application/json; charset=utf-8",
+                _json_rl.dumps({
+                    "error": "rate_limited",
+                    "scope": "enrollment_confirm",
+                    "retry_after_seconds": 60,
+                }) + "\n",
+            )
+
         # Look up by the token_id that the URI's `&token=` param embeds.
         # We persist the full URI in enrollment_token_uri, so we match by
         # substring. The URI shape is canonical (see _build_token_uri),
@@ -1274,6 +1351,23 @@ class LaunchApp:
                         else:
                             autobind_status = "error"
                             autobind_detail = detail
+
+        # v0.30.13: write an audit row for every confirm with a non-empty
+        # pubkey_hex — applied, refused, error, anything. Lets the legit
+        # admin detect URI-race attempts via GET /api/audit/<token_id>.
+        # (issue #55). We deliberately do NOT audit empty-pubkey confirms
+        # because the original Phase B contract is "this is best-effort
+        # status book-keeping" — non-autobind confirms aren't security
+        # events.
+        if pubkey_hex:
+            self.record_autobind_audit(
+                token_id=token_id,
+                pubkey_hex=pubkey_hex,
+                source_ip=source_ip,
+                result=autobind_status,
+                detail=autobind_detail,
+                occurred_at=now_dt,
+            )
 
         # Tiny JSON-ish ack so curl users see what happened.
         import json as _json
@@ -1398,6 +1492,40 @@ class LaunchApp:
     # a human-readable reason on failure ("already bound", "docker recreate
     # failed: ...", "could not update instance.env: ...", etc.).
     # ------------------------------------------------------------------
+    def handle_audit_query(self, path: str) -> Tuple[HTTPStatus, str, str]:
+        """GET /api/audit/<token_id> — return autobind audit rows as JSON.
+
+        v0.30.13 (issue #55). Lets the holder of an enrollment URI (the
+        legit admin or their dashboard) check whether any other party
+        attempted to bind a different pubkey to this tenant's gateway.
+
+        Auth: none. The token_id is a 32-char hex secret already; holding
+        it implies you also held the URI. Rows expose only:
+          * pubkey_hex_short (first 16 chars — enough to confirm "is this
+            MY key?", not enough to recover the attacker's key)
+          * source_ip
+          * result + detail
+          * occurred_at
+
+        Returns JSON:
+          200 {"token_id":"...","rows":[{...}, ...]}
+          400 {"error":"missing token_id"}
+        """
+        import json as _json_aq
+        token_id = path[len("/api/audit/"):].strip()
+        if not token_id:
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "application/json; charset=utf-8",
+                _json_aq.dumps({"error": "missing token_id"}) + "\n",
+            )
+        rows = self.fetch_autobind_audit(token_id)
+        return (
+            HTTPStatus.OK,
+            "application/json; charset=utf-8",
+            _json_aq.dumps({"token_id": token_id, "rows": rows}) + "\n",
+        )
+
     def _apply_admin_pubkey(
         self,
         instance_dir: str,
@@ -1599,10 +1727,24 @@ class LaunchApp:
                 (scope, key, occurred_at.isoformat()),
             )
 
-    def rate_limit_exceeded(self, scope: str, key: str, now_dt: dt.datetime, limit: int) -> bool:
+    def rate_limit_exceeded(
+        self,
+        scope: str,
+        key: str,
+        now_dt: dt.datetime,
+        limit: int,
+        window: dt.timedelta = dt.timedelta(hours=1),
+    ) -> bool:
+        """Check whether ``(scope, key)`` has exceeded ``limit`` attempts in ``window``.
+
+        The original signature was a fixed 1-hour window for onboarding
+        anti-abuse. v0.30.13 generalises it so the confirm-callback
+        endpoint can apply a tighter per-minute window without
+        duplicating the SQL.
+        """
         if limit <= 0:
             return False
-        window_start = (now_dt - dt.timedelta(hours=1)).isoformat()
+        window_start = (now_dt - window).isoformat()
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM rate_limit_attempts WHERE scope = ? AND key = ? AND occurred_at >= ?",
@@ -1610,6 +1752,62 @@ class LaunchApp:
             ).fetchone()
         count = row[0] if row else 0
         return count > limit
+
+    # v0.30.13: audit log helpers for the autobind flow (issue #55).
+    # Every call into _apply_admin_pubkey records a row here regardless of
+    # outcome — that's the visibility tool that lets a legit admin detect
+    # an attacker who tried to win the URI-race. Read back by tenant via
+    # GET /api/audit/<token_id>.
+    def record_autobind_audit(
+        self,
+        token_id: str,
+        pubkey_hex: str,
+        source_ip: str,
+        result: str,
+        detail: str,
+        occurred_at: dt.datetime,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO autobind_audit
+                  (token_id, pubkey_hex_short, source_ip, result, detail, occurred_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token_id,
+                    (pubkey_hex or "")[:16],
+                    source_ip or "unknown",
+                    result,
+                    detail or "",
+                    occurred_at.isoformat(),
+                ),
+            )
+
+    def fetch_autobind_audit(self, token_id: str, limit: int = 50) -> list[dict]:
+        """Return the most-recent ``limit`` audit rows for ``token_id``."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, pubkey_hex_short, source_ip, result, detail, occurred_at
+                FROM autobind_audit
+                WHERE token_id = ?
+                ORDER BY occurred_at DESC
+                LIMIT ?
+                """,
+                (token_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "pubkey_hex_short": r["pubkey_hex_short"],
+                "source_ip": r["source_ip"],
+                "result": r["result"],
+                "detail": r["detail"],
+                "occurred_at": r["occurred_at"],
+            }
+            for r in rows
+        ]
 
     def rate_limited_response(self, scope: str) -> Tuple[HTTPStatus, str, str]:
         body = f"""

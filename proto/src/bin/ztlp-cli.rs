@@ -7136,9 +7136,9 @@ async fn confirm_enrollment(
             "--max-time",
             "5",
             "-o",
-            "/dev/null",                       // discard body to stderr; HTTP code stays printable
+            "/dev/null", // discard body to stderr; HTTP code stays printable
             "-w",
-            "%{http_code}",                    // print just the status code
+            "%{http_code}", // print just the status code
             "-X",
             "POST",
             "-H",

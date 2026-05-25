@@ -1,0 +1,6 @@
+# Captured env bundles contain secret values — never commit.
+env-captures/
+
+# Python bytecode
+__pycache__/
+*.pyc

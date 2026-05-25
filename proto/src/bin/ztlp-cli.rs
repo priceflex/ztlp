@@ -7147,8 +7147,17 @@ async fn confirm_enrollment(
     let result = tokio::process::Command::new("curl")
         .args([
             "-s",
+            // v0.30.12: bumped from 5s to 60s. With the v0.30.12 server-side
+            // change, /api/enrollment/confirm runs `docker compose up -d
+            // --force-recreate gateway` inline when pubkey_hex is present —
+            // which can take 10-30s. The 5s budget the original Phase B
+            // landed with is fine for the no-op status flip, but reliably
+            // times out the auto-bind path. The endpoint is still
+            // best-effort from the CLI's POV (the device IS enrolled at NS
+            // regardless), so a wider timeout doesn't make us *less*
+            // resilient; it just lets the happy path complete.
             "--max-time",
-            "5",
+            "60",
             "-w",
             "\n%{http_code}", // append HTTP code on its own line so we can split body/code
             "-X",

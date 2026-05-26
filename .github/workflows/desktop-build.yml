@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'desktop/**'
+      - 'service/**'
       - '.github/workflows/desktop-build.yml'
   pull_request:
     branches: [main]
     paths:
       - 'desktop/**'
+      - 'service/**'
   workflow_dispatch:
 
 jobs:
@@ -69,6 +71,11 @@ jobs:
           else
             cp ../proto/target/release/ztlp.exe src-tauri/binaries/ztlp-x86_64-pc-windows-msvc.exe
           fi
+
+      - name: Build ztlp-service
+        shell: bash
+        working-directory: service
+        run: cargo build --release
 
       - name: Build Desktop (Tauri)
         run: cargo tauri build

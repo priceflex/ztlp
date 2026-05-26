@@ -157,38 +157,75 @@ fn run_icacls(path: &str, extra_args: &[&str]) -> Result<()> {
 }
 
 /// Resolve the install-time user as `DOMAIN\USER` (icacls accepts both
-/// DOMAIN\USER and bare USER on a local machine).
+/// `DOMAIN\USER` and bare `USER` on a local machine).
 ///
-/// Strategy: try `USERNAME` + `USERDOMAIN` env vars first (set by every
-/// interactive Windows login). If either is missing, fall back to
-/// `whoami` and trust whatever it returns.
+/// Strategy: try `whoami` first. On every Windows host `whoami` returns
+/// a name that icacls can map to a SID (either `<computername>\<user>`
+/// on workgroup machines or `<domain>\<user>` on domain-joined ones).
+/// Fall back to env vars only if `whoami` fails — and even then, if
+/// `USERDOMAIN` is the literal "WORKGROUP" (the Windows default for
+/// non-domain hosts and NOT a SID-mappable principal), substitute
+/// `COMPUTERNAME` instead so the icacls grant resolves.
+///
+/// Why whoami-first: D2.T5 caught a real failure on a workgroup
+/// Windows 10 host where `USERDOMAIN=WORKGROUP, USERNAME=trs` made
+/// `icacls /grant "WORKGROUP\trs:(R)"` fail with error 1332
+/// ("No mapping between account names and security IDs was done").
+/// The `whoami` output (`desktop-lrc8dkh\trs`) is always SID-mappable.
 #[cfg(target_os = "windows")]
 fn resolve_current_user() -> Result<String> {
-    use anyhow::{anyhow, Context};
     use std::process::Command;
 
-    if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-        if !domain.is_empty() && !user.is_empty() {
-            return Ok(format!("{domain}\\{user}"));
+    // Primary path: whoami. Reliable on workgroup hosts; the env-var
+    // path is not.
+    if let Ok(out) = Command::new("whoami").output() {
+        if out.status.success() {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return Ok(name);
+            }
         }
     }
 
-    let out = Command::new("whoami")
-        .output()
-        .context("failed to spawn whoami for current-user resolution")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!(
-            "whoami failed (exit {:?}): stderr={}",
-            out.status.code(),
-            stderr.trim()
-        ));
+    // Fallback: env vars. Handle the WORKGROUP-is-not-a-principal
+    // case by substituting COMPUTERNAME.
+    resolve_from_env(
+        std::env::var("USERNAME").ok(),
+        std::env::var("USERDOMAIN").ok(),
+        std::env::var("COMPUTERNAME").ok(),
+    )
+}
+
+/// Pure-logic helper for the env-var fallback path. Lives outside the
+/// `cfg(target_os = "windows")` gate so it can be unit-tested on any
+/// platform. The Windows-only `resolve_current_user` calls this after
+/// `whoami` fails or returns empty.
+///
+/// Rules:
+///   1. `USERNAME` is required; empty/unset is a fatal error.
+///   2. If `USERDOMAIN` is set and is NOT the literal "WORKGROUP",
+///      return `DOMAIN\USER`.
+///   3. Otherwise (workgroup host) substitute `COMPUTERNAME` for the
+///      bogus "WORKGROUP" literal — the actual local SID authority.
+///   4. If both `USERDOMAIN` and `COMPUTERNAME` are unusable, fail.
+fn resolve_from_env(
+    username: Option<String>,
+    userdomain: Option<String>,
+    computername: Option<String>,
+) -> Result<String> {
+    use anyhow::anyhow;
+
+    let user = username.filter(|s| !s.is_empty()).ok_or_else(|| {
+        anyhow!("whoami unavailable AND USERNAME env var unset; cannot resolve installer user")
+    })?;
+    let domain = userdomain.filter(|s| !s.is_empty()).unwrap_or_default();
+    if !domain.is_empty() && domain != "WORKGROUP" {
+        return Ok(format!("{domain}\\{user}"));
     }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() {
-        return Err(anyhow!("whoami returned empty output"));
-    }
-    Ok(name)
+    let host = computername.filter(|s| !s.is_empty()).ok_or_else(|| {
+        anyhow!("neither whoami nor COMPUTERNAME available; cannot construct workgroup principal")
+    })?;
+    Ok(format!("{host}\\{user}"))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -350,4 +387,98 @@ fn uninstall_impl() -> Result<()> {
         "ztlp-service uninstall is only supported on Windows; current target: {}",
         std::env::consts::OS
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_from_env;
+
+    // D2.T5 caught this on a workgroup Windows 10 host: USERDOMAIN was
+    // the literal "WORKGROUP", which icacls cannot map to a SID
+    // (error 1332). The resolver must substitute COMPUTERNAME instead.
+    #[test]
+    fn workgroup_substitutes_computername_for_userdomain() {
+        let out = resolve_from_env(
+            Some("trs".into()),
+            Some("WORKGROUP".into()),
+            Some("DESKTOP-LRC8DKH".into()),
+        )
+        .expect("resolution should succeed on a workgroup host");
+        assert_eq!(out, "DESKTOP-LRC8DKH\\trs");
+    }
+
+    // Domain-joined host: keep the real USERDOMAIN (it IS a SID-mappable
+    // principal in this case).
+    #[test]
+    fn domain_joined_uses_userdomain() {
+        let out = resolve_from_env(
+            Some("trs".into()),
+            Some("TECHROCKSTARS".into()),
+            Some("DESKTOP-LRC8DKH".into()),
+        )
+        .expect("resolution should succeed on a domain host");
+        assert_eq!(out, "TECHROCKSTARS\\trs");
+    }
+
+    // Empty USERDOMAIN (env var present but blank) — fall through to
+    // computername like the workgroup case.
+    #[test]
+    fn empty_userdomain_falls_back_to_computername() {
+        let out = resolve_from_env(
+            Some("trs".into()),
+            Some(String::new()),
+            Some("DESKTOP-LRC8DKH".into()),
+        )
+        .expect("resolution should succeed");
+        assert_eq!(out, "DESKTOP-LRC8DKH\\trs");
+    }
+
+    // Missing USERDOMAIN env var entirely — same fallback.
+    #[test]
+    fn missing_userdomain_falls_back_to_computername() {
+        let out = resolve_from_env(Some("trs".into()), None, Some("DESKTOP-LRC8DKH".into()))
+            .expect("resolution should succeed");
+        assert_eq!(out, "DESKTOP-LRC8DKH\\trs");
+    }
+
+    // No USERNAME — fatal. icacls needs a principal.
+    #[test]
+    fn missing_username_errors() {
+        let err = resolve_from_env(
+            None,
+            Some("WORKGROUP".into()),
+            Some("DESKTOP-LRC8DKH".into()),
+        )
+        .expect_err("missing username must fail");
+        assert!(
+            err.to_string().contains("USERNAME"),
+            "error should name USERNAME: {}",
+            err
+        );
+    }
+
+    // Empty USERNAME — also fatal.
+    #[test]
+    fn empty_username_errors() {
+        let err = resolve_from_env(
+            Some(String::new()),
+            Some("WORKGROUP".into()),
+            Some("DESKTOP-LRC8DKH".into()),
+        )
+        .expect_err("empty username must fail");
+        assert!(err.to_string().contains("USERNAME"));
+    }
+
+    // Workgroup host with no COMPUTERNAME either — fatal (can't construct
+    // any SID-mappable name).
+    #[test]
+    fn workgroup_without_computername_errors() {
+        let err = resolve_from_env(Some("trs".into()), Some("WORKGROUP".into()), None)
+            .expect_err("workgroup without COMPUTERNAME must fail");
+        assert!(
+            err.to_string().contains("COMPUTERNAME"),
+            "error should name COMPUTERNAME: {}",
+            err
+        );
+    }
 }

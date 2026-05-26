@@ -111,6 +111,10 @@ pub async fn run_daemon(
         start_time,
         dns_listen: config.dns.listen.clone(),
         shutdown_tx: shutdown_tx.clone(),
+        // D1.T2: Bearer-token gate placeholder. D1.T3 will wire the
+        // real value (read from ~/.ztlp/agent.token); until then the
+        // daemon keeps its pre-D1 unauthenticated behavior.
+        expected_token: None,
     });
 
     // Write PID file

@@ -65,3 +65,73 @@ fn control_command_deserializes_legacy_without_token() {
     assert!(cmd.name.is_none());
     assert!(cmd.token.is_none());
 }
+
+// ─── D1.T2: handler gate tests ───────────────────────────────────────────
+
+use std::sync::Arc;
+use ztlp_proto::agent::control::{handle_request_line, AgentState, ControlResponse};
+
+fn make_cmd_json(cmd: &str, token: Option<&str>) -> String {
+    let c = ControlCommand {
+        cmd: cmd.into(),
+        name: None,
+        token: token.map(String::from),
+    };
+    serde_json::to_string(&c).unwrap()
+}
+
+fn parse_resp(s: &str) -> ControlResponse {
+    serde_json::from_str(s).expect("daemon must return well-formed ControlResponse JSON")
+}
+
+#[tokio::test]
+async fn rejects_when_token_required_but_missing() {
+    let state = AgentState::test_with_token(Arc::new("secret-abc".into()));
+    let line = make_cmd_json("status", None);
+    let resp = parse_resp(&handle_request_line(&state, &line).await);
+    assert!(!resp.ok, "expected ok=false, got {:?}", resp);
+    assert_eq!(resp.error.as_deref(), Some("unauthorized"));
+}
+
+#[tokio::test]
+async fn rejects_when_token_wrong() {
+    let state = AgentState::test_with_token(Arc::new("secret-abc".into()));
+    let line = make_cmd_json("status", Some("not-the-secret"));
+    let resp = parse_resp(&handle_request_line(&state, &line).await);
+    assert!(!resp.ok);
+    assert_eq!(resp.error.as_deref(), Some("unauthorized"));
+}
+
+#[tokio::test]
+async fn accepts_when_token_matches() {
+    let state = AgentState::test_with_token(Arc::new("secret-abc".into()));
+    let line = make_cmd_json("status", Some("secret-abc"));
+    let resp = parse_resp(&handle_request_line(&state, &line).await);
+    assert!(
+        resp.ok,
+        "expected ok=true with matching token, got error={:?}",
+        resp.error
+    );
+}
+
+#[tokio::test]
+async fn no_check_when_state_has_no_token() {
+    let state = AgentState::test_without_token();
+    let line = make_cmd_json("status", None);
+    let resp = parse_resp(&handle_request_line(&state, &line).await);
+    assert!(
+        resp.ok,
+        "expected ok=true in legacy mode, got error={:?}",
+        resp.error
+    );
+}
+
+#[tokio::test]
+async fn invalid_json_returns_parse_error_not_unauthorized() {
+    // Confirms the parse-error path doesn't leak whether the token would have been right.
+    let state = AgentState::test_with_token(Arc::new("secret-abc".into()));
+    let resp = parse_resp(&handle_request_line(&state, "not-json-at-all").await);
+    assert!(!resp.ok);
+    let err = resp.error.unwrap();
+    assert!(err.starts_with("invalid command:"), "got {err}");
+}

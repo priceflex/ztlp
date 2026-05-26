@@ -4,11 +4,7 @@
 //! `windows_service::service_dispatcher::start`, sets up a STOP-signal channel
 //! via `service_control_handler::register`, reports the standard SCM state
 //! transitions (START_PENDING → RUNNING → STOP_PENDING → STOPPED), and drives
-//! a placeholder heartbeat loop until SCM signals stop.
-//!
-//! The placeholder `run_loop` is intentionally minimal — D2.T3 replaces it
-//! with the real child-process supervisor. Keep the dispatcher / control
-//! handler wiring stable so D2.T3 only swaps the worker body.
+//! the child-process supervisor (D2.T3) until SCM signals stop.
 //!
 //! On every other target `run_service()` returns Err("requires Windows SCM").
 
@@ -42,10 +38,11 @@ fn run_service_impl() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
+    use crate::supervisor::{BackoffPolicy, ChildSpec, Supervisor};
     use crate::SERVICE_NAME;
     use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::Duration;
     use windows_service::{
         define_windows_service,
@@ -166,8 +163,25 @@ mod windows_impl {
 
         tracing::info!(service = SERVICE_NAME, "reported RUNNING to SCM");
 
-        // Placeholder worker. D2.T3 replaces this with the supervisor.
-        run_loop(stop_rx);
+        // Build the ChildSpec for `ztlp.exe agent start --foreground` and
+        // run the supervisor. Plan-deviation: the original plan said
+        // `--token-path "C:\ProgramData\ZTLP\agent.token"` but that CLI
+        // flag does not exist on `ztlp agent start`. The daemon reads
+        // ZTLP_AGENT_TOKEN_PATH from the environment (wired in D1), so
+        // we pass the path via env instead. This is more idiomatic for
+        // service-spawned children anyway.
+        let supervisor_result = match build_agent_child_spec() {
+            Ok(spec) => Supervisor::new(spec, BackoffPolicy::default(), stop_rx).run(),
+            Err(e) => {
+                tracing::error!(error = %e, "ztlp-service: failed to build agent child spec");
+                // Fall through to STOP_PENDING / STOPPED so SCM sees a
+                // clean exit; the error is already logged.
+                Ok(())
+            }
+        };
+        if let Err(e) = supervisor_result {
+            tracing::error!(error = %e, "ztlp-service: supervisor returned error");
+        }
 
         // STOP_PENDING — best-effort signal to the SCM that we're winding
         // down. Not a hard failure if it doesn't land; we'll still report
@@ -200,41 +214,43 @@ mod windows_impl {
         Ok(())
     }
 
-    /// Placeholder worker loop. Logs a heartbeat every 5 seconds via a
-    /// helper thread so the event log shows the service is alive, and
-    /// blocks the calling thread on `stop_rx.recv()` until the control
-    /// handler signals SERVICE_CONTROL_STOP.
-    ///
-    /// D2.T3 replaces the body of this function with the child-process
-    /// supervisor (spawn ztlp-agent, watch for exit, restart on policy).
-    fn run_loop(stop_rx: mpsc::Receiver<()>) {
-        // Heartbeat thread. Shares the stop signal via a second channel so
-        // we can shut it down cleanly when the main loop exits.
-        let (hb_stop_tx, hb_stop_rx) = mpsc::channel::<()>();
-        let heartbeat = thread::spawn(move || {
-            let mut tick: u64 = 0;
-            loop {
-                match hb_stop_rx.recv_timeout(Duration::from_secs(5)) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        tick += 1;
-                        tracing::info!(
-                            service = SERVICE_NAME,
-                            tick,
-                            "ztlp-service heartbeat (placeholder run_loop; D2.T3 replaces this)"
-                        );
-                    }
-                }
-            }
-        });
+    /// Locate `ztlp.exe` next to the current executable and assemble the
+    /// `ChildSpec` for `ztlp.exe agent start --foreground`. Ensures the
+    /// log directory exists. The installer is responsible for placing
+    /// `ztlp.exe` next to `ztlp-service.exe`; if it's missing we surface
+    /// a clear error.
+    fn build_agent_child_spec() -> anyhow::Result<ChildSpec> {
+        use anyhow::Context;
 
-        // Block until SCM signals stop. recv() returns Err only if the
-        // sender was dropped, which on a healthy run shouldn't happen —
-        // either way we exit the loop and proceed to STOP_PENDING.
-        let _ = stop_rx.recv();
+        let service_exe = std::env::current_exe().context("current_exe() failed")?;
+        let exe_dir = service_exe
+            .parent()
+            .context("current_exe has no parent directory")?;
+        let agent_binary = exe_dir.join("ztlp.exe");
+        if !agent_binary.exists() {
+            anyhow::bail!(
+                "ztlp.exe not found next to ztlp-service.exe (expected at {}); \
+                 the installer must place them in the same directory",
+                agent_binary.display()
+            );
+        }
 
-        // Tear down the heartbeat thread.
-        let _ = hb_stop_tx.send(());
-        let _ = heartbeat.join();
+        let log_dir = PathBuf::from(r"C:\ProgramData\ZTLP\logs");
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("creating log dir {}", log_dir.display()))?;
+        let log_path = log_dir.join("agent.log");
+
+        let token_path = OsString::from(r"C:\ProgramData\ZTLP\agent.token");
+
+        Ok(ChildSpec {
+            binary: agent_binary,
+            args: vec![
+                OsString::from("agent"),
+                OsString::from("start"),
+                OsString::from("--foreground"),
+            ],
+            env: vec![(OsString::from("ZTLP_AGENT_TOKEN_PATH"), token_path)],
+            log_path,
+        })
     }
 }

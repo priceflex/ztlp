@@ -6,6 +6,7 @@
 
 pub mod install;
 pub mod service;
+pub mod supervisor;
 
 /// Windows service name registered with the SCM.
 ///

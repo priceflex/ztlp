@@ -30,6 +30,7 @@ pub mod hardware_key;
 pub mod local_tls;
 pub mod proxy;
 pub mod renewal;
+pub mod session_lock;
 pub mod stream;
 pub mod tunnel_pool;
 pub mod user_binding;

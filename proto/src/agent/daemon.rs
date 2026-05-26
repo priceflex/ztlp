@@ -359,6 +359,68 @@ pub async fn run_daemon(
         }
     });
 
+    // ── Spawn session-lockdown task (D3.T3) ─────────────────────────────
+    // Listens on a broadcast channel that Windows session-change events
+    // post to. On any reason (lock/logoff/console/remote disconnect) we
+    // drain ALL tunnels and GC the VIP pool. The producer side lives in
+    // ztlp-service.exe (see service/src/session.rs once D4/D5 land); this
+    // daemon-side wiring runs regardless of platform so the test surface
+    // is exercised on Linux CI.
+    let (lockdown_tx, mut lockdown_rx) =
+        tokio::sync::broadcast::channel::<super::session_lock::LockdownReason>(8);
+    super::session_lock::spawn_listener(lockdown_tx.clone())
+        .unwrap_or_else(|e| warn!("session-lock listener init failed (non-fatal): {e}"));
+
+    let lock_tunnel_pool = tunnel_pool.clone();
+    let lock_dns_state = dns_state.clone();
+    let lockdown_handle = tokio::spawn(async move {
+        loop {
+            match lockdown_rx.recv().await {
+                Ok(reason) => {
+                    // Snapshot names under one lock, then drop the guard
+                    // before per-tunnel removal — same pattern as the GC
+                    // idle path so lock ordering stays consistent.
+                    let names: Vec<String> = {
+                        let pool = lock_tunnel_pool.lock().await;
+                        pool.tunnel_info().into_iter().map(|t| t.name).collect()
+                    };
+
+                    for name in &names {
+                        let mut pool = lock_tunnel_pool.lock().await;
+                        if pool.remove(name).is_some() {
+                            info!(
+                                target: "lockdown_teardown",
+                                reason = reason.as_str(),
+                                tunnel_name = %name,
+                                "tearing down tunnel due to session lockdown"
+                            );
+                        }
+                    }
+
+                    // GC the VIP pool so the next session starts clean.
+                    {
+                        let mut st = lock_dns_state.lock().await;
+                        let freed = st.vip_pool.gc_expired();
+                        info!(
+                            target: "lockdown_teardown",
+                            reason = reason.as_str(),
+                            tunnels_torn_down = names.len(),
+                            vips_freed = freed,
+                            "session lockdown teardown complete"
+                        );
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("session-lockdown receiver lagged, missed {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Sender dropped — daemon is shutting down. Exit.
+                    break;
+                }
+            }
+        }
+    });
+
     // ── Print startup info ──────────────────────────────────────────────
     if foreground {
         eprintln!("ZTLP Agent v{}", env!("CARGO_PKG_VERSION"));
@@ -410,6 +472,7 @@ pub async fn run_daemon(
     ctrl_handle.abort();
     proxy_handle.abort();
     gc_handle.abort();
+    lockdown_handle.abort();
 
     info!("agent stopped");
     Ok(())

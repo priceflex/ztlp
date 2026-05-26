@@ -3,14 +3,15 @@
 //! Provides three subcommands:
 //!   * `install`   — register the Windows service via sc.exe
 //!   * `uninstall` — remove the Windows service via sc.exe (idempotent)
-//!   * `run`       — the SCM-invoked entrypoint (filled in by D2.T2)
+//!   * `run`       — the SCM-invoked entrypoint (D2.T2 dispatcher;
+//!     D2.T3 replaces the placeholder run_loop with the
+//!     real child-process supervisor)
 //!
 //! On non-Windows targets all three return a clean "unsupported on this
 //! platform" error so the binary still builds and behaves predictably in CI.
 
-use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use ztlp_service::install;
+use ztlp_service::{install, service};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -46,20 +47,11 @@ fn main() {
     let result = match cli.command {
         Command::Install => install::install(),
         Command::Uninstall => install::uninstall(),
-        Command::Run => run_service(),
+        Command::Run => service::run_service(),
     };
 
     if let Err(err) = result {
         eprintln!("ztlp-service: {err:#}");
         std::process::exit(1);
     }
-}
-
-fn run_service() -> Result<()> {
-    // D2.T2 wires this up to the SCM dispatcher / supervisor. Keeping the
-    // surface here so the CLI shape is locked in early.
-    Err(anyhow!(
-        "ztlp-service run: D2.T2 not yet implemented (current target: {})",
-        std::env::consts::OS
-    ))
 }

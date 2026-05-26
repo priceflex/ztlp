@@ -7,8 +7,10 @@
 
 use anyhow::Result;
 
-/// Windows service name registered with the SCM.
-pub const SERVICE_NAME: &str = "ZtlpAgent";
+// Re-export the canonical SERVICE_NAME from the crate root so existing
+// `install::SERVICE_NAME` callers keep working while there's exactly one
+// definition (in `lib.rs`) shared with the SCM dispatcher in `service.rs`.
+pub use crate::SERVICE_NAME;
 
 /// Human-readable display name shown in services.msc.
 pub const SERVICE_DISPLAY_NAME: &str = "ZTLP Agent";

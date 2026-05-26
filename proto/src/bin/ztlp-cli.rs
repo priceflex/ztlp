@@ -10234,6 +10234,7 @@ async fn cmd_agent_stop() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = control::ControlCommand {
         cmd: "shutdown".to_string(),
         name: None,
+        token: None,
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -10268,6 +10269,7 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = control::ControlCommand {
         cmd: "status".to_string(),
         name: None,
+        token: None,
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -10352,6 +10354,7 @@ async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = control::ControlCommand {
         cmd: "dns_cache".to_string(),
         name: None,
+        token: None,
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -10421,6 +10424,7 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = control::ControlCommand {
         cmd: "flush_dns".to_string(),
         name: None,
+        token: None,
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -10456,6 +10460,7 @@ async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = control::ControlCommand {
         cmd: "tunnels".to_string(),
         name: None,
+        token: None,
     };
 
     match control::send_command(&ipc_addr, &cmd).await {

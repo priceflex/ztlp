@@ -44,8 +44,16 @@ use super::dns::DnsResolverState;
 pub struct ControlCommand {
     pub cmd: String,
     /// Optional name parameter (for connect/disconnect).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Bearer token authenticating this caller.
+    ///
+    /// `None` is permitted on the wire for backward compatibility with
+    /// pre-D1 CLI binaries. The daemon decides whether to require a
+    /// token based on whether `AgentState::expected_token` is set
+    /// (configured via `~/.ztlp/agent.token` — D1.T3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// A control response to the CLI.

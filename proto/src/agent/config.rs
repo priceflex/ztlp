@@ -488,6 +488,33 @@ pub fn default_token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.token"))
 }
 
+/// Best-effort load of the agent control-plane Bearer token.
+///
+/// Reads the file at [`default_token_path`] and returns
+/// `Some(trimmed_content)` on success, or `None` if the file is missing,
+/// unreadable, empty, or whitespace-only.
+///
+/// A `None` result means "no token file" — the resulting `ControlCommand`
+/// will have `token: None`, which the daemon will only accept if it is
+/// running in legacy mode (`expected_token: None`). Production daemons
+/// (post-D1.T3) always materialize a token and require it, so a missing
+/// file when a daemon is running will surface as `unauthorized` from
+/// the daemon — which is the correct, loud failure mode.
+///
+/// This function intentionally never errors: callers (CLI / desktop IPC)
+/// already get a useful connect-error from `send_command` if the daemon
+/// is not running at all.
+pub fn load_agent_token() -> Option<String> {
+    let path = default_token_path();
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10307,7 +10307,30 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
             }
             return Ok(());
         }
-        _ => {}
+        Ok(resp) => {
+            // Daemon answered but rejected (most common cause post-D1.T3:
+            // missing or stale ~/.ztlp/agent.token). Surface the actual
+            // error and a remediation hint so the user doesn't chase
+            // "not running" when the daemon is in fact up.
+            eprintln!(
+                "  {} {}",
+                c_red("✗"),
+                resp.error.as_deref().unwrap_or("unknown error")
+            );
+            if resp.error.as_deref() == Some("unauthorized")
+                && ztlp_proto::agent::config::load_agent_token().is_none()
+            {
+                let path = ztlp_proto::agent::config::default_token_path();
+                eprintln!(
+                    "  {} {} {}",
+                    c_dim("hint:"),
+                    c_dim("agent token not found at"),
+                    c_dim(&path.display().to_string())
+                );
+            }
+            return Ok(());
+        }
+        Err(_) => {}
     }
 
     // Daemon not running — show config

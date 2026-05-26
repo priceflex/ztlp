@@ -20,6 +20,17 @@ pub const SERVICE_DESCRIPTION: &str = "Zero Trust Layer Protocol background agen
 ///
 /// On non-Windows targets this returns Err with a message containing
 /// "only supported on Windows" so callers can degrade gracefully.
+///
+/// Rollback contract: install() is two SCM calls (`sc.exe create` then
+/// `sc.exe description`). If `create` succeeds but `description` fails,
+/// the service would otherwise be left half-configured in the SCM
+/// registry, which makes the next `install` call fail with
+/// "service already exists". To preserve the installed-state invariant
+/// (`install()` either fully registers the service or leaves the host
+/// untouched), a failed `description` triggers a compensating
+/// `sc.exe delete` to roll back the partial registration. If the
+/// rollback itself fails, both errors are surfaced via anyhow's context
+/// chain.
 pub fn install() -> Result<()> {
     install_impl()
 }
@@ -39,7 +50,16 @@ fn install_impl() -> Result<()> {
     use std::process::Command;
 
     let exe = std::env::current_exe().context("locating current executable for service binPath")?;
-    let bin_path = format!("{} run", exe.display());
+    // The SCM stores binPath as a single string and later launches it via
+    // CreateProcess(NULL, binPath, ...), which tokenizes using Windows'
+    // unquoted-path rules. If the exe lives under e.g.
+    // `C:\Program Files\ZTLP\ztlp-service.exe` and the path is NOT quoted,
+    // the SCM will try `C:\Program.exe` first (the classic "unquoted
+    // service path" issue — both a functional break on Program Files
+    // installs and a known privilege-escalation surface). Wrap with
+    // literal double quotes so the stored value is e.g.
+    // `"C:\Program Files\ZTLP\ztlp-service.exe" run`.
+    let bin_path = format!("\"{}\" run", exe.display());
 
     let create = Command::new("sc.exe")
         .args([
@@ -74,12 +94,45 @@ fn install_impl() -> Result<()> {
     if !describe.status.success() {
         let stderr = String::from_utf8_lossy(&describe.stderr);
         let stdout = String::from_utf8_lossy(&describe.stdout);
-        return Err(anyhow!(
+        let describe_err = anyhow!(
             "sc.exe description {SERVICE_NAME} failed (exit {:?}): stdout={} stderr={}",
             describe.status.code(),
             stdout.trim(),
             stderr.trim()
-        ));
+        );
+
+        // Roll back the partial `sc.exe create` so the host is returned
+        // to its pre-install state and a subsequent `install()` call
+        // does not collide with a half-configured service registration.
+        let rollback = Command::new("sc.exe")
+            .args(["delete", SERVICE_NAME])
+            .output();
+        match rollback {
+            Ok(out) if out.status.success() => {
+                tracing::warn!(
+                    service = SERVICE_NAME,
+                    "rolled back partial service registration after sc.exe description failure"
+                );
+                return Err(
+                    describe_err.context("rolled back sc.exe create after description failure")
+                );
+            }
+            Ok(out) => {
+                let r_stderr = String::from_utf8_lossy(&out.stderr);
+                let r_stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(describe_err.context(format!(
+                    "rollback sc.exe delete {SERVICE_NAME} also failed (exit {:?}): stdout={} stderr={}",
+                    out.status.code(),
+                    r_stdout.trim(),
+                    r_stderr.trim()
+                )));
+            }
+            Err(e) => {
+                return Err(
+                    describe_err.context(anyhow!("failed to spawn rollback sc.exe delete: {e}"))
+                );
+            }
+        }
     }
 
     tracing::info!(service = SERVICE_NAME, "installed Windows service");

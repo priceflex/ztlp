@@ -3,8 +3,8 @@
 //! On Windows, `run_service()` registers with the Service Control Manager via
 //! `windows_service::service_dispatcher::start`, sets up a STOP-signal channel
 //! via `service_control_handler::register`, reports the standard SCM state
-//! transitions (RUNNING → STOP_PENDING → STOPPED), and drives a placeholder
-//! heartbeat loop until SCM signals stop.
+//! transitions (START_PENDING → RUNNING → STOP_PENDING → STOPPED), and drives
+//! a placeholder heartbeat loop until SCM signals stop.
 //!
 //! The placeholder `run_loop` is intentionally minimal — D2.T3 replaces it
 //! with the real child-process supervisor. Keep the dispatcher / control
@@ -73,13 +73,39 @@ mod windows_impl {
     /// Safe service entry. Called by the macro-generated `ffi_service_main`
     /// on a background thread the SCM spins up for us. There is no stdout /
     /// stderr available here — all diagnostics go through `tracing`.
-    fn service_main(_arguments: Vec<OsString>) {
-        if let Err(e) = service_main_inner() {
-            tracing::error!(error = %e, "ztlp-service: service_main failed");
+    ///
+    /// FFI safety: `ffi_service_main` is `extern "system" fn`, so a panic
+    /// crossing that boundary is UB. We wrap the entire body in
+    /// `catch_unwind` and log instead of propagating. `AssertUnwindSafe` is
+    /// fine because on panic we drop all captured state and return; the SCM
+    /// dispatcher's watchdog will mark the service Stopped once we exit.
+    fn service_main(arguments: Vec<OsString>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service_main_inner(arguments)
+        }));
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "ztlp-service: service_main_inner returned error");
+            }
+            Err(panic_payload) => {
+                let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<non-string panic payload>".to_string()
+                };
+                tracing::error!(panic = %msg, "ztlp-service: service_main panicked across FFI boundary");
+                // We don't have status_handle out here; the SCM dispatcher
+                // watchdog will transition the service to Stopped once this
+                // function returns. Logging the payload is the minimum
+                // FFI safety contract.
+            }
         }
     }
 
-    fn service_main_inner() -> windows_service::Result<()> {
+    fn service_main_inner(_arguments: Vec<OsString>) -> windows_service::Result<()> {
         // Stop channel — the SCM control handler closure owns the sender
         // and fires it on STOP; `run_loop` blocks on the receiver.
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -111,6 +137,21 @@ mod windows_impl {
         };
 
         let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+
+        // Report START_PENDING — we have a control handler but aren't
+        // accepting controls yet. wait_hint is generous (10s) because
+        // D2.T3's supervisor will spawn a child process here. The SCM
+        // tolerates an instant jump to RUNNING, but sc.exe start clients
+        // and event log consumers expect to see START_PENDING first.
+        status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::StartPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(10),
+            process_id: None,
+        })?;
 
         // Report RUNNING — we're ready to accept STOP.
         status_handle.set_service_status(ServiceStatus {

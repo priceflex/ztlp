@@ -55,12 +55,15 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
 
       - name: Build ZTLP core daemon
+        shell: bash
         run: |
           cd ../proto
           cargo build --release --bin ztlp
           cd ../desktop
           mkdir -p src-tauri/binaries/
-          # Tauri expects external binaries to be postfixed with the target triple
+          # Tauri expects external binaries to be postfixed with the target triple.
+          # `shell: bash` is required so this step uses Git Bash on Windows runners
+          # (default is PowerShell, which can't parse `if [ ... ]; then`).
           if [ "${{ matrix.target }}" == "linux" ]; then
             cp ../proto/target/release/ztlp src-tauri/binaries/ztlp-x86_64-unknown-linux-gnu
           else

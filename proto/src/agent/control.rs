@@ -44,8 +44,16 @@ use super::dns::DnsResolverState;
 pub struct ControlCommand {
     pub cmd: String,
     /// Optional name parameter (for connect/disconnect).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Bearer token authenticating this caller.
+    ///
+    /// `None` is permitted on the wire for backward compatibility with
+    /// pre-D1 CLI binaries. The daemon decides whether to require a
+    /// token based on whether `AgentState::expected_token` is set
+    /// (configured via `~/.ztlp/agent.token` — D1.T3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// A control response to the CLI.
@@ -116,6 +124,80 @@ pub struct AgentState {
     pub start_time: Instant,
     pub dns_listen: String,
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// Bearer token the daemon requires on every control command.
+    ///
+    /// When `Some(_)`, the daemon authenticates every incoming
+    /// `ControlCommand` against this value (constant-time compare) and
+    /// returns `{"ok":false,"error":"unauthorized"}` on mismatch. When
+    /// `None`, no authentication is performed — preserved for backward
+    /// compatibility with pre-D1 builds. D1.T3 wires the real value
+    /// from `~/.ztlp/agent.token`.
+    ///
+    /// Held behind `Arc` because `AgentState` is shared across all the
+    /// short-lived per-connection tasks the control socket spawns.
+    pub expected_token: Option<Arc<String>>,
+}
+
+/// Constant-time byte-slice equality.
+///
+/// We compare both lengths and bytes without short-circuiting so the
+/// runtime depends only on `max(a.len(), b.len())`, not on the position
+/// of the first differing byte. This prevents a local attacker from
+/// recovering the token one byte at a time via response-time timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Lengths are public (a is the configured token, b is the wire input —
+    // the wire input length is observable via the JSON we just parsed). We
+    // start the accumulator at 1 for any length mismatch so the function
+    // returns `false` regardless of byte content; the byte loop still runs
+    // up to the longer of the two so timing depends only on the longer
+    // input. This avoids the narrow corner where a 256-byte all-zero token
+    // would have compared equal to an empty token via a u8-truncated
+    // (a.len() ^ b.len()) length term.
+    let len = a.len().max(b.len());
+    let mut diff: u8 = if a.len() == b.len() { 0 } else { 1 };
+    for i in 0..len {
+        let ai = *a.get(i).unwrap_or(&0);
+        let bi = *b.get(i).unwrap_or(&0);
+        diff |= ai ^ bi;
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod constant_time_eq_tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn equal_inputs_return_true() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+        assert!(constant_time_eq(&[0u8; 256], &[0u8; 256]));
+        assert!(constant_time_eq(b"deadbeefcafef00d", b"deadbeefcafef00d"));
+    }
+
+    #[test]
+    fn different_inputs_return_false() {
+        assert!(!constant_time_eq(b"a", b"b"));
+        assert!(!constant_time_eq(b"deadbeef", b"DEADBEEF"));
+    }
+
+    #[test]
+    fn length_mismatch_returns_false_even_when_bytes_align() {
+        // Regression: an earlier version XOR-ed the lengths and truncated
+        // to u8, so a 256-byte all-zero token compared equal to an empty
+        // token because (0 ^ 256) as u8 == 0. The new length-mismatch
+        // seed is 1 whenever the lengths differ, so this case correctly
+        // returns false.
+        assert!(!constant_time_eq(b"", &[0u8; 256]));
+        assert!(!constant_time_eq(&[0u8; 256], b""));
+        assert!(!constant_time_eq(b"secret", b"secret-extra"));
+        assert!(!constant_time_eq(b"secret-extra", b"secret"));
+    }
+
+    #[test]
+    fn empty_vs_empty_is_equal() {
+        assert!(constant_time_eq(b"", b""));
+    }
 }
 
 /// Run the control socket server.
@@ -157,17 +239,54 @@ pub async fn run_control_socket(
                 }
             }
 
-            let response = match serde_json::from_str::<ControlCommand>(&line) {
-                Ok(cmd) => handle_command(cmd, &state).await,
-                Err(e) => ControlResponse::err(format!("invalid command: {}", e)),
-            };
-
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = writer.write_all(json.as_bytes()).await;
-                let _ = writer.write_all(b"\n").await;
-            }
+            let json = handle_request_line(&state, &line).await;
+            let _ = writer.write_all(json.as_bytes()).await;
+            let _ = writer.write_all(b"\n").await;
         });
     }
+}
+
+/// Parse one JSON request line, enforce the optional Bearer-token gate,
+/// dispatch the command, and return the serialized response.
+///
+/// Extracted from the accept loop so it can be unit-tested without
+/// standing up a TCP socket. Returns the response body (no trailing
+/// newline) — the caller is responsible for framing.
+///
+/// ## Auth model
+///
+/// * If `state.expected_token` is `None`, no authentication is performed
+///   (legacy/single-user mode — preserved for backward compatibility).
+/// * If `state.expected_token` is `Some(expected)`, every command must
+///   carry a `token` field whose bytes match `expected` under
+///   [`constant_time_eq`]. On mismatch (including missing token), the
+///   command is **not** dispatched and we return
+///   `{"ok":false,"error":"unauthorized"}` verbatim.
+///
+/// Parse errors (malformed JSON) short-circuit *before* the auth check
+/// and return a distinct `"invalid command: …"` error so that the
+/// unauthorized path cannot be distinguished from a parse failure by an
+/// attacker probing with garbage.
+pub async fn handle_request_line(state: &AgentState, line: &str) -> String {
+    let cmd: ControlCommand = match serde_json::from_str(line) {
+        Ok(c) => c,
+        Err(e) => {
+            return serde_json::to_string(&ControlResponse::err(format!("invalid command: {}", e)))
+                .unwrap_or_else(|_| r#"{"ok":false,"error":"invalid command"}"#.to_string());
+        }
+    };
+
+    if let Some(expected) = state.expected_token.as_ref() {
+        let provided = cmd.token.as_deref().unwrap_or("");
+        if !constant_time_eq(expected.as_bytes(), provided.as_bytes()) {
+            return serde_json::to_string(&ControlResponse::err("unauthorized"))
+                .unwrap_or_else(|_| r#"{"ok":false,"error":"unauthorized"}"#.to_string());
+        }
+    }
+
+    let resp = handle_command(cmd, state).await;
+    serde_json::to_string(&resp)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"response serialization failed"}"#.to_string())
 }
 
 /// Handle a control command.
@@ -341,6 +460,54 @@ pub fn is_process_running(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// Test-only helpers exposed for integration tests in `tests/`.
+///
+/// These aren't gated on `#[cfg(test)]` because `cfg(test)` only fires
+/// for the crate's own unit-test pass, not for downstream integration
+/// tests. `#[doc(hidden)]` keeps them out of the public docs surface,
+/// and they construct no resources beyond a tiny in-memory VIP pool +
+/// an empty tunnel pool + a broadcast channel — cheap to ship even in
+/// release builds and not exercised by production code paths.
+#[doc(hidden)]
+impl AgentState {
+    /// Test-only: build an `AgentState` with auth enabled.
+    ///
+    /// Uses a minimal in-memory DNS resolver state (a /30 VIP pool with
+    /// no domain mappings) and an empty 1-slot tunnel pool. Sufficient
+    /// for the `status` command and the auth gate; not suitable for
+    /// commands that exercise tunnel-pool or DNS-resolver behavior.
+    pub fn test_with_token(token: Arc<String>) -> Self {
+        Self::test_state(Some(token))
+    }
+
+    /// Test-only: build an `AgentState` with no token configured
+    /// (legacy/unauthenticated mode).
+    pub fn test_without_token() -> Self {
+        Self::test_state(None)
+    }
+
+    fn test_state(expected_token: Option<Arc<String>>) -> Self {
+        let vip_pool = super::vip_pool::VipPool::new("127.200.0.0/30")
+            .expect("test VIP pool /30 must construct");
+        let dns_state = Arc::new(Mutex::new(DnsResolverState {
+            vip_pool,
+            domain_mapper: super::domain_map::DomainMapper::empty(),
+            ns_server: "127.0.0.53:53".to_string(),
+            upstream_dns: "1.1.1.1:53".to_string(),
+        }));
+        let tunnel_pool = Arc::new(Mutex::new(super::tunnel_pool::TunnelPool::new(1)));
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        Self {
+            dns_state,
+            tunnel_pool,
+            start_time: Instant::now(),
+            dns_listen: "127.0.0.53:53".to_string(),
+            shutdown_tx,
+            expected_token,
+        }
     }
 }
 

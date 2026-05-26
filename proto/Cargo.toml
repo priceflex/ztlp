@@ -122,6 +122,9 @@ rustls = { version = "0.23.40" }
 rcgen = { version = "0.13" }
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.
 # LTO gives good dead-code elimination without sacrificing speed.

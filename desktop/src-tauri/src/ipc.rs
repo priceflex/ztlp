@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use ztlp_proto::agent::config::load_agent_token;
 use ztlp_proto::agent::control::{ControlCommand, ControlResponse};
 
 pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Result<Value, String> {
@@ -10,6 +11,7 @@ pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Res
     let req = ControlCommand {
         cmd: cmd.to_string(),
         name,
+        token: load_agent_token(),
     };
 
     let mut req_bytes =

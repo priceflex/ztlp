@@ -1,0 +1,29 @@
+[package]
+name = "ztlp-service"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "ZTLP Windows service host (install/uninstall/run)."
+
+[[bin]]
+name = "ztlp-service"
+path = "src/main.rs"
+
+[lib]
+name = "ztlp_service"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.7"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }

@@ -23,6 +23,7 @@ const EnrollmentComponent = (() => {
               placeholder="ztlp://enroll/zone-name/token..."
               spellcheck="false"
               autocomplete="off"
+              oninput="EnrollmentComponent.updateButtonState()"
             >
             <button class="btn btn-secondary btn-sm" onclick="EnrollmentComponent.paste()" title="Paste from clipboard">
               📋 Paste
@@ -31,7 +32,24 @@ const EnrollmentComponent = (() => {
           <div class="form-hint">Get this URI from your zone administrator or the ZTLP gateway dashboard.</div>
         </div>
 
-        <button class="btn btn-primary" id="enroll-btn" onclick="EnrollmentComponent.enroll()">
+        <!-- D3.T4: Single-user attestation. Verbatim text per the plan; do
+             not edit without revisiting the desktop-windows plan. The
+             checkbox MUST be checked to enable the Enroll button. -->
+        <div class="form-group" style="margin-top: 12px;">
+          <label class="form-label" style="display: flex; align-items: flex-start; gap: 8px; cursor: pointer;">
+            <input
+              type="checkbox"
+              id="enroll-attestation"
+              style="margin-top: 3px; flex-shrink: 0;"
+              onchange="EnrollmentComponent.updateButtonState()"
+            >
+            <span style="font-size: 13px; line-height: 1.4;">
+              I attest I am the only user of this device.
+            </span>
+          </label>
+        </div>
+
+        <button class="btn btn-primary" id="enroll-btn" onclick="EnrollmentComponent.enroll()" disabled>
           🔑 Enroll
         </button>
 
@@ -82,6 +100,17 @@ const EnrollmentComponent = (() => {
     try {
       const result = await invoke('enroll', { tokenUri: uri });
       if (result.success) {
+        // D3.T4: Record the attestation audit trail. The verbatim text is
+        // captured server-side along with timestamp + resolved SID/UID.
+        // Failure here is non-fatal — enrollment already succeeded; we
+        // surface a warning so operators can manually re-record later.
+        try {
+          await invoke('record_attestation', {
+            text: 'I attest I am the only user of this device.',
+          });
+        } catch (attestErr) {
+          console.warn('attestation record failed (non-fatal):', attestErr);
+        }
         showStatus('success',
           `✓ ${result.message}` +
           (result.zone_name ? ` — Zone: ${result.zone_name}` : '') +
@@ -99,7 +128,22 @@ const EnrollmentComponent = (() => {
     } finally {
       btn.disabled = false;
       btn.textContent = '🔑 Enroll';
+      // Re-evaluate gating: enroll button stays disabled until attestation
+      // is re-confirmed for the next attempt.
+      updateButtonState();
     }
+  }
+
+  // D3.T4: Enroll button is disabled until the single-user attestation
+  // checkbox is checked AND a token URI is present. Idempotent — safe to
+  // call any number of times.
+  function updateButtonState() {
+    const checkbox = document.getElementById('enroll-attestation');
+    const input = document.getElementById('enroll-uri');
+    const btn = document.getElementById('enroll-btn');
+    if (!checkbox || !btn) return;
+    const hasUri = input && input.value && input.value.trim().length > 0;
+    btn.disabled = !(checkbox.checked && hasUri);
   }
 
   function showStatus(type, message) {
@@ -109,5 +153,5 @@ const EnrollmentComponent = (() => {
     el.textContent = message;
   }
 
-  return { render, paste, enroll };
+  return { render, paste, enroll, updateButtonState };
 })();

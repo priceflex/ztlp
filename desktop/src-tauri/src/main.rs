@@ -23,6 +23,7 @@ fn main() {
             commands::get_status,
             commands::get_identity,
             commands::enroll,
+            commands::record_attestation,
             commands::get_services,
             commands::get_config,
             commands::save_config,

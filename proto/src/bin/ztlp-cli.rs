@@ -500,6 +500,14 @@ enum Commands {
         #[arg(long)]
         owner: Option<String>,
 
+        /// Bind this identity to the current OS user (D3.T1).
+        ///
+        /// When set, identity.json records the current user's SID (Windows)
+        /// or numeric UID (Unix). The daemon will refuse to start under any
+        /// other user.
+        #[arg(long)]
+        bind_user: bool,
+
         /// Skip confirmation prompts
         #[arg(short = 'y', long)]
         yes: bool,
@@ -6640,6 +6648,7 @@ async fn cmd_setup(
     name_arg: &Option<String>,
     _setup_type: SetupType,
     _owner_arg: &Option<String>,
+    bind_user: bool,
     auto_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use dialoguer::{Input, Select};
@@ -6656,7 +6665,7 @@ async fn cmd_setup(
 
     // If token provided, skip menu and go straight to enrollment
     if let Some(token_str) = token_arg {
-        return setup_join(token_str, name_arg, auto_yes).await;
+        return setup_join(token_str, name_arg, bind_user, auto_yes).await;
     }
 
     // Interactive menu
@@ -6680,9 +6689,23 @@ async fn cmd_setup(
                 .interact_text()
                 .map_err(|e| format!("input error: {}", e))?;
 
-            setup_join(&token_str, name_arg, auto_yes).await
+            setup_join(&token_str, name_arg, bind_user, auto_yes).await
         }
-        1 => setup_create_network(auto_yes).await,
+        1 => {
+            // CodeRabbit #4 (ztlp-cli.rs:509): --bind-user is meaningful only for
+            // the join path, where it stamps the joining user's SID/UID into
+            // identity.json. The create-network branch generates a network and
+            // doesn't enroll a node identity, so the flag would silently no-op.
+            // Fail fast instead so operators see the misconfiguration.
+            if bind_user {
+                return Err("--bind-user is not supported with create-network setup; \
+                            it applies only to the join path (where identity.json is written). \
+                            Re-run without --bind-user, or use 'ztlp setup --bind-user' \
+                            with an enrollment token to join an existing network."
+                    .into());
+            }
+            setup_create_network(auto_yes).await
+        }
         _ => unreachable!(),
     }
 }
@@ -6691,6 +6714,7 @@ async fn cmd_setup(
 async fn setup_join(
     token_str: &str,
     name_arg: &Option<String>,
+    bind_user: bool,
     auto_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use dialoguer::{Confirm, Input};
@@ -6771,7 +6795,23 @@ async fn setup_join(
     // Generate identity
     eprintln!();
     eprintln!("  {} Generating identity...", c_dim("→"));
-    let identity = NodeIdentity::generate()?;
+    let mut identity = NodeIdentity::generate()?;
+
+    // D3.T1: --bind-user records the current OS user's SID/UID so the daemon
+    // refuses to operate under any other user. We resolve eagerly here so an
+    // unenrollable environment fails BEFORE we touch the gateway.
+    if bind_user {
+        let sid = ztlp_proto::agent::user_binding::current_user_sid().map_err(|e| {
+            format!(
+                "--bind-user requires a working user-resolution shim: {}\n\
+                 Hint: run `id -u` (Unix) or `whoami /user` (Windows) manually to diagnose.",
+                e
+            )
+        })?;
+        eprintln!("  {} Binding identity to user {}", c_dim("→"), c_cyan(&sid));
+        identity.bound_user_sid = Some(sid);
+    }
+
     identity.save(&key_path)?;
 
     #[cfg(unix)]
@@ -10952,8 +10992,9 @@ async fn main() {
             name,
             r#type,
             owner,
+            bind_user,
             yes,
-        } => cmd_setup(token, name, *r#type, owner, *yes).await,
+        } => cmd_setup(token, name, *r#type, owner, *bind_user, *yes).await,
 
         Commands::Admin(subcmd) => match subcmd {
             AdminCommands::InitZone {

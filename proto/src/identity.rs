@@ -91,6 +91,19 @@ pub struct NodeIdentity {
     /// X25519 static public key (32 bytes), derived from the private key.
     #[serde(with = "hex_bytes")]
     pub static_public_key: Vec<u8>,
+
+    /// Optional OS-user binding (D3.T1).
+    ///
+    /// When set (typically by `ztlp setup --bind-user`), the daemon will refuse
+    /// to start if the current process's user identity does not match this
+    /// value. The format is platform-specific:
+    /// - Windows: a SID string like `S-1-5-21-...`.
+    /// - Unix: `uid:<numeric uid>` (e.g. `uid:1000`).
+    ///
+    /// `#[serde(default)]` keeps existing identity.json files (written before
+    /// this field existed) loading cleanly with `bound_user_sid = None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_user_sid: Option<String>,
 }
 
 impl NodeIdentity {
@@ -112,6 +125,7 @@ impl NodeIdentity {
             node_id,
             static_private_key: keypair.private.to_vec(),
             static_public_key: keypair.public.to_vec(),
+            bound_user_sid: None,
         })
     }
 

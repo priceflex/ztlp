@@ -64,6 +64,64 @@ pub fn enroll(token_uri: String, state: State<'_, AppState>) -> Result<EnrollRes
     Ok(result)
 }
 
+// ── Attestation (D3.T4) ─────────────────────────────────────────────────
+//
+// On successful enrollment the frontend invokes `record_attestation` with the
+// verbatim attestation text the user checked. We write a small JSON audit
+// record to ~/.ztlp/attestation.json containing the text, the resolved OS
+// user identifier (SID on Windows, `uid:N` on Unix), and an ISO-8601 UTC
+// timestamp. The file is intended to live alongside identity.json for the
+// life of the enrollment so a future audit can correlate device → user →
+// attestation moment.
+
+/// JSON payload written to `~/.ztlp/attestation.json`.
+#[derive(serde::Serialize)]
+struct AttestationRecord {
+    /// The verbatim text the user attested to.
+    text: String,
+    /// SID (Windows) or `uid:N` (Unix) of the user running this process.
+    /// Empty string if resolution failed — the field is always present so
+    /// downstream tooling can rely on the shape.
+    user_sid: String,
+    /// ISO-8601 UTC timestamp, e.g. `2026-05-26T15:42:00Z`.
+    recorded_at_utc: String,
+}
+
+#[tauri::command]
+pub fn record_attestation(text: String) -> Result<String, String> {
+    // Resolve the current user. If it fails we still write the record so we
+    // have an audit trail; the user_sid field is just empty in that case.
+    let user_sid =
+        ztlp_proto::agent::user_binding::current_user_sid().unwrap_or_default();
+
+    // ISO-8601 UTC. chrono is already in the dependency graph; if it ever
+    // gets pruned we'll switch to a manual SystemTime-based format.
+    let recorded_at_utc = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    let record = AttestationRecord {
+        text,
+        user_sid,
+        recorded_at_utc,
+    };
+
+    let home = dirs::home_dir().ok_or_else(|| {
+        "could not resolve home directory for attestation record".to_string()
+    })?;
+    let dir = home.join(".ztlp");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create_dir_all ~/.ztlp failed: {}", e))?;
+    let path = dir.join("attestation.json");
+
+    let json = serde_json::to_string_pretty(&record)
+        .map_err(|e| format!("serialize attestation: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("write attestation.json: {}", e))?;
+
+    Ok(path.display().to_string())
+}
+
 // ── Services ────────────────────────────────────────────────────────────
 
 #[tauri::command]

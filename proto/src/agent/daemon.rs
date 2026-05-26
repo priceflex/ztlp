@@ -40,7 +40,7 @@ use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
 use super::local_tls::{self, SniCertResolver};
 use super::proxy;
-use super::tunnel_pool::TunnelPool;
+use super::tunnel_pool::{TunnelPool, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL};
 use super::vip_pool::VipPool;
 
 /// GC interval for expired VIP allocations (60 seconds).
@@ -69,6 +69,50 @@ pub async fn run_daemon(
             e
         )
     })?;
+
+    // D3.T1: enforce OS-user binding if identity.json has bound_user_sid set.
+    // Mismatch is fatal (the daemon refuses to operate). ResolutionFailed is
+    // logged as a warning so a broken whoami/id environment can't brick the
+    // daemon when the identity is in fact unbound (the common case).
+    match crate::agent::user_binding::current_user_sid() {
+        Ok(current_sid) => {
+            if let Err(e) = crate::agent::user_binding::verify_user_binding(&identity, &current_sid)
+            {
+                match &e {
+                    crate::agent::user_binding::BindingError::Mismatch { expected, actual } => {
+                        tracing::error!(
+                            target: "bound_user_mismatch",
+                            expected_sid = %expected,
+                            actual_sid = %actual,
+                            identity_path = %identity_path.display(),
+                            "identity is bound to a different OS user; refusing to start"
+                        );
+                    }
+                    crate::agent::user_binding::BindingError::ResolutionFailed(_) => {
+                        // Shouldn't happen on this branch (we got Ok from current_user_sid)
+                        // but be defensive.
+                        tracing::error!("verify_user_binding returned unexpected error: {e}");
+                    }
+                }
+                return Err(format!("bound_user_mismatch: {e}").into());
+            }
+        }
+        Err(e) => {
+            // Couldn't resolve the current user. If the identity is bound we
+            // can't safely enforce, so refuse. If unbound, log and continue.
+            if identity.bound_user_sid.is_some() {
+                tracing::error!(
+                    target: "bound_user_mismatch",
+                    identity_path = %identity_path.display(),
+                    "identity has bound_user_sid but current user could not be resolved: {e}"
+                );
+                return Err(format!("bound_user_mismatch: cannot enforce binding: {e}").into());
+            }
+            tracing::warn!(
+                "could not resolve current user identity for binding check (identity is unbound, continuing): {e}"
+            );
+        }
+    }
 
     info!(
         "ZTLP Agent v{} starting (NodeID: {})",
@@ -100,8 +144,39 @@ pub async fn run_daemon(
     }));
 
     // Initialize tunnel pool
-    let tunnel_pool = Arc::new(Mutex::new(TunnelPool::new(config.tunnel.max_tunnels)));
-    info!("tunnel pool: max {} tunnels", config.tunnel.max_tunnels);
+    // D3.T2: honor config.tunnel.idle_timeout / keepalive_interval. On parse
+    // failure we keep the daemon up using the built-in defaults and log a
+    // warning that names the bad value, so operators see the problem in the
+    // log instead of having a daemon that refuses to start.
+    let idle_timeout = match config::parse_duration_str(&config.tunnel.idle_timeout) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                "invalid tunnel.idle_timeout '{}': {} — falling back to default {:?}",
+                config.tunnel.idle_timeout, e, DEFAULT_IDLE_TIMEOUT
+            );
+            DEFAULT_IDLE_TIMEOUT
+        }
+    };
+    let keepalive_interval = match config::parse_duration_str(&config.tunnel.keepalive_interval) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                "invalid tunnel.keepalive_interval '{}': {} — falling back to default {:?}",
+                config.tunnel.keepalive_interval, e, DEFAULT_KEEPALIVE_INTERVAL
+            );
+            DEFAULT_KEEPALIVE_INTERVAL
+        }
+    };
+    let tunnel_pool = Arc::new(Mutex::new(TunnelPool::with_timeouts(
+        config.tunnel.max_tunnels,
+        idle_timeout,
+        keepalive_interval,
+    )));
+    info!(
+        "tunnel pool: max {} tunnels, idle_timeout={:?}, keepalive={:?}",
+        config.tunnel.max_tunnels, idle_timeout, keepalive_interval
+    );
 
     // Shutdown channel
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -227,15 +302,130 @@ pub async fn run_daemon(
     });
 
     // ── Spawn GC task ───────────────────────────────────────────────────
+    // Two responsibilities, both on the same ~GC_INTERVAL cadence:
+    //   1. Reap expired VIP allocations from the DNS resolver state.
+    //   2. D3.T2: tear down tunnels whose `last_activity` exceeded the
+    //      configured `idle_timeout`. We snapshot the idle-name list under
+    //      the lock, then drop and re-take it per removal so a slow GC tick
+    //      can't block other tunnel operations for the full iteration.
     let gc_state = dns_state.clone();
+    let gc_tunnel_pool = tunnel_pool.clone();
+    let gc_idle_timeout = idle_timeout;
     let gc_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(GC_INTERVAL);
         loop {
             interval.tick().await;
-            let mut st = gc_state.lock().await;
-            let freed = st.vip_pool.gc_expired();
-            if freed > 0 {
-                debug!("GC: freed {} expired VIP allocations", freed);
+
+            // VIP GC.
+            {
+                let mut st = gc_state.lock().await;
+                let freed = st.vip_pool.gc_expired();
+                if freed > 0 {
+                    debug!("GC: freed {} expired VIP allocations", freed);
+                }
+            }
+
+            // D3.T2: idle-tunnel teardown. Snapshot names + last_activity
+            // metadata under one lock, then drop the guard before remove()
+            // so we don't hold the mutex across multiple operations.
+            let idle_names: Vec<(String, u64)> = {
+                let pool = gc_tunnel_pool.lock().await;
+                pool.idle_tunnels()
+                    .into_iter()
+                    .map(|name| {
+                        let secs = pool
+                            .get(&name)
+                            .map(|t| t.last_activity.elapsed().as_secs())
+                            .unwrap_or(0);
+                        (name, secs)
+                    })
+                    .collect()
+            };
+
+            for (name, last_activity_secs) in idle_names {
+                let mut pool = gc_tunnel_pool.lock().await;
+                // CodeRabbit #2 (daemon.rs:346): re-check idleness under the lock.
+                // The snapshot above goes stale as soon as we drop the guard, so
+                // a tunnel that received traffic between the snapshot and now
+                // would otherwise be torn down while active.
+                let still_idle = pool
+                    .get(&name)
+                    .map(|t| t.last_activity.elapsed() >= gc_idle_timeout)
+                    .unwrap_or(false);
+                if still_idle && pool.remove(&name).is_some() {
+                    // Structured event for the audit story in the D3 plan:
+                    // "on idle teardown, the daemon logs a structured
+                    //  idle_teardown event". Emitted per-tunnel so the
+                    //  log is useful even when several tunnels reap at once.
+                    info!(
+                        target: "idle_teardown",
+                        tunnel_name = %name,
+                        last_activity_secs = last_activity_secs,
+                        "tearing down idle tunnel"
+                    );
+                }
+            }
+        }
+    });
+
+    // ── Spawn session-lockdown task (D3.T3) ─────────────────────────────
+    // Listens on a broadcast channel that Windows session-change events
+    // post to. On any reason (lock/logoff/console/remote disconnect) we
+    // drain ALL tunnels and GC the VIP pool. The producer side lives in
+    // ztlp-service.exe (see service/src/session.rs once D4/D5 land); this
+    // daemon-side wiring runs regardless of platform so the test surface
+    // is exercised on Linux CI.
+    let (lockdown_tx, mut lockdown_rx) =
+        tokio::sync::broadcast::channel::<super::session_lock::LockdownReason>(8);
+    super::session_lock::spawn_listener(lockdown_tx.clone())
+        .unwrap_or_else(|e| warn!("session-lock listener init failed (non-fatal): {e}"));
+
+    let lock_tunnel_pool = tunnel_pool.clone();
+    let lock_dns_state = dns_state.clone();
+    let lockdown_handle = tokio::spawn(async move {
+        loop {
+            match lockdown_rx.recv().await {
+                Ok(reason) => {
+                    // Snapshot names under one lock, then drop the guard
+                    // before per-tunnel removal — same pattern as the GC
+                    // idle path so lock ordering stays consistent.
+                    let names: Vec<String> = {
+                        let pool = lock_tunnel_pool.lock().await;
+                        pool.tunnel_info().into_iter().map(|t| t.name).collect()
+                    };
+
+                    for name in &names {
+                        let mut pool = lock_tunnel_pool.lock().await;
+                        if pool.remove(name).is_some() {
+                            info!(
+                                target: "lockdown_teardown",
+                                reason = reason.as_str(),
+                                tunnel_name = %name,
+                                "tearing down tunnel due to session lockdown"
+                            );
+                        }
+                    }
+
+                    // GC the VIP pool so the next session starts clean.
+                    {
+                        let mut st = lock_dns_state.lock().await;
+                        let freed = st.vip_pool.gc_expired();
+                        info!(
+                            target: "lockdown_teardown",
+                            reason = reason.as_str(),
+                            tunnels_torn_down = names.len(),
+                            vips_freed = freed,
+                            "session lockdown teardown complete"
+                        );
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("session-lockdown receiver lagged, missed {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Sender dropped — daemon is shutting down. Exit.
+                    break;
+                }
             }
         }
     });
@@ -291,6 +481,7 @@ pub async fn run_daemon(
     ctrl_handle.abort();
     proxy_handle.abort();
     gc_handle.abort();
+    lockdown_handle.abort();
 
     info!("agent stopped");
     Ok(())

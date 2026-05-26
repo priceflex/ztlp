@@ -6691,7 +6691,21 @@ async fn cmd_setup(
 
             setup_join(&token_str, name_arg, bind_user, auto_yes).await
         }
-        1 => setup_create_network(auto_yes).await,
+        1 => {
+            // CodeRabbit #4 (ztlp-cli.rs:509): --bind-user is meaningful only for
+            // the join path, where it stamps the joining user's SID/UID into
+            // identity.json. The create-network branch generates a network and
+            // doesn't enroll a node identity, so the flag would silently no-op.
+            // Fail fast instead so operators see the misconfiguration.
+            if bind_user {
+                return Err("--bind-user is not supported with create-network setup; \
+                            it applies only to the join path (where identity.json is written). \
+                            Re-run without --bind-user, or use 'ztlp setup --bind-user' \
+                            with an enrollment token to join an existing network."
+                    .into());
+            }
+            setup_create_network(auto_yes).await
+        }
         _ => unreachable!(),
     }
 }

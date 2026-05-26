@@ -310,6 +310,7 @@ pub async fn run_daemon(
     //      can't block other tunnel operations for the full iteration.
     let gc_state = dns_state.clone();
     let gc_tunnel_pool = tunnel_pool.clone();
+    let gc_idle_timeout = idle_timeout;
     let gc_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(GC_INTERVAL);
         loop {
@@ -343,7 +344,15 @@ pub async fn run_daemon(
 
             for (name, last_activity_secs) in idle_names {
                 let mut pool = gc_tunnel_pool.lock().await;
-                if pool.remove(&name).is_some() {
+                // CodeRabbit #2 (daemon.rs:346): re-check idleness under the lock.
+                // The snapshot above goes stale as soon as we drop the guard, so
+                // a tunnel that received traffic between the snapshot and now
+                // would otherwise be torn down while active.
+                let still_idle = pool
+                    .get(&name)
+                    .map(|t| t.last_activity.elapsed() >= gc_idle_timeout)
+                    .unwrap_or(false);
+                if still_idle && pool.remove(&name).is_some() {
                     // Structured event for the audit story in the D3 plan:
                     // "on idle teardown, the daemon logs a structured
                     //  idle_teardown event". Emitted per-tunnel so the

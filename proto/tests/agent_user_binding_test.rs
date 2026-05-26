@@ -74,11 +74,25 @@ fn test_current_user_sid_returns_something() {
             "unix current_user_sid should start with 'uid:', got {:?}",
             sid
         );
-        // The portion after "uid:" should parse as an integer.
-        let n: u32 = sid["uid:".len()..]
+        // CodeRabbit #5: align with the implementation, which validates as u64.
+        // Parsing as u32 here would break for very large UIDs that the
+        // implementation accepts (e.g. some containerized setups use UIDs
+        // well above u32::MAX, like 4_294_967_295+).
+        let n: u64 = sid["uid:".len()..]
             .parse()
             .expect("uid suffix should be numeric");
         // sanity: most users have uid < 1_000_000; root is 0.
         assert!(n < 10_000_000, "uid looks bogus: {}", n);
+    }
+
+    // CodeRabbit #5 follow-up: assert the Windows SID format too, so the test
+    // catches regressions on either platform — not just Unix.
+    #[cfg(windows)]
+    {
+        assert!(
+            sid.starts_with("S-"),
+            "windows current_user_sid should start with 'S-', got {:?}",
+            sid
+        );
     }
 }

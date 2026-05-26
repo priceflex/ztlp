@@ -54,3 +54,6 @@ v30-telemetry-evidence.log
 tenants/test-ztlp/root_key.json
 tenants/*/root_key.json
 .ssh/
+
+# Local docker build cache for cargo (root-owned, never commit)
+.docker-cargo/

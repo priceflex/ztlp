@@ -14,7 +14,7 @@
 //! entry point is a no-op on those platforms (returns `Ok(())`).
 //!
 //! Architecturally this module is *cooperative*: it does not own the tunnel
-//! pool or the DNS state. It accepts a `tokio::sync::broadcast::Sender<()>`
+//! pool or the DNS state. It accepts a `tokio::sync::broadcast::Sender<LockdownReason>`
 //! (the lockdown channel) supplied by `daemon.rs`. The daemon's GC task
 //! subscribes to the channel and drives the actual teardown using the same
 //! locks the periodic-idle path uses. This keeps lock ordering identical to

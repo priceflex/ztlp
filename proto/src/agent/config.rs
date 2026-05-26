@@ -517,7 +517,10 @@ pub fn parse_duration_str(s: &str) -> Result<Duration, String> {
     let n: u64 = num_part
         .parse()
         .map_err(|e| format!("invalid duration '{}': {}", s, e))?;
-    Ok(Duration::from_secs(n * unit_secs))
+    let secs = n
+        .checked_mul(unit_secs)
+        .ok_or_else(|| format!("invalid duration '{}': value is too large", s))?;
+    Ok(Duration::from_secs(secs))
 }
 
 /// Default path to the per-install control-plane Bearer token file.
@@ -788,5 +791,19 @@ node_id = "abcd"
         assert!(parse_duration_str("5y").is_err());
         // Non-numeric leading characters.
         assert!(parse_duration_str("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_str_rejects_overflow() {
+        // CodeRabbit #1 (config.rs:520): n * unit_secs would wrap on huge inputs
+        // and silently produce a smaller-than-requested timeout. The checked_mul
+        // path must reject these instead of wrapping.
+        let huge = format!("{}m", u64::MAX);
+        let err = parse_duration_str(&huge).unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected overflow error, got: {}",
+            err
+        );
     }
 }

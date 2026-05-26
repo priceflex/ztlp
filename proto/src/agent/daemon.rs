@@ -17,9 +17,11 @@
 //! ```
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand::RngCore;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -32,7 +34,7 @@ use crate::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use crate::transport::TransportNode;
 use crate::tunnel;
 
-use super::config::AgentConfig;
+use super::config::{self, AgentConfig};
 use super::control::{self, AgentState};
 use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
@@ -104,6 +106,20 @@ pub async fn run_daemon(
     // Shutdown channel
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
+    // ── D1.T3: Load-or-generate the control-plane Bearer token ──────────
+    // Per-install secret stored at ~/.ztlp/agent.token (0600 on unix).
+    // This is what AgentState.expected_token checks against when a
+    // ControlCommand carries `token: Some(...)`. The CLI side gets wired
+    // in D1.T4; until then any pre-T4 client sending `token: None` will
+    // be rejected, which is the intended production gate.
+    let token_path = config::default_token_path();
+    let token = ensure_token_file(&token_path).map_err(|e| format!("token file: {e}"))?;
+    info!(
+        "control plane token at {} ({} chars)",
+        token_path.display(),
+        token.len()
+    );
+
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
         dns_state: dns_state.clone(),
@@ -111,10 +127,8 @@ pub async fn run_daemon(
         start_time,
         dns_listen: config.dns.listen.clone(),
         shutdown_tx: shutdown_tx.clone(),
-        // D1.T2: Bearer-token gate placeholder. D1.T3 will wire the
-        // real value (read from ~/.ztlp/agent.token); until then the
-        // daemon keeps its pre-D1 unauthenticated behavior.
-        expected_token: None,
+        // D1.T3: real Bearer token wired in. The T2 gate is now live.
+        expected_token: Some(Arc::new(token)),
     });
 
     // Write PID file
@@ -807,4 +821,69 @@ mod tests {
         // Just verify it doesn't panic
         let _ = pid;
     }
+}
+
+// ─── Control-plane Bearer token persistence (D1.T3) ─────────────────────────
+
+/// Load (or generate-and-persist) the per-install control-plane Bearer token.
+///
+/// Returns the hex-encoded token string. If a non-empty trimmed token already
+/// exists at `path`, it is returned unchanged (idempotent). Otherwise 32
+/// cryptographically-random bytes are generated, hex-encoded to a 64-char
+/// lowercase string, and written atomically.
+///
+/// ## Atomic write protocol
+///
+/// 1. Create parent directories as needed.
+/// 2. Write the new token to `<path>.tmp`.
+/// 3. On unix, chmod the tmp file to `0o600` *before* renaming, so the final
+///    path is never world-readable, not even for a microsecond.
+/// 4. Rename tmp → final. Rename is atomic on the same filesystem.
+///
+/// Whitespace-only existing files are treated as missing and regenerated.
+pub fn ensure_token_file(path: &Path) -> std::io::Result<String> {
+    // Fast path: existing non-empty token.
+    if path.exists() {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let trimmed = contents.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+                // fall through to regenerate
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Generate fresh token: 32 random bytes → 64 hex chars.
+    let mut raw = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+
+    // Ensure parent dir exists.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    // Atomic write: tmp → chmod tmp → rename.
+    let tmp_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".tmp");
+        std::path::PathBuf::from(p)
+    };
+
+    std::fs::write(&tmp_path, &token)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    std::fs::rename(&tmp_path, path)?;
+
+    Ok(token)
 }

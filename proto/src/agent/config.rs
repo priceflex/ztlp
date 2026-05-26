@@ -466,6 +466,28 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Default path to the per-install control-plane Bearer token file.
+///
+/// Resolution order:
+/// 1. `ZTLP_AGENT_TOKEN_PATH` env var if set (used by tests and the D2
+///    Windows installer to place the file under `C:\ProgramData\ZTLP\`).
+/// 2. `~/.ztlp/agent.token` if `home_dir()` is available.
+/// 3. `/tmp/ztlp-agent.token` as a last-resort fallback — mirrors the
+///    `control::default_pid_path` pattern.
+///
+/// The file itself is materialized (and chmodded 0o600 on unix) by
+/// `daemon::ensure_token_file`.
+pub fn default_token_path() -> PathBuf {
+    if let Ok(override_path) = std::env::var("ZTLP_AGENT_TOKEN_PATH") {
+        if !override_path.is_empty() {
+            return PathBuf::from(override_path);
+        }
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("agent.token"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.token"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

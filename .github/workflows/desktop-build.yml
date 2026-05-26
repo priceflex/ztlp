@@ -88,6 +88,7 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/deb/*.deb
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            service/target/release/ztlp-service
           if-no-files-found: warn
 
       - name: Upload Windows artifacts
@@ -98,4 +99,5 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*.exe
             desktop/src-tauri/target/release/bundle/msi/*.msi
+            service/target/release/ztlp-service.exe
           if-no-files-found: warn

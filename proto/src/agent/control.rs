@@ -145,19 +145,59 @@ pub struct AgentState {
 /// of the first differing byte. This prevents a local attacker from
 /// recovering the token one byte at a time via response-time timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    // Length mismatch is itself a leak unless we still iterate something —
-    // do the XOR scan up to the longer of the two and accumulate the
-    // length difference into the result, so the function returns `false`
-    // for any length mismatch but in constant time relative to the
-    // longer input.
+    // Lengths are public (a is the configured token, b is the wire input —
+    // the wire input length is observable via the JSON we just parsed). We
+    // start the accumulator at 1 for any length mismatch so the function
+    // returns `false` regardless of byte content; the byte loop still runs
+    // up to the longer of the two so timing depends only on the longer
+    // input. This avoids the narrow corner where a 256-byte all-zero token
+    // would have compared equal to an empty token via a u8-truncated
+    // (a.len() ^ b.len()) length term.
     let len = a.len().max(b.len());
-    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    let mut diff: u8 = if a.len() == b.len() { 0 } else { 1 };
     for i in 0..len {
         let ai = *a.get(i).unwrap_or(&0);
         let bi = *b.get(i).unwrap_or(&0);
         diff |= ai ^ bi;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod constant_time_eq_tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn equal_inputs_return_true() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+        assert!(constant_time_eq(&[0u8; 256], &[0u8; 256]));
+        assert!(constant_time_eq(b"deadbeefcafef00d", b"deadbeefcafef00d"));
+    }
+
+    #[test]
+    fn different_inputs_return_false() {
+        assert!(!constant_time_eq(b"a", b"b"));
+        assert!(!constant_time_eq(b"deadbeef", b"DEADBEEF"));
+    }
+
+    #[test]
+    fn length_mismatch_returns_false_even_when_bytes_align() {
+        // Regression: an earlier version XOR-ed the lengths and truncated
+        // to u8, so a 256-byte all-zero token compared equal to an empty
+        // token because (0 ^ 256) as u8 == 0. The new length-mismatch
+        // seed is 1 whenever the lengths differ, so this case correctly
+        // returns false.
+        assert!(!constant_time_eq(b"", &[0u8; 256]));
+        assert!(!constant_time_eq(&[0u8; 256], b""));
+        assert!(!constant_time_eq(b"secret", b"secret-extra"));
+        assert!(!constant_time_eq(b"secret-extra", b"secret"));
+    }
+
+    #[test]
+    fn empty_vs_empty_is_equal() {
+        assert!(constant_time_eq(b"", b""));
+    }
 }
 
 /// Run the control socket server.

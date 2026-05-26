@@ -32,4 +32,5 @@ pub mod proxy;
 pub mod renewal;
 pub mod stream;
 pub mod tunnel_pool;
+pub mod user_binding;
 pub mod vip_pool;

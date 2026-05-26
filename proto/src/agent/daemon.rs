@@ -70,6 +70,50 @@ pub async fn run_daemon(
         )
     })?;
 
+    // D3.T1: enforce OS-user binding if identity.json has bound_user_sid set.
+    // Mismatch is fatal (the daemon refuses to operate). ResolutionFailed is
+    // logged as a warning so a broken whoami/id environment can't brick the
+    // daemon when the identity is in fact unbound (the common case).
+    match crate::agent::user_binding::current_user_sid() {
+        Ok(current_sid) => {
+            if let Err(e) = crate::agent::user_binding::verify_user_binding(&identity, &current_sid)
+            {
+                match &e {
+                    crate::agent::user_binding::BindingError::Mismatch { expected, actual } => {
+                        tracing::error!(
+                            target: "bound_user_mismatch",
+                            expected_sid = %expected,
+                            actual_sid = %actual,
+                            identity_path = %identity_path.display(),
+                            "identity is bound to a different OS user; refusing to start"
+                        );
+                    }
+                    crate::agent::user_binding::BindingError::ResolutionFailed(_) => {
+                        // Shouldn't happen on this branch (we got Ok from current_user_sid)
+                        // but be defensive.
+                        tracing::error!("verify_user_binding returned unexpected error: {e}");
+                    }
+                }
+                return Err(format!("bound_user_mismatch: {e}").into());
+            }
+        }
+        Err(e) => {
+            // Couldn't resolve the current user. If the identity is bound we
+            // can't safely enforce, so refuse. If unbound, log and continue.
+            if identity.bound_user_sid.is_some() {
+                tracing::error!(
+                    target: "bound_user_mismatch",
+                    identity_path = %identity_path.display(),
+                    "identity has bound_user_sid but current user could not be resolved: {e}"
+                );
+                return Err(format!("bound_user_mismatch: cannot enforce binding: {e}").into());
+            }
+            tracing::warn!(
+                "could not resolve current user identity for binding check (identity is unbound, continuing): {e}"
+            );
+        }
+    }
+
     info!(
         "ZTLP Agent v{} starting (NodeID: {})",
         env!("CARGO_PKG_VERSION"),

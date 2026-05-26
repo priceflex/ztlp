@@ -6,6 +6,7 @@
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::local_tls::TlsConfig;
 use crate::identity::NodeId;
@@ -466,6 +467,59 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Parse a short duration string like `"30s"`, `"5m"`, `"2h"`, or `"1d"`.
+///
+/// Used to interpret `[tunnel].idle_timeout`, `[tunnel].keepalive_interval`,
+/// and similar config fields. The format is a sequence of ASCII digits
+/// followed by exactly one unit suffix:
+///
+/// - `s` — seconds
+/// - `m` — minutes
+/// - `h` — hours
+/// - `d` — days (24h)
+///
+/// Bare numbers (no unit), the empty string, unknown units, and any
+/// non-numeric prefix are all rejected — we'd rather force the operator
+/// to spell out the unit than silently treat `"30"` as either seconds or
+/// milliseconds and surprise them later.
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::time::Duration;
+/// assert_eq!(parse_duration_str("5m").unwrap(), Duration::from_secs(300));
+/// assert!(parse_duration_str("30").is_err());
+/// ```
+pub fn parse_duration_str(s: &str) -> Result<Duration, String> {
+    if s.is_empty() {
+        return Err("empty duration string".to_string());
+    }
+    // Split into trailing unit char and leading numeric portion.
+    let last = s
+        .chars()
+        .next_back()
+        .ok_or_else(|| "empty duration string".to_string())?;
+    let (num_part, unit_secs) = match last {
+        's' => (&s[..s.len() - 1], 1u64),
+        'm' => (&s[..s.len() - 1], 60u64),
+        'h' => (&s[..s.len() - 1], 60 * 60),
+        'd' => (&s[..s.len() - 1], 24 * 60 * 60),
+        _ => {
+            return Err(format!(
+                "invalid duration '{}': expected suffix s/m/h/d, got '{}'",
+                s, last
+            ));
+        }
+    };
+    if num_part.is_empty() {
+        return Err(format!("invalid duration '{}': missing numeric value", s));
+    }
+    let n: u64 = num_part
+        .parse()
+        .map_err(|e| format!("invalid duration '{}': {}", s, e))?;
+    Ok(Duration::from_secs(n * unit_secs))
+}
+
 /// Default path to the per-install control-plane Bearer token file.
 ///
 /// Resolution order:
@@ -692,5 +746,47 @@ node_id = "abcd"
         let cfg = AgentConfig::load_from_path(Path::new("/nonexistent/agent.toml"));
         // Should return defaults without error
         assert_eq!(cfg.dns.listen, "127.0.0.53:5353");
+    }
+
+    // ── D3.T2: parse_duration_str ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_duration_str_seconds() {
+        assert_eq!(
+            parse_duration_str("30s").unwrap(),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_str_minutes() {
+        assert_eq!(
+            parse_duration_str("5m").unwrap(),
+            std::time::Duration::from_secs(5 * 60)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_str_hours_and_days() {
+        assert_eq!(
+            parse_duration_str("2h").unwrap(),
+            std::time::Duration::from_secs(2 * 60 * 60)
+        );
+        assert_eq!(
+            parse_duration_str("1d").unwrap(),
+            std::time::Duration::from_secs(24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_str_rejects_bare_number_and_garbage() {
+        // Bare number — no unit suffix — must be rejected.
+        assert!(parse_duration_str("30").is_err());
+        // Empty string.
+        assert!(parse_duration_str("").is_err());
+        // Unknown unit.
+        assert!(parse_duration_str("5y").is_err());
+        // Non-numeric leading characters.
+        assert!(parse_duration_str("abc").is_err());
     }
 }

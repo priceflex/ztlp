@@ -40,7 +40,7 @@ use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
 use super::local_tls::{self, SniCertResolver};
 use super::proxy;
-use super::tunnel_pool::TunnelPool;
+use super::tunnel_pool::{TunnelPool, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL};
 use super::vip_pool::VipPool;
 
 /// GC interval for expired VIP allocations (60 seconds).
@@ -144,8 +144,39 @@ pub async fn run_daemon(
     }));
 
     // Initialize tunnel pool
-    let tunnel_pool = Arc::new(Mutex::new(TunnelPool::new(config.tunnel.max_tunnels)));
-    info!("tunnel pool: max {} tunnels", config.tunnel.max_tunnels);
+    // D3.T2: honor config.tunnel.idle_timeout / keepalive_interval. On parse
+    // failure we keep the daemon up using the built-in defaults and log a
+    // warning that names the bad value, so operators see the problem in the
+    // log instead of having a daemon that refuses to start.
+    let idle_timeout = match config::parse_duration_str(&config.tunnel.idle_timeout) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                "invalid tunnel.idle_timeout '{}': {} — falling back to default {:?}",
+                config.tunnel.idle_timeout, e, DEFAULT_IDLE_TIMEOUT
+            );
+            DEFAULT_IDLE_TIMEOUT
+        }
+    };
+    let keepalive_interval = match config::parse_duration_str(&config.tunnel.keepalive_interval) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                "invalid tunnel.keepalive_interval '{}': {} — falling back to default {:?}",
+                config.tunnel.keepalive_interval, e, DEFAULT_KEEPALIVE_INTERVAL
+            );
+            DEFAULT_KEEPALIVE_INTERVAL
+        }
+    };
+    let tunnel_pool = Arc::new(Mutex::new(TunnelPool::with_timeouts(
+        config.tunnel.max_tunnels,
+        idle_timeout,
+        keepalive_interval,
+    )));
+    info!(
+        "tunnel pool: max {} tunnels, idle_timeout={:?}, keepalive={:?}",
+        config.tunnel.max_tunnels, idle_timeout, keepalive_interval
+    );
 
     // Shutdown channel
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
@@ -271,15 +302,59 @@ pub async fn run_daemon(
     });
 
     // ── Spawn GC task ───────────────────────────────────────────────────
+    // Two responsibilities, both on the same ~GC_INTERVAL cadence:
+    //   1. Reap expired VIP allocations from the DNS resolver state.
+    //   2. D3.T2: tear down tunnels whose `last_activity` exceeded the
+    //      configured `idle_timeout`. We snapshot the idle-name list under
+    //      the lock, then drop and re-take it per removal so a slow GC tick
+    //      can't block other tunnel operations for the full iteration.
     let gc_state = dns_state.clone();
+    let gc_tunnel_pool = tunnel_pool.clone();
     let gc_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(GC_INTERVAL);
         loop {
             interval.tick().await;
-            let mut st = gc_state.lock().await;
-            let freed = st.vip_pool.gc_expired();
-            if freed > 0 {
-                debug!("GC: freed {} expired VIP allocations", freed);
+
+            // VIP GC.
+            {
+                let mut st = gc_state.lock().await;
+                let freed = st.vip_pool.gc_expired();
+                if freed > 0 {
+                    debug!("GC: freed {} expired VIP allocations", freed);
+                }
+            }
+
+            // D3.T2: idle-tunnel teardown. Snapshot names + last_activity
+            // metadata under one lock, then drop the guard before remove()
+            // so we don't hold the mutex across multiple operations.
+            let idle_names: Vec<(String, u64)> = {
+                let pool = gc_tunnel_pool.lock().await;
+                pool.idle_tunnels()
+                    .into_iter()
+                    .map(|name| {
+                        let secs = pool
+                            .get(&name)
+                            .map(|t| t.last_activity.elapsed().as_secs())
+                            .unwrap_or(0);
+                        (name, secs)
+                    })
+                    .collect()
+            };
+
+            for (name, last_activity_secs) in idle_names {
+                let mut pool = gc_tunnel_pool.lock().await;
+                if pool.remove(&name).is_some() {
+                    // Structured event for the audit story in the D3 plan:
+                    // "on idle teardown, the daemon logs a structured
+                    //  idle_teardown event". Emitted per-tunnel so the
+                    //  log is useful even when several tunnels reap at once.
+                    info!(
+                        target: "idle_teardown",
+                        tunnel_name = %name,
+                        last_activity_secs = last_activity_secs,
+                        "tearing down idle tunnel"
+                    );
+                }
             }
         }
     });

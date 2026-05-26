@@ -23,16 +23,28 @@ pub const SERVICE_DESCRIPTION: &str = "Zero Trust Layer Protocol background agen
 /// On non-Windows targets this returns Err with a message containing
 /// "only supported on Windows" so callers can degrade gracefully.
 ///
-/// Rollback contract: install() is two SCM calls (`sc.exe create` then
-/// `sc.exe description`). If `create` succeeds but `description` fails,
-/// the service would otherwise be left half-configured in the SCM
-/// registry, which makes the next `install` call fail with
-/// "service already exists". To preserve the installed-state invariant
-/// (`install()` either fully registers the service or leaves the host
-/// untouched), a failed `description` triggers a compensating
-/// `sc.exe delete` to roll back the partial registration. If the
-/// rollback itself fails, both errors are surfaced via anyhow's context
-/// chain.
+/// Steps (in order):
+/// 1. `harden_token_file_acl()` — ensure `C:\ProgramData\ZTLP\agent.token`
+///    exists with an ACL granting {SYSTEM:F, BUILTIN\Administrators:R,
+///    current-user:R}. This runs FIRST so a failure here means no service
+///    ever gets registered.
+/// 2. `sc.exe create` — register the service with the SCM.
+/// 3. `sc.exe description` — set the friendly description.
+///
+/// Rollback contract: `sc.exe create` then `sc.exe description` form a
+/// two-phase commit. If `create` succeeds but `description` fails, the
+/// service would otherwise be left half-configured in the SCM registry,
+/// which makes the next `install` call fail with "service already exists".
+/// To preserve the installed-state invariant (`install()` either fully
+/// registers the service or leaves the SCM untouched), a failed
+/// `description` triggers a compensating `sc.exe delete` to roll back the
+/// partial registration. If the rollback itself fails, both errors are
+/// surfaced via anyhow's context chain.
+///
+/// Note: the ACL hardening step is NOT rolled back on a later SCM failure.
+/// The token file and its ACL are valid independently of service
+/// registration, the operation is idempotent, and the daemon (next time
+/// it starts) will rotate the token contents anyway.
 pub fn install() -> Result<()> {
     install_impl()
 }
@@ -42,14 +54,160 @@ pub fn install() -> Result<()> {
 /// Idempotent on Windows: if the service does not exist (sc.exe exit 1060)
 /// this is treated as success. On non-Windows targets returns Err with a
 /// message containing "only supported on Windows".
+///
+/// Does NOT delete the token file or alter its ACL — the file persists
+/// across reinstalls so the daemon can rotate the same token rather than
+/// invalidating every existing client session on every reinstall.
 pub fn uninstall() -> Result<()> {
     uninstall_impl()
+}
+
+/// Ensure `C:\ProgramData\ZTLP\agent.token` exists with the hardened ACL
+/// that lets the LocalSystem daemon write it and the install-time user
+/// (plus Administrators) read it.
+///
+/// Idempotent: running twice is safe (icacls overwrites the explicit ACEs).
+///
+/// On non-Windows targets this is a no-op returning `Ok(())`. Rationale:
+/// `install()` already bails out with "only supported on Windows" before
+/// reaching this step, so the only callers on Linux are tests that want
+/// to confirm the function is harmless.
+pub fn harden_token_file_acl() -> Result<()> {
+    harden_token_file_acl_impl()
+}
+
+#[cfg(target_os = "windows")]
+fn harden_token_file_acl_impl() -> Result<()> {
+    use anyhow::Context;
+    use std::fs::OpenOptions;
+    use std::path::Path;
+
+    let dir = Path::new(crate::TOKEN_DIR);
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating token directory {}", dir.display()))?;
+
+    let token_path = crate::TOKEN_FILE;
+    // Touch the file if it doesn't exist. We deliberately do NOT truncate;
+    // the daemon's `ensure_token_file` is the authority on contents.
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(token_path)
+        .with_context(|| format!("touching token file {token_path}"))?;
+
+    // Identify the currently-logged-on user (the principal running the
+    // installer). Prefer environment variables — set by every interactive
+    // login — and fall back to `whoami` if either is unset (e.g. weird
+    // service-account installer scenarios).
+    let current_user =
+        resolve_current_user().context("resolving current user for token-file ACL grant")?;
+
+    // 1) Strip inherited ACEs so we start from a known baseline.
+    run_icacls(token_path, &["/inheritance:r"]).context("icacls /inheritance:r")?;
+
+    // 2) SYSTEM gets full control (the daemon runs as LocalSystem and
+    //    must be able to rotate the token).
+    run_icacls(token_path, &["/grant", "SYSTEM:(F)"]).context("icacls grant SYSTEM:F")?;
+
+    // 3) Administrators get read access (operator can audit / recover).
+    run_icacls(token_path, &["/grant", r"BUILTIN\Administrators:(R)"])
+        .context("icacls grant BUILTIN\\Administrators:R")?;
+
+    // 4) The user who ran the installer gets read access — this is what
+    //    lets the Tauri UI (running in that user's session) read the
+    //    token and authenticate to the LocalSystem-owned daemon.
+    let user_grant = format!("{current_user}:(R)");
+    run_icacls(token_path, &["/grant", &user_grant])
+        .with_context(|| format!("icacls grant {current_user}:R"))?;
+
+    tracing::info!(
+        token_file = token_path,
+        user = %current_user,
+        "hardened token-file ACL"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_icacls(path: &str, extra_args: &[&str]) -> Result<()> {
+    use anyhow::anyhow;
+    use std::process::Command;
+
+    let mut cmd = Command::new("icacls");
+    cmd.arg(path);
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| anyhow!("failed to spawn icacls: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(anyhow!(
+            "icacls {} {:?} failed (exit {:?}): stdout={} stderr={}",
+            path,
+            extra_args,
+            out.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the install-time user as `DOMAIN\USER` (icacls accepts both
+/// DOMAIN\USER and bare USER on a local machine).
+///
+/// Strategy: try `USERNAME` + `USERDOMAIN` env vars first (set by every
+/// interactive Windows login). If either is missing, fall back to
+/// `whoami` and trust whatever it returns.
+#[cfg(target_os = "windows")]
+fn resolve_current_user() -> Result<String> {
+    use anyhow::{anyhow, Context};
+    use std::process::Command;
+
+    if let (Ok(domain), Ok(user)) = (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        if !domain.is_empty() && !user.is_empty() {
+            return Ok(format!("{domain}\\{user}"));
+        }
+    }
+
+    let out = Command::new("whoami")
+        .output()
+        .context("failed to spawn whoami for current-user resolution")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "whoami failed (exit {:?}): stderr={}",
+            out.status.code(),
+            stderr.trim()
+        ));
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        return Err(anyhow!("whoami returned empty output"));
+    }
+    Ok(name)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn harden_token_file_acl_impl() -> Result<()> {
+    // No-op stub. `install()` on non-Windows already bails with
+    // "only supported on Windows" before this is reachable from the
+    // public install flow; tests rely on this being a safe Ok return.
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn install_impl() -> Result<()> {
     use anyhow::{anyhow, Context};
     use std::process::Command;
+
+    // Step 1: harden the token-file ACL BEFORE registering the service.
+    // If this fails, no service gets registered and the operator sees
+    // the icacls error directly.
+    harden_token_file_acl().context("hardening token-file ACL before service registration")?;
 
     let exe = std::env::current_exe().context("locating current executable for service binPath")?;
     // The SCM stores binPath as a single string and later launches it via

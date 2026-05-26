@@ -235,12 +235,12 @@ mod windows_impl {
             );
         }
 
-        let log_dir = PathBuf::from(r"C:\ProgramData\ZTLP\logs");
+        let log_dir = PathBuf::from(crate::TOKEN_DIR).join("logs");
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("creating log dir {}", log_dir.display()))?;
         let log_path = log_dir.join("agent.log");
 
-        let token_path = OsString::from(r"C:\ProgramData\ZTLP\agent.token");
+        let token_path = OsString::from(crate::TOKEN_FILE);
 
         Ok(ChildSpec {
             binary: agent_binary,

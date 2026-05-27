@@ -29,6 +29,8 @@ use std::net::{IpAddr, SocketAddr};
 /// Higher u32 = higher priority = dial first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CandidateClass {
+    /// Loopback (127.0.0.0/8, ::1) — never useful across hosts. Lowest priority.
+    Loopback = 0,
     /// Relay backstop — only used when nothing else works.
     Relay = 50,
     /// NS-observed server-reflexive (the gateway's NAT'd public address).
@@ -131,6 +133,10 @@ fn is_link_local_v4(ip: std::net::Ipv4Addr) -> bool {
 pub fn classify(addr: SocketAddr, client_subnets: &[(IpAddr, u8)]) -> CandidateClass {
     match addr.ip() {
         IpAddr::V4(v4) => {
+            // Loopback short-circuits — useless across hosts, lowest priority.
+            if v4.is_loopback() {
+                return CandidateClass::Loopback;
+            }
             // Same-subnet trumps everything.
             if ip_in_any_subnet(IpAddr::V4(v4), client_subnets) {
                 return CandidateClass::HostSameSubnet;
@@ -148,6 +154,10 @@ pub fn classify(addr: SocketAddr, client_subnets: &[(IpAddr, u8)]) -> CandidateC
             CandidateClass::HostPublicV4
         }
         IpAddr::V6(v6) => {
+            // Loopback short-circuits — useless across hosts, lowest priority.
+            if v6.is_loopback() {
+                return CandidateClass::Loopback;
+            }
             // fe80::/10 — link-local
             let seg0 = v6.segments()[0];
             if (seg0 & 0xffc0) == 0xfe80 {
@@ -406,5 +416,25 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             0
         ));
+    }
+
+    // ---------- Test 16 (T4) ----------
+    #[test]
+    fn classify_loopback_v4_returns_priority_zero() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "127.0.0.1:23095".parse().unwrap();
+        let class = classify(addr, &[]);
+        assert_eq!(class, CandidateClass::Loopback);
+        assert_eq!(class.priority(), 0);
+    }
+
+    // ---------- Test 17 (T4) ----------
+    #[test]
+    fn classify_loopback_v6_returns_priority_zero() {
+        use std::net::SocketAddr;
+        let addr: SocketAddr = "[::1]:23095".parse().unwrap();
+        let class = classify(addr, &[]);
+        assert_eq!(class, CandidateClass::Loopback);
+        assert_eq!(class.priority(), 0);
     }
 }

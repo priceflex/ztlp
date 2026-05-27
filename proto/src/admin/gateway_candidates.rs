@@ -54,6 +54,7 @@ pub fn class_short_name(class: CandidateClass) -> &'static str {
         | CandidateClass::HostLinkLocalV6 => "host",
         CandidateClass::ServerReflexive => "srflx",
         CandidateClass::Relay => "relay",
+        CandidateClass::Loopback => "lo",
     }
 }
 

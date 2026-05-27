@@ -120,3 +120,14 @@ pub mod transport;
 pub mod tunnel;
 #[cfg(feature = "tokio-runtime")]
 pub mod vip;
+
+// ── Convenience re-exports for the LIST_RELAYS (0x0D) wire protocol ───
+// Hoisted so callers like `cmd_connect` (R2) can do
+// `use ztlp_proto::{encode_list_relays_request, query_ns_for_relays, RelayListing};`
+// without having to walk through `punch::`.
+#[cfg(feature = "tokio-runtime")]
+pub use punch::{
+    decode_list_relays_request, decode_list_relays_response, encode_list_relays_request,
+    encode_list_relays_response, query_ns_for_relays, RelayListing, MAX_LIST_RELAYS_COUNT,
+    NS_LIST_RELAYS,
+};

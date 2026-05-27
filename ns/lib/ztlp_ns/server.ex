@@ -251,6 +251,25 @@ defmodule ZtlpNs.Server do
     <<0x06>>  # ACK
   end
 
+  # LIST_RELAYS query (0x0D) — return registered relays, optionally scoped by zone.
+  #
+  # Wire format (request):
+  #   <<0x0D, requester_node_id::binary-16, zone_len::8, zone::binary-zone_len>>
+  #   - zone_len may be 0 to request relays across all zones (NS-policy capped)
+  #
+  # Wire format (response):
+  #   <<0x0D, count::8, [<<addr_family::8, addr::binary-4or16, port::16,
+  #                          region_len::8, region::binary-region_len>>]*>>
+  #   - count is u8, max 32 relays per response
+  #
+  # R1: returns an empty list — the relay registration source will be wired in
+  # R2 once the bench validates the wire format end-to-end.
+  defp process_query(<<0x0D, _requester_node_id::binary-size(16), zone_len::8,
+                       _zone::binary-size(zone_len)>>, _source) do
+    relays = []
+    encode_list_relays_response(relays)
+  end
+
   # Admin query (0x13) — list records or query audit log
   #
   # Wire format variants:
@@ -899,6 +918,28 @@ defmodule ZtlpNs.Server do
     addrs_bin = encode_addr_list(Enum.take(unique, count))
 
     <<0x0A, count::8, addrs_bin::binary>>
+  end
+
+  # Encode LIST_RELAYS (0x0D) response.
+  #
+  # Accepts a list of relay maps shaped like:
+  #   %{addr: {ip_tuple, port}, region: binary}
+  # where ip_tuple is either a 4-tuple (IPv4) or 8-tuple (IPv6).
+  #
+  # Caps the list at 32 entries (MAX_LIST_RELAYS_COUNT) per response.
+  defp encode_list_relays_response(relays) when is_list(relays) do
+    capped = Enum.take(relays, 32)
+    count = length(capped)
+
+    body =
+      Enum.reduce(capped, <<>>, fn %{addr: {ip, port}, region: region}, acc ->
+        addr_bin = encode_addr(ip, port)
+        region_bin = if is_binary(region), do: region, else: to_string(region)
+        region_len = byte_size(region_bin)
+        acc <> addr_bin <> <<region_len::8, region_bin::binary>>
+      end)
+
+    <<0x0D, count::8, body::binary>>
   end
 
   defp encode_addr_list(addrs) do

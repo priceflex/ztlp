@@ -323,3 +323,39 @@ cargo build --release
 # Run tests to verify nothing is broken
 cargo test
 ```
+
+---
+
+## Z2LS Windows gateway deploy scripts (v0.32, added 2026-05-28)
+
+`deploy-z2ls-v032.ps1` and `rollback-z2ls.ps1` are NSSM-based deployment scripts for the Z2LS Windows gateway at `10.170.3.111`. Captured 2026-05-28 during v0.32 bench validation — see [`docs/v0.32.0-bench-validation.md`](../docs/v0.32.0-bench-validation.md#update-2026-05-28--z2ls-windows-gateway-bench-result).
+
+**Workflow:**
+
+```powershell
+# Stage the new binary
+scp ztlp.exe trs@10.170.3.111:Downloads\ztlp-v032.exe
+
+# Stage the script
+scp deploy-z2ls-v032.ps1 trs@10.170.3.111:deploy-z2ls-v032.ps1
+
+# Run (as Administrator)
+ssh trs@10.170.3.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\deploy-z2ls-v032.ps1'
+
+# Emergency rollback
+ssh trs@10.170.3.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\rollback-z2ls.ps1'
+```
+
+**Pitfalls captured (DO NOT REPEAT):**
+
+1. **`nssm get AppParameters` returns UTF-16 raw bytes.** Every character is followed by `\0`. If you do `$x = nssm get …; nssm set … "$x --new-flag"` you get garbage parameters and the service won't start. **Always rewrite from a clean string literal.** See `$BaseParams` in `deploy-z2ls-v032.ps1`.
+
+2. **Unicode in `Write-Host` strings gets mangled** through the SSH-to-PowerShell encoding round-trip. Use `[OK]` / `[!!]` ASCII markers instead of `✓` / `⚠`.
+
+3. **Service start can take >5 seconds.** Loop with `$svc.Refresh()` up to 15s before declaring failure.
+
+**Service identity:**
+- Service: `ztlp_listener` (NSSM-managed)
+- Binary path: `C:\TRS_Tools\ztlp\ztlp.exe`
+- NSSM path: `C:\TRS_Tools\ztlp\nssm.exe`
+- Log path: `C:\TRS_Tools\ztlp\logs\ztlp-listener.out.log`

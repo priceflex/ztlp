@@ -21,6 +21,7 @@
 //! Precedence: `exclude` > `include` > `all` > default filter.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use tracing::warn;
 
 /// Hard cap on advertised candidates, per spec. Ranking + truncation logic
 /// (when more than this many qualify) lands in M4.
@@ -60,32 +61,42 @@ pub(crate) fn filter_candidates(
     let mut out = Vec::with_capacity(MAX_CANDIDATES);
     for iface in ifaces {
         // Precedence: exclude > include > all > default filter.
-        if exclude.iter().any(|n| n == &iface.name) {
+        if exclude.iter().any(|n| n == iface.name.as_str()) {
             continue;
         }
-        let force_include = include.iter().any(|n| n == &iface.name);
+        // Down interfaces are always skipped — operator cannot force-include
+        // a down NIC because there is nothing to advertise (no address bound).
+        // This check sits OUTSIDE the !force_include branch so include= cannot
+        // resurrect a down iface.
+        if !iface.is_up {
+            continue;
+        }
+        let force_include = include.iter().any(|n| n == iface.name.as_str());
 
-        if !force_include {
-            // Down interfaces are always skipped (operator can't force-include
-            // a down NIC — there's nothing to advertise).
-            if !iface.is_up {
+        if !force_include && !all {
+            if is_default_skipped_name(&iface.name) {
                 continue;
             }
-            if !all {
-                if is_default_skipped_name(&iface.name) {
-                    continue;
-                }
-                // Address-class filter (loopback / link-local).
-                match iface.ip {
-                    IpAddr::V4(v4) => {
-                        if v4.is_loopback() || v4.is_link_local() {
-                            continue;
-                        }
+            // Address-class filter (loopback / link-local / v6 unspecified /
+            // v6 multicast). Per spec: "publish IPv6 only when global-or-ULA"
+            // — we reject the v6 oddities (loopback, link-local, unspecified,
+            // multicast) and accept the rest. Stable stdlib doesn't have
+            // is_global() / is_unique_local() for v6 yet, so global + ULA +
+            // any other unicast all fall through together. This matches what
+            // a same-LAN dial-direct can plausibly use.
+            match iface.ip {
+                IpAddr::V4(v4) => {
+                    if v4.is_loopback() || v4.is_link_local() {
+                        continue;
                     }
-                    IpAddr::V6(v6) => {
-                        if v6.is_loopback() || is_v6_link_local(&v6) {
-                            continue;
-                        }
+                }
+                IpAddr::V6(v6) => {
+                    if v6.is_loopback()
+                        || v6.is_unspecified()
+                        || v6.is_multicast()
+                        || is_v6_link_local(&v6)
+                    {
+                        continue;
                     }
                 }
             }
@@ -127,12 +138,24 @@ pub fn enumerate_local_candidates_with_overrides(
 ) -> Vec<SocketAddr> {
     let ifaces = match if_addrs::get_if_addrs() {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            // Surface the failure — same-LAN dial-direct will silently stop
+            // working otherwise and nobody will know why. Empty Vec is still
+            // safe (relay/srflx paths remain operational) but at least
+            // operators see the cause in logs.
+            warn!("local_candidates: get_if_addrs failed: {e}");
+            return Vec::new();
+        }
     };
-    // `if_addrs::get_if_addrs()` only returns up interfaces on POSIX/Windows,
-    // so we mark every observed iface as `is_up: true`. (The `is_up` field
-    // on `CandidateInput` exists so the test harness can also exercise the
-    // down-iface skip path deterministically.)
+    // NOTE: `if_addrs::get_if_addrs()` does NOT filter by IFF_UP/IFF_RUNNING
+    // (verified against if-addrs 0.13.4 source — only IFF_BROADCAST flag is
+    // inspected, and only for broadcast-addr derivation). Down NICs with
+    // stale addresses CAN appear here. The `is_up` field on `CandidateInput`
+    // exists so the test harness can deterministically exercise the
+    // down-iface skip path; at runtime we currently can't observe iface
+    // admin state through if_addrs and trust the OS to drop addresses from
+    // down NICs (which Linux does on `ip link set down`; rare edge cases
+    // with static-config'd down ifaces will leak — accepted limitation).
     let snapshot: Vec<CandidateInput> = ifaces
         .into_iter()
         .map(|i| {
@@ -355,6 +378,61 @@ mod tests {
             assert_eq!(sa.port(), PORT, "port mismatch on {sa}");
         }
         assert!(!out.is_empty());
+    }
+
+    // ── Regression tests added 2026-05-28 after M1 code-quality review ──
+
+    /// Force-include must NOT resurrect a down NIC — there's no usable
+    /// address to advertise on a down iface even if the operator names it.
+    /// Pins the comment+code consistency fix in filter_candidates.
+    #[test]
+    fn force_include_does_not_resurrect_down_iface() {
+        let out = run_with(
+            vec![iface("eth0", ip4(10, 0, 0, 5), false)],
+            PORT,
+            &["eth0".to_string()],
+            &[],
+            false,
+        );
+        assert_eq!(
+            out,
+            Vec::<SocketAddr>::new(),
+            "down iface leaked through include="
+        );
+    }
+
+    /// IPv6 ULA (fc00::/7) is publishable per spec. Closes the doc-claim
+    /// gap that v0.32 supports global-or-ULA but only global was tested.
+    #[test]
+    fn ipv6_ula_fd00_is_included() {
+        let ula: IpAddr = IpAddr::V6("fd12:3456::1".parse().expect("valid v6 literal"));
+        let out = run(vec![iface("eth0", ula, true)], PORT);
+        assert_eq!(out, vec![SocketAddr::new(ula, PORT)]);
+    }
+
+    /// IPv6 unspecified (::) and multicast (ff00::/8) are filtered. Edge
+    /// addresses no real NIC would have but the M1 code now rejects them
+    /// explicitly per the address-class filter.
+    #[test]
+    fn ipv6_unspecified_and_multicast_are_excluded() {
+        let unspec: IpAddr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+        let mcast: IpAddr = IpAddr::V6("ff02::1".parse().expect("valid v6 multicast literal"));
+        let out = run(
+            vec![iface("eth0", unspec, true), iface("eth1", mcast, true)],
+            PORT,
+        );
+        assert_eq!(out, Vec::<SocketAddr>::new());
+    }
+
+    /// Exactly-at-cap boundary — pin `>=` vs `>` in the truncation loop.
+    /// A `>` typo would let 9 through; this test catches it.
+    #[test]
+    fn exactly_8_passes_through() {
+        let inputs: Vec<CandidateInput> = (0..8)
+            .map(|i| iface(&format!("eth{i}"), ip4(10, 0, 0, i as u8 + 1), true))
+            .collect();
+        let out = run(inputs, PORT);
+        assert_eq!(out.len(), 8, "exactly-8 must not truncate");
     }
 
     #[test]

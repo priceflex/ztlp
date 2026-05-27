@@ -61,6 +61,7 @@ pub mod packet_router;
 pub mod pipeline;
 pub mod pmtu;
 pub mod pqkem;
+pub mod r3_pool_consult;
 pub mod reject;
 pub mod rekey;
 pub mod relay_pool;

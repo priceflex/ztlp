@@ -2862,6 +2862,21 @@ async fn cmd_connect(
 
         let start_time = Instant::now();
 
+        // R3: Consult relay_pool.primary() ONCE per outer handshake attempt so
+        // every retransmit lands on the same relay endpoint (the relay state
+        // machine MUST NOT see traffic jump mid-handshake). On a fresh
+        // `cmd_connect` invocation the pool returns its currently-healthy
+        // primary; if that primary turns out to be dead, the
+        // `report_handshake_failure` call at the error sites below shifts the
+        // pool's primary for the NEXT invocation. We fall back to `send_addr`
+        // when no pool was created (legacy path with no relay configured).
+        let attempt_addr: std::net::SocketAddr = if let Some(orchestrator) = &relay_pool {
+            let pool_guard = orchestrator.lock().await;
+            pool_guard.pool().primary().unwrap_or(send_addr)
+        } else {
+            send_addr
+        };
+
         // Message 1: HELLO (with retransmit on timeout)
         eprintln!("\n{}", c_dim("→ Sending HELLO (message 1/3)..."));
         let msg1 = ctx.write_message(&[])?;
@@ -2876,7 +2891,7 @@ async fn cmd_connect(
         }
         let mut pkt1 = hello_hdr.serialize();
         pkt1.extend_from_slice(&msg1);
-        node.send_raw(&pkt1, send_addr).await?;
+        node.send_raw(&pkt1, attempt_addr).await?;
 
         // Message 2: receive HELLO_ACK (with retransmit of HELLO on timeout)
         eprintln!("{}", c_dim("← Waiting for HELLO_ACK (message 2/3)..."));
@@ -2897,11 +2912,26 @@ async fn cmd_connect(
                     // Not a HELLO_ACK for our session — ignore and keep waiting
                     continue;
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    // Socket error during handshake recv — pool sees this as a
+                    // handshake failure against `attempt_addr`.
+                    if let Some(orchestrator) = &relay_pool {
+                        let mut pool_guard = orchestrator.lock().await;
+                        pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+                    }
+                    return Err(e.into());
+                }
                 Err(_) => {
                     // Timeout — retransmit HELLO
                     retries += 1;
                     if retries > MAX_HANDSHAKE_RETRIES {
+                        // Exhausted retransmits: this attempt_addr is unhealthy
+                        // — report so the next cmd_connect call shifts to a
+                        // different primary.
+                        if let Some(orchestrator) = &relay_pool {
+                            let mut pool_guard = orchestrator.lock().await;
+                            pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+                        }
                         return Err("handshake failed: no HELLO_ACK after retransmits".into());
                     }
                     debug!(
@@ -2914,7 +2944,7 @@ async fn cmd_connect(
                         retries,
                         MAX_HANDSHAKE_RETRIES
                     );
-                    node.send_raw(&pkt1, send_addr).await?; // exact same bytes
+                    node.send_raw(&pkt1, attempt_addr).await?; // exact same bytes
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
                 }
             }
@@ -2945,14 +2975,28 @@ async fn cmd_connect(
         final_hdr.payload_len = msg3.len() as u16;
         let mut pkt3 = final_hdr.serialize();
         pkt3.extend_from_slice(&msg3);
-        node.send_raw(&pkt3, send_addr).await?;
+        node.send_raw(&pkt3, attempt_addr).await?;
 
         // Finalize — handshake should be complete after sending msg3
         if !ctx.is_finished() {
+            // Treat incomplete handshake as a failure against the relay.
+            if let Some(orchestrator) = &relay_pool {
+                let mut pool_guard = orchestrator.lock().await;
+                pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+            }
             return Err("handshake did not complete".into());
         }
 
         let handshake_time = start_time.elapsed();
+        // R3: Record success against the relay so the pool's RTT EWMA and
+        // health counters reflect a working primary. Done AFTER `is_finished`
+        // so a half-completed exchange doesn't get credited.
+        if let Some(orchestrator) = &relay_pool {
+            let mut pool_guard = orchestrator.lock().await;
+            pool_guard
+                .pool_mut()
+                .report_handshake_success(attempt_addr, handshake_time);
+        }
         let peer_node_id = NodeId::from_bytes(recv2_header.src_node_id);
         let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
 

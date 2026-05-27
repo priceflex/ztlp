@@ -261,6 +261,112 @@ These are two flags on opposite ends of a ZTLP connection:
 
 If you see a `--forward NAME:H:P` flag on the listener and a `--service NAME` flag on the client, they pair: `--service ssh` from the client tells the gateway to forward to `127.0.0.1:22` from its `--forward ssh:127.0.0.1:22` config.
 
+### What `--service` values can operators use?
+
+This subsection is for operators reading the doc to figure out what to type on
+`ztlp connect`. **Cookbook authors:** you don't render anything from this — but
+the cookbook's `node['ztlp']['forwards']` attribute is the source of truth for
+which values are LEGAL. If a name isn't in `forwards`, the gateway will reject
+the connect attempt.
+
+#### The rule
+
+`--service NAME` on the client must match a `--forward NAME:HOST:PORT` entry on
+the Z2LS gateway. For the default Z2LS deploy the gateway runs:
+
+```
+--forward ssh:127.0.0.1:22
+```
+
+so the ONLY legal value is `--service ssh`.
+
+#### Adding more services (cookbook attribute change)
+
+To expose RDP, WinRM, etc., the cookbook's `node['ztlp']['forwards']` array
+needs the corresponding entries. Common Windows services worth exposing:
+
+| `--service NAME` | Gateway-side `--forward` | What the operator gets |
+|---|---|---|
+| `ssh` | `ssh:127.0.0.1:22` | OpenSSH shell — current default |
+| `rdp` | `rdp:127.0.0.1:3389` | Windows Remote Desktop |
+| `winrm` | `winrm:127.0.0.1:5985` | PowerShell remoting (HTTP) |
+| `winrm-tls` | `winrm-tls:127.0.0.1:5986` | PowerShell remoting (HTTPS) |
+| `smb` | `smb:127.0.0.1:445` | File sharing — see security note below |
+| `vnc` | `vnc:127.0.0.1:5900` | TightVNC / RealVNC if installed |
+| `http` | `http:127.0.0.1:80` | If the box runs IIS / a local webapp |
+| `https` | `https:127.0.0.1:443` | Same for TLS |
+| `ipp` | `ipp:127.0.0.1:631` | Network printing |
+
+Operator-side examples assuming the above are all enabled:
+
+```bash
+# RDP — the operator runs mstsc to 127.0.0.1:3389 after this connects
+ztlp connect --multi-candidate --ns-server 16.147.41.195:23096 \
+    --service rdp -L 3389:127.0.0.1:3389 \
+    z2ls-desktop-lrc8dkh-dcc1e2.z2ls-final-e2e.techrockstars.ztlp
+
+# WinRM (PowerShell remoting over HTTP)
+ztlp connect --multi-candidate --ns-server 16.147.41.195:23096 \
+    --service winrm -L 5985:127.0.0.1:5985 \
+    z2ls-desktop-lrc8dkh-dcc1e2.z2ls-final-e2e.techrockstars.ztlp
+# then: Enter-PSSession -ComputerName localhost -Port 5985
+```
+
+#### Name validation rules (wire-level)
+
+From `proto/src/tunnel.rs#parse_forward_arg`:
+
+- **Characters:** `a-z A-Z 0-9 - _` only. Dots, spaces, and dashes-at-start are rejected.
+- **Length:** 1 to 253 bytes for the `--forward` parse, but **63 bytes** is the wire cap
+  (`CLIENT_ROUTE_MAX_SVC_LEN` in CLIENT_ROUTE frames) — keep names short.
+- **Encoding:** ASCII only. UTF-8 with non-ASCII bytes will be rejected.
+
+So `winrm-tls` is fine. `winrm.tls` (dot) and `Remote Desktop` (space) are not.
+Stick to lowercase-with-dashes slug style.
+
+#### Three quirks operators should know
+
+1. **The magic `_default` service.** If the listener has `--forward 127.0.0.1:22`
+   (no `NAME:` prefix), the gateway registers it under the name `_default`. A
+   client that omits `--service` entirely lands there. We don't use this on Z2LS —
+   the cookbook always names `ssh:` — but it's how some bench setups work.
+
+2. **The gateway picks the forward by name; the client controls which.** Z2LS
+   doesn't have to expose every service. The cookbook attribute
+   `node['ztlp']['forwards']` is the source of truth for which names are valid
+   on this machine. If an operator tries `--service rdp` against a gateway whose
+   cookbook only has `ssh:127.0.0.1:22` in `forwards`, the connect attempt fails
+   with "service not found" in the gateway logs.
+
+3. **`--service` is also gated by `policy.toml`.** Today policy says:
+   ```toml
+   [[services]]
+   name = "ssh"
+   allow = ["*"]
+   ```
+   For each new `--forward` you add, you also need a matching `[[services]]`
+   block in `policy.toml`. Otherwise the gateway rejects the CLIENT_ROUTE with
+   "service not allowed" even though the forward exists. The cookbook should
+   keep `forwards` and `services` in sync — see §10 future-work #1 (per-service
+   RBAC) for the long-form version of this.
+
+#### Security note before expanding services
+
+Adding RDP or SMB to Z2LS means **anyone with a valid ZTLP identity in your
+zone can hit those ports**. Today `allow = ["*"]` means every enrolled device
+gets access to every forwarded service.
+
+If you want service-by-service RBAC ("techs get ssh+rdp, admins also get smb"),
+that's the v0.32.2 NS `group_index` work that isn't fully wired through policy
+yet. Until it is, **the policy layer is binary: enrolled = access,
+not-enrolled = no access** — per service granularity comes later.
+
+For Z2LS today the recommendation is to keep it to `ssh` and optionally `rdp`.
+SMB-over-ZTLP works but tunneling SMB across the internet is a strong "are you
+sure?" question — even with ZTLP's Noise encryption, SMB is chatty enough that
+a misbehaving client could cause noticeable latency on the host, and you lose
+the natural perimeter that "SMB only on the LAN" gives you.
+
 ### Computing `--service-name`
 
 Per the live deploy: `z2ls-desktop-lrc8dkh-dcc1e2`. The shape is:

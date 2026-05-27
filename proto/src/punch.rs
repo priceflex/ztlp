@@ -237,6 +237,58 @@ pub fn decode_peer_endpoints_response(data: &[u8]) -> Result<Vec<PeerEndpoint>, 
     Ok(endpoints)
 }
 
+/// Decode a PUNCH_REPORT packet — symmetric inverse of
+/// [`encode_punch_report`].
+///
+/// Used by the NS to track gateway-reported endpoints, and by the M8
+/// compatibility-matrix tests to pin the wire format. The parser is
+/// length-bounded: it will stop early if the byte stream is truncated
+/// rather than panic.
+///
+/// Wire format:
+/// ```text
+/// [0x0C]                     query type
+/// [node_id: 16B]             reporter's NodeID
+/// [reported_count: 1B]       number of reported endpoints
+/// [reported_addrs...]        endpoint entries
+/// ```
+///
+/// Returns `None` if the type byte is wrong or the buffer is too
+/// short to even hold the header. Truncated address entries past
+/// the header are silently dropped (parser-tolerant by design — this
+/// is the same posture the Elixir NS parser takes).
+pub fn decode_punch_report(data: &[u8]) -> Option<(NodeId, Vec<SocketAddr>)> {
+    if data.is_empty() || data[0] != NS_PUNCH_REPORT {
+        return None;
+    }
+    // 1 (type) + 16 (node_id) + 1 (count) = 18
+    if data.len() < 18 {
+        return None;
+    }
+
+    let mut node_id_bytes = [0u8; 16];
+    node_id_bytes.copy_from_slice(&data[1..17]);
+    let node_id = NodeId::from_bytes(node_id_bytes);
+
+    let count = data[17] as usize;
+    let mut endpoints = Vec::with_capacity(count);
+    let mut pos = 18;
+    for _ in 0..count {
+        if pos >= data.len() {
+            break;
+        }
+        match decode_addr(&data[pos..]) {
+            Some((addr, consumed)) => {
+                endpoints.push(addr);
+                pos += consumed;
+            }
+            None => break,
+        }
+    }
+
+    Some((node_id, endpoints))
+}
+
 /// Decode a PUNCH_NOTIFY message from NS.
 ///
 /// Wire format:
@@ -1126,6 +1178,80 @@ mod tests {
         assert_eq!(pkt[0], NS_PUNCH_REPORT);
         assert_eq!(pkt[17], 1);
         assert_eq!(pkt.len(), 18 + 7); // 1 IPv4 addr
+    }
+
+    // ── decode_punch_report (M8) ─────────────────────────────────────
+
+    #[test]
+    fn test_decode_punch_report_empty_roundtrip() {
+        let node_id = NodeId::from_bytes([0xAA; 16]);
+        let pkt = encode_punch_report(&node_id, &[]);
+        let (decoded_id, addrs) = decode_punch_report(&pkt).unwrap();
+        assert_eq!(decoded_id, node_id);
+        assert!(addrs.is_empty());
+    }
+
+    #[test]
+    fn test_decode_punch_report_multi_v4_roundtrip() {
+        let node_id = NodeId::from_bytes([0x55; 16]);
+        let addrs: Vec<SocketAddr> = vec![
+            "10.0.0.5:23095".parse().unwrap(),
+            "192.168.1.5:23095".parse().unwrap(),
+            "100.64.1.5:23095".parse().unwrap(),
+        ];
+        let pkt = encode_punch_report(&node_id, &addrs);
+        let (decoded_id, decoded_addrs) = decode_punch_report(&pkt).unwrap();
+        assert_eq!(decoded_id, node_id);
+        assert_eq!(decoded_addrs, addrs);
+    }
+
+    #[test]
+    fn test_decode_punch_report_mixed_v4_v6_roundtrip() {
+        let node_id = NodeId::from_bytes([0x99; 16]);
+        let addrs: Vec<SocketAddr> = vec![
+            "10.0.0.5:23095".parse().unwrap(),
+            "[2001:db8::1]:23095".parse().unwrap(),
+        ];
+        let pkt = encode_punch_report(&node_id, &addrs);
+        let (decoded_id, decoded_addrs) = decode_punch_report(&pkt).unwrap();
+        assert_eq!(decoded_id, node_id);
+        assert_eq!(decoded_addrs, addrs);
+    }
+
+    #[test]
+    fn test_decode_punch_report_rejects_wrong_type_byte() {
+        let mut pkt = vec![0u8; 18];
+        pkt[0] = 0xFF; // not NS_PUNCH_REPORT
+        assert!(decode_punch_report(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_decode_punch_report_rejects_too_short() {
+        // Only 5 bytes — far shorter than the 18-byte header.
+        let pkt = vec![NS_PUNCH_REPORT, 0, 0, 0, 0];
+        assert!(decode_punch_report(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_decode_punch_report_truncated_addrs_drops_extras() {
+        // Claim 3 addrs, supply 1 complete + truncated tail.
+        // Parser should yield the 1 complete addr and stop.
+        let node_id = NodeId::from_bytes([0x33; 16]);
+        let mut pkt = Vec::new();
+        pkt.push(NS_PUNCH_REPORT);
+        pkt.extend_from_slice(node_id.as_bytes());
+        pkt.push(3); // claim 3
+                     // One full IPv4: 10.0.0.5:23095
+        pkt.push(4);
+        pkt.extend_from_slice(&[10, 0, 0, 5]);
+        pkt.extend_from_slice(&23095u16.to_be_bytes());
+        // Truncated next addr — only family byte, no rest.
+        pkt.push(4);
+
+        let (decoded_id, addrs) = decode_punch_report(&pkt).unwrap();
+        assert_eq!(decoded_id, node_id);
+        assert_eq!(addrs.len(), 1, "stops at truncation, no panic");
+        assert_eq!(addrs[0], "10.0.0.5:23095".parse::<SocketAddr>().unwrap());
     }
 
     // ── Wire Encoding Roundtrip ─────────────────────────────────────

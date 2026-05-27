@@ -47,6 +47,7 @@ pub mod error;
 pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
+pub mod h10_defaults;
 pub mod handshake;
 pub mod http_injector;
 pub mod identity;
@@ -61,6 +62,7 @@ pub mod packet_router;
 pub mod pipeline;
 pub mod pmtu;
 pub mod pqkem;
+pub mod r3_pool_consult;
 pub mod reject;
 pub mod rekey;
 pub mod relay_pool;
@@ -104,6 +106,10 @@ pub mod policy;
 #[cfg(feature = "tokio-runtime")]
 pub mod punch;
 #[cfg(feature = "tokio-runtime")]
+pub mod punch_agent;
+#[cfg(all(feature = "tokio-runtime", feature = "quic-transport"))]
+pub mod punch_socket;
+#[cfg(feature = "tokio-runtime")]
 pub mod relay;
 // Nebula-pivot R1: real module deleted; `send_controller.rs` is a tiny stub shim for vip.rs.
 #[cfg(feature = "tokio-runtime")]
@@ -116,3 +122,14 @@ pub mod transport;
 pub mod tunnel;
 #[cfg(feature = "tokio-runtime")]
 pub mod vip;
+
+// ── Convenience re-exports for the LIST_RELAYS (0x0D) wire protocol ───
+// Hoisted so callers like `cmd_connect` (R2) can do
+// `use ztlp_proto::{encode_list_relays_request, query_ns_for_relays, RelayListing};`
+// without having to walk through `punch::`.
+#[cfg(feature = "tokio-runtime")]
+pub use punch::{
+    decode_list_relays_request, decode_list_relays_response, encode_list_relays_request,
+    encode_list_relays_response, query_ns_for_relays, RelayListing, MAX_LIST_RELAYS_COUNT,
+    NS_LIST_RELAYS,
+};

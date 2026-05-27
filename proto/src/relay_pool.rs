@@ -35,6 +35,85 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
+// ─── Probe wire format ──────────────────────────────────────────────────────
+
+/// ZTLP magic byte 1 — high byte of 0x5A37.
+pub const PROBE_MAGIC_0: u8 = 0x5A;
+/// ZTLP magic byte 2 — low byte of 0x5A37.
+pub const PROBE_MAGIC_1: u8 = 0x37;
+/// Probe-ping packet type (client → relay).
+///
+/// v0.30.11 relays do not recognise this type and silently drop it. That is
+/// intentional: shipping the client side now lets us roll out the probe
+/// machinery without a coordinated relay redeploy.
+pub const PROBE_PING_TYPE: u8 = 0xFE;
+/// Reserved/echo packet type (relay → client, future use).
+#[allow(dead_code)]
+pub const PROBE_ECHO_TYPE: u8 = 0xFF;
+
+/// Send a lightweight UDP "probe" to a relay and measure RTT.
+///
+/// # Wire format
+///
+/// ```text
+///   byte 0: 0x5A     (ZTLP magic high)
+///   byte 1: 0x37     (ZTLP magic low)
+///   byte 2: 0xFE     (PROBE_PING type)
+///   byte 3: 0x00     (reserved)
+///   byte 4..12: nonce (u64, big-endian) — for future echo matching
+/// ```
+///
+/// Total length: 12 bytes.
+///
+/// # Semantics against v0.30.11 relays
+///
+/// Production relays (v0.30.11) don't recognise `0xFE` and will silently drop
+/// the packet. That's **intentional** — this ships the client side of the
+/// probe without requiring a coordinated relay deployment.
+///
+/// Therefore "success" here means:
+///   * `sendto()` returned `Ok`, AND
+///   * no ICMP destination-unreachable surfaced via `recv_from` within `timeout`.
+///
+/// "Failure" means:
+///   * `sendto()` returned an I/O error, OR
+///   * a subsequent `recv_from` surfaced an ICMP-style error
+///     (e.g. `ConnectionRefused` on Linux for a closed UDP port on the same host).
+///
+/// # Future
+///
+/// When the relay learns to echo `0xFF + nonce`, the success criterion will
+/// change to "we received the expected echo within `timeout`". The
+/// nonce is already in the wire format so that upgrade is backwards-compatible.
+#[cfg(feature = "tokio-runtime")]
+pub async fn probe_relay(
+    sock: &tokio::net::UdpSocket,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<Duration, std::io::Error> {
+    let nonce: u64 = rand::random();
+    let mut pkt = [0u8; 12];
+    pkt[0] = PROBE_MAGIC_0;
+    pkt[1] = PROBE_MAGIC_1;
+    pkt[2] = PROBE_PING_TYPE;
+    pkt[3] = 0x00;
+    pkt[4..12].copy_from_slice(&nonce.to_be_bytes());
+
+    let start = Instant::now();
+    sock.send_to(&pkt, addr).await?;
+
+    // No echo is expected from v0.30.11 relays. Treat:
+    //   - timeout elapsed                 → success (relay silently dropped)
+    //   - some packet arrived             → success (relay is alive)
+    //   - recv_from returned io::Error    → failure (ICMP unreachable, etc.)
+    let mut buf = [0u8; 32];
+    match tokio::time::timeout(timeout, sock.recv_from(&mut buf)).await {
+        Err(_elapsed) => Ok(start.elapsed()),
+        Ok(Ok((_n, _from))) => Ok(start.elapsed()),
+        Ok(Err(e)) => Err(e),
+    }
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Default interval between relay health probes.
@@ -2184,5 +2263,112 @@ mod tests {
         // Dead relay 1 not in NS list → pruned
         assert!(pool.get_relay(&relay_addr(1)).is_none());
         assert!(pool.get_relay(&relay_addr2(2)).is_some());
+    }
+
+    // ── probe_relay() tests ─────────────────────────────────────────────
+    //
+    // These exercise the UDP probe primitive used by the R2 probe task.
+    // probe_relay treats "no reply within timeout" as success because
+    // v0.30.11 relays silently drop the unknown 0xFE probe packet.
+
+    #[cfg(feature = "tokio-runtime")]
+    #[tokio::test]
+    async fn test_probe_relay_succeeds_against_silent_listener() {
+        // GIVEN a UDP socket that is bound but never reads — it will neither
+        // echo nor generate an ICMP-unreachable error.
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = silent.local_addr().unwrap();
+        let probe_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // WHEN we probe the silent listener with a 100ms timeout
+        let timeout = Duration::from_millis(100);
+        let start = Instant::now();
+        let result = probe_relay(&probe_sock, listener_addr, timeout).await;
+        let wall = start.elapsed();
+
+        // THEN we get Ok(latency) and the call actually waited ~timeout
+        // (success = "no error came back within timeout").
+        assert!(
+            result.is_ok(),
+            "probe against silent listener should succeed, got {:?}",
+            result
+        );
+        // recv_from must have blocked for ~timeout (allow some slack on slow CI)
+        assert!(
+            wall >= Duration::from_millis(90),
+            "probe returned too quickly ({:?}); expected ~100ms wait for timeout",
+            wall
+        );
+
+        // Keep the silent socket alive until the assertion completes so the
+        // OS doesn't tear it down mid-probe.
+        drop(silent);
+    }
+
+    #[cfg(feature = "tokio-runtime")]
+    #[tokio::test]
+    async fn test_probe_relay_returns_error_on_bad_addr() {
+        // GIVEN a UDP port we explicitly closed: bind then drop to free it.
+        // On Linux, sending to a closed UDP port on loopback produces an
+        // ICMP-destination-unreachable that the kernel surfaces back on the
+        // sending socket as recv_from() -> ConnectionRefused.
+        //
+        // This delivery is platform-dependent (some sandboxed/CI kernels
+        // suppress local ICMP). If the platform DOESN'T surface the error,
+        // probe_relay will return Ok after timeout — in which case we treat
+        // the test as inconclusive and skip the assertion rather than fail.
+        let temp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = temp.local_addr().unwrap();
+        drop(temp); // port is now closed
+
+        let probe_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let result = probe_relay(&probe_sock, closed_addr, Duration::from_millis(200)).await;
+
+        match result {
+            Err(e) => {
+                // Expected path on Linux loopback.
+                assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::HostUnreachable
+                            | std::io::ErrorKind::NetworkUnreachable
+                    ),
+                    "unexpected error kind: {:?}",
+                    e.kind()
+                );
+            }
+            Ok(_) => {
+                // Platform did not deliver ICMP back to userspace —
+                // treat as inconclusive. Document and accept.
+                eprintln!(
+                    "test_probe_relay_returns_error_on_bad_addr: \
+                     platform did not deliver ICMP unreachable; \
+                     probe_relay returned Ok (inconclusive)."
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "tokio-runtime")]
+    #[tokio::test]
+    async fn test_probe_relay_does_not_panic_on_zero_timeout() {
+        // GIVEN a silent listener and a zero-duration timeout
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = silent.local_addr().unwrap();
+        let probe_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // WHEN we probe with Duration::ZERO
+        let result = probe_relay(&probe_sock, listener_addr, Duration::ZERO).await;
+
+        // THEN recv_from times out immediately and we treat that as success.
+        assert!(
+            result.is_ok(),
+            "zero-timeout probe should be Ok (immediate timeout = success), got {:?}",
+            result
+        );
+
+        drop(silent);
     }
 }

@@ -46,8 +46,23 @@ pub const NS_PUNCH_NOTIFY: u8 = 0x0B;
 /// NS endpoint report type.
 pub const NS_PUNCH_REPORT: u8 = 0x0C;
 
-/// Default keepalive interval (25s — below most NAT timeouts of 30-60s).
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+/// NS query / response type for LIST_RELAYS.
+///
+/// Lets a ZTLP client ask NS for the currently registered relay set, optionally
+/// scoped to a zone. Both request and response start with this byte so the
+/// receiver can demux without ambiguity (request always has a 16-byte node_id
+/// after it, response has a u8 count).
+pub const NS_LIST_RELAYS: u8 = 0x0D;
+
+/// Maximum number of relays NS may return in a single LIST_RELAYS response.
+/// The count field is a u8 but we intentionally cap at 32 — this is a hint to
+/// clients, not a routing table, and 32 is more than enough geographic spread.
+pub const MAX_LIST_RELAYS_COUNT: usize = 32;
+
+/// Default keepalive interval (10s — well below typical SD-WAN/conntrack
+/// timeouts of 30-120s. Steve confirmed 10s on 2026-05-27 after the
+/// Z2LS bench showed punctuated stalls under load.).
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 // ─── Error Type ─────────────────────────────────────────────────────
 
@@ -266,6 +281,37 @@ pub fn decode_punch_notify(data: &[u8]) -> Result<(NodeId, Vec<PeerEndpoint>), P
     }
 
     Ok((node_id, endpoints))
+}
+
+/// Build a `PUNCH_NOTIFY` payload — wire format mirror of
+/// `decode_punch_notify`. Exposed for testing the gateway dispatcher
+/// in isolation from the NS server.
+///
+/// In production NS emits these packets directly; the gateway never
+/// builds them. We expose this as `pub` (rather than `pub(crate)` or
+/// `#[cfg(test)]`-only) because the integration test in H6 lives in
+/// `proto/tests/` (an external integration-test target) and needs to
+/// synthesize NS-style packets.
+pub fn encode_punch_notify(requester_node_id: &NodeId, endpoints: &[SocketAddr]) -> Vec<u8> {
+    let count = endpoints.len().min(255) as u8;
+    let mut pkt = Vec::with_capacity(1 + 16 + 1 + count as usize * 7);
+    pkt.push(NS_PUNCH_NOTIFY);
+    pkt.extend_from_slice(requester_node_id.as_bytes());
+    pkt.push(count);
+    for addr in endpoints.iter().take(count as usize) {
+        encode_addr(&mut pkt, *addr);
+    }
+    pkt
+}
+
+/// Test-only alias retained for in-crate tests that imported it
+/// before `encode_punch_notify` got promoted to the public API.
+#[doc(hidden)]
+pub fn encode_punch_notify_for_test(
+    requester_node_id: &NodeId,
+    endpoints: &[SocketAddr],
+) -> Vec<u8> {
+    encode_punch_notify(requester_node_id, endpoints)
 }
 
 /// Check if a packet is a punch packet (single byte 0x00).
@@ -539,6 +585,300 @@ fn decode_addr(data: &[u8]) -> Option<(SocketAddr, usize)> {
             ))
         }
         _ => None,
+    }
+}
+
+// ─── LIST_RELAYS (0x0D) Wire Protocol ───────────────────────────────
+//
+// Co-located in punch.rs because it shares the encode_addr / decode_addr
+// helpers above and the same NS-query → response request/reply shape as
+// PEER_ENDPOINTS. Keeping it in one module avoids a circular dep with
+// relay_pool (which is sync) and keeps the tokio-runtime helpers
+// (`query_ns_for_relays`) next to their wire siblings.
+
+/// A single relay entry as returned by NS LIST_RELAYS.
+///
+/// This is intentionally a thin wire-format struct — it does not carry
+/// the runtime health / load fields of `relay_pool::RelayInfo` because
+/// those fields aren't part of the LIST_RELAYS wire format (R1).
+/// Callers can lift this into a richer `RelayInfo` once they want to
+/// track liveness via probes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayListing {
+    /// Socket address (IPv4 or IPv6) of the relay.
+    pub addr: SocketAddr,
+    /// Geographic region tag (e.g. `"us-west-2"`). May be empty.
+    pub region: String,
+}
+
+/// Encode a LIST_RELAYS request to the NS.
+///
+/// Wire format:
+/// ```text
+/// [0x0D]                      query type
+/// [requester_node_id: 16B]    our NodeID
+/// [zone_len: 1B]              length of zone string (0..=255)
+/// [zone: zone_len bytes]      UTF-8 zone scope; empty = all zones
+/// ```
+pub fn encode_list_relays_request(node_id: &NodeId, zone: &str) -> Vec<u8> {
+    let zone_bytes = zone.as_bytes();
+    let zone_len = zone_bytes.len().min(255) as u8;
+    let mut pkt = Vec::with_capacity(1 + 16 + 1 + zone_len as usize);
+
+    pkt.push(NS_LIST_RELAYS);
+    pkt.extend_from_slice(node_id.as_bytes());
+    pkt.push(zone_len);
+    pkt.extend_from_slice(&zone_bytes[..zone_len as usize]);
+
+    pkt
+}
+
+/// Decode a LIST_RELAYS request (NS-side).
+///
+/// Returns `None` if the buffer is too short, the type byte doesn't match,
+/// or the declared zone length runs past the buffer end.
+pub fn decode_list_relays_request(bytes: &[u8]) -> Option<(NodeId, String)> {
+    // type(1) + node_id(16) + zone_len(1) = 18 bytes minimum
+    if bytes.len() < 18 {
+        return None;
+    }
+    if bytes[0] != NS_LIST_RELAYS {
+        return None;
+    }
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(&bytes[1..17]);
+    let node_id = NodeId::from_bytes(id_bytes);
+
+    let zone_len = bytes[17] as usize;
+    if 18 + zone_len > bytes.len() {
+        return None;
+    }
+    let zone = std::str::from_utf8(&bytes[18..18 + zone_len])
+        .ok()?
+        .to_string();
+    Some((node_id, zone))
+}
+
+/// Encode a LIST_RELAYS response from NS.
+///
+/// Wire format:
+/// ```text
+/// [0x0D]                                response type
+/// [count: 1B]                           number of relays (≤ MAX_LIST_RELAYS_COUNT)
+/// per relay:
+///   [addr_family: 1B]                   4 = IPv4, 6 = IPv6
+///   [addr: 4 or 16B]                    raw address bytes
+///   [port: 2B big-endian]               UDP port
+///   [region_len: 1B]                    length of region tag
+///   [region: region_len bytes]          UTF-8 region tag
+/// ```
+///
+/// If more than [`MAX_LIST_RELAYS_COUNT`] relays are supplied, the encoder
+/// silently truncates to that limit — clients should treat the response as
+/// a hint, not an exhaustive list.
+pub fn encode_list_relays_response(relays: &[RelayListing]) -> Vec<u8> {
+    let count = relays.len().min(MAX_LIST_RELAYS_COUNT);
+    let mut pkt = Vec::with_capacity(2 + count * 32);
+
+    pkt.push(NS_LIST_RELAYS);
+    pkt.push(count as u8);
+
+    for relay in relays.iter().take(count) {
+        encode_addr(&mut pkt, relay.addr);
+
+        let region_bytes = relay.region.as_bytes();
+        let region_len = region_bytes.len().min(255) as u8;
+        pkt.push(region_len);
+        pkt.extend_from_slice(&region_bytes[..region_len as usize]);
+    }
+
+    pkt
+}
+
+/// Decode a LIST_RELAYS response from NS (client-side).
+///
+/// Returns `None` if the buffer is malformed in any of:
+/// - missing/wrong type byte
+/// - missing count byte
+/// - any per-entry field runs past the buffer
+/// - declared addr_family is not 4 or 6
+/// - region bytes aren't valid UTF-8
+pub fn decode_list_relays_response(bytes: &[u8]) -> Option<Vec<RelayListing>> {
+    if bytes.len() < 2 {
+        return None;
+    }
+    if bytes[0] != NS_LIST_RELAYS {
+        return None;
+    }
+    let count = bytes[1] as usize;
+    let mut out = Vec::with_capacity(count);
+    let mut pos = 2;
+
+    for _ in 0..count {
+        // decode_addr validates family + length and returns the consumed count
+        let (addr, consumed) = decode_addr(bytes.get(pos..)?)?;
+        pos += consumed;
+
+        // region_len(1) must be present
+        if pos >= bytes.len() {
+            return None;
+        }
+        let region_len = bytes[pos] as usize;
+        pos += 1;
+        if pos + region_len > bytes.len() {
+            return None;
+        }
+        let region = std::str::from_utf8(&bytes[pos..pos + region_len])
+            .ok()?
+            .to_string();
+        pos += region_len;
+
+        out.push(RelayListing { addr, region });
+    }
+
+    Some(out)
+}
+
+/// Send a LIST_RELAYS request to NS and wait for one matching response.
+///
+/// On success returns the parsed relay listing. Returns `io::Error` if:
+/// - the underlying socket I/O fails
+/// - `timeout` elapses before any matching packet arrives
+/// - the response is malformed or has the wrong type byte
+///
+/// Implementation note: this filters by the first byte (`0x0D`) and ignores
+/// any other packets that may interleave on a shared UDP socket (PUNCH_NOTIFY,
+/// punch bytes, etc.). It only consumes one matching packet then returns.
+pub async fn query_ns_for_relays(
+    sock: &UdpSocket,
+    ns_addr: SocketAddr,
+    node_id: &NodeId,
+    zone: &str,
+    timeout_dur: Duration,
+) -> Result<Vec<RelayListing>, std::io::Error> {
+    let req = encode_list_relays_request(node_id, zone);
+    sock.send_to(&req, ns_addr).await?;
+
+    let mut buf = vec![0u8; 4096];
+
+    let recv_loop = async {
+        loop {
+            let (n, _from) = sock.recv_from(&mut buf).await?;
+            if n >= 1 && buf[0] == NS_LIST_RELAYS {
+                return Ok::<&[u8], std::io::Error>(&buf[..n]);
+            }
+            // Otherwise drop it and keep listening — this is a shared socket
+            // contract; not our packet, not our problem.
+        }
+    };
+
+    match timeout(timeout_dur, recv_loop).await {
+        Ok(Ok(packet)) => decode_list_relays_response(packet).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed LIST_RELAYS response",
+            )
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(_elapsed) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "LIST_RELAYS query timed out",
+        )),
+    }
+}
+
+// ─── Gateway-side responder ─────────────────────────────────────────
+
+/// Default duration for the gateway-side punch response loop.
+///
+/// 10 seconds gives a generous window for the client's QUIC handshake
+/// to traverse the freshly-opened NAT pinhole on every common SD-WAN /
+/// consumer-router NAT. Production wraps this with the punch_timeout
+/// from PunchConfig but the standalone responder uses this default.
+pub const DEFAULT_RESPONDER_DURATION: Duration = Duration::from_secs(10);
+
+/// Interval between successive `PUNCH_BYTE` sends in the responder loop.
+///
+/// 200ms balances "open the pinhole quickly so the client's handshake
+/// doesn't time out waiting" against "don't flood the peer's NAT". With
+/// `DEFAULT_RESPONDER_DURATION = 10s` and 200ms cadence, we send up to
+/// 50 punch bytes per peer endpoint per responder invocation — well
+/// within UDP keepalive budgets.
+pub const RESPONDER_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Gateway-side punch responder.
+///
+/// Sends `PUNCH_BYTE` (`0x00`) to each address in `peer_endpoints`
+/// every [`RESPONDER_INTERVAL`] for at most `duration`. Each send
+/// pokes the peer's NAT so that subsequent QUIC handshake traffic
+/// from this socket (delivered through Quinn) can traverse the
+/// freshly-opened pinhole.
+///
+/// # Behavior
+///
+/// - Sends to ALL endpoints on every tick — peer may sit behind
+///   multiple NATs (IPv4 + IPv6, primary + cellular). The cost is
+///   `endpoints.len()` UDP sends every 200ms, which is negligible
+///   for the typical 1-3 endpoint case.
+/// - Send errors are logged at DEBUG and do NOT terminate the loop.
+///   The whole point is best-effort NAT poking; transient EAGAIN /
+///   permission-denied on one endpoint shouldn't abort the others.
+/// - Returns `Ok(())` after `duration` elapses regardless of whether
+///   the handshake actually traversed — success/failure is observed
+///   by the QUIC connection state machine, not by this function.
+///
+/// # Why not check for incoming punches?
+///
+/// The H3 [`crate::punch_socket::PunchSocket`] wrapper intercepts
+/// inbound `PUNCH_NOTIFY` BEFORE Quinn sees them, but inbound QUIC
+/// handshakes flow through unchanged. So the success signal is just
+/// "Quinn accepted a new connection from one of the peer endpoints"
+/// — handled entirely by Quinn's accept loop, not by this function.
+///
+/// # Example
+///
+/// ```no_run
+/// # use std::net::SocketAddr;
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use tokio::net::UdpSocket;
+/// # use ztlp_proto::punch::respond_to_punch;
+/// # async fn example() -> std::io::Result<()> {
+/// let sock = Arc::new(UdpSocket::bind("0.0.0.0:23095").await?);
+/// let peer_addrs: Vec<SocketAddr> = vec![
+///     "203.0.113.5:54321".parse().unwrap(),
+///     "[2001:db8::5]:54321".parse().unwrap(),
+/// ];
+/// respond_to_punch(&sock, &peer_addrs, Duration::from_secs(10)).await;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn respond_to_punch(
+    socket: &Arc<UdpSocket>,
+    peer_endpoints: &[SocketAddr],
+    duration: Duration,
+) {
+    if peer_endpoints.is_empty() {
+        // Defensive — caller should not invoke with empty endpoints
+        // but tolerate it without panicking. Just sleep and exit.
+        tokio::time::sleep(duration).await;
+        return;
+    }
+
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut ticker = tokio::time::interval(RESPONDER_INTERVAL);
+    // interval()'s first tick is immediate — that's exactly what we
+    // want: poke the NAT right away, not 200ms from now.
+    loop {
+        ticker.tick().await;
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        for ep in peer_endpoints {
+            if let Err(e) = socket.send_to(&[PUNCH_BYTE], ep).await {
+                debug!("punch responder: send to {} failed: {} (continuing)", ep, e);
+            }
+        }
     }
 }
 
@@ -841,7 +1181,7 @@ mod tests {
         assert_eq!(config.punch_interval, Duration::from_millis(500));
         assert_eq!(config.punch_timeout, Duration::from_secs(10));
         assert!(config.punch_all_addresses);
-        assert_eq!(config.keepalive_interval, Duration::from_secs(25));
+        assert_eq!(config.keepalive_interval, Duration::from_secs(10));
     }
 
     // ── KeepaliveTracker Tests ──────────────────────────────────────
@@ -1114,5 +1454,282 @@ mod tests {
         let timed_out = PunchResult::TimedOut;
         assert_eq!(timed_out, PunchResult::TimedOut);
         assert_ne!(success, timed_out);
+    }
+
+    // ── H4: respond_to_punch responder loop ─────────────────────────
+
+    /// H4 — verifies respond_to_punch sends PUNCH_BYTE to each
+    /// configured peer endpoint at least once within the duration.
+    #[tokio::test]
+    async fn h4_respond_to_punch_sends_byte_to_each_endpoint() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoints = vec![peer1.local_addr().unwrap(), peer2.local_addr().unwrap()];
+
+        // Run responder for 500ms — at 200ms cadence with immediate
+        // first tick, both peers should receive at least one byte.
+        tokio::spawn(async move {
+            respond_to_punch(&gw, &endpoints, Duration::from_millis(500)).await;
+        });
+
+        let mut b = [0u8; 4];
+        let (n1, _) = tokio::time::timeout(Duration::from_secs(2), peer1.recv_from(&mut b))
+            .await
+            .expect("peer1 did not receive PUNCH_BYTE")
+            .expect("peer1 recv_from io error");
+        assert_eq!(n1, 1, "PUNCH_BYTE is a 1-byte packet");
+        assert_eq!(b[0], PUNCH_BYTE, "first byte must be 0x00");
+
+        let (n2, _) = tokio::time::timeout(Duration::from_secs(2), peer2.recv_from(&mut b))
+            .await
+            .expect("peer2 did not receive PUNCH_BYTE")
+            .expect("peer2 recv_from io error");
+        assert_eq!(n2, 1);
+        assert_eq!(b[0], PUNCH_BYTE);
+    }
+
+    /// H4 — verifies that the responder exits after the configured
+    /// duration. We give it 200ms; it should be done within 400ms
+    /// (200ms duration + scheduling slack).
+    #[tokio::test]
+    async fn h4_respond_to_punch_exits_after_duration() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoints = vec![peer.local_addr().unwrap()];
+
+        let start = tokio::time::Instant::now();
+        respond_to_punch(&gw, &endpoints, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "responder ran too long: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "responder exited too early: {:?}",
+            elapsed
+        );
+    }
+
+    /// H4 — defensive: empty endpoint list should not panic; should
+    /// just sleep for the duration and return.
+    #[tokio::test]
+    async fn h4_respond_to_punch_empty_endpoints_does_not_panic() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let start = tokio::time::Instant::now();
+        respond_to_punch(&gw, &[], Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(400));
+    }
+
+    // ── LIST_RELAYS (0x0D) — R1 wire protocol tests ─────────────────
+
+    #[test]
+    fn test_encode_decode_roundtrip_empty() {
+        let id = NodeId::from_bytes([0x42; 16]);
+        let bytes = encode_list_relays_request(&id, "");
+        // type(1) + node_id(16) + zone_len(1) = 18 bytes for empty zone
+        assert_eq!(bytes.len(), 18);
+        assert_eq!(bytes[0], NS_LIST_RELAYS);
+        let (decoded_id, decoded_zone) = decode_list_relays_request(&bytes).expect("decode");
+        assert_eq!(decoded_id.as_bytes(), id.as_bytes());
+        assert_eq!(decoded_zone, "");
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_with_zone() {
+        let id = NodeId::from_bytes([0x77; 16]);
+        let zone = "us-west-2";
+        let bytes = encode_list_relays_request(&id, zone);
+        assert_eq!(bytes.len(), 18 + zone.len());
+        let (decoded_id, decoded_zone) = decode_list_relays_request(&bytes).expect("decode");
+        assert_eq!(decoded_id.as_bytes(), id.as_bytes());
+        assert_eq!(decoded_zone, zone);
+    }
+
+    #[test]
+    fn test_decode_request_rejects_short_buffer() {
+        // 1-byte input should be rejected
+        assert!(decode_list_relays_request(&[NS_LIST_RELAYS]).is_none());
+        // 17 bytes (missing zone_len) should also be rejected
+        let too_short = vec![NS_LIST_RELAYS; 17];
+        assert!(decode_list_relays_request(&too_short).is_none());
+        // Empty buffer
+        assert!(decode_list_relays_request(&[]).is_none());
+    }
+
+    #[test]
+    fn test_decode_request_rejects_wrong_byte() {
+        // 18 bytes but starting with 0x0A (PEER_ENDPOINTS), not 0x0D
+        let mut wrong = vec![0x0A_u8; 18];
+        wrong[17] = 0; // zone_len = 0 so the remaining bytes parse
+        assert!(decode_list_relays_request(&wrong).is_none());
+    }
+
+    #[test]
+    fn test_decode_request_rejects_overrun_zone_len() {
+        // zone_len says 10 but only 0 zone bytes follow
+        let id = NodeId::from_bytes([0xAB; 16]);
+        let mut bytes = Vec::new();
+        bytes.push(NS_LIST_RELAYS);
+        bytes.extend_from_slice(id.as_bytes());
+        bytes.push(10); // zone_len = 10, but no zone bytes
+        assert!(decode_list_relays_request(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_encode_response_caps_at_32_relays() {
+        // Feed 50 relays; encoder MUST cap count byte at 32.
+        let relays: Vec<RelayListing> = (0..50)
+            .map(|i| RelayListing {
+                addr: SocketAddr::from((Ipv4Addr::new(10, 0, 0, i as u8), 9000 + i as u16)),
+                region: "us-west-2".to_string(),
+            })
+            .collect();
+        let bytes = encode_list_relays_response(&relays);
+        assert_eq!(bytes[0], NS_LIST_RELAYS);
+        assert_eq!(bytes[1] as usize, MAX_LIST_RELAYS_COUNT);
+
+        // Roundtrip should give us exactly 32 entries.
+        let decoded = decode_list_relays_response(&bytes).expect("decode");
+        assert_eq!(decoded.len(), MAX_LIST_RELAYS_COUNT);
+    }
+
+    #[test]
+    fn test_response_roundtrip_ipv4() {
+        let relays = vec![
+            RelayListing {
+                addr: SocketAddr::from((Ipv4Addr::new(203, 0, 113, 5), 9000)),
+                region: "us-west-2".to_string(),
+            },
+            RelayListing {
+                addr: SocketAddr::from((Ipv4Addr::new(198, 51, 100, 9), 9001)),
+                region: "eu-central-1".to_string(),
+            },
+        ];
+        let bytes = encode_list_relays_response(&relays);
+        let decoded = decode_list_relays_response(&bytes).expect("decode");
+        assert_eq!(decoded, relays);
+    }
+
+    #[test]
+    fn test_response_roundtrip_ipv6() {
+        let relays = vec![RelayListing {
+            addr: SocketAddr::new(IpAddr::V6("2001:db8::5".parse().unwrap()), 9100),
+            region: "".to_string(),
+        }];
+        let bytes = encode_list_relays_response(&relays);
+        let decoded = decode_list_relays_response(&bytes).expect("decode");
+        assert_eq!(decoded, relays);
+    }
+
+    #[test]
+    fn test_response_rejects_mismatched_addr_family() {
+        // Hand-craft a buffer that claims addr_family=4 but only supplies
+        // 16 IPv6-style bytes. The first byte after the count is 4, then
+        // we shove 16 bytes of payload; decode_addr only reads 4 of those
+        // and the rest will misalign the next field, causing a parse failure.
+        //
+        // More direct: addr_family=99 (invalid) — decode_addr returns None.
+        let mut bytes = Vec::new();
+        bytes.push(NS_LIST_RELAYS);
+        bytes.push(1); // count = 1
+        bytes.push(99); // bogus family
+        bytes.extend_from_slice(&[0u8; 6]); // some payload
+        assert!(decode_list_relays_response(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_response_rejects_short_buffer() {
+        // Less than 2 bytes
+        assert!(decode_list_relays_response(&[]).is_none());
+        assert!(decode_list_relays_response(&[NS_LIST_RELAYS]).is_none());
+        // Wrong leading byte
+        assert!(decode_list_relays_response(&[0x0A, 0]).is_none());
+        // count=1 but no relay bytes follow
+        assert!(decode_list_relays_response(&[NS_LIST_RELAYS, 1]).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_query_ns_for_relays_succeeds_against_fake_ns() {
+        // Bind a fake NS socket that reads one request and replies with
+        // a hardcoded LIST_RELAYS response containing 2 IPv4 relays.
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ns_addr = ns_sock.local_addr().unwrap();
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let our_id = NodeId::from_bytes([0xC1; 16]);
+
+        // Spawn the fake NS task
+        let ns_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (n, src) = ns_sock.recv_from(&mut buf).await.unwrap();
+            // First byte must be 0x0D
+            assert_eq!(buf[0], NS_LIST_RELAYS);
+            // node_id bytes 1..17 must echo the client's NodeId
+            assert_eq!(&buf[1..17], &[0xC1; 16]);
+            // Build a 2-relay response
+            let relays = vec![
+                RelayListing {
+                    addr: SocketAddr::from((Ipv4Addr::new(203, 0, 113, 1), 9000)),
+                    region: "us-west-2".to_string(),
+                },
+                RelayListing {
+                    addr: SocketAddr::from((Ipv4Addr::new(203, 0, 113, 2), 9001)),
+                    region: "eu-central-1".to_string(),
+                },
+            ];
+            let resp = encode_list_relays_response(&relays);
+            ns_sock.send_to(&resp, src).await.unwrap();
+            let _ = n;
+        });
+
+        let listings = query_ns_for_relays(
+            &client_sock,
+            ns_addr,
+            &our_id,
+            "us-west-2",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("query ok");
+
+        assert_eq!(listings.len(), 2);
+        assert_eq!(listings[0].region, "us-west-2");
+        assert_eq!(listings[1].region, "eu-central-1");
+
+        ns_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_query_ns_for_relays_times_out() {
+        // Bind a fake NS that never sends a reply.
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ns_addr = ns_sock.local_addr().unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let our_id = NodeId::from_bytes([0xDE; 16]);
+
+        // Keep ns_sock alive but never reply — drop it in the spawn.
+        let _silent_ns = tokio::spawn(async move {
+            // Hold the socket so the OS keeps the port bound.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(ns_sock);
+        });
+
+        let err = query_ns_for_relays(
+            &client_sock,
+            ns_addr,
+            &our_id,
+            "",
+            Duration::from_millis(150),
+        )
+        .await
+        .expect_err("expected timeout");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 }

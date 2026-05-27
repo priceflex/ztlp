@@ -257,9 +257,13 @@ enum Commands {
         #[arg(long)]
         no_relay_fallback: bool,
 
-        /// Enable NS-coordinated hole punching (Nebula-style)
+        /// Enable NS-coordinated hole punching (auto-on when --ns-server is set in v0.30.12+)
         #[arg(long)]
         punch: bool,
+
+        /// Disable NS-coordinated UDP hole punching even when --ns-server is set
+        #[arg(long, conflicts_with = "punch")]
+        no_punch: bool,
 
         /// Delay before sending punch packets (e.g. "100ms", "1s")
         #[arg(long, value_parser = parse_duration_arg)]
@@ -269,9 +273,13 @@ enum Commands {
         #[arg(long, value_parser = parse_duration_arg)]
         punch_timeout: Option<Duration>,
 
-        /// Enable multi-relay pool with automatic failover (default: on when multiple relays available)
+        /// Enable multi-relay failover via probe pool (auto-on when --ns-server is set in v0.30.12+)
         #[arg(long)]
         relay_pool: bool,
+
+        /// Disable multi-relay failover even when --ns-server is set
+        #[arg(long, conflicts_with = "relay_pool")]
+        no_relay_pool: bool,
 
         /// Health check probe interval for relay pool (e.g. "30s", "1m")
         #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
@@ -393,6 +401,30 @@ enum Commands {
         /// Example: `--admin-pubkey-email deadbeef...=ops@trs.com`
         #[arg(long, value_name = "HEX=EMAIL")]
         admin_pubkey_email: Vec<String>,
+
+        /// Enable NS-coordinated hole punching on the gateway side.
+        ///
+        /// When set together with `--ns-server`, the gateway:
+        /// 1. Sends periodic PUNCH_REPORT (0x0C) packets to NS so NS
+        ///    learns the gateway's NAT-mapped public endpoint.
+        /// 2. Wraps the QUIC listener socket with PunchRuntime, which
+        ///    intercepts incoming PUNCH_NOTIFY (0x0B) packets before
+        ///    Quinn sees them and routes them to a dispatcher.
+        /// 3. The dispatcher fires PUNCH_BYTE (0x00) at the requester's
+        ///    reported endpoints, opening the NAT pinhole so the
+        ///    client's subsequent QUIC handshake can traverse.
+        ///
+        /// Requires `--ns-server`. Without NS, there is no coordinator
+        /// for the punch dance and the flag is a no-op (a warning is
+        /// printed at startup).
+        ///
+        /// (Auto-on when `--ns-server` is set in v0.30.12+.)
+        #[arg(long, default_value_t = false)]
+        punch: bool,
+
+        /// Disable NS-coordinated UDP hole punching even when --ns-server is set
+        #[arg(long, conflicts_with = "punch", default_value_t = false)]
+        no_punch: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -2377,7 +2409,7 @@ async fn cmd_connect(
         };
 
         // Initialize relay pool if --relay-pool is enabled or multiple relays are available
-        let _relay_pool = if relay_pool_enabled || relay.is_some() {
+        let relay_pool = if relay_pool_enabled || relay.is_some() {
             let pool_config = RelayPoolConfig {
                 probe_interval: relay_probe_interval,
                 failover_enabled: relay.is_none() || relay_pool_enabled, // failover off when pinned
@@ -2401,7 +2433,7 @@ async fn cmd_connect(
                 eprintln!("  {} {:?}", c_cyan("Probe interval:"), relay_probe_interval);
             }
 
-            Some(FailoverOrchestrator::new(pool))
+            Some(Arc::new(Mutex::new(FailoverOrchestrator::new(pool))))
         } else {
             None
         };
@@ -2413,6 +2445,47 @@ async fn cmd_connect(
         if send_addr != peer_addr {
             eprintln!("{} {}", c_cyan("Via relay:"), send_addr);
         }
+
+        // ── R2: spawn relay probe task ──────────────────────────────────
+        // Drives pool.record_probe_success / record_probe_failure at
+        // `relay_probe_interval`. Shares the existing UDP socket so kernel
+        // ICMP errors route back correctly. Aborted at end of cmd_connect.
+        let probe_handle: Option<tokio::task::JoinHandle<()>> =
+            if let Some(pool_arc) = relay_pool.as_ref() {
+                let probe_socket = node.socket.clone();
+                let probe_pool = pool_arc.clone();
+                Some(tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(relay_probe_interval);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // Skip the immediate first tick — give the connection a moment
+                    // to come up before we start probing.
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        let targets = {
+                            let guard = probe_pool.lock().await;
+                            guard.pool().relays_needing_probe()
+                        };
+                        for relay_addr in targets {
+                            let result = ztlp_proto::relay_pool::probe_relay(
+                                &probe_socket,
+                                relay_addr,
+                                std::time::Duration::from_millis(500),
+                            )
+                            .await;
+                            let mut guard = probe_pool.lock().await;
+                            match result {
+                                Ok(latency) => {
+                                    guard.pool_mut().record_probe_success(relay_addr, latency)
+                                }
+                                Err(_e) => guard.pool_mut().record_probe_failure(relay_addr),
+                            }
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
 
         // NAT traversal (if --nat-assist)
         if nat_assist {
@@ -2803,6 +2876,21 @@ async fn cmd_connect(
 
         let start_time = Instant::now();
 
+        // R3: Consult relay_pool.primary() ONCE per outer handshake attempt so
+        // every retransmit lands on the same relay endpoint (the relay state
+        // machine MUST NOT see traffic jump mid-handshake). On a fresh
+        // `cmd_connect` invocation the pool returns its currently-healthy
+        // primary; if that primary turns out to be dead, the
+        // `report_handshake_failure` call at the error sites below shifts the
+        // pool's primary for the NEXT invocation. We fall back to `send_addr`
+        // when no pool was created (legacy path with no relay configured).
+        let attempt_addr: std::net::SocketAddr = if let Some(orchestrator) = &relay_pool {
+            let pool_guard = orchestrator.lock().await;
+            pool_guard.pool().primary().unwrap_or(send_addr)
+        } else {
+            send_addr
+        };
+
         // Message 1: HELLO (with retransmit on timeout)
         eprintln!("\n{}", c_dim("→ Sending HELLO (message 1/3)..."));
         let msg1 = ctx.write_message(&[])?;
@@ -2817,7 +2905,7 @@ async fn cmd_connect(
         }
         let mut pkt1 = hello_hdr.serialize();
         pkt1.extend_from_slice(&msg1);
-        node.send_raw(&pkt1, send_addr).await?;
+        node.send_raw(&pkt1, attempt_addr).await?;
 
         // Message 2: receive HELLO_ACK (with retransmit of HELLO on timeout)
         eprintln!("{}", c_dim("← Waiting for HELLO_ACK (message 2/3)..."));
@@ -2838,11 +2926,26 @@ async fn cmd_connect(
                     // Not a HELLO_ACK for our session — ignore and keep waiting
                     continue;
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => {
+                    // Socket error during handshake recv — pool sees this as a
+                    // handshake failure against `attempt_addr`.
+                    if let Some(orchestrator) = &relay_pool {
+                        let mut pool_guard = orchestrator.lock().await;
+                        pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+                    }
+                    return Err(e.into());
+                }
                 Err(_) => {
                     // Timeout — retransmit HELLO
                     retries += 1;
                     if retries > MAX_HANDSHAKE_RETRIES {
+                        // Exhausted retransmits: this attempt_addr is unhealthy
+                        // — report so the next cmd_connect call shifts to a
+                        // different primary.
+                        if let Some(orchestrator) = &relay_pool {
+                            let mut pool_guard = orchestrator.lock().await;
+                            pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+                        }
                         return Err("handshake failed: no HELLO_ACK after retransmits".into());
                     }
                     debug!(
@@ -2855,7 +2958,7 @@ async fn cmd_connect(
                         retries,
                         MAX_HANDSHAKE_RETRIES
                     );
-                    node.send_raw(&pkt1, send_addr).await?; // exact same bytes
+                    node.send_raw(&pkt1, attempt_addr).await?; // exact same bytes
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
                 }
             }
@@ -2886,14 +2989,28 @@ async fn cmd_connect(
         final_hdr.payload_len = msg3.len() as u16;
         let mut pkt3 = final_hdr.serialize();
         pkt3.extend_from_slice(&msg3);
-        node.send_raw(&pkt3, send_addr).await?;
+        node.send_raw(&pkt3, attempt_addr).await?;
 
         // Finalize — handshake should be complete after sending msg3
         if !ctx.is_finished() {
+            // Treat incomplete handshake as a failure against the relay.
+            if let Some(orchestrator) = &relay_pool {
+                let mut pool_guard = orchestrator.lock().await;
+                pool_guard.pool_mut().report_handshake_failure(attempt_addr);
+            }
             return Err("handshake did not complete".into());
         }
 
         let handshake_time = start_time.elapsed();
+        // R3: Record success against the relay so the pool's RTT EWMA and
+        // health counters reflect a working primary. Done AFTER `is_finished`
+        // so a half-completed exchange doesn't get credited.
+        if let Some(orchestrator) = &relay_pool {
+            let mut pool_guard = orchestrator.lock().await;
+            pool_guard
+                .pool_mut()
+                .report_handshake_success(attempt_addr, handshake_time);
+        }
         let peer_node_id = NodeId::from_bytes(recv2_header.src_node_id);
         let (_transport, session) = ctx.finalize(peer_node_id, session_id)?;
 
@@ -3008,6 +3125,14 @@ async fn cmd_connect(
             // Interactive data loop
             interactive_data_loop(&node, session_id, send_addr).await?;
         }
+
+        // ── R2: stop the relay probe task before returning ──────────────
+        if let Some(h) = probe_handle.as_ref() {
+            h.abort();
+        }
+        // Touch relay_pool so the binding lives until the end of the legacy
+        // path (R3 will replace this with real usage of pool().primary()).
+        let _ = relay_pool.as_ref();
 
         return Ok(());
     }
@@ -3861,7 +3986,7 @@ async fn cmd_listen(
     _gateway_mode: bool,
     forward: &[String],
     _policy_path: &Option<PathBuf>,
-    _ns_server: &Option<String>,
+    ns_server: &Option<String>,
     _stun_server: &Option<String>,
     _nat_assist: bool,
     _max_sessions: usize,
@@ -3873,6 +3998,7 @@ async fn cmd_listen(
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
     _quic: bool,
+    punch_enabled: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -3912,14 +4038,102 @@ async fn cmd_listen(
         None
     };
 
-    let server = QuicEndpoint::bind_with_socket(server_cfg, std_socket)?;
+    // Load gateway identity up front — we need its NodeId for the
+    // PunchAgent if --punch is enabled.
+    let identity = load_or_generate_identity(key)?;
+
+    // ── Punch-mode setup ──────────────────────────────────────────
+    // When --punch is set together with --ns-server, we wrap the Quinn
+    // socket in PunchRuntime so PUNCH_NOTIFY (0x0B) and PUNCH_BYTE
+    // (0x00) are intercepted/dropped before Quinn's QUIC parser sees
+    // them. Without --ns-server, --punch is a no-op because there's no
+    // coordinator for the punch dance — we warn instead of failing
+    // so existing scripts that pass --punch alone keep working.
+    let punch_ns_addr: Option<std::net::SocketAddr> = if punch_enabled {
+        match ns_server.as_deref() {
+            Some(s) => match s.parse() {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    eprintln!(
+                        "{} --punch requires a parseable --ns-server (got {:?}: {})",
+                        c_yellow("⚠"),
+                        s,
+                        e
+                    );
+                    None
+                }
+            },
+            None => {
+                eprintln!(
+                    "{} --punch requires --ns-server; running without punch (relay-only)",
+                    c_yellow("⚠")
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (intercept_tx, intercept_rx) = if punch_ns_addr.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let server = if let Some(tx) = intercept_tx.clone() {
+        let runtime: std::sync::Arc<dyn quinn::Runtime> =
+            std::sync::Arc::new(ztlp_proto::punch_socket::PunchRuntime::new(tx));
+        QuicEndpoint::bind_with_socket_and_runtime(server_cfg, std_socket, runtime)?
+    } else {
+        QuicEndpoint::bind_with_socket(server_cfg, std_socket)?
+    };
     println!(
         "ZTLP QUIC server listening on UDP {}",
         server.inner.local_addr().unwrap()
     );
 
+    // ── Start the PunchAgent keepalive + dispatcher (if --punch) ──
+    // We hold the JoinHandles in a Vec so they live as long as cmd_listen
+    // does — dropping them earlier would cancel the tasks. The dispatcher
+    // exits naturally when its sender side (the PunchSocket inside Quinn's
+    // runtime) is dropped at shutdown.
+    let mut _punch_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if let (Some(ns_addr), Some(rx)) = (punch_ns_addr, intercept_rx) {
+        // Bind a separate keepalive socket (ephemeral) — we cannot share
+        // the QUIC socket because Quinn has taken ownership of it. The
+        // NS server will learn this ephemeral socket's (ip, port) as the
+        // gateway's :learned endpoint. For the local-network bench this
+        // is fine — both Quinn and keepalive go through the same NAT,
+        // so the (ip, port) NS sees is reachable.
+        //
+        // FUTURE: extract the std::net::UdpSocket fd before handing to
+        // Quinn so keepalive + Quinn share the same kernel socket; the
+        // quinn AsyncUdpSocket trait does not expose the std socket so
+        // this requires a refactor to PunchRuntime to also retain a
+        // raw fd clone. Tracked as a follow-up.
+        let keepalive_sock = std::sync::Arc::new(
+            tokio::net::UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
+        );
+        let gw_node_id = identity.node_id;
+        let agent = ztlp_proto::punch_agent::PunchAgent::new(keepalive_sock, ns_addr, gw_node_id);
+        println!(
+            "{} Punch enabled — keepalive to {} every {:?}",
+            c_green("✓"),
+            ns_addr,
+            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL
+        );
+        _punch_handles
+            .push(agent.start_keepalive(ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL));
+        _punch_handles
+            .push(agent.start_dispatcher(rx, ztlp_proto::punch::DEFAULT_RESPONDER_DURATION));
+    }
+
     let _cfw = forward.to_vec();
-    let identity = load_or_generate_identity(key)?;
+    // identity already loaded above (before the punch block needs the NodeId).
 
     if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
         if let Ok(target) = r_addr.parse::<std::net::SocketAddr>() {
@@ -10963,12 +11177,27 @@ async fn main() {
             nat_assist,
             no_relay_fallback,
             punch,
+            no_punch,
             punch_delay,
             punch_timeout,
             relay_pool,
+            no_relay_pool,
             relay_probe_interval,
             quic,
         } => {
+            // H10 (v0.30.12): when --ns-server is set, both --punch and
+            // --relay-pool auto-flip to ON unless the user explicitly opted
+            // out with --no-punch / --no-relay-pool (clap's `conflicts_with`
+            // already rejects the contradictory combos --punch+--no-punch
+            // and --relay-pool+--no-relay-pool before we get here).
+            let (punch_active, relay_pool_active) =
+                ztlp_proto::h10_defaults::resolve_punch_and_pool_flags(
+                    ns_server.is_some(),
+                    *punch,
+                    *no_punch,
+                    *relay_pool,
+                    *no_relay_pool,
+                );
             cmd_connect(
                 *quic,
                 target,
@@ -10983,10 +11212,10 @@ async fn main() {
                 stun_server,
                 *nat_assist,
                 *no_relay_fallback,
-                *punch,
+                punch_active,
                 punch_delay,
                 punch_timeout,
-                *relay_pool,
+                relay_pool_active,
                 *relay_probe_interval,
             )
             .await
@@ -11010,7 +11239,22 @@ async fn main() {
             header_hmac_secret,
             admin_pubkey_email,
             quic,
+            punch,
+            no_punch,
         } => {
+            // H10 (v0.30.12): when --ns-server is set, --punch auto-flips
+            // to ON unless --no-punch is passed. Gateways don't fail over
+            // (they ARE the destination), so we only resolve the punch
+            // half of the matrix here — the relay-pool half is hard-coded
+            // false because cmd_listen doesn't take a relay-pool flag.
+            let (punch_active, _pool_unused) =
+                ztlp_proto::h10_defaults::resolve_punch_and_pool_flags(
+                    ns_server.is_some(),
+                    *punch,
+                    *no_punch,
+                    false,
+                    false,
+                );
             cmd_listen(
                 bind,
                 key,
@@ -11029,6 +11273,7 @@ async fn main() {
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
                 *quic,
+                punch_active,
             )
             .await
         }

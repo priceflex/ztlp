@@ -329,6 +329,57 @@ pub mod tokio_endpoint {
             })
         }
 
+        /// Variant of `bind_with_socket` that accepts a custom
+        /// [`quinn::Runtime`] instead of the default `TokioRuntime`.
+        ///
+        /// Used by `ztlp listen --punch` to install a
+        /// [`crate::punch_socket::PunchRuntime`] that intercepts
+        /// hole-punch protocol bytes before Quinn sees them. The
+        /// runtime's `wrap_udp_socket` is called by quinn with the
+        /// provided std socket, producing the AsyncUdpSocket that
+        /// powers the endpoint.
+        pub fn bind_with_socket_and_runtime(
+            cfg: QuicEndpointConfig,
+            std_socket: std::net::UdpSocket,
+            runtime: Arc<dyn quinn::Runtime>,
+        ) -> Result<Self, QuicTransportError> {
+            ensure_crypto();
+            let (certs, key) = generate_self_signed();
+            let mut server_crypto = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|e| QuicTransportError::Endpoint(std::io::Error::other(e)))?;
+
+            server_crypto.alpn_protocols = cfg.alpn.clone();
+            let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
+                quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
+            ));
+
+            let mut transport_config = quinn::TransportConfig::default();
+            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
+                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
+            }
+            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
+                transport_config
+                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
+            }
+            server_config.transport_config(Arc::new(transport_config));
+
+            std_socket.set_nonblocking(true)?;
+
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(server_config),
+                std_socket,
+                runtime,
+            )?;
+
+            Ok(Self {
+                _cfg: cfg,
+                inner: endpoint,
+            })
+        }
+
         pub async fn connect_with_socket(
             cfg: QuicEndpointConfig,
             remote: SocketAddr,

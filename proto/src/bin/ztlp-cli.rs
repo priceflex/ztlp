@@ -2407,6 +2407,22 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 
 /// `ztlp connect` — Connect to a ZTLP peer (supports NS name resolution)
 #[allow(clippy::too_many_arguments)]
+/// v0.32.2 (A1): pick the address to dial in the QUIC path.
+///
+/// Given the NS-resolved peer address (typically the relay) and an
+/// optional multi-candidate winning address (a LAN-direct host candidate
+/// from PUNCH_REPORT), prefer the multi-candidate winner. When the
+/// winner is `None` — multi-candidate disabled, no NodeID, NS query
+/// failed, or no candidate succeeded — fall back to the NS-resolved
+/// address unchanged. Extracted as a free fn so the override logic is
+/// directly unit-testable without spinning up the full QUIC stack.
+fn pick_quic_dial_target(
+    ns_resolved: SocketAddr,
+    multi_candidate_winner: Option<SocketAddr>,
+) -> SocketAddr {
+    multi_candidate_winner.unwrap_or(ns_resolved)
+}
+
 async fn cmd_connect(
     _quic: bool,
     target: &str,
@@ -2447,7 +2463,16 @@ async fn cmd_connect(
     // Default (none of the above) stays on the QUIC mode path, which
     // handles SVC-record-resolved connects through relays via the
     // CLIENT_ROUTE frame and is what works end-to-end today.
-    let want_legacy_path = relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled;
+    //
+    // v0.32.2 (A1): `--multi-candidate` always forces the QUIC path even
+    // when `--ns-server` would have implicitly enabled punch (the default
+    // resolved by `h10_defaults::resolve_punch_and_pool_flags`). The
+    // legacy parallel-session handshake is broken end-to-end against the
+    // v0.30 production relay, so silently dropping a multi-candidate user
+    // into legacy was the exact bug A1 fixes. The QUIC path now contains
+    // the M6 dial logic; `--multi-candidate` is the canonical opt-in.
+    let want_legacy_path =
+        !multi_candidate && (relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled);
 
     if want_legacy_path {
         // Legacy UDP fallback for NAT traversal / relays
@@ -3255,6 +3280,92 @@ async fn cmd_connect(
 
     let node_id = peer_node_id.unwrap_or_else(|| ztlp_proto::identity::NodeId([0; 16]));
     let identity = load_or_generate_identity(key)?;
+
+    // ── v0.32.2 (A1): multi-candidate dial moved into the QUIC path ──
+    //
+    // When `--multi-candidate` is set AND we have an NS-resolved peer
+    // NodeID, race the host candidates from PUNCH_REPORT alongside the
+    // NS-resolved `peer_addr` (which is typically the relay backstop).
+    // The winning path's address overrides `peer_addr` for the rest of
+    // this function — both CLIENT_ROUTE and the subsequent QUIC handshake
+    // then target the LAN-direct winner. Failure (NS query timeout, no
+    // candidate succeeded, parse error, probe bind failure) falls back
+    // to the NS-resolved `peer_addr` unchanged — same outcome as if
+    // `--multi-candidate` weren't passed at all. This is the "safe
+    // default" the original M6 commit was designed around.
+    //
+    // Crucially this is decoupled from `punch_enabled`. The pre-fix M6
+    // block lived in the legacy-UDP branch and was gated on `punch`,
+    // which meant `--multi-candidate --ns-server NAME` silently fell
+    // back to the broken legacy parallel-session handshake. The QUIC
+    // path is the path that actually completes end-to-end against the
+    // v0.30 production relay, so multi-candidate logic belongs here.
+    //
+    // The probe uses a fresh ephemeral UDP socket — NOT `std_socket`,
+    // which Quinn takes ownership of below. Sharing a single fd with
+    // Quinn led to the v0.31 punch fd-aliasing trap; a separate probe
+    // socket sidesteps it entirely.
+    let multi_candidate_winner: Option<SocketAddr> = if multi_candidate && peer_node_id.is_some() {
+        match ns_server
+            .as_deref()
+            .and_then(|s| s.parse::<SocketAddr>().ok())
+        {
+            Some(ns_addr) => {
+                eprintln!(
+                    "{} multi-candidate dial enabled (v0.32.2)",
+                    c_dim("[v0.32.2]")
+                );
+                match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                    Ok(probe_sock) => {
+                        let probe_sock = std::sync::Arc::new(probe_sock);
+                        let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
+                        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+                        match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
+                            peer_node_id.unwrap(),
+                            ns_addr,
+                            probe_sock,
+                            identity.node_id,
+                            &local_subnets,
+                            Some(peer_addr),
+                            policy,
+                        )
+                        .await
+                        {
+                            Ok(outcome) => {
+                                eprintln!(
+                                    "{} multi-candidate dial succeeded: {} ({:?})",
+                                    c_green("✓"),
+                                    outcome.winning_addr,
+                                    outcome.class
+                                );
+                                Some(outcome.winning_addr)
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} multi-candidate dial failed: {:?}; falling back to NS-resolved addr",
+                                    c_dim("[v0.32.2]"),
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} multi-candidate probe socket bind failed: {}; falling back",
+                            c_dim("[v0.32.2]"),
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let peer_addr = pick_quic_dial_target(peer_addr, multi_candidate_winner);
 
     // Bind a UDP socket Quinn will reuse for the QUIC connection.
     let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
@@ -12478,5 +12589,23 @@ mod tests {
             .iter()
             .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
         assert!(found, "node_id key missing from SVC-record CBOR");
+    }
+
+    // ── v0.32.2 A1: pick_quic_dial_target — multi-candidate winner overrides
+    // the NS-resolved address before CLIENT_ROUTE + QUIC handshake. When
+    // multi-candidate is disabled or returns no winner, fall back to NS.
+    #[test]
+    fn pick_quic_dial_target_prefers_multi_candidate_winner() {
+        use std::net::SocketAddr;
+        let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap(); // relay
+        let lan: SocketAddr = "10.170.3.111:23095".parse().unwrap(); // host
+        assert_eq!(pick_quic_dial_target(ns, Some(lan)), lan);
+    }
+
+    #[test]
+    fn pick_quic_dial_target_falls_back_to_ns_when_no_winner() {
+        use std::net::SocketAddr;
+        let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap();
+        assert_eq!(pick_quic_dial_target(ns, None), ns);
     }
 }

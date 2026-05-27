@@ -20,7 +20,7 @@ Both subsystems share the same root cause: **underscore-prefixed unused variable
 
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
-| H0 | Spike: prove quinn AsyncUdpSocket wrapper compiles | 🔲 | — | 30-min throwaway branch, NOT merged — purely a viability check |
+| H0 | Spike: prove quinn AsyncUdpSocket wrapper compiles | ✅ | spike-NOT-MERGED | Spike branch deleted; PunchRuntime+PunchSocket compiled clean against quinn 0.11.9. Findings: quinn::Instant is private (use std::time::Instant); RecvMeta::clone() exists so meta-compaction works without unsafe |
 | H1 | PunchAgent skeleton (shared socket + NS addr) | 🔲 | — | |
 | H2 | PunchAgent keepalive sends PUNCH_REPORT every 25s | 🔲 | — | |
 | H3 | PunchSocket — quinn AsyncUdpSocket wrapper intercepts 0x0B | 🔲 | — | **Highest risk — H0 spike must pass first** |
@@ -36,9 +36,9 @@ Both subsystems share the same root cause: **underscore-prefixed unused variable
 | H9 | Update docs/NAT-TRAVERSAL.md with implementation status | 🔲 | — | |
 | **DONE** | All tests green, PR merged | 🔲 | — | |
 
-**Last resumed at:** _(populated on session restart — set this when resuming so we know where the last context left off)_
+**Last resumed at:** 2026-05-27 — H0 spike confirmed quinn 0.11.9 viability. Spike branch deleted; on `feature/resilient-connectivity-v0.30.12` ready to start H1.
 
-**Branch:** `feat/resilient-connectivity` (created from main after this plan PR merges)
+**Branch:** `feature/resilient-connectivity-v0.30.12` (created from `main` at commit 30f3659 after plan PR #63 merged)
 
 ---
 

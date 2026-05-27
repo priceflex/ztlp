@@ -1,11 +1,23 @@
 # v0.32 — Multi-Candidate Discovery (ICE-Style Connectivity)
 
-**Status:** Draft spec
-**Author:** drafted with assistant, for Steve's review
+**Status:** **APPROVED** — Steve signed off on the four open questions 2026-05-28. M1 in progress.
+**Author:** drafted with assistant, approved by Steve
 **Branch:** `docs/v0.32-multi-candidate-discovery`
 **Companion:** [`v0.31.0-relay-deployment-investigation.md`](../v0.31.0-relay-deployment-investigation.md) — the failure mode this spec eliminates
 
-> **For Hermes:** When this plan is approved and execution begins, use `subagent-driven-development` skill. After each task lands (RED→GREEN→commit), update the Progress Tracker table in the same commit so a session restart can resume cleanly.
+> **For Hermes:** Execution uses `subagent-driven-development` skill + **BDD/TDD discipline per task**. Every task lands as RED (failing test first) → GREEN (minimal impl) → REFACTOR → commit. Update the Progress Tracker table in the same commit as each task so a session restart can resume cleanly.
+
+## BDD/TDD discipline (mandatory per task)
+
+Every M-task must be implemented in this order — no exceptions:
+
+1. **RED.** Write the failing test first. For Rust this is `cargo test <test_name>` returning a clear failure that pins the desired behaviour. For Elixir it's `mix test path/to/test:LINE` failing the same way. Commit message marker: `(RED captured: <what fails>)`.
+2. **GREEN.** Write the minimum production code that turns the failing test green. No extra features, no speculative generality.
+3. **REFACTOR.** Clean up names, extract helpers, run `cargo fmt && cargo clippy --all-targets -- -D warnings` (Rust) or `mix format && mix credo --strict` (Elixir). Tests must still pass.
+4. **Full-suite verify.** `cargo test --all` (proto) or `mix test` (ns). No regressions tolerated.
+5. **Commit.** Single squash-style commit per task with the What/Why/Details/Tests/Validation/Follow-up template Steve uses.
+
+Subagent briefs MUST quote this discipline verbatim in the implementer context. The spec-compliance reviewer MUST verify the RED test exists and was added in the same commit as the implementation (use `git show <sha> --stat` to confirm test file + source file changed together).
 
 ---
 
@@ -110,17 +122,19 @@ NS already parses + stores this via `parse_and_track_reported/2`. No NS wire cha
 
 ### Where priority lives
 
-ICE-style priority is computed **client-side at dial time**, not embedded in the wire format. Each `RelayListing`-style candidate entry gets a runtime-derived priority:
+ICE-style priority is computed **client-side at dial time**, not embedded in the wire format. Each `RelayListing`-style candidate entry gets a runtime-derived priority. **Steve-approved priority ladder (2026-05-28):**
 
 | Class | Source | Priority |
 |---|---|---|
-| Host (RFC1918) | Gateway-reported IPv4 in `10/8`, `172.16/12`, `192.168/16` | 200 |
-| Host (link-local IPv6) | Gateway-reported `fe80::/10` | 150 |
-| Host (public) | Gateway-reported globally routable | 180 |
-| Server-reflexive | NS-observed source (`:learned`) | 100 |
-| Relay | Relay pool primary | 50 |
+| Host (same-subnet RFC1918) | Client and gateway share a subnet (e.g. both in `10.170.3.0/24`) | **250** |
+| Host (other RFC1918) | Gateway-reported `10/8`, `172.16/12`, `192.168/16` outside client subnet | **200** |
+| Host (VPN/overlay) | Tailscale `100.64/10`, our own overlay nets, any other private routable | **180** |
+| Host (public IPv4) | Gateway-reported globally routable v4 | **160** |
+| Host (link-local IPv6) | Gateway-reported `fe80::/10` | **140** |
+| Server-reflexive | NS-observed source (`:learned`) | **100** |
+| Relay | Relay pool primary | **50** |
 
-Dialer fires handshakes in priority bands with a 250ms inter-band delay so the LAN candidate "wins by default" if it's reachable.
+Dialer fires handshakes in priority bands with a 250ms inter-band delay so the same-subnet LAN candidate "wins by default" if it's reachable. **VPN/overlay candidates are explicitly included** — they may be the only valid path for remote operators on Tailscale.
 
 ---
 
@@ -261,11 +275,34 @@ This is the artifact future-Steve uses to debug "why isn't z2ls reachable from m
 
 ---
 
-## Open questions for Steve
+## Decisions (Steve-approved 2026-05-28)
 
-1. **Hard cap on candidates per gateway.** I picked 8 (fits MTU comfortably, covers any plausible host). Want it higher or lower?
-2. **Priority for VPN-overlay IPs** (Tailscale's 100.64/10, your own overlay nets). Treat as host (high prio) or skip entirely? Current draft includes them as host; could be wrong on a multi-overlay machine.
-3. **Should the gateway opt out of candidate-publishing per interface?** e.g. you might not want to advertise the Docker bridge IP for a cloud gateway. A `ztlp listen --advertise-interface ens5 --advertise-interface tailscale0` flag could be the right knob, but it adds operator burden vs. "just enumerate everything and let priority sort it out."
-4. **Roll the v0.32 release with this *and* the v0.31 follow-ups** (real probe ack for relay-pool failover, the v0.31 carry-forwards), or ship multi-candidate as its own v0.32.0 and bundle the others into v0.32.1?
+1. **Candidate cap: hard 8 per gateway.** Fits the existing `reported_count::8` wire model, covers real-world host counts (LAN + Docker + VPN + WAN/srflx + relay), avoids MTU/log spam and path explosion, deterministic and easy to test. **If a gateway has >8 candidates, rank and keep the best 8** (priority ladder above is the ranking function).
 
-Once these are answered I'll implement task-by-task with the subagent-driven workflow, same cadence as v0.31.
+2. **VPN-overlay IPs are host candidates, lower priority than RFC1918 LAN.** Tailscale `100.64/10`, our own overlays, etc. all qualify. Explicitly **do not skip** — VPN may be the only valid path for remote operators. See priority table above for the full order.
+
+3. **Interface publishing: default auto-publish with safe filtering, operator override flags.**
+   **Publish by default:**
+   - up + running interfaces
+   - non-loopback
+   - non-link-local
+   - IPv4 first
+   - IPv6 only if the local stack supports it cleanly (interface has at least one global-or-ULA v6 address bound)
+   **Skip by default:**
+   - `127.0.0.0/8` (loopback)
+   - `169.254.0.0/16` (IPv4 link-local / APIPA)
+   - Docker bridges (`docker0`, `br-*`) **unless explicitly enabled**
+   - down interfaces
+   **Operator override flags on `ztlp listen`:**
+   - `--advertise-interface <name>` — force include (additive, can repeat)
+   - `--no-advertise-interface <name>` — force exclude (additive, can repeat)
+   - `--advertise-all-interfaces` — disable filtering entirely (drops the Docker/link-local default skips)
+   Flag precedence: `--no-advertise-interface` > `--advertise-interface` > `--advertise-all-interfaces` > default filter.
+
+4. **Release scope: ship multi-candidate as its own v0.32.0.** Do not bundle with v0.31 carry-forwards (relay probe ack, etc.). Reasons: materially changes connectivity behaviour (easier rollback if needed); cleaner test matrix; keeps v0.31 focused on auth/security hardening that already shipped; v0.32 becomes the unambiguous "resilient-connectivity" release.
+
+---
+
+## Next steps
+
+Proceed with M1 using the BDD/TDD discipline at the top of this doc and the `subagent-driven-development` skill. Update the Progress Tracker in the same commit as each task lands.

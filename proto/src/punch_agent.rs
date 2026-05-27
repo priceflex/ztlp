@@ -39,13 +39,16 @@ use tokio::task::JoinHandle;
 use crate::identity::NodeId;
 use crate::punch::{decode_punch_notify, encode_punch_report, respond_to_punch, PeerEndpoint};
 
-/// Default interval for the keepalive task: 25 seconds — chosen to sit
-/// comfortably under common NAT idle timeouts (30-60s on consumer
-/// routers, 90s+ on enterprise gear). Re-exported from
-/// [`crate::punch::DEFAULT_KEEPALIVE_INTERVAL`] but documented separately
-/// here because that's the punch-client constant; the gateway keepalive
-/// is a different role with the same numerical value.
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+/// Default keepalive cadence — kept in sync with
+/// [`crate::punch::DEFAULT_KEEPALIVE_INTERVAL`] (10 s as of v0.30.12).
+/// 10 s comfortably stays under typical SD-WAN / conntrack timeouts
+/// (30-120 s); Steve picked this on 2026-05-27 after the Z2LS bench
+/// observed stalls at the wider 25 s cadence.
+///
+/// Re-declared here (rather than re-exported) because the gateway
+/// keepalive is a different role from the punch-client keepalive even
+/// though they currently share a numerical value.
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Gateway-side hole-punch agent.
 ///

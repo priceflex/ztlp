@@ -59,8 +59,10 @@ pub const NS_LIST_RELAYS: u8 = 0x0D;
 /// clients, not a routing table, and 32 is more than enough geographic spread.
 pub const MAX_LIST_RELAYS_COUNT: usize = 32;
 
-/// Default keepalive interval (25s — below most NAT timeouts of 30-60s).
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+/// Default keepalive interval (10s — well below typical SD-WAN/conntrack
+/// timeouts of 30-120s. Steve confirmed 10s on 2026-05-27 after the
+/// Z2LS bench showed punctuated stalls under load.).
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 // ─── Error Type ─────────────────────────────────────────────────────
 
@@ -1179,7 +1181,7 @@ mod tests {
         assert_eq!(config.punch_interval, Duration::from_millis(500));
         assert_eq!(config.punch_timeout, Duration::from_secs(10));
         assert!(config.punch_all_addresses);
-        assert_eq!(config.keepalive_interval, Duration::from_secs(25));
+        assert_eq!(config.keepalive_interval, Duration::from_secs(10));
     }
 
     // ── KeepaliveTracker Tests ──────────────────────────────────────

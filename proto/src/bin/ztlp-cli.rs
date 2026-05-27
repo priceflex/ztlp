@@ -257,9 +257,13 @@ enum Commands {
         #[arg(long)]
         no_relay_fallback: bool,
 
-        /// Enable NS-coordinated hole punching (Nebula-style)
+        /// Enable NS-coordinated hole punching (auto-on when --ns-server is set in v0.30.12+)
         #[arg(long)]
         punch: bool,
+
+        /// Disable NS-coordinated UDP hole punching even when --ns-server is set
+        #[arg(long, conflicts_with = "punch")]
+        no_punch: bool,
 
         /// Delay before sending punch packets (e.g. "100ms", "1s")
         #[arg(long, value_parser = parse_duration_arg)]
@@ -269,9 +273,13 @@ enum Commands {
         #[arg(long, value_parser = parse_duration_arg)]
         punch_timeout: Option<Duration>,
 
-        /// Enable multi-relay pool with automatic failover (default: on when multiple relays available)
+        /// Enable multi-relay failover via probe pool (auto-on when --ns-server is set in v0.30.12+)
         #[arg(long)]
         relay_pool: bool,
+
+        /// Disable multi-relay failover even when --ns-server is set
+        #[arg(long, conflicts_with = "relay_pool")]
+        no_relay_pool: bool,
 
         /// Health check probe interval for relay pool (e.g. "30s", "1m")
         #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
@@ -409,8 +417,14 @@ enum Commands {
         /// Requires `--ns-server`. Without NS, there is no coordinator
         /// for the punch dance and the flag is a no-op (a warning is
         /// printed at startup).
+        ///
+        /// (Auto-on when `--ns-server` is set in v0.30.12+.)
         #[arg(long, default_value_t = false)]
         punch: bool,
+
+        /// Disable NS-coordinated UDP hole punching even when --ns-server is set
+        #[arg(long, conflicts_with = "punch", default_value_t = false)]
+        no_punch: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -11163,12 +11177,27 @@ async fn main() {
             nat_assist,
             no_relay_fallback,
             punch,
+            no_punch,
             punch_delay,
             punch_timeout,
             relay_pool,
+            no_relay_pool,
             relay_probe_interval,
             quic,
         } => {
+            // H10 (v0.30.12): when --ns-server is set, both --punch and
+            // --relay-pool auto-flip to ON unless the user explicitly opted
+            // out with --no-punch / --no-relay-pool (clap's `conflicts_with`
+            // already rejects the contradictory combos --punch+--no-punch
+            // and --relay-pool+--no-relay-pool before we get here).
+            let (punch_active, relay_pool_active) =
+                ztlp_proto::h10_defaults::resolve_punch_and_pool_flags(
+                    ns_server.is_some(),
+                    *punch,
+                    *no_punch,
+                    *relay_pool,
+                    *no_relay_pool,
+                );
             cmd_connect(
                 *quic,
                 target,
@@ -11183,10 +11212,10 @@ async fn main() {
                 stun_server,
                 *nat_assist,
                 *no_relay_fallback,
-                *punch,
+                punch_active,
                 punch_delay,
                 punch_timeout,
-                *relay_pool,
+                relay_pool_active,
                 *relay_probe_interval,
             )
             .await
@@ -11211,7 +11240,21 @@ async fn main() {
             admin_pubkey_email,
             quic,
             punch,
+            no_punch,
         } => {
+            // H10 (v0.30.12): when --ns-server is set, --punch auto-flips
+            // to ON unless --no-punch is passed. Gateways don't fail over
+            // (they ARE the destination), so we only resolve the punch
+            // half of the matrix here — the relay-pool half is hard-coded
+            // false because cmd_listen doesn't take a relay-pool flag.
+            let (punch_active, _pool_unused) =
+                ztlp_proto::h10_defaults::resolve_punch_and_pool_flags(
+                    ns_server.is_some(),
+                    *punch,
+                    *no_punch,
+                    false,
+                    false,
+                );
             cmd_listen(
                 bind,
                 key,
@@ -11230,7 +11273,7 @@ async fn main() {
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
                 *quic,
-                *punch,
+                punch_active,
             )
             .await
         }

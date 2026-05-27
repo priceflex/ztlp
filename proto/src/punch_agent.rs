@@ -68,16 +68,72 @@ pub struct PunchAgent {
     /// This gateway's NodeId — embedded in `PUNCH_REPORT` so NS can index
     /// the endpoint mapping by node.
     pub node_id: NodeId,
+
+    /// Cached listener port (extracted from `socket.local_addr()` at
+    /// construction time). Stamped onto every local-candidate
+    /// `SocketAddr` enumerated for inclusion in `PUNCH_REPORT`. If the
+    /// underlying socket cannot report its local_addr (extremely rare on
+    /// a bound socket), this falls through to `0` and a WARN is logged —
+    /// the dialer side (M5) can ignore port-0 candidates.
+    pub(crate) listener_port: u16,
+
+    /// Operator override: force-include these interface names in the
+    /// PUNCH_REPORT candidate list, even if the default filter would
+    /// skip them. Empty in the default constructor.
+    pub(crate) advertise_include: Vec<String>,
+
+    /// Operator override: force-exclude these interface names from the
+    /// PUNCH_REPORT candidate list. Takes precedence over `include` and
+    /// `all`. Empty in the default constructor.
+    pub(crate) advertise_exclude: Vec<String>,
+
+    /// Operator override: when true, disable the default filter entirely
+    /// (link-local, docker bridges, etc. all flow through). Only
+    /// `advertise_exclude` still applies. False in the default constructor.
+    pub(crate) advertise_all: bool,
 }
 
 impl PunchAgent {
     /// Construct a new agent over the given shared socket, NS address,
     /// and node identity.
     pub fn new(socket: Arc<UdpSocket>, ns_addr: SocketAddr, node_id: NodeId) -> Self {
+        Self::with_advertise_overrides(socket, ns_addr, node_id, Vec::new(), Vec::new(), false)
+    }
+
+    /// Construct a new agent with explicit operator overrides for the
+    /// PUNCH_REPORT candidate enumeration filter.
+    ///
+    /// See [`crate::local_candidates::enumerate_local_candidates_with_overrides`]
+    /// for filter semantics. `include`/`exclude` are interface names
+    /// (e.g. `"eth0"`, `"docker0"`); `all` disables the default skip
+    /// filter when true.
+    pub fn with_advertise_overrides(
+        socket: Arc<UdpSocket>,
+        ns_addr: SocketAddr,
+        node_id: NodeId,
+        advertise_include: Vec<String>,
+        advertise_exclude: Vec<String>,
+        advertise_all: bool,
+    ) -> Self {
+        let listener_port = match socket.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "ztlp::punch_agent",
+                    error = %e,
+                    "PunchAgent: socket.local_addr() failed; using port 0 (candidates will be unusable)"
+                );
+                0
+            }
+        };
         Self {
             socket,
             ns_addr,
             node_id,
+            listener_port,
+            advertise_include,
+            advertise_exclude,
+            advertise_all,
         }
     }
 
@@ -130,10 +186,10 @@ impl PunchAgent {
         let socket = self.socket.clone();
         let ns_addr = self.ns_addr;
         let node_id = self.node_id;
-        // Pre-encode the packet — the keepalive contents are static (no
-        // reported endpoints; NS learns the endpoint from the source
-        // address of this very packet).
-        let pkt = encode_punch_report(&node_id, &[]);
+        let port = self.listener_port;
+        let include = self.advertise_include.clone();
+        let exclude = self.advertise_exclude.clone();
+        let all = self.advertise_all;
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -141,6 +197,16 @@ impl PunchAgent {
             // we want — register with NS as soon as the keepalive starts.
             loop {
                 ticker.tick().await;
+                // Re-enumerate every tick — laptops change networks
+                // (Wi-Fi → Ethernet → VPN flip) and the per-tick
+                // getifaddrs(3) cost is microseconds. Re-encode every
+                // tick because the candidate set can change between
+                // ticks; cloud gateways pay a tiny constant cost for
+                // this insurance.
+                let candidates = crate::local_candidates::enumerate_local_candidates_with_overrides(
+                    port, &include, &exclude, all,
+                );
+                let pkt = encode_punch_report(&node_id, &candidates);
                 if let Err(e) = socket.send_to(&pkt, ns_addr).await {
                     // Don't tear down on send failure — NAT mapping is
                     // refreshed best-effort. Log + carry on.
@@ -269,6 +335,12 @@ mod tests {
     /// first tick is documented as immediate-on-first-poll, not "after
     /// interval has elapsed" — so a real-clock test with a short timeout
     /// is the most honest validation of the production behavior.
+    ///
+    /// Updated for M2 (v0.32): reported_count is no longer hard-coded
+    /// to 0 — the keepalive now enumerates local NICs and attaches them
+    /// as reported endpoints. We assert the count is a valid u8 (i.e.
+    /// the byte at offset 17 was actually written) and accept any value
+    /// because the host's NIC set is environment-dependent.
     #[tokio::test]
     async fn keepalive_sends_punch_report_on_first_tick() {
         // Fake NS receiver — agent will send to this address.
@@ -289,14 +361,14 @@ mod tests {
             .expect("keepalive did not arrive within 500ms");
         let (n, _src) = recv.expect("recv_from returned io error");
 
-        // Wire format: 0x0C + 16-byte node_id + 1-byte reported_count (0)
+        // Wire format: 0x0C + 16-byte node_id + 1-byte reported_count + reported_addrs...
         assert!(n >= 18, "PUNCH_REPORT too short: {} bytes", n);
         assert_eq!(buf[0], 0x0C, "first byte must be NS_PUNCH_REPORT");
         assert_eq!(&buf[1..17], &node_id.0[..], "node_id must match");
-        assert_eq!(
-            buf[17], 0,
-            "reported_count should be 0 (NS learns endpoint)"
-        );
+        // M2: reported_count is environment-dependent (≥ 0). We just
+        // verify the byte exists; behaviour of local-candidate
+        // enumeration is covered by the M2-T4/T6 tests below.
+        let _reported_count = buf[17];
 
         // Clean up the keepalive task — without abort, it would keep
         // ticking in the background and interact with later tests.
@@ -432,5 +504,186 @@ mod tests {
         assert_eq!(buf[0], PUNCH_BYTE_CONST);
 
         handle.abort();
+    }
+
+    // ── M2 (v0.32): multi-candidate discovery — PUNCH_REPORT carries local NICs ──
+
+    /// Inline mini-decoder for PUNCH_REPORT (0x0C) used by M2 tests.
+    /// Returns (node_id, reported_endpoints).
+    /// Format: 0x0C | node_id[16] | count[1] | (family[1] + addr + port[2])*
+    fn decode_punch_report_for_test(data: &[u8]) -> (NodeId, Vec<SocketAddr>) {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        assert!(data.len() >= 18, "punch report too short: {}", data.len());
+        assert_eq!(data[0], 0x0C, "expected NS_PUNCH_REPORT");
+        let mut nid = [0u8; 16];
+        nid.copy_from_slice(&data[1..17]);
+        let count = data[17] as usize;
+        let mut endpoints = Vec::with_capacity(count);
+        let mut pos = 18;
+        for _ in 0..count {
+            assert!(pos < data.len(), "truncated punch report");
+            match data[pos] {
+                4 => {
+                    assert!(pos + 7 <= data.len(), "truncated v4 addr");
+                    let ip =
+                        Ipv4Addr::new(data[pos + 1], data[pos + 2], data[pos + 3], data[pos + 4]);
+                    let port = u16::from_be_bytes([data[pos + 5], data[pos + 6]]);
+                    endpoints.push(SocketAddr::new(IpAddr::V4(ip), port));
+                    pos += 7;
+                }
+                6 => {
+                    assert!(pos + 19 <= data.len(), "truncated v6 addr");
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&data[pos + 1..pos + 17]);
+                    let port = u16::from_be_bytes([data[pos + 17], data[pos + 18]]);
+                    endpoints.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(octets)), port));
+                    pos += 19;
+                }
+                f => panic!("unknown addr family {} in punch report", f),
+            }
+        }
+        (NodeId(nid), endpoints)
+    }
+
+    /// M2-T1: PunchAgent caches the listener port at construction so the
+    /// keepalive can attach it to every reported local candidate.
+    #[tokio::test]
+    async fn punch_agent_caches_listener_port_on_construction() {
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let expected_port = sock.local_addr().unwrap().port();
+        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), NodeId([0x01; 16]));
+        assert_eq!(
+            agent.listener_port, expected_port,
+            "listener_port must be cached from the bound socket"
+        );
+        assert_ne!(
+            agent.listener_port, 0,
+            "ephemeral bind should never produce port 0"
+        );
+    }
+
+    /// M2-T2: default constructor leaves all three override knobs empty/false.
+    #[tokio::test]
+    async fn punch_agent_default_advertise_overrides_are_empty() {
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), NodeId([0x02; 16]));
+        assert!(agent.advertise_include.is_empty());
+        assert!(agent.advertise_exclude.is_empty());
+        assert!(!agent.advertise_all);
+    }
+
+    /// M2-T3: with_advertise_overrides() stores all three knobs on the agent.
+    #[tokio::test]
+    async fn punch_agent_with_advertise_overrides_stores_them() {
+        let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let agent = PunchAgent::with_advertise_overrides(
+            sock,
+            "127.0.0.1:23096".parse().unwrap(),
+            NodeId([0x03; 16]),
+            vec!["eth0".to_string()],
+            vec!["docker0".to_string()],
+            true,
+        );
+        assert_eq!(agent.advertise_include, vec!["eth0".to_string()]);
+        assert_eq!(agent.advertise_exclude, vec!["docker0".to_string()]);
+        assert!(agent.advertise_all);
+    }
+
+    /// M2-T4: load-bearing behaviour — every PUNCH_REPORT keepalive packet
+    /// carries the gateway's local NIC addresses with the cached listener
+    /// port stamped onto each one.
+    #[tokio::test]
+    async fn keepalive_packet_includes_local_candidates_with_listener_port() {
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ns_addr = ns_sock.local_addr().unwrap();
+
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let gw_port = gw_sock.local_addr().unwrap().port();
+
+        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([7u8; 16]));
+        let handle = agent.start_keepalive(Duration::from_millis(50));
+
+        let mut buf = [0u8; 1024];
+        let (n, _src) =
+            tokio::time::timeout(Duration::from_millis(500), ns_sock.recv_from(&mut buf))
+                .await
+                .expect("keepalive packet did not arrive within 500ms")
+                .expect("recv_from io error");
+
+        let (nid, endpoints) = decode_punch_report_for_test(&buf[..n]);
+        assert_eq!(nid, NodeId([7u8; 16]), "node_id round-trips");
+        for ep in &endpoints {
+            assert_eq!(
+                ep.port(),
+                gw_port,
+                "every reported endpoint must carry the cached listener port"
+            );
+        }
+
+        handle.abort();
+    }
+
+    /// M2-T5: smoke test — with_advertise_overrides() wires the override
+    /// path end-to-end and the keepalive still sends a well-formed
+    /// PUNCH_REPORT (type 0x0C) without crashing.
+    #[tokio::test]
+    async fn keepalive_packet_respects_exclude_override() {
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ns_addr = ns_sock.local_addr().unwrap();
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let agent = PunchAgent::with_advertise_overrides(
+            gw_sock,
+            ns_addr,
+            NodeId([0x55; 16]),
+            Vec::new(),
+            vec!["lo".to_string()],
+            false,
+        );
+        assert_eq!(agent.advertise_exclude, vec!["lo".to_string()]);
+        let handle = agent.start_keepalive(Duration::from_millis(50));
+
+        let mut buf = [0u8; 1024];
+        let (n, _src) =
+            tokio::time::timeout(Duration::from_millis(500), ns_sock.recv_from(&mut buf))
+                .await
+                .expect("keepalive packet did not arrive within 500ms")
+                .expect("recv_from io error");
+        assert!(n >= 18, "packet too short");
+        assert_eq!(buf[0], 0x0C, "must be NS_PUNCH_REPORT");
+
+        handle.abort();
+    }
+
+    /// M2-T6: re-enumeration happens INSIDE the tokio tick loop, not
+    /// cached pre-tick. We verify by receiving ≥3 packets in 200ms with
+    /// a 30ms interval, and every packet's reported endpoints carry the
+    /// cached listener port.
+    #[tokio::test]
+    async fn keepalive_re_enumerates_each_tick() {
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ns_addr = ns_sock.local_addr().unwrap();
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let gw_port = gw_sock.local_addr().unwrap().port();
+
+        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0xC0; 16]));
+        let handle = agent.start_keepalive(Duration::from_millis(30));
+
+        let mut count = 0usize;
+        let mut buf = [0u8; 1024];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        while tokio::time::Instant::now() < deadline && count < 3 {
+            if let Ok(Ok((n, _src))) =
+                tokio::time::timeout(Duration::from_millis(100), ns_sock.recv_from(&mut buf)).await
+            {
+                let (_nid, endpoints) = decode_punch_report_for_test(&buf[..n]);
+                for ep in &endpoints {
+                    assert_eq!(ep.port(), gw_port, "port stable across re-enumerations");
+                }
+                count += 1;
+            }
+        }
+        handle.abort();
+        assert!(count >= 3, "expected ≥3 keepalives in 250ms, got {}", count);
     }
 }

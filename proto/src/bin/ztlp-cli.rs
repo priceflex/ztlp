@@ -425,6 +425,29 @@ enum Commands {
         /// Disable NS-coordinated UDP hole punching even when --ns-server is set
         #[arg(long, conflicts_with = "punch", default_value_t = false)]
         no_punch: bool,
+
+        /// Force-include this interface name in the PUNCH_REPORT
+        /// candidate list, even if the default filter would skip it.
+        /// Additive — repeat the flag to add multiple interfaces:
+        /// `--advertise-interface eth0 --advertise-interface wg0`.
+        ///
+        /// (v0.32+ multi-candidate discovery — see
+        /// docs/plans/2026-05-28-multi-candidate-discovery-v0.32.md.)
+        #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+        advertise_interface: Vec<String>,
+
+        /// Force-exclude this interface name from the PUNCH_REPORT
+        /// candidate list. Takes precedence over `--advertise-interface`
+        /// and `--advertise-all-interfaces`. Additive — repeat the flag
+        /// to exclude multiple interfaces.
+        #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+        no_advertise_interface: Vec<String>,
+
+        /// Advertise ALL interfaces in PUNCH_REPORT, disabling the
+        /// default skip filter (loopback, link-local, docker bridges,
+        /// `br-*`, down ifaces). `--no-advertise-interface` still applies.
+        #[arg(long, default_value_t = false)]
+        advertise_all_interfaces: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -3999,6 +4022,9 @@ async fn cmd_listen(
     admin_pubkey_email: &[String],
     _quic: bool,
     punch_enabled: bool,
+    advertise_interface: &[String],
+    no_advertise_interface: &[String],
+    advertise_all_interfaces: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -4119,7 +4145,14 @@ async fn cmd_listen(
                 .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
         );
         let gw_node_id = identity.node_id;
-        let agent = ztlp_proto::punch_agent::PunchAgent::new(keepalive_sock, ns_addr, gw_node_id);
+        let agent = ztlp_proto::punch_agent::PunchAgent::with_advertise_overrides(
+            keepalive_sock,
+            ns_addr,
+            gw_node_id,
+            advertise_interface.to_vec(),
+            no_advertise_interface.to_vec(),
+            advertise_all_interfaces,
+        );
         println!(
             "{} Punch enabled — keepalive to {} every {:?}",
             c_green("✓"),
@@ -11241,6 +11274,9 @@ async fn main() {
             quic,
             punch,
             no_punch,
+            advertise_interface,
+            no_advertise_interface,
+            advertise_all_interfaces,
         } => {
             // H10 (v0.30.12): when --ns-server is set, --punch auto-flips
             // to ON unless --no-punch is passed. Gateways don't fail over
@@ -11274,6 +11310,9 @@ async fn main() {
                 admin_pubkey_email,
                 *quic,
                 punch_active,
+                advertise_interface,
+                no_advertise_interface,
+                *advertise_all_interfaces,
             )
             .await
         }

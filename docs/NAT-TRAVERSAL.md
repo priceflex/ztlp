@@ -37,6 +37,74 @@ network topology, with the client transparently choosing the best path. No flags
 
 ---
 
+## Implementation status — v0.30.12 (2026-05-27)
+
+The work proposed in the table above is **shipped** as of v0.30.12 (PR #63 merged
+docs, follow-up PR ships code on `feature/resilient-connectivity-v0.30.12`).
+The 14-row tracker in [`docs/plans/2026-05-27-resilient-connectivity-plan.md`](plans/2026-05-27-resilient-connectivity-plan.md)
+is the authoritative source of per-task SHAs and test counts; the table below
+summarises what landed.
+
+| Task | Status | Commit | Verified by |
+|------|--------|--------|-------------|
+| H0 — `quinn::AsyncUdpSocket` wrapper spike | ✅ | 0fa4e13 | throwaway example compiled and ran; quinn 0.11.9 confirmed |
+| H1 — `PunchAgent` skeleton | ✅ | 884932e | inline unit test |
+| H2 — `start_keepalive(10s)` emits `0x0C PUNCH_REPORT` | ✅ | 83aa185 (10s confirmed in a39a49e) | wire-format unit test |
+| H3 — `PunchSocket` intercepts `0x0B` / drops `0x00` before Quinn | ✅ | 566cb46 | 5 unit tests with `FakeSocket` driver |
+| H4 — Gateway-side responder + dispatcher | ✅ | f2372e7 | 6 unit tests (responder + dispatcher + malformed-payload tolerance) |
+| H5 — `--punch` / `--ns-server` wired into `ztlp listen` | ✅ | c65c83b | live binary `--help`; 896 lib tests |
+| H6 — In-process end-to-end punch test (fake NS, no relay) | ✅ | 83c991c | `proto/tests/punch_e2e_test.rs` — happy path + 2 timeouts in 0.61 s |
+| H7 — Elixir `pick_best_notify_addr/1` prefers `:learned` | ✅ | 7e886ac | 4 BDD ExUnit tests |
+| H10 — Auto-on when `--ns-server` is set, `--no-punch` / `--no-relay-pool` escape hatches | ✅ | a39a49e | 9 BDD unit tests + smoke test against `ztlp connect/listen --help` |
+| R1 — `0x0D LIST_RELAYS` protocol (Rust + Elixir) | ✅ | f0245fb | 12 Rust + 4 Elixir tests |
+| R2 — Relay probe task drives `record_probe_*` | ✅ | 1f23162 | 3 BDD tests; v0.30.11-compatible probe wire format |
+| R3 — `pool.primary()` consulted per handshake; `report_handshake_*` after | ✅ | a2452d2 | 4 BDD tests (no-pool fallback, primary override, failed-primary→backup, empty-pool) |
+| H8 — Bench validation on AWS + SD-WAN | 🔲 | — | **Requires NS-restart window with Steve.** pcap evidence + manual relay-kill / NS-kill tests pending |
+| H9 — This doc | ✅ | (this commit) | — |
+
+**Defaults as of v0.30.12:**
+
+```
+ztlp connect <name>                       → QUIC mode, no NAT traversal (legacy default)
+ztlp connect <name> --ns-server <addr>    → punch ON  +  relay-pool ON  (auto)
+ztlp connect <name> --ns-server <addr> --no-punch       → relay-pool ON, no punch
+ztlp connect <name> --ns-server <addr> --no-relay-pool  → punch ON, single relay
+ztlp listen --ns-server <addr>            → punch ON  (gateway side)
+ztlp listen --ns-server <addr> --no-punch → punch OFF (audit mode)
+```
+
+**Wire-protocol additions in v0.30.12:**
+
+| Type byte | Direction      | Purpose                                    |
+|-----------|----------------|--------------------------------------------|
+| `0x0A`    | client → NS    | `PEER_ENDPOINTS` query (existing)          |
+| `0x0B`    | NS → client/gw | `PUNCH_NOTIFY` (existing, intercepted by `PunchSocket`) |
+| `0x0C`    | gw → NS        | `PUNCH_REPORT` keepalive (10 s cadence)    |
+| `0x0D`    | client → NS    | **`LIST_RELAYS` (new)** — query registered relays, optionally per-zone |
+| `0x5A37 / 0xFE` | client → relay | **Probe ping (new)** — silent on v0.30.11 relays; success = no ICMP |
+
+**Keepalive:** 10 s (down from the 25 s originally proposed; revised after the
+2026-05-27 Z2LS bench observed punctuated stalls under load on the SD-WAN
+edge).
+
+**H8 pcap excerpt:** placeholder pending Steve's NS-restart window.
+Expected packet sequence on a successful punch (validated by the in-process
+H6 test today — bench validation will confirm against real SD-WAN):
+
+```
+1. client → NS    : 0x0A PEER_ENDPOINTS request (target NodeID, requester reported endpoints)
+2. NS → gw        : 0x0B PUNCH_NOTIFY        (requester NodeID + endpoints to punch toward)
+3. NS → client    : 0x0A PEER_ENDPOINTS response (gateway's known endpoints incl. :learned)
+4. gw → client    : 0x00 PUNCH_BYTE × N      (200 ms cadence for up to 10 s)
+4'. client → gw   : 0x00 PUNCH_BYTE × N      (200 ms cadence for up to 10 s)
+5. either side    : ZTLP magic 0x5A37 …      (real handshake, NAT pinhole now open)
+```
+
+`PunchSocket` consumes bytes 2 and 4/4′ before Quinn ever sees them, so the
+QUIC stack only ever sees the post-pinhole real handshake at step 5.
+
+---
+
 ## Why this debug session needed hole punching
 
 The bench setup tonight had:

@@ -268,6 +268,37 @@ pub fn decode_punch_notify(data: &[u8]) -> Result<(NodeId, Vec<PeerEndpoint>), P
     Ok((node_id, endpoints))
 }
 
+/// Build a `PUNCH_NOTIFY` payload — wire format mirror of
+/// `decode_punch_notify`. Exposed for testing the gateway dispatcher
+/// in isolation from the NS server.
+///
+/// In production NS emits these packets directly; the gateway never
+/// builds them. We expose this as `pub` (rather than `pub(crate)` or
+/// `#[cfg(test)]`-only) because the integration test in H6 lives in
+/// `proto/tests/` (an external integration-test target) and needs to
+/// synthesize NS-style packets.
+pub fn encode_punch_notify(requester_node_id: &NodeId, endpoints: &[SocketAddr]) -> Vec<u8> {
+    let count = endpoints.len().min(255) as u8;
+    let mut pkt = Vec::with_capacity(1 + 16 + 1 + count as usize * 7);
+    pkt.push(NS_PUNCH_NOTIFY);
+    pkt.extend_from_slice(requester_node_id.as_bytes());
+    pkt.push(count);
+    for addr in endpoints.iter().take(count as usize) {
+        encode_addr(&mut pkt, *addr);
+    }
+    pkt
+}
+
+/// Test-only alias retained for in-crate tests that imported it
+/// before `encode_punch_notify` got promoted to the public API.
+#[doc(hidden)]
+pub fn encode_punch_notify_for_test(
+    requester_node_id: &NodeId,
+    endpoints: &[SocketAddr],
+) -> Vec<u8> {
+    encode_punch_notify(requester_node_id, endpoints)
+}
+
 /// Check if a packet is a punch packet (single byte 0x00).
 pub fn is_punch_packet(data: &[u8]) -> bool {
     data.len() == 1 && data[0] == PUNCH_BYTE
@@ -539,6 +570,101 @@ fn decode_addr(data: &[u8]) -> Option<(SocketAddr, usize)> {
             ))
         }
         _ => None,
+    }
+}
+
+// ─── Gateway-side responder ─────────────────────────────────────────
+
+/// Default duration for the gateway-side punch response loop.
+///
+/// 10 seconds gives a generous window for the client's QUIC handshake
+/// to traverse the freshly-opened NAT pinhole on every common SD-WAN /
+/// consumer-router NAT. Production wraps this with the punch_timeout
+/// from PunchConfig but the standalone responder uses this default.
+pub const DEFAULT_RESPONDER_DURATION: Duration = Duration::from_secs(10);
+
+/// Interval between successive `PUNCH_BYTE` sends in the responder loop.
+///
+/// 200ms balances "open the pinhole quickly so the client's handshake
+/// doesn't time out waiting" against "don't flood the peer's NAT". With
+/// `DEFAULT_RESPONDER_DURATION = 10s` and 200ms cadence, we send up to
+/// 50 punch bytes per peer endpoint per responder invocation — well
+/// within UDP keepalive budgets.
+pub const RESPONDER_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Gateway-side punch responder.
+///
+/// Sends `PUNCH_BYTE` (`0x00`) to each address in `peer_endpoints`
+/// every [`RESPONDER_INTERVAL`] for at most `duration`. Each send
+/// pokes the peer's NAT so that subsequent QUIC handshake traffic
+/// from this socket (delivered through Quinn) can traverse the
+/// freshly-opened pinhole.
+///
+/// # Behavior
+///
+/// - Sends to ALL endpoints on every tick — peer may sit behind
+///   multiple NATs (IPv4 + IPv6, primary + cellular). The cost is
+///   `endpoints.len()` UDP sends every 200ms, which is negligible
+///   for the typical 1-3 endpoint case.
+/// - Send errors are logged at DEBUG and do NOT terminate the loop.
+///   The whole point is best-effort NAT poking; transient EAGAIN /
+///   permission-denied on one endpoint shouldn't abort the others.
+/// - Returns `Ok(())` after `duration` elapses regardless of whether
+///   the handshake actually traversed — success/failure is observed
+///   by the QUIC connection state machine, not by this function.
+///
+/// # Why not check for incoming punches?
+///
+/// The H3 [`crate::punch_socket::PunchSocket`] wrapper intercepts
+/// inbound `PUNCH_NOTIFY` BEFORE Quinn sees them, but inbound QUIC
+/// handshakes flow through unchanged. So the success signal is just
+/// "Quinn accepted a new connection from one of the peer endpoints"
+/// — handled entirely by Quinn's accept loop, not by this function.
+///
+/// # Example
+///
+/// ```no_run
+/// # use std::net::SocketAddr;
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use tokio::net::UdpSocket;
+/// # use ztlp_proto::punch::respond_to_punch;
+/// # async fn example() -> std::io::Result<()> {
+/// let sock = Arc::new(UdpSocket::bind("0.0.0.0:23095").await?);
+/// let peer_addrs: Vec<SocketAddr> = vec![
+///     "203.0.113.5:54321".parse().unwrap(),
+///     "[2001:db8::5]:54321".parse().unwrap(),
+/// ];
+/// respond_to_punch(&sock, &peer_addrs, Duration::from_secs(10)).await;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn respond_to_punch(
+    socket: &Arc<UdpSocket>,
+    peer_endpoints: &[SocketAddr],
+    duration: Duration,
+) {
+    if peer_endpoints.is_empty() {
+        // Defensive — caller should not invoke with empty endpoints
+        // but tolerate it without panicking. Just sleep and exit.
+        tokio::time::sleep(duration).await;
+        return;
+    }
+
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut ticker = tokio::time::interval(RESPONDER_INTERVAL);
+    // interval()'s first tick is immediate — that's exactly what we
+    // want: poke the NAT right away, not 200ms from now.
+    loop {
+        ticker.tick().await;
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        for ep in peer_endpoints {
+            if let Err(e) = socket.send_to(&[PUNCH_BYTE], ep).await {
+                debug!("punch responder: send to {} failed: {} (continuing)", ep, e);
+            }
+        }
     }
 }
 
@@ -1114,5 +1240,75 @@ mod tests {
         let timed_out = PunchResult::TimedOut;
         assert_eq!(timed_out, PunchResult::TimedOut);
         assert_ne!(success, timed_out);
+    }
+
+    // ── H4: respond_to_punch responder loop ─────────────────────────
+
+    /// H4 — verifies respond_to_punch sends PUNCH_BYTE to each
+    /// configured peer endpoint at least once within the duration.
+    #[tokio::test]
+    async fn h4_respond_to_punch_sends_byte_to_each_endpoint() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoints = vec![peer1.local_addr().unwrap(), peer2.local_addr().unwrap()];
+
+        // Run responder for 500ms — at 200ms cadence with immediate
+        // first tick, both peers should receive at least one byte.
+        tokio::spawn(async move {
+            respond_to_punch(&gw, &endpoints, Duration::from_millis(500)).await;
+        });
+
+        let mut b = [0u8; 4];
+        let (n1, _) = tokio::time::timeout(Duration::from_secs(2), peer1.recv_from(&mut b))
+            .await
+            .expect("peer1 did not receive PUNCH_BYTE")
+            .expect("peer1 recv_from io error");
+        assert_eq!(n1, 1, "PUNCH_BYTE is a 1-byte packet");
+        assert_eq!(b[0], PUNCH_BYTE, "first byte must be 0x00");
+
+        let (n2, _) = tokio::time::timeout(Duration::from_secs(2), peer2.recv_from(&mut b))
+            .await
+            .expect("peer2 did not receive PUNCH_BYTE")
+            .expect("peer2 recv_from io error");
+        assert_eq!(n2, 1);
+        assert_eq!(b[0], PUNCH_BYTE);
+    }
+
+    /// H4 — verifies that the responder exits after the configured
+    /// duration. We give it 200ms; it should be done within 400ms
+    /// (200ms duration + scheduling slack).
+    #[tokio::test]
+    async fn h4_respond_to_punch_exits_after_duration() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoints = vec![peer.local_addr().unwrap()];
+
+        let start = tokio::time::Instant::now();
+        respond_to_punch(&gw, &endpoints, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "responder ran too long: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "responder exited too early: {:?}",
+            elapsed
+        );
+    }
+
+    /// H4 — defensive: empty endpoint list should not panic; should
+    /// just sleep for the duration and return.
+    #[tokio::test]
+    async fn h4_respond_to_punch_empty_endpoints_does_not_panic() {
+        let gw = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let start = tokio::time::Instant::now();
+        respond_to_punch(&gw, &[], Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(400));
     }
 }

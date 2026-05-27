@@ -37,7 +37,7 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
 use crate::identity::NodeId;
-use crate::punch::encode_punch_report;
+use crate::punch::{decode_punch_notify, encode_punch_report, respond_to_punch, PeerEndpoint};
 
 /// Default interval for the keepalive task: 25 seconds — chosen to sit
 /// comfortably under common NAT idle timeouts (30-60s on consumer
@@ -151,6 +151,88 @@ impl PunchAgent {
             }
         })
     }
+
+    /// Spawn a background task that consumes intercepted `PUNCH_NOTIFY`
+    /// packets from `intercept_rx` and invokes the gateway-side
+    /// punch responder for each.
+    ///
+    /// # Why this exists
+    ///
+    /// [`crate::punch_socket::PunchSocket`] strips `0x0B PUNCH_NOTIFY`
+    /// out of the inbound packet stream before Quinn sees it, and forwards
+    /// the payload to an unbounded channel. This dispatcher consumes
+    /// that channel: for each notification it decodes the requester
+    /// NodeId + endpoints and fires [`crate::punch::respond_to_punch`]
+    /// against the requester's endpoints, opening the NAT pinhole so
+    /// the requester's subsequent QUIC handshake can traverse.
+    ///
+    /// # Returns
+    ///
+    /// `JoinHandle<()>` for the dispatcher task. The task runs until
+    /// the channel sender is dropped (i.e. the underlying `PunchSocket`
+    /// is destroyed) at which point the receiver yields `None` and the
+    /// task exits cleanly. The caller can also `abort()` the handle for
+    /// graceful shutdown.
+    ///
+    /// # Concurrency
+    ///
+    /// Each decoded notification spawns a fresh responder task — multiple
+    /// concurrent punch attempts (e.g. from several different clients)
+    /// don't serialize through one responder. This matters in production
+    /// where a busy gateway may field punch attempts from many clients
+    /// simultaneously.
+    pub fn start_dispatcher(
+        &self,
+        mut intercept_rx: tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, SocketAddr)>,
+        responder_duration: Duration,
+    ) -> JoinHandle<()> {
+        let socket = self.socket.clone();
+        tokio::spawn(async move {
+            while let Some((payload, src)) = intercept_rx.recv().await {
+                // Decode the notification. Malformed packets are logged
+                // and dropped — punch is best-effort.
+                let (requester_id, endpoints) = match decode_punch_notify(&payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "ztlp::punch_agent",
+                            error = %e,
+                            src = %src,
+                            "PUNCH_NOTIFY decode failed"
+                        );
+                        continue;
+                    }
+                };
+
+                let target_addrs: Vec<SocketAddr> =
+                    endpoints.iter().map(|e: &PeerEndpoint| e.addr).collect();
+
+                if target_addrs.is_empty() {
+                    tracing::debug!(
+                        target: "ztlp::punch_agent",
+                        requester = %requester_id,
+                        "PUNCH_NOTIFY with no endpoints — skipping responder"
+                    );
+                    continue;
+                }
+
+                tracing::info!(
+                    target: "ztlp::punch_agent",
+                    requester = %requester_id,
+                    endpoint_count = target_addrs.len(),
+                    "PUNCH_NOTIFY received; responding"
+                );
+
+                // Spawn the responder so the dispatcher loop can
+                // immediately accept the next notification without
+                // blocking for `responder_duration` seconds.
+                let sock_clone = socket.clone();
+                tokio::spawn(async move {
+                    respond_to_punch(&sock_clone, &target_addrs, responder_duration).await;
+                });
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +327,107 @@ mod tests {
         }
         handle.abort();
         assert!(count >= 3, "expected >=3 keepalives, got {}", count);
+    }
+
+    // ── H4: start_dispatcher consumes PUNCH_NOTIFY + invokes responder ──
+
+    use crate::punch::{encode_punch_notify_for_test, PUNCH_BYTE as PUNCH_BYTE_CONST};
+
+    /// H4 — dispatcher decodes a PUNCH_NOTIFY and fires PUNCH_BYTE
+    /// at the requester's reported endpoints.
+    #[tokio::test]
+    async fn h4_dispatcher_fires_responder_on_punch_notify() {
+        // Set up the gateway socket (where responder PUNCH_BYTE will
+        // come from) and an "imagined requester" socket (where they
+        // should arrive).
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let requester = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let requester_addr = requester.local_addr().unwrap();
+
+        let agent = PunchAgent::new(
+            gw_sock,
+            "127.0.0.1:0".parse().unwrap(), // NS addr unused in this test
+            NodeId([0xDE; 16]),
+        );
+
+        // Build the PUNCH_NOTIFY payload that PunchSocket would have
+        // forwarded — requester NodeId + one endpoint.
+        let requester_id = NodeId([0xAB; 16]);
+        let notify_payload = encode_punch_notify_for_test(&requester_id, &[requester_addr]);
+
+        // Wire up the channel ourselves (no PunchSocket needed for
+        // this isolated test of the dispatcher).
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = agent.start_dispatcher(rx, Duration::from_millis(400));
+
+        // Inject the notification.
+        tx.send((notify_payload, "127.0.0.1:1234".parse().unwrap()))
+            .unwrap();
+
+        // Expect a PUNCH_BYTE on the requester socket within 1s.
+        let mut buf = [0u8; 4];
+        let (n, _src) = tokio::time::timeout(Duration::from_secs(1), requester.recv_from(&mut buf))
+            .await
+            .expect("requester did not receive PUNCH_BYTE")
+            .expect("requester recv_from io error");
+
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], PUNCH_BYTE_CONST);
+
+        handle.abort();
+    }
+
+    /// H4 — dispatcher gracefully exits when the channel sender is dropped.
+    #[tokio::test]
+    async fn h4_dispatcher_exits_when_channel_closes() {
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), NodeId([0x11; 16]));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, SocketAddr)>();
+        let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
+
+        // Drop the sender; receiver should yield None immediately.
+        drop(tx);
+
+        // The dispatcher task should complete (cleanly exit the while-let loop).
+        tokio::time::timeout(Duration::from_millis(500), handle)
+            .await
+            .expect("dispatcher did not exit after channel close")
+            .expect("dispatcher task panicked");
+    }
+
+    /// H4 — malformed PUNCH_NOTIFY payloads are logged and skipped;
+    /// the dispatcher keeps running.
+    #[tokio::test]
+    async fn h4_dispatcher_tolerates_malformed_notifies() {
+        let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let requester = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let requester_addr = requester.local_addr().unwrap();
+
+        let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), NodeId([0x22; 16]));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = agent.start_dispatcher(rx, Duration::from_millis(300));
+
+        // First send a truncated (malformed) notify — dispatcher should
+        // skip it.
+        tx.send((vec![0x0B, 0xFF], "127.0.0.1:1234".parse().unwrap()))
+            .unwrap();
+
+        // Then send a valid one; verify it still fires.
+        let req_id = NodeId([0x33; 16]);
+        let valid = encode_punch_notify_for_test(&req_id, &[requester_addr]);
+        tx.send((valid, "127.0.0.1:1234".parse().unwrap())).unwrap();
+
+        // Should receive PUNCH_BYTE despite the earlier garbage.
+        let mut buf = [0u8; 4];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(1), requester.recv_from(&mut buf))
+            .await
+            .expect("requester did not receive PUNCH_BYTE after malformed")
+            .expect("requester recv_from io error");
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], PUNCH_BYTE_CONST);
+
+        handle.abort();
     }
 }

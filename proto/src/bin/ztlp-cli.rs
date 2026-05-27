@@ -12449,9 +12449,9 @@ mod tests {
             ciborium::value::Value::Map(m) => m,
             _ => panic!("expected CBOR map"),
         };
-        let found = map.iter().any(|(k, _)| {
-            matches!(k, ciborium::value::Value::Text(s) if s == "node_id")
-        });
+        let found = map
+            .iter()
+            .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
         assert!(found, "node_id key missing from KEY-record CBOR");
     }
 
@@ -12474,9 +12474,9 @@ mod tests {
             ciborium::value::Value::Map(m) => m,
             _ => panic!("expected CBOR map"),
         };
-        let found = map.iter().any(|(k, _)| {
-            matches!(k, ciborium::value::Value::Text(s) if s == "node_id")
-        });
+        let found = map
+            .iter()
+            .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
         assert!(found, "node_id key missing from SVC-record CBOR");
     }
 }

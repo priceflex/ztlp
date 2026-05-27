@@ -753,13 +753,10 @@ mod tests {
         let handle = agent.start_keepalive(Duration::from_millis(50));
 
         let mut buf = vec![0u8; 4096];
-        let (n, _src) = tokio::time::timeout(
-            Duration::from_secs(2),
-            ns_sock.recv_from(&mut buf),
-        )
-        .await
-        .expect("keepalive arrived")
-        .expect("recv ok");
+        let (n, _src) = tokio::time::timeout(Duration::from_secs(2), ns_sock.recv_from(&mut buf))
+            .await
+            .expect("keepalive arrived")
+            .expect("recv ok");
 
         handle.abort();
 

@@ -621,13 +621,11 @@ mod tests {
         });
 
         let dialer = QuicDialer::new().await.expect("QuicDialer::new");
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            dialer.dial(echo_addr),
-        )
-        .await
-        .expect("no timeout")
-        .expect("dial ok");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), dialer.dial(echo_addr))
+                .await
+                .expect("no timeout")
+                .expect("dial ok");
         // probe completed — outcome doesn't matter for liveness, only that the
         // dial completed without an EAFNOSUPPORT error.
         let _ = result;
@@ -647,13 +645,11 @@ mod tests {
         });
 
         let dialer = QuicDialer::new().await.expect("QuicDialer::new");
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            dialer.dial(echo_addr),
-        )
-        .await
-        .expect("no timeout")
-        .expect("dial ok");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), dialer.dial(echo_addr))
+                .await
+                .expect("no timeout")
+                .expect("dial ok");
         let _ = result;
     }
 }

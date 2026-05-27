@@ -392,24 +392,15 @@ pub fn is_punch_notify(data: &[u8]) -> bool {
 /// See A2 in `docs/plans/2026-05-28-v0.32.2-followups.md` for the
 /// matching family-aware-bind fix on the v0.32 QUIC dial path
 /// (`multi_candidate_dial.rs`).
-pub(crate) async fn send_punch_packet(
-    socket: &UdpSocket,
-    dest: SocketAddr,
-) -> std::io::Result<()> {
+pub(crate) async fn send_punch_packet(socket: &UdpSocket, dest: SocketAddr) -> std::io::Result<()> {
     // Family-aware soft-skip: if the shared punch socket is bound to a
     // different family than `dest`, the raw send_to would return
     // EAFNOSUPPORT (os error 97 on Linux). That's noise — the punch
     // socket is shared across the NAT mapping lifecycle and cannot be
     // re-bound mid-flow, so there's no useful recovery. We debug-log
     // once and treat the send as a no-op success.
-    let socket_is_v4 = socket
-        .local_addr()
-        .map(|a| a.is_ipv4())
-        .unwrap_or(false);
-    let socket_is_v6 = socket
-        .local_addr()
-        .map(|a| a.is_ipv6())
-        .unwrap_or(false);
+    let socket_is_v4 = socket.local_addr().map(|a| a.is_ipv4()).unwrap_or(false);
+    let socket_is_v6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
     if (socket_is_v4 && dest.is_ipv6()) || (socket_is_v6 && dest.is_ipv4()) {
         debug!(
             target: "punch",
@@ -1893,10 +1884,7 @@ mod tests {
         let v6_responder = match UdpSocket::bind("[::1]:0").await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "skipping A2 IPv6 test — host cannot bind [::1]:0: {}",
-                    e
-                );
+                eprintln!("skipping A2 IPv6 test — host cannot bind [::1]:0: {}", e);
                 return;
             }
         };
@@ -1916,13 +1904,10 @@ mod tests {
         let v4_peer_addr = v4_peer.local_addr().unwrap();
         send_punch_packet(&v4_socket, v4_peer_addr).await.unwrap();
         let mut buf = [0u8; 4];
-        let (len, _) = tokio::time::timeout(
-            Duration::from_secs(1),
-            v4_peer.recv_from(&mut buf),
-        )
-        .await
-        .expect("v4 peer should receive punch within 1s")
-        .unwrap();
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), v4_peer.recv_from(&mut buf))
+            .await
+            .expect("v4 peer should receive punch within 1s")
+            .unwrap();
         assert_eq!(len, 1);
         assert_eq!(buf[0], PUNCH_BYTE);
     }

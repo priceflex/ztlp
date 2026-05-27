@@ -2471,8 +2471,8 @@ async fn cmd_connect(
     // v0.30 production relay, so silently dropping a multi-candidate user
     // into legacy was the exact bug A1 fixes. The QUIC path now contains
     // the M6 dial logic; `--multi-candidate` is the canonical opt-in.
-    let want_legacy_path = !multi_candidate
-        && (relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled);
+    let want_legacy_path =
+        !multi_candidate && (relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled);
 
     if want_legacy_path {
         // Legacy UDP fallback for NAT traversal / relays
@@ -3305,10 +3305,11 @@ async fn cmd_connect(
     // which Quinn takes ownership of below. Sharing a single fd with
     // Quinn led to the v0.31 punch fd-aliasing trap; a separate probe
     // socket sidesteps it entirely.
-    let multi_candidate_winner: Option<SocketAddr> = if multi_candidate
-        && peer_node_id.is_some()
-    {
-        match ns_server.as_deref().and_then(|s| s.parse::<SocketAddr>().ok()) {
+    let multi_candidate_winner: Option<SocketAddr> = if multi_candidate && peer_node_id.is_some() {
+        match ns_server
+            .as_deref()
+            .and_then(|s| s.parse::<SocketAddr>().ok())
+        {
             Some(ns_addr) => {
                 eprintln!(
                     "{} multi-candidate dial enabled (v0.32.2)",

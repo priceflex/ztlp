@@ -862,7 +862,7 @@ defmodule ZtlpNs.Server do
 
   defp maybe_send_punch_notify(_target, _requester, nil), do: :ok
 
-  defp pick_best_notify_addr(endpoints) do
+  def pick_best_notify_addr(endpoints) do
     # Prefer learned addresses (more likely to reach through NAT)
     learned = Enum.filter(endpoints, fn {type, _ip, _port} -> type == :learned end)
 

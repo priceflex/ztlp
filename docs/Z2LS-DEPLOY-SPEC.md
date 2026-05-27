@@ -247,8 +247,19 @@ What each flag does and where it should come from:
 | `--ns-server` | `16.147.41.195:23096` | `node['ztlp']['ns_server']` | Same source as `config.toml`. **Yes, this is duplicated. CLI flags override the config file.** Cookbook should only set it in one place to avoid drift — pick the CLI flag (more visible in `nssm get` audit). |
 | `--gateway` | (flag-only) | hardcode | This is what makes the listener register as a routable gateway with the NS. |
 | `--relay` | `34.218.240.106:23095` | `node['ztlp']['relay']` | Same source as `config.toml`. |
-| `--service-name` | `z2ls-desktop-lrc8dkh-dcc1e2` | **derived: see below** | This is the per-machine slug under the zone. |
+| `--service-name` | `z2ls-desktop-lrc8dkh-dcc1e2` | **derived: see below** | The per-machine slug under the zone. Required to disambiguate Z2LS gateways on the shared relay — default `"ztlp-gateway"` would collide across every Z2LS box. |
 | `--max-sessions` | `100` | `node['ztlp']['max_sessions']` | Default 100 is fine for Z2LS shop boxes. |
+
+### `--service-name` vs `--service` — don't confuse them
+
+These are two flags on opposite ends of a ZTLP connection:
+
+| Flag | On which command | What it does | Cookbook concern |
+|---|---|---|---|
+| `--service-name` | `ztlp listen --gateway` (Z2LS side) | Routing slug the relay indexes this gateway under. Default `"ztlp-gateway"` — must be overridden on Z2LS so multiple shops' gateways don't collide on the shared relay. | **Yes — cookbook MUST set this per-machine.** Derivation in subsection below. |
+| `--service` | `ztlp connect` (operator side) | Names which `--forward NAME:HOST:PORT` on the gateway the client wants to route to. Gets emitted in a CLIENT_ROUTE frame inside the handshake. | **Not a cookbook concern.** The cookbook never runs `ztlp connect`. Operators do, from their own laptop. The spec only mentions it in §9 (healthcheck) and §1 (architecture). |
+
+If you see a `--forward NAME:H:P` flag on the listener and a `--service NAME` flag on the client, they pair: `--service ssh` from the client tells the gateway to forward to `127.0.0.1:22` from its `--forward ssh:127.0.0.1:22` config.
 
 ### Computing `--service-name`
 

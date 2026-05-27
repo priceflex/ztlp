@@ -1,6 +1,6 @@
 # NAT Traversal in ZTLP
 
-**Status:** Living design doc — captured 2026-05-26 after debugging same-WAN client→gateway routing through an SD-WAN edge.
+**Status:** Living design doc — captured 2026-05-26 after debugging same-WAN client→gateway routing through an SD-WAN edge. Updated 2026-05-28 with v0.32 multi-candidate discovery status.
 
 This doc answers: **how does hole-punching work, when should ZTLP use it, and what's the right default?**
 
@@ -13,27 +13,13 @@ end-to-end. That's the architecture every modern overlay net uses (Tailscale, Ne
 Twingate, WireGuard+STUN). When it lands, the relay becomes a fallback path for the
 ~10-20% of NAT topologies that can't be punched.
 
-**Tactically (today, 2026-05-26)**: punching is NOT shippable. The v0.30.13 binary has
-the CLI flags wired up but neither the **gateway side** nor the **NS rendezvous** is
-implemented. See "What I actually tried tonight" below. Until those land, the only
-viable paths are:
+**Tactical status:**
+- **v0.30.12 (shipped 2026-05-27):** hole punch + relay pool + NS coordination — all in place. Punch auto-on with `--ns-server`. Relay fallback works.
+- **v0.32 (this branch, 2026-05-28):** multi-candidate discovery layered on top. Gateways publish ALL local NIC addresses to NS; clients parallel-dial in priority bands (same-subnet host wins by default). Closes the v0.31 same-LAN failure mode documented in [`docs/v0.31.0-relay-deployment-investigation.md`](v0.31.0-relay-deployment-investigation.md).
 
-- **LAN-direct** (works today, no relay involved) — for same-network endpoints
-- **Relay-routed** (works today) — for cross-network endpoints, requires the SD-WAN to
-  not block unsolicited inbound on `:23095` (i.e., a port-forward on the customer's
-  edge to the gateway)
-
-Concretely, our flags **should** change once the protocol is built out:
-
-| Today                          | Should be                                                |
-|--------------------------------|----------------------------------------------------------|
-| `--punch` opt-in               | **punch always on**, opt out with `--no-punch`           |
-| `--nat-assist` opt-in          | **nat-assist always on**, opt out with `--no-nat-assist` |
-| `--no-relay-fallback` opt-in   | Keep — that's the audit-mode escape hatch                |
-| `--relay-pool` opt-in          | Keep opt-in (only useful with multiple relays)           |
-
-The default user experience should be: **`ztlp connect <name>` Just Works** on every
-network topology, with the client transparently choosing the best path. No flags.
+The default user experience is: **`ztlp connect <name>` Just Works** on every
+network topology, with the client transparently choosing the best path. No flags
+required.
 
 ---
 
@@ -145,6 +131,75 @@ Operational notes from the bench (recorded as production pitfalls):
 - NS mnesia tables MUST be wiped on minor-version upgrade; v0.30.10 → v0.30.12 crashed on boot until the mnesia dir was removed (preserve `ca/`). Documented in `ztlp-prod-deployment` skill.
 - The Chef-managed Z2LS identity is X25519-only (no Ed25519 signing key), so NS `register` requires `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false` env in v0.30.12 NS until identities are regenerated. Track as a follow-up to migrate the gateway identity format before flipping NS back to auth-required.
 - `probe_relay()` cannot distinguish "relay alive, ignored my unknown 0xFE packet" from "no listener at all" — both produce the same recv_from timeout. To actually drive R2 failover, the relay needs a 0xFE → 0xFF echo (v0.31.0 work).
+
+---
+
+## Implementation status — v0.32 multi-candidate discovery (2026-05-28)
+
+v0.32 adds ICE-style multi-candidate discovery on top of the v0.30.12 punch infrastructure. The plan is in [`docs/plans/2026-05-28-multi-candidate-discovery-v0.32.md`](plans/2026-05-28-multi-candidate-discovery-v0.32.md); live bench evidence in [`docs/v0.32.0-bench-validation.md`](v0.32.0-bench-validation.md).
+
+**What v0.32 changes vs v0.30.12:**
+
+| Concern | v0.30.12 | v0.32 |
+|---|---|---|
+| What NS knows about a gateway | Only its NAT'd source IP (`:learned` / server-reflexive) | All local NIC addresses (`:reported` host candidates) PLUS `:learned` |
+| Client dial strategy | Sequential: try direct, then punch, then relay | Parallel: race host candidates + srflx + relay in priority bands with 250ms inter-band delay |
+| Same-LAN connectivity | Round-trips through public WAN, hairpin NAT, or relay (broken at TR edge per v0.31 investigation) | Direct LAN connection in <1ms — same-subnet host candidate wins by default |
+| Operator visibility | None — must shell into NS and grep Mnesia state | `ztlp gateway candidates <name>` admin command |
+
+| Task | Status | Commit | Verified by |
+|------|--------|--------|-------------|
+| M1 — Gateway local-candidate enumerator (`enumerate_local_candidates`) | ✅ | `96b8eb8` + `03e6392` | 20 BDD tests covering 6 filter rules + 3 override flags + IPv6/ULA/exactly-8 boundaries |
+| M2 — Wire enumerator into `PUNCH_REPORT` keepalive | ✅ | `a67add5` | 6 BDD tests on PunchAgent (port cache, override storage, packet contents, per-tick re-enumeration); 3 new CLI flags `--advertise-interface` / `--no-advertise-interface` / `--advertise-all-interfaces` |
+| M3 — NS receives N-endpoint PUNCH_REPORT + PEER_ENDPOINTS roundtrip | ✅ | `5e9ae6c` | 5 BDD ExUnit tests (3-IPv4 store, mixed v4+v6, 8-cap, malformed-tolerant, roundtrip) |
+| M4 — Client priority calculator (7-tier ladder) | ✅ | `c42754a` | 15 BDD tests; same-subnet=250 > other RFC1918=200 > VPN/overlay=180 > public-v4=160 > v6-link-local=140 > srflx=100 > relay=50 |
+| M5 — Parallel-dial orchestrator with cancellation | ✅ | `b62bbbd` | 12 BDD tests using `#[tokio::test(start_paused=true)]` mocked time; task-leak check confirms `JoinSet::abort_all()` correctness |
+| M6 — `--multi-candidate` flag wired into `cmd_connect` | ✅ | `103cfff` | 10 BDD tests; hidden experimental flag; safe fall-through to v0.31 path on any failure |
+| M7 — `ztlp gateway candidates <name>` admin command | ✅ | `b619220` | 7 BDD tests on pure formatters; live `--help` shows new subcommand |
+| M8 — Backward-compatibility matrix wire tests | ✅ | `0ad9423` | 8 integration tests + 6 unit tests for `decode_punch_report`; pins all 6 rows of the Mixed-version safety table |
+| M9 — Live bench validation | ✅ | `5ed01ca` | AWS smoke test: v0.32 gateway with `--advertise-all-interfaces` registered 8 reported host candidates with v0.31 production NS; M4 prioritize() ranked live data correctly |
+| M10 — This NAT-TRAVERSAL.md update | ✅ | (this commit) | — |
+
+**v0.32 defaults (current; flips at v0.32.0 release):**
+
+```
+ztlp connect <name> --ns-server <addr>                        → v0.31 path (status quo)
+ztlp connect <name> --ns-server <addr> --multi-candidate      → v0.32 parallel dial (experimental, hidden)
+ztlp listen --ns-server <addr>                                → punch + default candidate filter
+ztlp listen --ns-server <addr> --advertise-all-interfaces     → publishes loopback / docker / link-local too
+ztlp gateway candidates <name> --ns-server <addr>             → admin diagnostic
+```
+
+At v0.32.0 release, `--multi-candidate` becomes default-true and the escape hatch flips to `--no-multi-candidate`.
+
+**v0.32 wire-protocol additions:** none. v0.32 is fully back-compat with v0.31 wire frames — the `reported_count::8` field in `PUNCH_REPORT` (`0x0C`) and the `endpoint_count::8` field in `PEER_ENDPOINTS` (`0x0A`) responses have always supported N>0; v0.30.12 gateways just always sent `N=0`. v0.32 gateways populate them.
+
+**Live-data evidence (v0.32 gateway on AWS `16.147.41.195:23997` with `--advertise-all-interfaces`):**
+
+```elixir
+iex> ZtlpNs.EndpointStore.get_endpoints(<<0x6d, 0x82, 0x76, 0x9c, ...>>)
+[
+  {:reported, {172, 18, 0, 1},   48278},   ← docker bridge
+  {:reported, {127, 0, 0, 1},    48278},   ← loopback (operator-opted in)
+  {:reported, {172, 20, 0, 1},   48278},
+  {:reported, {172, 17, 0, 1},   48278},
+  {:learned,  {16, 147, 41, 195}, 48278},  ← NAT'd source / srflx
+  {:reported, {172, 21, 0, 1},   48278},
+  {:reported, {172, 19, 0, 1},   48278},
+  {:reported, {172, 26, 13, 55}, 48278},   ← AWS VPC private IP — the real LAN address
+  {:reported, {172, 22, 0, 1},   48278},
+]
+```
+
+Compare to v0.30.12, where the same query would return only the `:learned` entry. The v0.31 production NS parsed all 8 reported entries with no code changes — the wire protocol was already shaped for this.
+
+### v0.32.1 follow-up candidates (out of scope for v0.32.0)
+
+1. **Keepalive socket port mismatch:** v0.32 gateways send PUNCH_REPORT from an ephemeral socket (M2 limitation), so the reported endpoints carry the *keepalive* port (e.g. `48278` above) rather than the *listener* port (`23997`). This means the host candidates ARE published to NS but a client dialing them lands on the wrong UDP port. Tracked: share Quinn's fd between listen and keepalive paths. Until fixed, same-LAN dial works *if* the gateway is in pure-Rust mode where Quinn binds the same socket; production Elixir gateways may need a different fix.
+
+2. **`ns register` doesn't populate `node_id` CBOR field:** the new `ztlp gateway candidates` admin tool resolves the gateway NodeID by reading `cbor_extract_string(key_record, "node_id")`. The bare `ztlp ns register` debug command writes a KEY record but omits this field, so the admin command errors on gateways registered that way. Production gateways register via the launch flow which writes the full record; the limitation only affects bench testing.
+
+3. **Loopback over-classification:** when an operator uses `--advertise-all-interfaces`, `127.0.0.1` gets advertised as a host candidate and classifies as `HostPublicV4` (priority 160) rather than being filtered out at the classifier. Harmless in the ranking (srflx and relay are still below it) but cosmetically wrong; classifier should treat loopback as priority 0 / unfilable.
 
 ---
 
@@ -428,13 +483,15 @@ See "Recommended changes" above — items 1 and 2 are the critical path.
 
 ### Workaround for the same-WAN topology in the meantime
 
-Use LAN-direct (skip the relay path entirely) when both endpoints are on the same LAN:
+**Updated 2026-05-28 (v0.32):** the v0.32 multi-candidate code shipped in M1–M9 above largely retires this workaround. With `ztlp connect <name> --ns-server <addr> --multi-candidate`, the same-LAN dial-direct path lights up automatically — the gateway publishes its LAN addresses to NS, the client races them, and the LAN candidate (priority 250) wins by default.
+
+**Still useful as a manual fallback** (no NS, no DNS, no NodeID — just direct IP):
 
 ```bash
 ./ztlp connect <gateway-LAN-IP>:23095 --service ssh -L 2222:127.0.0.1:22
 ```
 
-This is what works on the bench today. See `Z2LS-E2E-RUNBOOK.md` "Working commands".
+This bypasses NS entirely; use it when the gateway and client are on the same subnet AND you don't need any of the discovery, identity, or relay-failover machinery. See `Z2LS-E2E-RUNBOOK.md` "Working commands" for the historical bench recipe.
 
 ---
 

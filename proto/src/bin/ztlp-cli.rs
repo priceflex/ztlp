@@ -4222,30 +4222,36 @@ async fn cmd_listen(
         // is fine — both Quinn and keepalive go through the same NAT,
         // so the (ip, port) NS sees is reachable.
         //
-        // FUTURE: extract the std::net::UdpSocket fd before handing to
-        // Quinn so keepalive + Quinn share the same kernel socket; the
-        // quinn AsyncUdpSocket trait does not expose the std socket so
-        // this requires a refactor to PunchRuntime to also retain a
-        // raw fd clone. Tracked as a follow-up.
+        // We bind a fresh ephemeral socket for the keepalive task; the
+        // QUIC listener port is plumbed explicitly via with_listener_port
+        // so PUNCH_REPORT candidates carry the listener's port, not the
+        // keepalive socket's ephemeral port.
+        let listener_port = server
+            .inner
+            .local_addr()
+            .map_err(|e| format!("failed to read QUIC listener local_addr: {}", e))?
+            .port();
         let keepalive_sock = std::sync::Arc::new(
             tokio::net::UdpSocket::bind("0.0.0.0:0")
                 .await
                 .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
         );
         let gw_node_id = identity.node_id;
-        let agent = ztlp_proto::punch_agent::PunchAgent::with_advertise_overrides(
+        let agent = ztlp_proto::punch_agent::PunchAgent::with_listener_port(
             keepalive_sock,
             ns_addr,
             gw_node_id,
+            listener_port,
             advertise_interface.to_vec(),
             no_advertise_interface.to_vec(),
             advertise_all_interfaces,
         );
         println!(
-            "{} Punch enabled — keepalive to {} every {:?}",
+            "{} Punch enabled — keepalive to {} every {:?} (advertising listener port {})",
             c_green("✓"),
             ns_addr,
-            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL
+            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL,
+            listener_port,
         );
         _punch_handles
             .push(agent.start_keepalive(ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL));

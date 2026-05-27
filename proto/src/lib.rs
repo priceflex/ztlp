@@ -53,6 +53,10 @@ pub mod http_injector;
 pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
+/// v0.32 multi-candidate discovery (M1): enumerate the gateway's local
+/// non-loopback NIC addresses for advertising as host candidates in
+/// PUNCH_REPORT. Pure-fn module; wiring lands in M2.
+pub mod local_candidates;
 pub mod metrics;
 #[cfg(feature = "ios-sync")]
 pub mod mux;

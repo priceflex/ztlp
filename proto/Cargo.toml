@@ -101,6 +101,11 @@ qr2term = { version = "0.3", optional = true }
 dirs = { version = "5", optional = true }
 httparse = "1.10.1"
 hmac = "0.12"
+# v0.32 multi-candidate discovery (M1): pure-Rust cross-platform NIC
+# enumeration (Linux/macOS/Windows). Used by `local_candidates` to publish
+# the gateway's local interface addresses as ICE-style host candidates in
+# PUNCH_REPORT. No winapi headaches, no privileged calls.
+if-addrs = "0.13"
 
 # --- Optional: QUIC transport (gated behind `quic-transport` feature) ---
 # Why optional: the QUIC pivot is in-progress (see hermes_session_handoff.md

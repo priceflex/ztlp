@@ -22,8 +22,8 @@ Both subsystems share the same root cause: **underscore-prefixed unused variable
 |---|---|---|---|---|
 | H0 | Spike: prove quinn AsyncUdpSocket wrapper compiles | ✅ | spike-NOT-MERGED | Spike branch deleted; PunchRuntime+PunchSocket compiled clean against quinn 0.11.9. Findings: quinn::Instant is private (use std::time::Instant); RecvMeta::clone() exists so meta-compaction works without unsafe |
 | H1 | PunchAgent skeleton (shared socket + NS addr) | ✅ | 884932e | RED: stub PunchAgent w/o new() fails E0599. GREEN: 883 lib tests pass, fmt+clippy clean |
-| H2 | PunchAgent keepalive sends PUNCH_REPORT every 25s | ✅ | _commit-pending_ | start_keepalive(Duration) spawns tokio task; first tick immediate (tokio::interval semantics); 0x0C wire format verified; 885 lib tests pass (+2). Tests use real-clock with 500ms/600ms windows to honestly cover the immediate-first-tick behavior. socket field's #[allow(dead_code)] removed |
-| H3 | PunchSocket — quinn AsyncUdpSocket wrapper intercepts 0x0B | 🔲 | — | **Highest risk — H0 spike must pass first** |
+| H2 | PunchAgent keepalive sends PUNCH_REPORT every 25s | ✅ | 83aa185 | start_keepalive(Duration) spawns tokio task; first tick immediate (tokio::interval semantics); 0x0C wire format verified; 885 lib tests pass (+2). Tests use real-clock with 500ms/600ms windows to honestly cover the immediate-first-tick behavior. socket field's #[allow(dead_code)] removed |
+| H3 | PunchSocket — quinn AsyncUdpSocket wrapper intercepts 0x0B | ✅ | _commit-pending_ | Highest-risk task; H0 spike de-risked it. 5 new tests cover: PUNCH_NOTIFY intercept, PUNCH_BYTE drop, QUIC passthrough, interleaved batch compaction, empty-datagram tolerance. FakeSocket helper drives poll_recv without real UDP (no flake risk). 890 lib tests pass. fmt+clippy clean (no warnings on punch_socket.rs) |
 | H4 | Gateway-side responder sends PUNCH_BYTE to requester eps | 🔲 | — | |
 | H5 | Wire --punch / --ns-server flags into ztlp listen | 🔲 | — | Removes `_ns_server` underscore prefix in cmd_listen |
 | H6 | End-to-end integration test (fake NS, in-process) | 🔲 | — | |

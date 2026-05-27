@@ -105,6 +105,8 @@ pub mod policy;
 pub mod punch;
 #[cfg(feature = "tokio-runtime")]
 pub mod punch_agent;
+#[cfg(all(feature = "tokio-runtime", feature = "quic-transport"))]
+pub mod punch_socket;
 #[cfg(feature = "tokio-runtime")]
 pub mod relay;
 // Nebula-pivot R1: real module deleted; `send_controller.rs` is a tiny stub shim for vip.rs.

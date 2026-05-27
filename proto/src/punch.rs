@@ -378,6 +378,49 @@ pub fn is_punch_notify(data: &[u8]) -> bool {
 
 // ─── Hole Punch Procedure ───────────────────────────────────────────
 
+/// Send a single punch packet (`PUNCH_BYTE`) to `dest` using `socket`.
+///
+/// Family-aware soft-skip: if `socket` is IPv4-bound and `dest` is IPv6
+/// (or vice-versa), the send would otherwise return `EAFNOSUPPORT`
+/// (`os error 97` on Linux). That's noisy log spam and — for the punch
+/// dispatcher — it has no useful recovery: the punch socket is shared
+/// across the whole NAT mapping lifecycle and cannot be re-bound mid-flow.
+///
+/// Instead we detect the mismatch up front, debug-log it, and return
+/// `Ok(())`. Same-family sends behave identically to a raw `send_to`.
+///
+/// See A2 in `docs/plans/2026-05-28-v0.32.2-followups.md` for the
+/// matching family-aware-bind fix on the v0.32 QUIC dial path
+/// (`multi_candidate_dial.rs`).
+pub(crate) async fn send_punch_packet(
+    socket: &UdpSocket,
+    dest: SocketAddr,
+) -> std::io::Result<()> {
+    // Family-aware soft-skip: if the shared punch socket is bound to a
+    // different family than `dest`, the raw send_to would return
+    // EAFNOSUPPORT (os error 97 on Linux). That's noise — the punch
+    // socket is shared across the NAT mapping lifecycle and cannot be
+    // re-bound mid-flow, so there's no useful recovery. We debug-log
+    // once and treat the send as a no-op success.
+    let socket_is_v4 = socket
+        .local_addr()
+        .map(|a| a.is_ipv4())
+        .unwrap_or(false);
+    let socket_is_v6 = socket
+        .local_addr()
+        .map(|a| a.is_ipv6())
+        .unwrap_or(false);
+    if (socket_is_v4 && dest.is_ipv6()) || (socket_is_v6 && dest.is_ipv4()) {
+        debug!(
+            target: "punch",
+            "skipping cross-family candidate {} — shared punch socket family mismatch",
+            dest
+        );
+        return Ok(());
+    }
+    socket.send_to(&[PUNCH_BYTE], dest).await.map(|_| ())
+}
+
 /// Execute the hole punch procedure.
 ///
 /// 1. Query NS for peer endpoints
@@ -472,7 +515,7 @@ pub async fn execute_punch(
             tokio::select! {
                 _ = ticker.tick() => {
                     for addr in &send_addrs {
-                        if let Err(e) = punch_socket.send_to(&[PUNCH_BYTE], addr).await {
+                        if let Err(e) = send_punch_packet(&punch_socket, *addr).await {
                             debug!("punch: send to {} failed: {}", addr, e);
                         } else {
                             debug!("punch: sent punch to {}", addr);
@@ -508,7 +551,7 @@ pub async fn execute_punch(
                         for ep in &new_endpoints {
                             debug!("punch: PUNCH_NOTIFY added target: {}", ep.addr);
                             // Send punch immediately to the new addresses
-                            let _ = socket.send_to(&[PUNCH_BYTE], ep.addr).await;
+                            let _ = send_punch_packet(&socket, ep.addr).await;
                         }
                     }
                     continue;
@@ -1829,6 +1872,59 @@ mod tests {
         assert_eq!(listings[1].region, "eu-central-1");
 
         ns_task.await.unwrap();
+    }
+
+    /// A2 — Verifies the punch sender does NOT propagate `EAFNOSUPPORT` to
+    /// the dispatcher when a candidate address is in a different family
+    /// (IPv6) than the shared punch socket (IPv4-bound).
+    ///
+    /// Before the fix, calling `socket.send_to(&packet, v6_addr)` on an
+    /// IPv4-only UDP socket returned `Address family not supported by
+    /// protocol (os error 97)`. The fix uses `send_punch_packet`, which
+    /// detects the family mismatch and treats it as a soft-skip (debug-log
+    /// + `Ok(())`) rather than a fatal IO error.
+    #[tokio::test]
+    async fn test_send_punch_packet_skips_ipv6_on_ipv4_socket() {
+        // IPv4-bound shared socket — the realistic execute_punch state.
+        let v4_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // A v6 echo responder on [::1]. If the OS rejects the bind, the
+        // host has IPv6 disabled — report and skip rather than work around.
+        let v6_responder = match UdpSocket::bind("[::1]:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "skipping A2 IPv6 test — host cannot bind [::1]:0: {}",
+                    e
+                );
+                return;
+            }
+        };
+        let v6_addr = v6_responder.local_addr().unwrap();
+        assert!(v6_addr.is_ipv6(), "echo responder should be v6");
+
+        // The send must not return EAFNOSUPPORT to the caller.
+        let result = send_punch_packet(&v4_socket, v6_addr).await;
+        assert!(
+            result.is_ok(),
+            "send_punch_packet must soft-skip cross-family candidates, got {:?}",
+            result
+        );
+
+        // Same-family send must still actually transmit.
+        let v4_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let v4_peer_addr = v4_peer.local_addr().unwrap();
+        send_punch_packet(&v4_socket, v4_peer_addr).await.unwrap();
+        let mut buf = [0u8; 4];
+        let (len, _) = tokio::time::timeout(
+            Duration::from_secs(1),
+            v4_peer.recv_from(&mut buf),
+        )
+        .await
+        .expect("v4 peer should receive punch within 1s")
+        .unwrap();
+        assert_eq!(len, 1);
+        assert_eq!(buf[0], PUNCH_BYTE);
     }
 
     #[tokio::test]

@@ -1550,6 +1550,31 @@ enum GatewayCommands {
         #[arg(short, long, default_value = "0.0.0.0:23095")]
         bind: String,
     },
+
+    /// Print candidates NS knows for a named gateway (v0.32 admin tool).
+    ///
+    /// Resolves the gateway name via NS SVC/KEY records, queries NS for
+    /// PEER_ENDPOINTS, classifies each candidate using the v0.32 priority
+    /// ladder, and prints the result as a human-readable table or JSON.
+    ///
+    /// This closes the v0.31 debugging gap (see
+    /// docs/v0.31.0-relay-deployment-investigation.md) where it took two
+    /// days to discover NS only had the WAN address for Z2LS.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp gateway candidates z2ls --ns-server 16.147.41.195:23096\n  \
+            ztlp gateway candidates z2ls --ns-server 127.0.0.1:23096 --json")]
+    Candidates {
+        /// Gateway name to query (resolved via NS).
+        name: String,
+
+        /// NS server address (host:port).
+        #[arg(short = 'n', long)]
+        ns_server: String,
+
+        /// Output as JSON instead of human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -6057,6 +6082,100 @@ async fn cmd_gateway_start(elixir: bool, bind: &str) -> Result<(), Box<dyn std::
     eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
 
     relay.run().await?;
+
+    Ok(())
+}
+
+/// `ztlp gateway candidates <name>` — operator-facing diagnostic (v0.32 M7).
+///
+/// Resolves the gateway name via NS (SVC + KEY records), queries NS for
+/// `PEER_ENDPOINTS` (0x0A), classifies each returned endpoint against the
+/// v0.32 priority ladder (with an *empty* client-subnet set — same-subnet
+/// is the dialer's concern, not the operator's), and pretty-prints the
+/// result.
+///
+/// Pure formatting lives in `ztlp_proto::admin::gateway_candidates`; this
+/// fn is the thin glue that does the NS round-trip.
+async fn cmd_gateway_candidates(
+    name: &str,
+    ns_server: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::admin::gateway_candidates::{format_candidates_json, format_candidates_table};
+    use ztlp_proto::candidate_priority::{classify, RankedCandidate};
+    use ztlp_proto::punch::{
+        decode_peer_endpoints_response, encode_peer_endpoints_request, NS_PEER_ENDPOINTS,
+    };
+
+    // 1. Resolve the gateway name → (transport addr, NodeId) via NS.
+    let ns_server_opt = Some(ns_server.to_string());
+    let (_gateway_addr, gateway_nid) = resolve_target(name, &ns_server_opt).await?;
+    let gateway_nid = gateway_nid.ok_or_else(|| {
+        format!(
+            "could not resolve NodeId for gateway '{}' via NS at {} (no KEY record?)",
+            name, ns_server,
+        )
+    })?;
+
+    // 2. Build a throwaway requester identity. We're a diagnostic tool
+    //    — we don't need a stable NodeId for this.
+    let requester = NodeIdentity::generate()?;
+
+    // 3. Open an ephemeral UDP socket and ask NS for the gateway's
+    //    endpoints. Wire format: PEER_ENDPOINTS (0x0A).
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid --ns-server '{}': {}", ns_server, e))?;
+
+    let req = encode_peer_endpoints_request(&requester.node_id, &gateway_nid, &[]);
+    socket.send_to(&req, ns_addr).await?;
+
+    // 4. Wait up to 5s for the response.
+    let mut buf = [0u8; 1500];
+    let endpoints = match tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (len, from) = socket.recv_from(&mut buf).await?;
+            if from == ns_addr && !buf[..len].is_empty() && buf[0] == NS_PEER_ENDPOINTS {
+                return decode_peer_endpoints_response(&buf[..len])
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
+            }
+            // Ignore stray packets and keep waiting.
+        }
+    })
+    .await
+    {
+        Ok(Ok(eps)) => eps,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(format!(
+                "timeout waiting for PEER_ENDPOINTS response from NS at {}",
+                ns_addr,
+            )
+            .into());
+        }
+    };
+
+    // 5. Classify each endpoint with an empty client_subnets — we're a
+    //    diagnostic tool, "same-subnet" doesn't apply.
+    let ranked: Vec<RankedCandidate> = endpoints
+        .iter()
+        .map(|ep| {
+            let class = classify(ep.addr, &[]);
+            RankedCandidate {
+                addr: ep.addr,
+                class,
+                priority: class.priority(),
+            }
+        })
+        .collect();
+
+    // 6. Print.
+    if json {
+        println!("{}", format_candidates_json(name, &gateway_nid, &ranked));
+    } else {
+        print!("{}", format_candidates_table(name, &gateway_nid, &ranked));
+    }
 
     Ok(())
 }
@@ -11407,6 +11526,11 @@ async fn main() {
 
         Commands::Gateway(subcmd) => match subcmd {
             GatewayCommands::Start { elixir, bind } => cmd_gateway_start(*elixir, bind).await,
+            GatewayCommands::Candidates {
+                name,
+                ns_server,
+                json,
+            } => cmd_gateway_candidates(name, ns_server, *json).await,
         },
 
         Commands::Inspect { hex_bytes, file } => cmd_inspect(hex_bytes, file),

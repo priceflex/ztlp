@@ -36,6 +36,7 @@
 #![deny(unsafe_code)]
 
 // ── Always-available modules (sync, no tokio) ─────────────────────────
+pub mod admin;
 pub mod admission;
 #[cfg(feature = "tokio-runtime")]
 pub mod agent;

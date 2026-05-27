@@ -2395,7 +2395,7 @@ async fn cmd_connect(
         };
 
         // Initialize relay pool if --relay-pool is enabled or multiple relays are available
-        let _relay_pool = if relay_pool_enabled || relay.is_some() {
+        let relay_pool = if relay_pool_enabled || relay.is_some() {
             let pool_config = RelayPoolConfig {
                 probe_interval: relay_probe_interval,
                 failover_enabled: relay.is_none() || relay_pool_enabled, // failover off when pinned
@@ -2419,7 +2419,7 @@ async fn cmd_connect(
                 eprintln!("  {} {:?}", c_cyan("Probe interval:"), relay_probe_interval);
             }
 
-            Some(FailoverOrchestrator::new(pool))
+            Some(Arc::new(Mutex::new(FailoverOrchestrator::new(pool))))
         } else {
             None
         };
@@ -2431,6 +2431,47 @@ async fn cmd_connect(
         if send_addr != peer_addr {
             eprintln!("{} {}", c_cyan("Via relay:"), send_addr);
         }
+
+        // ── R2: spawn relay probe task ──────────────────────────────────
+        // Drives pool.record_probe_success / record_probe_failure at
+        // `relay_probe_interval`. Shares the existing UDP socket so kernel
+        // ICMP errors route back correctly. Aborted at end of cmd_connect.
+        let probe_handle: Option<tokio::task::JoinHandle<()>> =
+            if let Some(pool_arc) = relay_pool.as_ref() {
+                let probe_socket = node.socket.clone();
+                let probe_pool = pool_arc.clone();
+                Some(tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(relay_probe_interval);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // Skip the immediate first tick — give the connection a moment
+                    // to come up before we start probing.
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        let targets = {
+                            let guard = probe_pool.lock().await;
+                            guard.pool().relays_needing_probe()
+                        };
+                        for relay_addr in targets {
+                            let result = ztlp_proto::relay_pool::probe_relay(
+                                &probe_socket,
+                                relay_addr,
+                                std::time::Duration::from_millis(500),
+                            )
+                            .await;
+                            let mut guard = probe_pool.lock().await;
+                            match result {
+                                Ok(latency) => {
+                                    guard.pool_mut().record_probe_success(relay_addr, latency)
+                                }
+                                Err(_e) => guard.pool_mut().record_probe_failure(relay_addr),
+                            }
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
 
         // NAT traversal (if --nat-assist)
         if nat_assist {
@@ -3026,6 +3067,14 @@ async fn cmd_connect(
             // Interactive data loop
             interactive_data_loop(&node, session_id, send_addr).await?;
         }
+
+        // ── R2: stop the relay probe task before returning ──────────────
+        if let Some(h) = probe_handle.as_ref() {
+            h.abort();
+        }
+        // Touch relay_pool so the binding lives until the end of the legacy
+        // path (R3 will replace this with real usage of pool().primary()).
+        let _ = relay_pool.as_ref();
 
         return Ok(());
     }

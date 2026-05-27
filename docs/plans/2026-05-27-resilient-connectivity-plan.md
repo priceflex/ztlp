@@ -21,7 +21,7 @@ Both subsystems share the same root cause: **underscore-prefixed unused variable
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
 | H0 | Spike: prove quinn AsyncUdpSocket wrapper compiles | ✅ | spike-NOT-MERGED | Spike branch deleted; PunchRuntime+PunchSocket compiled clean against quinn 0.11.9. Findings: quinn::Instant is private (use std::time::Instant); RecvMeta::clone() exists so meta-compaction works without unsafe |
-| H1 | PunchAgent skeleton (shared socket + NS addr) | 🔲 | — | |
+| H1 | PunchAgent skeleton (shared socket + NS addr) | ✅ | _commit-pending_ | RED: stub PunchAgent w/o new() fails E0599. GREEN: 883 lib tests pass, fmt+clippy clean. socket field has temporary #[allow(dead_code)] until H2 |
 | H2 | PunchAgent keepalive sends PUNCH_REPORT every 25s | 🔲 | — | |
 | H3 | PunchSocket — quinn AsyncUdpSocket wrapper intercepts 0x0B | 🔲 | — | **Highest risk — H0 spike must pass first** |
 | H4 | Gateway-side responder sends PUNCH_BYTE to requester eps | 🔲 | — | |

@@ -41,6 +41,7 @@ pub mod admission;
 pub mod agent;
 pub mod android;
 pub mod anti_replay;
+pub mod candidate_priority;
 pub mod client_profile;
 pub mod enrollment;
 pub mod error;

@@ -87,21 +87,64 @@ ztlp listen --ns-server <addr> --no-punch → punch OFF (audit mode)
 2026-05-27 Z2LS bench observed punctuated stalls under load on the SD-WAN
 edge).
 
-**H8 pcap excerpt:** placeholder pending Steve's NS-restart window.
-Expected packet sequence on a successful punch (validated by the in-process
-H6 test today — bench validation will confirm against real SD-WAN):
+**H8 pcap excerpt — VALIDATED 2026-05-27 against AWS NS + Z2LS Windows gateway + external Linux client (real SD-WAN edge).**
 
+Bench setup:
+- NS: `priceflex/ztlp-ns:v0.30.12` on AWS `16.147.41.195:23096` (rebuilt from feature/resilient-connectivity-v0.30.12 merge commit `e214d3f`)
+- Z2LS Windows gateway: `C:\TRS_Tools\ztlp\ztlp.exe listen ... --ns-server 16.147.41.195:23096 ...` (no `--punch` flag — H10 auto-enables it)
+- Client: this Linux orchestrator host (external, behind separate NAT)
+- Invocation: `ztlp connect z2ls-desktop-lrc8dkh-dcc1e2.z2ls-final-e2e.techrockstars.ztlp --ns-server 16.147.41.195:23096 --service ssh --local-forward 12224:127.0.0.1:22`
+
+What the Z2LS gateway log captured immediately after v0.30.10 → v0.30.12 swap (proving H10 default-flip + 10s keepalive land in production):
 ```
-1. client → NS    : 0x0A PEER_ENDPOINTS request (target NodeID, requester reported endpoints)
-2. NS → gw        : 0x0B PUNCH_NOTIFY        (requester NodeID + endpoints to punch toward)
-3. NS → client    : 0x0A PEER_ENDPOINTS response (gateway's known endpoints incl. :learned)
-4. gw → client    : 0x00 PUNCH_BYTE × N      (200 ms cadence for up to 10 s)
-4'. client → gw   : 0x00 PUNCH_BYTE × N      (200 ms cadence for up to 10 s)
-5. either side    : ZTLP magic 0x5A37 …      (real handshake, NAT pinhole now open)
+ZTLP QUIC server listening on UDP 0.0.0.0:23095
+[H10] Punch enabled — keepalive to 16.147.41.195:23096 every 10s
+Enabling QUIC gateway registration for relay: 34.218.240.106:23095 (src=0.0.0.0:23095)
+gateway registered with 34.218.240.106:23095 (service: z2ls-desktop-lrc8dkh-dcc1e2)
 ```
 
-`PunchSocket` consumes bytes 2 and 4/4′ before Quinn ever sees them, so the
-QUIC stack only ever sees the post-pinhole real handshake at step 5.
+Client log captured the full punch coordination cycle:
+```
+Relay pool: enabled
+  Primary relay: 34.218.240.106:23095
+  Probe interval: 30s
+Connecting to: 34.218.240.106:23095
+Hole punching enabled — coordinating via NS...
+punch: querying NS at 16.147.41.195:23096 for peer bc97d655929c30be37885ff8de4881c8 endpoints
+punch: targeting 1 peer endpoints
+punch: target endpoint: 204.16.122.24:60808       ← real SD-WAN-mapped public endpoint
+punch: waiting 100ms for PUNCH_NOTIFY propagation
+punch: sent punch to 204.16.122.24:60808           (× 20 attempts at 500ms cadence)
+⚠ Hole punch timed out — continuing with direct connection attempt
+✓ Listening for TCP connections on 127.0.0.1:12224
+
+(after tunnel established)
+DEBUG relay 34.218.240.106:23095 probe success: 500.656727ms   ← R2 probe task working
+```
+
+pcap (UDP filter `port 23095 or port 23096`, sampled mid-handshake) shows the exact expected wire-format byte counts:
+```
+06:56:57.581  client.46515 → NS.23096  UDP len=65   ← SVC lookup (name → record)
+06:56:57.617  NS.23096 → client.46515  UDP len=322  ← SVC record response
+06:56:57.617  client.36863 → NS.23096  UDP len=65   ← KEY lookup (NodeID → pubkey)
+06:56:57.651  NS.23096 → client.36863  UDP len=377  ← KEY record response
+06:56:57.652  client.58609 → NS.23096  UDP len=41   ← 0x0A PEER_ENDPOINTS query (1+16+16+1+7 = 41 ✓)
+06:56:57.687  NS.23096 → client.58609  UDP len=9    ← 0x0A response with 1 IPv4 endpoint (1+1+1+4+2 = 9 ✓)
+```
+
+Findings vs Done Criteria:
+| Criterion | Result |
+|-----------|--------|
+| `PEER_ENDPOINTS → PUNCH_NOTIFY → bidirectional PUNCH_BYTE → direct QUIC` | ⚠ Partial — NS coordination + client-side punch packets confirmed. Punch DID NOT succeed against this SD-WAN edge (consistent with symmetric NAT documented in the doc above); fell back to relay path as designed. |
+| punch timeout → automatic relay fallback | ✅ confirmed; client logged "Hole punch timed out — continuing with direct connection attempt", relay path stayed up |
+| kill primary relay mid-session → failover within 10s | ⚠ Partial — tunnel survived a 90s relay-down window, but probe_relay's "no ICMP = healthy" heuristic means probes still reported success against a stopped docker container (documented limitation in relay_pool.rs; future work to make probes actively echo-confirmed) |
+| kill NS mid-session → existing session continues | ✅ **confirmed** — `docker stop ztlp-ns` for 30s+ during an active tunnel: probe task continued, tunnel stayed listening on the local-forward port, no client-side errors |
+| Steve's canonical command works end-to-end | ✅ tunnel established via the relay path on the first try; the punch *attempt* is automatic from `--ns-server` alone (no `--punch` flag needed) |
+
+Operational notes from the bench (recorded as production pitfalls):
+- NS mnesia tables MUST be wiped on minor-version upgrade; v0.30.10 → v0.30.12 crashed on boot until the mnesia dir was removed (preserve `ca/`). Documented in `ztlp-prod-deployment` skill.
+- The Chef-managed Z2LS identity is X25519-only (no Ed25519 signing key), so NS `register` requires `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false` env in v0.30.12 NS until identities are regenerated. Track as a follow-up to migrate the gateway identity format before flipping NS back to auth-required.
+- `probe_relay()` cannot distinguish "relay alive, ignored my unknown 0xFE packet" from "no listener at all" — both produce the same recv_from timeout. To actually drive R2 failover, the relay needs a 0xFE → 0xFF echo (v0.31.0 work).
 
 ---
 

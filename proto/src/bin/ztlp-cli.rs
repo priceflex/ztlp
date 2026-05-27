@@ -284,6 +284,21 @@ enum Commands {
         /// Health check probe interval for relay pool (e.g. "30s", "1m")
         #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
         relay_probe_interval: Duration,
+
+        /// Enable v0.32 multi-candidate parallel dial (experimental).
+        ///
+        /// When combined with `--punch` + `--ns-server`, the client queries
+        /// NS for the target's PEER_ENDPOINTS, ranks them via the v0.32
+        /// priority ladder (host > srflx > relay), and races them in
+        /// parallel. The winning path's address replaces `send_addr` and
+        /// the existing handshake continues as normal.
+        ///
+        /// Failure falls through to the existing v0.31 send_addr path —
+        /// safe to leave on. Hidden until v0.32.0 ships, at which point
+        /// this flag flips to default-true with `--no-multi-candidate`
+        /// as the escape hatch.
+        #[arg(long, hide = true)]
+        multi_candidate: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -425,6 +440,29 @@ enum Commands {
         /// Disable NS-coordinated UDP hole punching even when --ns-server is set
         #[arg(long, conflicts_with = "punch", default_value_t = false)]
         no_punch: bool,
+
+        /// Force-include this interface name in the PUNCH_REPORT
+        /// candidate list, even if the default filter would skip it.
+        /// Additive — repeat the flag to add multiple interfaces:
+        /// `--advertise-interface eth0 --advertise-interface wg0`.
+        ///
+        /// (v0.32+ multi-candidate discovery — see
+        /// docs/plans/2026-05-28-multi-candidate-discovery-v0.32.md.)
+        #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+        advertise_interface: Vec<String>,
+
+        /// Force-exclude this interface name from the PUNCH_REPORT
+        /// candidate list. Takes precedence over `--advertise-interface`
+        /// and `--advertise-all-interfaces`. Additive — repeat the flag
+        /// to exclude multiple interfaces.
+        #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+        no_advertise_interface: Vec<String>,
+
+        /// Advertise ALL interfaces in PUNCH_REPORT, disabling the
+        /// default skip filter (loopback, link-local, docker bridges,
+        /// `br-*`, down ifaces). `--no-advertise-interface` still applies.
+        #[arg(long, default_value_t = false)]
+        advertise_all_interfaces: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -1512,6 +1550,31 @@ enum GatewayCommands {
         #[arg(short, long, default_value = "0.0.0.0:23095")]
         bind: String,
     },
+
+    /// Print candidates NS knows for a named gateway (v0.32 admin tool).
+    ///
+    /// Resolves the gateway name via NS SVC/KEY records, queries NS for
+    /// PEER_ENDPOINTS, classifies each candidate using the v0.32 priority
+    /// ladder, and prints the result as a human-readable table or JSON.
+    ///
+    /// This closes the v0.31 debugging gap (see
+    /// docs/v0.31.0-relay-deployment-investigation.md) where it took two
+    /// days to discover NS only had the WAN address for Z2LS.
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp gateway candidates z2ls --ns-server 16.147.41.195:23096\n  \
+            ztlp gateway candidates z2ls --ns-server 127.0.0.1:23096 --json")]
+    Candidates {
+        /// Gateway name to query (resolved via NS).
+        name: String,
+
+        /// NS server address (host:port).
+        #[arg(short = 'n', long)]
+        ns_server: String,
+
+        /// Output as JSON instead of human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -2363,6 +2426,7 @@ async fn cmd_connect(
     punch_timeout: &Option<Duration>,
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
+    multi_candidate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
     //
@@ -2579,6 +2643,53 @@ async fn cmd_connect(
                 }
             }
             eprintln!();
+        }
+
+        // ── v0.32 M6: multi-candidate parallel dial (opt-in) ─────────
+        // When --multi-candidate is passed AND we have an NS-resolved
+        // peer NodeID, race the host candidates from PUNCH_REPORT
+        // alongside the relay backstop. The winning path's address
+        // overrides `send_addr`. Failure falls through unchanged to
+        // the existing NS-coordinated punch path below.
+        if multi_candidate && punch_enabled && _resolved_node_id.is_some() {
+            eprintln!(
+                "{} multi-candidate dial enabled (v0.32 experimental)",
+                c_dim("[v0.32]")
+            );
+            if let Some(ns_str) = ns_server.as_deref() {
+                if let Ok(ns_addr) = ns_str.parse::<SocketAddr>() {
+                    let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
+                    let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+                    match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
+                        _resolved_node_id.unwrap(),
+                        ns_addr,
+                        node.socket.clone(),
+                        identity.node_id,
+                        &local_subnets,
+                        Some(send_addr),
+                        policy,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            eprintln!(
+                                "{} multi-candidate dial succeeded: {} ({:?})",
+                                c_green("✓"),
+                                outcome.winning_addr,
+                                outcome.class
+                            );
+                            send_addr = outcome.winning_addr;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{} multi-candidate dial failed: {:?}; falling back",
+                                c_dim("[v0.32]"),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // NS-coordinated hole punching (if --punch)
@@ -3999,6 +4110,9 @@ async fn cmd_listen(
     admin_pubkey_email: &[String],
     _quic: bool,
     punch_enabled: bool,
+    advertise_interface: &[String],
+    no_advertise_interface: &[String],
+    advertise_all_interfaces: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -4119,7 +4233,14 @@ async fn cmd_listen(
                 .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
         );
         let gw_node_id = identity.node_id;
-        let agent = ztlp_proto::punch_agent::PunchAgent::new(keepalive_sock, ns_addr, gw_node_id);
+        let agent = ztlp_proto::punch_agent::PunchAgent::with_advertise_overrides(
+            keepalive_sock,
+            ns_addr,
+            gw_node_id,
+            advertise_interface.to_vec(),
+            no_advertise_interface.to_vec(),
+            advertise_all_interfaces,
+        );
         println!(
             "{} Punch enabled — keepalive to {} every {:?}",
             c_green("✓"),
@@ -5961,6 +6082,100 @@ async fn cmd_gateway_start(elixir: bool, bind: &str) -> Result<(), Box<dyn std::
     eprintln!("  {} Ctrl+C\n", c_dim("Stop:"));
 
     relay.run().await?;
+
+    Ok(())
+}
+
+/// `ztlp gateway candidates <name>` — operator-facing diagnostic (v0.32 M7).
+///
+/// Resolves the gateway name via NS (SVC + KEY records), queries NS for
+/// `PEER_ENDPOINTS` (0x0A), classifies each returned endpoint against the
+/// v0.32 priority ladder (with an *empty* client-subnet set — same-subnet
+/// is the dialer's concern, not the operator's), and pretty-prints the
+/// result.
+///
+/// Pure formatting lives in `ztlp_proto::admin::gateway_candidates`; this
+/// fn is the thin glue that does the NS round-trip.
+async fn cmd_gateway_candidates(
+    name: &str,
+    ns_server: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::admin::gateway_candidates::{format_candidates_json, format_candidates_table};
+    use ztlp_proto::candidate_priority::{classify, RankedCandidate};
+    use ztlp_proto::punch::{
+        decode_peer_endpoints_response, encode_peer_endpoints_request, NS_PEER_ENDPOINTS,
+    };
+
+    // 1. Resolve the gateway name → (transport addr, NodeId) via NS.
+    let ns_server_opt = Some(ns_server.to_string());
+    let (_gateway_addr, gateway_nid) = resolve_target(name, &ns_server_opt).await?;
+    let gateway_nid = gateway_nid.ok_or_else(|| {
+        format!(
+            "could not resolve NodeId for gateway '{}' via NS at {} (no KEY record?)",
+            name, ns_server,
+        )
+    })?;
+
+    // 2. Build a throwaway requester identity. We're a diagnostic tool
+    //    — we don't need a stable NodeId for this.
+    let requester = NodeIdentity::generate()?;
+
+    // 3. Open an ephemeral UDP socket and ask NS for the gateway's
+    //    endpoints. Wire format: PEER_ENDPOINTS (0x0A).
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid --ns-server '{}': {}", ns_server, e))?;
+
+    let req = encode_peer_endpoints_request(&requester.node_id, &gateway_nid, &[]);
+    socket.send_to(&req, ns_addr).await?;
+
+    // 4. Wait up to 5s for the response.
+    let mut buf = [0u8; 1500];
+    let endpoints = match tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (len, from) = socket.recv_from(&mut buf).await?;
+            if from == ns_addr && !buf[..len].is_empty() && buf[0] == NS_PEER_ENDPOINTS {
+                return decode_peer_endpoints_response(&buf[..len])
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
+            }
+            // Ignore stray packets and keep waiting.
+        }
+    })
+    .await
+    {
+        Ok(Ok(eps)) => eps,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(format!(
+                "timeout waiting for PEER_ENDPOINTS response from NS at {}",
+                ns_addr,
+            )
+            .into());
+        }
+    };
+
+    // 5. Classify each endpoint with an empty client_subnets — we're a
+    //    diagnostic tool, "same-subnet" doesn't apply.
+    let ranked: Vec<RankedCandidate> = endpoints
+        .iter()
+        .map(|ep| {
+            let class = classify(ep.addr, &[]);
+            RankedCandidate {
+                addr: ep.addr,
+                class,
+                priority: class.priority(),
+            }
+        })
+        .collect();
+
+    // 6. Print.
+    if json {
+        println!("{}", format_candidates_json(name, &gateway_nid, &ranked));
+    } else {
+        print!("{}", format_candidates_table(name, &gateway_nid, &ranked));
+    }
 
     Ok(())
 }
@@ -11184,6 +11399,7 @@ async fn main() {
             no_relay_pool,
             relay_probe_interval,
             quic,
+            multi_candidate,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -11217,6 +11433,7 @@ async fn main() {
                 punch_timeout,
                 relay_pool_active,
                 *relay_probe_interval,
+                *multi_candidate,
             )
             .await
         }
@@ -11241,6 +11458,9 @@ async fn main() {
             quic,
             punch,
             no_punch,
+            advertise_interface,
+            no_advertise_interface,
+            advertise_all_interfaces,
         } => {
             // H10 (v0.30.12): when --ns-server is set, --punch auto-flips
             // to ON unless --no-punch is passed. Gateways don't fail over
@@ -11274,6 +11494,9 @@ async fn main() {
                 admin_pubkey_email,
                 *quic,
                 punch_active,
+                advertise_interface,
+                no_advertise_interface,
+                *advertise_all_interfaces,
             )
             .await
         }
@@ -11303,6 +11526,11 @@ async fn main() {
 
         Commands::Gateway(subcmd) => match subcmd {
             GatewayCommands::Start { elixir, bind } => cmd_gateway_start(*elixir, bind).await,
+            GatewayCommands::Candidates {
+                name,
+                ns_server,
+                json,
+            } => cmd_gateway_candidates(name, ns_server, *json).await,
         },
 
         Commands::Inspect { hex_bytes, file } => cmd_inspect(hex_bytes, file),

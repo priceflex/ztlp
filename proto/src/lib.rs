@@ -36,12 +36,16 @@
 #![deny(unsafe_code)]
 
 // ── Always-available modules (sync, no tokio) ─────────────────────────
+pub mod admin;
 pub mod admission;
 #[cfg(feature = "tokio-runtime")]
 pub mod agent;
 pub mod android;
 pub mod anti_replay;
+pub mod candidate_priority;
 pub mod client_profile;
+#[cfg(feature = "tokio-runtime")]
+pub mod dial_orchestrator;
 pub mod enrollment;
 pub mod error;
 pub mod fec;
@@ -53,7 +57,13 @@ pub mod http_injector;
 pub mod identity;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
+/// v0.32 multi-candidate discovery (M1): enumerate the gateway's local
+/// non-loopback NIC addresses for advertising as host candidates in
+/// PUNCH_REPORT. Pure-fn module; wiring lands in M2.
+pub mod local_candidates;
 pub mod metrics;
+#[cfg(feature = "tokio-runtime")]
+pub mod multi_candidate_dial;
 #[cfg(feature = "ios-sync")]
 pub mod mux;
 pub mod ns_cbor;

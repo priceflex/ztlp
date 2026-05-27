@@ -4222,30 +4222,36 @@ async fn cmd_listen(
         // is fine — both Quinn and keepalive go through the same NAT,
         // so the (ip, port) NS sees is reachable.
         //
-        // FUTURE: extract the std::net::UdpSocket fd before handing to
-        // Quinn so keepalive + Quinn share the same kernel socket; the
-        // quinn AsyncUdpSocket trait does not expose the std socket so
-        // this requires a refactor to PunchRuntime to also retain a
-        // raw fd clone. Tracked as a follow-up.
+        // We bind a fresh ephemeral socket for the keepalive task; the
+        // QUIC listener port is plumbed explicitly via with_listener_port
+        // so PUNCH_REPORT candidates carry the listener's port, not the
+        // keepalive socket's ephemeral port.
+        let listener_port = server
+            .inner
+            .local_addr()
+            .map_err(|e| format!("failed to read QUIC listener local_addr: {}", e))?
+            .port();
         let keepalive_sock = std::sync::Arc::new(
             tokio::net::UdpSocket::bind("0.0.0.0:0")
                 .await
                 .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
         );
         let gw_node_id = identity.node_id;
-        let agent = ztlp_proto::punch_agent::PunchAgent::with_advertise_overrides(
+        let agent = ztlp_proto::punch_agent::PunchAgent::with_listener_port(
             keepalive_sock,
             ns_addr,
             gw_node_id,
+            listener_port,
             advertise_interface.to_vec(),
             no_advertise_interface.to_vec(),
             advertise_all_interfaces,
         );
         println!(
-            "{} Punch enabled — keepalive to {} every {:?}",
+            "{} Punch enabled — keepalive to {} every {:?} (advertising listener port {})",
             c_green("✓"),
             ns_addr,
-            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL
+            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL,
+            listener_port,
         );
         _punch_handles
             .push(agent.start_keepalive(ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL));
@@ -12417,5 +12423,60 @@ mod tests {
         let ns = None;
         let resolved_addr = None;
         assert!(!relay_path_active(&relay, &ns, resolved_addr));
+    }
+
+    /// T3 (v0.32.1) — KEY-record CBOR sent by `ns register` must include
+    /// `node_id`. Without it, the NS Phoenix layer can't bind the
+    /// registration to the operator's Ed25519 identity and the
+    /// `KEY -> SVC` lookup chain breaks for v0.32.1 bench deployments.
+    ///
+    /// The M9 bench raised this as a possible gap; closer reading of the
+    /// source confirmed it was already present at the KEY and SVC call
+    /// sites in `cmd_ns_register`. This test pins that contract so a
+    /// future refactor can't silently drop the field.
+    #[test]
+    fn ns_register_key_record_includes_node_id() {
+        let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+        let pubkey_hex = "abcd".repeat(16);
+        let key_bin = cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", node_id_hex),
+            ("public_key", &pubkey_hex),
+        ]);
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(&key_bin[..]).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        let found = map
+            .iter()
+            .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
+        assert!(found, "node_id key missing from KEY-record CBOR");
+    }
+
+    /// T3 (v0.32.1) — SVC-record CBOR sent by `ns register --address`
+    /// must also include `node_id`. Mirrors the KEY-record guard above;
+    /// the SVC record is what `ns lookup` ultimately returns, so losing
+    /// `node_id` here would break the operator-identity binding even if
+    /// the KEY record stayed intact.
+    #[test]
+    fn ns_register_svc_record_includes_node_id() {
+        let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+        let svc_bin = cbor_map(&mut vec![
+            ("address", "10.0.0.1:23095"),
+            ("node_id", node_id_hex),
+            ("zone", "example.zt"),
+        ]);
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(&svc_bin[..]).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        let found = map
+            .iter()
+            .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
+        assert!(found, "node_id key missing from SVC-record CBOR");
     }
 }

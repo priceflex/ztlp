@@ -178,24 +178,31 @@ pub async fn try_multi_candidate_connect(
 /// M6 ship without disturbing the existing QUIC handshake state
 /// machine in cmd_connect. Phase 2 (post-v0.32.0) replaces the body
 /// with the real handshake.
+///
+/// ## Per-dial, family-matched bind (v0.32.1)
+///
+/// As of v0.32.1, the dialer binds a fresh ephemeral UDP socket PER
+/// `dial()` call with an address family matched to the candidate's
+/// (`0.0.0.0:0` for IPv4, `[::]:0` for IPv6). This costs one extra
+/// bind/close per candidate (~50 µs on Linux) and lets us dial IPv6
+/// candidates without `EAFNOSUPPORT`.
+///
+/// Pre-v0.32.1 the dialer held a single `0.0.0.0:0` socket across all
+/// candidates, which broke every IPv6 host candidate in PUNCH_REPORT
+/// with `send_to: Address family not supported by protocol (os error 97)`.
 pub struct QuicDialer {
-    socket: Arc<UdpSocket>,
+    // No persistent socket — sockets are per-dial, family-matched.
+    _private: (),
 }
 
 impl QuicDialer {
-    /// Bind an ephemeral UDP socket for outbound probes.
+    /// Construct a new QuicDialer.
     ///
-    /// We deliberately do NOT reuse the caller's primary socket — the
-    /// caller is already in a `recv_from` loop on it (for the NS
-    /// response), and adding a probe-reply listener to the same
-    /// socket would race those receives. An ephemeral socket avoids
-    /// the bookkeeping; M6's job is to prove the wire path, not
-    /// optimise NAT mappings.
+    /// Infallible in practice — sockets are bound per `dial()` call
+    /// against the candidate's address family. Returns `io::Result`
+    /// for forward compatibility (Phase 2 may bind shared state).
     pub async fn new() -> std::io::Result<Self> {
-        let sock = UdpSocket::bind("0.0.0.0:0").await?;
-        Ok(Self {
-            socket: Arc::new(sock),
-        })
+        Ok(Self { _private: () })
     }
 
     /// Build a probe packet: `0xFE` + 8 nonce bytes.
@@ -220,8 +227,20 @@ impl QuicDialer {
 #[async_trait]
 impl Dialer for QuicDialer {
     async fn dial(&self, addr: SocketAddr) -> Result<DialSuccess, DialError> {
+        // Bind the probe socket with the family that matches `addr`.
+        // IPv4 → 0.0.0.0:0, IPv6 → [::]:0. Costs microseconds; avoids
+        // EAFNOSUPPORT on IPv6 candidates.
+        let bind_addr = match addr {
+            SocketAddr::V4(_) => "0.0.0.0:0",
+            SocketAddr::V6(_) => "[::]:0",
+        };
+        let socket = match UdpSocket::bind(bind_addr).await {
+            Ok(s) => s,
+            Err(e) => return Err(DialError::Other(format!("bind {bind_addr}: {e}"))),
+        };
+
         let pkt = Self::probe_packet();
-        if let Err(e) = self.socket.send_to(&pkt, addr).await {
+        if let Err(e) = socket.send_to(&pkt, addr).await {
             return Err(DialError::Other(format!("send_to {addr}: {e}")));
         }
         // Read loop: accept the first datagram that comes back FROM `addr`.
@@ -233,7 +252,7 @@ impl Dialer for QuicDialer {
         let inner = async {
             let mut buf = [0u8; 1500];
             loop {
-                match self.socket.recv_from(&mut buf).await {
+                match socket.recv_from(&mut buf).await {
                     Ok((_len, from)) if from == addr => return Ok(DialSuccess { addr }),
                     Ok(_) => continue, // unrelated reply — keep listening
                     Err(e) => return Err(DialError::Other(format!("recv: {e}"))),
@@ -380,8 +399,17 @@ mod tests {
 
     // ── Test 2 ────────────────────────────────────────────────────────
     /// When NS returns 1 host candidate AND a relay is supplied,
-    /// the host (priority 160 public-v4) should win because it's in
-    /// the higher band and we give it `band_delay` of head start.
+    /// the host (same-subnet, priority 250) should win because it's
+    /// in the higher band and we give it `band_delay` of head start.
+    ///
+    /// v0.32.1 note: pre-T4, 127.0.0.1 classified as HostPublicV4 (160)
+    /// via the catch-all branch — naturally above Relay (50). T4 made
+    /// loopback short-circuit to priority 0, which inverted the rank
+    /// vs. Relay. To preserve the test's stated intent ("host wins"),
+    /// we now pass `127.0.0.0/8` in `our_local_subnets` so the same
+    /// loopback address classifies as HostSameSubnet — exercising the
+    /// operator-override path that v0.32.1's classify() now respects
+    /// over the loopback short-circuit.
     #[tokio::test]
     async fn try_connect_prefers_host_over_relay_when_host_reachable() {
         let (host_addr, _host_h) = spawn_echo_responder().await;
@@ -391,6 +419,13 @@ mod tests {
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let our_id = fresh_node_id();
         let peer_id = fresh_node_id();
+
+        // Operator-override: treat 127.0.0.0/8 as a reachable subnet.
+        // Without this override, T4's loopback short-circuit would rank
+        // 127.0.0.1 below Relay (priority 0 vs 50) and the relay would
+        // win — which is correct production behavior but defeats this
+        // test's purpose (host-over-relay precedence).
+        let local_subnets = vec![(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)), 8u8)];
 
         let policy = DialPolicy {
             per_candidate_timeout: Duration::from_secs(2),
@@ -402,7 +437,7 @@ mod tests {
             ns_addr,
             our_socket,
             our_id,
-            &[],
+            &local_subnets,
             Some(relay_addr),
             policy,
         )
@@ -413,9 +448,7 @@ mod tests {
             out.winning_addr, host_addr,
             "host candidate should win over relay"
         );
-        // Class depends on the IP — 127.0.0.1 is not RFC1918 / CGNAT /
-        // global-public per our classifier (it falls into HostPublicV4
-        // by the catch-all branch). Either way it must NOT be Relay.
+        // Class is HostSameSubnet because we passed 127.0.0.0/8 in subnets.
         assert_ne!(out.class, CandidateClass::Relay);
     }
 
@@ -567,5 +600,56 @@ mod tests {
             Err(MultiCandidateError::NsQueryFailed(_)) => {}
             other => panic!("expected NsQueryFailed, got {:?}", other),
         }
+    }
+
+    // ── Test 9: T2 — QuicDialer dual-stack ─────────────────────────────
+
+    /// T2 — QuicDialer must succeed against an IPv6 loopback echo
+    /// responder. Today's bind of 0.0.0.0:0 fails with
+    /// EAFNOSUPPORT on send_to([::1]).
+    #[tokio::test]
+    async fn quic_dialer_dials_ipv6_loopback() {
+        // IPv6 loopback echo: bind ::1, echo any datagram back to its src.
+        let echo = Arc::new(UdpSocket::bind("[::1]:0").await.expect("bind v6 echo"));
+        let echo_addr = echo.local_addr().unwrap();
+        let echo_clone = echo.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64];
+            if let Ok((n, src)) = echo_clone.recv_from(&mut buf).await {
+                let _ = echo_clone.send_to(&buf[..n], src).await;
+            }
+        });
+
+        let dialer = QuicDialer::new().await.expect("QuicDialer::new");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), dialer.dial(echo_addr))
+                .await
+                .expect("no timeout")
+                .expect("dial ok");
+        // probe completed — outcome doesn't matter for liveness, only that the
+        // dial completed without an EAFNOSUPPORT error.
+        let _ = result;
+    }
+
+    /// T2 — IPv4 path still works (regression).
+    #[tokio::test]
+    async fn quic_dialer_dials_ipv4_loopback() {
+        let echo = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind v4 echo"));
+        let echo_addr = echo.local_addr().unwrap();
+        let echo_clone = echo.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 64];
+            if let Ok((n, src)) = echo_clone.recv_from(&mut buf).await {
+                let _ = echo_clone.send_to(&buf[..n], src).await;
+            }
+        });
+
+        let dialer = QuicDialer::new().await.expect("QuicDialer::new");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), dialer.dial(echo_addr))
+                .await
+                .expect("no timeout")
+                .expect("dial ok");
+        let _ = result;
     }
 }

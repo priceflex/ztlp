@@ -137,6 +137,38 @@ impl PunchAgent {
         }
     }
 
+    /// Construct a PunchAgent with an EXPLICIT listener port that
+    /// may differ from the keepalive socket's bind port.
+    ///
+    /// This is the production shape on listeners: the keepalive socket
+    /// is bound to an ephemeral port (because Quinn owns the listener
+    /// socket), but the candidates advertised in PUNCH_REPORT must
+    /// carry the LISTENER port so peers dial the right destination.
+    ///
+    /// `with_socket()` and `with_advertise_overrides()` are equivalent
+    /// to calling this with `listener_port = socket.local_addr().port()`
+    /// — useful for tests and for direct gateways that share their
+    /// listener socket with the keepalive task.
+    pub fn with_listener_port(
+        socket: Arc<UdpSocket>,
+        ns_addr: SocketAddr,
+        node_id: NodeId,
+        listener_port: u16,
+        advertise_include: Vec<String>,
+        advertise_exclude: Vec<String>,
+        advertise_all: bool,
+    ) -> Self {
+        Self {
+            socket,
+            ns_addr,
+            node_id,
+            listener_port,
+            advertise_include,
+            advertise_exclude,
+            advertise_all,
+        }
+    }
+
     /// Spawn a background task that emits a `PUNCH_REPORT` (`0x0C`) packet
     /// to the NS server every `interval`.
     ///
@@ -685,5 +717,65 @@ mod tests {
         }
         handle.abort();
         assert!(count >= 3, "expected ≥3 keepalives in 250ms, got {}", count);
+    }
+
+    /// T1 — when the operator explicitly supplies a listener port that
+    /// differs from the keepalive socket's bind port, PUNCH_REPORT must
+    /// advertise the EXPLICIT listener port. This is the production
+    /// shape: keepalive socket is ephemeral, listener is fixed.
+    #[tokio::test]
+    async fn keepalive_uses_explicit_listener_port_over_socket_port() {
+        use crate::punch::decode_punch_report;
+        use std::time::Duration;
+
+        // NS-side listener (receives PUNCH_REPORTs)
+        let ns_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind ns");
+        let ns_addr = ns_sock.local_addr().unwrap();
+
+        // Gateway keepalive socket — ephemeral; its port is NOT the listener port.
+        let gw_keepalive = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind gw"));
+        let keepalive_port = gw_keepalive.local_addr().unwrap().port();
+
+        // Production-shape listener port — completely different from keepalive port.
+        let explicit_listener_port: u16 = 23095;
+        assert_ne!(explicit_listener_port, keepalive_port);
+
+        let node_id = NodeId([0xBB; 16]);
+        let agent = PunchAgent::with_listener_port(
+            gw_keepalive,
+            ns_addr,
+            node_id,
+            explicit_listener_port,
+            vec![],
+            vec![],
+            true, // --advertise-all to get loopback candidate
+        );
+        let handle = agent.start_keepalive(Duration::from_millis(50));
+
+        let mut buf = vec![0u8; 4096];
+        let (n, _src) = tokio::time::timeout(Duration::from_secs(2), ns_sock.recv_from(&mut buf))
+            .await
+            .expect("keepalive arrived")
+            .expect("recv ok");
+
+        handle.abort();
+
+        let (decoded_node_id, candidates) =
+            decode_punch_report(&buf[..n]).expect("decode_punch_report");
+        assert_eq!(decoded_node_id, node_id);
+        assert!(
+            !candidates.is_empty(),
+            "expected at least one candidate w/ --advertise-all"
+        );
+        for c in &candidates {
+            assert_eq!(
+                c.port(),
+                explicit_listener_port,
+                "candidate {} carries port {} but should carry explicit listener port {}",
+                c,
+                c.port(),
+                explicit_listener_port
+            );
+        }
     }
 }

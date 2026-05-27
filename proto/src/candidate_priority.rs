@@ -133,13 +133,17 @@ fn is_link_local_v4(ip: std::net::Ipv4Addr) -> bool {
 pub fn classify(addr: SocketAddr, client_subnets: &[(IpAddr, u8)]) -> CandidateClass {
     match addr.ip() {
         IpAddr::V4(v4) => {
-            // Loopback short-circuits — useless across hosts, lowest priority.
-            if v4.is_loopback() {
-                return CandidateClass::Loopback;
-            }
-            // Same-subnet trumps everything.
+            // Operator-supplied subnet override wins over the loopback
+            // short-circuit: if the operator explicitly told us
+            // `127.0.0.0/8 is in my reachable subnets` (e.g. in-host
+            // multi-process testing), respect that — same-subnet always
+            // outranks loopback's cosmetic priority-0 rule.
             if ip_in_any_subnet(IpAddr::V4(v4), client_subnets) {
                 return CandidateClass::HostSameSubnet;
+            }
+            // Loopback otherwise short-circuits — useless across hosts.
+            if v4.is_loopback() {
+                return CandidateClass::Loopback;
             }
             if is_rfc1918_v4(v4) {
                 return CandidateClass::HostOtherRfc1918;

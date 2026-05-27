@@ -399,8 +399,17 @@ mod tests {
 
     // ── Test 2 ────────────────────────────────────────────────────────
     /// When NS returns 1 host candidate AND a relay is supplied,
-    /// the host (priority 160 public-v4) should win because it's in
-    /// the higher band and we give it `band_delay` of head start.
+    /// the host (same-subnet, priority 250) should win because it's
+    /// in the higher band and we give it `band_delay` of head start.
+    ///
+    /// v0.32.1 note: pre-T4, 127.0.0.1 classified as HostPublicV4 (160)
+    /// via the catch-all branch — naturally above Relay (50). T4 made
+    /// loopback short-circuit to priority 0, which inverted the rank
+    /// vs. Relay. To preserve the test's stated intent ("host wins"),
+    /// we now pass `127.0.0.0/8` in `our_local_subnets` so the same
+    /// loopback address classifies as HostSameSubnet — exercising the
+    /// operator-override path that v0.32.1's classify() now respects
+    /// over the loopback short-circuit.
     #[tokio::test]
     async fn try_connect_prefers_host_over_relay_when_host_reachable() {
         let (host_addr, _host_h) = spawn_echo_responder().await;
@@ -410,6 +419,13 @@ mod tests {
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let our_id = fresh_node_id();
         let peer_id = fresh_node_id();
+
+        // Operator-override: treat 127.0.0.0/8 as a reachable subnet.
+        // Without this override, T4's loopback short-circuit would rank
+        // 127.0.0.1 below Relay (priority 0 vs 50) and the relay would
+        // win — which is correct production behavior but defeats this
+        // test's purpose (host-over-relay precedence).
+        let local_subnets = vec![(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)), 8u8)];
 
         let policy = DialPolicy {
             per_candidate_timeout: Duration::from_secs(2),
@@ -421,7 +437,7 @@ mod tests {
             ns_addr,
             our_socket,
             our_id,
-            &[],
+            &local_subnets,
             Some(relay_addr),
             policy,
         )
@@ -432,9 +448,7 @@ mod tests {
             out.winning_addr, host_addr,
             "host candidate should win over relay"
         );
-        // Class depends on the IP — 127.0.0.1 is not RFC1918 / CGNAT /
-        // global-public per our classifier (it falls into HostPublicV4
-        // by the catch-all branch). Either way it must NOT be Relay.
+        // Class is HostSameSubnet because we passed 127.0.0.0/8 in subnets.
         assert_ne!(out.class, CandidateClass::Relay);
     }
 

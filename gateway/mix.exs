@@ -15,7 +15,13 @@ defmodule ZtlpGateway.MixProject do
       # in PR release/v0.30.4 to align manifests with the re-cut v0.30.4
       # tag. The release_test.exs "version reporting (regression pin)" block
       # floors this at 0.30.4 to prevent silent down-drift going forward.
-      version: "0.31.0",
+      # Bumped 0.30.4 → 0.31.0 in release/v0.31.0 (resilient-connectivity).
+      # Bumped 0.31.0 → 0.32.2 in PR release/v0.32.2 to align with the v0.32
+      # family (multi-candidate discovery + QUIC-path dial + IPv6 fixes,
+      # PRs #69/#70/#71). All three v0.32.x releases shipped while mix.exs
+      # still read 0.31.0; this PR closes that drift. Floor ratcheted to
+      # 0.32.2 in release_test.exs.
+      version: "0.32.2",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

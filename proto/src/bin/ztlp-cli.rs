@@ -393,6 +393,24 @@ enum Commands {
         /// Example: `--admin-pubkey-email deadbeef...=ops@trs.com`
         #[arg(long, value_name = "HEX=EMAIL")]
         admin_pubkey_email: Vec<String>,
+
+        /// Enable NS-coordinated hole punching on the gateway side.
+        ///
+        /// When set together with `--ns-server`, the gateway:
+        /// 1. Sends periodic PUNCH_REPORT (0x0C) packets to NS so NS
+        ///    learns the gateway's NAT-mapped public endpoint.
+        /// 2. Wraps the QUIC listener socket with PunchRuntime, which
+        ///    intercepts incoming PUNCH_NOTIFY (0x0B) packets before
+        ///    Quinn sees them and routes them to a dispatcher.
+        /// 3. The dispatcher fires PUNCH_BYTE (0x00) at the requester's
+        ///    reported endpoints, opening the NAT pinhole so the
+        ///    client's subsequent QUIC handshake can traverse.
+        ///
+        /// Requires `--ns-server`. Without NS, there is no coordinator
+        /// for the punch dance and the flag is a no-op (a warning is
+        /// printed at startup).
+        #[arg(long, default_value_t = false)]
+        punch: bool,
     },
 
     /// Manage ZTLP relay nodes
@@ -3861,7 +3879,7 @@ async fn cmd_listen(
     _gateway_mode: bool,
     forward: &[String],
     _policy_path: &Option<PathBuf>,
-    _ns_server: &Option<String>,
+    ns_server: &Option<String>,
     _stun_server: &Option<String>,
     _nat_assist: bool,
     _max_sessions: usize,
@@ -3873,6 +3891,7 @@ async fn cmd_listen(
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
     _quic: bool,
+    punch_enabled: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -3912,14 +3931,102 @@ async fn cmd_listen(
         None
     };
 
-    let server = QuicEndpoint::bind_with_socket(server_cfg, std_socket)?;
+    // Load gateway identity up front — we need its NodeId for the
+    // PunchAgent if --punch is enabled.
+    let identity = load_or_generate_identity(key)?;
+
+    // ── Punch-mode setup ──────────────────────────────────────────
+    // When --punch is set together with --ns-server, we wrap the Quinn
+    // socket in PunchRuntime so PUNCH_NOTIFY (0x0B) and PUNCH_BYTE
+    // (0x00) are intercepted/dropped before Quinn's QUIC parser sees
+    // them. Without --ns-server, --punch is a no-op because there's no
+    // coordinator for the punch dance — we warn instead of failing
+    // so existing scripts that pass --punch alone keep working.
+    let punch_ns_addr: Option<std::net::SocketAddr> = if punch_enabled {
+        match ns_server.as_deref() {
+            Some(s) => match s.parse() {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    eprintln!(
+                        "{} --punch requires a parseable --ns-server (got {:?}: {})",
+                        c_yellow("⚠"),
+                        s,
+                        e
+                    );
+                    None
+                }
+            },
+            None => {
+                eprintln!(
+                    "{} --punch requires --ns-server; running without punch (relay-only)",
+                    c_yellow("⚠")
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (intercept_tx, intercept_rx) = if punch_ns_addr.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let server = if let Some(tx) = intercept_tx.clone() {
+        let runtime: std::sync::Arc<dyn quinn::Runtime> =
+            std::sync::Arc::new(ztlp_proto::punch_socket::PunchRuntime::new(tx));
+        QuicEndpoint::bind_with_socket_and_runtime(server_cfg, std_socket, runtime)?
+    } else {
+        QuicEndpoint::bind_with_socket(server_cfg, std_socket)?
+    };
     println!(
         "ZTLP QUIC server listening on UDP {}",
         server.inner.local_addr().unwrap()
     );
 
+    // ── Start the PunchAgent keepalive + dispatcher (if --punch) ──
+    // We hold the JoinHandles in a Vec so they live as long as cmd_listen
+    // does — dropping them earlier would cancel the tasks. The dispatcher
+    // exits naturally when its sender side (the PunchSocket inside Quinn's
+    // runtime) is dropped at shutdown.
+    let mut _punch_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if let (Some(ns_addr), Some(rx)) = (punch_ns_addr, intercept_rx) {
+        // Bind a separate keepalive socket (ephemeral) — we cannot share
+        // the QUIC socket because Quinn has taken ownership of it. The
+        // NS server will learn this ephemeral socket's (ip, port) as the
+        // gateway's :learned endpoint. For the local-network bench this
+        // is fine — both Quinn and keepalive go through the same NAT,
+        // so the (ip, port) NS sees is reachable.
+        //
+        // FUTURE: extract the std::net::UdpSocket fd before handing to
+        // Quinn so keepalive + Quinn share the same kernel socket; the
+        // quinn AsyncUdpSocket trait does not expose the std socket so
+        // this requires a refactor to PunchRuntime to also retain a
+        // raw fd clone. Tracked as a follow-up.
+        let keepalive_sock = std::sync::Arc::new(
+            tokio::net::UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
+        );
+        let gw_node_id = identity.node_id;
+        let agent = ztlp_proto::punch_agent::PunchAgent::new(keepalive_sock, ns_addr, gw_node_id);
+        println!(
+            "{} Punch enabled — keepalive to {} every {:?}",
+            c_green("✓"),
+            ns_addr,
+            ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL
+        );
+        _punch_handles
+            .push(agent.start_keepalive(ztlp_proto::punch_agent::DEFAULT_KEEPALIVE_INTERVAL));
+        _punch_handles
+            .push(agent.start_dispatcher(rx, ztlp_proto::punch::DEFAULT_RESPONDER_DURATION));
+    }
+
     let _cfw = forward.to_vec();
-    let identity = load_or_generate_identity(key)?;
+    // identity already loaded above (before the punch block needs the NodeId).
 
     if let (Some(r_addr), Some(reg_sock)) = (relay_addr, register_socket) {
         if let Ok(target) = r_addr.parse::<std::net::SocketAddr>() {
@@ -11010,6 +11117,7 @@ async fn main() {
             header_hmac_secret,
             admin_pubkey_email,
             quic,
+            punch,
         } => {
             cmd_listen(
                 bind,
@@ -11029,6 +11137,7 @@ async fn main() {
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
                 *quic,
+                *punch,
             )
             .await
         }

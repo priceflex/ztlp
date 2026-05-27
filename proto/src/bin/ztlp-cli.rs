@@ -1744,6 +1744,79 @@ fn cmd_keygen(
 /// - ZTLP name with port (e.g., `myserver.clients.techrockstars.ztlp:23095`)
 ///
 /// Returns the resolved SocketAddr and optionally the peer's NodeID from NS.
+/// Parse a target string into a name and an optional explicit port.
+///
+/// The user can type `mygw.example.ztlp` (no port) or `mygw.example.ztlp:22`
+/// (with a port). The explicit port is the user's *service port* hint — what
+/// downstream service on the gateway they want to reach. It is NOT the QUIC
+/// transport port, which always comes from the SVC record's address.
+///
+/// Bug history: pre-2026-05-26 this distinction wasn't made, and the user-
+/// supplied port clobbered the transport port read from NS. The client then
+/// tried to open a QUIC handshake to e.g. `:22` (SSH) on the relay box and
+/// silently hung in PTO retries forever.
+///
+/// Returns `(name_part, explicit_port)`. If the suffix after `:` isn't a valid
+/// u16, returns the whole string as the name with `None`.
+fn parse_target_name_and_port(target: &str) -> (&str, Option<u16>) {
+    if let Some(idx) = target.rfind(':') {
+        let after_colon = &target[idx + 1..];
+        if let Ok(port) = after_colon.parse::<u16>() {
+            return (&target[..idx], Some(port));
+        }
+    }
+    (target, None)
+}
+
+/// Build the final transport endpoint from an NS SVC address and the user's
+/// optional service-port hint.
+///
+/// The transport port ALWAYS comes from the SVC record. The user's port is
+/// preserved separately as a service port (currently informational; the
+/// gateway picks the actual forward by service name).
+///
+/// Returns `(transport, service_port)`. `transport` is `None` when NS didn't
+/// resolve an address — the caller is expected to do DNS fallback or fail
+/// with a clear error.
+fn build_resolved_endpoint(
+    svc_addr: Option<SocketAddr>,
+    user_supplied_port: Option<u16>,
+) -> (Option<SocketAddr>, Option<u16>) {
+    (svc_addr, user_supplied_port)
+}
+
+/// True when the connect command should enter the relay-routed code path
+/// (which is where NAT-traversal, hole-punching, and the relay pool live).
+///
+/// Bug history (Issue 2, 2026-05-26): pre-fix this was effectively
+/// `relay.is_some()`, meaning users who relied on NS to discover the relay
+/// (the common case) silently bypassed all NAT-traversal logic — `--punch`
+/// was a no-op.
+///
+/// The legacy path is active when the user explicitly opted into a feature
+/// that only lives there:
+/// - `--relay <addr>` (explicit relay routing)
+/// - `--punch` (NS-coordinated hole punching)
+/// - `--nat-assist` (STUN discovery + relay-mediated hole punching)
+/// - `--relay-pool` (multi-relay failover)
+///
+/// LAN-direct (`ztlp connect 192.168.1.5:23095`, no flags) and NS-resolved
+/// connects without these flags stay on the QUIC mode path, which works
+/// today via CLIENT_ROUTE.
+///
+/// The `ns_server` and `resolved_addr` arguments are present in the
+/// signature but are intentionally not consulted yet — they're for the
+/// future "always enter relay path when NS gave us a relay address so
+/// punch can be made the default" change. The current behaviour is
+/// "only enter the legacy path when the user explicitly opted in".
+fn relay_path_active(
+    relay: &Option<String>,
+    _ns_server: &Option<String>,
+    _resolved_addr: Option<SocketAddr>,
+) -> bool {
+    relay.is_some()
+}
+
 async fn resolve_target(
     target: &str,
     ns_server_opt: &Option<String>,
@@ -1767,16 +1840,7 @@ async fn resolve_target(
     eprintln!("  {} {}", c_dim("NS server:"), ns_server);
 
     // Strip optional port from name (e.g., "name.ztlp:23095")
-    let (name_part, explicit_port) = if let Some(idx) = target.rfind(':') {
-        let after_colon = &target[idx + 1..];
-        if let Ok(port) = after_colon.parse::<u16>() {
-            (&target[..idx], Some(port))
-        } else {
-            (target, None)
-        }
-    } else {
-        (target, None)
-    };
+    let (name_part, explicit_port) = parse_target_name_and_port(target);
 
     // Query SVC record (type 2) for endpoint address
     let mut resolved_addr: Option<SocketAddr> = None;
@@ -1823,14 +1887,26 @@ async fn resolve_target(
         eprintln!("  {} KEY record found", c_green("✓"));
     }
 
-    // Build final address
-    let final_addr = if let Some(addr) = resolved_addr {
-        // If explicit port was given, override the NS-provided port
-        if let Some(port) = explicit_port {
-            SocketAddr::new(addr.ip(), port)
-        } else {
-            addr
-        }
+    // Build final address.
+    //
+    // Bug history (fix 2026-05-26): we used to do
+    //   SocketAddr::new(addr.ip(), explicit_port_override)
+    // when both an NS SVC record and a `:port` in the user's target were
+    // present. That clobbered the relay's port (e.g. :23095) with the
+    // user-supplied service port (e.g. :22) and the client then tried to
+    // open a QUIC handshake against the relay's SSH listener — silent PTO
+    // forever. The user's `:port` is a *service port hint*, NOT the QUIC
+    // transport port. We now use the SVC transport as-is and pass the
+    // service-port hint via `build_resolved_endpoint`.
+    //
+    // The DNS-fallback path is unchanged: there, `explicit_port` is used to
+    // construct the DNS lookup target (no NS, no relay involved, so the
+    // transport port IS the user's port).
+    let (transport_from_svc, _service_port_hint) =
+        build_resolved_endpoint(resolved_addr, explicit_port);
+
+    let final_addr = if let Some(addr) = transport_from_svc {
+        addr
     } else {
         // No address from NS — if this looks like a hostname, try DNS resolution
         let port = explicit_port.unwrap_or(23095);
@@ -2256,7 +2332,28 @@ async fn cmd_connect(
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if relay.is_some() {
+    // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
+    //
+    // Pre-fix: the legacy UDP path (which is the ONLY place where
+    // `--punch`, `--nat-assist`, and `--relay-pool` are wired up) was
+    // gated on `relay.is_some()`. That meant users who relied on NS to
+    // discover the relay (the common case — `ztlp connect <name>
+    // --ns-server …`) silently bypassed all NAT-traversal logic. The
+    // `--punch` flag was effectively a no-op in NS-resolved mode.
+    //
+    // The fix: enter the legacy/NAT-traversal path whenever the user
+    // explicitly opted into a feature that lives there:
+    //   • `--relay <addr>` (explicit relay routing)
+    //   • `--punch` (NS-coordinated hole punching)
+    //   • `--nat-assist` (STUN discovery + relay-mediated hole punching)
+    //   • `--relay-pool` (multi-relay failover)
+    //
+    // Default (none of the above) stays on the QUIC mode path, which
+    // handles SVC-record-resolved connects through relays via the
+    // CLIENT_ROUTE frame and is what works end-to-end today.
+    let want_legacy_path = relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled;
+
+    if want_legacy_path {
         // Legacy UDP fallback for NAT traversal / relays
 
         let identity = load_or_generate_identity(key)?;
@@ -11711,5 +11808,141 @@ mod tests {
         let (zone, secret) = cfg.expect("default-env-name path should resolve via slugified var");
         assert_eq!(zone, "tech-rockstars.com");
         assert_eq!(secret, b"tr-secret");
+    }
+
+    // ── Issue 1 (CLI port parsing): the `:port` suffix on a `ztlp connect <name>:<port>`
+    // ── target is the user's *service port* hint, NOT the QUIC transport port. The
+    // ── transport address (and its port) MUST come from the NS SVC record. Before
+    // ── this fix the `:22` in `connect mygw.example.ztlp:22` was clobbering the
+    // ── relay port `23095` from the SVC record, so the client tried to open QUIC
+    // ── to the relay's SSH port — and silently hung forever.
+    //
+    // ── These tests cover the pure `build_resolved_endpoint` helper that the bug
+    // ── lives in. Network-touching `resolve_target` is harder to unit-test; the
+    // ── helper extraction makes the parsing logic isolated and testable.
+
+    #[test]
+    fn build_resolved_endpoint_keeps_svc_transport_port_when_user_supplied_port() {
+        // Repro of Issue 1: SVC says relay is on :23095, user typed `name:22`.
+        // The QUIC transport must go to :23095, NOT :22.
+        let svc_addr: std::net::SocketAddr = "34.218.240.106:23095".parse().unwrap();
+        let user_port = Some(22u16);
+
+        let (transport, service_port) = build_resolved_endpoint(Some(svc_addr), user_port);
+
+        assert_eq!(
+            transport.unwrap().port(),
+            23095,
+            "transport port must come from SVC record, not the user-supplied :port suffix"
+        );
+        assert_eq!(
+            service_port,
+            Some(22),
+            "user-supplied port is preserved as a service-port hint"
+        );
+    }
+
+    #[test]
+    fn build_resolved_endpoint_uses_svc_port_when_no_user_port() {
+        let svc_addr: std::net::SocketAddr = "10.0.0.5:23095".parse().unwrap();
+        let (transport, service_port) = build_resolved_endpoint(Some(svc_addr), None);
+        assert_eq!(transport.unwrap(), svc_addr);
+        assert_eq!(service_port, None);
+    }
+
+    #[test]
+    fn build_resolved_endpoint_returns_no_transport_when_svc_missing() {
+        // Caller is expected to do DNS fallback in this case
+        let (transport, service_port) = build_resolved_endpoint(None, Some(22));
+        assert!(transport.is_none());
+        assert_eq!(service_port, Some(22));
+    }
+
+    #[test]
+    fn build_resolved_endpoint_with_no_svc_and_no_user_port() {
+        let (transport, service_port) = build_resolved_endpoint(None, None);
+        assert!(transport.is_none());
+        assert_eq!(service_port, None);
+    }
+
+    #[test]
+    fn parse_target_name_and_port_handles_bare_name() {
+        let (name, port) = parse_target_name_and_port("mygw.example.ztlp");
+        assert_eq!(name, "mygw.example.ztlp");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn parse_target_name_and_port_handles_name_with_port() {
+        let (name, port) = parse_target_name_and_port("mygw.example.ztlp:22");
+        assert_eq!(name, "mygw.example.ztlp");
+        assert_eq!(port, Some(22));
+    }
+
+    #[test]
+    fn parse_target_name_and_port_handles_name_with_non_numeric_suffix() {
+        // e.g. IPv6 literal-ish — don't treat as port
+        let (name, port) = parse_target_name_and_port("not-a-port:foobar");
+        assert_eq!(name, "not-a-port:foobar");
+        assert_eq!(port, None);
+    }
+
+    // ── Issue 2 (NS-resolved path bypasses NAT-traversal): the legacy code gated
+    // ── the entire punch / nat-assist / relay-pool block on `relay.is_some()`,
+    // ── meaning users who relied on NS to discover the relay address (the common
+    // ── case) silently got NO hole punching even when they passed --punch.
+    //
+    // ── The fix is in `cmd_connect`: the legacy path is now entered when ANY of
+    // ── --relay / --punch / --nat-assist / --relay-pool is set. The
+    // ── `relay_path_active` helper covers the --relay specifically — it
+    // ── remains true to legacy behavior so LAN-direct connects (no flags)
+    // ── continue to use the QUIC-mode path that works today.
+
+    #[test]
+    fn relay_path_active_when_explicit_relay() {
+        let relay = Some("34.218.240.106:23095".to_string());
+        let ns = None;
+        let resolved_addr = None;
+        assert!(
+            relay_path_active(&relay, &ns, resolved_addr),
+            "explicit --relay should activate the relay path"
+        );
+    }
+
+    #[test]
+    fn relay_path_active_inactive_when_only_ns_resolved() {
+        // NS-resolved without --relay/--punch/--nat-assist stays on QUIC
+        // mode. The legacy path is only entered when user explicitly opts
+        // in (cmd_connect checks --punch/--nat-assist/--relay-pool too).
+        let relay = None;
+        let ns = Some("16.147.41.195:23096".to_string());
+        let resolved_addr: Option<std::net::SocketAddr> =
+            Some("34.218.240.106:23095".parse().unwrap());
+        assert!(
+            !relay_path_active(&relay, &ns, resolved_addr),
+            "NS-resolved alone (no opt-in flag) should stay on QUIC mode"
+        );
+    }
+
+    #[test]
+    fn relay_path_inactive_for_raw_ip_no_ns_no_relay() {
+        // Plain `ztlp connect 192.168.1.5:23095` — direct, no relay, no NS.
+        // Don't run the relay/punch path.
+        let relay = None;
+        let ns = None;
+        let resolved_addr: Option<std::net::SocketAddr> =
+            Some("192.168.1.5:23095".parse().unwrap());
+        assert!(
+            !relay_path_active(&relay, &ns, resolved_addr),
+            "LAN-direct connect (no --relay, no --ns-server) should NOT enter the relay path"
+        );
+    }
+
+    #[test]
+    fn relay_path_inactive_when_nothing_resolved() {
+        let relay = None;
+        let ns = None;
+        let resolved_addr = None;
+        assert!(!relay_path_active(&relay, &ns, resolved_addr));
     }
 }

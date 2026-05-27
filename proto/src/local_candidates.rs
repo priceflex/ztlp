@@ -20,7 +20,7 @@
 //!
 //! Precedence: `exclude` > `include` > `all` > default filter.
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tracing::warn;
 
 /// Hard cap on advertised candidates, per spec. Ranking + truncation logic
@@ -168,6 +168,68 @@ pub fn enumerate_local_candidates_with_overrides(
         })
         .collect();
     filter_candidates(snapshot, port, include, exclude, all)
+}
+
+/// Returns `(IpAddr, prefix_len)` for each up + non-loopback interface
+/// on the host. Used by the v0.32 multi-candidate dialer to detect
+/// same-subnet remote candidates (priority 250 — `HostSameSubnet`).
+///
+/// Filter rules mirror [`enumerate_local_candidates`]:
+/// - loopback (127/8, ::1) skipped
+/// - v4 link-local (169.254/16) and v6 link-local (fe80::/10) skipped
+/// - docker0 / br-* skipped
+/// - prefix length comes from `if_addrs::Ifv4Addr::prefixlen` /
+///   `Ifv6Addr::prefixlen` (the platform-derived value)
+///
+/// On failure (no get_if_addrs) returns empty Vec — same fail-safe as
+/// [`enumerate_local_candidates`]. The multi-candidate dialer still
+/// works (it just can't promote anything to `HostSameSubnet`).
+pub fn our_local_subnets() -> Vec<(IpAddr, u8)> {
+    let ifaces = match if_addrs::get_if_addrs() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("our_local_subnets: get_if_addrs failed: {e}");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<(IpAddr, u8)> = Vec::with_capacity(ifaces.len());
+    for iface in ifaces {
+        if is_default_skipped_name(&iface.name) {
+            continue;
+        }
+        match &iface.addr {
+            if_addrs::IfAddr::V4(v4) => {
+                if v4.ip.is_loopback() || v4.ip.is_link_local() {
+                    continue;
+                }
+                out.push((IpAddr::V4(v4.ip), v4.prefixlen));
+            }
+            if_addrs::IfAddr::V6(v6) => {
+                if v6.ip.is_loopback() || is_v6_link_local(&v6.ip) {
+                    continue;
+                }
+                out.push((IpAddr::V6(v6.ip), v6.prefixlen));
+            }
+        }
+    }
+    out
+}
+
+/// Convert an IPv4 netmask to its CIDR prefix length. Currently unused
+/// (if_addrs already exposes `prefixlen`), but kept as a small public
+/// helper because callers that build subnet lists from raw netmasks
+/// (e.g. parsed from `/proc/net/route` on minimal embedded targets)
+/// occasionally need it.
+#[doc(hidden)]
+pub fn netmask_to_prefix_v4(mask: Ipv4Addr) -> u8 {
+    u32::from(mask).count_ones() as u8
+}
+
+/// Convert an IPv6 netmask to its CIDR prefix length. See
+/// [`netmask_to_prefix_v4`].
+#[doc(hidden)]
+pub fn netmask_to_prefix_v6(mask: Ipv6Addr) -> u8 {
+    u128::from(mask).count_ones() as u8
 }
 
 #[cfg(test)]
@@ -454,6 +516,41 @@ mod tests {
                     assert!((seg0 & 0xffc0) != 0xfe80, "v6 link-local leaked: {v6}");
                 }
             }
+        }
+    }
+
+    // ── v0.32 M6: our_local_subnets() tests ──────────────────────────
+
+    /// Live-host sanity test for the multi-candidate dialer's input.
+    /// Asserts `our_local_subnets()` returns at least one entry on a
+    /// reasonably-configured host (any non-loopback NIC qualifies). If
+    /// this fires in CI on a network-less container, swap to a tighter
+    /// assertion or skip — but the typical dev box + CI runner has at
+    /// least eth0/wlan0 with an RFC1918 addr.
+    #[test]
+    fn our_local_subnets_returns_nonempty_for_local_host() {
+        let subnets = our_local_subnets();
+        assert!(
+            !subnets.is_empty(),
+            "expected at least one non-loopback subnet on this host"
+        );
+        for (ip, prefix) in &subnets {
+            match ip {
+                IpAddr::V4(_) => assert!(*prefix <= 32, "v4 prefix > 32: {prefix}"),
+                IpAddr::V6(_) => assert!(*prefix <= 128, "v6 prefix > 128: {prefix}"),
+            }
+        }
+    }
+
+    /// `our_local_subnets()` must filter loopback the same way
+    /// `enumerate_local_candidates` does — otherwise the same-subnet
+    /// detection would falsely match 127.0.0.0/8 host candidates and
+    /// route them to priority 250.
+    #[test]
+    fn our_local_subnets_skips_loopback() {
+        let subnets = our_local_subnets();
+        for (ip, _prefix) in &subnets {
+            assert!(!ip.is_loopback(), "loopback in our_local_subnets: {ip}");
         }
     }
 }

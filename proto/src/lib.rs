@@ -61,6 +61,8 @@ pub mod ios_tunnel_engine;
 /// PUNCH_REPORT. Pure-fn module; wiring lands in M2.
 pub mod local_candidates;
 pub mod metrics;
+#[cfg(feature = "tokio-runtime")]
+pub mod multi_candidate_dial;
 #[cfg(feature = "ios-sync")]
 pub mod mux;
 pub mod ns_cbor;

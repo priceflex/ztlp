@@ -284,6 +284,21 @@ enum Commands {
         /// Health check probe interval for relay pool (e.g. "30s", "1m")
         #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
         relay_probe_interval: Duration,
+
+        /// Enable v0.32 multi-candidate parallel dial (experimental).
+        ///
+        /// When combined with `--punch` + `--ns-server`, the client queries
+        /// NS for the target's PEER_ENDPOINTS, ranks them via the v0.32
+        /// priority ladder (host > srflx > relay), and races them in
+        /// parallel. The winning path's address replaces `send_addr` and
+        /// the existing handshake continues as normal.
+        ///
+        /// Failure falls through to the existing v0.31 send_addr path —
+        /// safe to leave on. Hidden until v0.32.0 ships, at which point
+        /// this flag flips to default-true with `--no-multi-candidate`
+        /// as the escape hatch.
+        #[arg(long, hide = true)]
+        multi_candidate: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -2386,6 +2401,7 @@ async fn cmd_connect(
     punch_timeout: &Option<Duration>,
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
+    multi_candidate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
     //
@@ -2602,6 +2618,53 @@ async fn cmd_connect(
                 }
             }
             eprintln!();
+        }
+
+        // ── v0.32 M6: multi-candidate parallel dial (opt-in) ─────────
+        // When --multi-candidate is passed AND we have an NS-resolved
+        // peer NodeID, race the host candidates from PUNCH_REPORT
+        // alongside the relay backstop. The winning path's address
+        // overrides `send_addr`. Failure falls through unchanged to
+        // the existing NS-coordinated punch path below.
+        if multi_candidate && punch_enabled && _resolved_node_id.is_some() {
+            eprintln!(
+                "{} multi-candidate dial enabled (v0.32 experimental)",
+                c_dim("[v0.32]")
+            );
+            if let Some(ns_str) = ns_server.as_deref() {
+                if let Ok(ns_addr) = ns_str.parse::<SocketAddr>() {
+                    let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
+                    let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+                    match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
+                        _resolved_node_id.unwrap(),
+                        ns_addr,
+                        node.socket.clone(),
+                        identity.node_id,
+                        &local_subnets,
+                        Some(send_addr),
+                        policy,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            eprintln!(
+                                "{} multi-candidate dial succeeded: {} ({:?})",
+                                c_green("✓"),
+                                outcome.winning_addr,
+                                outcome.class
+                            );
+                            send_addr = outcome.winning_addr;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{} multi-candidate dial failed: {:?}; falling back",
+                                c_dim("[v0.32]"),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // NS-coordinated hole punching (if --punch)
@@ -11217,6 +11280,7 @@ async fn main() {
             no_relay_pool,
             relay_probe_interval,
             quic,
+            multi_candidate,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -11250,6 +11314,7 @@ async fn main() {
                 punch_timeout,
                 relay_pool_active,
                 *relay_probe_interval,
+                *multi_candidate,
             )
             .await
         }

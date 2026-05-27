@@ -167,7 +167,7 @@ This follows the resilient-connectivity plan's H/R numbering convention. New let
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
 | M1 | Gateway local-candidate enumerator | ✅ | 96b8eb8 + 03e6392 | RED: filter_candidates() didn't exist; tests failed to compile (E0433). GREEN: 16 tests pass, 941/941 lib suite clean. Quality review surfaced 3 important issues (silent get_if_addrs error, force_include + down NIC inconsistency, doc/code drift on v6 filter) + 1 coverage gap (ULA/exactly-8) — all fixed in 03e6392 with 4 new regression tests. Final: 20/20 local_candidates tests pass, 945/945 lib suite passes, fmt+build clean. Deps: if-addrs 0.13 added. |
-| M2 | Wire into PUNCH_REPORT keepalive | 🔲 | — | |
+| M2 | Wire into PUNCH_REPORT keepalive | ✅ | a67add5 | RED: 6 failing tests + compile errors (no field `advertise_exclude`, no fn `with_advertise_overrides`). GREEN: 4 new PunchAgent fields, with_advertise_overrides() constructor, start_keepalive() re-enumerates per tick via enumerate_local_candidates_with_overrides(). CLI: 3 new clap flags (--advertise-interface, --no-advertise-interface, --advertise-all-interfaces) wired through cmd_listen. 12/12 punch_agent tests pass (6 prior + 6 new). 951/951 lib suite green (was 945, +6). Spec review PASS, quality review APPROVED zero critical/important issues. 2 files, 302+/10- LOC. |
 | M3 | NS test: N-endpoint roundtrip | 🔲 | — | |
 | M4 | Client priority calculator | 🔲 | — | |
 | M5 | Parallel-dial orchestrator | 🔲 | — | |

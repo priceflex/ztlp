@@ -12424,4 +12424,59 @@ mod tests {
         let resolved_addr = None;
         assert!(!relay_path_active(&relay, &ns, resolved_addr));
     }
+
+    /// T3 (v0.32.1) — KEY-record CBOR sent by `ns register` must include
+    /// `node_id`. Without it, the NS Phoenix layer can't bind the
+    /// registration to the operator's Ed25519 identity and the
+    /// `KEY -> SVC` lookup chain breaks for v0.32.1 bench deployments.
+    ///
+    /// The M9 bench raised this as a possible gap; closer reading of the
+    /// source confirmed it was already present at the KEY and SVC call
+    /// sites in `cmd_ns_register`. This test pins that contract so a
+    /// future refactor can't silently drop the field.
+    #[test]
+    fn ns_register_key_record_includes_node_id() {
+        let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+        let pubkey_hex = "abcd".repeat(16);
+        let key_bin = cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", node_id_hex),
+            ("public_key", &pubkey_hex),
+        ]);
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(&key_bin[..]).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        let found = map.iter().any(|(k, _)| {
+            matches!(k, ciborium::value::Value::Text(s) if s == "node_id")
+        });
+        assert!(found, "node_id key missing from KEY-record CBOR");
+    }
+
+    /// T3 (v0.32.1) — SVC-record CBOR sent by `ns register --address`
+    /// must also include `node_id`. Mirrors the KEY-record guard above;
+    /// the SVC record is what `ns lookup` ultimately returns, so losing
+    /// `node_id` here would break the operator-identity binding even if
+    /// the KEY record stayed intact.
+    #[test]
+    fn ns_register_svc_record_includes_node_id() {
+        let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";
+        let svc_bin = cbor_map(&mut vec![
+            ("address", "10.0.0.1:23095"),
+            ("node_id", node_id_hex),
+            ("zone", "example.zt"),
+        ]);
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(&svc_bin[..]).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        let found = map.iter().any(|(k, _)| {
+            matches!(k, ciborium::value::Value::Text(s) if s == "node_id")
+        });
+        assert!(found, "node_id key missing from SVC-record CBOR");
+    }
 }

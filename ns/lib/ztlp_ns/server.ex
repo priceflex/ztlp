@@ -59,7 +59,7 @@ defmodule ZtlpNs.Server do
   use GenServer
   require Logger
 
-  alias ZtlpNs.{Audit, Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, Store, StructuredLog}
+  alias ZtlpNs.{Audit, Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, RegistrationError, Store, StructuredLog}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -331,7 +331,7 @@ defmodule ZtlpNs.Server do
     if type == :unknown do
       StructuredLog.warn(:registration_rejected,
         name: name, reason: :unknown_type)
-      <<0xFF>>
+      RegistrationError.encode(:unknown_type)
     else
       handle_authenticated_registration(name, type, type_byte, data_bin, data_len, sig, pubkey)
     end
@@ -348,7 +348,7 @@ defmodule ZtlpNs.Server do
     if ZtlpNs.Config.require_registration_auth?() do
       StructuredLog.warn(:registration_rejected,
         name: name, reason: :missing_pubkey)
-      <<0xFF>>
+      RegistrationError.encode(:missing_pubkey)
     else
       # Dev/demo mode: accept unsigned registrations
       type =
@@ -361,7 +361,7 @@ defmodule ZtlpNs.Server do
       if type == :unknown do
         StructuredLog.warn(:registration_rejected,
           name: name, reason: :unknown_type)
-        <<0xFF>>
+        RegistrationError.encode(:unknown_type)
       else
         handle_unsigned_registration(name, type, data_bin)
       end
@@ -522,19 +522,19 @@ defmodule ZtlpNs.Server do
             {:error, reason} ->
               StructuredLog.warn(:registration_rejected,
                 name: name, reason: reason)
-              <<0xFF>>
+              RegistrationError.encode(RegistrationError.from_internal(reason))
           end
 
         {:error, reason} ->
           StructuredLog.warn(:registration_rejected,
             name: name, reason: reason)
-          <<0xFF>>
+          RegistrationError.encode(RegistrationError.from_internal(reason))
       end
     else
       {:error, reason} ->
         StructuredLog.warn(:registration_rejected,
           name: name, reason: reason)
-        <<0xFF>>
+        RegistrationError.encode(RegistrationError.from_internal(reason))
     end
   end
 
@@ -595,19 +595,19 @@ defmodule ZtlpNs.Server do
             {:error, reason} ->
               StructuredLog.warn(:registration_rejected,
                 name: name, reason: reason, mode: :unsigned)
-              <<0xFF>>
+              RegistrationError.encode(RegistrationError.from_internal(reason))
           end
 
         {:error, reason} ->
           StructuredLog.warn(:registration_rejected,
             name: name, reason: reason, mode: :unsigned)
-          <<0xFF>>
+          RegistrationError.encode(RegistrationError.from_internal(reason))
       end
     else
       {:error, reason} ->
         StructuredLog.warn(:registration_rejected,
           name: name, reason: reason, mode: :unsigned)
-        <<0xFF>>
+        RegistrationError.encode(RegistrationError.from_internal(reason))
     end
   end
 

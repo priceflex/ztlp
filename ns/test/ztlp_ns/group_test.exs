@@ -729,8 +729,8 @@ defmodule ZtlpNs.GroupTest do
       {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
       :gen_udp.close(socket)
 
-      # Should be rejected (0xFF = invalid)
-      assert <<0xFF>> = response
+      # Should be rejected — non-zone-authority key fails zone auth → :unauthorized (0x05)
+      assert <<0xFF, 0x05>> = response
       assert :not_found = Store.lookup("hackers@zone.ztlp", :group)
     end
   end

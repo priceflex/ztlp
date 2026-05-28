@@ -270,8 +270,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_ip, _port, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      # Should be rejected (0xFF)
-      assert response == <<0xFF>>
+      # Should be rejected with missing_pubkey (v1 registration in prod mode)
+      assert response == <<0xFF, 0x02>>
     end
 
     test "v2 registration with bad signature is rejected via UDP" do
@@ -300,7 +300,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_ip, _port, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      assert response == <<0xFF>>
+      # Bad Ed25519 signature → :invalid_signature (0x04)
+      assert response == <<0xFF, 0x04>>
     end
 
     test "v2 registration with valid signature for self-registration succeeds" do
@@ -412,8 +413,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_ip, _port, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      # Should be rejected (0xFF) — default requires auth
-      assert response == <<0xFF>>
+      # Should be rejected (0xFF) — default requires auth → :missing_pubkey
+      assert response == <<0xFF, 0x02>>
     end
   end
 
@@ -1146,7 +1147,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_, _, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      assert response == <<0xFF>>
+      # Invalid name format (uppercase) → :invalid_name (0x03)
+      assert response == <<0xFF, 0x03>>
     end
 
     test "unknown record type in query returns 0xFF" do
@@ -1162,6 +1164,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_, _, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
+      # Query path (0x01) keeps the opaque <<0xFF>> response. Granular
+      # error codes apply to registration paths (0x09/0x0A) only.
       assert response == <<0xFF>>
     end
 
@@ -1190,7 +1194,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_, _, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      assert response == <<0xFF>>
+      # Malformed CBOR data → :invalid_data (0x0A)
+      assert response == <<0xFF, 0x0A>>
     end
   end
 end

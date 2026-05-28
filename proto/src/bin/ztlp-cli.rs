@@ -1696,6 +1696,49 @@ fn format_msg_type(mt: MsgType) -> &'static str {
     }
 }
 
+/// Decode a 2-byte NS registration error response `<<0xFF, code>>` into a
+/// human-readable message.
+///
+/// Pre-v0.34 NS servers returned a bare `<<0xFF>>` with no reason — the
+/// single-byte form returns a generic "rejected" message. New servers
+/// encode a granular reason code in the second byte; this maps it to a
+/// description matching `ZtlpNs.RegistrationError` (ns/lib/ztlp_ns/registration_error.ex).
+///
+/// Wire format must stay in sync with the NS module. New codes must be
+/// appended (never renumbered) to preserve compatibility.
+fn decode_registration_error(resp: &[u8]) -> &'static str {
+    // Old servers: bare <<0xFF>>
+    if resp.len() < 2 {
+        return "rejected (server returned no reason code; old server?)";
+    }
+    match resp[1] {
+        0x00 => "rejected (unspecified)",
+        0x01 => "rejected: unknown record type",
+        0x02 => {
+            "rejected: missing pubkey (server requires authenticated registration; \
+                  use a v2 client or set ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false on the server)"
+        }
+        0x03 => "rejected: invalid name (check zone suffix and character set)",
+        0x04 => "rejected: invalid Ed25519 signature (identity key may have changed)",
+        0x05 => {
+            "rejected: unauthorized (your key is not allowed to register this name in this zone)"
+        }
+        0x06 => "rejected: name is owned by a different key (key-overwrite protection)",
+        0x07 => "rejected: your key or NodeID has been revoked",
+        0x08 => "rejected: this name has been revoked and cannot be re-registered",
+        0x09 => "rejected: rate-limited (too many registrations for this name; retry later)",
+        0x0A => "rejected: invalid record data (CBOR decode failed or required field missing)",
+        0x0B => "rejected: storage error on the NS server (retry may succeed)",
+        other => {
+            // Unknown reason code — likely a newer NS server. We still got the
+            // 0xFF first byte so we know it's a rejection. Caller can read the
+            // raw code from resp[1] if they want to log it.
+            let _ = other;
+            "rejected (unknown reason code from newer NS server)"
+        }
+    }
+}
+
 /// Pretty-print a byte array as hex with optional grouping.
 fn hex_grouped(bytes: &[u8], group_size: usize) -> String {
     let hex = hex::encode(bytes);
@@ -5869,7 +5912,11 @@ async fn cmd_ns_register(
                     eprintln!("  {} KEY record registered", c_green("✓"));
                 }
                 Some(0xFF) => {
-                    return Err("NS server rejected KEY registration (invalid data format)".into());
+                    return Err(format!(
+                        "KEY registration failed: {}",
+                        decode_registration_error(resp)
+                    )
+                    .into());
                 }
                 Some(code) => {
                     return Err(
@@ -5921,8 +5968,9 @@ async fn cmd_ns_register(
                     }
                     Some(0xFF) => {
                         eprintln!(
-                            "  {} SVC registration failed (server rejected)",
-                            c_yellow("⚠")
+                            "  {} SVC registration failed: {}",
+                            c_yellow("⚠"),
+                            decode_registration_error(resp)
                         );
                         eprintln!(
                             "    {}",
@@ -12634,5 +12682,59 @@ mod tests {
         use std::net::SocketAddr;
         let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap();
         assert_eq!(pick_quic_dial_target(ns, None), ns);
+    }
+
+    // ── decode_registration_error ──────────────────────────────────
+    // These codes must stay in lockstep with ZtlpNs.RegistrationError
+    // (ns/lib/ztlp_ns/registration_error.ex). New codes must be appended
+    // (never renumbered) to preserve wire compatibility across mixed-
+    // version fleets.
+
+    #[test]
+    fn decode_registration_error_handles_old_server_one_byte_response() {
+        // Pre-v0.34 NS servers return bare <<0xFF>>; we still tell the
+        // user the request was rejected, just without a granular reason.
+        let resp = [0xFFu8];
+        let msg = decode_registration_error(&resp);
+        assert!(msg.contains("rejected"));
+        assert!(msg.contains("old server") || msg.contains("no reason"));
+    }
+
+    #[test]
+    fn decode_registration_error_handles_all_known_codes() {
+        // Every code 0x00..=0x0B must produce a message; none should panic.
+        for code in 0x00u8..=0x0B {
+            let resp = [0xFFu8, code];
+            let msg = decode_registration_error(&resp);
+            assert!(
+                msg.contains("rejected"),
+                "code 0x{:02X} produced unexpected message: {}",
+                code,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn decode_registration_error_named_codes_have_useful_text() {
+        // Spot-check a few: each reason should produce a recognizable hint.
+        assert!(decode_registration_error(&[0xFF, 0x02]).contains("missing pubkey"));
+        assert!(decode_registration_error(&[0xFF, 0x03]).contains("invalid name"));
+        assert!(decode_registration_error(&[0xFF, 0x04]).contains("signature"));
+        assert!(decode_registration_error(&[0xFF, 0x05]).contains("unauthorized"));
+        assert!(decode_registration_error(&[0xFF, 0x06]).contains("owned by a different key"));
+        assert!(decode_registration_error(&[0xFF, 0x07]).contains("revoked"));
+        assert!(decode_registration_error(&[0xFF, 0x09]).contains("rate-limited"));
+        assert!(decode_registration_error(&[0xFF, 0x0A]).contains("invalid record data"));
+    }
+
+    #[test]
+    fn decode_registration_error_unknown_code_is_safe() {
+        // Newer NS servers may return reason codes we don't know yet.
+        // We must not panic and must still indicate rejection.
+        let resp = [0xFFu8, 0xFE];
+        let msg = decode_registration_error(&resp);
+        assert!(msg.contains("rejected"));
+        assert!(msg.contains("unknown") || msg.contains("newer"));
     }
 }

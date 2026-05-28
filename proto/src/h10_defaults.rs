@@ -1,4 +1,4 @@
-//! H10 — Default flip for `--punch` and `--relay-pool`.
+//! H10 — Default flip for `--punch`, `--relay-pool`, and `--multi-candidate`.
 //!
 //! v0.30.12 changes the user-facing CLI so that whenever `--ns-server` is
 //! provided, both NS-coordinated hole punching and multi-relay failover are
@@ -6,10 +6,18 @@
 //! `--no-relay-pool` — let advanced users opt out without giving up the rest
 //! of the NS-coordinated experience.
 //!
-//! This file deliberately contains ONLY a pure, side-effect-free helper plus
-//! its BDD-style test suite. The clap layer (in `proto/src/bin/ztlp-cli.rs`)
-//! parses the four flags and the conflict guards (`conflicts_with`), then
-//! delegates the resolution of the *effective* state to this helper.
+//! v0.32.3 extends the same pattern to `--multi-candidate`: when `--ns-server`
+//! is set, multi-candidate auto-enables so the connect attempt takes the QUIC
+//! routing path (which works end-to-end against v0.32.x relays) instead of the
+//! legacy `--punch` UDP path (which is broken against v0.32.x relays and fails
+//! before sending HELLO with "Invalid argument (os error 22)"). The
+//! `--no-multi-candidate` escape hatch lets advanced users opt out for the
+//! rare case where they explicitly want the legacy path (debugging, etc.).
+//!
+//! This file deliberately contains ONLY pure, side-effect-free helpers plus
+//! their BDD-style test suites. The clap layer (in `proto/src/bin/ztlp-cli.rs`)
+//! parses the flags and the conflict guards (`conflicts_with`), then delegates
+//! the resolution of the *effective* state to these helpers.
 //!
 //! Behaviour matrix:
 //!
@@ -49,6 +57,35 @@ pub fn resolve_punch_and_pool_flags(
         relay_pool || ns_server_set
     };
     (punch_active, relay_pool_active)
+}
+
+/// Resolve the *effective* state of `--multi-candidate` after taking the
+/// v0.32.3 default-flip and the `--no-multi-candidate` escape hatch into
+/// account.
+///
+/// Behaviour:
+///
+/// | --ns-server | --multi-candidate | --no-multi-candidate | multi_candidate_active |
+/// |-------------|-------------------|----------------------|------------------------|
+/// | unset       | false             | false                | false (unchanged)      |
+/// | unset       | true              | false                | true  (explicit)       |
+/// | set         | false             | false                | true  (auto-flip)      |
+/// | set         | true              | false                | true  (explicit)       |
+/// | set         | false             | true                 | false (opt-out)        |
+///
+/// `--no-multi-candidate` is an unconditional veto. clap's `conflicts_with`
+/// is what prevents `--multi-candidate` AND `--no-multi-candidate` from
+/// reaching this helper simultaneously.
+pub fn resolve_multi_candidate_flag(
+    ns_server_set: bool,
+    multi_candidate: bool,
+    no_multi_candidate: bool,
+) -> bool {
+    if no_multi_candidate {
+        false
+    } else {
+        multi_candidate || ns_server_set
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +193,72 @@ mod tests {
         let (punch, pool) = resolve_punch_and_pool_flags(false, false, true, false, false);
         assert!(!punch);
         assert!(!pool);
+    }
+
+    // ── v0.32.3 multi-candidate tests ────────────────────────────────────
+
+    // BDD: GIVEN no --ns-server and no flags
+    //       WHEN  we resolve multi-candidate
+    //       THEN  it stays OFF (no behaviour change for non-NS paths)
+    #[test]
+    fn test_mc_no_ns_no_flags_returns_false() {
+        let mc = resolve_multi_candidate_flag(false, false, false);
+        assert!(!mc, "multi-candidate must stay OFF without --ns-server");
+    }
+
+    // BDD: GIVEN --ns-server set and no multi-candidate flags
+    //       WHEN  we resolve
+    //       THEN  multi-candidate auto-flips to ON (v0.32.3 default flip)
+    //
+    // This is THE regression test for the v0.32.3 fix. v0.32.2 users hitting
+    // a v0.32.x relay via `ztlp connect --ns-server <ns> <name>` got dropped
+    // into the broken legacy --punch path because punch auto-flipped without
+    // multi-candidate also auto-flipping.
+    #[test]
+    fn test_mc_ns_alone_auto_enables() {
+        let mc = resolve_multi_candidate_flag(true, false, false);
+        assert!(mc, "multi-candidate must auto-ON when --ns-server is set");
+    }
+
+    // BDD: GIVEN --ns-server set and --no-multi-candidate
+    //       WHEN  we resolve
+    //       THEN  multi-candidate is OFF (explicit opt-out wins)
+    #[test]
+    fn test_mc_no_mc_overrides_auto_on() {
+        let mc = resolve_multi_candidate_flag(true, false, true);
+        assert!(!mc, "--no-multi-candidate must veto the auto-ON behaviour");
+    }
+
+    // BDD: GIVEN --multi-candidate explicit, no --ns-server
+    //       WHEN  we resolve
+    //       THEN  multi-candidate is ON (explicit opt-in works in non-NS mode)
+    #[test]
+    fn test_mc_explicit_without_ns_works() {
+        let mc = resolve_multi_candidate_flag(false, true, false);
+        assert!(
+            mc,
+            "explicit --multi-candidate must work without --ns-server"
+        );
+    }
+
+    // BDD: GIVEN --ns-server set and --multi-candidate (belt-and-suspenders)
+    //       WHEN  we resolve
+    //       THEN  multi-candidate is ON (no-op for the redundant flag)
+    #[test]
+    fn test_mc_explicit_with_ns_is_idempotent() {
+        let mc = resolve_multi_candidate_flag(true, true, false);
+        assert!(
+            mc,
+            "explicit --multi-candidate with --ns-server stays ON (idempotent)"
+        );
+    }
+
+    // BDD: GIVEN no --ns-server and --no-multi-candidate (degenerate)
+    //       WHEN  we resolve
+    //       THEN  multi-candidate is OFF (already-off, --no-* is no-op)
+    #[test]
+    fn test_mc_no_mc_alone_without_ns_is_noop() {
+        let mc = resolve_multi_candidate_flag(false, false, true);
+        assert!(!mc, "--no-multi-candidate without --ns-server is a no-op");
     }
 }

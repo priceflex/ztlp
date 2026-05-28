@@ -326,7 +326,7 @@ defmodule ZtlpNs.Enrollment do
         "public_key" => pubkey_hex
       },
       created_at: System.system_time(:second),
-      ttl: 3600,
+      ttl: ZtlpNs.RecordDefaults.default_ttl(:key),
       serial: System.system_time(:second),
       signature: nil,
       signer_public_key: nil
@@ -356,7 +356,7 @@ defmodule ZtlpNs.Enrollment do
           "zone" => token.zone
         },
         created_at: System.system_time(:second),
-        ttl: 3600,
+        ttl: ZtlpNs.RecordDefaults.default_ttl(:svc),
         serial: System.system_time(:second),
         signature: nil,
         signer_public_key: nil

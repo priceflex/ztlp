@@ -31,9 +31,12 @@ defmodule ZtlpGateway.BackendPoolTest do
         :ok
     end
 
-    # Capture baseline metrics for relative assertions
-    status = BackendPool.status()
-    {:ok, baseline: status}
+    # Reset pool state to guarantee a clean baseline regardless of test ordering.
+    # Without this, counters (active, idle, pool_hits, etc.) leak across tests
+    # and the "status shows correct metrics" test fails intermittently in CI.
+    BackendPool.reset_for_test()
+
+    :ok
   end
 
   describe "checkout creates new connection when pool empty" do
@@ -288,7 +291,7 @@ defmodule ZtlpGateway.BackendPoolTest do
   end
 
   describe "status reports correct counts" do
-    test "status shows correct metrics", %{baseline: baseline} do
+    test "status shows correct metrics" do
       {lsock, port} = start_listener()
 
       # Checkout creates active connections
@@ -299,25 +302,31 @@ defmodule ZtlpGateway.BackendPoolTest do
       _server2 = accept(lsock)
 
       status = BackendPool.status()
-      assert status.active >= baseline.active + 2
-      assert status.pool_misses >= baseline.pool_misses + 2
+      assert status.active == 2
+      assert status.pool_misses == 2
+      assert status.total_checkouts == 2
 
       # Checkin one — it becomes idle
       BackendPool.checkin(pid1)
       Process.sleep(50)
 
       status = BackendPool.status()
-      assert status.idle >= baseline.idle + 1
-      assert status.total_checkins >= baseline.total_checkins + 1
+      assert status.idle == 1
+      assert status.total_checkins == 1
+      # One active connection remains (pid2)
+      assert status.active == 1
 
       # Checkout again — reuse the idle one (pool hit)
       assert {:ok, _} = BackendPool.checkout(@host, port, self())
       Process.sleep(20)
 
       status = BackendPool.status()
-      assert status.pool_hits >= baseline.pool_hits + 1
-      assert status.total_checkouts >= baseline.total_checkouts + 3
-      assert status.total_checkins >= baseline.total_checkins + 1
+      assert status.pool_hits == 1
+      assert status.total_checkouts == 3
+      assert status.total_checkins == 1
+      # idle drained, two active now
+      assert status.idle == 0
+      assert status.active == 2
 
       :gen_tcp.close(lsock)
     end

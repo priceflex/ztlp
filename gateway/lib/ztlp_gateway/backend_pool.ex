@@ -104,6 +104,18 @@ defmodule ZtlpGateway.BackendPool do
     GenServer.call(__MODULE__, {:idle_count, host, port})
   end
 
+  @doc false
+  # Test-only: synchronously reset all pool state.
+  #
+  # Closes every idle socket, stops every active Conn process, clears the ETS
+  # table, and zeroes all counters. Used in test setup to guarantee a clean
+  # baseline regardless of test ordering. Do NOT call this from production
+  # code — it will drop in-flight client connections.
+  @spec reset_for_test() :: :ok
+  def reset_for_test do
+    GenServer.call(__MODULE__, :reset_for_test)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -165,6 +177,32 @@ defmodule ZtlpGateway.BackendPool do
   def handle_call({:idle_count, host, port}, _from, state) do
     count = length(:ets.lookup(@table, {host, port}))
     {:reply, count, state}
+  end
+
+  def handle_call(:reset_for_test, _from, state) do
+    # Close all idle sockets and clear the ETS table.
+    :ets.tab2list(@table)
+    |> Enum.each(fn {_key, socket, _ts} -> :gen_tcp.close(socket) end)
+
+    :ets.delete_all_objects(@table)
+
+    # Stop every active Conn process and demonitor it.
+    Enum.each(state.active_monitors, fn {ref, {pid, _key}} ->
+      Process.demonitor(ref, [:flush])
+      if Process.alive?(pid) do
+        ZtlpGateway.BackendPool.Conn.stop(pid)
+      end
+    end)
+
+    new_state = %{state |
+      active_monitors: %{},
+      pool_hits: 0,
+      pool_misses: 0,
+      total_checkouts: 0,
+      total_checkins: 0
+    }
+
+    {:reply, :ok, new_state}
   end
 
   def handle_call(:status, _from, state) do

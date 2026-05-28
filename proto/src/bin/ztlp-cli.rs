@@ -285,7 +285,7 @@ enum Commands {
         #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
         relay_probe_interval: Duration,
 
-        /// Enable v0.32 multi-candidate parallel dial (experimental).
+        /// Enable v0.32 multi-candidate parallel dial.
         ///
         /// When combined with `--punch` + `--ns-server`, the client queries
         /// NS for the target's PEER_ENDPOINTS, ranks them via the v0.32
@@ -293,12 +293,25 @@ enum Commands {
         /// parallel. The winning path's address replaces `send_addr` and
         /// the existing handshake continues as normal.
         ///
-        /// Failure falls through to the existing v0.31 send_addr path —
-        /// safe to leave on. Hidden until v0.32.0 ships, at which point
-        /// this flag flips to default-true with `--no-multi-candidate`
-        /// as the escape hatch.
-        #[arg(long, hide = true)]
+        /// Failure falls through unchanged to the existing path — safe to
+        /// leave on.
+        ///
+        /// **v0.32.3 default flip:** when `--ns-server` is set, this flag
+        /// auto-enables (the legacy `--punch` UDP path is broken against
+        /// v0.32.x relays and fails with "Invalid argument (os error 22)").
+        /// Use `--no-multi-candidate` to opt out for debugging.
+        #[arg(long, hide = true, conflicts_with = "no_multi_candidate")]
         multi_candidate: bool,
+
+        /// Opt out of the v0.32.3 multi-candidate auto-flip.
+        ///
+        /// When `--ns-server` is set, `--multi-candidate` auto-enables to
+        /// route the connect through the QUIC path that works against
+        /// v0.32.x relays. This flag is the explicit escape hatch for users
+        /// who specifically want the legacy `--punch` UDP path (typically
+        /// for debugging or against a pre-v0.32 relay).
+        #[arg(long, hide = true, conflicts_with = "multi_candidate")]
+        no_multi_candidate: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -11517,6 +11530,7 @@ async fn main() {
             relay_probe_interval,
             quic,
             multi_candidate,
+            no_multi_candidate,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -11530,6 +11544,20 @@ async fn main() {
                     *no_punch,
                     *relay_pool,
                     *no_relay_pool,
+                );
+            // v0.32.3: when --ns-server is set, --multi-candidate auto-flips
+            // to ON so the connect attempt takes the QUIC routing path that
+            // works against v0.32.x relays. The legacy --punch UDP path is
+            // broken end-to-end against v0.32 relays and fails with
+            // "Invalid argument (os error 22)" before sending HELLO. Use
+            // --no-multi-candidate to opt out for the rare case where the
+            // legacy path is actually wanted (e.g. talking to a pre-v0.32
+            // relay, or debugging).
+            let multi_candidate_active =
+                ztlp_proto::h10_defaults::resolve_multi_candidate_flag(
+                    ns_server.is_some(),
+                    *multi_candidate,
+                    *no_multi_candidate,
                 );
             cmd_connect(
                 *quic,
@@ -11550,7 +11578,7 @@ async fn main() {
                 punch_timeout,
                 relay_pool_active,
                 *relay_probe_interval,
-                *multi_candidate,
+                multi_candidate_active,
             )
             .await
         }

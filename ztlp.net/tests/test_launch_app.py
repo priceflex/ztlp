@@ -171,7 +171,7 @@ class LaunchAppTest(unittest.TestCase):
         # v0.30.5: connect command uses the V2 routing key `gw:<zone>` so the
         # relay routes by zone (collision-safe) instead of by V1 truncated org
         # slug. See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
-        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --service gw:example.ztlp", claim_body)
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --multi-candidate --service gw:example.ztlp", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
@@ -220,7 +220,7 @@ class LaunchAppTest(unittest.TestCase):
         # v0.30.5: connect command uses the V2 routing key `gw:<zone>`
         # so the relay routes by zone (collision-safe). Tenant "Launch Co"
         # has zone "launch.ztlp" so the gateway service is "gw:launch.ztlp".
-        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --service gw:launch.ztlp", launch_body)
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --multi-candidate --service gw:launch.ztlp", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
 

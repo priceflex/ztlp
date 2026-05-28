@@ -1075,8 +1075,19 @@ class LaunchApp:
         zone = row["zone"] or ""
         slug = self._slug_for_row(row)
         gw_service = f"gw:{zone}" if zone else (f"gw-{slug[:11]}" if slug else "gw-bootstrap")
+        # v0.32.3: `--multi-candidate` is required (for now) to force the QUIC
+        # routing path through the relay. Without it, v0.32.x clients drop into
+        # the broken legacy --punch path when --ns-server is set and fail with
+        # "Invalid argument (os error 22)" before sending HELLO. The CLI's own
+        # default-flip is happening in the same release (proto/src/bin/ztlp-cli.rs)
+        # but we still emit the flag explicitly here so the copy-pasted command
+        # works against ANY client built since v0.32.0 — including the ones
+        # already in users' hands on Macs / Windows boxes from the v0.32.2
+        # download. Once v0.32.4+ are uniformly deployed in the wild we can
+        # drop the explicit flag from the rendered command.
         connect_command = (
             f"ztlp connect {service} --ns-server {ns_server} "
+            f"--multi-candidate "
             f"--service {gw_service} -L 18080:127.0.0.1:3000"
         )
         note_html = f"<p class='notice'>{esc(note)}</p>" if note else ""

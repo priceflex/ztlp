@@ -11553,12 +11553,11 @@ async fn main() {
             // --no-multi-candidate to opt out for the rare case where the
             // legacy path is actually wanted (e.g. talking to a pre-v0.32
             // relay, or debugging).
-            let multi_candidate_active =
-                ztlp_proto::h10_defaults::resolve_multi_candidate_flag(
-                    ns_server.is_some(),
-                    *multi_candidate,
-                    *no_multi_candidate,
-                );
+            let multi_candidate_active = ztlp_proto::h10_defaults::resolve_multi_candidate_flag(
+                ns_server.is_some(),
+                *multi_candidate,
+                *no_multi_candidate,
+            );
             cmd_connect(
                 *quic,
                 target,

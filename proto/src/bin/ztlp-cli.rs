@@ -1714,11 +1714,15 @@ fn decode_registration_error(resp: &[u8]) -> &'static str {
     match resp[1] {
         0x00 => "rejected (unspecified)",
         0x01 => "rejected: unknown record type",
-        0x02 => "rejected: missing pubkey (server requires authenticated registration; \
-                  use a v2 client or set ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false on the server)",
+        0x02 => {
+            "rejected: missing pubkey (server requires authenticated registration; \
+                  use a v2 client or set ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false on the server)"
+        }
         0x03 => "rejected: invalid name (check zone suffix and character set)",
         0x04 => "rejected: invalid Ed25519 signature (identity key may have changed)",
-        0x05 => "rejected: unauthorized (your key is not allowed to register this name in this zone)",
+        0x05 => {
+            "rejected: unauthorized (your key is not allowed to register this name in this zone)"
+        }
         0x06 => "rejected: name is owned by a different key (key-overwrite protection)",
         0x07 => "rejected: your key or NodeID has been revoked",
         0x08 => "rejected: this name has been revoked and cannot be re-registered",
@@ -5908,10 +5912,11 @@ async fn cmd_ns_register(
                     eprintln!("  {} KEY record registered", c_green("✓"));
                 }
                 Some(0xFF) => {
-                    return Err(
-                        format!("KEY registration failed: {}", decode_registration_error(resp))
-                            .into(),
-                    );
+                    return Err(format!(
+                        "KEY registration failed: {}",
+                        decode_registration_error(resp)
+                    )
+                    .into());
                 }
                 Some(code) => {
                     return Err(

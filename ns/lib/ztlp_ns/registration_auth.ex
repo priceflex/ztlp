@@ -26,7 +26,15 @@ defmodule ZtlpNs.RegistrationAuth do
   alias ZtlpNs.{Record, Store, Zone}
 
   @rate_limit_table :ztlp_ns_registration_rate_limit
-  @rate_limit_window 3600  # 1 hour in seconds
+  # 60 seconds. v0.33.0 dropped this from 3600s to 60s to break the
+  # interaction with the device-record TTL: when both windows were equal
+  # at 3600s, a Mac coming online ~50min after enrollment would have its
+  # refresh REJECTED as rate-limited *while* its record was about to be
+  # purged, leaving a dead zone where the device was unreachable by name
+  # even though it was online and had a valid identity. 60s preserves the
+  # anti-flood goal (no rapid churn) while letting legitimate half-TTL
+  # refreshes succeed.
+  @rate_limit_window 60
 
   @doc """
   Initialize the rate-limiting ETS table.

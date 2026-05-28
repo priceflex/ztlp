@@ -544,6 +544,31 @@ defmodule ZtlpNs.AdminTest do
       :ets.insert(:ztlp_ns_registration_rate_limit, {"test.ztlp", System.system_time(:second) - 7200})
       assert :ok = RegistrationAuth.check_rate_limit("test.ztlp", pub)
     end
+
+    # v0.33.0 — rate-limit window dropped from 3600s to 60s. Pin the new
+    # constant so an accidental revert (or a "let's make it stricter")
+    # gets flagged in CI before it ships. See record_defaults.ex for the
+    # interaction with device-record TTL.
+    test "v0.33.0: rate limit window is 60s, not 3600s" do
+      {pub, _priv} = Crypto.generate_keypair()
+      now = System.system_time(:second)
+
+      # Insert a timestamp 61 seconds ago (just past the new window).
+      # Under the pre-v0.33.0 3600s window this would still be rejected;
+      # under the v0.33.0 60s window it must succeed.
+      :ets.insert(:ztlp_ns_registration_rate_limit, {"v033.test.ztlp", now - 61})
+      assert :ok = RegistrationAuth.check_rate_limit("v033.test.ztlp", pub)
+    end
+
+    test "v0.33.0: rate limit still blocks rapid back-to-back refreshes" do
+      {pub, _priv} = Crypto.generate_keypair()
+      now = System.system_time(:second)
+
+      # Insert a timestamp 30 seconds ago — well inside the 60s anti-flood
+      # window. This must still be rejected to preserve the anti-flood goal.
+      :ets.insert(:ztlp_ns_registration_rate_limit, {"v033.flood.ztlp", now - 30})
+      assert {:error, :rate_limited} = RegistrationAuth.check_rate_limit("v033.flood.ztlp", pub)
+    end
   end
 
   # ── Registration Auth Revocation Check Tests ───────────────────────

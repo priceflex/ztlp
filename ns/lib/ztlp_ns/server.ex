@@ -741,17 +741,10 @@ defmodule ZtlpNs.Server do
     end
   end
 
-  # Correct default TTLs per record type (ZTLP spec)
-  defp default_ttl(:key), do: 86_400       # 24 hours
-  defp default_ttl(:svc), do: 86_400       # 24 hours
-  defp default_ttl(:relay), do: 3_600      # 1 hour
-  defp default_ttl(:policy), do: 3_600     # 1 hour
-  defp default_ttl(:revoke), do: 0         # Never expires
-  defp default_ttl(:bootstrap), do: 86_400 # 24 hours
-  defp default_ttl(:device), do: 86_400    # 24 hours
-  defp default_ttl(:user), do: 86_400      # 24 hours
-  defp default_ttl(:group), do: 86_400     # 24 hours
-  defp default_ttl(_), do: 3_600           # Default fallback
+  # Default TTL per record type. Delegates to ZtlpNs.RecordDefaults so the
+  # enrollment path (ZtlpNs.Enrollment.register_device/5) cannot drift from
+  # the canonical table — see record_defaults.ex for the v0.33.0 history.
+  defp default_ttl(type), do: ZtlpNs.RecordDefaults.default_ttl(type)
 
   # Persist registration signing key on startup.
   # Loads from file if configured, generates and saves if not found.

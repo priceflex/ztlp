@@ -122,17 +122,46 @@ defmodule ZtlpRelay.UdpListener do
   def handle_info({:udp, socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
 
+    # ZTLP control frames (`0x5A 0x37 0x??`) are addressed TO the relay
+    # itself — GATEWAY_REGISTER heartbeats, CLIENT_ROUTE setup, V2
+    # variants, future control types. They must NEVER be swallowed by
+    # the fast peer-table forward below, even when the sender's 5-tuple
+    # happens to match the gateway side of an established forwarded
+    # session. Without this gate, gateway heartbeats sent from the same
+    # `{ip, port}` the gateway used for an earlier HELLO_ACK get
+    # blind-forwarded to the client and the gateway silently tombstones
+    # out of the relay's registration table after one TTL.
+    #
+    # The QUIC fast-5-tuple bypass branch below already has the same
+    # protection (search `is_ztlp_control_frame`); this is the matching
+    # protection for the post-handshake Noise-transport forwarder.
+    #
+    # Regression test: `heartbeat_after_session_test.exs`.
+    # Discovered 2026-05-28 during the v0.34.0 end-to-end walkthrough
+    # — the bug is latent since v0.29 (commit bf687ec) but only
+    # manifests after a client connects and then the gateway tries to
+    # send its next heartbeat from the same 5-tuple.
+    is_ztlp_control_frame =
+      case data do
+        <<0x5A, 0x37, _type, _rest::binary>> -> true
+        _ -> false
+      end
+
     # First attempt to route known data flows dynamically
     is_data_forwarded =
-      GatewayForwarder.lookup_by_peer(sender)
-      |> case do
-        {:ok, _session_id, other_peer} ->
-          :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
-          ZtlpRelay.Stats.increment(:forwarded)
-          true
+      if is_ztlp_control_frame do
+        false
+      else
+        GatewayForwarder.lookup_by_peer(sender)
+        |> case do
+          {:ok, _session_id, other_peer} ->
+            :gen_udp.send(socket, elem(other_peer, 0), elem(other_peer, 1), data)
+            ZtlpRelay.Stats.increment(:forwarded)
+            true
 
-        :error ->
-          false
+          :error ->
+            false
+        end
       end
 
     # ------------------------------------------------------------------

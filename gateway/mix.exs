@@ -21,7 +21,7 @@ defmodule ZtlpGateway.MixProject do
       # PRs #69/#70/#71). All three v0.32.x releases shipped while mix.exs
       # still read 0.31.0; this PR closes that drift. Floor ratcheted to
       # 0.32.2 in release_test.exs.
-      version: "0.34.0",
+      version: "0.34.1",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

@@ -159,7 +159,9 @@ defmodule ZtlpGateway.ServiceRegistrar do
               case bootstrap_zone_delegation(socket, state) do
                 :ok ->
                   Logger.info("[ServiceRegistrar] Zone delegation key re-bootstrapped for #{state.zone}")
-                  Map.put(state, :zone_bootstrapped, true)
+                  state
+                  |> Map.put(:zone_bootstrapped, true)
+                  |> Map.put(:zone_just_recovered, true)
                 {:error, reason} ->
                   Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(reason)}")
                   state
@@ -172,7 +174,9 @@ defmodule ZtlpGateway.ServiceRegistrar do
                 case bootstrap_zone_delegation(socket, state) do
                   :ok ->
                     Logger.info("[ServiceRegistrar] Zone delegation key bootstrapped for #{state.zone}")
-                    Map.put(state, :zone_bootstrapped, true)
+                    state
+                    |> Map.put(:zone_bootstrapped, true)
+                    |> Map.put(:zone_just_recovered, true)
                   {:error, boot_reason} ->
                     Logger.warning("[ServiceRegistrar] Zone delegation bootstrap failed: #{inspect(boot_reason)}")
                     state
@@ -218,8 +222,14 @@ defmodule ZtlpGateway.ServiceRegistrar do
             }
           end
 
-        # Schedule next registration
+        # Schedule next registration.
+        # next_interval reads the :zone_just_recovered flag for fast-retry,
+        # then we clear it on the state we keep so the NEXT cycle plans
+        # against the normal (capped) interval rather than another 60s
+        # retry. Without this clear, a one-shot recovery turns into an
+        # infinite 60s loop.
         interval = next_interval(state)
+        state = Map.delete(state, :zone_just_recovered)
         Process.send_after(self(), :register, interval)
 
         {:noreply, state}
@@ -228,6 +238,7 @@ defmodule ZtlpGateway.ServiceRegistrar do
         Logger.warning("[ServiceRegistrar] Failed to open UDP socket: #{inspect(reason)}")
         state = %{state | consecutive_failures: state.consecutive_failures + 1, last_error: {:socket, reason}}
         interval = next_interval(state)
+        state = Map.delete(state, :zone_just_recovered)
         Process.send_after(self(), :register, interval)
         {:noreply, state}
     end
@@ -575,12 +586,45 @@ defmodule ZtlpGateway.ServiceRegistrar do
 
   # ── Private: Scheduling ─────────────────────────────────────
 
-  defp next_interval(%{consecutive_failures: 0, ttl: ttl}) do
-    # Normal: re-register at TTL/2
-    div(ttl * 1000, 2)
+  @doc false
+  # Public for testing only — see service_registrar_test.exs "next_interval/1"
+  # describe blocks.
+  #
+  # Refresh schedule rules, in priority order:
+  #
+  #   1. Zone-key recovery fast-path. When the registrar detects that the
+  #      zone KEY record was missing and just got re-bootstrapped, the
+  #      `zone_just_recovered: true` flag is set on the state. SVC records
+  #      under that zone were almost certainly orphaned during the gap;
+  #      re-register them within @recovery_retry to restore the chain.
+  #
+  #   2. Failure backoff. On consecutive failures, exponential backoff up
+  #      to @max_backoff. This path is reached even when ttl is huge —
+  #      backoff doesn't care about the TTL.
+  #
+  #   3. Normal refresh. min(TTL/2, @max_refresh_interval). The cap is
+  #      what protects us from the 12-hour-blind-window bug — production
+  #      SVC TTL is 24h, and without the cap one missed cycle means a
+  #      24h outage for every enrollment that depends on the SVC record.
+  #
+  # Anti-pitfall: callers must NOT remove the @max_refresh_interval cap to
+  # "match the TTL exactly". Records expire on the NS side at exactly TTL,
+  # but real-world clock drift, NS restarts, gateway restarts, and network
+  # partitions mean you want multiple refresh attempts per TTL window —
+  # not one cycle that's always a single failure away from a 24h outage.
+  @max_refresh_interval 30 * 60 * 1000  # 30 minutes
+  @recovery_retry 60_000                # 60 seconds after zone-key recovery
+
+  def next_interval(%{zone_just_recovered: true}) do
+    @recovery_retry
   end
 
-  defp next_interval(%{consecutive_failures: n}) do
+  def next_interval(%{consecutive_failures: 0, ttl: ttl}) do
+    # Normal: re-register at TTL/2, capped at @max_refresh_interval.
+    min(div(ttl * 1000, 2), @max_refresh_interval)
+  end
+
+  def next_interval(%{consecutive_failures: n}) do
     # Exponential backoff on failure, capped at max_backoff
     backoff = @initial_backoff * :math.pow(2, min(n - 1, 4)) |> trunc()
     min(backoff, @max_backoff)

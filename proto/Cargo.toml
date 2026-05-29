@@ -16,7 +16,7 @@ name = "ztlp-proto"
 # IPv6 fix PR #71). All three v0.32.x releases shipped while this manifest
 # still read 0.31.0; this PR closes that drift so a v0.32.2-tagged binary
 # actually reports 0.32.2 via env!("CARGO_PKG_VERSION").
-version = "0.34.1"
+version = "0.34.2"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

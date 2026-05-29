@@ -84,6 +84,28 @@ module Ztlp
       Result.new(status: :error, message: "#{e.class}: #{e.message}")
     end
 
+    # Seed shared machines for a specific Network, bypassing the ZONE-env
+    # lookup. This is what Network#after_create_commit calls so that newly
+    # created tenant Networks (e.g. customer sub-zones added post-boot via
+    # the dashboard) get their NS+Relay rows automatically without needing
+    # another entrypoint pass.
+    #
+    # The env hash is still consulted for the IP addresses (so the same
+    # ZTLP_SHARED_NS_ADDR / ZTLP_NS_SERVER vars Launch already injects
+    # apply); only the Network lookup is short-circuited.
+    #
+    # Returns the same Result shape as `.call`.
+    def self.call_for_network(network:, env: ENV.to_h)
+      new(env).call_for_network(network)
+    end
+
+    def self.call_for_network_safely(network:, env: ENV.to_h)
+      call_for_network(network: network, env: env)
+    rescue => e
+      Rails.logger.error("[EnsureSharedMachines] unexpected error for network=#{network&.id}: #{e.class}: #{e.message}")
+      Result.new(status: :error, message: "#{e.class}: #{e.message}")
+    end
+
     def initialize(env)
       @env = env || {}
     end
@@ -94,6 +116,14 @@ module Ztlp
 
       network = Network.find_by(zone: zone)
       return Result.new(status: :skipped, message: "no Network for zone=#{zone} yet (did EnsureNetworkFromEnv run?)") unless network
+
+      call_for_network(network)
+    end
+
+    # Per-network entry point. Public so the Network model callback can
+    # call it directly via the class-level helper above.
+    def call_for_network(network)
+      return Result.new(status: :skipped, message: "network is nil") unless network
 
       ns_ip    = ip_from_addr(@env["ZTLP_SHARED_NS_ADDR"].presence || @env["ZTLP_NS_SERVER"].presence || DEFAULT_NS_ADDR)
       relay_ip = ip_from_addr(@env["ZTLP_SHARED_RELAY_ADDR"].presence || @env["ZTLP_BOOTSTRAP_LISTENER_ADDR"].presence || DEFAULT_RELAY_ADDR)

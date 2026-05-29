@@ -151,4 +151,41 @@ class Ztlp::EnsureSharedMachinesTest < ActiveSupport::TestCase
     assert_equal :error, result.status
     assert_match(/synthetic/, result.message)
   end
+
+  # ── call_for_network (per-network entrypoint for the Network callback) ──
+
+  test "call_for_network seeds the given network without consulting ZONE env" do
+    # No ZONE env var — this previously short-circuited .call, but
+    # call_for_network should ignore that and seed the network it was passed.
+    assert_difference -> { Machine.count }, 2 do
+      result = Ztlp::EnsureSharedMachines.call_for_network(network: @network, env: {})
+      assert_equal :created, result.status
+    end
+  end
+
+  test "call_for_network returns :skipped when network is nil" do
+    assert_no_difference -> { Machine.count } do
+      result = Ztlp::EnsureSharedMachines.call_for_network(network: nil)
+      assert_equal :skipped, result.status
+      assert_match(/network is nil/i, result.message)
+    end
+  end
+
+  test "call_for_network is idempotent on the same network" do
+    Ztlp::EnsureSharedMachines.call_for_network(network: @network, env: {})
+    assert_no_difference -> { Machine.count } do
+      result = Ztlp::EnsureSharedMachines.call_for_network(network: @network, env: {})
+      assert_equal :existing, result.status
+    end
+  end
+
+  test "call_for_network_safely swallows unexpected exceptions" do
+    # Force the inner call_for_network to raise (something downstream of
+    # the nil-guard) — wrapper must convert to :error, not propagate.
+    Ztlp::EnsureSharedMachines.any_instance.stubs(:call_for_network)
+                              .raises(StandardError.new("synthetic"))
+    result = Ztlp::EnsureSharedMachines.call_for_network_safely(network: @network)
+    assert_equal :error, result.status
+    assert_match(/synthetic/, result.message)
+  end
 end

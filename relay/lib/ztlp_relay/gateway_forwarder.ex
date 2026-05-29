@@ -574,7 +574,7 @@ defmodule ZtlpRelay.GatewayForwarder do
 
   def handle_call(:clear_all, _from, state) do
     :ets.delete_all_objects(@peer_table)
-    {:reply, :ok, %{state | sessions: %{}, dynamic_gateways: %{}}}
+    {:reply, :ok, %{state | sessions: %{}, dynamic_gateways: []}}
   end
 
   @impl true

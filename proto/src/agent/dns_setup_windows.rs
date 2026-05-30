@@ -201,7 +201,7 @@ pub fn normalize_namespace(zone: &str) -> String {
 /// Returns the list of namespaces actually installed (after normalization +
 /// dedup). The operation is idempotent — calling `setup_zones` twice with
 /// the same args results in the same final state.
-pub fn setup_zones<A: NrptApi>(
+pub fn setup_zones<A: NrptApi + ?Sized>(
     api: &A,
     namespaces: &[String],
     agent_resolver: &str,
@@ -229,7 +229,7 @@ pub fn setup_zones<A: NrptApi>(
 /// untouched.
 ///
 /// Returns the list of namespaces actually removed.
-pub fn teardown_managed<A: NrptApi>(api: &A) -> Result<Vec<String>, NrptError> {
+pub fn teardown_managed<A: NrptApi + ?Sized>(api: &A) -> Result<Vec<String>, NrptError> {
     let all = api.list_rules()?;
     let mut removed = Vec::new();
     for rule in all {

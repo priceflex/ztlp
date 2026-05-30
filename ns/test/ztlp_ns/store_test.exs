@@ -225,4 +225,56 @@ defmodule ZtlpNs.StoreTest do
       assert timeout > 0, "timeout must be positive"
     end
   end
+
+  # ──────────────────────────────────────────────────────────────────
+  # Case-insensitive storage / lookup (v0.34.3 — DNS-aligned semantics)
+  #
+  # ZTLP names are case-insensitive. Mnesia keys MUST be the canonical
+  # lowercase form so that records inserted as "Foo.ztlp" can be looked
+  # up as "foo.ztlp" or "FOO.ztlp" and vice versa.
+  #
+  # The signed record's .name field is preserved as the caller supplied
+  # it — the signature was computed over those bytes, so storing the
+  # signed payload unchanged keeps Record.verify happy. Only the Mnesia
+  # KEY is canonicalized.
+  # ──────────────────────────────────────────────────────────────────
+
+  describe "case-insensitive Mnesia key canonicalization (v0.34.3)" do
+    test "insert with mixed-case name → lookup by lowercase finds it" do
+      rec = make_signed_key("TRSDC.tech-rockstars.trs.ztlp")
+      assert :ok = Store.insert(rec)
+      # Lookup by canonical lowercase should find the record.
+      assert {:ok, found} = Store.lookup("trsdc.tech-rockstars.trs.ztlp", :key)
+      # The record's .name preserves the original case (it's signed).
+      assert found.name == "TRSDC.tech-rockstars.trs.ztlp"
+    end
+
+    test "insert with lowercase name → lookup by uppercase finds it" do
+      rec = make_signed_key("acme.ztlp")
+      assert :ok = Store.insert(rec)
+      assert {:ok, found} = Store.lookup("ACME.ZTLP", :key)
+      assert found.name == "acme.ztlp"
+    end
+
+    test "insert with mixed-case → lookup with arbitrary-case both succeed" do
+      rec = make_signed_key("Mixed.Case.ZTLP")
+      assert :ok = Store.insert(rec)
+      assert {:ok, _} = Store.lookup("Mixed.Case.ZTLP", :key)
+      assert {:ok, _} = Store.lookup("mixed.case.ztlp", :key)
+      assert {:ok, _} = Store.lookup("MIXED.CASE.ZTLP", :key)
+    end
+
+    test "two records differing only in case collide (same canonical key)" do
+      # Pre-v0.34.3 these would be two separate Mnesia entries.
+      # v0.34.3+: the second insert is a serial-bump update of the first
+      # (or :stale_serial if older). They share one canonical Mnesia key.
+      rec1 = make_signed_key("ACME.ztlp", serial: 1)
+      rec2 = make_signed_key("acme.ztlp", serial: 2)
+      assert :ok = Store.insert(rec1)
+      assert :ok = Store.insert(rec2)
+      # Only ONE record at the canonical key (newer serial wins).
+      assert {:ok, found} = Store.lookup("acme.ztlp", :key)
+      assert found.serial == 2
+    end
+  end
 end

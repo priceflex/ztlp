@@ -30,6 +30,11 @@ defmodule ZtlpNs.NameValidator do
   Returns `:ok` if the name is valid, or `{:error, reason}` with a
   descriptive reason atom.
 
+  ZTLP names are **case-insensitive** (DNS-aligned). Mixed-case input
+  is accepted and considered valid; callers that need the canonical
+  storage / lookup form should call `canonicalize/1` to lowercase the
+  name before keying into the Store.
+
   ## Examples
 
       iex> ZtlpNs.NameValidator.validate("node1.acme.ztlp")
@@ -38,8 +43,8 @@ defmodule ZtlpNs.NameValidator do
       iex> ZtlpNs.NameValidator.validate("")
       {:error, :empty_name}
 
-      iex> ZtlpNs.NameValidator.validate("UPPER.ztlp")
-      {:error, :invalid_characters}
+      iex> ZtlpNs.NameValidator.validate("Node1.Acme.Ztlp")
+      :ok
   """
   @spec validate(String.t()) :: :ok | {:error, atom()}
   def validate(name) when is_binary(name) do
@@ -55,11 +60,36 @@ defmodule ZtlpNs.NameValidator do
         {:error, :invalid_characters}
 
       true ->
-        validate_labels(name)
+        validate_labels(canonicalize(name))
     end
   end
 
   def validate(_), do: {:error, :invalid_name_type}
+
+  @doc """
+  Return the canonical (storage / lookup) form of a name.
+
+  ZTLP names are case-insensitive per DNS conventions. The canonical
+  form is the ASCII-lowercased string. Callers MUST use this form as
+  the Mnesia key when inserting or looking up records so that
+  `Foo.ztlp` and `foo.ztlp` resolve to the same record.
+
+  This is intentionally a no-op for already-lowercase input so that
+  the v0.34.0..v0.34.2 on-disk schema (which is uniformly lowercase
+  except for one stale TRSDC ghost) is binary-compatible.
+
+  ## Examples
+
+      iex> ZtlpNs.NameValidator.canonicalize("TRSDC.trs.ztlp")
+      "trsdc.trs.ztlp"
+
+      iex> ZtlpNs.NameValidator.canonicalize("acme.ztlp")
+      "acme.ztlp"
+  """
+  @spec canonicalize(String.t()) :: String.t()
+  def canonicalize(name) when is_binary(name) do
+    String.downcase(name, :ascii)
+  end
 
   @doc """
   Validate a name and check it ends with the expected zone suffix.
@@ -80,7 +110,11 @@ defmodule ZtlpNs.NameValidator do
   def validate_with_suffix(name, suffix) when is_binary(name) and is_binary(suffix) do
     case validate(name) do
       :ok ->
-        if name == suffix or String.ends_with?(name, "." <> suffix) do
+        # Case-insensitive suffix match — both sides canonicalized.
+        canon_name = canonicalize(name)
+        canon_suffix = canonicalize(suffix)
+
+        if canon_name == canon_suffix or String.ends_with?(canon_name, "." <> canon_suffix) do
           :ok
         else
           {:error, :invalid_zone_suffix}

@@ -592,8 +592,15 @@ defmodule ZtlpNs.SecurityHardeningTest do
       assert {:error, :name_too_long} = NameValidator.validate(long_name)
     end
 
-    test "uppercase characters" do
-      assert {:error, :invalid_characters} = NameValidator.validate("NODE.ztlp")
+    test "uppercase characters are accepted (DNS-aligned case-insensitive)" do
+      # Pre-v0.34.3: uppercase was rejected as :invalid_characters.
+      # v0.34.3+: ZTLP names are case-insensitive per DNS conventions; the
+      # validator accepts mixed-case input and callers are expected to
+      # canonicalize via NameValidator.canonicalize/1 before keying storage.
+      # See ns/lib/ztlp_ns/name_validator.ex for the rationale.
+      assert :ok = NameValidator.validate("NODE.ztlp")
+      assert :ok = NameValidator.validate("Mixed.Case.ztlp")
+      assert :ok = NameValidator.validate("TRSDC.tech-rockstars.trs.ztlp")
     end
 
     test "special characters" do
@@ -1120,12 +1127,16 @@ defmodule ZtlpNs.SecurityHardeningTest do
   # ═══════════════════════════════════════════════════════════════════
 
   describe "edge cases" do
-    test "registration with invalid name format is rejected" do
+    test "registration with mixed-case name is accepted and canonicalized" do
+      # Pre-v0.34.3: uppercase in the name rejected with 0xFF 0x03 (:invalid_name).
+      # v0.34.3+: uppercase is accepted, record is stored under the canonical
+      # (lowercase) key. Callers using mixed case can still lookup with any
+      # casing once Store-side canonicalization lands.
       server_port = Server.port()
       {:ok, client} = :gen_udp.open(0, [:binary, {:active, false}])
 
       {pub, priv} = Crypto.generate_keypair()
-      # Name with uppercase (invalid)
+      # Name with uppercase — previously rejected, now accepted.
       name = "BAD-NAME.ztlp"
       name_len = byte_size(name)
       type_byte = 1
@@ -1147,8 +1158,8 @@ defmodule ZtlpNs.SecurityHardeningTest do
       {:ok, {_, _, response}} = :gen_udp.recv(client, 0, 5000)
       :gen_udp.close(client)
 
-      # Invalid name format (uppercase) → :invalid_name (0x03)
-      assert response == <<0xFF, 0x03>>
+      # v0.34.3+: mixed-case is accepted → 0x06 ACK
+      assert response == <<0x06>>
     end
 
     test "unknown record type in query returns 0xFF" do

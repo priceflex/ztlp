@@ -29,7 +29,7 @@ defmodule ZtlpNs.Store do
 
   use GenServer
 
-  alias ZtlpNs.Record
+  alias ZtlpNs.{NameValidator, Record}
 
   @records_table :ztlp_ns_records
   @revoked_table :ztlp_ns_revoked
@@ -127,8 +127,15 @@ defmodule ZtlpNs.Store do
   # Separated from insert/1 to avoid deep nesting.
   # Checks serial monotonicity and capacity before inserting.
   defp do_insert(%Record{} = record) do
+    # Mnesia key is the canonical (lowercase) form of the name. The record's
+    # .name field is preserved as-is — the signature was computed over those
+    # bytes, so the stored payload must match for Record.verify to keep
+    # passing. ZTLP names are DNS-style case-insensitive (v0.34.3+).
+    canonical_name = NameValidator.canonicalize(record.name)
+    key = {canonical_name, record.type}
+
     # Invariant 3: Serial numbers must be monotonic
-    case :mnesia.dirty_read(@records_table, {record.name, record.type}) do
+    case :mnesia.dirty_read(@records_table, key) do
       [{@records_table, _key, existing}] when existing.serial >= record.serial ->
         {:error, :stale_serial}
 
@@ -138,7 +145,7 @@ defmodule ZtlpNs.Store do
           {:error, :store_full}
         else
           # Insert the record
-          :mnesia.dirty_write({@records_table, {record.name, record.type}, record})
+          :mnesia.dirty_write({@records_table, key, record})
 
           # If this is a revocation record, update the revocation set
           if record.type == :revoke do
@@ -158,20 +165,26 @@ defmodule ZtlpNs.Store do
   The revocation check happens FIRST — if the requested name matches
   a revoked node ID, the lookup is blocked even if the record exists.
   Expired records (TTL exceeded) are treated as not found.
+
+  Names are matched case-insensitively (v0.34.3+ DNS-aligned semantics):
+  `Foo.ztlp`, `foo.ztlp`, and `FOO.ZTLP` all resolve to the same record.
   """
   @spec lookup(String.t(), Record.record_type()) ::
           {:ok, Record.t()} | :not_found | {:error, :revoked}
   def lookup(name, type) when is_binary(name) and is_atom(type) do
+    canonical_name = NameValidator.canonicalize(name)
+    key = {canonical_name, type}
+
     # Invariant 2: Revocation takes priority
-    if revoked?(name) do
+    if revoked?(canonical_name) do
       {:error, :revoked}
     else
-      case :mnesia.dirty_read(@records_table, {name, type}) do
+      case :mnesia.dirty_read(@records_table, key) do
         [{@records_table, _key, record}] ->
           # Invariant 4: Check TTL expiration
           if Record.expired?(record) do
             # Clean up expired record
-            :mnesia.dirty_delete(@records_table, {name, type})
+            :mnesia.dirty_delete(@records_table, key)
             :not_found
           else
             {:ok, record}
@@ -188,10 +201,14 @@ defmodule ZtlpNs.Store do
 
   Checks the revocation table for any ZTLP_REVOKE record that includes
   this ID in its `revoked_ids` list.
+
+  Revocation lookup is case-insensitive (v0.34.3+).
   """
   @spec revoked?(String.t()) :: boolean()
   def revoked?(name_or_id) when is_binary(name_or_id) do
-    case :mnesia.dirty_read(@revoked_table, name_or_id) do
+    canonical = NameValidator.canonicalize(name_or_id)
+
+    case :mnesia.dirty_read(@revoked_table, canonical) do
       [{@revoked_table, _id, _record}] -> true
       [] -> false
     end

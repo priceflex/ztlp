@@ -11405,6 +11405,104 @@ async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+// ─── Windows DNS path (D4.T3) ──────────────────────────────────────────────
+//
+// Windows uses NRPT (Name Resolution Policy Table) instead of resolv.conf or
+// /etc/resolver. The trait + helpers live in [`dns_setup_windows`]; these
+// CLI wrappers preserve the same UX as the Unix path so users running
+// `ztlp agent dns-setup` see the same kind of output regardless of OS.
+
+#[cfg(windows)]
+async fn cmd_agent_dns_setup_windows(
+    zones: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::config::AgentConfig;
+    use ztlp_proto::agent::dns_setup_windows;
+
+    let config = AgentConfig::load();
+
+    // Same merge order as the Unix path: zones from config, then domain_map
+    // keys, then any CLI-passed comma-separated additions. Dedup happens
+    // inside setup_zones via the seen-HashSet.
+    let mut zone_list: Vec<String> = config.dns.zones.clone();
+    for domain in config.dns.domain_map.keys() {
+        if !zone_list.contains(domain) {
+            zone_list.push(domain.clone());
+        }
+    }
+    if let Some(extra) = zones {
+        for z in extra.split(',') {
+            let z = z.trim().to_string();
+            if !z.is_empty() && !zone_list.contains(&z) {
+                zone_list.push(z);
+            }
+        }
+    }
+
+    let api = dns_setup_windows::default_nrpt_api();
+    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &config.dns.listen) {
+        Ok(installed) => {
+            eprintln!(
+                "{} NRPT rules installed ({} namespace{})",
+                c_green("✓"),
+                installed.len(),
+                if installed.len() == 1 { "" } else { "s" }
+            );
+            for ns in &installed {
+                eprintln!("  {} → {}", ns, config.dns.listen);
+            }
+            eprintln!();
+            eprintln!(
+                "{}",
+                c_dim(
+                    "Verify with: Get-DnsClientNrptRule | Where-Object Comment -Match 'ZTLP-managed'"
+                )
+            );
+        }
+        Err(e) => {
+            eprintln!("{} NRPT setup failed: {}", c_red("✗"), e);
+            eprintln!();
+            eprintln!(
+                "{}",
+                c_dim(
+                    "Hint: NRPT modification requires elevation. Run as Administrator or via the ZTLP service."
+                )
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn cmd_agent_dns_teardown_windows() -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::dns_setup_windows;
+
+    let api = dns_setup_windows::default_nrpt_api();
+    match dns_setup_windows::teardown_managed(api.as_ref()) {
+        Ok(removed) => {
+            if removed.is_empty() {
+                eprintln!("{}", c_dim("No ZTLP-managed NRPT rules found"));
+            } else {
+                eprintln!(
+                    "{} Removed {} NRPT rule{}",
+                    c_green("✓"),
+                    removed.len(),
+                    if removed.len() == 1 { "" } else { "s" }
+                );
+                for ns in &removed {
+                    eprintln!("  {}", ns);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{} NRPT teardown failed: {}", c_red("✗"), e);
+        }
+    }
+
+    Ok(())
+}
+
 /// `ztlp agent pull-certs` — Pull TLS certs for service hostnames.
 ///
 /// Scans the CA cert directory for issued certs, and copies them to the
@@ -11916,11 +12014,33 @@ async fn main() {
                 cmd_agent_pull_certs(ca_dir, output).await
             }
             #[cfg(not(unix))]
-            AgentCommands::DnsSetup { .. }
-            | AgentCommands::DnsTeardown
-            | AgentCommands::Install { .. } => {
-                Err("dns-setup, dns-teardown, and install are only supported on Unix".into())
+            AgentCommands::DnsSetup { zones } => {
+                #[cfg(windows)]
+                {
+                    cmd_agent_dns_setup_windows(zones).await
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = zones;
+                    Err("dns-setup is not supported on this platform".into())
+                }
             }
+            #[cfg(not(unix))]
+            AgentCommands::DnsTeardown => {
+                #[cfg(windows)]
+                {
+                    cmd_agent_dns_teardown_windows().await
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("dns-teardown is not supported on this platform".into())
+                }
+            }
+            #[cfg(not(unix))]
+            AgentCommands::Install { .. } => Err(
+                "install is only supported on Unix; use the ZTLP Windows service installer instead"
+                    .into(),
+            ),
         },
     };
 

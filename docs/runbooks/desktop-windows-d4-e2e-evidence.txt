@@ -1,0 +1,583 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260530131336
+Username: DESKTOP-LRC8DKH\TRS
+RunAs User: DESKTOP-LRC8DKH\TRS
+Configuration Name: 
+Machine: DESKTOP-LRC8DKH (Microsoft Windows NT 10.0.19045.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Users\trs\ztlp-d4-e2e.ps1 -Token ztlp://enroll/?zone=trs.ztlp&ns=16.147.41.195:23096&relay=34.218.240.106:23095&token=12ffd31eae8ceec4&expires=1780175599&callback=https%3A%2F%2Fwww.ztlp.net%2Fapi%2Fenrollment%2Fconfirm
+Process ID: 3824
+PSVersion: 5.1.19041.6456
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.6456
+BuildVersion: 10.0.19041.6456
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+
+================================================================
+  0. Environment
+================================================================
+2026-05-30 13:13:36-07:00
+IsAdmin: True
+Host:    DESKTOP-LRC8DKH
+User:    trs
+PSVer:   5.1.19041.6456
+
+
+
+================================================================
+  1. Pre-flight - existing ZTLP NRPT rules (should be none)
+================================================================
+[OK] Clean - no ZTLP NRPT rules present
+
+================================================================
+  2. Enroll with token (ztlp setup --token ...)
+================================================================
+ztlp.exe :
+At C:\Users\trs\ztlp-d4-e2e.ps1:52 char:17
++ ... ollResult = & $ztlpExe setup --token $Token --name "lrc8dkh-d4smoke3" ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+  [1mΓòöΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòù[0m
+  [1mΓòæ[0m       ZTLP Setup Wizard v0.5.2      [1mΓòæ[0m
+  [1mΓòÜΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓò¥[0m
+
+  [32mΓ£ô[0m Token valid
+    [36mZone:[0m trs.ztlp
+    [36mNS server:[0m 16.147.41.195:23096
+    [36mRelay:[0m 34.218.240.106:23095
+    [36mExpires in:[0m 59m
+    [36mMax uses:[0m 1
+
+  [36mΓåÆ[0m Enrolling as [1mlrc8dkh-d4smoke3.trs.ztlp[0m
+  [33mΓÜá[0m Overwriting existing identity
+
+  [2mΓåÆ[0m Generating identity...
+  [32mΓ£ô[0m Identity saved to C:\Users\TRS\.ztlp\identity.json
+    [36mNodeID:[0m 77a72b6d4a876bf7b7a9446c950ef241
+
+  [2mΓåÆ[0m Registering with namespace server...
+  [32mΓ£ô[0m Enrolled as [1mlrc8dkh-d4smoke3.trs.ztlp[0m
+  [32mΓ£ô[0m Config written to C:\Users\TRS\.ztlp\config.toml
+  [33m![0m Bootstrap callback failed to connect to https://www.ztlp.net/api/enrollment/confirm (curl exit
+60):
+
+  [2mΓåÆ[0m Testing connectivity...
+  [32mΓ£ô[0m Relay 34.218.240.106:23095: reachable (no reply expected)
+
+  [1mΓöÇΓöÇ You're in! ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ[0m
+
+  Connect to a peer:  [36mztlp[0m connect peer.trs.ztlp
+  Check status:       [36mztlp[0m status
+  View your identity: [36mztlp[0m status --identity
+  Config file:        C:\Users\TRS\.ztlp\config.toml
+
+  [1mΓöÇΓöÇ Enable passwordless sign-in (optional) ΓöÇΓöÇΓöÇΓöÇΓöÇ[0m
+
+  Paste this [36mpublic key[0m on your zone's claim page to enable
+  passwordless Bootstrap sign-in from this device:
+
+      [1m3ef4565072843d291cf910cc03933a067f827e98aea4af36a46e0e61034a8f48[0m
+
+  [2mΓä╣[0m Only the public half is shown. The private key stays
+  [2m [0m  in C:\Users\TRS\.ztlp\identity.json on this machine (chmod 600).
+
+
+EXIT_CODE: 0
+[OK] identity.json written
+
+================================================================
+  3. D4 - agent dns-setup (auto-detect zone from identity)
+================================================================
+ztlp.exe : [32mΓ£ô[0m NRPT rules installed (1 namespace)
+At C:\Users\trs\ztlp-d4-e2e.ps1:72 char:14
++ $dnsResult = & $ztlpExe agent dns-setup --zones trs.ztlp 2>&1
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([32mΓ£ô[0m NR...d (1 namespace):String) [], RemoteE
+xception
+    + FullyQualifiedErrorId : NativeCommandError
+
+  .trs.ztlp ΓåÆ 127.0.0.53:5353
+
+[2mVerify with: Get-DnsClientNrptRule | Where-Object Comment -Match 'ZTLP-managed'[0m
+
+EXIT_CODE: 0
+
+================================================================
+  4. Verify NRPT rule shape (Get-DnsClientNrptRule)
+================================================================
+
+Name                                   Namespace   NameServers Comment
+----                                   ---------   ----------- -------
+{25289340-C95F-4392-8CD2-1C08A0D24382} {.trs.ztlp}             ZTLP-managed
+
+
+
+Full record (JSON):
+{
+    "CimClass":  {
+                     "CimSuperClassName":  null,
+                     "CimSuperClass":  null,
+                     "CimClassProperties":  [
+                                                {
+                                                    "Name":  "Comment",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessDnsServers",
+                                                    "Value":  null,
+                                                    "CimType":  30,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessEnabled",
+                                                    "Value":  null,
+                                                    "CimType":  1,
+                                                    "Flags":  "Property, ReadOnly, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessProxyName",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessProxyType",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "ValueMap = ...",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessQueryIPsecEncryption",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "ValueMap = ...",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DirectAccessQueryIPsecRequired",
+                                                    "Value":  null,
+                                                    "CimType":  1,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DisplayName",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DnsSecEnabled",
+                                                    "Value":  null,
+                                                    "CimType":  1,
+                                                    "Flags":  "Property, ReadOnly, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DnsSecQueryIPsecEncryption",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "ValueMap = ...",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DnsSecQueryIPsecRequired",
+                                                    "Value":  null,
+                                                    "CimType":  1,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "DnsSecValidationRequired",
+                                                    "Value":  null,
+                                                    "CimType":  1,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "IPsecCARestriction",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "Name",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "NameEncoding",
+                                                    "Value":  null,
+                                                    "CimType":  14,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "ValueMap = ...",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "NameServers",
+                                                    "Value":  null,
+                                                    "CimType":  30,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "Namespace",
+                                                    "Value":  null,
+                                                    "CimType":  30,
+                                                    "Flags":  "Property, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True",
+                                                                       "write = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                },
+                                                {
+                                                    "Name":  "Version",
+                                                    "Value":  null,
+                                                    "CimType":  6,
+                                                    "Flags":  "Property, ReadOnly, NullValue",
+                                                    "Qualifiers":  [
+                                                                       "read = True"
+                                                                   ],
+                                                    "ReferenceClassName":  null
+                                                }
+                                            ],
+                     "CimClassQualifiers":  [
+                                                {
+                                                    "Name":  "ClassVersion",
+                                                    "Value":  "1.0.0",
+                                                    "CimType":  14,
+                                                    "Flags":  "EnableOverride, ToSubclass"
+                                                },
+                                                {
+                                                    "Name":  "dynamic",
+                                                    "Value":  true,
+                                                    "CimType":  1,
+                                                    "Flags":  "EnableOverride, ToSubclass"
+                                                },
+                                                {
+                                                    "Name":  "locale",
+                                                    "Value":  1033,
+                                                    "CimType":  7,
+                                                    "Flags":  "EnableOverride, Restricted"
+                                                },
+                                                {
+                                                    "Name":  "provider",
+                                                    "Value":  "DnsClientPSProvider",
+                                                    "CimType":  14,
+                                                    "Flags":  "EnableOverride, ToSubclass"
+                                                }
+                                            ],
+                     "CimClassMethods":  [
+
+                                         ],
+                     "CimSystemProperties":  {
+                                                 "Namespace":  "root/Microsoft/Windows/DNS",
+                                                 "ServerName":  "DESKTOP-LRC8DKH",
+                                                 "ClassName":  "DnsClientNrptRule",
+                                                 "Path":  null
+                                             }
+                 },
+    "CimInstanceProperties":  [
+                                  {
+                                      "Name":  "Comment",
+                                      "Value":  "ZTLP-managed",
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessDnsServers",
+                                      "Value":  null,
+                                      "CimType":  30,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessEnabled",
+                                      "Value":  false,
+                                      "CimType":  1,
+                                      "Flags":  "Property, ReadOnly, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessProxyName",
+                                      "Value":  null,
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessProxyType",
+                                      "Value":  null,
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessQueryIPsecEncryption",
+                                      "Value":  null,
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DirectAccessQueryIPsecRequired",
+                                      "Value":  null,
+                                      "CimType":  1,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DisplayName",
+                                      "Value":  "",
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DnsSecEnabled",
+                                      "Value":  false,
+                                      "CimType":  1,
+                                      "Flags":  "Property, ReadOnly, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DnsSecQueryIPsecEncryption",
+                                      "Value":  null,
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DnsSecQueryIPsecRequired",
+                                      "Value":  null,
+                                      "CimType":  1,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "DnsSecValidationRequired",
+                                      "Value":  null,
+                                      "CimType":  1,
+                                      "Flags":  "Property, NotModified, NullValue",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "IPsecCARestriction",
+                                      "Value":  "",
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "Name",
+                                      "Value":  "{25289340-C95F-4392-8CD2-1C08A0D24382}",
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "NameEncoding",
+                                      "Value":  "Disable",
+                                      "CimType":  14,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "NameServers",
+                                      "Value":  [
+                                                    "127.0.0.53:5353"
+                                                ],
+                                      "CimType":  30,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "Namespace",
+                                      "Value":  [
+                                                    ".trs.ztlp"
+                                                ],
+                                      "CimType":  30,
+                                      "Flags":  "Property, NotModified",
+                                      "IsValueModified":  false
+                                  },
+                                  {
+                                      "Name":  "Version",
+                                      "Value":  2,
+                                      "CimType":  6,
+                                      "Flags":  "Property, ReadOnly, NotModified",
+                                      "IsValueModified":  false
+                                  }
+                              ],
+    "CimSystemProperties":  {
+                                "Namespace":  "root/Microsoft/Windows/DNS",
+                                "ServerName":  "DESKTOP-LRC8DKH",
+                                "ClassName":  "DnsClientNrptRule",
+                                "Path":  null
+                            },
+    "DA":  false,
+    "DADnsServers":  null,
+    "DnsSec":  false,
+    "DirectAccessDnsServers":  null,
+    "NameServers":  null,
+    "Comment":  "ZTLP-managed",
+    "DirectAccessEnabled":  false,
+    "DirectAccessProxyName":  null,
+    "DirectAccessProxyType":  null,
+    "DirectAccessQueryIPsecEncryption":  null,
+    "DirectAccessQueryIPsecRequired":  null,
+    "DisplayName":  "",
+    "DnsSecEnabled":  false,
+    "DnsSecQueryIPsecEncryption":  null,
+    "DnsSecQueryIPsecRequired":  null,
+    "DnsSecValidationRequired":  null,
+    "IPsecCARestriction":  "",
+    "Name":  "{25289340-C95F-4392-8CD2-1C08A0D24382}",
+    "NameEncoding":  "Disable",
+    "Namespace":  [
+                      ".trs.ztlp"
+                  ],
+    "Version":  2,
+    "PSComputerName":  null
+}
+
+================================================================
+  5. Verify DNS interception
+================================================================
+nslookup probe.trs.ztlp (should hit ZTLP loopback resolver):
+nslookup : *** UnKnown can't find probe.trs.ztlp: Non-existent domain
+At C:\Users\trs\ztlp-d4-e2e.ps1:97 char:1
++ nslookup probe.trs.ztlp 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (*** UnKnown can...existent domain:String) [], RemoteE
+   xception
+    + FullyQualifiedErrorId : NativeCommandError
+
+
+
+
+Resolve-DnsName probe.trs.ztlp (cross-check):
+
+================================================================
+  6. D4 - agent dns-teardown (first call should remove rules)
+================================================================
+ztlp.exe : [32mΓ£ô[0m Removed 1 NRPT rule
+At C:\Users\trs\ztlp-d4-e2e.ps1:103 char:14
++ $teardown1 = & $ztlpExe agent dns-teardown 2>&1
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([32mΓ£ô[0m Removed 1 NRPT rule:String) [], RemoteEx
+ception
+    + FullyQualifiedErrorId : NativeCommandError
+
+  .trs.ztlp
+EXIT_CODE: 0
+[OK] All ZTLP NRPT rules removed
+
+================================================================
+  7. Idempotency - agent dns-teardown second call should no-op cleanly
+================================================================
+ztlp.exe : [2mNo ZTLP-managed NRPT rules found[0m
+At C:\Users\trs\ztlp-d4-e2e.ps1:118 char:14
++ $teardown2 = & $ztlpExe agent dns-teardown 2>&1
++              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2mNo ZTLP-managed NRPT rules found[0m:String) [],
+RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+EXIT_CODE: 0
+[OK] Teardown is idempotent
+
+================================================================
+  8. RESULT
+================================================================
+[PASS] ALL D4 CHECKS PASSED
+Evidence: C:\Users\trs\ztlp-d4-e2e-evidence.txt
+**********************
+Windows PowerShell transcript end
+End time: 20260530131338
+**********************

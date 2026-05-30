@@ -780,6 +780,48 @@ enum AgentCommands {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+
+    /// Install the ZTLP Root CA into the system trust store (D5.T1).
+    ///
+    /// Plants `~/.ztlp/ca/root.pem` into the platform's trust store so
+    /// browsers automatically validate the ZTLP cert chain for any
+    /// `*.<zone>.ztlp` service.
+    ///
+    /// Requires elevation:
+    ///   - macOS:   `sudo`
+    ///   - Linux:   `sudo`
+    ///   - Windows: must run from an elevated PowerShell. With
+    ///              `--machine-scope` the cert lands in
+    ///              `LocalMachine\Root` (every user trusts it). Without
+    ///              the flag it goes into `CurrentUser\Root`.
+    #[command(after_help = "EXAMPLES:\n  \
+            sudo ztlp agent install-ca-cert\n  \
+            ztlp agent install-ca-cert --machine-scope         (Windows, elevated)\n  \
+            ztlp agent install-ca-cert --cert /path/to/root.pem")]
+    InstallCaCert {
+        /// Path to the root CA cert (default: ~/.ztlp/ca/root.pem).
+        #[arg(long)]
+        cert: Option<PathBuf>,
+
+        /// On Windows, install into `LocalMachine\Root` instead of the
+        /// per-user store. Ignored on macOS / Linux (always machine-scope
+        /// there). Required by the service installer.
+        #[arg(long)]
+        machine_scope: bool,
+    },
+
+    /// Remove the ZTLP Root CA from the system trust store.
+    ///
+    /// Inverse of `install-ca-cert`. Useful for uninstall paths and
+    /// rotation workflows.
+    #[command(after_help = "EXAMPLES:\n  \
+            sudo ztlp agent remove-ca-cert\n  \
+            ztlp agent remove-ca-cert --cert /path/to/root.pem")]
+    RemoveCaCert {
+        /// Path to the root CA cert (default: ~/.ztlp/ca/root.pem).
+        #[arg(long)]
+        cert: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -9926,6 +9968,75 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// Generate a real X.509 root CA + intermediate CA pair using rcgen.
+///
+/// Returns `(root_cert_pem, root_key_pem, intermediate_cert_pem, intermediate_key_pem)`.
+///
+/// **Replaces** the original comment-PEM stub (which wasn't valid X.509 and
+/// failed `certutil -addstore Root` on Windows / `security` on macOS).
+///
+/// Crypto: ECDSA P-256 throughout. Root and intermediate both 10-year
+/// validity (operators rotate via `ztlp admin ca-rotate-intermediate`).
+///
+/// CN convention:
+///   Root:         `CN=ZTLP Root CA - <zone>`
+///   Intermediate: `CN=ZTLP Intermediate CA - <zone>`
+///
+/// Pulled into `bin/ztlp-cli.rs` rather than `agent/cert_mint.rs` because
+/// this is the *one-shot setup* operation. Once the chain exists on disk
+/// the mint path doesn't need to regenerate it.
+fn generate_real_ca_chain(zone: &str) -> Result<(String, String, String, String), Box<dyn std::error::Error>> {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+
+    let now = time::OffsetDateTime::now_utc();
+    let ten_years = time::Duration::days(365 * 10);
+
+    // ── Root CA ────────────────────────────────────────────────────────
+    let root_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let mut root_params = CertificateParams::new(Vec::<String>::new())?;
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let mut root_dn = DistinguishedName::new();
+    root_dn.push(DnType::CommonName, format!("ZTLP Root CA - {}", zone));
+    root_dn.push(DnType::OrganizationName, "ZTLP");
+    root_params.distinguished_name = root_dn;
+    root_params.not_before = now;
+    root_params.not_after = now + ten_years;
+    let root_cert = root_params.self_signed(&root_key)?;
+    let root_cert_pem = root_cert.pem();
+    let root_key_pem = root_key.serialize_pem();
+
+    // ── Intermediate CA (signed by root) ───────────────────────────────
+    let intermediate_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let mut int_params = CertificateParams::new(Vec::<String>::new())?;
+    // PathLenConstraint(0) — intermediate can only issue leaves, not
+    // further intermediates. Defense in depth.
+    int_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    int_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let mut int_dn = DistinguishedName::new();
+    int_dn.push(
+        DnType::CommonName,
+        format!("ZTLP Intermediate CA - {}", zone),
+    );
+    int_dn.push(DnType::OrganizationName, "ZTLP");
+    int_params.distinguished_name = int_dn;
+    int_params.not_before = now;
+    int_params.not_after = now + ten_years;
+    let intermediate_cert = int_params.signed_by(&intermediate_key, &root_cert, &root_key)?;
+    let intermediate_cert_pem = intermediate_cert.pem();
+    let intermediate_key_pem = intermediate_key.serialize_pem();
+
+    Ok((
+        root_cert_pem,
+        root_key_pem,
+        intermediate_cert_pem,
+        intermediate_key_pem,
+    ))
+}
+
 fn cmd_admin_ca_init(
     zone: &str,
     output: &Option<PathBuf>,
@@ -9959,39 +10070,35 @@ fn cmd_admin_ca_init(
         return Ok(());
     }
 
-    // Generate root CA key (Ed25519 → we use it as seed for reproducible CA)
-    let root_key = generate_signing_key();
-    std::fs::write(&root_key_path, root_key.to_bytes())?;
-
-    // Write root cert placeholder (PEM)
-    let root_cert_pem = format!(
-        "-----BEGIN CERTIFICATE-----\n# ZTLP Root CA for zone: {}\n# Generated: {}\n# Key: {}\n-----END CERTIFICATE-----\n",
-        zone,
-        utc_timestamp_iso(),
-        hex::encode(root_key.verifying_key().as_bytes()),
-    );
+    // D5.T2.0: Generate REAL X.509 chain (ECDSA P-256). The previous
+    // implementation wrote comment-only PEM frames which were not valid
+    // X.509 and which `certutil -addstore Root` (Windows) and the macOS
+    // `security` tool both rejected. Browsers wouldn't trust the chain
+    // even if it loaded, because nothing was actually signed.
+    let (root_cert_pem, root_key_pem, intermediate_cert_pem, intermediate_key_pem) =
+        generate_real_ca_chain(zone)?;
     std::fs::write(&root_cert_path, &root_cert_pem)?;
-
-    // Generate intermediate CA key
-    let intermediate_key = generate_signing_key();
-    std::fs::write(&intermediate_key_path, intermediate_key.to_bytes())?;
-
-    let intermediate_cert_pem = format!(
-        "-----BEGIN CERTIFICATE-----\n# ZTLP Intermediate CA for zone: {}\n# Generated: {}\n# Key: {}\n# Issuer: {}\n-----END CERTIFICATE-----\n",
-        zone,
-        utc_timestamp_iso(),
-        hex::encode(intermediate_key.verifying_key().as_bytes()),
-        hex::encode(root_key.verifying_key().as_bytes()),
-    );
+    std::fs::write(&root_key_path, &root_key_pem)?;
     std::fs::write(&intermediate_cert_path, &intermediate_cert_pem)?;
+    std::fs::write(&intermediate_key_path, &intermediate_key_pem)?;
 
-    // Write zone metadata
+    // Mode 600 on Unix (Windows ACLs handle this elsewhere).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root_key_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&intermediate_key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    // Zone metadata — used by ca-rotate-intermediate and audit tooling.
+    // Now records cert subject DNs instead of the bogus ed25519 hex keys
+    // the stub recorded.
     let meta = format!(
-        "{{\"zone\":\"{}\",\"created\":\"{}\",\"root_key\":\"{}\",\"intermediate_key\":\"{}\"}}",
+        "{{\"zone\":\"{}\",\"created\":\"{}\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\",\"algorithm\":\"ECDSA P-256\"}}",
         zone,
         utc_timestamp_iso(),
-        hex::encode(root_key.verifying_key().as_bytes()),
-        hex::encode(intermediate_key.verifying_key().as_bytes()),
+        zone,
+        zone,
     );
     std::fs::write(ca_dir.join("ca.json"), &meta)?;
 
@@ -10001,10 +10108,12 @@ fn cmd_admin_ca_init(
     std::fs::write(ca_dir.join("certs").join("index.json"), "[]")?;
 
     if json_output {
-        println!("{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"root_key\":\"{}\",\"intermediate_key\":\"{}\"}}",
-            zone, ca_dir.display(),
-            hex::encode(root_key.verifying_key().as_bytes()),
-            hex::encode(intermediate_key.verifying_key().as_bytes()),
+        println!(
+            "{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"algorithm\":\"ECDSA P-256\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\"}}",
+            zone,
+            ca_dir.display(),
+            zone,
+            zone,
         );
     } else {
         eprintln!("{}", c_bold(&format!("ZTLP CA Initialized for {}", zone)));
@@ -10012,16 +10121,21 @@ fn cmd_admin_ca_init(
         eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
         eprintln!(
             "  {} {}",
-            c_cyan("Root key:    "),
-            hex::encode(root_key.verifying_key().as_bytes())
+            c_cyan("Root CN:     "),
+            format!("ZTLP Root CA - {}", zone)
         );
         eprintln!(
             "  {} {}",
             c_cyan("Intermediate:"),
-            hex::encode(intermediate_key.verifying_key().as_bytes())
+            format!("ZTLP Intermediate CA - {}", zone)
         );
+        eprintln!("  {} ECDSA P-256, 10 year validity", c_cyan("Algorithm:   "));
         eprintln!();
         eprintln!("  {} Import root cert: ztlp admin ca-export-root | sudo tee /usr/local/share/ca-certificates/ztlp.crt", c_dim("→"));
+        eprintln!(
+            "  {} On Windows (machine-wide trust): ztlp agent install-ca-cert --machine-scope",
+            c_dim("→")
+        );
     }
 
     Ok(())
@@ -11503,6 +11617,81 @@ async fn cmd_agent_dns_teardown_windows() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
+/// `ztlp agent install-ca-cert` — Install ZTLP Root CA into system trust store (D5.T1).
+///
+/// Cross-platform entry point. On Windows, `machine_scope` flips between
+/// `CurrentUser\Root` (default) and `LocalMachine\Root` (required for
+/// service-installed scenarios where browsers run under any user). On
+/// macOS / Linux this flag is a no-op (always system-wide).
+fn cmd_agent_install_ca_cert(
+    cert_arg: &Option<PathBuf>,
+    machine_scope: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::ca_trust::{
+        default_ca_cert_path, install_ca_cert_with_scope, CertStoreScope,
+    };
+    let cert_path = cert_arg
+        .clone()
+        .unwrap_or_else(default_ca_cert_path);
+    if !cert_path.exists() {
+        eprintln!(
+            "  {} No root CA cert at {} — run `ztlp admin ca-init --zone <zone>` first",
+            c_red("✗"),
+            cert_path.display()
+        );
+        return Err("root CA cert not found".into());
+    }
+
+    let scope = if machine_scope {
+        CertStoreScope::Machine
+    } else {
+        CertStoreScope::User
+    };
+
+    eprintln!(
+        "  {} Installing {} into {} trust store...",
+        c_dim("→"),
+        cert_path.display(),
+        if matches!(scope, CertStoreScope::Machine) {
+            "machine-wide"
+        } else {
+            "user"
+        }
+    );
+
+    install_ca_cert_with_scope(&cert_path, scope)
+        .map_err(|e| format!("CA trust install failed: {}", e))?;
+
+    eprintln!(
+        "  {} ZTLP Root CA installed{}",
+        c_green("✓"),
+        if matches!(scope, CertStoreScope::Machine) {
+            " (machine-wide)"
+        } else {
+            ""
+        }
+    );
+    eprintln!(
+        "  {} Browsers will now validate any leaf signed by this CA",
+        c_dim("→")
+    );
+    Ok(())
+}
+
+/// `ztlp agent remove-ca-cert` — Inverse of install. Removes from the
+/// system trust store. Idempotent (errors only if the OS layer reports a
+/// real failure, not just "cert not present").
+fn cmd_agent_remove_ca_cert(
+    cert_arg: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::ca_trust::{default_ca_cert_path, remove_ca_cert};
+    let cert_path = cert_arg.clone().unwrap_or_else(default_ca_cert_path);
+    remove_ca_cert(&cert_path)
+        .map_err(|e| format!("CA trust remove failed: {}", e))?;
+    eprintln!("  {} ZTLP Root CA removed from trust store", c_green("✓"));
+    Ok(())
+}
+
 /// `ztlp agent pull-certs` — Pull TLS certs for service hostnames.
 ///
 /// Scans the CA cert directory for issued certs, and copies them to the
@@ -12013,6 +12202,11 @@ async fn main() {
             AgentCommands::PullCerts { ca_dir, output } => {
                 cmd_agent_pull_certs(ca_dir, output).await
             }
+            AgentCommands::InstallCaCert {
+                cert,
+                machine_scope,
+            } => cmd_agent_install_ca_cert(cert, *machine_scope),
+            AgentCommands::RemoveCaCert { cert } => cmd_agent_remove_ca_cert(cert),
             #[cfg(not(unix))]
             AgentCommands::DnsSetup { zones } => {
                 #[cfg(windows)]

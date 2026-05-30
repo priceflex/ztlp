@@ -86,6 +86,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 blake2 = "0.10"
 sha2 = { version = "0.10", default-features = false }
+# D5: certutil cert removal uses SHA1 thumbprint as the unique cert
+# selector (CN matching breaks when ca-init suffixes the zone).
+sha1 = "0.10"
 subtle = "2.6"
 toml = "0.8"
 base64 = "0.22"
@@ -136,7 +139,11 @@ rustls = { version = "0.23.40" }
 # identity via the Noise XX prologue tunneled over stream 0 (so the X.509
 # layer is effectively ignored). Gated behind `quic-transport` to keep the
 # default + ios-sync builds lean.
-rcgen = { version = "0.13" }
+rcgen = { version = "0.13", features = ["x509-parser"] }
+# D5.T2: cert_mint needs explicit time::OffsetDateTime for leaf validity
+# windows. Already pulled transitively by rcgen but we declare it directly
+# so future rcgen bumps don't silently break us.
+time = { version = "0.3", default-features = false, features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]

@@ -18,6 +18,7 @@
 
 pub mod ca_trust;
 pub mod cert_install;
+pub mod cert_mint;
 pub mod config;
 pub mod control;
 pub mod daemon;

@@ -112,6 +112,16 @@ pub struct SniCertResolver {
     certs: std::sync::RwLock<HashMap<String, Arc<CertifiedKey>>>,
     /// Directory containing cert files.
     cert_dir: PathBuf,
+    /// Optional intermediate CA used to mint leaves on demand when the
+    /// requested SNI hostname has no pre-provisioned cert on disk (D5.T2).
+    ///
+    /// When `None`, the resolver behaves exactly as before: a miss returns
+    /// `None` and the TLS handshake fails (back-compat with the existing
+    /// pre-provisioned-only workflow). When `Some`, a miss falls through
+    /// to `IntermediateCa::mint_leaf`, persists the result to disk so a
+    /// subsequent agent restart finds it via `preload_all`, and warms the
+    /// in-memory cache.
+    mint_ca: Option<Arc<crate::agent::cert_mint::IntermediateCa>>,
 }
 
 impl std::fmt::Debug for SniCertResolver {
@@ -122,17 +132,46 @@ impl std::fmt::Debug for SniCertResolver {
                 "cached_certs",
                 &self.certs.read().map(|c| c.len()).unwrap_or(0),
             )
+            .field("mint_ca", &self.mint_ca.is_some())
             .finish()
     }
 }
 
 impl SniCertResolver {
     /// Create a new resolver that loads certs from the given directory.
+    ///
+    /// No on-demand minting — misses return `None` and the TLS handshake
+    /// fails. Use [`SniCertResolver::with_mint_ca`] to enable D5.T2
+    /// on-demand leaf minting.
     pub fn new(cert_dir: PathBuf) -> Self {
         Self {
             certs: std::sync::RwLock::new(HashMap::new()),
             cert_dir,
+            mint_ca: None,
         }
+    }
+
+    /// Create a new resolver that loads certs from disk AND mints fresh
+    /// leaves from `mint_ca` on miss (D5.T2).
+    ///
+    /// The minted leaves are persisted into `cert_dir` so subsequent
+    /// `preload_all` calls find them on restart.
+    pub fn with_mint_ca(
+        cert_dir: PathBuf,
+        mint_ca: Arc<crate::agent::cert_mint::IntermediateCa>,
+    ) -> Self {
+        Self {
+            certs: std::sync::RwLock::new(HashMap::new()),
+            cert_dir,
+            mint_ca: Some(mint_ca),
+        }
+    }
+
+    /// Attach an intermediate CA after construction (used by the agent
+    /// startup path, which constructs the resolver before knowing whether
+    /// the CA chain on disk is loadable).
+    pub fn set_mint_ca(&mut self, mint_ca: Arc<crate::agent::cert_mint::IntermediateCa>) {
+        self.mint_ca = Some(mint_ca);
     }
 
     /// Preload a cert for a specific hostname from files.
@@ -189,6 +228,13 @@ impl SniCertResolver {
     }
 
     /// Try to resolve a cert for a hostname, loading from disk if needed.
+    ///
+    /// Resolution order:
+    /// 1. In-memory cache (fast path).
+    /// 2. `<cert_dir>/<hostname>.pem` + `.key` on disk (D2 pre-provisioning).
+    /// 3. **D5.T2:** if a `mint_ca` is configured, mint a fresh leaf signed
+    ///    by it, persist to disk, and warm the cache. The next ClientHello
+    ///    for the same hostname hits the cache.
     fn resolve_cert(&self, hostname: &str) -> Option<Arc<CertifiedKey>> {
         // Check cache first
         {
@@ -208,9 +254,49 @@ impl SniCertResolver {
                 info!("loaded TLS cert for {} (on-demand)", hostname);
                 Some(key)
             }
-            Err(e) => {
-                debug!("no cert for {}: {}", hostname, e);
-                None
+            Err(disk_err) => {
+                // No pre-provisioned cert. If we have an intermediate CA
+                // attached (D5.T2), mint a leaf on the fly.
+                let Some(ref ca) = self.mint_ca else {
+                    debug!("no cert for {}: {} (no mint CA configured)", hostname, disk_err);
+                    return None;
+                };
+                match ca.mint_leaf(hostname) {
+                    Ok(minted) => {
+                        // Persist for next-run preload_all. We tolerate
+                        // persist errors — the in-memory copy is still
+                        // valid for this session.
+                        if let Err(e) = minted.persist(&self.cert_dir) {
+                            warn!(
+                                "failed to persist minted leaf for {}: {} (continuing with in-memory copy)",
+                                hostname, e
+                            );
+                        }
+                        match minted.into_certified_key() {
+                            Ok(ck) => {
+                                if let Ok(mut certs) = self.certs.write() {
+                                    certs.insert(hostname.to_string(), Arc::clone(&ck));
+                                }
+                                info!(
+                                    "minted on-demand TLS cert for {} (D5.T2 on-demand path)",
+                                    hostname
+                                );
+                                Some(ck)
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "minted leaf for {} but failed to convert to CertifiedKey: {}",
+                                    hostname, e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("failed to mint leaf for {}: {}", hostname, e);
+                        None
+                    }
+                }
             }
         }
     }
@@ -526,6 +612,92 @@ enabled = false
         assert_eq!(resolver.cert_count(), 0);
         assert!(resolver.resolve_cert("nonexistent.ztlp").is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ─── D5.T2: on-demand minting fallback ───────────────────────────────
+
+    /// Without a mint CA configured, the resolver behaves exactly as
+    /// before: a miss returns None (back-compat).
+    #[test]
+    fn test_resolver_without_mint_ca_misses_return_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = SniCertResolver::new(dir.path().to_path_buf());
+        assert!(resolver.resolve_cert("vault.trs.ztlp").is_none());
+        // And nothing got persisted by accident.
+        assert!(!dir.path().join("vault_trs_ztlp.pem").exists());
+    }
+
+    /// With a mint CA, a miss triggers a fresh leaf mint and the result
+    /// gets persisted under `<host_with_underscores>.pem` so subsequent
+    /// agent restarts find it via `preload_all`.
+    #[test]
+    fn test_resolver_with_mint_ca_mints_on_miss_and_persists() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let resolver =
+            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+
+        let ck = resolver.resolve_cert("vault.trs.ztlp").expect("should mint");
+        assert_eq!(ck.cert.len(), 2, "expected leaf + intermediate in chain");
+
+        // Persisted to disk.
+        assert!(
+            dir.path().join("vault_trs_ztlp.pem").exists(),
+            "minted leaf should be persisted"
+        );
+        assert!(
+            dir.path().join("vault_trs_ztlp.key").exists(),
+            "minted key should be persisted"
+        );
+    }
+
+    /// Second resolve for the SAME hostname must hit the in-memory cache
+    /// (no re-mint, same CertifiedKey instance). Otherwise we'd churn
+    /// certs on every ClientHello.
+    #[test]
+    fn test_resolver_caches_minted_leaves() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let resolver =
+            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+
+        let ck1 = resolver.resolve_cert("vault.trs.ztlp").unwrap();
+        let ck2 = resolver.resolve_cert("vault.trs.ztlp").unwrap();
+        // Same Arc instance — proves the cache hit, not a fresh mint.
+        assert!(Arc::ptr_eq(&ck1, &ck2));
+    }
+
+    /// Invalid SNI hostnames (single-label, garbage) fall through to
+    /// None — we don't crash, and we don't mint nonsense.
+    #[test]
+    fn test_resolver_with_mint_ca_rejects_invalid_hostname() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let resolver =
+            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+        // No dot — fails hostname validation, no mint, no panic.
+        assert!(resolver.resolve_cert("localhost").is_none());
+    }
+
+    /// Setting the mint CA after construction (the agent startup path)
+    /// activates the fallback for subsequent resolves.
+    #[test]
+    fn test_resolver_set_mint_ca_activates_fallback() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let dir = tempfile::tempdir().unwrap();
+        let mut resolver = SniCertResolver::new(dir.path().to_path_buf());
+        // No CA → miss returns None.
+        assert!(resolver.resolve_cert("api.trs.ztlp").is_none());
+
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        resolver.set_mint_ca(Arc::new(ca));
+
+        // Now the same hostname mints.
+        let ck = resolver.resolve_cert("api.trs.ztlp").expect("should mint");
+        assert_eq!(ck.cert.len(), 2);
     }
 
     #[test]

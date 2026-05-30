@@ -12037,9 +12037,10 @@ async fn main() {
                 }
             }
             #[cfg(not(unix))]
-            AgentCommands::Install { .. } => {
-                Err("install is only supported on Unix; use the ZTLP Windows service installer instead".into())
-            }
+            AgentCommands::Install { .. } => Err(
+                "install is only supported on Unix; use the ZTLP Windows service installer instead"
+                    .into(),
+            ),
         },
     };
 

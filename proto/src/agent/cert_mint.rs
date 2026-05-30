@@ -208,9 +208,10 @@ impl IntermediateCa {
         // SAN — the only identity binding browsers honour. We deliberately
         // do NOT set CN to the hostname (CN-in-cert identity is deprecated;
         // serverAuth EKU + SAN dns is what matters).
-        params.subject_alt_names = vec![SanType::DnsName(hostname.to_string().try_into().map_err(
-            |e: rcgen::Error| CertMintError::Rcgen(format!("invalid dns SAN: {}", e)),
-        )?)];
+        params.subject_alt_names =
+            vec![SanType::DnsName(hostname.to_string().try_into().map_err(
+                |e: rcgen::Error| CertMintError::Rcgen(format!("invalid dns SAN: {}", e)),
+            )?)];
 
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, hostname);

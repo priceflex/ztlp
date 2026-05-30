@@ -9985,7 +9985,9 @@ fn unix_now() -> u64 {
 /// Pulled into `bin/ztlp-cli.rs` rather than `agent/cert_mint.rs` because
 /// this is the *one-shot setup* operation. Once the chain exists on disk
 /// the mint path doesn't need to regenerate it.
-fn generate_real_ca_chain(zone: &str) -> Result<(String, String, String, String), Box<dyn std::error::Error>> {
+fn generate_real_ca_chain(
+    zone: &str,
+) -> Result<(String, String, String, String), Box<dyn std::error::Error>> {
     use rcgen::{
         BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
         KeyUsagePurpose,
@@ -10087,7 +10089,10 @@ fn cmd_admin_ca_init(
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&root_key_path, std::fs::Permissions::from_mode(0o600))?;
-        std::fs::set_permissions(&intermediate_key_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(
+            &intermediate_key_path,
+            std::fs::Permissions::from_mode(0o600),
+        )?;
     }
 
     // Zone metadata — used by ca-rotate-intermediate and audit tooling.
@@ -10129,7 +10134,10 @@ fn cmd_admin_ca_init(
             c_cyan("Intermediate:"),
             format!("ZTLP Intermediate CA - {}", zone)
         );
-        eprintln!("  {} ECDSA P-256, 10 year validity", c_cyan("Algorithm:   "));
+        eprintln!(
+            "  {} ECDSA P-256, 10 year validity",
+            c_cyan("Algorithm:   ")
+        );
         eprintln!();
         eprintln!("  {} Import root cert: ztlp admin ca-export-root | sudo tee /usr/local/share/ca-certificates/ztlp.crt", c_dim("→"));
         eprintln!(
@@ -11630,9 +11638,7 @@ fn cmd_agent_install_ca_cert(
     use ztlp_proto::agent::ca_trust::{
         default_ca_cert_path, install_ca_cert_with_scope, CertStoreScope,
     };
-    let cert_path = cert_arg
-        .clone()
-        .unwrap_or_else(default_ca_cert_path);
+    let cert_path = cert_arg.clone().unwrap_or_else(default_ca_cert_path);
     if !cert_path.exists() {
         eprintln!(
             "  {} No root CA cert at {} — run `ztlp admin ca-init --zone <zone>` first",
@@ -11681,13 +11687,10 @@ fn cmd_agent_install_ca_cert(
 /// `ztlp agent remove-ca-cert` — Inverse of install. Removes from the
 /// system trust store. Idempotent (errors only if the OS layer reports a
 /// real failure, not just "cert not present").
-fn cmd_agent_remove_ca_cert(
-    cert_arg: &Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_agent_remove_ca_cert(cert_arg: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::ca_trust::{default_ca_cert_path, remove_ca_cert};
     let cert_path = cert_arg.clone().unwrap_or_else(default_ca_cert_path);
-    remove_ca_cert(&cert_path)
-        .map_err(|e| format!("CA trust remove failed: {}", e))?;
+    remove_ca_cert(&cert_path).map_err(|e| format!("CA trust remove failed: {}", e))?;
     eprintln!("  {} ZTLP Root CA removed from trust store", c_green("✓"));
     Ok(())
 }

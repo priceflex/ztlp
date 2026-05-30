@@ -544,7 +544,9 @@ mod tests {
         assert_eq!(computed, expected, "thumbprint must match raw DER hash");
         // certutil format: 40 uppercase hex chars, no separators.
         assert_eq!(computed.len(), 40);
-        assert!(computed.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+        assert!(computed
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
     }
 
     #[cfg(target_os = "windows")]

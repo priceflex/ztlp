@@ -258,7 +258,10 @@ impl SniCertResolver {
                 // No pre-provisioned cert. If we have an intermediate CA
                 // attached (D5.T2), mint a leaf on the fly.
                 let Some(ref ca) = self.mint_ca else {
-                    debug!("no cert for {}: {} (no mint CA configured)", hostname, disk_err);
+                    debug!(
+                        "no cert for {}: {} (no mint CA configured)",
+                        hostname, disk_err
+                    );
                     return None;
                 };
                 match ca.mint_leaf(hostname) {
@@ -635,10 +638,11 @@ enabled = false
         use crate::agent::cert_mint::IntermediateCa;
         let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+        let resolver = SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
 
-        let ck = resolver.resolve_cert("vault.trs.ztlp").expect("should mint");
+        let ck = resolver
+            .resolve_cert("vault.trs.ztlp")
+            .expect("should mint");
         assert_eq!(ck.cert.len(), 2, "expected leaf + intermediate in chain");
 
         // Persisted to disk.
@@ -660,8 +664,7 @@ enabled = false
         use crate::agent::cert_mint::IntermediateCa;
         let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+        let resolver = SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
 
         let ck1 = resolver.resolve_cert("vault.trs.ztlp").unwrap();
         let ck2 = resolver.resolve_cert("vault.trs.ztlp").unwrap();
@@ -676,8 +679,7 @@ enabled = false
         use crate::agent::cert_mint::IntermediateCa;
         let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
+        let resolver = SniCertResolver::with_mint_ca(dir.path().to_path_buf(), Arc::new(ca));
         // No dot — fails hostname validation, no mint, no panic.
         assert!(resolver.resolve_cert("localhost").is_none());
     }

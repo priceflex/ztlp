@@ -388,11 +388,30 @@ pub(crate) fn parse_list_output(stdout: &str) -> Result<Vec<NrptRule>, NrptError
     };
     let mut rules = Vec::with_capacity(entries.len());
     for entry in entries {
-        let namespace = entry
-            .get("Namespace")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NrptError::ParseError(format!("missing Namespace field in {}", entry)))?
-            .to_string();
+        // NRPT's `Namespace` is a string[] in the underlying CIM model, so
+        // `ConvertTo-Json` always emits it as a JSON array — even when the rule
+        // only covers one namespace. PowerShell 5.1 / Windows Server are
+        // particularly strict about this; older mocked tests used a bare string
+        // and missed the array shape (caught in the v0.34.3 D4 smoke run on
+        // DESKTOP-LRC8DKH). Accept both shapes for forward-compat.
+        let namespace = match entry.get("Namespace") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .find_map(|v| v.as_str().map(|s| s.to_string()))
+                .ok_or_else(|| {
+                    NrptError::ParseError(format!(
+                        "Namespace array is empty or non-string in {}",
+                        entry
+                    ))
+                })?,
+            _ => {
+                return Err(NrptError::ParseError(format!(
+                    "missing Namespace field in {}",
+                    entry
+                )))
+            }
+        };
         let name_servers = match entry.get("NameServers") {
             Some(serde_json::Value::String(s)) => vec![s.clone()],
             Some(serde_json::Value::Array(arr)) => arr
@@ -873,6 +892,52 @@ mod tests {
         match err {
             NrptError::ParseError(msg) => {
                 assert!(msg.contains("invalid JSON"), "msg = {}", msg);
+            }
+            other => panic!("expected ParseError, got {:?}", other),
+        }
+    }
+
+    /// Regression: PowerShell 5.1 on Windows emits `Namespace` as a JSON array
+    /// (the underlying CIM type is `string[]`), even when there's only one
+    /// namespace per rule. The original parser was string-only and rejected the
+    /// real shape with a misleading "missing Namespace" error. This test pins
+    /// the actual JSON captured from `DESKTOP-LRC8DKH` during the D4 smoke run
+    /// on 2026-05-30.
+    #[test]
+    fn parse_list_accepts_namespace_array_real_windows_output() {
+        // Exact shape from `Get-DnsClientNrptRule | Select-Object Namespace,NameServers,Comment | ConvertTo-Json -Compress`
+        // on PowerShell 5.1.19041.6456 / Windows Server 2022.
+        let json = r#"{"Comment":"ZTLP-managed","NameServers":null,"Namespace":[".trs.ztlp"]}"#;
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].namespace, ".trs.ztlp");
+        assert_eq!(parsed[0].comment, "ZTLP-managed");
+    }
+
+    /// Regression: when the rule has BOTH namespace and name-servers as arrays
+    /// — the most common multi-zone shape.
+    #[test]
+    fn parse_list_accepts_namespace_array_with_servers_array() {
+        let json = r#"[{"Namespace":[".trs.ztlp"],"NameServers":["127.0.0.53:5353"],"Comment":"ZTLP-managed"}]"#;
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].namespace, ".trs.ztlp");
+        assert_eq!(parsed[0].name_servers, vec!["127.0.0.53:5353"]);
+    }
+
+    /// Edge case: namespace array is empty — should fail with a clear error
+    /// (NOT the old "missing Namespace" message which would be misleading).
+    #[test]
+    fn parse_list_rejects_empty_namespace_array() {
+        let json = r#"[{"Namespace":[],"NameServers":["127.0.0.53"],"Comment":"x"}]"#;
+        let err = parse_list_output(json).unwrap_err();
+        match err {
+            NrptError::ParseError(msg) => {
+                assert!(
+                    msg.contains("empty") || msg.contains("non-string"),
+                    "msg = {}",
+                    msg
+                );
             }
             other => panic!("expected ParseError, got {:?}", other),
         }

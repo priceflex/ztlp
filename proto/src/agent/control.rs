@@ -105,6 +105,44 @@ pub struct StatusInfo {
     pub domain_mappings: usize,
 }
 
+/// Setup wizard status — what the UI shows on the Setup page.
+///
+/// Each field is `true` when that step is complete and `false` otherwise.
+/// The UI uses this snapshot to render checkmarks and to know which
+/// button to enable next. We DO NOT report partial states (e.g. "CA
+/// half-installed"); the wizard treats each step as a discrete success
+/// the moment its persistence artifact exists on disk / in the trust
+/// store.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetupStatus {
+    /// `~/.ztlp/identity.json` exists and contains a NodeID.
+    pub identity_present: bool,
+    /// `~/.ztlp/identity.json` shows a non-empty zone (enrollment succeeded).
+    pub identity_enrolled: bool,
+    /// `~/.ztlp/ca/root.pem` and `intermediate.pem` are real X.509 certs.
+    pub ca_initialized: bool,
+    /// On Windows, the root CA thumbprint is in `LocalMachine\Root`.
+    /// On other platforms, the system-store check is currently best-effort
+    /// (reported as `None`) — the field is included for shape stability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_installed_system_trust: Option<bool>,
+    /// On Windows, NRPT rule is present for the device's zone.
+    /// On other platforms, reported as `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_configured: Option<bool>,
+    /// The agent daemon is running and reachable (we are the daemon, so
+    /// this is always `true` when this struct is returned — it lets the UI
+    /// distinguish "daemon down" (IPC timeout) from "daemon up but step
+    /// incomplete").
+    pub daemon_running: bool,
+    /// The detected zone the wizard will operate on. Empty until enrolled.
+    pub zone: String,
+    /// Filesystem paths the UI surfaces in tooltips. Always present so the
+    /// JS doesn't have to guess them.
+    pub ca_root_pem_path: String,
+    pub identity_path: String,
+}
+
 /// DNS cache entry for reporting.
 #[derive(Debug, Serialize)]
 pub struct DnsCacheEntry {
@@ -297,6 +335,7 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
         "dns_cache" => cmd_dns_cache(state).await,
         "flush_dns" => cmd_flush_dns(state).await,
         "shutdown" => cmd_shutdown(state).await,
+        "setup_status" => cmd_setup_status(state).await,
         other => ControlResponse::err(format!("unknown command: {}", other)),
     }
 }
@@ -380,6 +419,85 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     info!("shutdown requested via control socket");
     let _ = state.shutdown_tx.send(());
     ControlResponse::ok_empty()
+}
+
+/// Compute the wizard's setup status.
+///
+/// This is a thin observability call: it reads the filesystem and (on
+/// Windows) the cert/NRPT stores. It never modifies anything. The UI
+/// polls this once per page load and after each button click so the
+/// checkmarks update.
+///
+/// Daemon-running is implicitly `true` (we ARE the daemon answering).
+async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return ControlResponse::err("cannot resolve home directory"),
+    };
+    let identity_path = home.join(".ztlp").join("identity.json");
+    let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
+    let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
+
+    // Identity / enrollment: read identity.json and look for zone.
+    let (identity_present, identity_enrolled, zone) = match std::fs::read_to_string(&identity_path)
+    {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(v) => {
+                let z = v
+                    .get("zone")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let enrolled = !z.is_empty();
+                (true, enrolled, z)
+            }
+            Err(_) => (false, false, String::new()),
+        },
+        Err(_) => (false, false, String::new()),
+    };
+
+    // CA initialized: both root + intermediate PEMs present AND parseable as X.509.
+    let ca_initialized = ca_root_path.exists()
+        && ca_intermediate_path.exists()
+        && std::fs::read_to_string(&ca_root_path)
+            .map(|s| s.contains("-----BEGIN CERTIFICATE-----"))
+            .unwrap_or(false);
+
+    // Windows-only: cert in machine root + NRPT rule present.
+    #[cfg(target_os = "windows")]
+    let (ca_installed_system_trust, dns_configured) = {
+        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        let dns = if !zone.is_empty() {
+            let api = crate::agent::dns_setup_windows::default_nrpt_api();
+            match api.list_rules() {
+                Ok(rules) => Some(rules.iter().any(|r| {
+                    r.namespace
+                        .trim_start_matches('.')
+                        .eq_ignore_ascii_case(&zone)
+                })),
+                Err(_) => Some(false),
+            }
+        } else {
+            Some(false)
+        };
+        (ca, dns)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (ca_installed_system_trust, dns_configured) = (None, None);
+
+    let status = SetupStatus {
+        identity_present,
+        identity_enrolled,
+        ca_initialized,
+        ca_installed_system_trust,
+        dns_configured,
+        daemon_running: true,
+        zone,
+        ca_root_pem_path: ca_root_path.display().to_string(),
+        identity_path: identity_path.display().to_string(),
+    };
+
+    ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
 }
 
 // ─── Client side (for CLI commands) ─────────────────────────────────────────

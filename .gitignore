@@ -8,6 +8,7 @@ ZTLP_RFC_Draft_v0.5.docx
 /proto/target/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+/desktop/src-tauri/binaries/
 
 # Elixir build artifacts (relay)
 /relay/_build/

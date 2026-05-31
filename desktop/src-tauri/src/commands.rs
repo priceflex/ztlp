@@ -91,14 +91,11 @@ struct AttestationRecord {
 pub fn record_attestation(text: String) -> Result<String, String> {
     // Resolve the current user. If it fails we still write the record so we
     // have an audit trail; the user_sid field is just empty in that case.
-    let user_sid =
-        ztlp_proto::agent::user_binding::current_user_sid().unwrap_or_default();
+    let user_sid = ztlp_proto::agent::user_binding::current_user_sid().unwrap_or_default();
 
     // ISO-8601 UTC. chrono is already in the dependency graph; if it ever
     // gets pruned we'll switch to a manual SystemTime-based format.
-    let recorded_at_utc = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let recorded_at_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     let record = AttestationRecord {
         text,
@@ -106,18 +103,15 @@ pub fn record_attestation(text: String) -> Result<String, String> {
         recorded_at_utc,
     };
 
-    let home = dirs::home_dir().ok_or_else(|| {
-        "could not resolve home directory for attestation record".to_string()
-    })?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| "could not resolve home directory for attestation record".to_string())?;
     let dir = home.join(".ztlp");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create_dir_all ~/.ztlp failed: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all ~/.ztlp failed: {}", e))?;
     let path = dir.join("attestation.json");
 
     let json = serde_json::to_string_pretty(&record)
         .map_err(|e| format!("serialize attestation: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("write attestation.json: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("write attestation.json: {}", e))?;
 
     Ok(path.display().to_string())
 }
@@ -131,17 +125,38 @@ pub fn get_services(state: State<'_, AppState>) -> Vec<ServiceInfo> {
             let mut result = Vec::new();
             for t in tunnels {
                 if let Some(obj) = t.as_object() {
-                    let local_port = obj.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                    let target = obj.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let service_type = obj.get("protocol").and_then(|v| v.as_str()).unwrap_or("TCP").to_string();
-                    
+                    let local_port =
+                        obj.get("local_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                    let target = obj
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let service_type = obj
+                        .get("protocol")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("TCP")
+                        .to_string();
+
                     // Derive a standard name if none was given
-                    let name = obj.get("name").and_then(|v| v.as_str())
+                    let name = obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .map(String::from)
-                        .unwrap_or_else(|| format!("{}: {}", service_type, target.split(':').next().unwrap_or("unknown")));
+                        .unwrap_or_else(|| {
+                            format!(
+                                "{}: {}",
+                                service_type,
+                                target.split(':').next().unwrap_or("unknown")
+                            )
+                        });
 
                     result.push(ServiceInfo {
-                        id: obj.get("id").and_then(|v| v.as_str()).unwrap_or(&target).to_string(),
+                        id: obj
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&target)
+                            .to_string(),
                         name,
                         hostname: target,
                         port: local_port,
@@ -172,7 +187,8 @@ pub fn save_config_internal(
     mut config_path: std::path::PathBuf,
 ) -> Result<(), String> {
     *current = config.clone();
-    std::fs::create_dir_all(&config_path).map_err(|e| format!("Failed to create config directory: {}", e))?;
+    std::fs::create_dir_all(&config_path)
+        .map_err(|e| format!("Failed to create config directory: {}", e))?;
     config_path.push("agent.toml");
 
     // Write back the basic TOML parameters that the frontend might have touched.
@@ -195,7 +211,8 @@ auto_connect = {}
             .join("\n")
     );
 
-    std::fs::write(&config_path, toml_string).map_err(|e| format!("Failed to save config file at {:?}: {}", config_path, e))?;
+    std::fs::write(&config_path, toml_string)
+        .map_err(|e| format!("Failed to save config file at {:?}: {}", config_path, e))?;
     Ok(())
 }
 
@@ -228,21 +245,29 @@ pub fn get_traffic_stats(state: State<'_, AppState>) -> TrafficStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use crate::state::PortMapping;
+    use std::env;
 
     #[test]
     fn test_save_config_internal() {
         let temp_dir = env::temp_dir().join("ztlp_test_config_dir");
-        
+
         let config = AppConfig {
             relay_address: "relay.example.com".to_string(),
             stun_server: "stun.example.com".to_string(),
             tunnel_address: "10.0.0.2".to_string(),
             dns_servers: vec![],
             port_mappings: vec![
-                PortMapping { local_port: 8080, remote_host: "1.2.3.4".into(), remote_port: 80 },
-                PortMapping { local_port: 8443, remote_host: "5.6.7.8".into(), remote_port: 443 },
+                PortMapping {
+                    local_port: 8080,
+                    remote_host: "1.2.3.4".into(),
+                    remote_port: 80,
+                },
+                PortMapping {
+                    local_port: 8443,
+                    remote_host: "5.6.7.8".into(),
+                    remote_port: 443,
+                },
             ],
             mtu: 1420,
             auto_connect: true,

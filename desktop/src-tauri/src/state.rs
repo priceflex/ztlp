@@ -22,7 +22,6 @@ pub enum ConnectionState {
     Disconnecting,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionStatus {
     pub state: ConnectionState,
@@ -134,13 +133,13 @@ pub struct AppState {
 }
 
 impl Default for AppState {
-   fn default() -> Self {
-       // Generate or load identity.
+    fn default() -> Self {
+        // Generate or load identity.
         let default_path = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join(".ztlp")
             .join("identity.json");
-       let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
+        let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
             Ok(id) => Some(IdentityInfo {
                 node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
                 public_key: id

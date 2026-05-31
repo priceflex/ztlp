@@ -3,6 +3,7 @@
 
 mod commands;
 mod ipc;
+mod setup;
 mod state;
 mod tray;
 mod tunnel;
@@ -28,6 +29,11 @@ fn main() {
             commands::get_config,
             commands::save_config,
             commands::get_traffic_stats,
+            setup::setup_status,
+            setup::setup_run_ca_init,
+            setup::setup_install_ca,
+            setup::setup_install_dns,
+            setup::setup_test_browse,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ZTLP desktop application");

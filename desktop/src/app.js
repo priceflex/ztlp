@@ -99,6 +99,7 @@ function stopPolling() {
 async function init() {
   // Render all components
   HomeComponent.render();
+  SetupComponent.render();
   ServicesComponent.render();
   IdentityComponent.render();
   EnrollmentComponent.render();
@@ -107,6 +108,7 @@ async function init() {
   // Load initial data
   await Promise.all([
     HomeComponent.load(),
+    SetupComponent.load(),
     ServicesComponent.load(),
     IdentityComponent.load(),
     SettingsComponent.load(),

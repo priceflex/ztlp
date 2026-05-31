@@ -242,7 +242,49 @@ pub async fn run_daemon(
             warn!("failed to create cert dir {}: {}", cert_dir.display(), e);
         }
 
-        let resolver = Arc::new(SniCertResolver::new(cert_dir.clone()));
+        // D6.T1: try to load the intermediate CA BEFORE constructing the
+        // resolver, so we can use `with_mint_ca` (the only constructor
+        // that wraps the mint CA in the `Arc` the resolver expects). If
+        // the CA chain hasn't been initialized yet (no
+        // `~/.ztlp/ca/intermediate.{pem,key}`) we silently fall back
+        // to disk-only mode via the plain `new` constructor — the wizard
+        // surface step "CA initialized?" tells the user how to fix that.
+        let ca_dir = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("ca"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/ca"));
+        let intermediate_pem = ca_dir.join("intermediate.pem");
+        let intermediate_key = ca_dir.join("intermediate.key");
+        let resolver = if intermediate_pem.exists() && intermediate_key.exists() {
+            match crate::agent::cert_mint::IntermediateCa::load_from_dir(&ca_dir) {
+                Ok(ca) => {
+                    info!(
+                        "local TLS: on-demand cert minting enabled (intermediate at {})",
+                        intermediate_pem.display()
+                    );
+                    Arc::new(SniCertResolver::with_mint_ca(
+                        cert_dir.clone(),
+                        Arc::new(ca),
+                    ))
+                }
+                Err(e) => {
+                    warn!(
+                        "local TLS: intermediate CA present at {} but failed to load: {} \
+                         — on-demand minting disabled",
+                        intermediate_pem.display(),
+                        e
+                    );
+                    Arc::new(SniCertResolver::new(cert_dir.clone()))
+                }
+            }
+        } else {
+            info!(
+                "local TLS: no intermediate CA found at {} — \
+                 on-demand minting disabled (run `ztlp admin ca-init` first)",
+                intermediate_pem.display()
+            );
+            Arc::new(SniCertResolver::new(cert_dir.clone()))
+        };
+
         let loaded = resolver.preload_all();
         if loaded > 0 {
             info!(
@@ -253,8 +295,8 @@ pub async fn run_daemon(
         } else {
             info!(
                 "local TLS: enabled but no certs found in {} — \
-                 HTTPS connections will fail until certs are provisioned \
-                 (run: ztlp admin cert-issue --hostname <name>)",
+                 HTTPS connections will be served by on-demand minting \
+                 (if enabled above) or fail otherwise",
                 cert_dir.display()
             );
         }

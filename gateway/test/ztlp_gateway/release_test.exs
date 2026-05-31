@@ -79,8 +79,8 @@ defmodule ZtlpGateway.ReleaseTest do
       # maintenance on every routine version bump — it only fails on a
       # down-bump below the 0.32.2 floor.
       declared = ZtlpGateway.MixProject.project()[:version]
-      assert Version.compare(declared, "0.34.4") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.34.4 D6-UI-setup-wizard tag"
+      assert Version.compare(declared, "0.34.5") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.34.5 desktop-globalTauri tag"
     end
   end
 

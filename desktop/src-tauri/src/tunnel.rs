@@ -17,14 +17,12 @@ fn get_daemon_cmd() -> std::process::Command {
 
 /// Start a tunnel connection to the given relay/zone.
 pub fn start_tunnel(relay: &str, zone: &str) -> Result<ConnectionStatus, String> {
-   let now = chrono::Utc::now().timestamp();
-    let child = get_daemon_cmd()
-        .args(["agent", "start"])
-        .output();
-   match child {
-       Ok(output) if output.status.success() => Ok(ConnectionStatus {
-           state: ConnectionState::Connected,
-           relay: relay.to_string(),
+    let now = chrono::Utc::now().timestamp();
+    let child = get_daemon_cmd().args(["agent", "start"]).output();
+    match child {
+        Ok(output) if output.status.success() => Ok(ConnectionStatus {
+            state: ConnectionState::Connected,
+            relay: relay.to_string(),
             zone: zone.to_string(),
             connected_since: Some(now),
         }),
@@ -38,12 +36,10 @@ pub fn start_tunnel(relay: &str, zone: &str) -> Result<ConnectionStatus, String>
 
 /// Tear down the active tunnel.
 pub fn stop_tunnel() -> Result<(), String> {
-    let child = get_daemon_cmd()
-        .args(["agent", "stop"])
-        .output();
-   match child {
-       Ok(output) if output.status.success() => Ok(()),
-       Ok(output) => Err(format!(
+    let child = get_daemon_cmd().args(["agent", "stop"]).output();
+    match child {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
             "Daemon failed to stop: {}",
             String::from_utf8_lossy(&output.stderr)
         )),

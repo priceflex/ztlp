@@ -678,3 +678,34 @@ html, body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--gray-400);
 }
+
+/* ── Setup wizard (D6) ────────────────────────────────────────────── */
+
+.setup-step-state {
+  margin-top: 12px;
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+}
+
+.setup-ok {
+  color: #16a34a; /* green-600 */
+  font-weight: 600;
+}
+
+.setup-err {
+  color: #dc2626; /* red-600 */
+  font-weight: 600;
+}
+
+.setup-pending {
+  color: var(--text-secondary, #6b7280);
+}
+
+#setup-status-card ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+#setup-status-card li {
+  padding: 4px 0;
+}

@@ -51,10 +51,10 @@ pub fn ipc_request(cmd: &str, name: Option<String>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::net::TcpListener;
     use std::thread;
     use ztlp_proto::agent::control::ControlResponse;
-    use serde_json::json;
 
     #[test]
     fn test_ipc_request_success() {
@@ -69,7 +69,7 @@ mod tests {
 
             assert!(line.ends_with('\n'));
             let _req: ControlCommand = serde_json::from_str(&line).unwrap();
-            
+
             let resp = ControlResponse {
                 ok: true,
                 error: None,
@@ -95,7 +95,7 @@ mod tests {
             let mut reader = BufReader::new(&mut stream);
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            
+
             let resp = ControlResponse {
                 ok: false,
                 error: Some("Test error message".to_string()),

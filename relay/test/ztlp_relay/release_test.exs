@@ -73,8 +73,8 @@ defmodule ZtlpRelay.ReleaseTest do
       # IPv6 fix, PR #71). All three releases shipped while mix.exs still
       # read 0.31.0; this PR closes that drift.
       declared = ZtlpRelay.MixProject.project()[:version]
-      assert Version.compare(declared, "0.32.2") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.32.2 multi-candidate-QUIC-path tag"
+      assert Version.compare(declared, "0.34.4") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.34.4 D6-UI-setup-wizard tag"
     end
   end
 

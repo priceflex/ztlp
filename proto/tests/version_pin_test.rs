@@ -43,15 +43,15 @@ use ztlp_proto::updater::SemVer;
 /// v0.30.4 tag was found to point at `6e9d40b`, whose manifests still read
 /// 0.30.3. v0.30.4 is being re-cut from the post-bump commit so the tag
 ///
-/// Ratcheted 0.30.4 → 0.32.2 in PR <release/v0.32.2> to align the floor with
-/// the v0.32 family: v0.32 (multi-candidate discovery, PR #69), v0.32.1
-/// (keepalive-port + IPv6 dual-stack + loopback classifier fixes, PR #70),
-/// v0.32.2 (multi-candidate dial moves into QUIC path + punch IPv6 fix,
-/// PR #71). All three releases shipped from manifests still reading 0.31.0;
-/// this PR closes that drift so v0.32.2-tagged binaries actually report
-/// 0.32.2 at runtime via env!("CARGO_PKG_VERSION").
-/// and four-component manifests finally agree.
-const MINIMUM_VERSION: &str = "0.32.2";
+/// Ratcheted 0.32.2 → 0.34.4 in PR <release/v0.34.4> to align the floor with
+/// the v0.34 family: v0.34 (granular registration error codes, PR #77),
+/// v0.34.1 (relay control-frame exemption), v0.34.2 (gateway SVC refresh cap,
+/// PR #80), v0.34.3 (NS mixed-case enrollment, PR #81), v0.34.4 (D4 Windows
+/// NRPT DNS interception PR #82, D5 browser TLS green-lock PR #83, D6 UI
+/// Setup Wizard PR #84). Per the release-version-pinning skill pitfall 13,
+/// the floor must track the current release; leaving it at 0.32.2 while
+/// manifests sit at 0.34.x lets future down-bumps slip through silently.
+const MINIMUM_VERSION: &str = "0.34.4";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

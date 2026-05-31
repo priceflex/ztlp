@@ -16,7 +16,7 @@ defmodule ZtlpNs.MixProject do
       # Bumped 0.30.4 → 0.31.0 in release/v0.31.0 (resilient-connectivity).
       # Bumped 0.31.0 → 0.32.2 in PR release/v0.32.2 to align with the v0.32
       # family (PRs #69/#70/#71). Floor ratcheted to 0.32.2 in release_test.exs.
-      version: "0.34.3",
+      version: "0.34.4",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

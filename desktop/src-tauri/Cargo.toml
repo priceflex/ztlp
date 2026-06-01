@@ -1,12 +1,15 @@
 [package]
 name = "ztlp-desktop"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "ZTLP Desktop — Zero Trust Layer Protocol client"
 authors = ["Steven Price <steve@techrockstars.com>"]
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "devtools"] }
+# `devtools` feature is gated to debug builds via [target.'cfg(debug_assertions)']
+# section below — keeps release binaries lean and prevents the WebView inspector
+# from being available in production installs.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

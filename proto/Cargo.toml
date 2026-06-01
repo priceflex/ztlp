@@ -16,7 +16,12 @@ name = "ztlp-proto"
 # IPv6 fix PR #71). All three v0.32.x releases shipped while this manifest
 # still read 0.31.0; this PR closes that drift so a v0.32.2-tagged binary
 # actually reports 0.32.2 via env!("CARGO_PKG_VERSION").
-version = "0.34.6"
+# Bumped 0.34.6 → 0.34.7 in PR release/v0.34.7 to ship the desktop
+# enrollment-paste handler fix (PR #89). The fix is purely desktop JS but
+# the protocol patch version is bumped so the release tag is monotonic
+# and floor tests can be ratcheted; the floor at tests/version_pin_test.rs
+# (and the 3× mix.exs floor guards) is moved to 0.34.7 in the same PR.
+version = "0.34.7"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

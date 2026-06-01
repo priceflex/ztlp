@@ -4627,6 +4627,82 @@ async fn cmd_listen(
             eprintln!("Invalid relay address format: {}", r_addr);
         }
     }
+
+    // ── NS self-registration heartbeat ──────────────────────────────
+    //
+    // When the operator passed all three of (--ns-server, --service-name,
+    // --zone), spawn a background task that periodically publishes our
+    // KEY+SVC records to NS. Refreshes the records BEFORE the 24h NS TTL
+    // expires, so a listener that's been up for >24h stays reachable via
+    // ZTLP-NS lookups without any external (Chef, cron) intervention.
+    //
+    // Heartbeat cadence: 8 hours nominal + up to 10 minutes uniform jitter
+    // to smear load when ~1000 listeners share the same interval.
+    //
+    // The initial publish is synchronous and aborts startup on error — a
+    // misconfigured zone/identity should fail fast at the Windows service
+    // event log, not silently never publish.
+    //
+    // See docs/plans/2026-06-01-ns-self-register-heartbeat.md for design.
+    if let (Some(ns), Some(z)) = (ns_server.as_deref(), zone) {
+        // Advertised address = the QUIC listener's bound address. The relay
+        // sees the same (ip, port) for both GATEWAY_REGISTER and client
+        // traffic; NS likewise gets the listener's address so direct-dial
+        // clients can bypass the relay.
+        let listener_addr = server
+            .inner
+            .local_addr()
+            .map_err(|e| format!("failed to read QUIC listener local_addr: {}", e))?;
+        let advertise_addr = listener_addr.to_string();
+
+        let name = service_name.to_string();
+        let zone_s = z.to_string();
+        let ns_s = ns.to_string();
+        let identity_arc = std::sync::Arc::new(identity.clone());
+
+        // Initial synchronous publish — fail fast on misconfiguration so the
+        // Windows service launcher gets a visible failure rather than a
+        // silently-broken NS presence.
+        match ns_publish_self(
+            &name,
+            &zone_s,
+            &identity_arc,
+            &ns_s,
+            Some(&advertise_addr),
+        )
+        .await
+        {
+            Ok(()) => {
+                eprintln!(
+                    "{} NS heartbeat enrolled: {} @ {} -> {}",
+                    c_green("✓"),
+                    name,
+                    advertise_addr,
+                    ns_s
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} initial NS publish failed: {} (heartbeat will retry)",
+                    c_yellow("⚠"),
+                    e
+                );
+            }
+        }
+
+        // Spawn the long-lived heartbeat task. We don't hold the JoinHandle
+        // — the task lives as long as the process.
+        tokio::spawn(ns_heartbeat_task(
+            name,
+            zone_s,
+            identity_arc,
+            ns_s,
+            Some(advertise_addr),
+            Duration::from_secs(8 * 3600),     // 8h nominal
+            Duration::from_secs(10 * 60),      // ±10min jitter
+        ));
+    }
+
     let service_registry = match ztlp_proto::tunnel::ServiceRegistry::from_forward_args(forward) {
         Ok(reg) => std::sync::Arc::new(reg),
         Err(e) => {
@@ -5882,6 +5958,202 @@ fn build_registration_packet(name: &str, type_byte: u8, data_bin: &[u8]) -> Vec<
     pkt.extend_from_slice(data_bin);
     pkt.extend_from_slice(&sig_len.to_be_bytes());
     pkt
+}
+
+/// Publish KEY and (optionally) SVC records for `identity` to NS at `ns_server`.
+///
+/// Extracted from `cmd_ns_register` so the same logic can be driven by:
+///   - The `ztlp ns register` CLI subcommand (backward compat).
+///   - The `ns_heartbeat_task` that runs inside `ztlp listen`, refreshing the
+///     record before its 24h TTL expires.
+///
+/// Validates that `name` is within `zone` before touching the network, so a
+/// misconfigured listener fails fast at startup rather than silently never
+/// publishing.
+///
+/// See docs/plans/2026-06-01-ns-self-register-heartbeat.md for design.
+async fn ns_publish_self(
+    name: &str,
+    zone: &str,
+    identity: &NodeIdentity,
+    ns_server: &str,
+    address: Option<&String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate the name is within the specified zone BEFORE binding any
+    // socket — keeps test harnesses cheap and gives an obvious error at
+    // startup when an operator passes a mismatched name/zone.
+    if !name.ends_with(&format!(".{}", zone)) && name != zone {
+        return Err(format!(
+            "name '{}' is not within zone '{}'\n  The name must end with '.{}'",
+            name, zone, zone
+        )
+        .into());
+    }
+
+    let ns_addr: SocketAddr = ns_server
+        .parse()
+        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+
+    let node_id_hex = hex::encode(identity.node_id.0);
+    let pubkey_hex = hex::encode(&identity.static_public_key);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+
+    // ── KEY record ──────────────────────────────────────────────────
+    // Include address in KEY record for backward compat with older NS servers
+    // that don't differentiate KEY vs SVC record types.
+    let key_data_bin = if let Some(addr) = address {
+        cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", &node_id_hex),
+            ("public_key", &pubkey_hex),
+            ("address", addr.as_str()),
+        ])
+    } else {
+        cbor_map(&mut vec![
+            ("algorithm", "Ed25519"),
+            ("node_id", &node_id_hex),
+            ("public_key", &pubkey_hex),
+        ])
+    };
+
+    let key_pkt = build_registration_packet(name, 1, &key_data_bin); // type 1 = KEY
+    sock.send_to(&key_pkt, ns_addr).await?;
+
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
+        Ok(Ok((len, _))) => {
+            let resp = &buf[..len];
+            match resp.first() {
+                Some(0x06) => { /* ACK */ }
+                Some(0xFF) => {
+                    return Err(format!(
+                        "KEY registration failed: {}",
+                        decode_registration_error(resp)
+                    )
+                    .into());
+                }
+                Some(code) => {
+                    return Err(
+                        format!("NS server returned unexpected response: 0x{:02x}", code).into(),
+                    );
+                }
+                None => {
+                    return Err("NS server returned empty response".into());
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            return Err(format!("network error during KEY registration: {}", e).into());
+        }
+        Err(_) => {
+            return Err(format!(
+                "timeout waiting for NS server response at {}",
+                ns_server
+            )
+            .into());
+        }
+    }
+
+    // ── SVC record (only when address provided) ─────────────────────
+    if let Some(addr_str) = address {
+        // Validate address format
+        let _: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| format!("invalid address '{}': {} (expected ip:port)", addr_str, e))?;
+
+        let svc_data_bin = cbor_map(&mut vec![
+            ("address", addr_str.as_str()),
+            ("node_id", &node_id_hex),
+            ("zone", zone),
+        ]);
+
+        let svc_pkt = build_registration_packet(name, 2, &svc_data_bin); // type 2 = SVC
+        sock.send_to(&svc_pkt, ns_addr).await?;
+
+        // SVC failures are non-fatal — KEY is the critical record. Callers can
+        // surface their own logging if they care; the heartbeat task just
+        // retries next tick.
+        let _ = timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await;
+    }
+
+    // ── Verify (KEY lookup) ─────────────────────────────────────────
+    // Small delay to let server process the registration.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let name_bytes = name.as_bytes();
+    let name_len_u16 = name_bytes.len() as u16;
+    let mut query = Vec::with_capacity(4 + name_bytes.len());
+    query.push(0x01); // Query opcode
+    query.extend_from_slice(&name_len_u16.to_be_bytes());
+    query.extend_from_slice(name_bytes);
+    query.push(1); // KEY record type
+
+    sock.send_to(&query, ns_addr).await?;
+    let _ = timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await;
+
+    Ok(())
+}
+
+/// Heartbeat loop that republishes this listener's NS records before the 24h
+/// TTL expires. Spawned by `cmd_listen` when NS settings are configured.
+///
+/// `interval` is the nominal time between publishes (8h in production).
+/// `jitter_max` adds [0, jitter_max) random delay each cycle to smear load
+/// from a large fleet (10min in production).
+///
+/// Failures are logged at WARN and retried on the next tick — the listener
+/// keeps serving traffic regardless of NS health.
+async fn ns_heartbeat_task(
+    name: String,
+    zone: String,
+    identity: std::sync::Arc<NodeIdentity>,
+    ns_server: String,
+    address: Option<String>,
+    interval: Duration,
+    jitter_max: Duration,
+) {
+    loop {
+        match ns_publish_self(&name, &zone, &identity, &ns_server, address.as_ref()).await {
+            Ok(()) => {
+                eprintln!(
+                    "{} [ns_heartbeat] published {} to {}",
+                    c_dim("→"),
+                    name,
+                    ns_server
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} [ns_heartbeat] publish failed ({}): {} — will retry in {:?}",
+                    c_yellow("⚠"),
+                    name,
+                    e,
+                    interval
+                );
+            }
+        }
+
+        // Sleep with jitter — uniform [0, jitter_max) added to the nominal
+        // interval. Avoids stampeding NS at the top of each cycle when 1000
+        // listeners share the same interval. Cheap LCG seeded from
+        // current-time nanos; cryptographic randomness is not required for
+        // load smearing.
+        let jitter = if jitter_max.is_zero() {
+            Duration::ZERO
+        } else {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            let r = nanos
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            let bound = (jitter_max.as_millis() as u64).max(1);
+            Duration::from_millis(r % bound)
+        };
+        tokio::time::sleep(interval + jitter).await;
+    }
 }
 
 /// `ztlp ns register` — Register with ZTLP-NS
@@ -12981,6 +13253,203 @@ mod tests {
             .iter()
             .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id"));
         assert!(found, "node_id key missing from SVC-record CBOR");
+    }
+
+    // ── v0.34.8 NS self-registration heartbeat ──────────────────────────
+    //
+    // Tests pin the contract for `ns_publish_self` (the helper extracted
+    // from `cmd_ns_register`) and `ns_heartbeat_task` (the periodic
+    // republish loop spawned by `cmd_listen`).
+    //
+    // See docs/plans/2026-06-01-ns-self-register-heartbeat.md for design.
+
+    /// Stub NS server that captures registration packets sent to it.
+    /// Replies 0x06 (ACK) to every registration and 0x02 (lookup found) to
+    /// every query so the helper's happy path completes.
+    ///
+    /// Wire opcodes (per build_registration_packet @ ztlp-cli.rs):
+    ///   - register: 0x09 (was 0x02 pre-v0.5.1)
+    ///   - query:    0x01
+    async fn spawn_capture_ns()
+    -> (std::net::SocketAddr, std::sync::Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>) {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let captured_c = captured.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                match sock.recv_from(&mut buf).await {
+                    Ok((len, src)) => {
+                        let pkt = buf[..len].to_vec();
+                        // Distinguish register (0x09) vs query (0x01)
+                        let reply: Vec<u8> = match pkt.first() {
+                            Some(0x01) => vec![0x02], // lookup found
+                            _ => vec![0x06],          // register ACK
+                        };
+                        captured_c.lock().await.push(pkt);
+                        let _ = sock.send_to(&reply, src).await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (addr, captured)
+    }
+
+    #[tokio::test]
+    async fn ns_publish_self_validates_name_in_zone() {
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+        // Name outside zone — must reject before any socket I/O.
+        let result = ns_publish_self(
+            "foo.bar.ztlp",
+            "baz.ztlp",
+            &identity,
+            "127.0.0.1:1", // unreachable, must NOT be touched
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "expected validation error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not within zone"),
+            "error must mention zone validation, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn ns_publish_self_constructs_key_packet_with_node_id() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+
+        let result = ns_publish_self(
+            "node.example.ztlp",
+            "example.ztlp",
+            &identity,
+            &ns_addr.to_string(),
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "publish failed: {:?}", result);
+
+        let pkts = captured.lock().await;
+        // KEY-only path: 1 register packet + 1 verification query.
+        assert_eq!(pkts.len(), 2, "expected 1 register + 1 query");
+
+        // Extract the CBOR data section from the first packet.
+        // Wire: <<opcode=0x09, name_len::u16, name, type=1, data_len::u16, data, sig_len::u16>>
+        let p = &pkts[0];
+        assert_eq!(p[0], 0x09, "expected register opcode (0x09)");
+        let name_len = u16::from_be_bytes([p[1], p[2]]) as usize;
+        let data_off = 1 + 2 + name_len + 1 + 2;
+        let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
+        let cbor = &p[data_off..data_off + data_len];
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        assert!(
+            map.iter()
+                .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "node_id")),
+            "KEY record missing node_id"
+        );
+        assert!(
+            map.iter()
+                .any(|(k, _)| matches!(k, ciborium::value::Value::Text(s) if s == "public_key")),
+            "KEY record missing public_key"
+        );
+    }
+
+    #[tokio::test]
+    async fn ns_publish_self_constructs_svc_packet_when_address_given() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+
+        let result = ns_publish_self(
+            "node.example.ztlp",
+            "example.ztlp",
+            &identity,
+            &ns_addr.to_string(),
+            Some(&"10.0.0.1:23095".to_string()),
+        )
+        .await;
+        assert!(result.is_ok(), "publish failed: {:?}", result);
+
+        let pkts = captured.lock().await;
+        // KEY + SVC + 1 verification query.
+        assert_eq!(
+            pkts.len(),
+            3,
+            "expected KEY + SVC + verify, got {}",
+            pkts.len()
+        );
+
+        // Second register packet should be the SVC record (type byte = 2).
+        let p = &pkts[1];
+        assert_eq!(p[0], 0x09, "expected register opcode (0x09)");
+        let name_len = u16::from_be_bytes([p[1], p[2]]) as usize;
+        let type_byte = p[3 + name_len];
+        assert_eq!(type_byte, 2, "second register should be SVC (type=2)");
+    }
+
+    #[tokio::test]
+    async fn ns_publish_self_omits_svc_when_no_address() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+        let _ = ns_publish_self(
+            "node.example.ztlp",
+            "example.ztlp",
+            &identity,
+            &ns_addr.to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let pkts = captured.lock().await;
+        // KEY + verify, no SVC. Register opcode = 0x09.
+        let registers: Vec<_> = pkts.iter().filter(|p| p.first() == Some(&0x09)).collect();
+        assert_eq!(
+            registers.len(),
+            1,
+            "expected exactly 1 register packet when no --address"
+        );
+    }
+
+    #[tokio::test]
+    async fn ns_heartbeat_task_republishes_on_tick() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = std::sync::Arc::new(
+            ztlp_proto::identity::NodeIdentity::generate().unwrap(),
+        );
+
+        // Spawn heartbeat with a short tick interval for the test.
+        let handle = tokio::spawn(ns_heartbeat_task(
+            "node.example.ztlp".to_string(),
+            "example.ztlp".to_string(),
+            identity,
+            ns_addr.to_string(),
+            Some("10.0.0.1:23095".to_string()),
+            std::time::Duration::from_millis(150),
+            std::time::Duration::from_millis(0), // no jitter for determinism
+        ));
+
+        // Wait long enough for at least 3 heartbeats (initial + 2 ticks).
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        handle.abort();
+
+        let pkts = captured.lock().await;
+        // Register opcode = 0x09.
+        let registers: Vec<_> = pkts.iter().filter(|p| p.first() == Some(&0x09)).collect();
+        // 3 cycles × 2 registers per cycle (KEY+SVC) = ≥6 register packets.
+        // Be permissive: ≥4 confirms heartbeat is actually republishing.
+        assert!(
+            registers.len() >= 4,
+            "expected ≥4 register packets across heartbeats, got {}",
+            registers.len()
+        );
     }
 
     // ── v0.32.2 A1: pick_quic_dial_target — multi-candidate winner overrides

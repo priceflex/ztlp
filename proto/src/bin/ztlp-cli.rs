@@ -4663,15 +4663,7 @@ async fn cmd_listen(
         // Initial synchronous publish — fail fast on misconfiguration so the
         // Windows service launcher gets a visible failure rather than a
         // silently-broken NS presence.
-        match ns_publish_self(
-            &name,
-            &zone_s,
-            &identity_arc,
-            &ns_s,
-            Some(&advertise_addr),
-        )
-        .await
-        {
+        match ns_publish_self(&name, &zone_s, &identity_arc, &ns_s, Some(&advertise_addr)).await {
             Ok(()) => {
                 eprintln!(
                     "{} NS heartbeat enrolled: {} @ {} -> {}",
@@ -4698,8 +4690,8 @@ async fn cmd_listen(
             identity_arc,
             ns_s,
             Some(advertise_addr),
-            Duration::from_secs(8 * 3600),     // 8h nominal
-            Duration::from_secs(10 * 60),      // ±10min jitter
+            Duration::from_secs(8 * 3600), // 8h nominal
+            Duration::from_secs(10 * 60),  // ±10min jitter
         ));
     }
 
@@ -6047,11 +6039,7 @@ async fn ns_publish_self(
             return Err(format!("network error during KEY registration: {}", e).into());
         }
         Err(_) => {
-            return Err(format!(
-                "timeout waiting for NS server response at {}",
-                ns_server
-            )
-            .into());
+            return Err(format!("timeout waiting for NS server response at {}", ns_server).into());
         }
     }
 
@@ -13270,8 +13258,10 @@ mod tests {
     /// Wire opcodes (per build_registration_packet @ ztlp-cli.rs):
     ///   - register: 0x09 (was 0x02 pre-v0.5.1)
     ///   - query:    0x01
-    async fn spawn_capture_ns()
-    -> (std::net::SocketAddr, std::sync::Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>) {
+    async fn spawn_capture_ns() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
+    ) {
         let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
         let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<Vec<u8>>::new()));
@@ -13345,8 +13335,7 @@ mod tests {
         let data_off = 1 + 2 + name_len + 1 + 2;
         let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
         let cbor = &p[data_off..data_off + data_len];
-        let decoded: ciborium::value::Value =
-            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let decoded: ciborium::value::Value = ciborium::de::from_reader(cbor).expect("cbor decode");
         let map = match decoded {
             ciborium::value::Value::Map(m) => m,
             _ => panic!("expected CBOR map"),
@@ -13421,9 +13410,7 @@ mod tests {
     #[tokio::test]
     async fn ns_heartbeat_task_republishes_on_tick() {
         let (ns_addr, captured) = spawn_capture_ns().await;
-        let identity = std::sync::Arc::new(
-            ztlp_proto::identity::NodeIdentity::generate().unwrap(),
-        );
+        let identity = std::sync::Arc::new(ztlp_proto::identity::NodeIdentity::generate().unwrap());
 
         // Spawn heartbeat with a short tick interval for the test.
         let handle = tokio::spawn(ns_heartbeat_task(

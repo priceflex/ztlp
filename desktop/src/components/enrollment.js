@@ -72,7 +72,15 @@ const EnrollmentComponent = (() => {
     try {
       const text = await navigator.clipboard.readText();
       const input = document.getElementById('enroll-uri');
-      if (input) input.value = text;
+      if (input) {
+        input.value = text.trim();
+        // Programmatic .value = ... does NOT fire 'input' / oninput, so the
+        // gating button stays disabled until the user clicks into the field.
+        // Re-run the gate directly (and dispatch an input event for any
+        // future listeners that might attach to this field).
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        updateButtonState();
+      }
     } catch {
       // Clipboard permission denied
       showStatus('error', 'Clipboard access denied. Please paste manually.');

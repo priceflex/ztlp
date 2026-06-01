@@ -1,7 +1,40 @@
 // ── Enrollment Component — Token paste enrollment ───────────────────
 
+// DIAGNOSTIC BUILD (PR #89, June 2026):
+// Steve reported the Enroll button stayed disabled even with URI + attestation
+// satisfied. AHK-driven repro on the Windows bench confirmed the bug is NOT in
+// paste() (the previously-suspected programmatic-value-set issue) — typing the
+// URI directly into the field + ticking the checkbox also leaves Enroll faded.
+// This build instruments updateButtonState() so we can see what's happening
+// without DevTools (writes to an on-page #enroll-debug strip + localStorage).
+const ENROLL_BUILD_TAG = 'ENROLL-BUILD-3-DIAGNOSTIC';
+console.log(ENROLL_BUILD_TAG);
+
+// Visible debug surface — appended to the enrollment page so screenshots
+// capture the gate's state without needing DevTools.
+function _enrollDebug(msg) {
+  try {
+    const ts = new Date().toISOString().split('T')[1].replace('Z', '');
+    const line = `${ts} ${msg}`;
+    console.log('[enroll-debug]', line);
+    // Persist last 20 lines in localStorage so we survive page reloads
+    const prev = JSON.parse(localStorage.getItem('enroll_debug') || '[]');
+    prev.push(line);
+    while (prev.length > 20) prev.shift();
+    localStorage.setItem('enroll_debug', JSON.stringify(prev));
+    // Render to on-page strip if present
+    const strip = document.getElementById('enroll-debug');
+    if (strip) {
+      strip.textContent = prev.slice(-6).join('\n');
+    }
+  } catch (e) {
+    console.error('[enroll-debug] write failed', e);
+  }
+}
+
 const EnrollmentComponent = (() => {
   const container = document.getElementById('page-enrollment');
+  _enrollDebug(`component init tag=${ENROLL_BUILD_TAG} container=${!!container}`);
 
   function render() {
     container.innerHTML = `
@@ -54,6 +87,10 @@ const EnrollmentComponent = (() => {
         </button>
 
         <div class="enrollment-status" id="enroll-status"></div>
+
+        <!-- DIAGNOSTIC strip (PR #89): renders the gate's last-seen state so
+             screenshots tell us what fired. Remove before merge to main. -->
+        <pre id="enroll-debug" style="margin-top:12px; padding:8px; background:#f5f5f5; border:1px solid #ddd; font-size:11px; white-space:pre-wrap; color:#333; max-height:120px; overflow-y:auto;">build: ${ENROLL_BUILD_TAG} (waiting for first event)</pre>
       </div>
 
       <div class="card">
@@ -66,11 +103,39 @@ const EnrollmentComponent = (() => {
         </div>
       </div>
     `;
+
+    // DIAGNOSTIC: also wire listeners programmatically. If the inline
+    // oninput/onchange attributes aren't firing (CSP, scope, whatever),
+    // these addEventListener calls will. _enrollDebug() will tell us
+    // which path actually invoked the gate.
+    const uriInput = document.getElementById('enroll-uri');
+    const checkbox = document.getElementById('enroll-attestation');
+    const pasteBtn = container.querySelector('button.btn-secondary');
+    if (uriInput) {
+      uriInput.addEventListener('input', () => {
+        _enrollDebug('addEventListener input fired');
+        updateButtonState();
+      });
+    }
+    if (checkbox) {
+      checkbox.addEventListener('change', () => {
+        _enrollDebug('addEventListener change fired');
+        updateButtonState();
+      });
+    }
+    if (pasteBtn) {
+      pasteBtn.addEventListener('click', () => {
+        _enrollDebug('addEventListener paste-click fired');
+      });
+    }
+    _enrollDebug(`render done uri=${!!uriInput} cb=${!!checkbox} paste=${!!pasteBtn}`);
   }
 
   async function paste() {
+    _enrollDebug('paste() entered');
     try {
       const text = await navigator.clipboard.readText();
+      _enrollDebug(`paste() readText OK len=${text.length}`);
       const input = document.getElementById('enroll-uri');
       if (input) {
         input.value = text.trim();
@@ -80,8 +145,12 @@ const EnrollmentComponent = (() => {
         // future listeners that might attach to this field).
         input.dispatchEvent(new Event('input', { bubbles: true }));
         updateButtonState();
+        _enrollDebug(`paste() input value set len=${input.value.length}`);
+      } else {
+        _enrollDebug('paste() input element NOT FOUND');
       }
-    } catch {
+    } catch (e) {
+      _enrollDebug(`paste() readText THREW: ${e && e.message ? e.message : String(e)}`);
       // Clipboard permission denied
       showStatus('error', 'Clipboard access denied. Please paste manually.');
     }
@@ -149,9 +218,16 @@ const EnrollmentComponent = (() => {
     const checkbox = document.getElementById('enroll-attestation');
     const input = document.getElementById('enroll-uri');
     const btn = document.getElementById('enroll-btn');
-    if (!checkbox || !btn) return;
+    if (!checkbox || !btn) {
+      _enrollDebug(`gate ABORT checkbox=${!!checkbox} btn=${!!btn} input=${!!input}`);
+      return;
+    }
+    const rawValue = input ? input.value : '(no input element)';
     const hasUri = input && input.value && input.value.trim().length > 0;
-    btn.disabled = !(checkbox.checked && hasUri);
+    const checked = checkbox.checked;
+    const shouldDisable = !(checked && hasUri);
+    btn.disabled = shouldDisable;
+    _enrollDebug(`gate checked=${checked} hasUri=${hasUri} rawLen=${rawValue.length} disabled=${btn.disabled}`);
   }
 
   function showStatus(type, message) {

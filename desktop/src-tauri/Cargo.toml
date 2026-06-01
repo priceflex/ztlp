@@ -1,15 +1,17 @@
 [package]
 name = "ztlp-desktop"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "ZTLP Desktop — Zero Trust Layer Protocol client"
 authors = ["Steven Price <steve@techrockstars.com>"]
 
 [dependencies]
-# `devtools` feature is gated to debug builds via [target.'cfg(debug_assertions)']
-# section below — keeps release binaries lean and prevents the WebView inspector
-# from being available in production installs.
-tauri = { version = "2", features = ["tray-icon"] }
+# `devtools` feature is enabled in release per ztlp-desktop-release skill
+# §3 invariant — operators MUST be able to right-click → Inspect on shipped
+# installers to triage UI bugs without a fresh build cycle. PR #89's
+# WebView2 inline-handler bug took ~2 hours to repro entirely because the
+# previous release shipped without devtools.
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

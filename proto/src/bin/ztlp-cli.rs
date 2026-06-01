@@ -408,6 +408,26 @@ enum Commands {
         #[arg(long)]
         zone_hmac_secret_env: Option<String>,
 
+        /// Fully-qualified ZTLP-NS name to publish as this listener's KEY
+        /// (and SVC, when a routable bind address is available) record.
+        ///
+        /// When set together with `--ns-server` and `--zone`, the listener
+        /// spawns a background heartbeat task that publishes its NS records
+        /// at boot and re-publishes every 8h ± 10min jitter — keeping the
+        /// records refreshed before the 24h NS TTL expires.
+        ///
+        /// This flag is the explicit opt-in for listener-driven NS
+        /// registration. Leave unset to keep the previous behavior where
+        /// NS registration is handled externally (Chef cookbook, manual
+        /// `ztlp ns register` call, etc.).
+        ///
+        /// The name MUST live inside `--zone` — i.e. end with `.<zone>` (or
+        /// equal `<zone>`). Mismatched name/zone aborts startup.
+        ///
+        /// See docs/plans/2026-06-01-ns-self-register-heartbeat.md.
+        #[arg(long)]
+        ns_register_name: Option<String>,
+
         /// Enable HTTP X-ZTLP-* header injection for passwordless admin auth.
         ///
         /// When set, the FIRST HTTP request on each forwarded TCP connection
@@ -4314,6 +4334,7 @@ async fn cmd_listen(
     service_name: &str,
     zone: Option<&str>,
     zone_hmac_secret_env: Option<&str>,
+    ns_register_name: Option<&str>,
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
@@ -4630,57 +4651,83 @@ async fn cmd_listen(
 
     // ── NS self-registration heartbeat ──────────────────────────────
     //
-    // When the operator passed all three of (--ns-server, --service-name,
-    // --zone), spawn a background task that periodically publishes our
-    // KEY+SVC records to NS. Refreshes the records BEFORE the 24h NS TTL
-    // expires, so a listener that's been up for >24h stays reachable via
-    // ZTLP-NS lookups without any external (Chef, cron) intervention.
+    // OPT-IN: only spawn when the operator explicitly passes
+    // `--ns-register-name` AND `--ns-server` AND `--zone`. Using
+    // `--service-name` (which has a default of `ztlp-gateway`) would silently
+    // register every gateway under a junk name, so we require an explicit
+    // name here. Listeners that already get their NS records published
+    // externally (Chef cookbook, manual `ztlp ns register`, etc.) simply
+    // omit `--ns-register-name` and behavior is unchanged.
     //
     // Heartbeat cadence: 8 hours nominal + up to 10 minutes uniform jitter
-    // to smear load when ~1000 listeners share the same interval.
+    // to smear load when ~1000 listeners share the same interval. Records
+    // carry a 24h TTL, so 3 cycles per TTL window is comfortable headroom.
     //
-    // The initial publish is synchronous and aborts startup on error — a
-    // misconfigured zone/identity should fail fast at the Windows service
-    // event log, not silently never publish.
+    // The initial publish is synchronous and ABORTS startup on error. A
+    // misconfigured zone/identity must fail fast at the Windows service
+    // event log rather than silently never publishing.
     //
-    // See docs/plans/2026-06-01-ns-self-register-heartbeat.md for design.
-    if let (Some(ns), Some(z)) = (ns_server.as_deref(), zone) {
-        // Advertised address = the QUIC listener's bound address. The relay
-        // sees the same (ip, port) for both GATEWAY_REGISTER and client
-        // traffic; NS likewise gets the listener's address so direct-dial
-        // clients can bypass the relay.
+    // The SVC record carries the listener's address, which clients use to
+    // dial directly. If the bind address is unspecified (`0.0.0.0:PORT` or
+    // `[::]:PORT`), publishing SVC would advertise an unroutable endpoint,
+    // so we publish KEY-only in that case. A concrete bind is required for
+    // SVC publication.
+    //
+    // See docs/plans/2026-06-01-ns-self-register-heartbeat.md.
+    if let (Some(register_name), Some(ns), Some(z)) = (ns_register_name, ns_server.as_deref(), zone)
+    {
         let listener_addr = server
             .inner
             .local_addr()
             .map_err(|e| format!("failed to read QUIC listener local_addr: {}", e))?;
-        let advertise_addr = listener_addr.to_string();
+        // Only publish SVC when bind is a concrete (routable) address.
+        // `0.0.0.0:PORT` and `[::]:PORT` would advertise an unroutable
+        // endpoint that clients can't dial.
+        let advertise_addr: Option<String> = if listener_addr.ip().is_unspecified() {
+            eprintln!(
+                "{} listener bound to unspecified address {}; publishing KEY only \
+                 (no SVC record) — dial requires a concrete --bind address",
+                c_yellow("⚠"),
+                listener_addr
+            );
+            None
+        } else {
+            Some(listener_addr.to_string())
+        };
 
-        let name = service_name.to_string();
+        let name = register_name.to_string();
         let zone_s = z.to_string();
         let ns_s = ns.to_string();
         let identity_arc = std::sync::Arc::new(identity.clone());
 
-        // Initial synchronous publish — fail fast on misconfiguration so the
-        // Windows service launcher gets a visible failure rather than a
-        // silently-broken NS presence.
-        match ns_publish_self(&name, &zone_s, &identity_arc, &ns_s, Some(&advertise_addr)).await {
-            Ok(()) => {
-                eprintln!(
-                    "{} NS heartbeat enrolled: {} @ {} -> {}",
-                    c_green("✓"),
-                    name,
-                    advertise_addr,
-                    ns_s
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "{} initial NS publish failed: {} (heartbeat will retry)",
-                    c_yellow("⚠"),
-                    e
-                );
-            }
-        }
+        // Initial synchronous publish — fail fast on misconfiguration.
+        ns_publish_self(
+            &name,
+            &zone_s,
+            &identity_arc,
+            &ns_s,
+            advertise_addr.as_ref(),
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "initial NS publish failed: {} — refusing to start listener with a \
+                 broken NS heartbeat config. Check --ns-register-name '{}' lives \
+                 inside --zone '{}', and NS at {} is reachable.",
+                e, name, zone_s, ns_s
+            )
+        })?;
+
+        eprintln!(
+            "{} NS heartbeat enrolled: {}{} -> {}",
+            c_green("✓"),
+            name,
+            advertise_addr
+                .as_deref()
+                .map(|a| format!(" @ {}", a))
+                .unwrap_or_default(),
+            ns_s
+        );
 
         // Spawn the long-lived heartbeat task. We don't hold the JoinHandle
         // — the task lives as long as the process.
@@ -4689,7 +4736,7 @@ async fn cmd_listen(
             zone_s,
             identity_arc,
             ns_s,
-            Some(advertise_addr),
+            advertise_addr,
             Duration::from_secs(8 * 3600), // 8h nominal
             Duration::from_secs(10 * 60),  // ±10min jitter
         ));
@@ -12194,6 +12241,7 @@ async fn main() {
             service_name,
             zone,
             zone_hmac_secret_env,
+            ns_register_name,
             http_inject_headers,
             header_hmac_secret,
             admin_pubkey_email,
@@ -12231,6 +12279,7 @@ async fn main() {
                 service_name,
                 zone.as_deref(),
                 zone_hmac_secret_env.as_deref(),
+                ns_register_name.as_deref(),
                 *http_inject_headers,
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,

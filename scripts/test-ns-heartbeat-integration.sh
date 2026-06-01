@@ -58,9 +58,27 @@ with open(log, "w") as f:
 PY
 
 NS_LOG="$WORKDIR/ns.log"
-python3 "$WORKDIR/stub_ns.py" "$NS_PORT" "$NS_LOG" &
+python3 -u "$WORKDIR/stub_ns.py" "$NS_PORT" "$NS_LOG" > "$WORKDIR/stub_ns.stdout" 2>&1 &
 NS_PID=$!
-sleep 0.5
+# Wait for stub NS to actually bind the UDP port — fixed sleep races on slow
+# CI runners. Probe by reading the stub's stdout for the "listening" log line.
+for i in $(seq 1 40); do
+    if grep -q "listening on 127.0.0.1:$NS_PORT" "$WORKDIR/stub_ns.stdout" 2>/dev/null; then
+        echo "  ✓ stub NS ready after ${i}*0.1s"
+        break
+    fi
+    if ! kill -0 "$NS_PID" 2>/dev/null; then
+        echo "FAIL: stub NS process died before becoming ready"
+        cat "$WORKDIR/stub_ns.stdout"
+        exit 1
+    fi
+    sleep 0.1
+done
+if ! grep -q "listening on 127.0.0.1:$NS_PORT" "$WORKDIR/stub_ns.stdout" 2>/dev/null; then
+    echo "FAIL: stub NS never reported listening after 4s"
+    cat "$WORKDIR/stub_ns.stdout"
+    exit 1
+fi
 
 # ── Generate a test identity ───────────────────────────────────────
 "$ZTLP" keygen --output "$WORKDIR/identity.json" >/dev/null 2>&1
@@ -75,24 +93,35 @@ LISTENER_LOG="$WORKDIR/listener.log"
     --bind "127.0.0.1:$LISTENER_PORT" \
     --key "$WORKDIR/identity.json" \
     --ns-server "127.0.0.1:$NS_PORT" \
-    --service-name "test-node.example.ztlp" \
+    --ns-register-name "test-node.example.ztlp" \
     --zone "example.ztlp" \
     > "$LISTENER_LOG" 2>&1 &
 LISTENER_PID=$!
 
 # ── Wait for initial heartbeat (max 10s) ───────────────────────────
 echo "Waiting for initial NS heartbeat..."
+FOUND_MSG=0
 for i in $(seq 1 20); do
     if grep -q "NS heartbeat enrolled" "$LISTENER_LOG" 2>/dev/null; then
         echo "  ✓ initial publish observed after ${i}*0.5s"
+        FOUND_MSG=1
         break
     fi
     if grep -q "initial NS publish failed" "$LISTENER_LOG" 2>/dev/null; then
         echo "  ✓ initial publish attempt observed (failed path) after ${i}*0.5s"
+        FOUND_MSG=1
         break
     fi
     sleep 0.5
 done
+if [ "$FOUND_MSG" -eq 0 ]; then
+    echo "FAIL: neither 'NS heartbeat enrolled' nor 'initial NS publish failed' found in listener log after 10s"
+    echo
+    echo "=== listener stderr ==="
+    cat "$LISTENER_LOG" | sed 's/^/  /'
+    kill $LISTENER_PID $NS_PID 2>/dev/null || true
+    exit 1
+fi
 
 # ── Assert: NS stub saw ≥2 register packets (KEY + SVC) ────────────
 sleep 1

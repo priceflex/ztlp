@@ -85,6 +85,35 @@ discovery: the **running service** publishes its own liveness.
           └────────────────┘
 ```
 
+### Opt-in via `--ns-register-name`
+
+Listener-driven NS self-registration is **opt-in**. Operators activate it
+by passing **all three** of:
+
+  - `--ns-server <addr>` — NS UDP endpoint
+  - `--zone <zone>` — zone the name lives in
+  - `--ns-register-name <fqsn>` — the fully-qualified name to publish
+    (e.g. `desktop-abc.tech-rockstars.trs.ztlp`)
+
+Without an explicit `--ns-register-name`, the listener does NOT touch NS
+on its own. This matters because `--service-name` has a default
+(`ztlp-gateway`) used for relay routing, so reusing it for NS would
+silently activate registration for every gateway and pollute NS with
+junk names.
+
+`--ns-register-name` MUST live inside `--zone` — i.e. end with
+`.<zone>` (or equal `<zone>`). Mismatched name/zone aborts startup.
+
+### Address publication: SVC vs KEY-only
+
+- **Concrete bind** (e.g. `--bind 1.2.3.4:23095`) → both KEY and SVC are
+  published. SVC carries the listener's bound address so clients can
+  dial directly.
+- **Unspecified bind** (e.g. `--bind 0.0.0.0:23095` or `[::]:23095`) →
+  KEY-only mode. Publishing SVC with `0.0.0.0` would advertise an
+  unroutable endpoint that clients can't dial. A warning is logged at
+  startup pointing operators at the `--bind` flag.
+
 ### Heartbeat cadence
 
 - TTL is 24h (86400s).

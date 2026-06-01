@@ -1,40 +1,23 @@
 // ── Enrollment Component — Token paste enrollment ───────────────────
-
-// DIAGNOSTIC BUILD (PR #89, June 2026):
-// Steve reported the Enroll button stayed disabled even with URI + attestation
-// satisfied. AHK-driven repro on the Windows bench confirmed the bug is NOT in
-// paste() (the previously-suspected programmatic-value-set issue) — typing the
-// URI directly into the field + ticking the checkbox also leaves Enroll faded.
-// This build instruments updateButtonState() so we can see what's happening
-// without DevTools (writes to an on-page #enroll-debug strip + localStorage).
-const ENROLL_BUILD_TAG = 'ENROLL-BUILD-3-DIAGNOSTIC';
-console.log(ENROLL_BUILD_TAG);
-
-// Visible debug surface — appended to the enrollment page so screenshots
-// capture the gate's state without needing DevTools.
-function _enrollDebug(msg) {
-  try {
-    const ts = new Date().toISOString().split('T')[1].replace('Z', '');
-    const line = `${ts} ${msg}`;
-    console.log('[enroll-debug]', line);
-    // Persist last 20 lines in localStorage so we survive page reloads
-    const prev = JSON.parse(localStorage.getItem('enroll_debug') || '[]');
-    prev.push(line);
-    while (prev.length > 20) prev.shift();
-    localStorage.setItem('enroll_debug', JSON.stringify(prev));
-    // Render to on-page strip if present
-    const strip = document.getElementById('enroll-debug');
-    if (strip) {
-      strip.textContent = prev.slice(-6).join('\n');
-    }
-  } catch (e) {
-    console.error('[enroll-debug] write failed', e);
-  }
-}
+//
+// History: PR #89 (June 2026) — Steve reported that on a fresh WebView2
+// Runtime (Chromium 148) the Enroll button stayed disabled even with a
+// URI in the field AND the attestation checkbox ticked. AHK-driven repro
+// on a clean install captured the on-page diagnostic strip showing that
+// inline HTML event-handler attributes (onclick="...", oninput="...",
+// onchange="...") were NOT being executed at all — only addEventListener
+// callbacks fired. We never confirmed the exact WebView2/Tauri2 change
+// that suppressed inline handlers (CSP, sandboxing, or a stricter HTML
+// parser), but the working fix is to bind every interactive element via
+// addEventListener from render() and drop the inline attributes.
+//
+// If you add new buttons / inputs to this page in the future, DO NOT
+// reach for `onclick="..."` — wire them in the `bindHandlers()` block
+// at the bottom of `render()`. The inline-attribute pattern is broken
+// for this WebView2 host.
 
 const EnrollmentComponent = (() => {
   const container = document.getElementById('page-enrollment');
-  _enrollDebug(`component init tag=${ENROLL_BUILD_TAG} container=${!!container}`);
 
   function render() {
     container.innerHTML = `
@@ -56,9 +39,8 @@ const EnrollmentComponent = (() => {
               placeholder="ztlp://enroll/zone-name/token..."
               spellcheck="false"
               autocomplete="off"
-              oninput="EnrollmentComponent.updateButtonState()"
             >
-            <button class="btn btn-secondary btn-sm" onclick="EnrollmentComponent.paste()" title="Paste from clipboard">
+            <button class="btn btn-secondary btn-sm" id="enroll-paste-btn" title="Paste from clipboard">
               📋 Paste
             </button>
           </div>
@@ -74,7 +56,6 @@ const EnrollmentComponent = (() => {
               type="checkbox"
               id="enroll-attestation"
               style="margin-top: 3px; flex-shrink: 0;"
-              onchange="EnrollmentComponent.updateButtonState()"
             >
             <span style="font-size: 13px; line-height: 1.4;">
               I attest I am the only user of this device.
@@ -82,15 +63,11 @@ const EnrollmentComponent = (() => {
           </label>
         </div>
 
-        <button class="btn btn-primary" id="enroll-btn" onclick="EnrollmentComponent.enroll()" disabled>
+        <button class="btn btn-primary" id="enroll-btn" disabled>
           🔑 Enroll
         </button>
 
         <div class="enrollment-status" id="enroll-status"></div>
-
-        <!-- DIAGNOSTIC strip (PR #89): renders the gate's last-seen state so
-             screenshots tell us what fired. Remove before merge to main. -->
-        <pre id="enroll-debug" style="margin-top:12px; padding:8px; background:#f5f5f5; border:1px solid #ddd; font-size:11px; white-space:pre-wrap; color:#333; max-height:120px; overflow-y:auto;">build: ${ENROLL_BUILD_TAG} (waiting for first event)</pre>
       </div>
 
       <div class="card">
@@ -104,55 +81,46 @@ const EnrollmentComponent = (() => {
       </div>
     `;
 
-    // DIAGNOSTIC: also wire listeners programmatically. If the inline
-    // oninput/onchange attributes aren't firing (CSP, scope, whatever),
-    // these addEventListener calls will. _enrollDebug() will tell us
-    // which path actually invoked the gate.
+    bindHandlers();
+    // Sync the initial enabled state in case the inputs were pre-populated
+    // by a future caller (defensive — currently render() is called with
+    // fresh DOM).
+    updateButtonState();
+  }
+
+  // bindHandlers wires every interactive element via addEventListener.
+  // Inline `onclick="..."` / `oninput="..."` attributes do NOT fire in
+  // the WebView2 Runtime version this app targets — see the file header.
+  function bindHandlers() {
     const uriInput = document.getElementById('enroll-uri');
     const checkbox = document.getElementById('enroll-attestation');
-    const pasteBtn = container.querySelector('button.btn-secondary');
-    if (uriInput) {
-      uriInput.addEventListener('input', () => {
-        _enrollDebug('addEventListener input fired');
-        updateButtonState();
-      });
-    }
-    if (checkbox) {
-      checkbox.addEventListener('change', () => {
-        _enrollDebug('addEventListener change fired');
-        updateButtonState();
-      });
-    }
-    if (pasteBtn) {
-      pasteBtn.addEventListener('click', () => {
-        _enrollDebug('addEventListener paste-click fired');
-      });
-    }
-    _enrollDebug(`render done uri=${!!uriInput} cb=${!!checkbox} paste=${!!pasteBtn}`);
+    const pasteBtn = document.getElementById('enroll-paste-btn');
+    const enrollBtn = document.getElementById('enroll-btn');
+
+    if (uriInput) uriInput.addEventListener('input', updateButtonState);
+    if (checkbox) checkbox.addEventListener('change', updateButtonState);
+    if (pasteBtn) pasteBtn.addEventListener('click', paste);
+    if (enrollBtn) enrollBtn.addEventListener('click', enroll);
   }
 
   async function paste() {
-    _enrollDebug('paste() entered');
+    const input = document.getElementById('enroll-uri');
+    if (!input) return;
     try {
       const text = await navigator.clipboard.readText();
-      _enrollDebug(`paste() readText OK len=${text.length}`);
-      const input = document.getElementById('enroll-uri');
-      if (input) {
-        input.value = text.trim();
-        // Programmatic .value = ... does NOT fire 'input' / oninput, so the
-        // gating button stays disabled until the user clicks into the field.
-        // Re-run the gate directly (and dispatch an input event for any
-        // future listeners that might attach to this field).
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        updateButtonState();
-        _enrollDebug(`paste() input value set len=${input.value.length}`);
-      } else {
-        _enrollDebug('paste() input element NOT FOUND');
-      }
+      input.value = (text || '').trim();
+      // `input.value = ...` does NOT fire the 'input' event, so re-run the
+      // gate explicitly. (We also dispatch an input event so any future
+      // listeners on this field still see the change.)
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      updateButtonState();
     } catch (e) {
-      _enrollDebug(`paste() readText THREW: ${e && e.message ? e.message : String(e)}`);
-      // Clipboard permission denied
-      showStatus('error', 'Clipboard access denied. Please paste manually.');
+      // Clipboard permission denied OR readText not available in this
+      // WebView2 context. Tell the user and let them paste manually with
+      // Ctrl+V into the field, which fires 'input' and updates the gate.
+      console.warn('clipboard readText failed:', e);
+      showStatus('error', 'Clipboard access denied. Please paste manually with Ctrl+V.');
+      input.focus();
     }
   }
 
@@ -203,10 +171,10 @@ const EnrollmentComponent = (() => {
     } catch (e) {
       showStatus('error', `Error: ${e}`);
     } finally {
-      btn.disabled = false;
       btn.textContent = '🔑 Enroll';
       // Re-evaluate gating: enroll button stays disabled until attestation
-      // is re-confirmed for the next attempt.
+      // is re-confirmed for the next attempt. (updateButtonState sets
+      // btn.disabled based on current input + checkbox state.)
       updateButtonState();
     }
   }
@@ -218,16 +186,9 @@ const EnrollmentComponent = (() => {
     const checkbox = document.getElementById('enroll-attestation');
     const input = document.getElementById('enroll-uri');
     const btn = document.getElementById('enroll-btn');
-    if (!checkbox || !btn) {
-      _enrollDebug(`gate ABORT checkbox=${!!checkbox} btn=${!!btn} input=${!!input}`);
-      return;
-    }
-    const rawValue = input ? input.value : '(no input element)';
+    if (!checkbox || !btn) return;
     const hasUri = input && input.value && input.value.trim().length > 0;
-    const checked = checkbox.checked;
-    const shouldDisable = !(checked && hasUri);
-    btn.disabled = shouldDisable;
-    _enrollDebug(`gate checked=${checked} hasUri=${hasUri} rawLen=${rawValue.length} disabled=${btn.disabled}`);
+    btn.disabled = !(checkbox.checked && hasUri);
   }
 
   function showStatus(type, message) {
@@ -239,3 +200,8 @@ const EnrollmentComponent = (() => {
 
   return { render, paste, enroll, updateButtonState };
 })();
+
+// Belt-and-suspenders: also expose on window so any remaining inline
+// handlers (or external callers) still resolve. The primary wiring is
+// the addEventListener path in render(); this is just a safety net.
+window.EnrollmentComponent = EnrollmentComponent;

@@ -67,8 +67,19 @@ function formatDuration(seconds) {
 }
 
 // ── State polling ───────────────────────────────────────────────────────
+//
+// Adaptive polling: 2s normal cadence when the agent is reachable, backing
+// off to 10s after consecutive failures so we don't hammer a missing socket
+// (each failed connect costs IPC_CONNECT_TIMEOUT = 100ms, ×2 for status+
+// traffic = 200ms every cycle; at 2s cadence that's 10% CPU/jank just on
+// dead loopback connects). 10s back-off keeps the UI responsive but still
+// detects when the agent comes online without forcing a manual refresh.
 
 let pollTimer = null;
+let consecutiveFailures = 0;
+const POLL_FAST_MS = 2000;
+const POLL_SLOW_MS = 10000;
+const FAILURE_THRESHOLD = 3;
 
 async function pollState() {
   try {
@@ -77,14 +88,29 @@ async function pollState() {
       invoke('get_traffic_stats'),
     ]);
     HomeComponent.update(status, traffic);
+    if (consecutiveFailures >= FAILURE_THRESHOLD) {
+      // Just recovered — return to fast cadence.
+      restartPolling(POLL_FAST_MS);
+    }
+    consecutiveFailures = 0;
   } catch (e) {
+    consecutiveFailures += 1;
     console.error('Poll error:', e);
+    if (consecutiveFailures === FAILURE_THRESHOLD) {
+      // Slow down to avoid burning CPU on connect-timeouts.
+      restartPolling(POLL_SLOW_MS);
+    }
   }
+}
+
+function restartPolling(intervalMs) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(pollState, intervalMs);
 }
 
 function startPolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(pollState, 2000);
+  pollTimer = setInterval(pollState, POLL_FAST_MS);
 }
 
 function stopPolling() {

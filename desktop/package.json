@@ -1,6 +1,6 @@
 {
   "name": "ztlp-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "ZTLP Desktop — Zero Trust Layer Protocol client",
   "scripts": {

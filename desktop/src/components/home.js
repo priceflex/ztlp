@@ -135,10 +135,23 @@ const HomeComponent = (() => {
     
     if (!ring) return; // Page not rendered yet
 
+    // Classify error: connection refused / unreachable daemon vs. genuine error.
+    // The backend wraps connect failures with "Failed to connect to daemon" —
+    // distinguish that from real daemon-side errors so the UI gives the user
+    // actionable guidance instead of a stack-trace-like message.
+    const errStr = err && err.toString ? err.toString() : String(err);
+    const isAgentDown = /Failed to connect to daemon|connection refused|ConnectionRefused/i.test(errStr);
+
     ring.className = 'status-ring error';
-    label.textContent = 'Error';
-    sublabel.textContent = err.toString();
-    btn.textContent = 'Retry';
+    if (isAgentDown) {
+      label.textContent = 'Agent not running';
+      sublabel.textContent = 'Start the ZTLP agent to connect (ztlp-node service).';
+      btn.textContent = 'Retry';
+    } else {
+      label.textContent = 'Error';
+      sublabel.textContent = errStr;
+      btn.textContent = 'Retry';
+    }
     btn.className = 'btn btn-primary';
     btn.disabled = false;
   }

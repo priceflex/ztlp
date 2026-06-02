@@ -18,7 +18,9 @@ defmodule ZtlpRelay.MixProject do
       # family (PRs #69/#70/#71). Floor ratcheted to 0.32.2 in release_test.exs.
       # Bumped 0.34.6 → 0.34.7 in release/v0.34.7 (desktop enroll-paste handler
       # fix, PR #89). Floor ratcheted to 0.34.7 in release_test.exs.
-      version: "0.34.7",
+      # Bumped 0.34.7 → 0.34.8 in release/v0.34.8 (NS self-register heartbeat
+      # in `ztlp listen`, PR #91). Floor ratcheted to 0.34.8 in release_test.exs.
+      version: "0.34.8",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

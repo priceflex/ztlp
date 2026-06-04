@@ -13559,4 +13559,542 @@ mod tests {
         assert!(msg.contains("rejected"));
         assert!(msg.contains("unknown") || msg.contains("newer"));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Auto-reconnect supervisor tests (BDD-shaped, RED-first)
+    //
+    // Scenarios from docs/plans/2026-06-04-auto-reconnect-dynamic-scenarios.md.
+    //
+    // S1 — Gateway restart, same IP+port (the common case)
+    // S2 — Gateway IP change (DHCP rotation across Chef-restart)
+    // S3 — Gateway port change (intentional config change)
+    // S4 — NS unreachable during reconnect (Mnesia migration window)
+    // S5 — NodeID changed (re-enrollment / identity rotation)
+    //
+    // These tests reference types and functions that DO NOT YET EXIST:
+    //   - Resolver trait + FakeResolver impl
+    //   - DisconnectReason enum
+    //   - SupervisorConfig struct
+    //   - compute_reconnect_delay() function
+    //   - run_supervisor() function
+    //
+    // They are written FIRST so the implementation in subsequent commits
+    // is guided by their contract. Per the test-driven-development skill,
+    // the build MUST fail with "cannot find type/function" errors after
+    // this commit — that's the RED state.
+    //
+    // The supervisor loop in T3 + the re-resolve logic in T4 make these
+    // tests pass (GREEN). Until then, this module is intentionally
+    // un-compilable.
+    //
+    // To run: cargo test --bin ztlp auto_reconnect
+    // ─────────────────────────────────────────────────────────────────────────
+    mod auto_reconnect {
+        #![allow(dead_code, unused_imports, unused_variables)]
+
+        use super::*;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        // Placeholder NodeId type — when T1 lands, switch to the real
+        // import. Defined locally so the test scaffolding compiles
+        // independently while the implementer wires the real type.
+        type TestNodeId = [u8; 16];
+
+        const N1: TestNodeId = [0x11; 16];
+        const N2: TestNodeId = [0x22; 16];
+
+        fn addr(s: &str) -> SocketAddr {
+            s.parse().expect("test addr must parse")
+        }
+
+        /// Programmable fake resolver — returns a queued sequence of
+        /// results, one per .resolve() call. Tests assert against the
+        /// call count to confirm re-resolve actually happened (or didn't,
+        /// for the --no-resolve-on-reconnect case).
+        struct FakeResolver {
+            // Wrapped in Mutex so it works under async test harness.
+            results: Mutex<Vec<Result<(SocketAddr, TestNodeId), String>>>,
+            call_count: Mutex<usize>,
+        }
+
+        impl FakeResolver {
+            fn new(results: Vec<Result<(SocketAddr, TestNodeId), String>>) -> Self {
+                Self {
+                    results: Mutex::new(results),
+                    call_count: Mutex::new(0),
+                }
+            }
+
+            fn calls(&self) -> usize {
+                *self.call_count.lock().unwrap()
+            }
+
+            // Mirrors the real Resolver trait's resolve() signature.
+            // T4 will introduce the trait and FakeResolver will impl it;
+            // until then this is a free-standing method the tests call
+            // directly to validate the fake itself.
+            async fn resolve(
+                &self,
+                _target: &str,
+                _ns_server: Option<&str>,
+            ) -> Result<(SocketAddr, TestNodeId), Box<dyn std::error::Error>> {
+                let mut count = self.call_count.lock().unwrap();
+                *count += 1;
+                let mut results = self.results.lock().unwrap();
+                if results.is_empty() {
+                    return Err("FakeResolver exhausted".into());
+                }
+                let next = results.remove(0);
+                next.map_err(|e| e.into())
+            }
+        }
+
+        // ── Sanity test for the fake resolver itself ────────────────────────
+        // This test doesn't depend on any unimplemented production code,
+        // so it should PASS even in the RED state. It's a guard against
+        // bugs in the test harness itself.
+
+        #[tokio::test]
+        async fn fake_resolver_returns_queued_results_in_order() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)),
+                Ok((addr("10.69.91.244:23095"), N1)),
+                Err("NS timeout".to_string()),
+            ]);
+
+            let r1 = resolver.resolve("foo.example", None).await.unwrap();
+            assert_eq!(r1.0, addr("10.69.91.243:23095"));
+            assert_eq!(r1.1, N1);
+
+            let r2 = resolver.resolve("foo.example", None).await.unwrap();
+            assert_eq!(r2.0, addr("10.69.91.244:23095"));
+
+            let r3 = resolver.resolve("foo.example", None).await;
+            assert!(r3.is_err(), "third call should return the queued error");
+
+            assert_eq!(resolver.calls(), 3, "should have made exactly 3 calls");
+        }
+
+        // ── Backoff math — T3 makes this pass ────────────────────────────────
+        // compute_reconnect_delay() does not exist yet. This will fail
+        // to compile with "cannot find function" — RED state confirmed.
+
+        #[test]
+        fn backoff_exponential_with_jitter_capped_at_30s() {
+            // attempt 1 → ~1000ms ±10%
+            let d1 = compute_reconnect_delay(1, 1000);
+            assert!(d1 >= Duration::from_millis(900) && d1 <= Duration::from_millis(1100),
+                "attempt 1 expected ~1000ms ±10%, got {:?}", d1);
+
+            // attempt 2 → ~2000ms
+            let d2 = compute_reconnect_delay(2, 1000);
+            assert!(d2 >= Duration::from_millis(1800) && d2 <= Duration::from_millis(2200),
+                "attempt 2 expected ~2000ms ±10%, got {:?}", d2);
+
+            // attempt 5 → ~16000ms
+            let d5 = compute_reconnect_delay(5, 1000);
+            assert!(d5 >= Duration::from_millis(14400) && d5 <= Duration::from_millis(17600),
+                "attempt 5 expected ~16000ms ±10%, got {:?}", d5);
+
+            // attempt 10 → CAPPED at 30000ms ±10%
+            let d10 = compute_reconnect_delay(10, 1000);
+            assert!(d10 <= Duration::from_millis(33000),
+                "attempt 10 must be capped near 30000ms ±10%, got {:?}", d10);
+            assert!(d10 >= Duration::from_millis(27000),
+                "attempt 10 should still be in the cap range ±10%, got {:?}", d10);
+
+            // attempt 100 → still capped
+            let d100 = compute_reconnect_delay(100, 1000);
+            assert!(d100 <= Duration::from_millis(33000),
+                "very high attempt count must remain capped, got {:?}", d100);
+        }
+
+        // ── DisconnectReason classification — T3 makes this pass ─────────────
+
+        #[test]
+        fn disconnect_reason_classifies_peer_close_as_recoverable() {
+            let r = DisconnectReason::PeerClosed("closed by peer: 0".to_string());
+            assert!(r.is_recoverable(), "PeerClosed should be recoverable");
+        }
+
+        #[test]
+        fn disconnect_reason_classifies_timeout_as_recoverable() {
+            let r = DisconnectReason::TimedOut;
+            assert!(r.is_recoverable());
+        }
+
+        #[test]
+        fn disconnect_reason_classifies_dial_failed_as_recoverable() {
+            let r = DisconnectReason::DialFailed("no route to host".to_string());
+            assert!(r.is_recoverable());
+        }
+
+        #[test]
+        fn disconnect_reason_classifies_user_interrupt_as_clean_exit() {
+            let r = DisconnectReason::UserInterrupt;
+            assert!(!r.is_recoverable(), "Ctrl-C must NOT retry");
+        }
+
+        #[test]
+        fn disconnect_reason_classifies_fatal_as_no_retry() {
+            let r = DisconnectReason::Fatal("identity mismatch".to_string());
+            assert!(!r.is_recoverable(), "Fatal disconnects must not retry");
+        }
+
+        // ── S1: Gateway restart, same IP+port ────────────────────────────────
+        // The common case (TRSDC daily reboot). After the QUIC session
+        // closes, supervisor re-resolves NS (gets same address back),
+        // re-dials, succeeds. One reconnect attempt total.
+
+        #[tokio::test]
+        async fn supervisor_recovers_from_peer_close_same_address() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)), // initial
+                Ok((addr("10.69.91.243:23095"), N1)), // after disconnect
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10, // tight loop for tests
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            // Simulate: first session runs, ends with PeerClosed; second
+            // session runs and "succeeds" (test harness exits on success).
+            // T3+T4 will provide the real run_supervisor that consults
+            // the fake resolver and a fake tunnel runner.
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("session 1".to_string()),
+                    DisconnectReason::UserInterrupt, // pretend the user Ctrl-C'd on session 2
+                ],
+            )
+            .await;
+
+            assert!(outcome.is_ok(), "supervisor should recover cleanly: {:?}", outcome);
+            assert_eq!(
+                resolver.calls(),
+                2,
+                "should re-resolve once after the disconnect"
+            );
+        }
+
+        // ── S2: Gateway IP change ────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_follows_new_gateway_ip_when_nodeid_matches() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)), // initial — old IP
+                Ok((addr("10.69.91.244:23095"), N1)), // after disconnect — NEW IP, same NodeID
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("session 1".to_string()),
+                    DisconnectReason::UserInterrupt,
+                ],
+            )
+            .await;
+
+            assert!(outcome.is_ok(), "should follow IP change when NodeID matches: {:?}", outcome);
+            // T7 e2e validation pins that the second dial actually used 10.69.91.244,
+            // not 10.69.91.243 — proves we re-resolved, didn't just retry stale.
+        }
+
+        // ── S3: Gateway port change ──────────────────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_follows_new_gateway_port_when_nodeid_matches() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)),
+                Ok((addr("10.69.91.243:23097"), N1)), // NEW PORT, same NodeID
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("session 1".to_string()),
+                    DisconnectReason::UserInterrupt,
+                ],
+            )
+            .await;
+
+            assert!(outcome.is_ok(), "should follow port change: {:?}", outcome);
+        }
+
+        // ── S4: NS unreachable during reconnect ─────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_falls_back_to_stale_address_when_ns_unreachable() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)),  // initial
+                Err("NS timeout".to_string()),         // NS down during 1st reconnect
+                Ok((addr("10.69.91.243:23095"), N1)),  // NS back, same address
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("session 1".to_string()),
+                    // 2nd attempt: NS lookup fails, but dial against stale
+                    // address "succeeds" (peer might still be alive even
+                    // if NS is down). Then session ends cleanly.
+                    DisconnectReason::UserInterrupt,
+                ],
+            )
+            .await;
+
+            assert!(
+                outcome.is_ok(),
+                "should fall back to stale peer_addr when NS unreachable: {:?}",
+                outcome
+            );
+            // The supervisor logged a WARN about NS being unreachable;
+            // observable via stderr in the live test, not asserted here.
+        }
+
+        // ── S5: NodeID change — default policy is fail-closed ────────────────
+
+        #[tokio::test]
+        async fn supervisor_fails_closed_on_nodeid_change_by_default() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)), // initial
+                Ok((addr("10.69.91.243:23095"), N2)), // SAME IP but DIFFERENT NodeID
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false, // DEFAULT — fail closed
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![DisconnectReason::PeerClosed("session 1".to_string())],
+            )
+            .await;
+
+            assert!(outcome.is_err(), "should fail closed on NodeID change");
+            let err_msg = format!("{}", outcome.unwrap_err());
+            assert!(
+                err_msg.contains("identity") || err_msg.contains("NodeID"),
+                "error should mention identity change, got: {}",
+                err_msg
+            );
+        }
+
+        // ── S5b: NodeID change with explicit opt-in ──────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_follows_nodeid_change_when_explicitly_allowed() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)),
+                Ok((addr("10.69.91.243:23095"), N2)),
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: true, // OPT IN
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("session 1".to_string()),
+                    DisconnectReason::UserInterrupt,
+                ],
+            )
+            .await;
+
+            assert!(
+                outcome.is_ok(),
+                "should follow NodeID change when --allow-identity-change set: {:?}",
+                outcome
+            );
+        }
+
+        // ── Negative: --no-reconnect ────────────────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_honors_no_reconnect_flag() {
+            let resolver = FakeResolver::new(vec![Ok((addr("10.69.91.243:23095"), N1))]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: true, // FAIL FAST
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![DisconnectReason::PeerClosed("session 1".to_string())],
+            )
+            .await;
+
+            assert!(outcome.is_err(), "--no-reconnect must exit on first disconnect");
+            assert_eq!(resolver.calls(), 1, "should not re-resolve when --no-reconnect set");
+        }
+
+        // ── Negative: --reconnect-attempts cap ──────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_honors_reconnect_attempts_cap() {
+            let resolver = FakeResolver::new(vec![
+                Ok((addr("10.69.91.243:23095"), N1)), // initial
+                Ok((addr("10.69.91.243:23095"), N1)), // attempt 1
+                Ok((addr("10.69.91.243:23095"), N1)), // attempt 2
+                Ok((addr("10.69.91.243:23095"), N1)), // attempt 3
+            ]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 3, // CAP
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("s1".into()),
+                    DisconnectReason::PeerClosed("s2".into()),
+                    DisconnectReason::PeerClosed("s3".into()),
+                    DisconnectReason::PeerClosed("s4".into()),
+                ],
+            )
+            .await;
+
+            assert!(outcome.is_err(), "should exit after 3 failed reconnect attempts");
+            let err_msg = format!("{}", outcome.unwrap_err());
+            assert!(
+                err_msg.contains("3 attempts") || err_msg.contains("giving up"),
+                "error should mention attempt limit, got: {}",
+                err_msg
+            );
+        }
+
+        // ── Negative: --no-resolve-on-reconnect ─────────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_skips_reresolve_when_flag_set() {
+            let resolver = FakeResolver::new(vec![Ok((addr("10.69.91.243:23095"), N1))]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: true, // SKIP NS LOOKUP ON RECONNECT
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![
+                    DisconnectReason::PeerClosed("s1".into()),
+                    DisconnectReason::UserInterrupt,
+                ],
+            )
+            .await;
+
+            assert!(outcome.is_ok(), "should recover without re-resolving: {:?}", outcome);
+            assert_eq!(
+                resolver.calls(),
+                1,
+                "should only resolve ONCE (initial) when --no-resolve-on-reconnect set"
+            );
+        }
+
+        // ── User interrupt — clean exit, no retry ───────────────────────────
+
+        #[tokio::test]
+        async fn supervisor_exits_cleanly_on_user_interrupt() {
+            let resolver = FakeResolver::new(vec![Ok((addr("10.69.91.243:23095"), N1))]);
+
+            let cfg = SupervisorConfig {
+                target: "TRSDC.tech-rockstars.trs.ztlp".to_string(),
+                ns_server: Some("16.147.41.195:23096".to_string()),
+                reconnect_attempts: 5,
+                reconnect_delay_ms: 10,
+                no_reconnect: false,
+                no_resolve_on_reconnect: false,
+                allow_identity_change: false,
+            };
+
+            let outcome = run_supervisor_test(
+                cfg,
+                &resolver,
+                vec![DisconnectReason::UserInterrupt],
+            )
+            .await;
+
+            assert!(outcome.is_ok(), "Ctrl-C should exit cleanly");
+            assert_eq!(resolver.calls(), 1, "should NOT retry after user interrupt");
+        }
+    }
 }

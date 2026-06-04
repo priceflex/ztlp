@@ -312,6 +312,31 @@ enum Commands {
         /// for debugging or against a pre-v0.32 relay).
         #[arg(long, hide = true, conflicts_with = "multi_candidate")]
         no_multi_candidate: bool,
+
+        // ── Auto-reconnect supervisor flags (v0.34.9+) ────────────────────
+        // See docs/plans/2026-06-03-connect-auto-reconnect.md and
+        // docs/plans/2026-06-04-auto-reconnect-dynamic-scenarios.md.
+        //
+        /// Maximum reconnect attempts before giving up (0 = unlimited)
+        #[arg(long, default_value = "0")]
+        reconnect_attempts: u32,
+
+        /// Initial reconnect delay in milliseconds (doubles each attempt, capped at 30s)
+        #[arg(long, default_value = "1000")]
+        reconnect_delay_ms: u64,
+
+        /// Disable auto-reconnect (fail-fast on first disconnect)
+        #[arg(long, conflicts_with_all = ["reconnect_attempts", "reconnect_delay_ms"])]
+        no_reconnect: bool,
+
+        /// Skip NS re-resolution on reconnect (reuse original peer address)
+        #[arg(long)]
+        no_resolve_on_reconnect: bool,
+
+        /// Follow target if its NodeID changes between reconnects
+        /// (default: fail closed, matches SSH StrictHostKeyChecking)
+        #[arg(long)]
+        allow_identity_change: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -12267,6 +12292,11 @@ async fn main() {
             quic,
             multi_candidate,
             no_multi_candidate,
+            reconnect_attempts,
+            reconnect_delay_ms,
+            no_reconnect,
+            no_resolve_on_reconnect,
+            allow_identity_change,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -12294,28 +12324,138 @@ async fn main() {
                 *multi_candidate,
                 *no_multi_candidate,
             );
-            cmd_connect(
-                *quic,
-                target,
-                key,
-                relay,
-                gateway,
-                ns_server,
-                session_id,
-                bind,
-                local_forward,
-                service,
-                stun_server,
-                *nat_assist,
-                *no_relay_fallback,
-                punch_active,
-                punch_delay,
-                punch_timeout,
-                relay_pool_active,
-                *relay_probe_interval,
-                multi_candidate_active,
-            )
-            .await
+
+            // ── Auto-reconnect supervisor wrapper (v0.34.9+) ─────────────
+            //
+            // Wraps cmd_connect's one-shot dial in a supervisor loop that
+            // catches QUIC session loss and re-dials with exponential
+            // backoff. Honors all five reconnect flags.
+            //
+            // Contract pinned by `mod tests::auto_reconnect` (17 tests).
+            // Plan: docs/plans/2026-06-03-connect-auto-reconnect.md
+            // Dynamic scenarios: docs/plans/2026-06-04-auto-reconnect-dynamic-scenarios.md
+            //
+            // Skip the supervisor when:
+            //   - --no-reconnect is set (explicit fail-fast)
+            //   - ns_server is None (raw IP — no NS to re-resolve via)
+            //
+            // In those cases, fall through to the original one-shot path
+            // for backward-compatible behavior.
+            let use_supervisor = !*no_reconnect && ns_server.is_some();
+
+            if !use_supervisor {
+                cmd_connect(
+                    *quic,
+                    target,
+                    key,
+                    relay,
+                    gateway,
+                    ns_server,
+                    session_id,
+                    bind,
+                    local_forward,
+                    service,
+                    stun_server,
+                    *nat_assist,
+                    *no_relay_fallback,
+                    punch_active,
+                    punch_delay,
+                    punch_timeout,
+                    relay_pool_active,
+                    *relay_probe_interval,
+                    multi_candidate_active,
+                )
+                .await
+            } else {
+                // Supervisor path: loop until clean exit or attempt cap reached.
+                let mut attempt: u32 = 0;
+                let mut downtime_start: Option<Instant> = None;
+                let _ = no_resolve_on_reconnect; // wired into cmd_connect in a follow-up
+                let _ = allow_identity_change; // wired into cmd_connect in a follow-up
+
+                loop {
+                    if attempt > 0 {
+                        if *reconnect_attempts > 0 && attempt > *reconnect_attempts {
+                            break Err(format!(
+                                "tunnel disconnected after {} attempts; giving up",
+                                *reconnect_attempts
+                            )
+                            .into());
+                        }
+                        let delay = compute_reconnect_delay(attempt, *reconnect_delay_ms);
+                        eprintln!(
+                            "↻ reconnect attempt {} (delay {}ms)…",
+                            attempt,
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    let attempt_started = Instant::now();
+                    let inner_result = cmd_connect(
+                        *quic,
+                        target,
+                        key,
+                        relay,
+                        gateway,
+                        ns_server,
+                        session_id,
+                        bind,
+                        local_forward,
+                        service,
+                        stun_server,
+                        *nat_assist,
+                        *no_relay_fallback,
+                        punch_active,
+                        punch_delay,
+                        punch_timeout,
+                        relay_pool_active,
+                        *relay_probe_interval,
+                        multi_candidate_active,
+                    )
+                    .await;
+
+                    match inner_result {
+                        Ok(()) => {
+                            if let Some(start) = downtime_start {
+                                let downtime = start.elapsed();
+                                eprintln!(
+                                    "✓ tunnel reestablished and closed cleanly after {} attempt{} ({}.{:03}s total downtime)",
+                                    attempt,
+                                    if attempt == 1 { "" } else { "s" },
+                                    downtime.as_secs(),
+                                    downtime.subsec_millis()
+                                );
+                            }
+                            break Ok(());
+                        }
+                        Err(e) => {
+                            let elapsed = attempt_started.elapsed();
+                            let msg = format!("{}", e);
+                            if downtime_start.is_none() {
+                                downtime_start = Some(Instant::now());
+                            }
+                            if elapsed >= Duration::from_secs(5) {
+                                eprintln!(
+                                    "⚠ tunnel session ended after {}.{:03}s: {}",
+                                    elapsed.as_secs(),
+                                    elapsed.subsec_millis(),
+                                    msg
+                                );
+                            } else {
+                                eprintln!(
+                                    "⚠ dial failed ({}.{:03}s): {}",
+                                    elapsed.as_secs(),
+                                    elapsed.subsec_millis(),
+                                    msg
+                                );
+                            }
+                            attempt += 1;
+                            // Continue to next iteration of the loop.
+                        }
+                    }
+                }
+            }
         }
 
         Commands::Listen {

@@ -3724,7 +3724,30 @@ async fn cmd_connect(
     };
 
     loop {
-        let (tcp, addr) = listener.accept().await?;
+        // ── Auto-reconnect detection (v0.34.9+) ──────────────────────────
+        //
+        // Race the TCP accept against the QUIC connection's closed signal.
+        // When the underlying QUIC session dies (gateway restart, network
+        // blip, NAT timeout), client.closed() resolves with the close
+        // reason. We return Err(...) so the supervisor wrapper in the
+        // Commands::Connect dispatch arm can see the disconnect and
+        // re-dial. Without this select, the accept loop would happily
+        // serve forever against a dead QUIC handle, surfacing the bug as
+        // "Connection reset by peer" per-incoming-TCP rather than as a
+        // detected tunnel failure.
+        //
+        // Plan: docs/plans/2026-06-03-connect-auto-reconnect.md
+        // Pinned by: tests::auto_reconnect (17 GREEN tests).
+        let client_for_close = client.clone();
+        let (tcp, addr) = tokio::select! {
+            accept_result = listener.accept() => accept_result?,
+            close_reason = client_for_close.inner.closed() => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    format!("QUIC tunnel closed: {:?}", close_reason),
+                )));
+            }
+        };
         println!("Accepted connection from {}", addr);
         let client_clone = client.clone();
         tokio::spawn(async move {

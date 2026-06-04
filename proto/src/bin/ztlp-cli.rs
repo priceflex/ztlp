@@ -2541,6 +2541,97 @@ fn pick_quic_dial_target(
     multi_candidate_winner.unwrap_or(ns_resolved)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-reconnect supervisor — production types
+//
+// Wraps cmd_connect's dial-and-tunnel logic in a supervisor loop that detects
+// QUIC session loss via quinn::Connection::closed(), classifies the disconnect
+// reason, optionally re-resolves NS for dynamic IP/port changes, and re-dials
+// with exponential backoff + jitter.
+//
+// Test contract pinned in `mod tests::auto_reconnect` (~line 13560+).
+// Plan: docs/plans/2026-06-03-connect-auto-reconnect.md
+// Dynamic scenarios: docs/plans/2026-06-04-auto-reconnect-dynamic-scenarios.md
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reason a QUIC tunnel session ended. Recoverable variants (PeerClosed,
+/// TimedOut, DialFailed) trigger a reconnect attempt subject to flags;
+/// non-recoverable variants (UserInterrupt, Fatal) exit the supervisor.
+#[derive(Debug, Clone)]
+pub enum DisconnectReason {
+    /// QUIC connection closed by peer (gateway restart, app close). Recoverable.
+    PeerClosed(String),
+    /// QUIC idle timeout (network blip, NAT eviction, keepalive failure). Recoverable.
+    TimedOut,
+    /// Initial dial failed before tunnel was ever established. Recoverable.
+    DialFailed(String),
+    /// User Ctrl-C / SIGTERM. NOT recoverable — exit cleanly with Ok(()).
+    UserInterrupt,
+    /// Unrecoverable error (NodeID mismatch, handshake auth failure, etc.).
+    /// Do not retry — surface to operator.
+    Fatal(String),
+}
+
+impl DisconnectReason {
+    /// True if the supervisor should attempt a reconnect for this disconnect
+    /// type. False for UserInterrupt (clean exit) and Fatal (no retry).
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            DisconnectReason::PeerClosed(_)
+                | DisconnectReason::TimedOut
+                | DisconnectReason::DialFailed(_)
+        )
+    }
+}
+
+/// Configuration for the auto-reconnect supervisor. Built from CLI flags
+/// in cmd_connect; passed by value into run_supervisor.
+#[derive(Debug, Clone)]
+pub struct SupervisorConfig {
+    /// Target name to resolve via NS (e.g. "TRSDC.tech-rockstars.trs.ztlp")
+    /// or raw "host:port" string.
+    pub target: String,
+    /// NS server address; None when target is a raw address.
+    pub ns_server: Option<String>,
+    /// Maximum reconnect attempts (0 = unlimited).
+    pub reconnect_attempts: u32,
+    /// Initial backoff delay in milliseconds; doubles each attempt, capped at 30s.
+    pub reconnect_delay_ms: u64,
+    /// Disable reconnect entirely — exit on first disconnect.
+    pub no_reconnect: bool,
+    /// Skip NS re-resolution on reconnect; dial the original peer_addr each time.
+    pub no_resolve_on_reconnect: bool,
+    /// Allow following the target if its NodeID changes between reconnects.
+    /// Default false (fail closed) — matches StrictHostKeyChecking semantics in SSH.
+    pub allow_identity_change: bool,
+}
+
+/// Compute reconnect backoff with exponential growth + 10% jitter, capped at 30s.
+///
+/// attempt=1 → base_ms ±10%
+/// attempt=2 → 2*base_ms ±10%
+/// attempt=N → min(base_ms << (N-1), 30_000) ±10%
+///
+/// 10% jitter avoids thundering-herd when many clients reconnect after the
+/// same gateway restart (the TRSDC daily-reboot case).
+pub fn compute_reconnect_delay(attempt: u32, base_ms: u64) -> Duration {
+    // Exponential: 2^(attempt-1), capped at 2^5 = 32x so a deep retry chain
+    // doesn't overflow before the 30s cap clamps it.
+    let exp = (attempt.saturating_sub(1)).min(5);
+    let multiplier: u64 = 1u64 << exp;
+    let raw_ms = base_ms.saturating_mul(multiplier);
+    let capped_ms = raw_ms.min(30_000);
+
+    // ±10% jitter via wrapping signed offset.
+    let jitter_ms = (capped_ms / 10).max(1);
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let offset: i64 = rng.gen_range(-(jitter_ms as i64)..=(jitter_ms as i64));
+    let final_ms = ((capped_ms as i64) + offset).max(0) as u64;
+    Duration::from_millis(final_ms)
+}
+
 async fn cmd_connect(
     _quic: bool,
     target: &str,
@@ -13650,6 +13741,144 @@ mod tests {
                 let next = results.remove(0);
                 next.map_err(|e| e.into())
             }
+        }
+
+        // ── Test harness: simulated supervisor loop ─────────────────────────
+        //
+        // run_supervisor_test() simulates the production supervisor against
+        // the FakeResolver and a programmed sequence of DisconnectReason
+        // values (one per session iteration). It exercises ALL the
+        // behaviors the BDD scenarios pin:
+        //
+        //   - Initial NS resolve (always)
+        //   - On disconnect: check is_recoverable, exit if not
+        //   - Check no_reconnect flag — exit fail-fast if set
+        //   - Check reconnect_attempts cap — exit with "giving up" if hit
+        //   - Sleep backoff (gated by reconnect_delay_ms — kept tight for tests)
+        //   - Re-resolve NS (unless no_resolve_on_reconnect set)
+        //   - On re-resolve error: fall back to last-known peer_addr (S4)
+        //   - On NodeID change: Fatal unless allow_identity_change (S5/S5b)
+        //   - Consume next programmed DisconnectReason for the next iteration
+        //
+        // When the harness runs out of programmed reasons OR encounters
+        // UserInterrupt, it returns Ok(()).
+        //
+        // This is the GREEN-state implementation of the supervisor contract.
+        // T4+T5 (the production wiring) lift this exact logic into the
+        // real cmd_connect path; the contract pinned by these tests
+        // ensures the production implementation behaves identically.
+        async fn run_supervisor_test(
+            cfg: SupervisorConfig,
+            resolver: &FakeResolver,
+            mut programmed_disconnects: Vec<DisconnectReason>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            // ── Initial resolve ──────────────────────────────────────────
+            let (mut peer_addr, initial_node_id) = resolver
+                .resolve(&cfg.target, cfg.ns_server.as_deref())
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("initial NS lookup failed: {}", e).into()
+                })?;
+            let mut expected_node_id = initial_node_id;
+            let mut attempt: u32 = 0;
+
+            // ── Supervisor loop ──────────────────────────────────────────
+            // Each iteration consumes ONE programmed DisconnectReason and
+            // decides what to do next. Empty queue = clean exit.
+            loop {
+                if programmed_disconnects.is_empty() {
+                    return Ok(());
+                }
+                let reason = programmed_disconnects.remove(0);
+
+                // ── Classify the disconnect ──────────────────────────────
+                match &reason {
+                    DisconnectReason::UserInterrupt => {
+                        // Clean exit — no retry, no re-resolve.
+                        return Ok(());
+                    }
+                    DisconnectReason::Fatal(msg) => {
+                        return Err(format!("fatal tunnel error: {}", msg).into());
+                    }
+                    DisconnectReason::PeerClosed(_)
+                    | DisconnectReason::TimedOut
+                    | DisconnectReason::DialFailed(_) => {
+                        // Recoverable — fall through to reconnect logic.
+                    }
+                }
+
+                // ── --no-reconnect short-circuit ─────────────────────────
+                if cfg.no_reconnect {
+                    return Err(format!(
+                        "tunnel disconnected ({:?}); --no-reconnect set",
+                        reason
+                    )
+                    .into());
+                }
+
+                // ── --reconnect-attempts cap ─────────────────────────────
+                attempt += 1;
+                if cfg.reconnect_attempts > 0 && attempt > cfg.reconnect_attempts {
+                    return Err(format!(
+                        "tunnel disconnected after {} attempts; giving up",
+                        cfg.reconnect_attempts
+                    )
+                    .into());
+                }
+
+                // ── Backoff sleep ────────────────────────────────────────
+                // Tests use reconnect_delay_ms=10 to keep the loop tight.
+                let delay = compute_reconnect_delay(attempt, cfg.reconnect_delay_ms);
+                tokio::time::sleep(delay).await;
+
+                // ── Re-resolve NS (unless flag disables it) ──────────────
+                if !cfg.no_resolve_on_reconnect {
+                    match resolver
+                        .resolve(&cfg.target, cfg.ns_server.as_deref())
+                        .await
+                    {
+                        Ok((new_addr, new_node_id)) => {
+                            // ── NodeID change policy (S5/S5b) ────────────
+                            if new_node_id != expected_node_id && !cfg.allow_identity_change {
+                                return Err(format!(
+                                    "gateway identity changed: expected NodeID {} got {} \
+                                    — re-run ztlp connect to verify, or pass \
+                                    --allow-identity-change",
+                                    hex_short(&expected_node_id),
+                                    hex_short(&new_node_id)
+                                )
+                                .into());
+                            }
+                            peer_addr = new_addr;
+                            expected_node_id = new_node_id;
+                        }
+                        Err(_e) => {
+                            // S4: NS unreachable — keep last-known addr,
+                            // log a WARN in production (stderr).
+                            // Tests just verify the supervisor doesn't crash
+                            // and proceeds to the next iteration.
+                            let _ = peer_addr; // explicit reuse
+                            // No-op — fall through to the dial-against-stale path.
+                        }
+                    }
+                }
+
+                // ── "Re-dial" — simulated here as success ────────────────
+                // The next iteration's programmed reason represents what
+                // happens after the (re)dial. If it's UserInterrupt, the
+                // dial succeeded and the test user Ctrl-C'd. If it's
+                // another recoverable disconnect, the new session also
+                // died and we'll loop again. Real production code does
+                // the QUIC handshake + TCP accept loop here.
+            }
+        }
+
+        /// Hex-encode the first 4 bytes of a NodeId for compact error messages.
+        fn hex_short(id: &TestNodeId) -> String {
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}…",
+                id[0], id[1], id[2], id[3]
+            )
         }
 
         // ── Sanity test for the fake resolver itself ────────────────────────

@@ -80,8 +80,8 @@ defmodule ZtlpNs.ReleaseTest do
       # routine version bump — it only fails on a down-bump below the 0.32.2
       # floor.
       declared = ZtlpNs.MixProject.project()[:version]
-      assert Version.compare(declared, "0.34.8") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.34.8 ns-self-register-heartbeat tag"
+      assert Version.compare(declared, "0.34.9") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.34.9 connect-auto-reconnect tag"
     end
   end
 

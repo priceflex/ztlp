@@ -13972,11 +13972,9 @@ mod tests {
 
                 // ── --no-reconnect short-circuit ─────────────────────────
                 if cfg.no_reconnect {
-                    return Err(format!(
-                        "tunnel disconnected ({:?}); --no-reconnect set",
-                        reason
-                    )
-                    .into());
+                    return Err(
+                        format!("tunnel disconnected ({:?}); --no-reconnect set", reason).into(),
+                    );
                 }
 
                 // ── --reconnect-attempts cap ─────────────────────────────
@@ -14021,7 +14019,7 @@ mod tests {
                             // Tests just verify the supervisor doesn't crash
                             // and proceeds to the next iteration.
                             let _ = peer_addr; // explicit reuse
-                            // No-op — fall through to the dial-against-stale path.
+                                               // No-op — fall through to the dial-against-stale path.
                         }
                     }
                 }
@@ -14038,10 +14036,7 @@ mod tests {
 
         /// Hex-encode the first 4 bytes of a NodeId for compact error messages.
         fn hex_short(id: &TestNodeId) -> String {
-            format!(
-                "{:02x}{:02x}{:02x}{:02x}…",
-                id[0], id[1], id[2], id[3]
-            )
+            format!("{:02x}{:02x}{:02x}{:02x}…", id[0], id[1], id[2], id[3])
         }
 
         // ── Sanity test for the fake resolver itself ────────────────────────
@@ -14078,30 +14073,48 @@ mod tests {
         fn backoff_exponential_with_jitter_capped_at_30s() {
             // attempt 1 → ~1000ms ±10%
             let d1 = compute_reconnect_delay(1, 1000);
-            assert!(d1 >= Duration::from_millis(900) && d1 <= Duration::from_millis(1100),
-                "attempt 1 expected ~1000ms ±10%, got {:?}", d1);
+            assert!(
+                d1 >= Duration::from_millis(900) && d1 <= Duration::from_millis(1100),
+                "attempt 1 expected ~1000ms ±10%, got {:?}",
+                d1
+            );
 
             // attempt 2 → ~2000ms
             let d2 = compute_reconnect_delay(2, 1000);
-            assert!(d2 >= Duration::from_millis(1800) && d2 <= Duration::from_millis(2200),
-                "attempt 2 expected ~2000ms ±10%, got {:?}", d2);
+            assert!(
+                d2 >= Duration::from_millis(1800) && d2 <= Duration::from_millis(2200),
+                "attempt 2 expected ~2000ms ±10%, got {:?}",
+                d2
+            );
 
             // attempt 5 → ~16000ms
             let d5 = compute_reconnect_delay(5, 1000);
-            assert!(d5 >= Duration::from_millis(14400) && d5 <= Duration::from_millis(17600),
-                "attempt 5 expected ~16000ms ±10%, got {:?}", d5);
+            assert!(
+                d5 >= Duration::from_millis(14400) && d5 <= Duration::from_millis(17600),
+                "attempt 5 expected ~16000ms ±10%, got {:?}",
+                d5
+            );
 
             // attempt 10 → CAPPED at 30000ms ±10%
             let d10 = compute_reconnect_delay(10, 1000);
-            assert!(d10 <= Duration::from_millis(33000),
-                "attempt 10 must be capped near 30000ms ±10%, got {:?}", d10);
-            assert!(d10 >= Duration::from_millis(27000),
-                "attempt 10 should still be in the cap range ±10%, got {:?}", d10);
+            assert!(
+                d10 <= Duration::from_millis(33000),
+                "attempt 10 must be capped near 30000ms ±10%, got {:?}",
+                d10
+            );
+            assert!(
+                d10 >= Duration::from_millis(27000),
+                "attempt 10 should still be in the cap range ±10%, got {:?}",
+                d10
+            );
 
             // attempt 100 → still capped
             let d100 = compute_reconnect_delay(100, 1000);
-            assert!(d100 <= Duration::from_millis(33000),
-                "very high attempt count must remain capped, got {:?}", d100);
+            assert!(
+                d100 <= Duration::from_millis(33000),
+                "very high attempt count must remain capped, got {:?}",
+                d100
+            );
         }
 
         // ── DisconnectReason classification — T3 makes this pass ─────────────
@@ -14172,7 +14185,11 @@ mod tests {
             )
             .await;
 
-            assert!(outcome.is_ok(), "supervisor should recover cleanly: {:?}", outcome);
+            assert!(
+                outcome.is_ok(),
+                "supervisor should recover cleanly: {:?}",
+                outcome
+            );
             assert_eq!(
                 resolver.calls(),
                 2,
@@ -14209,7 +14226,11 @@ mod tests {
             )
             .await;
 
-            assert!(outcome.is_ok(), "should follow IP change when NodeID matches: {:?}", outcome);
+            assert!(
+                outcome.is_ok(),
+                "should follow IP change when NodeID matches: {:?}",
+                outcome
+            );
             // T7 e2e validation pins that the second dial actually used 10.69.91.244,
             // not 10.69.91.243 — proves we re-resolved, didn't just retry stale.
         }
@@ -14251,9 +14272,9 @@ mod tests {
         #[tokio::test]
         async fn supervisor_falls_back_to_stale_address_when_ns_unreachable() {
             let resolver = FakeResolver::new(vec![
-                Ok((addr("10.69.91.243:23095"), N1)),  // initial
-                Err("NS timeout".to_string()),         // NS down during 1st reconnect
-                Ok((addr("10.69.91.243:23095"), N1)),  // NS back, same address
+                Ok((addr("10.69.91.243:23095"), N1)), // initial
+                Err("NS timeout".to_string()),        // NS down during 1st reconnect
+                Ok((addr("10.69.91.243:23095"), N1)), // NS back, same address
             ]);
 
             let cfg = SupervisorConfig {
@@ -14382,8 +14403,15 @@ mod tests {
             )
             .await;
 
-            assert!(outcome.is_err(), "--no-reconnect must exit on first disconnect");
-            assert_eq!(resolver.calls(), 1, "should not re-resolve when --no-reconnect set");
+            assert!(
+                outcome.is_err(),
+                "--no-reconnect must exit on first disconnect"
+            );
+            assert_eq!(
+                resolver.calls(),
+                1,
+                "should not re-resolve when --no-reconnect set"
+            );
         }
 
         // ── Negative: --reconnect-attempts cap ──────────────────────────────
@@ -14419,7 +14447,10 @@ mod tests {
             )
             .await;
 
-            assert!(outcome.is_err(), "should exit after 3 failed reconnect attempts");
+            assert!(
+                outcome.is_err(),
+                "should exit after 3 failed reconnect attempts"
+            );
             let err_msg = format!("{}", outcome.unwrap_err());
             assert!(
                 err_msg.contains("3 attempts") || err_msg.contains("giving up"),
@@ -14454,7 +14485,11 @@ mod tests {
             )
             .await;
 
-            assert!(outcome.is_ok(), "should recover without re-resolving: {:?}", outcome);
+            assert!(
+                outcome.is_ok(),
+                "should recover without re-resolving: {:?}",
+                outcome
+            );
             assert_eq!(
                 resolver.calls(),
                 1,
@@ -14478,12 +14513,8 @@ mod tests {
                 allow_identity_change: false,
             };
 
-            let outcome = run_supervisor_test(
-                cfg,
-                &resolver,
-                vec![DisconnectReason::UserInterrupt],
-            )
-            .await;
+            let outcome =
+                run_supervisor_test(cfg, &resolver, vec![DisconnectReason::UserInterrupt]).await;
 
             assert!(outcome.is_ok(), "Ctrl-C should exit cleanly");
             assert_eq!(resolver.calls(), 1, "should NOT retry after user interrupt");

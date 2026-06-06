@@ -22,7 +22,9 @@ defmodule ZtlpNs.MixProject do
       # in `ztlp listen`, PR #91). Floor ratcheted to 0.34.8 in release_test.exs.
       # Bumped 0.34.8 → 0.34.9 in release/v0.34.9 (connect auto-reconnect
       # supervisor, PR #93). Floor ratcheted to 0.34.9 in release_test.exs.
-      version: "0.34.9",
+      # Bumped 0.34.9 → 0.34.10 in release/v0.34.10 (supervisor default-on for
+      # raw-IP connects, PR #95). Floor ratcheted to 0.34.10 in release_test.exs.
+      version: "0.34.10",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

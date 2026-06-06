@@ -12355,16 +12355,18 @@ async fn main() {
             // backoff. Honors all five reconnect flags.
             //
             // Contract pinned by `mod tests::auto_reconnect` (17 tests).
+            // Gate pinned by `h10_defaults::resolve_supervisor_flag` (4 tests).
             // Plan: docs/plans/2026-06-03-connect-auto-reconnect.md
             // Dynamic scenarios: docs/plans/2026-06-04-auto-reconnect-dynamic-scenarios.md
             //
-            // Skip the supervisor when:
-            //   - --no-reconnect is set (explicit fail-fast)
-            //   - ns_server is None (raw IP — no NS to re-resolve via)
-            //
-            // In those cases, fall through to the original one-shot path
-            // for backward-compatible behavior.
-            let use_supervisor = !*no_reconnect && ns_server.is_some();
+            // v0.34.10: supervisor is default-on regardless of --ns-server.
+            // Previously gated on ns_server.is_some() which silently
+            // bypassed the supervisor for raw-IP connects (e.g. direct
+            // relay address). Only --no-reconnect now disables it.
+            let use_supervisor = ztlp_proto::h10_defaults::resolve_supervisor_flag(
+                ns_server.is_some(),
+                *no_reconnect,
+            );
 
             if !use_supervisor {
                 cmd_connect(

@@ -88,6 +88,35 @@ pub fn resolve_multi_candidate_flag(
     }
 }
 
+/// Resolve whether the auto-reconnect supervisor should engage for this
+/// `ztlp connect` invocation.
+///
+/// v0.34.10: the supervisor is **default-on** regardless of whether
+/// `--ns-server` was supplied. The only opt-out is the explicit
+/// `--no-reconnect` flag (which clap's `conflicts_with` already prevents
+/// from co-existing with the tuning flags).
+///
+/// Background: v0.34.9 introduced the supervisor but gated it behind
+/// `ns_server.is_some()` on the theory that the supervisor "needs NS to
+/// re-resolve via". In practice the supervisor already falls back to the
+/// last-known peer address when re-resolve is unavailable, so the gate
+/// was a false-precondition. Raw-IP connects (e.g. `ztlp connect <ip>:<port>`)
+/// silently fell through to one-shot mode and exited code=1 on the first
+/// idle-timeout — observed in production on 2026-06-01 with a 30h bootstrap
+/// tunnel that died at idle-timeout and never reconnected.
+///
+/// Behaviour:
+///
+/// | --ns-server | --no-reconnect | supervisor_active |
+/// |-------------|----------------|-------------------|
+/// | unset       | false          | true  (v0.34.10 default-on)   |
+/// | set         | false          | true  (unchanged from v0.34.9)|
+/// | unset       | true           | false (explicit fail-fast)    |
+/// | set         | true           | false (explicit fail-fast)    |
+pub fn resolve_supervisor_flag(_ns_server_set: bool, no_reconnect: bool) -> bool {
+    !no_reconnect
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +289,72 @@ mod tests {
     fn test_mc_no_mc_alone_without_ns_is_noop() {
         let mc = resolve_multi_candidate_flag(false, false, true);
         assert!(!mc, "--no-multi-candidate without --ns-server is a no-op");
+    }
+
+    // ── v0.34.10 supervisor default-on tests ─────────────────────────────
+    //
+    // Background: v0.34.9 introduced the auto-reconnect supervisor, but
+    // gated it behind `ns_server.is_some()`. That meant raw-IP connect
+    // (e.g. `ztlp connect <ip>:<port>` with no --ns-server) silently
+    // fell back to the one-shot path with NO reconnect on disconnect.
+    //
+    // Real-world hit (2026-06-01): bootstrap tunnel via direct relay
+    // address timed out after ~30h idle and exited code=1, because the
+    // dispatcher saw `ns_server == None` and skipped the supervisor.
+    //
+    // v0.34.10 makes the supervisor default-on regardless of ns_server.
+    // The supervisor's reconnect path falls back to last-known peer_addr
+    // when re-resolve is unavailable (already-implemented behavior), so
+    // there is no functional reason to gate on ns_server.
+    //
+    // Escape hatch: `--no-reconnect` remains an unconditional fail-fast
+    // veto for users who want v0.34.8-style one-shot behavior.
+
+    // BDD: GIVEN raw-IP connect (no --ns-server) and no --no-reconnect
+    //       WHEN  we resolve supervisor flag
+    //       THEN  supervisor is ENGAGED (v0.34.10 default-on)
+    #[test]
+    fn test_supervisor_raw_ip_default_engages() {
+        let active = resolve_supervisor_flag(false, false);
+        assert!(
+            active,
+            "v0.34.10: supervisor must engage on raw-IP connect by default"
+        );
+    }
+
+    // BDD: GIVEN --ns-server connect and no --no-reconnect
+    //       WHEN  we resolve supervisor flag
+    //       THEN  supervisor is ENGAGED (unchanged from v0.34.9)
+    #[test]
+    fn test_supervisor_ns_default_engages() {
+        let active = resolve_supervisor_flag(true, false);
+        assert!(
+            active,
+            "supervisor must engage on NS-resolved connect by default"
+        );
+    }
+
+    // BDD: GIVEN raw-IP connect and --no-reconnect set
+    //       WHEN  we resolve supervisor flag
+    //       THEN  supervisor is SKIPPED (explicit fail-fast)
+    #[test]
+    fn test_supervisor_no_reconnect_vetoes_raw_ip() {
+        let active = resolve_supervisor_flag(false, true);
+        assert!(
+            !active,
+            "--no-reconnect must veto supervisor even on raw-IP connect"
+        );
+    }
+
+    // BDD: GIVEN --ns-server connect and --no-reconnect set
+    //       WHEN  we resolve supervisor flag
+    //       THEN  supervisor is SKIPPED (explicit fail-fast)
+    #[test]
+    fn test_supervisor_no_reconnect_vetoes_ns() {
+        let active = resolve_supervisor_flag(true, true);
+        assert!(
+            !active,
+            "--no-reconnect must veto supervisor even on NS-resolved connect"
+        );
     }
 }

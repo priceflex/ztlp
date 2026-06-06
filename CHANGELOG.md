@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.34.10 — 2026-06-06
+
+### Auto-Reconnect Supervisor Default-On (proto)
+- **`ztlp connect` auto-reconnects on every disconnect path by default**, regardless of whether `--ns-server` was supplied. Previously the supervisor only engaged when an NS server was configured, so raw-IP connects (e.g. `ztlp connect <relay-ip>:<port>` for direct tunnels into a bootstrap container) silently fell back to one-shot mode and exited code=1 on the first idle-timeout. Observed in production: a 30-hour bootstrap tunnel via direct relay address died at QUIC `TimedOut` and never reconnected.
+- **`h10_defaults::resolve_supervisor_flag(ns_server_set, no_reconnect)`** (`proto/src/h10_defaults.rs`): new pure helper that pins the supervisor gate. The only opt-out is the explicit `--no-reconnect` flag; `--ns-server` is no longer a precondition.
+- **Backward-compatible:** users who relied on `v0.34.8`-style one-shot fail-fast behavior keep it with `--no-reconnect`.
+- **Tests**: 4 new BDD-style unit tests pin the gate behavior; the existing 17 supervisor scenario tests are unchanged. Total proto suite: 1567 passed, 0 failed.
+
+### Version pinning
+- proto/gateway/ns/relay manifests bumped 0.34.9 → 0.34.10. All 4 floor tests (`version_pin_test.rs`, 3× `release_test.exs`) ratcheted to 0.34.10.
+
 ## v0.26.0 — 2026-05-19
 
 ### ztlp.net Onboarding Hardening (Launch app)

@@ -23,7 +23,7 @@
 
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
-| T1 | NS: `ZtlpNs.AdminApi` HMAC verifier + tests | 🔲 | — | |
+| T1 | NS: `ZtlpNs.AdminApi` HMAC verifier + tests | ✅ | _commit-pending_ | |
 | T2 | NS: `ZtlpNs.AdminApi.list_records/1` + tests | 🔲 | — | |
 | T3 | NS: HTTP route `GET /admin/records` in MetricsServer + tests | 🔲 | — | |
 | T4 | NS: env var plumbing + config + Dockerfile | 🔲 | — | |

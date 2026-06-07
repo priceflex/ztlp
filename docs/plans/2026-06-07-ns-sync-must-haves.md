@@ -5,7 +5,7 @@
 **Goal:** Land the 4 production-readiness must-haves from `2026-06-07-ns-bootstrap-sync-production-readiness.md` so `ZTLP_NS_SYNC_ENABLED=true` can be safely flipped in production.
 
 **Architecture:**
-- NS side (Elixir, `ns/`): wrap `handle_admin_records/4` with per-IP rate-limit + audit-log emission on both success and failure branches. Both reuse the existing `ZtlpNs.RateLimiter` and `ZtlpNs.Audit` modules — no new infrastructure.
+- NS side (Elixir, `ns/`): wrap `handle_admin_records/5` (post-T1) with per-IP rate-limit + audit-log emission on both success and failure branches. Both reuse the existing `ZtlpNs.RateLimiter` and `ZtlpNs.Audit` modules — no new infrastructure.
 - Bootstrap side (Rails, `bootstrap/`): introduce `Ztlp::SyncState` (filesystem-backed JSON) so the cron loop can apply exponential backoff after transient NS failures, and surface `last_synced_at` / failure state in the dashboard.
 
 **Tech Stack:** Elixir 1.15 (NS), Ruby 3.0 / Rails 7 (Bootstrap), ExUnit, Minitest, Mnesia.
@@ -22,7 +22,7 @@
 
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
-| T1 | NS: thread peer IP from accept loop into `handle_admin_records/4` | ✅ | `ea43627` | passes 4 admin_api_http tests; full suite 834/834 |
+| T1 | NS: thread peer IP from accept loop into `handle_admin_records/5` | ✅ | `ea43627` | passes 4 admin_api_http tests; full suite 834/834 |
 | T2 | NS: rate-limit `/admin/records` via `ZtlpNs.RateLimiter` (item #1) | ✅ | `e1c52d7` | AdminApiRateLimiter 12/60 default; 429 + Retry-After; 838 tests pass |
 | T3 | NS: audit-log success + auth-failure on `/admin/records` (item #2) | ✅ | `7df6d4c` | audit entries on 200 and 401; 840 tests |
 | T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | ✅ | `3eb4fc9` | filesystem JSON at tmp/ztlp_sync_state.json; exp backoff capped at 15min; 7 new tests; bs suite 1160/0/0 |
@@ -39,12 +39,12 @@
 
 ## Pre-flight: existing infrastructure we're plugging into
 
-Confirmed by greppinng `ns/lib/` and `bootstrap/`:
+Confirmed by grepping `ns/lib/` and `bootstrap/`:
 
 - **`ZtlpNs.RateLimiter`** (`ns/lib/ztlp_ns/rate_limiter.ex`, 209 LOC) — already a GenServer + ETS token-bucket. Public API: `check(ip_tuple) :: :ok | :rate_limited`. Configuration via `:ztlp_ns` app env `:rate_limit` keylist (`queries_per_second`, `burst`).
   - Reuse pattern: T2 calls `ZtlpNs.RateLimiter.check(peer_ip)` BEFORE `AdminApi.verify_request` (verify is cheap but `list_records` walks the store — protect the expensive path). On `:rate_limited`, send 429 + `Retry-After`.
 - **`ZtlpNs.Audit`** (`ns/lib/ztlp_ns/audit.ex`, 199 LOC) — bounded ring buffer. Public API: `log(action :: atom, name :: String.t, type :: atom, details :: map) :: :ok`. New action atoms for T3: `:admin_api_records_pulled`, `:admin_api_auth_failed`.
-- **`metrics_server.ex`** `:gen_tcp.accept/2` at line 51 — peer IP is reachable via `:inet.peername/1` on the accepted socket. T1 extracts it and threads through `handle_admin_records/4`.
+- **`metrics_server.ex`** `:gen_tcp.accept/2` at line 51 — peer IP is reachable via `:inet.peername/1` on the accepted socket. T1 extracts it and threads through `handle_admin_records/5`.
 - **`Ztlp::SyncNsToBootstrap`** already returns `Result` with `status :ok | :error` (line 52). T5 uses `result.error?` and the audit-log `details` JSON.
 - **`AuditLog` Rails model** already used by the existing rake task (`bootstrap/lib/tasks/ztlp_ns_sync.rake` line 20) — we read its most recent row in T6/T7 to compute last-success timestamps. Avoids a parallel data source.
 
@@ -89,7 +89,7 @@ Confirmed by greppinng `ns/lib/` and `bootstrap/`:
 
 Each task is self-contained. Subagent gets: the task block below, the discipline block above, and pointer to the production-readiness source doc. Subagent does NOT need to read the plan file itself.
 
-### T1 — NS: thread peer IP from accept loop into `handle_admin_records/4`
+### T1 — NS: thread peer IP from accept loop into `handle_admin_records/5`
 
 **Objective:** Capture the peer IP at `:gen_tcp.accept/2` time and pass it through the request dispatcher so downstream handlers can use it for rate-limiting and audit logging. PURE PLUMBING — no behavior change, no new tests beyond verifying the IP arrives.
 

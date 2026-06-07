@@ -127,7 +127,10 @@ defmodule ZtlpNs.Config do
   def admin_api_rate_limit do
     case System.get_env("ZTLP_NS_ADMIN_API_RATE_LIMIT") do
       nil ->
-        Application.get_env(:ztlp_ns, :admin_api_rate_limit, {12, 60})
+        # App-config fallback is also normalized — a bad value like {12, 0}
+        # from a misconfigured deployment would otherwise cause div-by-zero
+        # in AdminApiRateLimiter.do_check/1. CodeRabbit #97.
+        normalize_rate_limit(Application.get_env(:ztlp_ns, :admin_api_rate_limit, {12, 60}))
       str ->
         case String.split(str, "/", parts: 2) do
           [c, w] ->
@@ -140,6 +143,11 @@ defmodule ZtlpNs.Config do
         end
     end
   end
+
+  defp normalize_rate_limit({count, window})
+       when is_integer(count) and is_integer(window) and count > 0 and window > 0,
+       do: {count, window}
+  defp normalize_rate_limit(_invalid), do: {12, 60}
 
   @doc "HTTPS URLs for bootstrap relay discovery (Step 1 of NIP)."
   @spec bootstrap_urls() :: [String.t()]

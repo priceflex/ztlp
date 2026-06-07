@@ -19,7 +19,12 @@ class Api::V1::SyncHealthControllerTest < ActionDispatch::IntegrationTest
   ENV_KEY = "ZTLP_HMAC_SECRET_ACME_ZTLP"
 
   setup do
-    Ztlp::SyncState.reset!
+    # Per-test tmp file — Rails parallelizes workers above 50 runs so
+    # SyncState's global tmp/ztlp_sync_state.json would otherwise race.
+    @tmpdir = Dir.mktmpdir("ztlp-api-sync-health")
+    @state_path = Pathname.new(File.join(@tmpdir, "ztlp_sync_state.json"))
+    Ztlp::SyncState.stubs(:state_file).returns(@state_path)
+
     @client   = api_clients(:z2ls_acme)
     @prev_env = ENV[ENV_KEY]
     ENV[ENV_KEY] = SECRET
@@ -27,7 +32,7 @@ class Api::V1::SyncHealthControllerTest < ActionDispatch::IntegrationTest
 
   teardown do
     ENV[ENV_KEY] = @prev_env
-    Ztlp::SyncState.reset!
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.exist?(@tmpdir)
   end
 
   test "GET /api/v1/sync_health without auth returns 401" do

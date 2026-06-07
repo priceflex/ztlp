@@ -85,6 +85,23 @@ class Ztlp::SyncStateTest < ActiveSupport::TestCase
     assert_equal 0, Ztlp::SyncState.current[:consecutive_failures]
   end
 
+  test "tolerates parseable-but-non-Hash JSON (returns default state)" do
+    # Regression: previously raised TypeError when accessing string keys
+    # on Array/String results from JSON.parse. CodeRabbit #97.
+    FileUtils.mkdir_p(File.dirname(@state_path))
+    File.write(@state_path, "[]")
+    assert Ztlp::SyncState.due?
+    assert_equal 0, Ztlp::SyncState.current[:consecutive_failures]
+
+    File.write(@state_path, "\"a string\"")
+    assert Ztlp::SyncState.due?
+    assert_equal 0, Ztlp::SyncState.current[:consecutive_failures]
+
+    # And writes still work after a non-Hash file (we recover cleanly).
+    Ztlp::SyncState.record_failure!(error_class: "TransportError")
+    assert_equal 1, Ztlp::SyncState.current[:consecutive_failures]
+  end
+
   test "persists across process boundary (round-trip)" do
     now = Time.utc(2026, 6, 7, 12)
     Ztlp::SyncState.record_failure!(error_class: "ServerError", timestamp: now)

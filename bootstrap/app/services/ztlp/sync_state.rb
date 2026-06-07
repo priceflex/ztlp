@@ -84,10 +84,14 @@ module Ztlp
       def load_state
         path = state_file
         return default_state unless File.exist?(path)
-        raw = File.read(path)
-        return default_state if raw.empty?
-        JSON.parse(raw)
-      rescue JSON::ParserError
+        File.open(path, File::RDONLY) do |f|
+          f.flock(File::LOCK_SH)
+          raw = f.read
+          return default_state if raw.empty?
+          parsed = JSON.parse(raw)
+          parsed.is_a?(Hash) ? parsed : default_state
+        end
+      rescue JSON::ParserError, Errno::ENOENT
         default_state
       end
 
@@ -102,7 +106,8 @@ module Ztlp
               default_state
             else
               begin
-                JSON.parse(raw)
+                parsed = JSON.parse(raw)
+                parsed.is_a?(Hash) ? parsed : default_state
               rescue JSON::ParserError
                 default_state
               end

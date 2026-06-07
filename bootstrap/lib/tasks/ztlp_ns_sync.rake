@@ -38,7 +38,13 @@ namespace :ztlp do
       # Persist sync health so the next cron tick can self-throttle during
       # NS outages (exp backoff 1m → 2m → 4m → 8m → 15m cap).
       if result.error?
-        Ztlp::SyncState.record_failure!(error_class: result.message || "UnknownError")
+        # result.message is shaped "ExceptionClass: message text" by the
+        # service (see sync_ns_to_bootstrap.rb). We persist ONLY the class
+        # name so /api/v1/sync_health and the dashboard banner don't leak
+        # transport error details. Split on ": " (colon-SPACE) so namespaced
+        # classes like "Ztlp::NsAdminClient::TransportError" survive intact.
+        error_class = (result.message.to_s.split(": ", 2).first.presence) || "UnknownError"
+        Ztlp::SyncState.record_failure!(error_class: error_class)
       else
         Ztlp::SyncState.record_success!
       end

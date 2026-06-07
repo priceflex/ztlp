@@ -11,14 +11,25 @@ defmodule ZtlpNs.MetricsServer do
 
   @default_port 9103
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts \\ []) do
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc "Return the listen port for a running MetricsServer (test helper)."
+  def port(server \\ __MODULE__), do: GenServer.call(server, :port)
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     :persistent_term.put({__MODULE__, :start_time}, System.monotonic_time(:second))
 
-    if metrics_enabled?() do
-      port = metrics_port()
+    # Tests can pass `enabled: true` and `port: 0` to start an ephemeral
+    # listener even when the global `:metrics_enabled` config is false.
+    enabled = Keyword.get(opts, :enabled, metrics_enabled?())
+    port_override = Keyword.get(opts, :port)
+
+    if enabled do
+      port = port_override || metrics_port()
       case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128]) do
         {:ok, ls} ->
           {:ok, actual_port} = :inet.port(ls)
@@ -53,25 +64,39 @@ defmodule ZtlpNs.MetricsServer do
   end
 
   @impl true
+  def handle_call(:port, _from, %{port: p} = state), do: {:reply, p, state}
+
+  @impl true
   def terminate(_reason, %{socket: nil}), do: :ok
   def terminate(_reason, %{socket: s}), do: :gen_tcp.close(s)
 
   defp handle_request(socket) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
-        drain_headers(socket)
         # Normalize path: http_bin returns binary strings, http returns charlists
         path_str = if is_list(path), do: List.to_string(path), else: path
-        case path_str do
+        {path_only, query} = split_path(path_str)
+        case path_only do
           "/metrics" ->
+            drain_headers(socket)
             body = collect_metrics()
             send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
-          "/health" -> send_response(socket, 200, "OK\n")
-          "/ready" -> send_response(socket, 200, "OK\n")
+          "/health" ->
+            drain_headers(socket)
+            send_response(socket, 200, "OK\n")
+          "/ready" ->
+            drain_headers(socket)
+            send_response(socket, 200, "OK\n")
           "/token_status" ->
+            drain_headers(socket)
             body = collect_token_status()
             send_response(socket, 200, body, "application/json")
-          _ -> send_response(socket, 404, "Not Found\n")
+          "/admin/records" ->
+            headers = collect_headers(socket, %{})
+            handle_admin_records(socket, path_str, query, headers)
+          _ ->
+            drain_headers(socket)
+            send_response(socket, 404, "Not Found\n")
         end
       {:ok, {:http_request, _, _, _}} ->
         drain_headers(socket)
@@ -79,6 +104,13 @@ defmodule ZtlpNs.MetricsServer do
       _ -> :ok
     end
     :gen_tcp.close(socket)
+  end
+
+  defp split_path(path) do
+    case String.split(path, "?", parts: 2) do
+      [p] -> {p, ""}
+      [p, q] -> {p, q}
+    end
   end
 
   defp drain_headers(socket) do
@@ -89,9 +121,64 @@ defmodule ZtlpNs.MetricsServer do
     end
   end
 
+  # Like drain_headers but accumulates {downcased-name => value} into a map
+  # so handlers can verify HMAC headers.
+  defp collect_headers(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 2_000) do
+      {:ok, :http_eoh} -> acc
+      {:ok, {:http_header, _, name, _, value}} ->
+        name_str = name |> to_string() |> String.downcase()
+        value_str = to_string(value)
+        collect_headers(socket, Map.put(acc, name_str, value_str))
+      _ -> acc
+    end
+  end
+
+  defp handle_admin_records(socket, path_with_query, query_str, headers) do
+    secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+
+    case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
+      :ok ->
+        opts = parse_admin_query(query_str)
+        body = ZtlpNs.AdminApi.list_records(opts) |> Jason.encode!()
+        send_response(socket, 200, body, "application/json")
+      {:error, reason} ->
+        Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
+        send_response(socket, 401, "")
+    end
+  end
+
+  @admin_record_types %{
+    "key" => :key, "svc" => :svc, "relay" => :relay, "policy" => :policy,
+    "revoke" => :revoke, "bootstrap" => :bootstrap, "operator" => :operator,
+    "device" => :device, "user" => :user, "group" => :group,
+    "ca" => :ca, "cert" => :cert
+  }
+
+  defp parse_admin_query(""), do: []
+  defp parse_admin_query(qs) do
+    qs
+    |> String.split("&", trim: true)
+    |> Enum.reduce([], fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        ["type", v] ->
+          case Map.get(@admin_record_types, String.downcase(v)) do
+            nil -> acc
+            atom -> Keyword.put(acc, :type, atom)
+          end
+        ["zone", v] -> Keyword.put(acc, :zone, URI.decode(v))
+        _ -> acc
+      end
+    end)
+  end
+
   defp send_response(socket, status, body, ct \\ "text/plain") do
     status_text = case status do
-      200 -> "OK"; 404 -> "Not Found"; 405 -> "Method Not Allowed"; _ -> "Error"
+      200 -> "OK"
+      401 -> "Unauthorized"
+      404 -> "Not Found"
+      405 -> "Method Not Allowed"
+      _ -> "Error"
     end
     :inet.setopts(socket, [packet: :raw])
     :gen_tcp.send(socket, [

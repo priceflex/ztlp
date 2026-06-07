@@ -5,6 +5,15 @@ class ZtlpNsSyncRakeTest < ActiveSupport::TestCase
   setup do
     Rails.application.load_tasks if Rake::Task.tasks.empty?
     Rake::Task["ztlp:ns:sync"].reenable
+    # Per-test tmp file — Rails parallelizes workers above 50 runs and the
+    # global tmp/ztlp_sync_state.json would otherwise collide across forks.
+    @tmpdir = Dir.mktmpdir("ztlp-rake-sync-state")
+    @state_path = Pathname.new(File.join(@tmpdir, "ztlp_sync_state.json"))
+    Ztlp::SyncState.stubs(:state_file).returns(@state_path)
+  end
+
+  teardown do
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.exist?(@tmpdir)
   end
 
   test "prints greppable status line and writes a success AuditLog" do
@@ -58,5 +67,68 @@ class ZtlpNsSyncRakeTest < ActiveSupport::TestCase
     assert_equal "failure", audit.status
     parsed = audit.parsed_details
     assert_equal 2, parsed["errors"].length
+  end
+
+  test "skips run when SyncState is not due (backoff active)" do
+    Ztlp::SyncState.record_failure!(error_class: "TransportError")
+    refute Ztlp::SyncState.due?
+
+    Ztlp::SyncNsToBootstrap.expects(:call).never
+
+    out, _err = capture_io { Rake::Task["ztlp:ns:sync"].invoke }
+    assert_match(/\[ztlp:ns:sync\] skipped/, out)
+    assert_match(/next_retry_at=/, out)
+  end
+
+  test "records SyncState success after a successful run" do
+    Ztlp::SyncNsToBootstrap.stubs(:call).returns(
+      Ztlp::SyncNsToBootstrap::Result.new(
+        status: :ok, created: 1, updated: 0, orphaned: 0, skipped: 0,
+        errors: [], message: "ok"
+      )
+    )
+
+    capture_io { Rake::Task["ztlp:ns:sync"].invoke }
+
+    state = Ztlp::SyncState.current
+    refute_nil state[:last_success_at]
+    assert_equal 0, state[:consecutive_failures]
+    assert_nil state[:next_retry_at]
+  end
+
+  test "records SyncState failure with error_class after error result" do
+    Ztlp::SyncNsToBootstrap.stubs(:call).returns(
+      Ztlp::SyncNsToBootstrap::Result.new(
+        status: :error, created: 0, updated: 0, orphaned: 0, skipped: 0,
+        errors: [{ name: "x", reason: "boom" }], message: "TransportError"
+      )
+    )
+
+    capture_io { Rake::Task["ztlp:ns:sync"].invoke }
+
+    state = Ztlp::SyncState.current
+    assert_equal 1, state[:consecutive_failures]
+    assert_equal "TransportError", state[:last_error_class]
+    refute_nil state[:next_retry_at]
+  end
+
+  test "persists only the exception class name, not the full error message" do
+    # Regression for CodeRabbit PR #97 finding: SyncNsToBootstrap formats
+    # result.message as "#{e.class}: #{e.message}", so storing message verbatim
+    # would leak transport details into /api/v1/sync_health and the banner.
+    Ztlp::SyncNsToBootstrap.stubs(:call).returns(
+      Ztlp::SyncNsToBootstrap::Result.new(
+        status: :error, created: 0, updated: 0, orphaned: 0, skipped: 0,
+        errors: [{ name: "x", reason: "boom" }],
+        message: "Ztlp::NsAdminClient::TransportError: Failed to open TCP connection to ns:9103 (Connection refused)"
+      )
+    )
+
+    capture_io { Rake::Task["ztlp:ns:sync"].invoke }
+
+    state = Ztlp::SyncState.current
+    assert_equal "Ztlp::NsAdminClient::TransportError", state[:last_error_class]
+    refute_match(/Connection refused/, state[:last_error_class].to_s)
+    refute_match(/ns:9103/,             state[:last_error_class].to_s)
   end
 end

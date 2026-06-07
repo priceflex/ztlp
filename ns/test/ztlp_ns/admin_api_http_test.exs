@@ -19,6 +19,10 @@ defmodule ZtlpNs.AdminApiHttpTest do
     prev_secret = Application.get_env(:ztlp_ns, :admin_api_secret)
     Application.put_env(:ztlp_ns, :admin_api_secret, @secret)
 
+    # Reset the global admin-API rate-limit bucket between tests so
+    # earlier tests don't bleed into later ones.
+    ZtlpNs.AdminApiRateLimiter.reset()
+
     Store.clear()
 
     # Seed one record so /admin/records has something to return.
@@ -102,6 +106,42 @@ defmodule ZtlpNs.AdminApiHttpTest do
              :httpc.request(:get, {url, []}, [], [])
   end
 
+  test "logs peer IP in admin records handler", %{port: port} do
+    path = "/admin/records"
+    headers = sign_headers("GET", path, "", @secret)
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+      end)
+
+    assert log =~ "peer_ip=127.0.0.1"
+  end
+
+  test "rate-limits after 12 requests in the window, returns 429 + Retry-After", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    path = "/admin/records"
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+    headers = sign_headers("GET", path, "", @secret)
+
+    # Burn through the bucket
+    for _ <- 1..12 do
+      {:ok, {{_, status, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+      assert status == 200
+    end
+
+    # 13th request should be 429 with Retry-After
+    # Note: same signature is fine because rate-limit fires BEFORE signature verify.
+    fresh_headers = sign_headers("GET", path, "", @secret)
+    {:ok, {{_, 429, _}, resp_headers, _}} = :httpc.request(:get, {url, fresh_headers}, [], [])
+    retry_after = Enum.find_value(resp_headers, fn {k, v} ->
+      if String.downcase(to_string(k)) == "retry-after", do: to_string(v)
+    end)
+    assert retry_after != nil
+    assert String.to_integer(retry_after) > 0
+  end
+
   test "GET /admin/records with a BAD signature returns 401", %{port: port} do
     ts = System.system_time(:second)
 
@@ -114,5 +154,50 @@ defmodule ZtlpNs.AdminApiHttpTest do
 
     assert {:ok, {{_, 401, _}, _resp_headers, _body}} =
              :httpc.request(:get, {url, headers}, [], [])
+  end
+
+  test "logs admin_api_records_pulled audit entry on 200", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    before = System.system_time(:second)
+    path = "/admin/records?type=key"
+    headers = sign_headers("GET", path, "", @secret)
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+
+    entries = ZtlpNs.Audit.since(before - 1)
+    matching = Enum.filter(entries, fn {_ts, action, _name, _type, details} ->
+      action == :admin_api_records_pulled and details[:type_filter] == :key
+    end)
+    assert length(matching) >= 1
+    {_ts, _action, name, type, details} = List.last(matching)
+    assert name == "/admin/records"
+    assert type == :admin_api
+    assert is_integer(details[:count])
+    assert details[:type_filter] == :key
+    assert details[:peer_ip] == "127.0.0.1"
+  end
+
+  test "logs admin_api_auth_failed audit entry on 401 (bad signature)", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    before = System.system_time(:second)
+    path = "/admin/records"
+    ts = System.system_time(:second)
+    bad_headers = [
+      {~c"x-ns-timestamp", String.to_charlist(to_string(ts))},
+      {~c"x-ns-signature", String.to_charlist(String.duplicate("0", 64))}
+    ]
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    {:ok, {{_, 401, _}, _, _}} = :httpc.request(:get, {url, bad_headers}, [], [])
+
+    entries = ZtlpNs.Audit.since(before - 1)
+    matching = Enum.filter(entries, fn {_ts, action, _name, _type, _details} ->
+      action == :admin_api_auth_failed
+    end)
+    assert length(matching) >= 1
+    {_ts, _action, _name, _type, details} = List.last(matching)
+    assert details[:peer_ip] == "127.0.0.1"
+    assert details[:reason] != nil
   end
 end

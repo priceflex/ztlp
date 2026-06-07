@@ -18,9 +18,13 @@
 
 ## 🔴 Must-have before production
 
+**STATUS: ✅ ALL LANDED in PR #97 (`feat/ns-sync-hardening`).** Items 1-4 below have status callouts noting their commit SHA and any deviations from the original spec.
+
 These three changes prevent foreseeable failure modes that would either hammer NS, leak data, or silently rot.
 
 ### 1. Rate-limit `/admin/records` on NS
+
+**Status: ✅ landed in PR #97 (commit `e1c52d7`).** Implementation deviation: created a separate `ZtlpNs.AdminApiRateLimiter` module (not `RateLimiter.check_admin_api/1` as originally specced) so admin-API traffic can't compete with the device-registration token bucket. Same algorithm, separate ETS table, separate threshold.
 
 **Problem:** Single shared HMAC secret with no per-client throttle. A leaked secret OR a Bootstrap stuck in a tight retry loop could hammer NS's Mnesia store at request frequency. The endpoint reads from every record in the store — not free.
 
@@ -39,6 +43,8 @@ These three changes prevent foreseeable failure modes that would either hammer N
 
 ### 2. NS-side audit log for SUCCESSFUL `/admin/records` calls
 
+**Status: ✅ landed in PR #97 (commit `7df6d4c`).** Implementation note: rate-limited (429) requests are NOT audited — they're `Logger.warning` only since they're attack signal, not authenticated activity. We don't want audit log floods amplifying a DoS attempt.
+
 **Problem:** Today we `Logger.warning` on 401s but say nothing on 200s. For SOC2/compliance and incident forensics, we need an append-only audit trail of "client X pulled N records at time T."
 
 **Fix shape:**
@@ -53,6 +59,8 @@ These three changes prevent foreseeable failure modes that would either hammer N
 **Estimated effort:** ~30 min, ~30 LOC.
 
 ### 3. Bootstrap-side exponential backoff on sync failures
+
+**Status: ✅ landed in PR #97 (commits `3eb4fc9` + `cf82fd3`).** Took the recommended "simpler shape" — `Ztlp::SyncState` filesystem JSON at `tmp/ztlp_sync_state.json`, flock-guarded. Rake task gated on `SyncState.due?`. Backoff: 1m → 2m → 4m → 8m → 15m (cap).
 
 **Problem:** The current cron loop runs every 5 minutes unconditionally. If NS is down or the secret is misconfigured, we'll log 12 errors/hour with no relief. The AuditLog table will fill with `status="failure"` rows fast.
 
@@ -71,6 +79,8 @@ These three changes prevent foreseeable failure modes that would either hammer N
 **Estimated effort:** ~2 hours, ~100 LOC + tests.
 
 ### 4. Health visibility — "last successful sync" indicator in dashboard
+
+**Status: ✅ landed in PR #97 (commits `6fb1a12` for the banner + `f06b945` for the JSON endpoint).** Banner appears at the top of `/networks/:id/ztlp_devices`. JSON endpoint at `GET /api/v1/sync_health` (HMAC-gated via existing `Api::V1::BaseController`). Band thresholds: green = <10min + 0 failures; yellow = 10-60min OR 1-2 failures; red = 3+ failures OR >60min OR never synced.
 
 **Problem:** Without UI feedback on sync health, a silent failure (HMAC secret rotated on NS but not BS, or NS DNS resolution broken) means stale data with no operator visibility. The Devices tab will look correct but be hours/days out of date.
 
@@ -214,8 +224,8 @@ Tied into the broader multi-tenant story for ZTLP. Architectural, not tactical.
 
 | Phase | Items | When |
 |---|---|---|
-| **Phase 1 — Production-ready** | #1, #3, #4 (rate limit, backoff, health UI) | Before flipping `ENABLED=true` |
-| **Phase 2 — Hardening** | #2, #5, #8 (audit log success, IP allow-list, runbook) | Within 1 sprint of going live |
+| **Phase 1 — Production-ready** ✅ | #1, #3, #4 (rate limit, backoff, health UI) + #2 (audit log) | **DONE in PR #97** |
+| **Phase 2 — Hardening** | #5, #8 (IP allow-list, runbook) | Within 1 sprint of going live — item #2 already shipped in Phase 1 |
 | **Phase 3 — Multi-tenant** | #6, #13 (per-zone secret, tenant isolation) | Before onboarding 2nd customer |
 | **Phase 4 — UX polish** | #7, #10 (manual sync button, presence info) | When operators ask |
 | **Phase 5 — Push model** | #9, #11 (webhooks, write-back) | When polling latency becomes a complaint |

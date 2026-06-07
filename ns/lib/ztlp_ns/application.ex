@@ -67,6 +67,7 @@ defmodule ZtlpNs.Application do
       ZtlpNs.TrustAnchor,
       ZtlpNs.Store,
       ZtlpNs.RateLimiter,
+      ZtlpNs.AdminApiRateLimiter,
       {Task.Supervisor, name: ZtlpNs.QuerySupervisor, max_children: ZtlpNs.Config.worker_pool_size()},
       ZtlpNs.EndpointStore,
       ZtlpNs.Audit,

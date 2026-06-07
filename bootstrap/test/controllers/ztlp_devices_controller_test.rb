@@ -17,6 +17,22 @@ class ZtlpDevicesControllerTest < ActionDispatch::IntegrationTest
     assert_match "bob-desktop", response.body
   end
 
+  test "index renders sync health banner" do
+    # Per-test tmp file — Rails parallelizes workers above 50 runs so the
+    # global tmp/ztlp_sync_state.json would otherwise race across forks.
+    tmpdir = Dir.mktmpdir("ztlp-devices-sync-state")
+    state_path = Pathname.new(File.join(tmpdir, "ztlp_sync_state.json"))
+    Ztlp::SyncState.stubs(:state_file).returns(state_path)
+
+    Ztlp::SyncState.record_success!
+    get network_ztlp_devices_path(@network)
+    assert_response :success
+    assert_match(/Last NS sync/, response.body)
+    assert_match(/sync-health-banner/, response.body)
+  ensure
+    FileUtils.remove_entry(tmpdir) if tmpdir && File.exist?(tmpdir)
+  end
+
   test "index filters by status enrolled" do
     get network_ztlp_devices_path(@network, status: "enrolled")
     assert_response :success

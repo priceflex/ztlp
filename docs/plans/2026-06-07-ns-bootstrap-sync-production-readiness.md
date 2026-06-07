@@ -108,6 +108,8 @@ These three changes prevent foreseeable failure modes that would either hammer N
 
 ### 5. NS-side IP allow-list for `/admin/records`
 
+**Status: ✅ landed in feat/ns-sync-tenant-isolation (T3 commit `b5072bd`).** Implementation deviation from this section's spec: CIDRs are PER-TENANT (`ZTLP_NS_ADMIN_API_TENANT_<SLUG>_CIDRS`), not a single global `ZTLP_NS_ADMIN_API_ALLOWED_CIDRS`. Each tenant's allowed CIDRs are bound to that tenant's secret. The union of all tenant CIDRs is the de-facto NS admin allow-list. Backwards-compat: empty tenant registry → no IP gate (legacy mode), so prod doesn't break before tenant config is added. See `docs/operations/ns-admin-tenant-isolation.md` for the operator guide.
+
 **Problem:** Even with rate-limiting, a leaked HMAC secret allows full record enumeration from anywhere on the internet. Defense in depth says we should also lock down by source IP.
 
 **Fix shape:**
@@ -118,6 +120,8 @@ These three changes prevent foreseeable failure modes that would either hammer N
 **Risk:** If we set CIDRs too narrowly we could break legitimate Bootstrap traffic. Mitigation: start permissive (`0.0.0.0/0`) in env, narrow after observation.
 
 ### 6. Per-zone secret scoping instead of one global secret
+
+**Status: ✅ landed in feat/ns-sync-tenant-isolation (T2 + T4 + T5 commits `c587cfa`, `881c841`, `35af350`).** Implemented as PER-TENANT secret scoping (one Bootstrap container = one tenant = one secret), rather than per-zone — matches Steve's MSP topology where each tenant manages multiple zones under a glob. NS identifies the calling tenant from the HMAC signature, then filters the response to records matching the tenant's zone glob. Tenant ALWAYS wins over the global secret when both could match (the critical security property — prevents a leaked global from impersonating a tenant). See `docs/operations/ns-admin-tenant-isolation.md` for full deployment + migration steps.
 
 **Problem:** Today every Bootstrap tenant that knows the global `ZTLP_NS_ADMIN_API_SECRET` could query records for every zone, including other customers' data. Today there's only one tenant (Tech Rockstars), so this is dormant. The moment a second customer onboards on the shared infrastructure, it's a real cross-tenant data leak.
 

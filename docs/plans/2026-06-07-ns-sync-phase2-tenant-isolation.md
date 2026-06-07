@@ -37,7 +37,7 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
-| T1 | CIDR parser + matcher module (`ZtlpNs.Cidr`) | 🔲 | — | Pure-data, TDD-friendly start |
+| T1 | CIDR parser + matcher module (`ZtlpNs.Cidr`) | ✅ | _commit-pending_ | 17 tests; full suite 862/845 |
 | T2 | Tenant config loader (env → struct) | 🔲 | — | `ZtlpNs.AdminApi.TenantRegistry` |
 | T3 | NS: IP allow-list gate on `/admin/records` (item #5) | 🔲 | — | Returns 403 + audit `:admin_api_ip_rejected` |
 | T4 | NS: per-tenant secret resolution + zone-glob scoping (item #6) | 🔲 | — | Backwards-compatible w/ global secret |
@@ -51,7 +51,7 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** _(populated on session restart)_
+**Last resumed at:** T1 done 2026-06-07T20:40:57Z
 
 ---
 

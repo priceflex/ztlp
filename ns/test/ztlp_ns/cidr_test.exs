@@ -82,5 +82,19 @@ defmodule ZtlpNs.CidrTest do
       {:ok, cidr} = Cidr.parse("172.18.0.0/16")
       assert Cidr.match?(cidr, {172, 18, 255, 255})
     end
+
+    # CodeRabbit PR #98 F3: previously the guard was is_integer/1 which
+    # admitted any int (including 1000, -1, 256) and produced garbage
+    # packed bytes that could spuriously match arbitrary CIDRs. The fix
+    # is `a in 0..255 and …` so out-of-range tuples fall through to the
+    # catch-all clause that returns false.
+    test "match? rejects out-of-bounds octets via guard (CodeRabbit PR #98 F3)" do
+      {:ok, cidr} = Cidr.parse("0.0.0.0/0")
+      refute Cidr.match?(cidr, {1000, 0, 0, 0})
+      refute Cidr.match?(cidr, {-1, 0, 0, 0})
+      refute Cidr.match?(cidr, {256, 0, 0, 0})
+      refute Cidr.match?(cidr, {0, 0, 0, 256})
+      refute Cidr.match?(cidr, {0, 999, 0, 0})
+    end
   end
 end

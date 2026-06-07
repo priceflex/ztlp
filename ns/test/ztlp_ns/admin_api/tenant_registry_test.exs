@@ -1,5 +1,8 @@
 defmodule ZtlpNs.AdminApi.TenantRegistryTest do
-  use ExUnit.Case, async: true
+  # CodeRabbit PR #98 F5: was async: true, but the cache_at_boot/0 +
+  # cached/0 tests mutate :persistent_term under a globally-keyed term.
+  # async with other test modules that touch the same key was racy.
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.AdminApi.TenantRegistry
   alias ZtlpNs.Cidr
@@ -260,6 +263,74 @@ defmodule ZtlpNs.AdminApi.TenantRegistryTest do
       canonical = "GET\n/admin/records\n1700000000\nfoo"
       sig = String.duplicate("0", 64)
       assert :no_match = TenantRegistry.identify_tenant(canonical, sig, %{})
+    end
+  end
+
+  describe "duplicate-secret detection (CodeRabbit PR #98 F1)" do
+    # identify_tenant/3's first-match wins is non-deterministic on
+    # collision because Enum order over a map is not stable. Refuse
+    # to boot rather than allow ambiguous identity assignment.
+    test "rejects duplicate tenant secrets at load" do
+      shared_hex = String.duplicate("a", 64)
+
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => shared_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "172.18.0.0/16",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_SECRET" => shared_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_ZONE_GLOB" => "*.acme.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_CIDRS" => "172.20.0.0/16"
+      }
+
+      err =
+        assert_raise RuntimeError, ~r/duplicate tenant SECRET/, fn ->
+          TenantRegistry.load_from_env(env)
+        end
+
+      # Both colliding slugs must be named so operators can act.
+      assert err.message =~ "ACME"
+      assert err.message =~ "TRS"
+    end
+
+    test "distinct secrets across tenants load fine" do
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "172.18.0.0/16",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_SECRET" => @acme_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_ZONE_GLOB" => "*.acme.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_CIDRS" => "172.20.0.0/16"
+      }
+
+      assert %{"TRS" => _, "ACME" => _} = TenantRegistry.load_from_env(env)
+    end
+  end
+
+  describe "cache_at_boot/0 failure modes (CodeRabbit PR #98 F2)" do
+    # The Application.start/2 rescue clause re-raises when tenant env
+    # vars are present but parsing fails (fail-closed). The actual
+    # re-raise is exercised by integration boot; here we pin the
+    # contract that cache_at_boot/0 itself raises so the rescue has
+    # something to react to.
+    test "cache_at_boot raises on invalid env (so Application can re-raise)" do
+      bad_keys = [
+        "ZTLP_NS_ADMIN_API_TENANT_BAD_SECRET",
+        "ZTLP_NS_ADMIN_API_TENANT_BAD_ZONE_GLOB",
+        "ZTLP_NS_ADMIN_API_TENANT_BAD_CIDRS"
+      ]
+
+      try do
+        System.put_env("ZTLP_NS_ADMIN_API_TENANT_BAD_SECRET", "not-hex-and-wrong-length")
+        System.put_env("ZTLP_NS_ADMIN_API_TENANT_BAD_ZONE_GLOB", "*.bad.ztlp")
+        System.put_env("ZTLP_NS_ADMIN_API_TENANT_BAD_CIDRS", "172.18.0.0/16")
+
+        assert_raise RuntimeError, ~r/secret/i, fn ->
+          TenantRegistry.cache_at_boot()
+        end
+      after
+        Enum.each(bad_keys, &System.delete_env/1)
+        TenantRegistry.clear_cache()
+      end
     end
   end
 end

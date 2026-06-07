@@ -97,7 +97,7 @@ defmodule ZtlpNs.Cidr do
 
   @spec match?(t(), :inet.ip4_address()) :: boolean()
   def match?(%__MODULE__{network_int: net, broadcast_int: bcast}, {a, b, c, d})
-      when is_integer(a) and is_integer(b) and is_integer(c) and is_integer(d) do
+      when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255 do
     ip_int = (a <<< 24) ||| (b <<< 16) ||| (c <<< 8) ||| d
     ip_int >= net and ip_int <= bcast
   end

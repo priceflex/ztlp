@@ -59,6 +59,33 @@ defmodule ZtlpNs.AdminApi.TenantRegistry do
     |> group_by_slug()
     |> Enum.map(&build_tenant!/1)
     |> Map.new()
+    |> ensure_unique_secrets!()
+  end
+
+  # CodeRabbit PR #98 F1: identify_tenant/3 walks the registry and
+  # first-match wins by secret. If two tenants share a secret, the
+  # caller's identity is decided by Enum iteration order — which is
+  # NOT a stable contract on a map. Refuse to boot rather than
+  # silently letting an ambiguous identity assignment ride.
+  defp ensure_unique_secrets!(registry) do
+    dup_groups =
+      registry
+      |> Map.values()
+      |> Enum.group_by(& &1.secret, & &1.slug)
+      |> Enum.filter(fn {_secret, slugs} -> length(slugs) > 1 end)
+
+    if dup_groups != [] do
+      slugs =
+        dup_groups
+        |> Enum.flat_map(fn {_secret, s} -> s end)
+        |> Enum.uniq()
+        |> Enum.sort()
+        |> Enum.join(", ")
+
+      raise "duplicate tenant SECRET across slugs: #{slugs}"
+    end
+
+    registry
   end
 
   defp group_by_slug(env_map) do

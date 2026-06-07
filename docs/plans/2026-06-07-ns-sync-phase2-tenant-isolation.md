@@ -49,9 +49,10 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T10 | Docs: update `bootstrap/.env.example` + production-readiness doc | ✅ | _commit-pending_ | bootstrap/.env.example + ztlp.net/.env.example updated with NS admin API + tenant variables; production-readiness doc items #5 + #6 marked ✅ with cross-links to Phase 2 commits |
 | T11 | Full suite sweep + PR + CodeRabbit | 🔲 | — | NS ≥ 855, BS ≥ 1175 |
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
+| F1 | CodeRabbit fixup: dup-secret detection (F1) + fail-closed env (F2) + IPv4 bounds (F3) + per-tenant CIDR check (F4) + sync test mod (F5) | ✅ | _commit-pending_ | 5 Major findings addressed; F4 closes cross-tenant CIDR escape vector (request signed as A from B's CIDR previously passed the union check); 6 new regression tests (3 in cidr_test, 2 in tenant_registry_test, 2 in admin_api_http_test, less one for the +1 distinct-secrets sanity assert); full suite 920/920 |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T10 done 2026-06-07T23:00:00Z
+**Last resumed at:** CodeRabbit fixup done 2026-06-07T23:12:29Z
 
 ---
 

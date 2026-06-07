@@ -61,18 +61,39 @@ defmodule ZtlpNs.Application do
     ZtlpNs.Config.load_admin_api_secret_from_env()
 
     # Load per-tenant admin-API registry from env once at boot, cache in
-    # :persistent_term. A misconfigured tenant entry logs loudly but does
-    # NOT crash NS — we fall through to legacy mode (no IP gate) so a
-    # typo doesn't take prod down. Operator should fix and restart.
+    # :persistent_term.
+    #
+    # CodeRabbit PR #98 F2: previously this rescue was UNCONDITIONAL fail-
+    # open — any parse error logged and continued in legacy mode. That
+    # silently disabled Phase 2 isolation on operator typos. The fix:
+    #   * If NO ZTLP_NS_ADMIN_API_TENANT_* env vars are set → legacy
+    #     mode is the EXPECTED state; swallow the (theoretical) error
+    #     and continue.
+    #   * If ANY tenant env vars ARE set → operator intended isolation;
+    #     a parse failure is a deployment bug, not a fall-through case.
+    #     Re-raise so OTP refuses to start the node (better than running
+    #     prod with isolation silently disabled).
     try do
       ZtlpNs.AdminApi.TenantRegistry.cache_at_boot()
     rescue
       e ->
+        tenant_env_present? =
+          System.get_env()
+          |> Map.keys()
+          |> Enum.any?(&String.starts_with?(&1, "ZTLP_NS_ADMIN_API_TENANT_"))
+
+        suffix =
+          if tenant_env_present?,
+            do: " — failing closed (tenant env present)",
+            else: " — running in legacy mode"
+
         Logger.error(
-          "[admin_api] tenant registry load failed: #{Exception.message(e)} — running in legacy mode"
+          "[admin_api] tenant registry load failed: #{Exception.message(e)}" <> suffix
         )
 
         ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+
+        if tenant_env_present?, do: reraise(e, __STACKTRACE__)
     end
 
     children = [

@@ -605,4 +605,86 @@ defmodule ZtlpNs.AdminApiHttpTest do
                })
     end
   end
+
+  describe "per-tenant CIDR re-check after HMAC identification (CodeRabbit PR #98 F4)" do
+    # CRITICAL fix: prior to F4 the IP allow-list only checked the
+    # UNION of all tenants' CIDRs. A request signed as tenant A from
+    # tenant B's CIDR passed the network lock — cross-tenant escape.
+    # Now: after the HMAC pins identity to a specific tenant, the
+    # peer IP must be in THAT tenant's CIDRs.
+    @trs_secret_hex_f4 String.duplicate("a", 64)
+    @trs_secret_raw_f4 :binary.copy(<<0xAA>>, 32)
+    @acme_secret_hex_f4 String.duplicate("b", 64)
+
+    test "rejects request signed as tenant A from tenant B's CIDR with 403 + audit", %{port: port} do
+      # TRS: CIDR 10.99.0.0/16 (intentionally NOT loopback).
+      # ACME: CIDR 127.0.0.0/8 (where the test server connects from).
+      # The union check sees 127.0.0.1 as allowed (it's in ACME's
+      # CIDR) so pre-F4 the request reached HMAC verify, identified
+      # as TRS, and returned 200 — that's the escape vector. With F4
+      # the post-auth re-check sees TRS's CIDRs don't include 127/8
+      # and returns 403.
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex_f4,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "10.99.0.0/16",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_SECRET" => @acme_secret_hex_f4,
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_ZONE_GLOB" => "*.acme.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+      before = System.system_time(:second)
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @trs_secret_raw_f4)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, status, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+      assert status == 403, "expected 403 for cross-tenant CIDR escape, got #{status}"
+
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      matching =
+        Enum.filter(entries, fn {_ts, action, _name, _type, details} ->
+          action == :admin_api_ip_rejected and details[:tenant] == "TRS"
+        end)
+
+      assert length(matching) >= 1,
+             "expected at least one :admin_api_ip_rejected audit entry with tenant=TRS"
+
+      {_ts, _action, _name, _type, details} = List.last(matching)
+      assert details[:severity] == :medium
+      assert details[:reason] == "ip_outside_identified_tenant_cidrs"
+      assert details[:peer_ip] == "127.0.0.1"
+    end
+
+    test "allows request signed as tenant from THAT tenant's CIDR with 200", %{port: port} do
+      # Sanity: prove the F4 fix only rejects the CIDR-mismatch case.
+      # TRS includes 127/8 in its CIDRs, so a TRS-signed request from
+      # loopback is still allowed.
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex_f4,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @trs_secret_raw_f4)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 200, _}, _, _}} =
+               :httpc.request(:get, {url, headers}, [], [])
+    end
+  end
 end

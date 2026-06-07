@@ -55,6 +55,149 @@ defmodule ZtlpNs.AdminApiTest do
     end
   end
 
+  describe "verify_request_with_registry/6" do
+    setup do
+      trs_secret = :crypto.strong_rand_bytes(32)
+      acme_secret = :crypto.strong_rand_bytes(32)
+      global_secret = :crypto.strong_rand_bytes(32)
+
+      trs = %ZtlpNs.AdminApi.TenantRegistry{
+        slug: "TRS",
+        secret: trs_secret,
+        zone_glob: "*.trs.ztlp",
+        cidrs: []
+      }
+
+      acme = %ZtlpNs.AdminApi.TenantRegistry{
+        slug: "ACME",
+        secret: acme_secret,
+        zone_glob: "*.acme.ztlp",
+        cidrs: []
+      }
+
+      %{
+        registry: %{"TRS" => trs, "ACME" => acme},
+        trs_secret: trs_secret,
+        acme_secret: acme_secret,
+        global_secret: global_secret,
+        trs: trs,
+        acme: acme
+      }
+    end
+
+    test "two tenants, signed by TRS — returns {:ok, {:tenant, TRS}}", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.trs_secret)
+      assert {:ok, {:tenant, %{slug: "TRS"}}} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "two tenants, signed by ACME — returns {:ok, {:tenant, ACME}}", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.acme_secret)
+      assert {:ok, {:tenant, %{slug: "ACME"}}} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "two tenants, signed by random secret — returns {:error, :bad_signature}", ctx do
+      random = :crypto.strong_rand_bytes(32)
+      headers = build_signed_headers("GET", "/admin/records", "", random)
+      assert {:error, :bad_signature} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "two tenants + global, signed by global — returns {:ok, :legacy}", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.global_secret)
+      assert {:ok, :legacy} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "two tenants + global, signed by tenant — TENANT WINS (not legacy)", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.trs_secret)
+      assert {:ok, {:tenant, %{slug: "TRS"}}} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "no tenants + global, signed by global — returns {:ok, :legacy}", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.global_secret)
+      assert {:ok, :legacy} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, %{}, ctx.global_secret
+               )
+    end
+
+    test "no tenants + no global — returns {:error, :no_secret}", ctx do
+      headers = build_signed_headers("GET", "/admin/records", "", ctx.global_secret)
+      assert {:error, :no_secret} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, %{}, nil)
+    end
+
+    test "tenants + no global, signed by random — returns {:error, :bad_signature}", ctx do
+      random = :crypto.strong_rand_bytes(32)
+      headers = build_signed_headers("GET", "/admin/records", "", random)
+      assert {:error, :bad_signature} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, nil)
+    end
+
+    test "stale timestamp rejected regardless of tenant", ctx do
+      stale_ts = System.system_time(:second) - 1000
+      body_hash = :crypto.hash(:sha256, "") |> Base.encode16(case: :lower)
+      canonical = "GET\n/admin/records\n#{stale_ts}\n#{body_hash}"
+      sig = :crypto.mac(:hmac, :sha256, ctx.trs_secret, canonical) |> Base.encode16(case: :lower)
+      headers = %{"x-ns-timestamp" => to_string(stale_ts), "x-ns-signature" => sig}
+      assert {:error, :stale_timestamp} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "missing timestamp header → {:error, :missing_header}", ctx do
+      headers = %{"x-ns-signature" => String.duplicate("0", 64)}
+      assert {:error, :missing_header} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "missing signature header → {:error, :missing_header}", ctx do
+      headers = %{"x-ns-timestamp" => to_string(System.system_time(:second))}
+      assert {:error, :missing_header} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+
+    test "malformed timestamp → {:error, :bad_request}", ctx do
+      headers = %{
+        "x-ns-timestamp" => "not-a-number",
+        "x-ns-signature" => String.duplicate("0", 64)
+      }
+      assert {:error, :bad_request} =
+               AdminApi.verify_request_with_registry(
+                 "GET", "/admin/records", "", headers, ctx.registry, ctx.global_secret
+               )
+    end
+  end
+
+  # Helper used by verify_request_with_registry/6 describe block.
+  defp build_signed_headers(method, path, body, secret) do
+    ts = System.system_time(:second)
+    body_hash = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+    canonical = "#{method}\n#{path}\n#{ts}\n#{body_hash}"
+    sig = :crypto.mac(:hmac, :sha256, secret, canonical) |> Base.encode16(case: :lower)
+    %{"x-ns-timestamp" => to_string(ts), "x-ns-signature" => sig}
+  end
+
   describe "list_records/1" do
     alias ZtlpNs.{Crypto, Record, Store}
 

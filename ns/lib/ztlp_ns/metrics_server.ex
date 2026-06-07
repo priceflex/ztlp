@@ -146,38 +146,232 @@ defmodule ZtlpNs.MetricsServer do
   defp handle_admin_records(socket, path_with_query, query_str, headers, peer_ip) do
     Logger.info("[admin_api] peer_ip=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
 
-    case ZtlpNs.AdminApiRateLimiter.check(peer_ip) do
-      :rate_limited ->
-        {_count, window} = ZtlpNs.Config.admin_api_rate_limit()
-        Logger.warning("[admin_api] 429 peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
-        send_response(socket, 429, "", "text/plain", [{"Retry-After", to_string(window)}])
+    case maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+      :rejected ->
+        :ok
 
       :ok ->
-        secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+        case ZtlpNs.AdminApiRateLimiter.check(peer_ip) do
+          :rate_limited ->
+            {_count, window} = ZtlpNs.Config.admin_api_rate_limit()
+            Logger.warning("[admin_api] 429 peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
+            send_response(socket, 429, "", "text/plain", [{"Retry-After", to_string(window)}])
 
-        case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
           :ok ->
-            opts = parse_admin_query(query_str)
-            records = ZtlpNs.AdminApi.list_records(opts)
-            body = Jason.encode!(records)
+            secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+            registry = ZtlpNs.AdminApi.TenantRegistry.cached()
 
-            ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
-              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-              zone_filter: Keyword.get(opts, :zone),
-              type_filter: Keyword.get(opts, :type),
-              count: records[:count]
-            })
+            case ZtlpNs.AdminApi.verify_request_with_registry(
+                   "GET",
+                   path_with_query,
+                   "",
+                   headers,
+                   registry,
+                   secret
+                 ) do
+              {:ok, identity} ->
+                # CodeRabbit PR #98 F4: the union CIDR gate in
+                # maybe_gate_by_cidr/3 above is necessary but NOT
+                # sufficient — it admits a request signed as tenant A
+                # that arrives from tenant B's CIDR. Now that we know
+                # which tenant the HMAC identifies, re-verify the peer
+                # IP against THAT tenant's CIDRs.
+                enforce_identified_tenant_cidr(
+                  socket,
+                  identity,
+                  registry,
+                  query_str,
+                  peer_ip
+                )
 
-            send_response(socket, 200, body, "application/json")
-          {:error, reason} ->
-            ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
-              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-              reason: inspect(reason)
-            })
+              {:error, reason} ->
+                ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
+                  peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+                  reason: inspect(reason),
+                  severity: :high
+                })
 
-            Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
-            send_response(socket, 401, "")
+                Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
+                send_response(socket, 401, "")
+            end
         end
+    end
+  end
+
+  # F4 (CodeRabbit PR #98): after a request has been HMAC-identified to
+  # a specific tenant, re-check that the peer IP is inside THAT tenant's
+  # CIDRs. The earlier union check (maybe_gate_by_cidr/3) only proves
+  # the IP belongs to SOME tenant — it cannot prevent cross-tenant CIDR
+  # escape (request signed as A from B's CIDR). Legacy identities skip
+  # this — they use the global secret, predate per-tenant CIDRs, and
+  # are gated only by the union (T3 + production-readiness item #5).
+  defp enforce_identified_tenant_cidr(socket, identity, registry, query_str, peer_ip) do
+    case identity do
+      {:tenant, tenant} ->
+        if ZtlpNs.AdminApi.TenantRegistry.ip_in_cidrs?(tenant, peer_ip) do
+          handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry)
+        else
+          ZtlpNs.Audit.log(:admin_api_ip_rejected, "/admin/records", :admin_api, %{
+            peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+            tenant: tenant.slug,
+            severity: :medium,
+            reason: "ip_outside_identified_tenant_cidrs"
+          })
+
+          Logger.warning(
+            "[admin_api] 403 tenant=#{tenant.slug} ip_outside_tenant_cidrs peer=#{:inet.ntoa(peer_ip)}"
+          )
+
+          send_response(socket, 403, "")
+        end
+
+      :legacy ->
+        handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry)
+    end
+  end
+
+  # Post-auth, post-CIDR-recheck fan-out: emit the legacy-global-secret
+  # audit signal when applicable, then drive the trust-authority hook
+  # → authorized-fan-out chain. Extracted so the F4 case branches stay
+  # narrow.
+  defp handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry) do
+    # Surface legacy-mode use when tenants are ALSO configured
+    # (transition period) so operators can grep for it.
+    if identity == :legacy and map_size(registry) > 0 do
+      ZtlpNs.Audit.log(:admin_api_legacy_global_secret, "/admin/records", :admin_api, %{
+        peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+        severity: :medium
+      })
+    end
+
+    opts = parse_admin_query(query_str)
+
+    # Trust-authority extension hook (T7). Returns :ok today;
+    # Phase 3+ implementations of this function can deny here.
+    authority_context = %{
+      peer_ip: peer_ip,
+      method: "GET",
+      path: "/admin/records",
+      query: query_str,
+      identity: identity
+    }
+
+    case ZtlpNs.AdminApi.verify_authority(identity, authority_context) do
+      :ok ->
+        handle_authorized_admin_records(socket, opts, identity, peer_ip)
+
+      {:error, :authority_denied} ->
+        ZtlpNs.Audit.log(:admin_api_authority_denied, "/admin/records", :admin_api, %{
+          peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+          identity: identity_label(identity),
+          severity: :critical
+        })
+
+        Logger.warning(
+          "[admin_api] 403 authority_denied identity=#{identity_label(identity)} peer=#{:inet.ntoa(peer_ip)}"
+        )
+
+        send_response(socket, 403, "")
+    end
+  end
+
+  # Render the calling identity as a short string for audit log details.
+  # `:legacy` means the request used the global ZTLP_NS_ADMIN_API_SECRET;
+  # `{:tenant, t}` carries the tenant struct from the registry.
+  defp identity_label({:tenant, %ZtlpNs.AdminApi.TenantRegistry{slug: slug}}), do: "tenant:#{slug}"
+  defp identity_label(:legacy), do: "legacy"
+
+  # Authorized-request fan-out: at this point the request has cleared
+  # peer-IP CIDR gate (T3), rate limit (T2 of PR #97), HMAC verify (T4),
+  # and trust-authority hook (T7). Run zone-glob scoping (T5), encode
+  # the body, and emit the success audit event.
+  defp handle_authorized_admin_records(socket, opts, identity, peer_ip) do
+    # Audit cross-tenant probe attempts BEFORE running the filter (the
+    # filter would just return empty for an out-of-glob zone, but the
+    # audit lets operators SEE the probe).
+    maybe_audit_outside_glob(identity, opts, peer_ip)
+
+    records =
+      opts
+      |> ZtlpNs.AdminApi.list_records()
+      |> apply_tenant_scope(identity)
+
+    body = Jason.encode!(records)
+
+    ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
+      peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+      zone_filter: Keyword.get(opts, :zone),
+      type_filter: Keyword.get(opts, :type),
+      count: records[:count],
+      identity: identity_label(identity),
+      severity: :info
+    })
+
+    send_response(socket, 200, body, "application/json")
+  end
+
+  # Filter the list_records response to the tenant's zone_glob. Legacy mode
+  # (global secret) sees everything — preserves backwards-compat.
+  #
+  # SECURITY: this is the cross-tenant isolation enforcement. A leaked tenant
+  # secret authenticates correctly via T4, but THIS function ensures it can
+  # only see records inside its own zone_glob.
+  defp apply_tenant_scope(%{records: rs} = response, {:tenant, tenant}) do
+    filtered =
+      Enum.filter(rs, fn record ->
+        name = record[:name] || record["name"]
+        is_binary(name) and
+          ZtlpNs.AdminApi.TenantRegistry.zone_matches?(tenant, name)
+      end)
+
+    %{response | records: filtered, count: length(filtered)}
+  end
+
+  defp apply_tenant_scope(response, :legacy), do: response
+
+  # When a tenant requests `?zone=X` outside its glob, the response filter
+  # already returns empty. We separately log this as :admin_api_zone_outside_glob
+  # at severity :high so operators can detect cross-tenant probe attempts.
+  defp maybe_audit_outside_glob({:tenant, tenant}, opts, peer_ip) do
+    case Keyword.get(opts, :zone) do
+      nil ->
+        :ok
+
+      user_zone ->
+        unless ZtlpNs.AdminApi.TenantRegistry.zone_matches?(tenant, user_zone) do
+          ZtlpNs.Audit.log(:admin_api_zone_outside_glob, "/admin/records", :admin_api, %{
+            peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+            tenant: tenant.slug,
+            requested_zone: user_zone,
+            tenant_glob: tenant.zone_glob,
+            severity: :high
+          })
+        end
+
+        :ok
+    end
+  end
+
+  defp maybe_audit_outside_glob(:legacy, _opts, _peer_ip), do: :ok
+
+  # IP allow-list gate: only enforced when the tenant registry is non-empty.
+  # When empty (legacy mode = only the global ZTLP_NS_ADMIN_API_SECRET is set),
+  # this returns :ok unconditionally — pure backwards-compat.
+  defp maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+    if ZtlpNs.AdminApi.TenantRegistry.any_tenant_allows_ip?(peer_ip) do
+      :ok
+    else
+      Logger.warning(
+        "[admin_api] 403 ip not in any tenant CIDR peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}"
+      )
+
+      ZtlpNs.Audit.log(:admin_api_ip_rejected, "/admin/records", :admin_api, %{
+        peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+        severity: :medium
+      })
+
+      send_response(socket, 403, "")
+      :rejected
     end
   end
 
@@ -209,6 +403,7 @@ defmodule ZtlpNs.MetricsServer do
     status_text = case status do
       200 -> "OK"
       401 -> "Unauthorized"
+      403 -> "Forbidden"
       404 -> "Not Found"
       405 -> "Method Not Allowed"
       429 -> "Too Many Requests"

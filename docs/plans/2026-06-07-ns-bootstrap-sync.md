@@ -25,8 +25,8 @@
 |---|---|---|---|---|
 | T1 | NS: `ZtlpNs.AdminApi` HMAC verifier + tests | ✅ | `ac25f3e` | 7/7 green, 817 NS total |
 | T2 | NS: `ZtlpNs.AdminApi.list_records/1` + tests | ✅ | `a39783f` | 7 new tests, 824 NS total |
-| T3 | NS: HTTP route `GET /admin/records` in MetricsServer + tests | ✅ | _commit-pending_ | 3 new integration tests, 827 NS total; Jason ~> 1.4 added as dep; orchestrator finished post-stall |
-| T4 | NS: env var plumbing + config + Dockerfile | 🔲 | — | |
+| T3 | NS: HTTP route `GET /admin/records` in MetricsServer + tests | ✅ | `a587ddd` | 3 new integration tests, 827 NS total; Jason ~> 1.4 added as dep |
+| T4 | NS: env var plumbing + config + Dockerfile | ✅ | _commit-pending_ | 6 new tests, 833 NS total; ZTLP_NS_ADMIN_API_SECRET loaded at boot, fail-closed on missing/malformed |
 | T5 | BS: `Ztlp::NsAdminClient` HTTP client + tests | 🔲 | — | |
 | T6 | BS: `ZtlpDevice` schema + `orphaned` status migration + tests | 🔲 | — | |
 | T7 | BS: `Ztlp::SyncNsToBootstrap` reconciler + tests | 🔲 | — | |

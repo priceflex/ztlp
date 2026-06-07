@@ -39,8 +39,8 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 |---|---|---|---|---|
 | T1 | CIDR parser + matcher module (`ZtlpNs.Cidr`) | ✅ | `383339e` | 17 tests; full suite 862/845 |
 | T2 | Tenant config loader (env → struct) | ✅ | c587cfa | `ZtlpNs.AdminApi.TenantRegistry`; env→struct; multi-CIDR; zone-glob leading-`*.` only (middle wildcards rejected); promoted `AdminApi.secure_compare/2` to public; 23 new tests; full suite 885/862 |
-| T3 | NS: IP allow-list gate on `/admin/records` (item #5) | ✅ | _commit-pending_ | CIDR gate before rate-limit; 403 + `:admin_api_ip_rejected` severity `:medium`; cached in `:persistent_term` at boot; backwards-compat (empty registry → no gate); 5 new tests; full suite 890/890 |
-| T4 | NS: per-tenant secret resolution + zone-glob scoping (item #6) | 🔲 | — | Backwards-compatible w/ global secret |
+| T3 | NS: IP allow-list gate on `/admin/records` (item #5) | ✅ | `b5072bd` | CIDR gate before rate-limit; 403 + `:admin_api_ip_rejected` severity `:medium`; cached in `:persistent_term` at boot; backwards-compat (empty registry → no gate); 5 new tests; full suite 890/890 |
+| T4 | NS: per-tenant secret resolution + zone-glob scoping (item #6) | ✅ | `_commit-pending_` | verify_request_with_registry/6; tenant-wins-over-global property pinned; :admin_api_legacy_global_secret audit on transition mode; preserves existing verify_request/5; 16 new tests; full suite 906/906 |
 | T5 | NS: filter `list_records` response to tenant's zone glob | 🔲 | — | Cross-zone enumeration prevented |
 | T6 | NS: severity tagging on all admin-API audit events | 🔲 | — | `:info/:medium/:high/:critical` |
 | T7 | NS: trust-authority extension hook (stub, future-proofing) | 🔲 | — | `verify_authority/2` returns :ok for now |
@@ -51,7 +51,7 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T3 done 2026-06-07T21:12:54Z
+**Last resumed at:** T4 done 2026-06-07T21:28:00Z (orchestrator-completed after subagent timeout — see commit body)
 
 ---
 

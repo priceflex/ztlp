@@ -159,9 +159,26 @@ defmodule ZtlpNs.MetricsServer do
 
           :ok ->
             secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+            registry = ZtlpNs.AdminApi.TenantRegistry.cached()
 
-            case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
-              :ok ->
+            case ZtlpNs.AdminApi.verify_request_with_registry(
+                   "GET",
+                   path_with_query,
+                   "",
+                   headers,
+                   registry,
+                   secret
+                 ) do
+              {:ok, identity} ->
+                # Surface legacy-mode use when tenants are ALSO configured
+                # (transition period) so operators can grep for it.
+                if identity == :legacy and map_size(registry) > 0 do
+                  ZtlpNs.Audit.log(:admin_api_legacy_global_secret, "/admin/records", :admin_api, %{
+                    peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+                    severity: :medium
+                  })
+                end
+
                 opts = parse_admin_query(query_str)
                 records = ZtlpNs.AdminApi.list_records(opts)
                 body = Jason.encode!(records)
@@ -170,10 +187,12 @@ defmodule ZtlpNs.MetricsServer do
                   peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
                   zone_filter: Keyword.get(opts, :zone),
                   type_filter: Keyword.get(opts, :type),
-                  count: records[:count]
+                  count: records[:count],
+                  identity: identity_label(identity)
                 })
 
                 send_response(socket, 200, body, "application/json")
+
               {:error, reason} ->
                 ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
                   peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
@@ -186,6 +205,12 @@ defmodule ZtlpNs.MetricsServer do
         end
     end
   end
+
+  # Render the calling identity as a short string for audit log details.
+  # `:legacy` means the request used the global ZTLP_NS_ADMIN_API_SECRET;
+  # `{:tenant, t}` carries the tenant struct from the registry.
+  defp identity_label({:tenant, %ZtlpNs.AdminApi.TenantRegistry{slug: slug}}), do: "tenant:#{slug}"
+  defp identity_label(:legacy), do: "legacy"
 
   # IP allow-list gate: only enforced when the tenant registry is non-empty.
   # When empty (legacy mode = only the global ZTLP_NS_ADMIN_API_SECRET is set),

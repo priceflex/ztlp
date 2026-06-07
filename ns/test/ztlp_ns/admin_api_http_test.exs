@@ -275,4 +275,99 @@ defmodule ZtlpNs.AdminApiHttpTest do
     assert details[:peer_ip] == "127.0.0.1"
     assert details[:reason] != nil
   end
+
+  describe "tenant-aware HMAC + global fallback (T4)" do
+    # Known-value tenant secret: hex "aa..aa" (64 chars) → 32 bytes of 0xAA.
+    @trs_secret_hex String.duplicate("a", 64)
+    @trs_secret_raw String.duplicate(<<0xAA>>, 32)
+
+    test "200 when signed with tenant TRS secret + IP in TRS CIDR", %{port: port} do
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records"
+      headers = sign_headers("GET", path, "", @trs_secret_raw)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+    end
+
+    test "401 when signed with neither tenant nor global secret", %{port: port} do
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      random = :crypto.strong_rand_bytes(32)
+      path = "/admin/records"
+      headers = sign_headers("GET", path, "", random)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 401, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+    end
+
+    test "200 + :admin_api_legacy_global_secret audit when using global with tenants configured",
+         %{port: port} do
+      # Tenants configured AND global also set (transition mode).
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+      before = System.system_time(:second)
+
+      # Sign with the GLOBAL @secret — should match global fallback.
+      path = "/admin/records"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      legacy_events =
+        Enum.filter(entries, fn {_ts, action, _name, _type, _details} ->
+          action == :admin_api_legacy_global_secret
+        end)
+
+      assert length(legacy_events) >= 1
+      {_ts, _action, _name, _type, details} = List.last(legacy_events)
+      assert details[:severity] == :medium
+      assert details[:peer_ip] == "127.0.0.1"
+    end
+
+    test "200 when global is the ONLY secret (pure legacy mode)", %{port: port} do
+      # No tenants — clear any cache from prior tests.
+      ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+    end
+  end
 end

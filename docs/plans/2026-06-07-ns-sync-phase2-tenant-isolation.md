@@ -38,8 +38,8 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
 | T1 | CIDR parser + matcher module (`ZtlpNs.Cidr`) | ✅ | `383339e` | 17 tests; full suite 862/845 |
-| T2 | Tenant config loader (env → struct) | ✅ | _commit-pending_ | `ZtlpNs.AdminApi.TenantRegistry`; env→struct; multi-CIDR; zone-glob leading-`*.` only (middle wildcards rejected); promoted `AdminApi.secure_compare/2` to public; 23 new tests; full suite 885/862 |
-| T3 | NS: IP allow-list gate on `/admin/records` (item #5) | 🔲 | — | Returns 403 + audit `:admin_api_ip_rejected` |
+| T2 | Tenant config loader (env → struct) | ✅ | c587cfa | `ZtlpNs.AdminApi.TenantRegistry`; env→struct; multi-CIDR; zone-glob leading-`*.` only (middle wildcards rejected); promoted `AdminApi.secure_compare/2` to public; 23 new tests; full suite 885/862 |
+| T3 | NS: IP allow-list gate on `/admin/records` (item #5) | ✅ | _commit-pending_ | CIDR gate before rate-limit; 403 + `:admin_api_ip_rejected` severity `:medium`; cached in `:persistent_term` at boot; backwards-compat (empty registry → no gate); 5 new tests; full suite 890/890 |
 | T4 | NS: per-tenant secret resolution + zone-glob scoping (item #6) | 🔲 | — | Backwards-compatible w/ global secret |
 | T5 | NS: filter `list_records` response to tenant's zone glob | 🔲 | — | Cross-zone enumeration prevented |
 | T6 | NS: severity tagging on all admin-API audit events | 🔲 | — | `:info/:medium/:high/:critical` |
@@ -51,7 +51,7 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T2 done 2026-06-07T20:48:04Z
+**Last resumed at:** T3 done 2026-06-07T21:12:54Z
 
 ---
 

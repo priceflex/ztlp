@@ -201,6 +201,29 @@ defmodule ZtlpNs.AdminApi.TenantRegistryTest do
     end
   end
 
+  describe "cache_at_boot/0 + cached/0" do
+    test "cached/0 returns empty map when not yet loaded" do
+      TenantRegistry.clear_cache()
+      assert TenantRegistry.cached() == %{}
+    end
+
+    test "cache_at_boot loads from env and persists" do
+      # Skip if any tenant env vars are set in the test environment
+      relevant =
+        System.get_env()
+        |> Map.keys()
+        |> Enum.filter(&String.starts_with?(&1, "ZTLP_NS_ADMIN_API_TENANT_"))
+
+      if relevant != [] do
+        IO.puts("Skipping: tenant env vars set in test environment: #{inspect(relevant)}")
+      else
+        TenantRegistry.clear_cache()
+        assert TenantRegistry.cache_at_boot() == %{}
+        assert TenantRegistry.cached() == %{}
+      end
+    end
+  end
+
   describe "identify_tenant/3" do
     setup do
       env = %{

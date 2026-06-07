@@ -60,6 +60,21 @@ defmodule ZtlpNs.Application do
     # without a service restart).
     ZtlpNs.Config.load_admin_api_secret_from_env()
 
+    # Load per-tenant admin-API registry from env once at boot, cache in
+    # :persistent_term. A misconfigured tenant entry logs loudly but does
+    # NOT crash NS — we fall through to legacy mode (no IP gate) so a
+    # typo doesn't take prod down. Operator should fix and restart.
+    try do
+      ZtlpNs.AdminApi.TenantRegistry.cache_at_boot()
+    rescue
+      e ->
+        Logger.error(
+          "[admin_api] tenant registry load failed: #{Exception.message(e)} — running in legacy mode"
+        )
+
+        ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+    end
+
     children = [
       # Order matters: TrustAnchor first, then Store (Mnesia tables),
       # then RateLimiter (ETS), then QuerySupervisor (worker pool),

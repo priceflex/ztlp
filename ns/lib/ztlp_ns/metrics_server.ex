@@ -146,38 +146,65 @@ defmodule ZtlpNs.MetricsServer do
   defp handle_admin_records(socket, path_with_query, query_str, headers, peer_ip) do
     Logger.info("[admin_api] peer_ip=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
 
-    case ZtlpNs.AdminApiRateLimiter.check(peer_ip) do
-      :rate_limited ->
-        {_count, window} = ZtlpNs.Config.admin_api_rate_limit()
-        Logger.warning("[admin_api] 429 peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
-        send_response(socket, 429, "", "text/plain", [{"Retry-After", to_string(window)}])
+    case maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+      :rejected ->
+        :ok
 
       :ok ->
-        secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+        case ZtlpNs.AdminApiRateLimiter.check(peer_ip) do
+          :rate_limited ->
+            {_count, window} = ZtlpNs.Config.admin_api_rate_limit()
+            Logger.warning("[admin_api] 429 peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
+            send_response(socket, 429, "", "text/plain", [{"Retry-After", to_string(window)}])
 
-        case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
           :ok ->
-            opts = parse_admin_query(query_str)
-            records = ZtlpNs.AdminApi.list_records(opts)
-            body = Jason.encode!(records)
+            secret = Application.get_env(:ztlp_ns, :admin_api_secret)
 
-            ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
-              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-              zone_filter: Keyword.get(opts, :zone),
-              type_filter: Keyword.get(opts, :type),
-              count: records[:count]
-            })
+            case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
+              :ok ->
+                opts = parse_admin_query(query_str)
+                records = ZtlpNs.AdminApi.list_records(opts)
+                body = Jason.encode!(records)
 
-            send_response(socket, 200, body, "application/json")
-          {:error, reason} ->
-            ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
-              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-              reason: inspect(reason)
-            })
+                ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
+                  peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+                  zone_filter: Keyword.get(opts, :zone),
+                  type_filter: Keyword.get(opts, :type),
+                  count: records[:count]
+                })
 
-            Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
-            send_response(socket, 401, "")
+                send_response(socket, 200, body, "application/json")
+              {:error, reason} ->
+                ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
+                  peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+                  reason: inspect(reason)
+                })
+
+                Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
+                send_response(socket, 401, "")
+            end
         end
+    end
+  end
+
+  # IP allow-list gate: only enforced when the tenant registry is non-empty.
+  # When empty (legacy mode = only the global ZTLP_NS_ADMIN_API_SECRET is set),
+  # this returns :ok unconditionally — pure backwards-compat.
+  defp maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+    if ZtlpNs.AdminApi.TenantRegistry.any_tenant_allows_ip?(peer_ip) do
+      :ok
+    else
+      Logger.warning(
+        "[admin_api] 403 ip not in any tenant CIDR peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}"
+      )
+
+      ZtlpNs.Audit.log(:admin_api_ip_rejected, "/admin/records", :admin_api, %{
+        peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+        severity: :medium
+      })
+
+      send_response(socket, 403, "")
+      :rejected
     end
   end
 
@@ -209,6 +236,7 @@ defmodule ZtlpNs.MetricsServer do
     status_text = case status do
       200 -> "OK"
       401 -> "Unauthorized"
+      403 -> "Forbidden"
       404 -> "Not Found"
       405 -> "Method Not Allowed"
       429 -> "Too Many Requests"

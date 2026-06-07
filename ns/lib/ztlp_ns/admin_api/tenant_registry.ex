@@ -44,6 +44,7 @@ defmodule ZtlpNs.AdminApi.TenantRegistry do
 
   @env_prefix "ZTLP_NS_ADMIN_API_TENANT_"
   @slug_re ~r/^[A-Z][A-Z0-9_]*$/
+  @cache_key {__MODULE__, :tenants}
 
   @doc "Scan `System.get_env/0` and build the registry. Raises on misconfiguration."
   @spec load_all() :: %{String.t() => t()}
@@ -230,5 +231,59 @@ defmodule ZtlpNs.AdminApi.TenantRegistry do
 
       if ZtlpNs.AdminApi.secure_compare(expected, sig_hex), do: {:ok, tenant}, else: false
     end)
+  end
+
+  # ── Boot-time cache (persistent_term) ───────────────────────────────
+
+  @doc """
+  Loads tenants from `System.get_env/0` and caches the resulting registry
+  in `:persistent_term` under `#{inspect(@cache_key)}`. Called once from
+  `ZtlpNs.Application.start/2`. Returns the loaded registry.
+
+  `:persistent_term.put/2` triggers a global GC of all processes that
+  reference the previous term — fine at boot, NEVER call from the hot
+  request path.
+  """
+  @spec cache_at_boot() :: %{String.t() => t()}
+  def cache_at_boot do
+    registry = load_all()
+    :persistent_term.put(@cache_key, registry)
+    registry
+  end
+
+  @doc """
+  Returns the cached registry. Returns `%{}` if `cache_at_boot/0` has
+  not yet run, so call sites can safely treat \"no cache\" as \"legacy
+  mode — no IP gate\".
+  """
+  @spec cached() :: %{String.t() => t()}
+  def cached do
+    :persistent_term.get(@cache_key, %{})
+  end
+
+  @doc "Test helper: clear the registry cache. Safe to call when not present."
+  @spec clear_cache() :: :ok
+  def clear_cache do
+    _ = :persistent_term.erase(@cache_key)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
+  True iff the cached registry is empty (legacy mode — no IP gate) OR
+  contains at least one tenant whose CIDR list covers `ip`. This is the
+  exact predicate used by `MetricsServer.handle_admin_records/5` to
+  decide whether to 403.
+  """
+  @spec any_tenant_allows_ip?(:inet.ip4_address()) :: boolean()
+  def any_tenant_allows_ip?(ip) do
+    case cached() do
+      empty when map_size(empty) == 0 ->
+        true
+
+      tenants ->
+        Enum.any?(tenants, fn {_slug, t} -> ip_in_cidrs?(t, ip) end)
+    end
   end
 end

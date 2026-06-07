@@ -370,4 +370,153 @@ defmodule ZtlpNs.AdminApiHttpTest do
       assert {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
     end
   end
+
+  describe "tenant zone-glob filtering on /admin/records response (T5)" do
+    @trs_secret_hex String.duplicate("a", 64)
+    @trs_secret_raw String.duplicate(<<0xAA>>, 32)
+    @acme_secret_hex String.duplicate("b", 64)
+    @acme_secret_raw String.duplicate(<<0xBB>>, 32)
+
+    defp seed_record(name) do
+      {pub, priv} = Crypto.generate_keypair()
+      now = System.system_time(:second)
+
+      rec =
+        %Record{
+          name: name,
+          type: :key,
+          data: %{pubkey: pub},
+          created_at: now,
+          ttl: 86_400,
+          serial: 1
+        }
+        |> Record.sign(priv)
+
+      :ok = Store.insert(rec)
+    end
+
+    test "tenant TRS only sees *.trs.ztlp records (cross-zone isolation)", %{port: port} do
+      seed_record("alice.trs.ztlp")
+      seed_record("bob.adms.trs.ztlp")
+      seed_record("alice.acme.ztlp")
+
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @trs_secret_raw)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["records"], & &1["name"])
+      assert "alice.trs.ztlp" in names
+      assert "bob.adms.trs.ztlp" in names
+      refute "alice.acme.ztlp" in names
+      assert parsed["count"] == length(names)
+    end
+
+    test "tenant ACME only sees *.acme.ztlp records (peer-deny verified)",
+         %{port: port} do
+      seed_record("alice.trs.ztlp")
+      seed_record("alice.acme.ztlp")
+
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_SECRET" => @acme_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_ZONE_GLOB" => "*.acme.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_ACME_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @acme_secret_raw)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["records"], & &1["name"])
+      refute "alice.trs.ztlp" in names
+      assert "alice.acme.ztlp" in names
+      assert parsed["count"] == length(names)
+    end
+
+    test ":legacy mode (global secret) sees ALL records (backwards-compat preserved)",
+         %{port: port} do
+      seed_record("alice.trs.ztlp")
+      seed_record("alice.acme.ztlp")
+
+      # NO tenants — pure legacy mode
+      ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["records"], & &1["name"])
+      assert "alice.trs.ztlp" in names
+      assert "alice.acme.ztlp" in names
+    end
+
+    test "tenant requesting zone outside their glob → empty result + :admin_api_zone_outside_glob audit",
+         %{port: port} do
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => @trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+      ZtlpNs.AdminApiRateLimiter.reset()
+      before = System.system_time(:second)
+
+      path = "/admin/records?type=key&zone=acme.ztlp"
+      headers = sign_headers("GET", path, "", @trs_secret_raw)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      # Empty result — tenant can't see records outside its glob
+      assert parsed["count"] == 0
+      assert parsed["records"] == []
+
+      # Audit event :admin_api_zone_outside_glob fired (severity :high)
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      matching =
+        Enum.filter(entries, fn {_ts, action, _name, _type, _details} ->
+          action == :admin_api_zone_outside_glob
+        end)
+
+      assert length(matching) >= 1
+      {_ts, _action, name, type, details} = List.last(matching)
+      assert name == "/admin/records"
+      assert type == :admin_api
+      assert details[:tenant] == "TRS"
+      assert details[:requested_zone] == "acme.ztlp"
+      assert details[:tenant_glob] == "*.trs.ztlp"
+      assert details[:severity] == :high
+      assert details[:peer_ip] == "127.0.0.1"
+    end
+  end
 end

@@ -180,7 +180,17 @@ defmodule ZtlpNs.MetricsServer do
                 end
 
                 opts = parse_admin_query(query_str)
-                records = ZtlpNs.AdminApi.list_records(opts)
+
+                # Audit cross-tenant probe attempts BEFORE running the filter
+                # (the filter would just return empty for an out-of-glob zone,
+                # but the audit lets operators SEE the probe).
+                maybe_audit_outside_glob(identity, opts, peer_ip)
+
+                records =
+                  opts
+                  |> ZtlpNs.AdminApi.list_records()
+                  |> apply_tenant_scope(identity)
+
                 body = Jason.encode!(records)
 
                 ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
@@ -211,6 +221,50 @@ defmodule ZtlpNs.MetricsServer do
   # `{:tenant, t}` carries the tenant struct from the registry.
   defp identity_label({:tenant, %ZtlpNs.AdminApi.TenantRegistry{slug: slug}}), do: "tenant:#{slug}"
   defp identity_label(:legacy), do: "legacy"
+
+  # Filter the list_records response to the tenant's zone_glob. Legacy mode
+  # (global secret) sees everything — preserves backwards-compat.
+  #
+  # SECURITY: this is the cross-tenant isolation enforcement. A leaked tenant
+  # secret authenticates correctly via T4, but THIS function ensures it can
+  # only see records inside its own zone_glob.
+  defp apply_tenant_scope(%{records: rs} = response, {:tenant, tenant}) do
+    filtered =
+      Enum.filter(rs, fn record ->
+        name = record[:name] || record["name"]
+        is_binary(name) and
+          ZtlpNs.AdminApi.TenantRegistry.zone_matches?(tenant, name)
+      end)
+
+    %{response | records: filtered, count: length(filtered)}
+  end
+
+  defp apply_tenant_scope(response, :legacy), do: response
+
+  # When a tenant requests `?zone=X` outside its glob, the response filter
+  # already returns empty. We separately log this as :admin_api_zone_outside_glob
+  # at severity :high so operators can detect cross-tenant probe attempts.
+  defp maybe_audit_outside_glob({:tenant, tenant}, opts, peer_ip) do
+    case Keyword.get(opts, :zone) do
+      nil ->
+        :ok
+
+      user_zone ->
+        unless ZtlpNs.AdminApi.TenantRegistry.zone_matches?(tenant, user_zone) do
+          ZtlpNs.Audit.log(:admin_api_zone_outside_glob, "/admin/records", :admin_api, %{
+            peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+            tenant: tenant.slug,
+            requested_zone: user_zone,
+            tenant_glob: tenant.zone_glob,
+            severity: :high
+          })
+        end
+
+        :ok
+    end
+  end
+
+  defp maybe_audit_outside_glob(:legacy, _opts, _peer_ip), do: :ok
 
   # IP allow-list gate: only enforced when the tenant registry is non-empty.
   # When empty (legacy mode = only the global ZTLP_NS_ADMIN_API_SECRET is set),

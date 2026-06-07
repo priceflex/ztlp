@@ -181,28 +181,33 @@ defmodule ZtlpNs.MetricsServer do
 
                 opts = parse_admin_query(query_str)
 
-                # Audit cross-tenant probe attempts BEFORE running the filter
-                # (the filter would just return empty for an out-of-glob zone,
-                # but the audit lets operators SEE the probe).
-                maybe_audit_outside_glob(identity, opts, peer_ip)
+                # Trust-authority extension hook (T7). Returns :ok today;
+                # Phase 3+ implementations of this function can deny here.
+                authority_context = %{
+                  peer_ip: peer_ip,
+                  method: "GET",
+                  path: "/admin/records",
+                  query: query_str,
+                  identity: identity
+                }
 
-                records =
-                  opts
-                  |> ZtlpNs.AdminApi.list_records()
-                  |> apply_tenant_scope(identity)
+                case ZtlpNs.AdminApi.verify_authority(identity, authority_context) do
+                  :ok ->
+                    handle_authorized_admin_records(socket, opts, identity, peer_ip)
 
-                body = Jason.encode!(records)
+                  {:error, :authority_denied} ->
+                    ZtlpNs.Audit.log(:admin_api_authority_denied, "/admin/records", :admin_api, %{
+                      peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+                      identity: identity_label(identity),
+                      severity: :critical
+                    })
 
-                ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
-                  peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-                  zone_filter: Keyword.get(opts, :zone),
-                  type_filter: Keyword.get(opts, :type),
-                  count: records[:count],
-                  identity: identity_label(identity),
-                  severity: :info
-                })
+                    Logger.warning(
+                      "[admin_api] 403 authority_denied identity=#{identity_label(identity)} peer=#{:inet.ntoa(peer_ip)}"
+                    )
 
-                send_response(socket, 200, body, "application/json")
+                    send_response(socket, 403, "")
+                end
 
               {:error, reason} ->
                 ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
@@ -223,6 +228,35 @@ defmodule ZtlpNs.MetricsServer do
   # `{:tenant, t}` carries the tenant struct from the registry.
   defp identity_label({:tenant, %ZtlpNs.AdminApi.TenantRegistry{slug: slug}}), do: "tenant:#{slug}"
   defp identity_label(:legacy), do: "legacy"
+
+  # Authorized-request fan-out: at this point the request has cleared
+  # peer-IP CIDR gate (T3), rate limit (T2 of PR #97), HMAC verify (T4),
+  # and trust-authority hook (T7). Run zone-glob scoping (T5), encode
+  # the body, and emit the success audit event.
+  defp handle_authorized_admin_records(socket, opts, identity, peer_ip) do
+    # Audit cross-tenant probe attempts BEFORE running the filter (the
+    # filter would just return empty for an out-of-glob zone, but the
+    # audit lets operators SEE the probe).
+    maybe_audit_outside_glob(identity, opts, peer_ip)
+
+    records =
+      opts
+      |> ZtlpNs.AdminApi.list_records()
+      |> apply_tenant_scope(identity)
+
+    body = Jason.encode!(records)
+
+    ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
+      peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+      zone_filter: Keyword.get(opts, :zone),
+      type_filter: Keyword.get(opts, :type),
+      count: records[:count],
+      identity: identity_label(identity),
+      severity: :info
+    })
+
+    send_response(socket, 200, body, "application/json")
+  end
 
   # Filter the list_records response to the tenant's zone_glob. Legacy mode
   # (global secret) sees everything — preserves backwards-compat.

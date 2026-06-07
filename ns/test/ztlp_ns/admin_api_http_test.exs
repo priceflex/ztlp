@@ -574,4 +574,35 @@ defmodule ZtlpNs.AdminApiHttpTest do
       assert details[:severity] == :high
     end
   end
+
+  describe "trust-authority extension hook (T7)" do
+    # Phase 3+ will implement verify_authority/2 to do CA-signed
+    # authorization. For now it returns :ok unconditionally — these
+    # tests pin BOTH the stub contract (returns :ok) AND the call site
+    # (deny path renders 403 + :admin_api_authority_denied severity
+    # :critical), so a future implementation can be slotted in without
+    # restructuring the auth chain.
+
+    test "verify_authority/2 stub returns :ok for legacy identity" do
+      assert :ok = ZtlpNs.AdminApi.verify_authority(:legacy, %{peer_ip: {127, 0, 0, 1}})
+    end
+
+    test "verify_authority/2 stub returns :ok for tenant identity" do
+      tenant = %ZtlpNs.AdminApi.TenantRegistry{
+        slug: "TRS",
+        secret: :crypto.strong_rand_bytes(32),
+        zone_glob: "*.trs.ztlp",
+        cidrs: []
+      }
+
+      assert :ok =
+               ZtlpNs.AdminApi.verify_authority({:tenant, tenant}, %{
+                 peer_ip: {127, 0, 0, 1},
+                 method: "GET",
+                 path: "/admin/records",
+                 query: "",
+                 identity: {:tenant, tenant}
+               })
+    end
+  end
 end

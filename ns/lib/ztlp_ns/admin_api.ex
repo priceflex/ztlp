@@ -187,6 +187,42 @@ defmodule ZtlpNs.AdminApi do
 
   def secure_compare(_, _), do: false
 
+  # ── Trust-authority extension hook (T7, stub for Phase 3+) ─────────
+
+  @type request_context :: %{
+          peer_ip: :inet.ip4_address(),
+          method: String.t(),
+          path: String.t(),
+          query: String.t(),
+          identity: identity()
+        }
+
+  @doc """
+  Trust-authority verification hook. Phase 3+ will plug CA-signed
+  authorization here. For now returns `:ok` unconditionally; the call
+  site in `ZtlpNs.MetricsServer.handle_admin_records/5` is pinned so
+  future implementations don't need to restructure the auth chain.
+
+  Future contract (NOT YET ENFORCED):
+
+    - Takes the authenticated `identity` plus a `request_context` map.
+    - Returns `:ok` if a valid trust authority has issued the tenant a
+      capability for this operation, OR if no trust authority is
+      configured (open mode).
+    - Returns `{:error, :authority_denied}` if a trust authority is
+      configured AND has explicitly denied this operation.
+
+  The hook fires AFTER tenant identification (T4) and BEFORE zone-glob
+  filtering (T5). A `:authority_denied` result short-circuits to 403
+  with audit severity `:critical`.
+
+  See `docs/operations/ns-admin-tenant-isolation.md` § Trust Authority
+  Forward Path for the design discussion.
+  """
+  @spec verify_authority(identity(), request_context() | map()) ::
+          :ok | {:error, :authority_denied}
+  def verify_authority(_identity, _context), do: :ok
+
   # ── list_records/1 ─────────────────────────────────────────────────
   #
   # JSON-safe projection of `ZtlpNs.Store.list_filtered/1`. The output

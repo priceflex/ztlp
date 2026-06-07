@@ -25,7 +25,7 @@
 | T1 | NS: thread peer IP from accept loop into `handle_admin_records/4` | ✅ | _commit-pending_ | passes 4 admin_api_http tests; full suite 834/834 |
 | T2 | NS: rate-limit `/admin/records` via `ZtlpNs.RateLimiter` (item #1) | ✅ | _commit-pending_ | AdminApiRateLimiter 12/60 default; 429 + Retry-After; 838 tests pass |
 | T3 | NS: audit-log success + auth-failure on `/admin/records` (item #2) | ✅ | _commit-pending_ | audit entries on 200 and 401; 840 tests |
-| T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | 🔲 | — | TDD-pure; new file `~/.ztlp_sync_state` |
+| T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | ✅ | _commit-pending_ | filesystem JSON at tmp/ztlp_sync_state.json; exp backoff capped at 15min; 7 new tests; bs suite 1160/0/0 |
 | T5 | BS: gate rake task on `SyncState.due?` w/ exponential backoff (item #3) | 🔲 | — | Cron stays dumb; backoff lives in task |
 | T6 | BS: `_sync_health.html.erb` partial + dashboard banner (item #4) | 🔲 | — | Pulls from SyncState; green/yellow/red |
 | T7 | BS: `/api/v1/sync_health` JSON endpoint (item #4) | 🔲 | — | Gated by existing `Ztlp::ApiAuthenticator` |
@@ -33,7 +33,7 @@
 | T9 | Docs: update production-readiness doc to mark items 1-4 ✅ | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T3 done 2026-06-07T16:58:06Z
+**Last resumed at:** T4 done 2026-06-07T17:10:08Z
 
 ---
 

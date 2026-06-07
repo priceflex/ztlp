@@ -102,6 +102,19 @@ defmodule ZtlpNs.AdminApiHttpTest do
              :httpc.request(:get, {url, []}, [], [])
   end
 
+  test "logs peer IP in admin records handler", %{port: port} do
+    path = "/admin/records"
+    headers = sign_headers("GET", path, "", @secret)
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+      end)
+
+    assert log =~ "peer_ip=127.0.0.1"
+  end
+
   test "GET /admin/records with a BAD signature returns 401", %{port: port} do
     ts = System.system_time(:second)
 

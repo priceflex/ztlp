@@ -50,7 +50,8 @@ defmodule ZtlpNs.MetricsServer do
   def handle_info(:accept, %{socket: ls} = state) do
     case :gen_tcp.accept(ls, 100) do
       {:ok, client} ->
-        spawn(fn -> handle_request(client) end)
+        peer_ip = peer_ip_for(client)
+        spawn(fn -> handle_request(client, peer_ip) end)
         send(self(), :accept)
         {:noreply, state}
       {:error, :timeout} ->
@@ -70,7 +71,7 @@ defmodule ZtlpNs.MetricsServer do
   def terminate(_reason, %{socket: nil}), do: :ok
   def terminate(_reason, %{socket: s}), do: :gen_tcp.close(s)
 
-  defp handle_request(socket) do
+  defp handle_request(socket, peer_ip) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
         # Normalize path: http_bin returns binary strings, http returns charlists
@@ -93,7 +94,7 @@ defmodule ZtlpNs.MetricsServer do
             send_response(socket, 200, body, "application/json")
           "/admin/records" ->
             headers = collect_headers(socket, %{})
-            handle_admin_records(socket, path_str, query, headers)
+            handle_admin_records(socket, path_str, query, headers, peer_ip)
           _ ->
             drain_headers(socket)
             send_response(socket, 404, "Not Found\n")
@@ -104,6 +105,14 @@ defmodule ZtlpNs.MetricsServer do
       _ -> :ok
     end
     :gen_tcp.close(socket)
+  end
+
+  # Returns peer IP tuple, or {0,0,0,0} if the socket has no remote address yet.
+  defp peer_ip_for(socket) do
+    case :inet.peername(socket) do
+      {:ok, {ip, _port}} -> ip
+      {:error, _} -> {0, 0, 0, 0}
+    end
   end
 
   defp split_path(path) do
@@ -134,7 +143,8 @@ defmodule ZtlpNs.MetricsServer do
     end
   end
 
-  defp handle_admin_records(socket, path_with_query, query_str, headers) do
+  defp handle_admin_records(socket, path_with_query, query_str, headers, peer_ip) do
+    Logger.info("[admin_api] peer_ip=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
     secret = Application.get_env(:ztlp_ns, :admin_api_secret)
 
     case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do

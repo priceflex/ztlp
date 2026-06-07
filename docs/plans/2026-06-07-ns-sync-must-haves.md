@@ -22,7 +22,7 @@
 
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
-| T1 | NS: thread peer IP from accept loop into `handle_admin_records/4` | 🔲 | — | Plumbing-only; no behavior change |
+| T1 | NS: thread peer IP from accept loop into `handle_admin_records/4` | ✅ | _commit-pending_ | passes 4 admin_api_http tests; full suite 834/834 |
 | T2 | NS: rate-limit `/admin/records` via `ZtlpNs.RateLimiter` (item #1) | 🔲 | — | Returns 429 + `Retry-After`; configurable threshold |
 | T3 | NS: audit-log success + auth-failure on `/admin/records` (item #2) | 🔲 | — | Adds 2 new `Audit` action atoms |
 | T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | 🔲 | — | TDD-pure; new file `~/.ztlp_sync_state` |
@@ -33,7 +33,7 @@
 | T9 | Docs: update production-readiness doc to mark items 1-4 ✅ | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** _(populated on session restart)_
+**Last resumed at:** T1 done 2026-06-07T16:46:57Z
 
 ---
 
@@ -97,9 +97,17 @@ Each task is self-contained. Subagent gets: the task block below, the discipline
 - Modify: `ns/lib/ztlp_ns/metrics_server.ex` (~line 50-100 — the accept loop and request handler)
 - Modify: `ns/test/ztlp_ns/admin_api_http_test.exs` — add a test asserting peer IP is observable (e.g., via a stub `RateLimiter.check/1` capturing the tuple).
 
-**Step 1 (RED):** In `admin_api_http_test.exs`, add `test "passes peer IP tuple to rate-limit check"` that uses `:meck` (already a dep) to mock `ZtlpNs.RateLimiter.check/1`, makes an `/admin/records` HTTP request from `127.0.0.1`, and asserts the mock was called with `{127, 0, 0, 1}`.
+**Step 1 (RED):** NS has no mocking lib (zero-dep policy — see `mix.exs:47`). Instead, use **log capture** to observe the peer IP is extracted. Add `test "logs peer IP in admin records handler"`:
+```elixir
+test "logs peer IP in admin records handler" do
+  log = ExUnit.CaptureLog.capture_log(fn ->
+    {:ok, _} = http_get("/admin/records?type=key", signed: true)
+  end)
+  assert log =~ "peer_ip=127.0.0.1"
+end
+```
 
-**Step 2 (verify RED):** `mix test test/ztlp_ns/admin_api_http_test.exs -t admin_peer_ip` — expect failure with "no mock invocation" (because nothing currently calls `RateLimiter.check/1` in this code path).
+**Step 2 (verify RED):** `mix test test/ztlp_ns/admin_api_http_test.exs` — expect failure because the handler doesn't currently log the peer IP.
 
 **Step 3 (GREEN):** In `metrics_server.ex`:
 ```elixir

@@ -23,7 +23,7 @@
 | # | Task | Status | Commit SHA | Notes |
 |---|---|---|---|---|
 | T1 | NS: thread peer IP from accept loop into `handle_admin_records/4` | ✅ | _commit-pending_ | passes 4 admin_api_http tests; full suite 834/834 |
-| T2 | NS: rate-limit `/admin/records` via `ZtlpNs.RateLimiter` (item #1) | 🔲 | — | Returns 429 + `Retry-After`; configurable threshold |
+| T2 | NS: rate-limit `/admin/records` via `ZtlpNs.RateLimiter` (item #1) | ✅ | _commit-pending_ | AdminApiRateLimiter 12/60 default; 429 + Retry-After; 838 tests pass |
 | T3 | NS: audit-log success + auth-failure on `/admin/records` (item #2) | 🔲 | — | Adds 2 new `Audit` action atoms |
 | T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | 🔲 | — | TDD-pure; new file `~/.ztlp_sync_state` |
 | T5 | BS: gate rake task on `SyncState.due?` w/ exponential backoff (item #3) | 🔲 | — | Cron stays dumb; backoff lives in task |
@@ -33,7 +33,7 @@
 | T9 | Docs: update production-readiness doc to mark items 1-4 ✅ | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T1 done 2026-06-07T16:46:57Z
+**Last resumed at:** T2 done 2026-06-07T16:54:00Z
 
 ---
 

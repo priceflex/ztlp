@@ -19,6 +19,10 @@ defmodule ZtlpNs.AdminApiHttpTest do
     prev_secret = Application.get_env(:ztlp_ns, :admin_api_secret)
     Application.put_env(:ztlp_ns, :admin_api_secret, @secret)
 
+    # Reset the global admin-API rate-limit bucket between tests so
+    # earlier tests don't bleed into later ones.
+    ZtlpNs.AdminApiRateLimiter.reset()
+
     Store.clear()
 
     # Seed one record so /admin/records has something to return.
@@ -113,6 +117,29 @@ defmodule ZtlpNs.AdminApiHttpTest do
       end)
 
     assert log =~ "peer_ip=127.0.0.1"
+  end
+
+  test "rate-limits after 12 requests in the window, returns 429 + Retry-After", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    path = "/admin/records"
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+    headers = sign_headers("GET", path, "", @secret)
+
+    # Burn through the bucket
+    for _ <- 1..12 do
+      {:ok, {{_, status, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+      assert status == 200
+    end
+
+    # 13th request should be 429 with Retry-After
+    # Note: same signature is fine because rate-limit fires BEFORE signature verify.
+    fresh_headers = sign_headers("GET", path, "", @secret)
+    {:ok, {{_, 429, _}, resp_headers, _}} = :httpc.request(:get, {url, fresh_headers}, [], [])
+    retry_after = Enum.find_value(resp_headers, fn {k, v} ->
+      if String.downcase(to_string(k)) == "retry-after", do: to_string(v)
+    end)
+    assert retry_after != nil
+    assert String.to_integer(retry_after) > 0
   end
 
   test "GET /admin/records with a BAD signature returns 401", %{port: port} do

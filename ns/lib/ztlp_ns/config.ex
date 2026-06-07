@@ -113,6 +113,34 @@ defmodule ZtlpNs.Config do
     end
   end
 
+  @doc """
+  Per-peer-IP rate limit for `/admin/records`.
+
+  Returns `{count, window_seconds}` — i.e. `count` requests allowed per
+  rolling `window_seconds` window. Defaults to `{12, 60}` (covers a
+  5-minute cron with retry headroom).
+
+  Override via `ZTLP_NS_ADMIN_API_RATE_LIMIT=N/W` (e.g. `"30/60"`).
+  Invalid values fall back to the default.
+  """
+  @spec admin_api_rate_limit() :: {pos_integer(), pos_integer()}
+  def admin_api_rate_limit do
+    case System.get_env("ZTLP_NS_ADMIN_API_RATE_LIMIT") do
+      nil ->
+        Application.get_env(:ztlp_ns, :admin_api_rate_limit, {12, 60})
+      str ->
+        case String.split(str, "/", parts: 2) do
+          [c, w] ->
+            case {Integer.parse(c), Integer.parse(w)} do
+              {{count, ""}, {window, ""}} when count > 0 and window > 0 ->
+                {count, window}
+              _ -> {12, 60}
+            end
+          _ -> {12, 60}
+        end
+    end
+  end
+
   @doc "HTTPS URLs for bootstrap relay discovery (Step 1 of NIP)."
   @spec bootstrap_urls() :: [String.t()]
   def bootstrap_urls do

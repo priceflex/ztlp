@@ -145,16 +145,25 @@ defmodule ZtlpNs.MetricsServer do
 
   defp handle_admin_records(socket, path_with_query, query_str, headers, peer_ip) do
     Logger.info("[admin_api] peer_ip=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
-    secret = Application.get_env(:ztlp_ns, :admin_api_secret)
 
-    case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
+    case ZtlpNs.AdminApiRateLimiter.check(peer_ip) do
+      :rate_limited ->
+        {_count, window} = ZtlpNs.Config.admin_api_rate_limit()
+        Logger.warning("[admin_api] 429 peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
+        send_response(socket, 429, "", "text/plain", [{"Retry-After", to_string(window)}])
+
       :ok ->
-        opts = parse_admin_query(query_str)
-        body = ZtlpNs.AdminApi.list_records(opts) |> Jason.encode!()
-        send_response(socket, 200, body, "application/json")
-      {:error, reason} ->
-        Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
-        send_response(socket, 401, "")
+        secret = Application.get_env(:ztlp_ns, :admin_api_secret)
+
+        case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
+          :ok ->
+            opts = parse_admin_query(query_str)
+            body = ZtlpNs.AdminApi.list_records(opts) |> Jason.encode!()
+            send_response(socket, 200, body, "application/json")
+          {:error, reason} ->
+            Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
+            send_response(socket, 401, "")
+        end
     end
   end
 
@@ -182,19 +191,22 @@ defmodule ZtlpNs.MetricsServer do
     end)
   end
 
-  defp send_response(socket, status, body, ct \\ "text/plain") do
+  defp send_response(socket, status, body, ct \\ "text/plain", extra_headers \\ []) do
     status_text = case status do
       200 -> "OK"
       401 -> "Unauthorized"
       404 -> "Not Found"
       405 -> "Method Not Allowed"
+      429 -> "Too Many Requests"
       _ -> "Error"
     end
     :inet.setopts(socket, [packet: :raw])
+    extra = Enum.map(extra_headers, fn {k, v} -> "#{k}: #{v}\r\n" end)
     :gen_tcp.send(socket, [
       "HTTP/1.1 #{status} #{status_text}\r\n",
       "Content-Type: #{ct}\r\n",
       "Content-Length: #{byte_size(body)}\r\n",
+      extra,
       "Connection: close\r\n\r\n",
       body
     ])

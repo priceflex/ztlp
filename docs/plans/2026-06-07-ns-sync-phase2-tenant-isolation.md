@@ -44,14 +44,14 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T5 | NS: filter `list_records` response to tenant's zone glob | ✅ | `35af350` | zone-glob filter on response; :admin_api_zone_outside_glob audit event severity :high; legacy mode unchanged; 4 new tests; 910/910 |
 | T6 | NS: severity tagging on all admin-API audit events | ✅ | `6acf5b0` | Added :info to :admin_api_records_pulled and :high to :admin_api_auth_failed; 2 regression tests pin coverage; full suite 912/912 |
 | T7 | NS: trust-authority extension hook (stub, future-proofing) | ✅ | `68e06af` | verify_authority/2 stub returns :ok; call site pinned post-T4 pre-T5; :admin_api_authority_denied severity :critical reserved for Phase 3+; 2 contract tests; 914/914 |
-| T8 | BS: client compatibility check (no code change expected) | ✅ | _commit-pending_ | BS suite 1175/1175 unchanged after NS Phase 2; added compatibility docstring to NsAdminClient documenting how the one-secret-per-BS-container model maps to NS-side tenant identification |
-| T9 | Docs: operator-facing deployment guide | 🔲 | — | `docs/operations/ns-admin-tenant-isolation.md` |
+| T8 | BS: client compatibility check (no code change expected) | ✅ | `7b189a6` | BS suite 1175/1175 unchanged after NS Phase 2; added compatibility docstring to NsAdminClient documenting how the one-secret-per-BS-container model maps to NS-side tenant identification |
+| T9 | Docs: operator-facing deployment guide | ✅ | _commit-pending_ | operator deployment guide in `docs/operations/ns-admin-tenant-isolation.md`; covers quick-start, TRS Option B operator-tenant pattern, verification commands, rolling-to-TRS-prod migration, second-tenant onboarding, two-lock-model deep dive, audit events reference, trust-authority forward path, deprecation timeline, troubleshooting + FAQ; 688 lines |
 | T10 | Docs: update `bootstrap/.env.example` + production-readiness doc | 🔲 | — | Plus runbook entries |
 | T11 | Full suite sweep + PR + CodeRabbit | 🔲 | — | NS ≥ 855, BS ≥ 1175 |
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T8 done 2026-06-07T22:50:00Z
+**Last resumed at:** T9 done 2026-06-07T22:48:57Z
 
 ---
 

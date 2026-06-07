@@ -55,6 +55,11 @@ defmodule ZtlpNs.Application do
       _ -> :ok
     end
 
+    # Load admin API HMAC secret from env (read by AdminApi.verify_request/5
+    # on every /admin/records request — supports rotation via Application.put_env
+    # without a service restart).
+    ZtlpNs.Config.load_admin_api_secret_from_env()
+
     children = [
       # Order matters: TrustAnchor first, then Store (Mnesia tables),
       # then RateLimiter (ETS), then QuerySupervisor (worker pool),

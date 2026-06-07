@@ -44,10 +44,15 @@ defmodule ZtlpNs.MixProject do
     ]
   end
 
-  # Zero external dependencies — pure Elixir/OTP only.
-  # This is a deliberate design choice matching the relay project.
+  # Historically zero external deps (matching the relay project's pure-Elixir/OTP
+  # design). Jason was added in feat/ns-bootstrap-sync (T3) as a runtime dep for
+  # encoding AdminApi.list_records/1 JSON responses on /admin/records — the
+  # hand-rolled approach used elsewhere (e.g. collect_token_status) does not
+  # scale to the projection's nested-map shape.
   defp deps do
-    []
+    [
+      {:jason, "~> 1.4"}
+    ]
   end
 
   defp elixirc_paths(_), do: ["lib"]

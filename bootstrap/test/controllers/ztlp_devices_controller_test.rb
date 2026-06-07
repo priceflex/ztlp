@@ -96,4 +96,67 @@ class ZtlpDevicesControllerTest < ActionDispatch::IntegrationTest
     assert_match "Revoked", response.body
     assert_match "Decommissioned", response.body
   end
+
+  test "index filters by status when ?status=orphaned" do
+    orphan = @network.ztlp_devices.create!(
+      name: "ghost-device",
+      node_id: "node-orphan-1",
+      status: "orphaned",
+      origin: "ns_sync",
+      last_synced_at: 1.hour.ago
+    )
+    get network_ztlp_devices_path(@network, status: "orphaned")
+    assert_response :success
+    assert_match "ghost-device", response.body
+    assert_no_match(/alice-laptop/, response.body)
+    assert_no_match(/bob-desktop/, response.body)
+  ensure
+    orphan&.destroy
+  end
+
+  test "index ignores invalid status param" do
+    get network_ztlp_devices_path(@network, status: "bogus; DROP TABLE")
+    assert_response :success
+    # falls back to no scoping — all devices shown
+    assert_match "alice-laptop", response.body
+  end
+
+  test "index renders NS source badge for ns_sync devices" do
+    synced = @network.ztlp_devices.create!(
+      name: "ns-synced-laptop",
+      node_id: "node-synced-1",
+      status: "enrolled",
+      origin: "ns_sync",
+      enrolled_at: 2.hours.ago,
+      last_synced_at: 3.minutes.ago
+    )
+    get network_ztlp_devices_path(@network)
+    assert_response :success
+    # Must show NS badge for ns_sync device, BS badge for bootstrap-origin
+    assert_select "tr", text: /ns-synced-laptop/ do
+      assert_select "span.source-badge-ns_sync", text: /NS/
+    end
+    assert_select "tr", text: /alice-laptop/ do
+      assert_select "span.source-badge-bootstrap", text: /BS/
+    end
+  ensure
+    synced&.destroy
+  end
+
+  test "index renders last_synced_at humanized for synced devices" do
+    synced = @network.ztlp_devices.create!(
+      name: "ns-synced-laptop-2",
+      node_id: "node-synced-2",
+      status: "enrolled",
+      origin: "ns_sync",
+      enrolled_at: 2.hours.ago,
+      last_synced_at: 3.minutes.ago
+    )
+    get network_ztlp_devices_path(@network)
+    assert_response :success
+    # ns-synced-laptop has last_synced_at = 3.minutes.ago
+    assert_match(/synced.*minute/i, response.body)
+  ensure
+    synced&.destroy
+  end
 end

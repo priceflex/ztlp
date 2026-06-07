@@ -21,6 +21,8 @@ defmodule ZtlpNs.Config do
   - `:name_suffix` — Required zone suffix for names (default: nil / no check).
   """
 
+  require Logger
+
   @doc "UDP port for the namespace query server."
   @spec port() :: non_neg_integer()
   def port do
@@ -203,5 +205,53 @@ defmodule ZtlpNs.Config do
       nil -> Application.get_env(:ztlp_ns, :require_registration_auth, true)
       _ -> true
     end
+  end
+
+  @doc """
+  Load the admin-API HMAC secret from `ZTLP_NS_ADMIN_API_SECRET` and store
+  it in `Application.get_env(:ztlp_ns, :admin_api_secret)` for runtime use
+  by `ZtlpNs.AdminApi.verify_request/5`.
+
+  Accepted forms:
+  - 64-char lowercase or uppercase hex (decoded to 32 raw bytes)
+  - 32 raw bytes (stored as-is)
+
+  Anything else (missing, empty, malformed hex, wrong length) leaves the
+  Application env at `nil` and logs a warning. The route returns 401 for
+  every request when the secret is `nil`, so absence is fail-closed —
+  there is no insecure default.
+  """
+  @spec load_admin_api_secret_from_env() :: :ok
+  def load_admin_api_secret_from_env do
+    case System.get_env("ZTLP_NS_ADMIN_API_SECRET") do
+      nil ->
+        Logger.info("[admin_api] secret not configured; /admin/records will reject all requests")
+        Application.delete_env(:ztlp_ns, :admin_api_secret)
+
+      "" ->
+        Logger.info("[admin_api] secret env var is empty; /admin/records will reject all requests")
+        Application.delete_env(:ztlp_ns, :admin_api_secret)
+
+      raw when is_binary(raw) and byte_size(raw) == 32 ->
+        Application.put_env(:ztlp_ns, :admin_api_secret, raw)
+        Logger.info("[admin_api] secret loaded from env (32 raw bytes)")
+
+      hex when is_binary(hex) and byte_size(hex) == 64 ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, bytes} when byte_size(bytes) == 32 ->
+            Application.put_env(:ztlp_ns, :admin_api_secret, bytes)
+            Logger.info("[admin_api] secret loaded from env (64-char hex → 32 bytes)")
+
+          _ ->
+            Logger.warning("[admin_api] ZTLP_NS_ADMIN_API_SECRET looks 64 chars but isn't valid hex; /admin/records disabled")
+            Application.delete_env(:ztlp_ns, :admin_api_secret)
+        end
+
+      other ->
+        Logger.warning("[admin_api] ZTLP_NS_ADMIN_API_SECRET wrong length=#{byte_size(other)} (need 32 raw or 64 hex); /admin/records disabled")
+        Application.delete_env(:ztlp_ns, :admin_api_secret)
+    end
+
+    :ok
   end
 end

@@ -1,13 +1,15 @@
 # frozen_string_literal: true
 
 class ZtlpDevicesController < ApplicationController
+  VALID_STATUSES = %w[pending enrolled revoked orphaned].freeze
+
   before_action :set_network
   before_action :set_device, only: [:show, :destroy]
 
   def index
     @devices = @network.ztlp_devices.includes(:ztlp_user, :machine).order(:name)
     @devices = @devices.where(ztlp_user_id: params[:user_id]) if params[:user_id].present?
-    @devices = @devices.where(status: params[:status]) if params[:status].present?
+    @devices = @devices.where(status: params[:status]) if params[:status].present? && VALID_STATUSES.include?(params[:status])
   end
 
   def show

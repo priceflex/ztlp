@@ -53,6 +53,18 @@ module Ztlp
     # GET /admin/records, optionally filtered by zone and/or type.
     # Returns the parsed JSON body as a Hash with string keys
     # ("records", "count", "generated_at").
+    #
+    # Compatibility with NS Phase 2 tenant isolation (PR after #97):
+    #   - This client signs with ONE `secret` (set via ENV["ZTLP_NS_ADMIN_API_SECRET"]).
+    #     NS will identify which tenant that secret belongs to via the
+    #     TenantRegistry and scope the response to that tenant's zone glob.
+    #     No code change here is needed; NS handles routing on its side.
+    #   - The Bootstrap container's secret is the TENANT secret (e.g. TRS's
+    #     ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET — copied identically into
+    #     ZTLP_NS_ADMIN_API_SECRET on the Bootstrap side).
+    #   - For zones outside the tenant's glob, NS returns an empty records
+    #     list (and emits :admin_api_zone_outside_glob audit on its side).
+    #     The caller sees `count: 0` — handle gracefully.
     def self.list_records(zone: nil, type: nil, base_url: nil, secret: nil, timeout: DEFAULT_TIMEOUT)
       base_url ||= ENV["ZTLP_NS_ADMIN_BASE_URL"]
       secret   ||= ENV["ZTLP_NS_ADMIN_API_SECRET"]

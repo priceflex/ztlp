@@ -46,11 +46,11 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T7 | NS: trust-authority extension hook (stub, future-proofing) | ✅ | `68e06af` | verify_authority/2 stub returns :ok; call site pinned post-T4 pre-T5; :admin_api_authority_denied severity :critical reserved for Phase 3+; 2 contract tests; 914/914 |
 | T8 | BS: client compatibility check (no code change expected) | ✅ | `7b189a6` | BS suite 1175/1175 unchanged after NS Phase 2; added compatibility docstring to NsAdminClient documenting how the one-secret-per-BS-container model maps to NS-side tenant identification |
 | T9 | Docs: operator-facing deployment guide | ✅ | `a07d317` | operator deployment guide in `docs/operations/ns-admin-tenant-isolation.md`; covers quick-start, TRS Option B operator-tenant pattern, verification commands, rolling-to-TRS-prod migration, second-tenant onboarding, two-lock-model deep dive, audit events reference, trust-authority forward path, deprecation timeline, troubleshooting + FAQ; 688 lines |
-| T10 | Docs: update `bootstrap/.env.example` + production-readiness doc | ✅ | _commit-pending_ | bootstrap/.env.example + ztlp.net/.env.example updated with NS admin API + tenant variables; production-readiness doc items #5 + #6 marked ✅ with cross-links to Phase 2 commits |
-| T11 | Full suite sweep + PR + CodeRabbit | 🔲 | — | NS ≥ 855, BS ≥ 1175 |
-| T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
-| F1 | CodeRabbit fixup: dup-secret detection (F1) + fail-closed env (F2) + IPv4 bounds (F3) + per-tenant CIDR check (F4) + sync test mod (F5) | ✅ | _commit-pending_ | 5 Major findings addressed; F4 closes cross-tenant CIDR escape vector (request signed as A from B's CIDR previously passed the union check); 6 new regression tests (3 in cidr_test, 2 in tenant_registry_test, 2 in admin_api_http_test, less one for the +1 distinct-secrets sanity assert); full suite 920/920 |
-| **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
+| T10 | Docs: update `bootstrap/.env.example` + production-readiness doc | ✅ | `1d600a2` | bootstrap/.env.example + ztlp.net/.env.example updated with NS admin API + tenant variables; production-readiness doc items #5 + #6 marked ✅ with cross-links to Phase 2 commits |
+| T11 | Full suite sweep + PR + CodeRabbit | ✅ | (no commit) | PR #98 opened https://github.com/priceflex/ztlp/pull/98 — NS 914/0 + BS 1175/0 at open; CodeRabbit posted 5 Major findings (handled in F1 fixup commit 7a94e1a); 920/0 after fixup |
+| T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | ✅ | `1d600a2` | Items #5 + #6 marked ✅ with cross-links in T10 commit (same SHA) — production-readiness doc updated alongside env examples |
+| F1 | CodeRabbit fixup: dup-secret detection (F1) + fail-closed env (F2) + IPv4 bounds (F3) + per-tenant CIDR check (F4) + sync test mod (F5) | ✅ | `7a94e1a` | 5 Major findings addressed; F4 closes cross-tenant CIDR escape vector (request signed as A from B's CIDR previously passed the union check); 6 new regression tests; full suite 920/920 |
+| **DONE** | All tests green, PR opened, CodeRabbit clean ✓ second-pass | ✅ | `7a94e1a` | NS 920/0 + BS 1175/0; PR #98 reviewed twice by CodeRabbit; awaiting merge |
 
 **Last resumed at:** CodeRabbit fixup done 2026-06-07T23:12:29Z
 

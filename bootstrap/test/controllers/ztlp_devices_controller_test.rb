@@ -17,6 +17,17 @@ class ZtlpDevicesControllerTest < ActionDispatch::IntegrationTest
     assert_match "bob-desktop", response.body
   end
 
+  test "index renders sync health banner" do
+    Ztlp::SyncState.reset!
+    Ztlp::SyncState.record_success!
+    get network_ztlp_devices_path(@network)
+    assert_response :success
+    assert_match(/Last NS sync/, response.body)
+    assert_match(/sync-health-banner/, response.body)
+  ensure
+    Ztlp::SyncState.reset!
+  end
+
   test "index filters by status enrolled" do
     get network_ztlp_devices_path(@network, status: "enrolled")
     assert_response :success

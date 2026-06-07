@@ -3,6 +3,7 @@
   .source-badge-bootstrap { display:inline-flex; align-items:center; padding:0.125rem 0.5rem; border-radius:9999px; font-size:0.7rem; font-weight:600; background:#e5e7eb; color:#374151; }
 </style>
 <div class="mb-6">
+  <%= render 'sync_health', state: Ztlp::SyncState.current %>
   <nav class="text-sm text-gray-500 mb-2">
     <%= link_to @network.name, @network, class: "hover:text-gray-700" %> /
     <span class="text-gray-700">Devices</span>

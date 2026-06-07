@@ -1,0 +1,18 @@
+<%
+  status = sync_health_status(state)
+  bg, fg = case status
+           when :green  then ["#dcfce7", "#166534"]
+           when :yellow then ["#fef9c3", "#854d0e"]
+           when :red    then ["#fee2e2", "#991b1b"]
+           end
+%>
+<div class="sync-health-banner sync-health-<%= status %>"
+     style="background:<%= bg %>;color:<%= fg %>;padding:0.5rem 1rem;border-radius:0.375rem;margin-bottom:0.75rem;font-size:0.875rem;display:flex;align-items:center;justify-content:space-between;">
+  <span>
+    <strong>NS Sync:</strong>
+    <%= sync_health_message(state) %>
+  </span>
+  <% if status == :red %>
+    <%= link_to "view audit log", audit_logs_path, style: "color:inherit;text-decoration:underline;font-weight:500;" %>
+  <% end %>
+</div>

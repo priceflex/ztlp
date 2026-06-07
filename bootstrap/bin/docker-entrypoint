@@ -81,4 +81,20 @@ fi
 ./bin/rails ztlp:network:check_ns_reachability || \
   echo "[entrypoint] WARN: ztlp:network:check_ns_reachability failed; continuing boot"
 
+# T8: NS → Bootstrap device sync. Background loop, 5-minute cadence, gated
+# on ZTLP_NS_SYNC_ENABLED=true so test/dev images don't hammer NS. Output
+# is teed to /rails/log/ns_sync.log for postmortem grepping. The `&`
+# detaches so `exec` below still hands PID 1 to the Rails server.
+if [ "${ZTLP_NS_SYNC_ENABLED:-false}" = "true" ]; then
+  (
+    while true; do
+      bundle exec rake ztlp:ns:sync 2>&1 | tee -a /rails/log/ns_sync.log
+      sleep 300
+    done
+  ) &
+  echo "[entrypoint] ZTLP_NS_SYNC_ENABLED=true — ztlp:ns:sync loop spawned (5min interval)"
+else
+  echo "[entrypoint] ZTLP_NS_SYNC_ENABLED is not 'true' — ztlp:ns:sync loop NOT spawned"
+fi
+
 exec "${@}"

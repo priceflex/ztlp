@@ -28,8 +28,8 @@
 | T3 | NS: HTTP route `GET /admin/records` in MetricsServer + tests | ✅ | `a587ddd` | 3 new integration tests, 827 NS total; Jason ~> 1.4 added as dep |
 | T4 | NS: env var plumbing + config + Dockerfile | ✅ | `ae820b2` | 6 new tests, 833 NS total; ZTLP_NS_ADMIN_API_SECRET loaded at boot, fail-closed on missing/malformed |
 | T5 | BS: `Ztlp::NsAdminClient` HTTP client + tests | ✅ | `34f9d78` | 8 new tests, 1122 BS total; Mocha-stubbed Net::HTTP (no webmock dep); HMAC-SHA256 over `METHOD\nPATH\nTS\nSHA256(body)` |
-| T6 | BS: `ZtlpDevice` schema + `orphaned` status migration + tests | ✅ | _commit-pending_ | 10 new tests, 1132 BS total; adds `origin` (default `bootstrap`) + `last_synced_at` + index on `origin`; status enum expanded to pending/enrolled/revoked/orphaned, origin validated |
-| T7 | BS: `Ztlp::SyncNsToBootstrap` reconciler + tests | 🔲 | — | |
+| T6 | BS: `ZtlpDevice` schema + `orphaned` status migration + tests | ✅ | `1a89011` | 10 new tests, 1132 BS total; adds `origin` (default `bootstrap`) + `last_synced_at` + index on `origin`; status enum expanded to pending/enrolled/revoked/orphaned, origin validated |
+| T7 | BS: `Ztlp::SyncNsToBootstrap` reconciler + tests | ✅ | _commit-pending_ | 11 new tests, 49 assertions, ~0.7s; longest-zone-suffix routing (case-insensitive), idempotent upserts, orphan sweep, origin="bootstrap" immune, TransportError → Result(:error) without raising |
 | T8 | BS: `ztlp:ns:sync` rake task + cron entrypoint | 🔲 | — | |
 | T9 | BS: Dashboard surfaces synced devices (UI badge + filter) | 🔲 | — | |
 | T10 | Deploy to prod bootstrap + verify live sync against NS | 🔲 | — | |

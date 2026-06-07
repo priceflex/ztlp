@@ -158,9 +158,23 @@ defmodule ZtlpNs.MetricsServer do
         case ZtlpNs.AdminApi.verify_request("GET", path_with_query, "", headers, secret: secret) do
           :ok ->
             opts = parse_admin_query(query_str)
-            body = ZtlpNs.AdminApi.list_records(opts) |> Jason.encode!()
+            records = ZtlpNs.AdminApi.list_records(opts)
+            body = Jason.encode!(records)
+
+            ZtlpNs.Audit.log(:admin_api_records_pulled, "/admin/records", :admin_api, %{
+              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+              zone_filter: Keyword.get(opts, :zone),
+              type_filter: Keyword.get(opts, :type),
+              count: records[:count]
+            })
+
             send_response(socket, 200, body, "application/json")
           {:error, reason} ->
+            ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
+              peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+              reason: inspect(reason)
+            })
+
             Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")
             send_response(socket, 401, "")
         end

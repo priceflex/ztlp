@@ -155,4 +155,49 @@ defmodule ZtlpNs.AdminApiHttpTest do
     assert {:ok, {{_, 401, _}, _resp_headers, _body}} =
              :httpc.request(:get, {url, headers}, [], [])
   end
+
+  test "logs admin_api_records_pulled audit entry on 200", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    before = System.system_time(:second)
+    path = "/admin/records?type=key"
+    headers = sign_headers("GET", path, "", @secret)
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+
+    entries = ZtlpNs.Audit.since(before - 1)
+    matching = Enum.filter(entries, fn {_ts, action, _name, _type, details} ->
+      action == :admin_api_records_pulled and details[:type_filter] == :key
+    end)
+    assert length(matching) >= 1
+    {_ts, _action, name, type, details} = List.last(matching)
+    assert name == "/admin/records"
+    assert type == :admin_api
+    assert is_integer(details[:count])
+    assert details[:type_filter] == :key
+    assert details[:peer_ip] == "127.0.0.1"
+  end
+
+  test "logs admin_api_auth_failed audit entry on 401 (bad signature)", %{port: port} do
+    ZtlpNs.AdminApiRateLimiter.reset()
+    before = System.system_time(:second)
+    path = "/admin/records"
+    ts = System.system_time(:second)
+    bad_headers = [
+      {~c"x-ns-timestamp", String.to_charlist(to_string(ts))},
+      {~c"x-ns-signature", String.to_charlist(String.duplicate("0", 64))}
+    ]
+    url = ~c"http://127.0.0.1:#{port}#{path}"
+
+    {:ok, {{_, 401, _}, _, _}} = :httpc.request(:get, {url, bad_headers}, [], [])
+
+    entries = ZtlpNs.Audit.since(before - 1)
+    matching = Enum.filter(entries, fn {_ts, action, _name, _type, _details} ->
+      action == :admin_api_auth_failed
+    end)
+    assert length(matching) >= 1
+    {_ts, _action, _name, _type, details} = List.last(matching)
+    assert details[:peer_ip] == "127.0.0.1"
+    assert details[:reason] != nil
+  end
 end

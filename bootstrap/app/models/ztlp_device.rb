@@ -11,13 +11,18 @@ class ZtlpDevice < ApplicationRecord
   has_many :connection_events, dependent: :destroy
 
   ASSURANCE_LEVELS = %w[unknown software device-bound hardware].freeze
+  VALID_STATUSES   = %w[pending enrolled revoked orphaned].freeze
+  VALID_ORIGINS    = %w[bootstrap ns_sync].freeze
 
   validates :name, presence: true, uniqueness: { scope: :network_id }
-  validates :status, inclusion: { in: %w[enrolled revoked] }
+  validates :status, inclusion: { in: VALID_STATUSES }
+  validates :origin, inclusion: { in: VALID_ORIGINS }
   validates :assurance_level, inclusion: { in: ASSURANCE_LEVELS }, allow_nil: true
 
   scope :enrolled, -> { where(status: "enrolled") }
   scope :revoked, -> { where(status: "revoked") }
+  scope :orphaned, -> { where(status: "orphaned") }
+  scope :synced_from_ns, -> { where(origin: "ns_sync") }
   scope :online, -> { where("last_seen_at > ?", 5.minutes.ago) }
   scope :offline, -> { where("last_seen_at <= ? OR last_seen_at IS NULL", 5.minutes.ago) }
   scope :recently_seen, -> { where("last_seen_at > ?", 24.hours.ago) }
@@ -46,6 +51,14 @@ class ZtlpDevice < ApplicationRecord
 
   def revoked?
     status == "revoked"
+  end
+
+  def orphaned?
+    status == "orphaned"
+  end
+
+  def synced_from_ns?
+    origin == "ns_sync"
   end
 
   def owner_name

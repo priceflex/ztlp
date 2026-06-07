@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_05_23_080000) do
+ActiveRecord::Schema[7.1].define(version: 2026_06_07_040000) do
   create_table "admin_users", force: :cascade do |t|
     t.string "email", null: false
     t.string "name", null: false
@@ -390,10 +390,13 @@ ActiveRecord::Schema[7.1].define(version: 2026_05_23_080000) do
     t.string "assurance_level", default: "software"
     t.string "cert_serial"
     t.datetime "cert_expires_at"
+    t.string "origin", default: "bootstrap", null: false
+    t.datetime "last_synced_at"
     t.index ["last_seen_at"], name: "index_ztlp_devices_on_last_seen_at"
     t.index ["machine_id"], name: "index_ztlp_devices_on_machine_id"
     t.index ["network_id", "name"], name: "index_ztlp_devices_on_network_id_and_name", unique: true
     t.index ["network_id"], name: "index_ztlp_devices_on_network_id"
+    t.index ["origin"], name: "index_ztlp_devices_on_origin"
     t.index ["ztlp_user_id"], name: "index_ztlp_devices_on_ztlp_user_id"
   end
 

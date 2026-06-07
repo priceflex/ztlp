@@ -85,10 +85,23 @@ fi
 # on ZTLP_NS_SYNC_ENABLED=true so test/dev images don't hammer NS. Output
 # is teed to /rails/log/ns_sync.log for postmortem grepping. The `&`
 # detaches so `exec` below still hands PID 1 to the Rails server.
+#
+# Hardening: the parent script runs with `set -e`. A tee failure inside the
+# loop body would normally kill the background subshell and silently stop
+# sync scheduling forever. We pre-create the log dir, fall back to no-tee
+# logging if it's not writable, and run the inner loop with errexit
+# disabled so a one-off rake failure doesn't take down the scheduler.
 if [ "${ZTLP_NS_SYNC_ENABLED:-false}" = "true" ]; then
+  mkdir -p /rails/log 2>/dev/null || \
+    echo "[entrypoint] WARN: /rails/log not creatable; ns_sync.log will be skipped"
   (
+    set +e
     while true; do
-      bundle exec rake ztlp:ns:sync 2>&1 | tee -a /rails/log/ns_sync.log
+      if [ -w /rails/log ]; then
+        bundle exec rake ztlp:ns:sync 2>&1 | tee -a /rails/log/ns_sync.log
+      else
+        bundle exec rake ztlp:ns:sync 2>&1
+      fi
       sleep 300
     done
   ) &

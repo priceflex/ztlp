@@ -152,4 +152,44 @@ class Ztlp::NsAdminClientTest < ActiveSupport::TestCase
     ENV.delete("ZTLP_NS_ADMIN_BASE_URL")
     ENV.delete("ZTLP_NS_ADMIN_API_SECRET")
   end
+
+  # ── CodeRabbit follow-up hardening (PR #96 review) ──
+
+  test "raises ServerError when NS returns 200 with malformed JSON" do
+    fake_resp = Net::HTTPOK.new("1.1", "200", "OK")
+    fake_resp.instance_variable_set(:@body, "not-json-at-all{")
+    def fake_resp.body; @body; end
+    Net::HTTP.any_instance.stubs(:request).returns(fake_resp)
+
+    err = assert_raises(Ztlp::NsAdminClient::ServerError) do
+      Ztlp::NsAdminClient.list_records(base_url: BASE, secret: SECRET)
+    end
+    assert_match(/invalid JSON/, err.message)
+  end
+
+  test "raises ConfigurationError for 64-char non-hex secret" do
+    bogus = "gg" * 32  # 64 chars, every char invalid hex
+    assert_raises(Ztlp::NsAdminClient::ConfigurationError) do
+      Ztlp::NsAdminClient.list_records(base_url: BASE, secret: bogus)
+    end
+  end
+
+  test "raises ConfigurationError for hex with one invalid character" do
+    # 63 valid hex + 1 invalid — would silently pack to garbage without validation
+    bogus = ("a" * 63) + "z"
+    assert_raises(Ztlp::NsAdminClient::ConfigurationError) do
+      Ztlp::NsAdminClient.list_records(base_url: BASE, secret: bogus)
+    end
+  end
+
+  test "accepts uppercase hex" do
+    upper_hex = SECRET.upcase
+    fake_resp = Net::HTTPOK.new("1.1", "200", "OK")
+    fake_resp.instance_variable_set(:@body, '{"records":[],"count":0,"generated_at":0}')
+    def fake_resp.body; @body; end
+    Net::HTTP.any_instance.stubs(:request).returns(fake_resp)
+
+    # Should not raise — uppercase hex is canonical
+    Ztlp::NsAdminClient.list_records(base_url: BASE, secret: upper_hex)
+  end
 end

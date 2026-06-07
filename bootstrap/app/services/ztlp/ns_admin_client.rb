@@ -96,7 +96,12 @@ module Ztlp
         end
 
       case resp.code.to_i
-      when 200      then JSON.parse(resp.body)
+      when 200
+        begin
+          JSON.parse(resp.body)
+        rescue JSON::ParserError => e
+          raise ServerError, "NS returned 200 with invalid JSON: #{e.message}"
+        end
       when 401      then raise AuthenticationError, "NS rejected admin signature (HTTP 401)"
       when 500..599 then raise ServerError, "NS returned HTTP #{resp.code}"
       else               raise Error, "NS returned unexpected HTTP #{resp.code}"
@@ -107,11 +112,16 @@ module Ztlp
     # what NS expects in `ZTLP_NS_ADMIN_API_SECRET`) or already-raw
     # 32 bytes. Anything else is a config error — fail loudly rather
     # than silently signing with the wrong key.
+    #
+    # IMPORTANT: pack("H*") silently accepts non-hex chars and produces
+    # garbage. Validate the hex character set BEFORE packing so a typo
+    # in the env var surfaces at boot, not as a wall of 401s.
     def self.decode_secret(secret)
-      packed = [secret].pack("H*")
-      return packed if packed.bytesize == 32
+      if secret.bytesize == 64 && secret.match?(/\A[0-9a-fA-F]{64}\z/)
+        return [secret].pack("H*")
+      end
       return secret if secret.bytesize == 32
-      raise ConfigurationError, "secret must be 32 raw bytes or 64-char hex"
+      raise ConfigurationError, "secret must be 32 raw bytes or 64-char hex (got #{secret.bytesize} bytes)"
     end
     private_class_method :decode_secret
   end

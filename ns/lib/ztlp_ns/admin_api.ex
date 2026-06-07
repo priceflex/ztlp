@@ -63,8 +63,19 @@ defmodule ZtlpNs.AdminApi do
     end
   end
 
-  # Constant-time string comparison. Stdlib-only (no Plug.Crypto dep).
-  defp secure_compare(a, b) when is_binary(a) and is_binary(b) and byte_size(a) == byte_size(b) do
+  @doc """
+  Constant-time string comparison. Stdlib-only (no Plug.Crypto dep).
+
+  Returns `false` immediately on length mismatch (length is not secret
+  for our HMAC hex strings — they're always 64 chars). For equal-length
+  inputs, every byte is XORed before the result is returned, so timing
+  does not leak which byte differed.
+
+  Public because `ZtlpNs.AdminApi.TenantRegistry.identify_tenant/3`
+  shares this primitive when comparing per-tenant HMAC signatures.
+  """
+  @spec secure_compare(binary(), binary()) :: boolean()
+  def secure_compare(a, b) when is_binary(a) and is_binary(b) and byte_size(a) == byte_size(b) do
     a
     |> :binary.bin_to_list()
     |> Enum.zip(:binary.bin_to_list(b))
@@ -72,7 +83,7 @@ defmodule ZtlpNs.AdminApi do
     |> Kernel.==(0)
   end
 
-  defp secure_compare(_, _), do: false
+  def secure_compare(_, _), do: false
 
   # ── list_records/1 ─────────────────────────────────────────────────
   #

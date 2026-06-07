@@ -28,12 +28,12 @@
 | T4 | BS: `Ztlp::SyncState` filesystem JSON (item #3 scaffolding) | ✅ | _commit-pending_ | filesystem JSON at tmp/ztlp_sync_state.json; exp backoff capped at 15min; 7 new tests; bs suite 1160/0/0 |
 | T5 | BS: gate rake task on `SyncState.due?` w/ exponential backoff (item #3) | ✅ | _commit-pending_ | rake gated on SyncState.due?; success/failure recorded via SyncState; 3 new tests; bs suite 1163/0/0 |
 | T6 | BS: `_sync_health.html.erb` partial + dashboard banner (item #4) | ✅ | _commit-pending_ | helper (3 bands) + partial + integration test; 1170 tests |
-| T7 | BS: `/api/v1/sync_health` JSON endpoint (item #4) | 🔲 | — | Gated by existing `Ztlp::ApiAuthenticator` |
+| T7 | BS: `/api/v1/sync_health` JSON endpoint (item #4) | ✅ | _commit-pending_ | controller subclass; HMAC-gated; 3 tests; 1173 tests total |
 | T8 | Full-suite sweep + CodeRabbit dry-run | 🔲 | — | `mix test` (NS) + `bin/rails test` (BS) green |
 | T9 | Docs: update production-readiness doc to mark items 1-4 ✅ | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T6 done 2026-06-07T17:19:36Z
+**Last resumed at:** T7 done 2026-06-07T17:25:32Z
 
 ---
 

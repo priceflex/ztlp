@@ -41,8 +41,8 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T2 | Tenant config loader (env → struct) | ✅ | c587cfa | `ZtlpNs.AdminApi.TenantRegistry`; env→struct; multi-CIDR; zone-glob leading-`*.` only (middle wildcards rejected); promoted `AdminApi.secure_compare/2` to public; 23 new tests; full suite 885/862 |
 | T3 | NS: IP allow-list gate on `/admin/records` (item #5) | ✅ | `b5072bd` | CIDR gate before rate-limit; 403 + `:admin_api_ip_rejected` severity `:medium`; cached in `:persistent_term` at boot; backwards-compat (empty registry → no gate); 5 new tests; full suite 890/890 |
 | T4 | NS: per-tenant secret resolution + zone-glob scoping (item #6) | ✅ | `881c841` | verify_request_with_registry/6; tenant-wins-over-global property pinned; :admin_api_legacy_global_secret audit on transition mode; preserves existing verify_request/5; 16 new tests; full suite 906/906 |
-| T5 | NS: filter `list_records` response to tenant's zone glob | ✅ | `_commit-pending_` | zone-glob filter on response; :admin_api_zone_outside_glob audit event severity :high; legacy mode unchanged; 4 new tests; 910/910 |
-| T6 | NS: severity tagging on all admin-API audit events | 🔲 | — | `:info/:medium/:high/:critical` |
+| T5 | NS: filter `list_records` response to tenant's zone glob | ✅ | `35af350` | zone-glob filter on response; :admin_api_zone_outside_glob audit event severity :high; legacy mode unchanged; 4 new tests; 910/910 |
+| T6 | NS: severity tagging on all admin-API audit events | ✅ | _commit-pending_ | Added :info to :admin_api_records_pulled and :high to :admin_api_auth_failed; 2 regression tests pin coverage; full suite 912/912 |
 | T7 | NS: trust-authority extension hook (stub, future-proofing) | 🔲 | — | `verify_authority/2` returns :ok for now |
 | T8 | BS: client compatibility check (no code change expected) | 🔲 | — | Confirm sync still passes with new NS-side logic |
 | T9 | Docs: operator-facing deployment guide | 🔲 | — | `docs/operations/ns-admin-tenant-isolation.md` |
@@ -51,7 +51,7 @@ A leaked secret now requires: stolen secret + access to the right Docker network
 | T12 | Docs: mark items #5 + #6 ✅ in production-readiness doc | 🔲 | — | Cross-link merged PR |
 | **DONE** | All tests green, PR opened, CodeRabbit clean | 🔲 | — | |
 
-**Last resumed at:** T5 done 2026-06-07T21:36:00Z
+**Last resumed at:** T6 done 2026-06-07T22:36:06Z
 
 ---
 

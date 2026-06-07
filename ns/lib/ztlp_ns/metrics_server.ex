@@ -198,7 +198,8 @@ defmodule ZtlpNs.MetricsServer do
                   zone_filter: Keyword.get(opts, :zone),
                   type_filter: Keyword.get(opts, :type),
                   count: records[:count],
-                  identity: identity_label(identity)
+                  identity: identity_label(identity),
+                  severity: :info
                 })
 
                 send_response(socket, 200, body, "application/json")
@@ -206,7 +207,8 @@ defmodule ZtlpNs.MetricsServer do
               {:error, reason} ->
                 ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
                   peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
-                  reason: inspect(reason)
+                  reason: inspect(reason),
+                  severity: :high
                 })
 
                 Logger.warning("[admin_api] 401 reason=#{inspect(reason)} path=#{path_with_query}")

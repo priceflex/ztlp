@@ -519,4 +519,59 @@ defmodule ZtlpNs.AdminApiHttpTest do
       assert details[:peer_ip] == "127.0.0.1"
     end
   end
+
+  describe "audit-event severity tagging (T6)" do
+    # Pins severity on the two events that PR #97 added (records_pulled,
+    # auth_failed) but didn't tag. T3-T5 added their own events already
+    # tagged. This block guards against a future audit event landing
+    # without a severity key.
+
+    test "200 success path → :admin_api_records_pulled severity :info", %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+      before = System.system_time(:second)
+
+      path = "/admin/records?type=key"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+      {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      pulled =
+        Enum.filter(entries, fn {_ts, action, _, _, _} ->
+          action == :admin_api_records_pulled
+        end)
+
+      assert length(pulled) >= 1
+      {_, _, _, _, details} = List.last(pulled)
+      assert details[:severity] == :info
+    end
+
+    test "401 bad-signature → :admin_api_auth_failed severity :high", %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.AdminApi.TenantRegistry.clear_cache()
+      before = System.system_time(:second)
+
+      ts = System.system_time(:second)
+      bad_headers = [
+        {~c"x-ns-timestamp", String.to_charlist(to_string(ts))},
+        {~c"x-ns-signature", String.to_charlist(String.duplicate("0", 64))}
+      ]
+
+      url = ~c"http://127.0.0.1:#{port}/admin/records"
+      {:ok, {{_, 401, _}, _, _}} = :httpc.request(:get, {url, bad_headers}, [], [])
+
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      failed =
+        Enum.filter(entries, fn {_ts, action, _, _, _} ->
+          action == :admin_api_auth_failed
+        end)
+
+      assert length(failed) >= 1
+      {_, _, _, _, details} = List.last(failed)
+      assert details[:severity] == :high
+    end
+  end
 end

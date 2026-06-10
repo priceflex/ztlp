@@ -687,4 +687,211 @@ defmodule ZtlpNs.AdminApiHttpTest do
                :httpc.request(:get, {url, headers}, [], [])
     end
   end
+
+  # ── GET /admin/audit ───────────────────────────────────────────────
+  #
+  # v0.35.x replacement for the removed unauthenticated UDP 0x13/0x02 and
+  # 0x13/0x03 audit opcodes. Same gate pipeline as /admin/records:
+  # CIDR union → rate limit → HMAC verify → per-tenant CIDR recheck →
+  # authority hook → zone-glob scope. Query params:
+  #   ?since=<unix_ts>   filter to entries at/after ts (default: all)
+  #   ?pattern=<glob>    filter entry name by glob (steve@*, *.ztlp, …)
+  #
+  # These are RED until handle_admin_audit/5 + the route exist.
+
+  describe "GET /admin/audit" do
+    test "valid signature returns 200 JSON with entries + count + generated_at",
+         %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.Audit.clear()
+      ZtlpNs.Audit.log(:registered, "laptop.trs.ztlp", :device, %{by: "test"})
+      ZtlpNs.Audit.log(:registered, "steve@trs.ztlp", :user, %{by: "test"})
+      :timer.sleep(20)
+
+      path = "/admin/audit"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 200, _}, resp_headers, body}} =
+               :httpc.request(:get, {url, headers}, [], [])
+
+      content_type =
+        Enum.find_value(resp_headers, fn {k, v} ->
+          if String.downcase(to_string(k)) == "content-type", do: to_string(v)
+        end)
+
+      assert content_type =~ "application/json"
+
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+      assert is_list(parsed["entries"])
+      assert is_integer(parsed["count"])
+      assert parsed["count"] >= 2
+      assert is_integer(parsed["generated_at"])
+
+      # Each entry exposes the canonical 5 fields the UDP path used to emit.
+      entry = hd(parsed["entries"])
+      assert Map.has_key?(entry, "timestamp")
+      assert Map.has_key?(entry, "action")
+      assert Map.has_key?(entry, "name")
+      assert Map.has_key?(entry, "type")
+      assert Map.has_key?(entry, "details")
+
+      names = Enum.map(parsed["entries"], & &1["name"])
+      assert "laptop.trs.ztlp" in names
+      assert "steve@trs.ztlp" in names
+    end
+
+    test "NO signature headers returns 401", %{port: port} do
+      url = ~c"http://127.0.0.1:#{port}/admin/audit"
+
+      assert {:ok, {{_, 401, _}, _resp_headers, _body}} =
+               :httpc.request(:get, {url, []}, [], [])
+    end
+
+    test "BAD signature returns 401", %{port: port} do
+      ts = System.system_time(:second)
+
+      headers = [
+        {~c"x-ns-timestamp", String.to_charlist(to_string(ts))},
+        {~c"x-ns-signature", String.to_charlist(String.duplicate("0", 64))}
+      ]
+
+      url = ~c"http://127.0.0.1:#{port}/admin/audit"
+
+      assert {:ok, {{_, 401, _}, _resp_headers, _body}} =
+               :httpc.request(:get, {url, headers}, [], [])
+    end
+
+    test "?since=<ts> filters to entries at/after the timestamp", %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.Audit.clear()
+
+      # An "old" entry, then a cutoff, then a "new" entry.
+      ZtlpNs.Audit.log(:registered, "old.trs.ztlp", :device, %{})
+      :timer.sleep(1100)
+      cutoff = System.system_time(:second)
+      :timer.sleep(20)
+      ZtlpNs.Audit.log(:registered, "new.trs.ztlp", :device, %{})
+      :timer.sleep(20)
+
+      path = "/admin/audit?since=#{cutoff}"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["entries"], & &1["name"])
+      assert "new.trs.ztlp" in names
+      refute "old.trs.ztlp" in names
+    end
+
+    test "?pattern=<glob> filters entry names by glob", %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.Audit.clear()
+      ZtlpNs.Audit.log(:registered, "steve@trs.ztlp", :user, %{})
+      ZtlpNs.Audit.log(:registered, "bob@trs.ztlp", :user, %{})
+      :timer.sleep(20)
+
+      path = "/admin/audit?pattern=#{URI.encode("steve@*")}"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["entries"], & &1["name"])
+      assert Enum.all?(names, &String.starts_with?(&1, "steve@")),
+             "expected only steve@* entries, got: #{inspect(names)}"
+      assert "steve@trs.ztlp" in names
+    end
+
+    test "emits :admin_api_audit_pulled audit entry on 200", %{port: port} do
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.Audit.clear()
+      ZtlpNs.Audit.log(:registered, "seed.trs.ztlp", :device, %{})
+      :timer.sleep(20)
+      before = System.system_time(:second)
+
+      path = "/admin/audit"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+      {:ok, {{_, 200, _}, _, _}} = :httpc.request(:get, {url, headers}, [], [])
+
+      entries = ZtlpNs.Audit.since(before - 1)
+
+      matching =
+        Enum.filter(entries, fn {_ts, action, name, _type, _details} ->
+          action == :admin_api_audit_pulled and name == "/admin/audit"
+        end)
+
+      assert length(matching) >= 1,
+             "expected an :admin_api_audit_pulled audit event"
+
+      {_ts, _action, _name, type, details} = List.last(matching)
+      assert type == :admin_api
+      assert details[:peer_ip] == "127.0.0.1"
+      assert is_integer(details[:count])
+    end
+
+    test "rejects with 403 when peer IP outside tenant CIDR union", %{port: port} do
+      trs_secret_hex = String.duplicate("a", 64)
+
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "10.99.0.0/16"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+
+      path = "/admin/audit"
+      headers = sign_headers("GET", path, "", @secret)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      assert {:ok, {{_, 403, _}, _, _}} =
+               :httpc.request(:get, {url, headers}, [], [])
+    end
+
+    test "tenant identity scopes audit entries to its zone glob", %{port: port} do
+      # TRS tenant (zone *.trs.ztlp, loopback CIDR). Seed entries inside
+      # and outside the glob; the tenant must only see its own.
+      trs_secret_hex = String.duplicate("b", 64)
+      trs_secret_raw = :binary.copy(<<0xbb>>, 32)
+
+      env = %{
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_SECRET" => trs_secret_hex,
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_ZONE_GLOB" => "*.trs.ztlp",
+        "ZTLP_NS_ADMIN_API_TENANT_TRS_CIDRS" => "127.0.0.0/8"
+      }
+
+      registry = ZtlpNs.AdminApi.TenantRegistry.load_from_env(env)
+      :persistent_term.put({ZtlpNs.AdminApi.TenantRegistry, :tenants}, registry)
+      on_exit(fn -> ZtlpNs.AdminApi.TenantRegistry.clear_cache() end)
+
+      ZtlpNs.AdminApiRateLimiter.reset()
+      ZtlpNs.Audit.clear()
+      ZtlpNs.Audit.log(:registered, "laptop.trs.ztlp", :device, %{})
+      ZtlpNs.Audit.log(:registered, "laptop.acme.ztlp", :device, %{})
+      :timer.sleep(20)
+
+      # Note: secret hex "bb"*64 decodes to 32 bytes of 0xbb.
+      _ = trs_secret_hex
+      path = "/admin/audit"
+      headers = sign_headers("GET", path, "", trs_secret_raw)
+      url = ~c"http://127.0.0.1:#{port}#{path}"
+
+      {:ok, {{_, 200, _}, _, body}} = :httpc.request(:get, {url, headers}, [], [])
+      {:ok, parsed} = Jason.decode(IO.iodata_to_binary(body))
+
+      names = Enum.map(parsed["entries"], & &1["name"])
+      assert "laptop.trs.ztlp" in names
+      refute "laptop.acme.ztlp" in names,
+             "tenant must not see audit entries outside its zone glob"
+    end
+  end
 end

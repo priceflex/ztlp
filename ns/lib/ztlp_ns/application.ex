@@ -121,10 +121,12 @@ defmodule ZtlpNs.Application do
         # Seed initial relay records (rich format for iOS relay-side VIP)
         ZtlpNs.RelaySeeder.seed()
 
+        vsn = ZtlpNs.version()
+
         if ZtlpNs.Cluster.clustered?() do
-          Logger.info("[ztlp-ns] Started in cluster mode with #{length(ZtlpNs.Cluster.members())} nodes")
+          Logger.info("[ztlp-ns] Started v#{vsn} in cluster mode with #{length(ZtlpNs.Cluster.members())} nodes")
         else
-          Logger.info("[ztlp-ns] Started in standalone mode")
+          Logger.info("[ztlp-ns] Started v#{vsn} in standalone mode")
         end
         {:ok, pid}
 

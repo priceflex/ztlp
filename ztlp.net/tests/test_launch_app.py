@@ -167,11 +167,11 @@ class LaunchAppTest(unittest.TestCase):
         # asserted on `row[2]` below — it's just not displayed twice.
         self.assertNotIn("ztlp setup --token", claim_body)
         self.assertNotIn("ztlp://enroll/", claim_body)
-        self.assertIn("34.219.38.89:23096", claim_body)
+        self.assertIn("44.230.7.100:23096", claim_body)
         # v0.30.5: connect command uses the V2 routing key `gw:<zone>` so the
         # relay routes by zone (collision-safe) instead of by V1 truncated org
         # slug. See docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md.
-        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 34.219.38.89:23096 --multi-candidate --service gw:example.ztlp", claim_body)
+        self.assertIn("ztlp connect bootstrap.example.ztlp --ns-server 44.230.7.100:23096 --multi-candidate --service gw:example.ztlp", claim_body)
         self.assertIn("Download ZTLP", claim_body)
         self.assertNotIn("http://127.0.0.1", claim_body)
         self.assertNotIn("/login", claim_body)
@@ -191,7 +191,7 @@ class LaunchAppTest(unittest.TestCase):
         self.assertTrue(row[2].startswith("ztlp://enroll/"))
         self.assertNotEqual(token, row[2])
         self.assertEqual("bootstrap.example.ztlp", row[3])
-        self.assertEqual("34.219.38.89:23096", row[4])
+        self.assertEqual("44.230.7.100:23096", row[4])
 
     def test_claim_launch_requires_claim_token_and_updates_status_without_exposing_admin_url(self):
         _status, _headers, body = self.post_form(
@@ -220,7 +220,7 @@ class LaunchAppTest(unittest.TestCase):
         # v0.30.5: connect command uses the V2 routing key `gw:<zone>`
         # so the relay routes by zone (collision-safe). Tenant "Launch Co"
         # has zone "launch.ztlp" so the gateway service is "gw:launch.ztlp".
-        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 34.219.38.89:23096 --multi-candidate --service gw:launch.ztlp", launch_body)
+        self.assertIn("ztlp connect bootstrap.launch.ztlp --ns-server 44.230.7.100:23096 --multi-candidate --service gw:launch.ztlp", launch_body)
         self.assertNotIn("http://127.0.0.1", launch_body)
         self.assertNotIn("/login", launch_body)
 
@@ -229,7 +229,7 @@ class LaunchAppTest(unittest.TestCase):
         conn.close()
         self.assertEqual("launch_requested", row[0])
         self.assertEqual("bootstrap.launch.ztlp", row[1])
-        self.assertEqual("34.219.38.89:23096", row[2])
+        self.assertEqual("44.230.7.100:23096", row[2])
         self.assertEqual("34.218.240.106:23095", row[3])
 
     def test_invalid_or_missing_token_is_not_found(self):
@@ -1084,9 +1084,15 @@ class ProvisionZoneDockersTest(unittest.TestCase):
         # `-y` from `ztlp setup` and the gateway sidecar crash-looped.
         self.assertNotIn("ztlp keygen --output /data/keys/identity.json -y", compose_text)
         self.assertIn("ztlp keygen --output /data/keys/identity.json", compose_text)
-        # Regression: `ztlp ns register` v0.26 takes --name <FQDN> + --zone
-        # (positional NAME and `--type svc` were removed).
-        self.assertIn("ns register --name bootstrap.acme.ztlp --zone acme.ztlp", compose_text)
+        # v0.35.1: the standalone `register_ns` sidecar (which ran the v1
+        # unauthenticated `ztlp ns register`) was removed — NS now requires
+        # authenticated registration so the gateway self-publishes its
+        # KEY+SVC records via `--ns-register-name <fqdn>` on the listen
+        # command instead. Assert the gateway carries it and the old sidecar
+        # command is gone.
+        self.assertIn("--ns-register-name bootstrap.acme.ztlp", compose_text)
+        self.assertNotIn("ns register --name", compose_text)
+        self.assertNotIn("ztlp-ns-reg-", compose_text)
         self.assertNotIn("--type svc", compose_text)
         # Regression (PR #5 / #6 / #8): env-file-sourced vars referenced in
         # the gateway `command:` MUST be written as `$$VAR` (escaped) so

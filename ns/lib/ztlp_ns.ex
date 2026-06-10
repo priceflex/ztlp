@@ -42,4 +42,21 @@ defmodule ZtlpNs do
   - UDP query protocol for lookups
   - Pure Elixir/OTP with zero external dependencies
   """
+
+  @doc """
+  The running NS release version, read from the loaded OTP application spec
+  (which is baked from `mix.exs` `:version` at compile time).
+
+  Surfaced in the boot log and the `ztlp_ns_info` Prometheus metric so an
+  operator can confirm exactly which build is live on a host without
+  shelling into the release. Falls back to `"unknown"` if the application
+  is not yet loaded (e.g. very early boot).
+  """
+  @spec version() :: String.t()
+  def version do
+    case :application.get_key(:ztlp_ns, :vsn) do
+      {:ok, vsn} -> List.to_string(vsn)
+      _ -> "unknown"
+    end
+  end
 end

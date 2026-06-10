@@ -1080,21 +1080,19 @@ class LaunchApp:
                 # so the gateway accepts the tenant-routed HELLO and bridges
                 # to Bootstrap. Verified end-to-end with `ztlp connect` +
                 # passwordless autologin on 2026-05-21.
-                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward 127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --zone {zone} --http-inject-headers --quic --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
+                f"    command: [\"sh\", \"-c\", \"[ -s /data/keys/identity.json ] && ! grep -Eq '\\\"node_id\\\"[[:space:]]*:[[:space:]]*\\\"\\\"' /data/keys/identity.json || ztlp keygen --output /data/keys/identity.json && exec ztlp listen --bind 0.0.0.0:{gw_port} --forward 127.0.0.1:{port} --key /data/keys/identity.json --gateway --ns-server {LAUNCH_NS_SERVER} --relay {BOOTSTRAP_LISTENER_ADDR} --service-name gw-{slug[:11]} --zone {zone} --ns-register-name {service} --http-inject-headers --quic --header-hmac-secret \\\"$$ZTLP_GATEWAY_HEADER_SECRET\\\" $$([ -n \\\"$$ZTLP_ADMIN_PUBKEY_HEX\\\" ] && echo \\\"--admin-pubkey-email $$ZTLP_ADMIN_PUBKEY_HEX=$$ZTLP_ADMIN_EMAIL\\\")\"]\n"
                 "    restart: unless-stopped\n"
                 "\n"
-                "  register_ns:\n"
-                f"    image: {LAUNCH_GATEWAY_IMAGE}\n"
-                f"    container_name: \"ztlp-ns-reg-{slug}\"\n"
-                "    network_mode: host\n"
-                "    volumes:\n"
-                "      - ./gateway_keys:/data/keys\n"
-                # `ztlp ns register` v0.26 CLI takes --name (FQDN) + --zone
-                # explicitly, plus --address for the SVC endpoint. The legacy
-                # positional NAME + `--type svc` flags were removed; pass the
-                # canonical `--name {fqdn} --zone {zone}` shape instead.
-                f"    command: [\"sh\", \"-c\", \"while [ ! -s /data/keys/identity.json ] || grep -q '\\\"node_id\\\":\\\"\\\"' /data/keys/identity.json; do sleep 1; done; exec ztlp ns register --name {service} --zone {zone} --address {BOOTSTRAP_LISTENER_ADDR} --key /data/keys/identity.json --ns-server {LAUNCH_NS_SERVER}\"]\n"
-                "\n"
+                # NOTE: the legacy `register_ns` sidecar (which ran
+                # `ztlp ns register`, the v1 unauthenticated KEY path) was
+                # removed in v0.35.1. NS now requires authenticated (v2)
+                # registration by default (ZTLP_NS_REQUIRE_REGISTRATION_AUTH
+                # defaults true), so the v1 path failed with "rejected:
+                # missing pubkey" and the sidecar crash-exited every boot.
+                # The gateway above now self-publishes its KEY+SVC records
+                # via `--ns-register-name {service}` (authenticated v2
+                # heartbeat at boot + every 8h), which is the correct path
+                # and makes the separate sidecar redundant.
                 "volumes:\n"
                 f"  bootstrap_{slug}_data:\n"
                 f"    name: \"ztlp_bootstrap_{slug}_data\"\n"

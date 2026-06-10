@@ -24,7 +24,11 @@ defmodule ZtlpNs.MixProject do
       # supervisor, PR #93). Floor ratcheted to 0.34.9 in release_test.exs.
       # Bumped 0.34.9 → 0.34.10 in release/v0.34.10 (supervisor default-on for
       # raw-IP connects, PR #95). Floor ratcheted to 0.34.10 in release_test.exs.
-      version: "0.34.10",
+      # Bumped 0.34.10 → 0.35.1 for the NS UDP 0x13 admin removal + gated HTTP
+      # /admin/audit endpoint (security: closes unauthenticated UDP admin
+      # surface; HTTP twin of removed audit opcodes). Minor bump signals the
+      # 0x13 wire-protocol break. Floor ratcheted to 0.35.1 in release_test.exs.
+      version: "0.35.1",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

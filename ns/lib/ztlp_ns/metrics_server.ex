@@ -576,7 +576,7 @@ defmodule ZtlpNs.MetricsServer do
 
     [
       "# HELP ztlp_ns_info Static info\n# TYPE ztlp_ns_info gauge\n",
-      "ztlp_ns_info{version=\"0.1.0\",storage=\"#{storage}\"} 1\n\n",
+      "ztlp_ns_info{version=\"#{ZtlpNs.version()}\",storage=\"#{storage}\"} 1\n\n",
       "# HELP ztlp_ns_uptime_seconds Seconds since NS started\n# TYPE ztlp_ns_uptime_seconds gauge\n",
       "ztlp_ns_uptime_seconds #{uptime}\n\n",
       "# HELP ztlp_ns_records_total Records in the store\n# TYPE ztlp_ns_records_total gauge\n",

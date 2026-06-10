@@ -95,6 +95,9 @@ defmodule ZtlpNs.MetricsServer do
           "/admin/records" ->
             headers = collect_headers(socket, %{})
             handle_admin_records(socket, path_str, query, headers, peer_ip)
+          "/admin/audit" ->
+            headers = collect_headers(socket, %{})
+            handle_admin_audit(socket, path_str, query, headers, peer_ip)
           _ ->
             drain_headers(socket)
             send_response(socket, 404, "Not Found\n")
@@ -144,9 +147,29 @@ defmodule ZtlpNs.MetricsServer do
   end
 
   defp handle_admin_records(socket, path_with_query, query_str, headers, peer_ip) do
+    handle_admin_gated(socket, :records, "/admin/records", path_with_query, query_str, headers, peer_ip)
+  end
+
+  defp handle_admin_audit(socket, path_with_query, query_str, headers, peer_ip) do
+    handle_admin_gated(socket, :audit, "/admin/audit", path_with_query, query_str, headers, peer_ip)
+  end
+
+  # Shared gate pipeline for every authenticated admin endpoint. `kind`
+  # selects the resource handler after the request clears the gates;
+  # `resource_path` is the canonical (query-less) path used for audit
+  # log `name` fields so events stay grouped per endpoint.
+  #
+  # Stages (order is security-critical — do not reorder):
+  #   1. CIDR union gate (only enforced when tenants are configured)
+  #   2. per-IP rate limit
+  #   3. HMAC verify + tenant identification
+  #   4. per-tenant CIDR recheck (CodeRabbit PR #98 F4)
+  #   5. trust-authority hook (T7)
+  #   6. zone-glob scope + encode + success audit
+  defp handle_admin_gated(socket, kind, resource_path, path_with_query, query_str, headers, peer_ip) do
     Logger.info("[admin_api] peer_ip=#{:inet.ntoa(peer_ip)} path=#{path_with_query}")
 
-    case maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+    case maybe_gate_by_cidr(socket, resource_path, peer_ip, path_with_query) do
       :rejected ->
         :ok
 
@@ -170,14 +193,15 @@ defmodule ZtlpNs.MetricsServer do
                    secret
                  ) do
               {:ok, identity} ->
-                # CodeRabbit PR #98 F4: the union CIDR gate in
-                # maybe_gate_by_cidr/3 above is necessary but NOT
-                # sufficient — it admits a request signed as tenant A
-                # that arrives from tenant B's CIDR. Now that we know
-                # which tenant the HMAC identifies, re-verify the peer
-                # IP against THAT tenant's CIDRs.
+                # CodeRabbit PR #98 F4: the union CIDR gate above is
+                # necessary but NOT sufficient — it admits a request
+                # signed as tenant A that arrives from tenant B's CIDR.
+                # Now that we know which tenant the HMAC identifies,
+                # re-verify the peer IP against THAT tenant's CIDRs.
                 enforce_identified_tenant_cidr(
                   socket,
+                  kind,
+                  resource_path,
                   identity,
                   registry,
                   query_str,
@@ -185,7 +209,7 @@ defmodule ZtlpNs.MetricsServer do
                 )
 
               {:error, reason} ->
-                ZtlpNs.Audit.log(:admin_api_auth_failed, "/admin/records", :admin_api, %{
+                ZtlpNs.Audit.log(:admin_api_auth_failed, resource_path, :admin_api, %{
                   peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
                   reason: inspect(reason),
                   severity: :high
@@ -200,18 +224,18 @@ defmodule ZtlpNs.MetricsServer do
 
   # F4 (CodeRabbit PR #98): after a request has been HMAC-identified to
   # a specific tenant, re-check that the peer IP is inside THAT tenant's
-  # CIDRs. The earlier union check (maybe_gate_by_cidr/3) only proves
+  # CIDRs. The earlier union check (maybe_gate_by_cidr/4) only proves
   # the IP belongs to SOME tenant — it cannot prevent cross-tenant CIDR
   # escape (request signed as A from B's CIDR). Legacy identities skip
   # this — they use the global secret, predate per-tenant CIDRs, and
   # are gated only by the union (T3 + production-readiness item #5).
-  defp enforce_identified_tenant_cidr(socket, identity, registry, query_str, peer_ip) do
+  defp enforce_identified_tenant_cidr(socket, kind, resource_path, identity, registry, query_str, peer_ip) do
     case identity do
       {:tenant, tenant} ->
         if ZtlpNs.AdminApi.TenantRegistry.ip_in_cidrs?(tenant, peer_ip) do
-          handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry)
+          handle_authenticated_admin(socket, kind, resource_path, identity, query_str, peer_ip, registry)
         else
-          ZtlpNs.Audit.log(:admin_api_ip_rejected, "/admin/records", :admin_api, %{
+          ZtlpNs.Audit.log(:admin_api_ip_rejected, resource_path, :admin_api, %{
             peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
             tenant: tenant.slug,
             severity: :medium,
@@ -226,7 +250,7 @@ defmodule ZtlpNs.MetricsServer do
         end
 
       :legacy ->
-        handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry)
+        handle_authenticated_admin(socket, kind, resource_path, identity, query_str, peer_ip, registry)
     end
   end
 
@@ -234,34 +258,32 @@ defmodule ZtlpNs.MetricsServer do
   # audit signal when applicable, then drive the trust-authority hook
   # → authorized-fan-out chain. Extracted so the F4 case branches stay
   # narrow.
-  defp handle_authenticated_admin_records(socket, identity, query_str, peer_ip, registry) do
+  defp handle_authenticated_admin(socket, kind, resource_path, identity, query_str, peer_ip, registry) do
     # Surface legacy-mode use when tenants are ALSO configured
     # (transition period) so operators can grep for it.
     if identity == :legacy and map_size(registry) > 0 do
-      ZtlpNs.Audit.log(:admin_api_legacy_global_secret, "/admin/records", :admin_api, %{
+      ZtlpNs.Audit.log(:admin_api_legacy_global_secret, resource_path, :admin_api, %{
         peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
         severity: :medium
       })
     end
-
-    opts = parse_admin_query(query_str)
 
     # Trust-authority extension hook (T7). Returns :ok today;
     # Phase 3+ implementations of this function can deny here.
     authority_context = %{
       peer_ip: peer_ip,
       method: "GET",
-      path: "/admin/records",
+      path: resource_path,
       query: query_str,
       identity: identity
     }
 
     case ZtlpNs.AdminApi.verify_authority(identity, authority_context) do
       :ok ->
-        handle_authorized_admin_records(socket, opts, identity, peer_ip)
+        dispatch_authorized_admin(socket, kind, query_str, identity, peer_ip)
 
       {:error, :authority_denied} ->
-        ZtlpNs.Audit.log(:admin_api_authority_denied, "/admin/records", :admin_api, %{
+        ZtlpNs.Audit.log(:admin_api_authority_denied, resource_path, :admin_api, %{
           peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
           identity: identity_label(identity),
           severity: :critical
@@ -273,6 +295,16 @@ defmodule ZtlpNs.MetricsServer do
 
         send_response(socket, 403, "")
     end
+  end
+
+  # Resource dispatch after all gates clear.
+  defp dispatch_authorized_admin(socket, :records, query_str, identity, peer_ip) do
+    opts = parse_admin_query(query_str)
+    handle_authorized_admin_records(socket, opts, identity, peer_ip)
+  end
+
+  defp dispatch_authorized_admin(socket, :audit, query_str, identity, peer_ip) do
+    handle_authorized_admin_audit(socket, query_str, identity, peer_ip)
   end
 
   # Render the calling identity as a short string for audit log details.
@@ -309,6 +341,122 @@ defmodule ZtlpNs.MetricsServer do
 
     send_response(socket, 200, body, "application/json")
   end
+
+  # Audit-log read endpoint. Same gate guarantees as records; here we
+  # parse ?since / ?pattern, fetch from the bounded audit ring, project
+  # to JSON-safe maps, and scope to the tenant's zone glob (a tenant may
+  # only read audit lines whose `name` falls inside its own zone).
+  defp handle_authorized_admin_audit(socket, query_str, identity, peer_ip) do
+    entries =
+      query_str
+      |> fetch_audit_entries()
+      |> apply_audit_tenant_scope(identity)
+
+    body =
+      Jason.encode!(%{
+        entries: entries,
+        count: length(entries),
+        generated_at: System.system_time(:second)
+      })
+
+    ZtlpNs.Audit.log(:admin_api_audit_pulled, "/admin/audit", :admin_api, %{
+      peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
+      count: length(entries),
+      identity: identity_label(identity),
+      severity: :info
+    })
+
+    send_response(socket, 200, body, "application/json")
+  end
+
+  # Parse + fetch audit entries per the ?since / ?pattern query params,
+  # then project each {ts, action, name, type, details} tuple into a
+  # JSON-safe map. Mirrors the field set the removed UDP 0x13 audit
+  # opcodes used to emit.
+  defp fetch_audit_entries(query_str) do
+    params = parse_audit_query(query_str)
+    since = params[:since]
+    pattern = params[:pattern]
+
+    entries =
+      cond do
+        pattern != nil and since != nil -> ZtlpNs.Audit.filter_since(pattern, since)
+        pattern != nil -> ZtlpNs.Audit.filter(pattern)
+        since != nil -> ZtlpNs.Audit.since(since)
+        true -> ZtlpNs.Audit.all()
+      end
+
+    Enum.map(entries, &project_audit_entry/1)
+  end
+
+  defp project_audit_entry({ts, action, name, type, details}) do
+    %{
+      timestamp: ts,
+      action: to_string(action),
+      name: name,
+      type: to_string(type),
+      details: jsonable_details(details)
+    }
+  end
+
+  # Coerce arbitrary audit `details` into a strictly JSON-encodable map.
+  # Audit details may carry atoms (e.g. severity: :high), nested maps,
+  # lists, or the odd tuple — Jason can't encode bare tuples, so we
+  # recursively normalize. Atom VALUES become strings; tuples are
+  # inspected (last-resort, shouldn't normally occur).
+  defp jsonable_details(details) when is_map(details) do
+    Map.new(details, fn {k, v} -> {to_string(k), jsonable_value(v)} end)
+  end
+
+  defp jsonable_details(other), do: %{"value" => jsonable_value(other)}
+
+  defp jsonable_value(v)
+       when is_binary(v) or is_integer(v) or is_float(v) or is_boolean(v) or is_nil(v),
+       do: v
+
+  defp jsonable_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp jsonable_value(v) when is_map(v), do: jsonable_details(v)
+  defp jsonable_value(v) when is_list(v), do: Enum.map(v, &jsonable_value/1)
+  defp jsonable_value(v), do: inspect(v)
+
+  # ?since=<unix_ts>&pattern=<glob>. Unknown/malformed params are
+  # silently dropped (same forgiving posture as parse_admin_query/1).
+  defp parse_audit_query(""), do: []
+
+  defp parse_audit_query(qs) do
+    qs
+    |> String.split("&", trim: true)
+    |> Enum.reduce([], fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        ["since", v] ->
+          case Integer.parse(v) do
+            {ts, ""} -> Keyword.put(acc, :since, ts)
+            _ -> acc
+          end
+
+        ["pattern", v] ->
+          Keyword.put(acc, :pattern, URI.decode(v))
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  # Filter projected audit entries to the tenant's zone_glob (matched on
+  # the entry `name`). Legacy mode (global secret) sees everything.
+  #
+  # SECURITY: cross-tenant audit isolation. A leaked tenant secret
+  # authenticates via T4 but THIS function ensures it can only read
+  # audit lines for names inside its own zone_glob.
+  defp apply_audit_tenant_scope(entries, {:tenant, tenant}) do
+    Enum.filter(entries, fn entry ->
+      name = entry[:name] || entry["name"]
+      is_binary(name) and ZtlpNs.AdminApi.TenantRegistry.zone_matches?(tenant, name)
+    end)
+  end
+
+  defp apply_audit_tenant_scope(entries, :legacy), do: entries
 
   # Filter the list_records response to the tenant's zone_glob. Legacy mode
   # (global secret) sees everything — preserves backwards-compat.
@@ -357,7 +505,7 @@ defmodule ZtlpNs.MetricsServer do
   # IP allow-list gate: only enforced when the tenant registry is non-empty.
   # When empty (legacy mode = only the global ZTLP_NS_ADMIN_API_SECRET is set),
   # this returns :ok unconditionally — pure backwards-compat.
-  defp maybe_gate_by_cidr(socket, peer_ip, path_with_query) do
+  defp maybe_gate_by_cidr(socket, resource_path, peer_ip, path_with_query) do
     if ZtlpNs.AdminApi.TenantRegistry.any_tenant_allows_ip?(peer_ip) do
       :ok
     else
@@ -365,7 +513,7 @@ defmodule ZtlpNs.MetricsServer do
         "[admin_api] 403 ip not in any tenant CIDR peer=#{:inet.ntoa(peer_ip)} path=#{path_with_query}"
       )
 
-      ZtlpNs.Audit.log(:admin_api_ip_rejected, "/admin/records", :admin_api, %{
+      ZtlpNs.Audit.log(:admin_api_ip_rejected, resource_path, :admin_api, %{
         peer_ip: peer_ip |> :inet.ntoa() |> to_string(),
         severity: :medium
       })

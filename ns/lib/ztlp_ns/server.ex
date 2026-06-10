@@ -270,47 +270,26 @@ defmodule ZtlpNs.Server do
     encode_list_relays_response(relays)
   end
 
-  # Admin query (0x13) — list records or query audit log
+  # Admin query (0x13) — REMOVED in v0.35.1
   #
-  # Wire format variants:
-  #   List records:  <<0x13, 0x01, type_byte::8, zone_len::16, zone::binary>>
-  #     type_byte 0x00 = all types
-  #   Audit since:   <<0x13, 0x02, since_ts::64>>
-  #   Audit filter:  <<0x13, 0x03, since_ts::64, pattern_len::16, pattern::binary>>
+  # The legacy UDP admin path (list records / dump audit log) was
+  # unauthenticated and publicly reachable on the same UDP socket that
+  # serves name resolution (0.0.0.0:23096). It allowed anyone with
+  # line-of-sight to the NS port to dump every record in the Store and
+  # stream the audit log via 5–13 byte packets. PR #98 (NS admin tenant
+  # isolation) added a gated HTTP replacement at /admin/records on port
+  # 9103 with per-tenant HMAC + CIDR + zone-glob scoping, but did not
+  # touch this UDP path. v0.35.1 removes the UDP path entirely.
   #
-  # Response: <<0x13, cbor_payload::binary>>
-  defp process_query(<<0x13, 0x01, type_byte::8, zone_len::16, zone::binary-size(zone_len)>>, _source) do
-    type_filter = if type_byte == 0x00, do: nil, else: (try do Record.byte_to_type(type_byte) rescue _ -> nil end)
-    zone_filter = if zone == "", do: nil, else: zone
-
-    records = Store.list_filtered(type: type_filter, zone: zone_filter)
-
-    entries = Enum.map(records, fn {name, type, record} ->
-      %{
-        "name" => name,
-        "type" => Atom.to_string(type),
-        "created_at" => record.created_at,
-        "ttl" => record.ttl,
-        "serial" => record.serial,
-        "data" => record.data
-      }
-    end)
-
-    payload = ZtlpNs.Cbor.encode(%{"records" => entries})
-    <<0x13, payload::binary>>
-  end
-
-  defp process_query(<<0x13, 0x02, since_ts::unsigned-big-64>>, _source) do
-    entries = Audit.since(since_ts)
-    payload = encode_audit_entries(entries)
-    <<0x13, payload::binary>>
-  end
-
-  defp process_query(<<0x13, 0x03, since_ts::unsigned-big-64, pattern_len::16, pattern::binary-size(pattern_len)>>, _source) do
-    entries = Audit.filter_since(pattern, since_ts)
-    payload = encode_audit_entries(entries)
-    <<0x13, payload::binary>>
-  end
+  # Migration: callers must move to the HTTP admin API.
+  # - ztlp-cli admin {devices,ls,groups,audit} retargeted in proto/
+  # - Bootstrap reconciliation uses ns_admin_client.rb (HTTP)
+  #
+  # 0x13 packets now fall through to the unknown-opcode catchall below
+  # and receive <<0xff>>. The audit module records the dropped attempts.
+  #
+  # Refs: docs/operations/ns-admin-tenant-isolation.md
+  # Refs: ns/test/ztlp_ns/admin_test.exs (regression pins)
 
   # Registration v2 (0x09) with pubkey — verify signature + zone auth
   defp process_query(
@@ -948,30 +927,4 @@ defmodule ZtlpNs.Server do
   defp encode_addr({a, b, c, d, e, f, g, h}, port) do
     <<6::8, a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16, port::16>>
   end
-
-  # Encode audit entries as CBOR for the admin query response
-  defp encode_audit_entries(entries) do
-    formatted = Enum.map(entries, fn {ts, action, name, type, details} ->
-      %{
-        "timestamp" => ts,
-        "action" => Atom.to_string(action),
-        "name" => name,
-        "type" => Atom.to_string(type),
-        "details" => stringify_map(details)
-      }
-    end)
-
-    ZtlpNs.Cbor.encode(%{"entries" => formatted})
-  end
-
-  # Ensure all map keys/values are strings for CBOR encoding
-  defp stringify_map(map) when is_map(map) do
-    Map.new(map, fn
-      {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_value(v)}
-      {k, v} -> {k, stringify_value(v)}
-    end)
-  end
-
-  defp stringify_value(v) when is_atom(v), do: Atom.to_string(v)
-  defp stringify_value(v), do: v
 end

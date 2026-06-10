@@ -586,132 +586,108 @@ defmodule ZtlpNs.AdminTest do
     end
   end
 
-  # ── Admin Query Wire Protocol Tests (0x13) ──────────────────────────
+  # ── Admin Query Wire Protocol Removal Tests (0x13) ─────────────────
+  #
+  # As of v0.35.1, the unauthenticated UDP 0x13 admin path is REMOVED.
+  # All admin traffic must go through the gated HTTP /admin/records
+  # endpoint on port 9103 (per PR #98 tenant isolation).
+  #
+  # These tests pin the regression: any 0x13 UDP packet must fall through
+  # to the unknown-opcode catchall and return <<0xff>>. NO records,
+  # NO audit entries, NO authentication bypass via the UDP socket.
 
-  describe "admin query via UDP (0x13)" do
+  describe "admin query UDP path removed (0x13 returns 0xff unknown-opcode)" do
     setup do
-    # Get the server's actual port
-    port = ZtlpNs.Server.port()
-    
-    # We must ensure the server is fully ready to avoid test failures
-    Process.sleep(50)
-    
-    {:ok, socket} = :gen_udp.open(0, [:binary, active: false])
-    {:ok, %{socket: socket, port: port}}
-  end
+      port = ZtlpNs.Server.port()
+      Process.sleep(50)
+      {:ok, socket} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, %{socket: socket, port: port}}
+    end
 
-    test "list all records via admin query", %{socket: socket, port: port} do
+    test "0x13/0x01 list-records query is no longer handled (returns 0xff)",
+         %{socket: socket, port: port} do
       device = make_signed_device("laptop.zone.ztlp")
       user = make_signed_user("steve@zone.ztlp")
       assert :ok = Store.insert(device)
       assert :ok = Store.insert(user)
 
-      # Send admin list query: <<0x13, 0x01, 0x00, 0x00, 0x00>>
-      # type_byte=0x00 (all), zone_len=0 (no zone filter)
+      # Pre-removal: <<0x13, cbor>> with records list.
+      # Post-removal: <<0xff>> unknown-opcode response.
       query = <<0x13, 0x01, 0x00, 0x00::16>>
       :gen_udp.send(socket, ~c"127.0.0.1", port, query)
 
       assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
-      assert <<0x13, cbor_data::binary>> = response
-      assert byte_size(cbor_data) > 0
-
-      # Decode CBOR and verify
-      {:ok, decoded} = ZtlpNs.Cbor.decode(cbor_data)
-      assert is_map(decoded)
-      records = decoded["records"]
-      assert is_list(records)
-      assert length(records) == 2
+      assert response == <<0xff>>,
+             "UDP 0x13 list-records must return <<0xff>> (unknown opcode), " <>
+             "not records. Got: #{inspect(response, limit: 8)}"
 
       :gen_udp.close(socket)
     end
 
-    test "list records filtered by type via admin query", %{socket: socket, port: port} do
-      device = make_signed_device("laptop.zone.ztlp")
-      user = make_signed_user("steve@zone.ztlp")
-      assert :ok = Store.insert(device)
-      assert :ok = Store.insert(user)
-
-      # Query for DEVICE only (type_byte=0x10)
-      query = <<0x13, 0x01, 0x10, 0x00::16>>
-      :gen_udp.send(socket, ~c"127.0.0.1", port, query)
-
-      assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
-      assert <<0x13, cbor_data::binary>> = response
-
-      {:ok, decoded} = ZtlpNs.Cbor.decode(cbor_data)
-      records = decoded["records"]
-      assert length(records) == 1
-      assert hd(records)["type"] == "device"
-
-      :gen_udp.close(socket)
-    end
-
-    test "list records filtered by zone via admin query", %{socket: socket, port: port} do
+    test "0x13/0x01 list-records with zone filter is no longer handled (returns 0xff)",
+         %{socket: socket, port: port} do
       d1 = make_signed_device("laptop.acme.ztlp")
-      d2 = make_signed_device("laptop.other.ztlp")
       assert :ok = Store.insert(d1)
-      assert :ok = Store.insert(d2)
 
-      # Query with zone filter
       zone = "acme.ztlp"
       zone_len = byte_size(zone)
       query = <<0x13, 0x01, 0x00, zone_len::16, zone::binary>>
       :gen_udp.send(socket, ~c"127.0.0.1", port, query)
 
       assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
-      assert <<0x13, cbor_data::binary>> = response
-
-      {:ok, decoded} = ZtlpNs.Cbor.decode(cbor_data)
-      records = decoded["records"]
-      assert length(records) == 1
-      assert hd(records)["name"] == "laptop.acme.ztlp"
+      assert response == <<0xff>>,
+             "UDP 0x13 zone-filtered query must return <<0xff>>, got #{inspect(response, limit: 8)}"
 
       :gen_udp.close(socket)
     end
 
-    test "audit query returns entries since timestamp", %{socket: socket, port: port} do
-      # Log some audit entries
+    test "0x13/0x02 audit-since query is no longer handled (returns 0xff)",
+         %{socket: socket, port: port} do
       Audit.log(:registered, "test.ztlp", :device, %{signer: "abc"})
       :timer.sleep(50)
 
       since_ts = System.system_time(:second) - 10
-
-      # Audit since: <<0x13, 0x02, since_ts::64>>
       query = <<0x13, 0x02, since_ts::unsigned-big-64>>
       :gen_udp.send(socket, ~c"127.0.0.1", port, query)
 
       assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
-      assert <<0x13, cbor_data::binary>> = response
-
-      {:ok, decoded} = ZtlpNs.Cbor.decode(cbor_data)
-      assert is_map(decoded)
-      entries = decoded["entries"]
-      assert is_list(entries)
-      assert length(entries) >= 1
+      assert response == <<0xff>>,
+             "UDP 0x13 audit-since must return <<0xff>>, got #{inspect(response, limit: 8)}"
 
       :gen_udp.close(socket)
     end
 
-    test "audit query with name filter", %{socket: socket, port: port} do
+    test "0x13/0x03 audit-filter query is no longer handled (returns 0xff)",
+         %{socket: socket, port: port} do
       Audit.log(:registered, "steve@zone.ztlp", :user)
-      Audit.log(:registered, "bob@zone.ztlp", :user)
       :timer.sleep(50)
 
       since_ts = System.system_time(:second) - 10
       pattern = "steve@*"
       pattern_len = byte_size(pattern)
-
-      # Audit filter: <<0x13, 0x03, since_ts::64, pattern_len::16, pattern::binary>>
       query = <<0x13, 0x03, since_ts::unsigned-big-64, pattern_len::16, pattern::binary>>
       :gen_udp.send(socket, ~c"127.0.0.1", port, query)
 
       assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
-      assert <<0x13, cbor_data::binary>> = response
+      assert response == <<0xff>>,
+             "UDP 0x13 audit-filter must return <<0xff>>, got #{inspect(response, limit: 8)}"
 
-      {:ok, decoded} = ZtlpNs.Cbor.decode(cbor_data)
-      entries = decoded["entries"]
-      assert is_list(entries)
-      assert Enum.all?(entries, fn e -> String.starts_with?(e["name"], "steve@") end)
+      :gen_udp.close(socket)
+    end
+
+    test "arbitrary 0x13 sub-opcode also returns 0xff (no leak path)",
+         %{socket: socket, port: port} do
+      # Belt-and-suspenders: verify any future 0x13/0x?? variant we didn't
+      # think of also falls through to unknown-opcode. Catches accidental
+      # re-introduction of an admin handler in this opcode space.
+      for sub <- [0x00, 0x04, 0x05, 0xff] do
+        query = <<0x13, sub, 0x00, 0x00, 0x00>>
+        :gen_udp.send(socket, ~c"127.0.0.1", port, query)
+        assert {:ok, {_, _, response}} = :gen_udp.recv(socket, 0, 5000)
+        assert response == <<0xff>>,
+               "0x13/0x#{Integer.to_string(sub, 16)} must return <<0xff>>, " <>
+               "got #{inspect(response, limit: 8)}"
+      end
 
       :gen_udp.close(socket)
     end

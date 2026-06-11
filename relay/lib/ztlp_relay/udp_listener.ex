@@ -805,7 +805,39 @@ defmodule ZtlpRelay.UdpListener do
         )
 
       _pid ->
-        case GatewayForwarder.pick_gateway_for_service(service_name) do
+        # Resolve the target gateway. Try the service-name string first
+        # (legacy / explicit `--service NAME` that matches a registration),
+        # then fall back to the NS-resolved NodeID carried in the packet.
+        #
+        # The NodeID fallback is REQUIRED for remote-site, symmetric-NAT'd
+        # endpoints (e.g. Casita Village Dental BILLING-COMPUTER, 2026-06-11):
+        # the gateway registers under its Z2LS service-name
+        # (`z2ls-bill-008247`) but the operator dials a generic
+        # `--service ssh`, so the CLIENT_ROUTE service-name field is "ssh"
+        # and never matches. The packet's 16-byte node_id, however, IS the
+        # gateway's NS-resolved NodeID. `pick_gateway_for_service/1` matches
+        # a 16-byte binary against `gw.node_id` (its authoritative tier), so
+        # routing by node_id succeeds where the name lookup fails.
+        #
+        # This mirrors the HELLO/`dst_svc_id` path in
+        # `forward_hello_to_gateway/5`, which already routes by NodeID. An
+        # all-zero node_id (direct ip:port connect, no NS resolution) is NOT
+        # used as a fallback key — that would round-robin onto an arbitrary
+        # tenant. Only a real, non-zero NodeID is tried.
+        pick_result =
+          case GatewayForwarder.pick_gateway_for_service(service_name) do
+            {:ok, _} = ok ->
+              ok
+
+            :error ->
+              case node_id do
+                <<0::128>> -> :error
+                <<nid::binary-size(16)>> -> GatewayForwarder.pick_gateway_for_service(nid)
+                _ -> :error
+              end
+          end
+
+        case pick_result do
           {:ok, gateway_addr} ->
             ensure_quic_tuple_table()
 

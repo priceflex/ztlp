@@ -3631,9 +3631,29 @@ async fn cmd_connect(
             .unwrap_or_default()
             .as_secs() as i64;
 
+        // Stamp the NS-resolved gateway NodeID into the CLIENT_ROUTE frame
+        // when we have one, so the relay can route by exact NodeID even when
+        // the `--service` string doesn't match the gateway's registered
+        // service-name (e.g. remote-site billing: gateway registered as
+        // `z2ls-bill-008247`, operator dials `--service ssh`). The relay's
+        // `do_install_client_route/3` falls back to this node_id (its
+        // authoritative `pick_gateway_for_service/1` NodeID tier) when the
+        // service-name lookup misses. Mirrors the HELLO `dst_svc_id` /
+        // `dst_routing_override` NodeID-pin path.
+        //
+        // For direct ip:port targets with no NS resolution, `node_id` is the
+        // all-zero NodeId; in that case fall back to the client's own NodeID
+        // (legacy behavior — harmless, the frame is dropped by a real gateway
+        // in β-direct mode anyway).
+        let client_route_node_id: [u8; 16] = if node_id.0 != [0u8; 16] {
+            node_id.0
+        } else {
+            identity.node_id.0
+        };
+
         // Dev-mode HMAC (None) — production should plumb the zone secret
         // through here, mirroring the relay's `Config.registration_secret/0`.
-        match build_client_route_packet(&identity.node_id.0, svc_name, ts, None) {
+        match build_client_route_packet(&client_route_node_id, svc_name, ts, None) {
             Ok(pkt) => match std_socket.send_to(&pkt, peer_addr) {
                 Ok(n) => {
                     eprintln!(

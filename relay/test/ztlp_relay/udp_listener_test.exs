@@ -423,5 +423,96 @@ defmodule ZtlpRelay.UdpListenerTest do
 
       :gen_udp.close(client)
     end
+
+    # ------------------------------------------------------------------
+    # NodeID fallback for CLIENT_ROUTE service-name mismatch
+    # ------------------------------------------------------------------
+    #
+    # Background (Casita Village Dental BILLING-COMPUTER, 2026-06-11):
+    # A remote-site, symmetric-NAT'd endpoint can ONLY be reached via relay
+    # forwarding. Its gateway registers under its Z2LS service-name
+    # (e.g. "z2ls-bill-008247"), and the operator dials it with a generic
+    # `--service ssh`. The QUIC fast-path sends a CLIENT_ROUTE whose
+    # service-name field is the literal "ssh" but whose 16-byte node_id IS
+    # the NS-resolved gateway NodeID.
+    #
+    # Before this fix, `do_install_client_route/3` looked the gateway up
+    # SOLELY by the service-name string ("ssh") and rejected the route
+    # ("no gateway registered for service=ssh"), so the tunnel never
+    # established. The HELLO/`dst_svc_id` path already matches by NodeID
+    # (GatewayForwarder.pick_gateway_for_service/1 NodeID tier); the
+    # CLIENT_ROUTE path must do the same: when the service-name lookup
+    # misses, fall back to the parsed node_id (16 bytes → NodeID tier).
+    #
+    # This also covers the 16-char service-name collision: a name that is
+    # exactly 16 bytes ("z2ls-bill-008247") is indistinguishable from a raw
+    # NodeID/hash binary in pick_gateway_for_service/1, so name-string
+    # matching is unreliable for these registrations — NodeID is the only
+    # robust key.
+    test "installs route via parsed NodeID when CLIENT_ROUTE service-name does not match (billing remote-site case)" do
+      port = UdpListener.get_port()
+      {:ok, client} = :gen_udp.open(0, [:binary])
+      {:ok, client_port} = :inet.port(client)
+      sender = {{127, 0, 0, 1}, client_port}
+
+      # Gateway registers under its Z2LS service-name with a known NodeID.
+      gw_node_id = :crypto.strong_rand_bytes(16)
+      gw_addr = {{174, 79, 254, 16}, 23095}
+      registered_service = "z2ls-bill-008247"
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, gw_node_id, registered_service, 60)
+      Process.sleep(20)
+
+      # Operator dials `--service ssh` → CLIENT_ROUTE carries service="ssh"
+      # but node_id = the registered gateway's NodeID.
+      ts = System.system_time(:second)
+      pkt = build_client_route(gw_node_id, "ssh", ts, <<0::256>>)
+      :gen_udp.send(client, {127, 0, 0, 1}, port, pkt)
+      Process.sleep(50)
+
+      assert [{{:client_map, ^sender}, {^gw_addr, inserted_at}}] =
+               :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}),
+             "CLIENT_ROUTE with a mismatched service-name but a valid registered " <>
+               "NodeID must install the route via the NodeID fallback"
+
+      assert is_integer(inserted_at)
+
+      :gen_udp.close(client)
+    end
+
+    test "NodeID fallback does NOT route when neither service-name nor NodeID match (no cross-tenant leak)" do
+      port = UdpListener.get_port()
+      {:ok, client} = :gen_udp.open(0, [:binary])
+      {:ok, client_port} = :inet.port(client)
+      sender = {{127, 0, 0, 1}, client_port}
+
+      # A registered gateway exists, but the CLIENT_ROUTE carries an
+      # UNKNOWN NodeID and an unknown service-name. Must reject — no
+      # silent round-robin onto the wrong tenant.
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        {{10, 9, 9, 9}, 23095},
+        :crypto.strong_rand_bytes(16),
+        "z2ls-other-tenant",
+        60
+      )
+
+      Process.sleep(20)
+
+      ts = System.system_time(:second)
+      pkt = build_client_route(:crypto.strong_rand_bytes(16), "ssh", ts, <<0::256>>)
+      :gen_udp.send(client, {127, 0, 0, 1}, port, pkt)
+      Process.sleep(50)
+
+      lookup_result =
+        if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
+          []
+        else
+          :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender})
+        end
+
+      assert lookup_result == [],
+             "unknown NodeID + unknown service must NOT install any route"
+
+      :gen_udp.close(client)
+    end
   end
 end

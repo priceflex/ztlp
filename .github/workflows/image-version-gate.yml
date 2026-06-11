@@ -1,0 +1,77 @@
+name: Image Version Gate
+
+# Asserts that, for each Elixir server component, the Docker image built from the
+# current tree carries an OTP application vsn equal to the component's mix.exs
+# `version:` — and, on a release tag push, that the git tag matches too.
+#
+# WHY: the prod relay once shipped under image tag `ztlp-node:v0.35.0` while the
+# OTP app baked in was actually 0.30.0 (no matching git tag existed). Nothing
+# asserted image tag == mix.exs == built app vsn, so a "newer" tag silently
+# shipped ancient code and broke relay-forwarding for behind-NAT endpoints.
+# This gate makes that drift a CI failure instead of a production incident.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - 'ns/**'
+      - 'gateway/**'
+      - 'scripts/verify-image-version.sh'
+      - '.github/workflows/image-version-gate.yml'
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - 'ns/**'
+      - 'gateway/**'
+      - 'scripts/verify-image-version.sh'
+      - '.github/workflows/image-version-gate.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version-gate:
+    name: ${{ matrix.component }} image tag == mix.exs == OTP app vsn
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, ns, gateway]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read mix.exs version
+        id: mixver
+        run: |
+          VER="$(grep -oE 'version:[[:space:]]*"[^"]+"' "${{ matrix.component }}/mix.exs" | head -1 | grep -oE '"[^"]+"' | tr -d '"')"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Component ${{ matrix.component }} mix.exs version: $VER"
+
+      - name: Build image from this commit
+        # Tag the locally-built image with the mix.exs-derived version so the
+        # verify script also exercises the (image tag == mix.exs) gate, not just
+        # (mix.exs == OTP app vsn).
+        run: |
+          docker build -t "ztlp-${{ matrix.component }}:v${{ steps.mixver.outputs.version }}" "./${{ matrix.component }}"
+
+      - name: Verify tag == mix.exs == OTP app vsn
+        run: |
+          chmod +x scripts/verify-image-version.sh
+          scripts/verify-image-version.sh "${{ matrix.component }}" "ztlp-${{ matrix.component }}:v${{ steps.mixver.outputs.version }}"
+
+      - name: On release tag, assert git tag matches mix.exs
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          GIT_TAG="${GITHUB_REF_NAME#v}"
+          MIX_VER="${{ steps.mixver.outputs.version }}"
+          echo "git tag: $GIT_TAG   mix.exs: $MIX_VER"
+          if [ "$GIT_TAG" != "$MIX_VER" ]; then
+            echo "::error::Release tag v${GIT_TAG} does not match ${{ matrix.component }}/mix.exs version ${MIX_VER}. Bump mix.exs or retag." >&2
+            exit 1
+          fi
+          echo "OK: git tag == ${{ matrix.component }} mix.exs version"

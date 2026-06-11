@@ -24,7 +24,12 @@ defmodule ZtlpRelay.MixProject do
       # supervisor, PR #93). Floor ratcheted to 0.34.9 in release_test.exs.
       # Bumped 0.34.9 → 0.34.10 in release/v0.34.10 (supervisor default-on for
       # raw-IP connects, PR #95). Floor ratcheted to 0.34.10 in release_test.exs.
-      version: "0.34.10",
+      # Bumped 0.34.10 → 0.34.11 in fix/relay-client-route-nodeid-fallback:
+      # do_install_client_route now falls back to the NS-resolved NodeID when
+      # the CLIENT_ROUTE service-name string misses, so remote-site /
+      # symmetric-NAT gateways (Casita billing) route via relay forwarding
+      # under a generic `--service ssh`. Floor ratcheted to 0.34.11.
+      version: "0.34.11",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

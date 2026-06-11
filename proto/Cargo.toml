@@ -31,7 +31,13 @@ name = "ztlp-proto"
 # raw-IP connects — removed the ns_server.is_some() gate so `ztlp connect
 # <ip>:<port>` without --ns-server now auto-reconnects on QUIC TimedOut,
 # PR #95). Floor ratcheted to 0.34.10 in version_pin_test.rs.
-version = "0.34.10"
+# Bumped 0.34.10 → 0.34.11 in fix/relay-client-route-nodeid-fallback:
+# `ztlp connect` now stamps the NS-resolved gateway NodeID (not the
+# client's own) into the CLIENT_ROUTE frame, so the relay can route a
+# remote-site/NAT gateway by NodeID when the `--service` string doesn't
+# match its registered service-name (Casita billing). Pairs with the
+# relay's do_install_client_route NodeID fallback (relay mix.exs 0.34.11).
+version = "0.34.11"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

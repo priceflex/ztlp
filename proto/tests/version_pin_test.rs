@@ -51,7 +51,7 @@ use ztlp_proto::updater::SemVer;
 /// Setup Wizard PR #84). Per the release-version-pinning skill pitfall 13,
 /// the floor must track the current release; leaving it at 0.32.2 while
 /// manifests sit at 0.34.x lets future down-bumps slip through silently.
-const MINIMUM_VERSION: &str = "0.34.11";
+const MINIMUM_VERSION: &str = "0.35.0";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

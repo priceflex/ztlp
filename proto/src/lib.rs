@@ -83,6 +83,7 @@ pub mod session;
 #[cfg(feature = "ios-sync")]
 pub mod session_health;
 pub mod stats;
+pub mod svc_candidates;
 pub mod updater;
 
 #[cfg(feature = "quic-transport")]

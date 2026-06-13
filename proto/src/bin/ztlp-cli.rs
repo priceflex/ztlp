@@ -2055,13 +2055,25 @@ fn relay_path_active(
     relay.is_some()
 }
 
+/// Resolve a target name/addr to its dial endpoint(s).
+///
+/// Returns `(best_addr, ranked_candidates, node_id)`:
+/// - `best_addr` — the single highest-priority candidate (== `ranked[0]`),
+///   kept for callers that only want one address (legacy behavior).
+/// - `ranked_candidates` — the FULL client-ranked candidate list (Stage 2),
+///   best-first. For a raw `ip:port` target this is a 1-element vec. The QUIC
+///   connect path tries these in order (failover) so a NAT'd box that
+///   publishes [private-LAN, relay] still connects for a remote operator: the
+///   unreachable LAN candidate fails fast and the relay backstop wins.
+/// - `node_id` — the NS-resolved gateway NodeID (for CLIENT_ROUTE / tenant
+///   isolation), when available.
 async fn resolve_target(
     target: &str,
     ns_server_opt: &Option<String>,
-) -> Result<(SocketAddr, Option<NodeId>), Box<dyn std::error::Error>> {
+) -> Result<(SocketAddr, Vec<SocketAddr>, Option<NodeId>), Box<dyn std::error::Error>> {
     // Try direct IP:port parsing first (backward compatible fast path)
     if let Ok(addr) = target.parse::<SocketAddr>() {
-        return Ok((addr, None));
+        return Ok((addr, vec![addr], None));
     }
 
     // Not a raw address — attempt ZTLP-NS resolution
@@ -2080,15 +2092,42 @@ async fn resolve_target(
     // Strip optional port from name (e.g., "name.ztlp:23095")
     let (name_part, explicit_port) = parse_target_name_and_port(target);
 
-    // Query SVC record (type 2) for endpoint address
+    // Query SVC record (type 2) for endpoint address(es).
+    //
+    // Stage 2 (v0.35.x): the SVC CBOR may now carry an `addresses` field — a
+    // comma-joined ICE candidate list (best-first as published by the
+    // gateway). We extract BOTH `address` (single, legacy) and `addresses`
+    // (list, new), then resolve+rank them client-side so a same-LAN operator
+    // prefers the LAN candidate and a remote operator falls through to the
+    // relay. Old SVC records (no `addresses`) degrade to the single `address`.
     let mut resolved_addr: Option<SocketAddr> = None;
-    if let Ok(Some(svc_data)) = ns_query(name_part, &ns_server, 2).await {
-        // SVC record data should contain an address string (e.g., "10.42.42.50:23095")
-        if let Ok(addr) = svc_data.parse::<SocketAddr>() {
-            eprintln!("  {} SVC record → {}", c_green("✓"), addr);
-            resolved_addr = Some(addr);
-        } else {
-            debug!("SVC record data '{}' is not a valid address", svc_data);
+    let mut svc_address_field: Option<String> = None;
+    let mut svc_addresses_field: Option<String> = None;
+    if let Ok(Some(raw)) = ns_query_raw(name_part, &ns_server, 2).await {
+        svc_address_field = cbor_extract_string(&raw.data_bytes, "address");
+        svc_addresses_field = cbor_extract_string(&raw.data_bytes, "addresses");
+    }
+    // Resolve the full candidate set (back-compat precedence: addresses list →
+    // single address), then rank against our local subnets.
+    let resolved_set = ztlp_proto::svc_candidates::resolve_candidates(
+        svc_address_field.as_deref(),
+        svc_addresses_field.as_deref(),
+    );
+    let mut ranked_candidates: Vec<SocketAddr> = Vec::new();
+    if !resolved_set.is_empty() {
+        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+        ranked_candidates =
+            ztlp_proto::svc_candidates::rank_candidates(&resolved_set, &local_subnets);
+        resolved_addr = ranked_candidates.first().copied();
+        if ranked_candidates.len() > 1 {
+            eprintln!(
+                "  {} SVC record → {} candidates, best {}",
+                c_green("✓"),
+                ranked_candidates.len(),
+                resolved_addr.map(|a| a.to_string()).unwrap_or_default()
+            );
+        } else if let Some(a) = resolved_addr {
+            eprintln!("  {} SVC record → {}", c_green("✓"), a);
         }
     }
 
@@ -2181,7 +2220,16 @@ async fn resolve_target(
         c_green("Resolved:"),
         c_bold(&final_addr.to_string())
     );
-    Ok((final_addr, resolved_node_id))
+    // The dial candidate list: the ranked SVC candidates when we have them
+    // (Stage 2 multi-candidate), else the single resolved/DNS address. We
+    // ensure `final_addr` is element 0 so single-address callers and the
+    // failover loop agree on the primary target.
+    let dial_candidates: Vec<SocketAddr> = if !ranked_candidates.is_empty() {
+        ranked_candidates
+    } else {
+        vec![final_addr]
+    };
+    Ok((final_addr, dial_candidates, resolved_node_id))
 }
 
 /// Extract a string value for a given text key from a CBOR-encoded map.
@@ -2364,6 +2412,12 @@ async fn ns_query_raw(
 }
 
 /// High-level NS query: extract a specific string field from a record's CBOR data.
+///
+/// Retained as a convenience helper (and for external callers / tests). The hot
+/// path `resolve_target` switched to `ns_query_raw` in v0.35.0 so it can read
+/// BOTH the legacy `address` and the new multi-candidate `addresses` field from
+/// one SVC fetch, so this single-field wrapper is currently unused in-crate.
+#[allow(dead_code)]
 async fn ns_query(
     name: &str,
     ns_server: &str,
@@ -2714,7 +2768,8 @@ async fn cmd_connect(
         let identity = load_or_generate_identity(key)?;
 
         // Resolve target: raw ip:port or ZTLP-NS name
-        let (peer_addr, _resolved_node_id) = resolve_target(target, ns_server).await?;
+        let (peer_addr, _dial_candidates, _resolved_node_id) =
+            resolve_target(target, ns_server).await?;
         // Capture the resolved gateway NodeID as raw bytes so per-session
         // HELLOs can stamp it into dst_svc_hash for strict tenant-isolated
         // relay routing. NodeId::zero() (default for direct ip:port
@@ -3510,7 +3565,49 @@ async fn cmd_connect(
     // QUIC mode
 
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
-    let (peer_addr, peer_node_id) = resolve_target(target, ns_server).await?;
+    let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
+
+    // ── Stage 2 (v0.35.x): multi-candidate pre-selection ─────────────
+    //
+    // `dial_candidates` is the client-RANKED SVC candidate set (best-first):
+    // e.g. a NAT'd box publishes [private-LAN, relay] and a same-LAN box
+    // publishes [LAN, relay]. `peer_addr` is candidate[0] (highest priority).
+    //
+    // For a REMOTE operator the top-ranked private-LAN candidate is
+    // unreachable, so picking candidate[0] blindly would regress that box.
+    // We pre-probe the ranked candidates (cheap UDP liveness, best-first) and
+    // pick the FIRST that answers — that becomes the QUIC dial target. This is
+    // the client half of ICE: only the client can judge which published
+    // candidate it can actually reach. If none answer (or there's only one
+    // candidate, the common case) we keep candidate[0] and let the existing
+    // QUIC handshake + auto-reconnect supervisor handle it exactly as before.
+    let peer_addr = if dial_candidates.len() > 1 {
+        match select_reachable_candidate(&dial_candidates).await {
+            Some(a) => {
+                if a != peer_addr {
+                    eprintln!(
+                        "{} multi-candidate: {} reachable, using it over {}",
+                        c_green("✓"),
+                        a,
+                        peer_addr
+                    );
+                }
+                a
+            }
+            None => {
+                eprintln!(
+                    "{} multi-candidate: none of {} candidates answered a probe; \
+                     using best-ranked {} and letting the handshake/reconnect retry",
+                    c_yellow("⚠"),
+                    dial_candidates.len(),
+                    peer_addr
+                );
+                peer_addr
+            }
+        }
+    } else {
+        peer_addr
+    };
 
     let node_id = peer_node_id.unwrap_or_else(|| ztlp_proto::identity::NodeId([0; 16]));
     let identity = load_or_generate_identity(key)?;
@@ -4839,20 +4936,54 @@ async fn cmd_listen(
             .inner
             .local_addr()
             .map_err(|e| format!("failed to read QUIC listener local_addr: {}", e))?;
-        // Only publish SVC when bind is a concrete (routable) address.
-        // `0.0.0.0:PORT` and `[::]:PORT` would advertise an unroutable
-        // endpoint that clients can't dial.
-        let advertise_addr: Option<String> = if listener_addr.ip().is_unspecified() {
+        let listener_port = listener_addr.port();
+
+        // ── Stage 2 (v0.35.x): multi-candidate SVC advertisement ────────
+        //
+        // Pre-Stage-2 behavior: a concrete bind echoed its own socket addr as
+        // the single SVC `address`; a wildcard (`0.0.0.0`/`[::]`) bind
+        // SURRENDERED and published KEY only — leaving multi-NIC / NAT'd
+        // fleets dark.
+        //
+        // Now: regardless of bind, enumerate every reachable local NIC
+        // (filtered: skips loopback/APIPA/docker/down) and append the relay
+        // backstop, then publish them ALL. `address` = best candidate (old
+        // clients still work); `addresses` = full comma-joined list (new
+        // clients rank + race/failover). When the box is bound concretely to a
+        // single routable NIC the enumerator still returns that NIC, so the
+        // legacy single-address case is preserved.
+        //
+        // The relay backstop is the box's registered relay (`relay_addr`) —
+        // this replaces the decaying out-of-band `ns register --address
+        // <relay>` Chef hack for NAT'd boxes: the heartbeat republishes the
+        // relay candidate every cycle, so the SVC never expires between
+        // converges.
+        let relay_advertise: Option<SocketAddr> =
+            relay_addr.and_then(|r| r.parse::<SocketAddr>().ok());
+        let (mut advertise_addr, advertise_addresses) = compute_advertised_svc(
+            listener_port,
+            relay_advertise,
+            advertise_interface,
+            no_advertise_interface,
+            advertise_all_interfaces,
+        );
+
+        // Rare fallback: concrete bind but the enumerator saw no NIC (e.g. a
+        // bind to an address if_addrs can't observe). Advertise the bind addr
+        // itself, matching legacy behavior exactly.
+        if advertise_addr.is_none() && !listener_addr.ip().is_unspecified() {
+            advertise_addr = Some(listener_addr.to_string());
+        }
+
+        if advertise_addr.is_none() {
             eprintln!(
-                "{} listener bound to unspecified address {}; publishing KEY only \
-                 (no SVC record) — dial requires a concrete --bind address",
+                "{} no routable candidate to advertise for {} (wildcard bind, no usable NIC, \
+                 no relay); publishing KEY only — dial requires at least one concrete \
+                 candidate or a --relay backstop",
                 c_yellow("⚠"),
                 listener_addr
             );
-            None
-        } else {
-            Some(listener_addr.to_string())
-        };
+        }
 
         let name = register_name.to_string();
         let zone_s = z.to_string();
@@ -4866,6 +4997,7 @@ async fn cmd_listen(
             &identity_arc,
             &ns_s,
             advertise_addr.as_ref(),
+            advertise_addresses.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -4887,15 +5019,25 @@ async fn cmd_listen(
                 .unwrap_or_default(),
             ns_s
         );
+        if let Some(list) = advertise_addresses.as_deref() {
+            eprintln!(
+                "{} advertising {} SVC candidates: {}",
+                c_dim("→"),
+                list.split(',').count(),
+                list
+            );
+        }
 
         // Spawn the long-lived heartbeat task. We don't hold the JoinHandle
-        // — the task lives as long as the process.
+        // — the task lives as long as the process. It republishes the SVC
+        // (incl. the relay candidate) every cycle, killing the decay.
         tokio::spawn(ns_heartbeat_task(
             name,
             zone_s,
             identity_arc,
             ns_s,
             advertise_addr,
+            advertise_addresses,
             Duration::from_secs(8 * 3600), // 8h nominal
             Duration::from_secs(10 * 60),  // ±10min jitter
         ));
@@ -6170,12 +6312,56 @@ fn build_registration_packet(name: &str, type_byte: u8, data_bin: &[u8]) -> Vec<
 /// publishing.
 ///
 /// See docs/plans/2026-06-01-ns-self-register-heartbeat.md for design.
+/// Compute the gateway's advertised SVC candidate set for the CURRENT NIC
+/// state (Stage 2). Re-evaluated on every heartbeat so a VPN flap or NIC
+/// change self-heals on the next cycle.
+///
+/// Returns `(best_address, addresses_field)`:
+/// - `best_address` — the single best candidate (element 0), used for the
+///   legacy `address` SVC field that old clients read. `None` when nothing
+///   routable is available (wildcard bind, no NIC, no relay) → caller
+///   publishes KEY only, exactly as the pre-Stage-2 surrender path did.
+/// - `addresses_field` — comma-joined full candidate list for the new
+///   `addresses` SVC field, or `None` when there's only 0/1 candidate (no
+///   point shipping a 1-element list; the single `address` already covers it).
+///
+/// `relay_advertise` is the relay backstop to append (NAT'd boxes that can't
+/// be reached on any LAN NIC). `include`/`exclude`/`all` are the operator
+/// interface overrides already plumbed through `cmd_listen`.
+fn compute_advertised_svc(
+    listener_port: u16,
+    relay_advertise: Option<SocketAddr>,
+    include: &[String],
+    exclude: &[String],
+    all: bool,
+) -> (Option<String>, Option<String>) {
+    let local = ztlp_proto::local_candidates::enumerate_local_candidates_with_overrides(
+        listener_port,
+        include,
+        exclude,
+        all,
+    );
+    let cands = ztlp_proto::svc_candidates::assemble_advertised(&local, relay_advertise);
+    let best = cands.first().cloned();
+    let addresses = if cands.len() > 1 {
+        Some(ztlp_proto::svc_candidates::encode_addresses_field(&cands))
+    } else {
+        None
+    };
+    (best, addresses)
+}
+
 async fn ns_publish_self(
     name: &str,
     zone: &str,
     identity: &NodeIdentity,
     ns_server: &str,
     address: Option<&String>,
+    // Stage 2 (v0.35.x): comma-joined ICE candidate list, best-first. When
+    // present it is published in the SVC record's `addresses` field ALONGSIDE
+    // the single `address` (which stays = best candidate for old clients).
+    // `None` (or empty) preserves the legacy single-address SVC record exactly.
+    addresses: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the name is within the specified zone BEFORE binding any
     // socket — keeps test harnesses cheap and gives an obvious error at
@@ -6256,11 +6442,21 @@ async fn ns_publish_self(
             .parse()
             .map_err(|e| format!("invalid address '{}': {} (expected ip:port)", addr_str, e))?;
 
-        let svc_data_bin = cbor_map(&mut vec![
+        let mut svc_pairs = vec![
             ("address", addr_str.as_str()),
-            ("node_id", &node_id_hex),
+            ("node_id", node_id_hex.as_str()),
             ("zone", zone),
-        ]);
+        ];
+        // Stage 2: publish the full ICE candidate set alongside the single
+        // `address`. Old clients read `address`; new clients split `addresses`,
+        // rank against their own subnets, and dial/failover. Empty/None list →
+        // legacy single-address SVC (no `addresses` key) for exact back-compat.
+        if let Some(list) = addresses {
+            if !list.is_empty() {
+                svc_pairs.push(("addresses", list));
+            }
+        }
+        let svc_data_bin = cbor_map(&mut svc_pairs);
 
         let svc_pkt = build_registration_packet(name, 2, &svc_data_bin); // type 2 = SVC
         sock.send_to(&svc_pkt, ns_addr).await?;
@@ -6304,11 +6500,23 @@ async fn ns_heartbeat_task(
     identity: std::sync::Arc<NodeIdentity>,
     ns_server: String,
     address: Option<String>,
+    // Stage 2: full ICE candidate list (comma-joined) published in the SVC
+    // `addresses` field every cycle. `None` → legacy single-address SVC.
+    addresses: Option<String>,
     interval: Duration,
     jitter_max: Duration,
 ) {
     loop {
-        match ns_publish_self(&name, &zone, &identity, &ns_server, address.as_ref()).await {
+        match ns_publish_self(
+            &name,
+            &zone,
+            &identity,
+            &ns_server,
+            address.as_ref(),
+            addresses.as_deref(),
+        )
+        .await
+        {
             Ok(()) => {
                 eprintln!(
                     "{} [ns_heartbeat] published {} to {}",
@@ -6795,7 +7003,8 @@ async fn cmd_gateway_candidates(
 
     // 1. Resolve the gateway name → (transport addr, NodeId) via NS.
     let ns_server_opt = Some(ns_server.to_string());
-    let (_gateway_addr, gateway_nid) = resolve_target(name, &ns_server_opt).await?;
+    let (_gateway_addr, _gateway_candidates, gateway_nid) =
+        resolve_target(name, &ns_server_opt).await?;
     let gateway_nid = gateway_nid.ok_or_else(|| {
         format!(
             "could not resolve NodeId for gateway '{}' via NS at {} (no KEY record?)",
@@ -7175,7 +7384,7 @@ async fn cmd_ping(
     interval: u64,
     bind: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (target_addr, _) = resolve_target(target, ns_server).await?;
+    let (target_addr, _target_candidates, _) = resolve_target(target, ns_server).await?;
 
     let raw_socket = socket2::Socket::new(
         if bind.contains(':') && bind.starts_with('[') {
@@ -7850,6 +8059,35 @@ async fn check_ztlp_udp_addr(addr: std::net::SocketAddr) -> bool {
         Ok(Err(_)) => false, // ICMP unreachable — port closed
         Err(_) => true,      // timeout with no error — likely open (silent drop = ZTLP L2)
     }
+}
+
+/// Stage 2 (v0.35.x) multi-candidate pre-selection: probe a client-ranked
+/// candidate list (best-first) and return the FIRST that looks reachable via
+/// the ZTLP UDP liveness probe ([`check_ztlp_udp_addr`]).
+///
+/// This is the client half of ICE: a gateway publishes ALL its addresses
+/// (LAN NICs + relay) and only the client can tell which one IT can reach. A
+/// same-LAN operator's probe to the LAN candidate succeeds first; a remote
+/// operator's LAN probe draws an ICMP-unreachable (or no listener) so we move
+/// on and the relay candidate wins. Returns `None` only when EVERY candidate
+/// fails the probe — the caller then keeps the best-ranked address and lets
+/// the QUIC handshake + auto-reconnect supervisor retry (the probe is
+/// advisory, never authoritative: a silent-dropping middlebox could mask a
+/// truly-open path, so we never hard-fail on probe alone).
+async fn select_reachable_candidate(
+    candidates: &[std::net::SocketAddr],
+) -> Option<std::net::SocketAddr> {
+    for cand in candidates {
+        if check_ztlp_udp_addr(*cand).await {
+            return Some(*cand);
+        }
+        eprintln!(
+            "{} candidate {} did not answer probe; trying next",
+            c_dim("·"),
+            cand
+        );
+    }
+    None
 }
 
 // ─── Setup Wizard ───────────────────────────────────────────────────────────
@@ -13622,6 +13860,7 @@ mod tests {
             &identity,
             "127.0.0.1:1", // unreachable, must NOT be touched
             None,
+            None,
         )
         .await;
         assert!(result.is_err(), "expected validation error");
@@ -13643,6 +13882,7 @@ mod tests {
             "example.ztlp",
             &identity,
             &ns_addr.to_string(),
+            None,
             None,
         )
         .await;
@@ -13688,6 +13928,7 @@ mod tests {
             &identity,
             &ns_addr.to_string(),
             Some(&"10.0.0.1:23095".to_string()),
+            None,
         )
         .await;
         assert!(result.is_ok(), "publish failed: {:?}", result);
@@ -13710,6 +13951,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ns_publish_self_svc_includes_addresses_list_when_given() {
+        // Stage 2: when a multi-candidate `addresses` list is supplied, the SVC
+        // CBOR must carry BOTH the legacy single `address` (back-compat) AND an
+        // `addresses` text field (comma-joined). Old clients read `address`;
+        // new clients split `addresses`.
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+
+        let result = ns_publish_self(
+            "node.example.ztlp",
+            "example.ztlp",
+            &identity,
+            &ns_addr.to_string(),
+            Some(&"10.0.0.1:23095".to_string()),
+            Some("10.0.0.1:23095,192.168.5.9:23095,44.230.7.100:23095"),
+        )
+        .await;
+        assert!(result.is_ok(), "publish failed: {:?}", result);
+
+        let pkts = captured.lock().await;
+        // KEY + SVC + verify.
+        let p = &pkts[1];
+        assert_eq!(p[0], 0x09, "expected register opcode (0x09)");
+        let name_len = u16::from_be_bytes([p[1], p[2]]) as usize;
+        assert_eq!(p[3 + name_len], 2, "second register should be SVC (type=2)");
+        let data_off = 1 + 2 + name_len + 1 + 2;
+        let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
+        let cbor = &p[data_off..data_off + data_len];
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        // Legacy single address still present.
+        assert!(
+            map.iter().any(|(k, v)| matches!(
+                (k, v),
+                (ciborium::value::Value::Text(s), ciborium::value::Value::Text(a))
+                    if s == "address" && a == "10.0.0.1:23095"
+            )),
+            "SVC record missing legacy `address`"
+        );
+        // New multi-candidate list present and exact.
+        assert!(
+            map.iter().any(|(k, v)| matches!(
+                (k, v),
+                (ciborium::value::Value::Text(s), ciborium::value::Value::Text(a))
+                    if s == "addresses"
+                        && a == "10.0.0.1:23095,192.168.5.9:23095,44.230.7.100:23095"
+            )),
+            "SVC record missing `addresses` candidate list"
+        );
+    }
+
+    #[tokio::test]
     async fn ns_publish_self_omits_svc_when_no_address() {
         let (ns_addr, captured) = spawn_capture_ns().await;
         let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
@@ -13718,6 +14015,7 @@ mod tests {
             "example.ztlp",
             &identity,
             &ns_addr.to_string(),
+            None,
             None,
         )
         .await
@@ -13744,6 +14042,7 @@ mod tests {
             identity,
             ns_addr.to_string(),
             Some("10.0.0.1:23095".to_string()),
+            None,
             std::time::Duration::from_millis(150),
             std::time::Duration::from_millis(0), // no jitter for determinism
         ));

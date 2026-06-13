@@ -37,7 +37,17 @@ name = "ztlp-proto"
 # remote-site/NAT gateway by NodeID when the `--service` string doesn't
 # match its registered service-name (Casita billing). Pairs with the
 # relay's do_install_client_route NodeID fallback (relay mix.exs 0.34.11).
-version = "0.34.11"
+# Bumped 0.34.11 → 0.35.0 in feature/svc-multi-candidate (Stage 2): the SVC
+# record now carries a multi-candidate `addresses` list (comma-joined ICE
+# candidate set) ALONGSIDE the legacy single `address`. A 0.0.0.0-bound
+# gateway auto-discovers every reachable NIC + the relay backstop and
+# publishes them ALL every heartbeat (kills SVC decay; retires the Chef
+# out-of-band relay-SVC hack). The client splits `addresses`, ranks against
+# its own subnets, probes best-first and dials the first reachable candidate
+# (client-side ICE). Purely additive on the wire — NS stores/serves the CBOR
+# verbatim (no NS change) and old clients keep reading `address`. Floor
+# ratcheted to 0.35.0 in version_pin_test.rs.
+version = "0.35.0"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

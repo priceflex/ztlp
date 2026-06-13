@@ -202,7 +202,10 @@ mod tests {
         let field = encode_addresses_field(&cands);
         assert_eq!(field, "10.69.94.151:23095,44.230.7.100:23095");
         let parsed = parse_addresses_field(&field);
-        assert_eq!(parsed, vec![sa(10, 69, 94, 151, 23095), sa(44, 230, 7, 100, 23095)]);
+        assert_eq!(
+            parsed,
+            vec![sa(10, 69, 94, 151, 23095), sa(44, 230, 7, 100, 23095)]
+        );
     }
 
     #[test]
@@ -210,13 +213,19 @@ mod tests {
         // A future gateway appends a candidate shape we don't grok; we keep the
         // ones we DO understand rather than discarding the whole list.
         let parsed = parse_addresses_field("10.0.0.1:23095,garbage,192.168.1.9:23095");
-        assert_eq!(parsed, vec![sa(10, 0, 0, 1, 23095), sa(192, 168, 1, 9, 23095)]);
+        assert_eq!(
+            parsed,
+            vec![sa(10, 0, 0, 1, 23095), sa(192, 168, 1, 9, 23095)]
+        );
     }
 
     #[test]
     fn parse_tolerates_whitespace_and_empties() {
         let parsed = parse_addresses_field(" 10.0.0.1:23095 , ,192.168.1.9:23095,");
-        assert_eq!(parsed, vec![sa(10, 0, 0, 1, 23095), sa(192, 168, 1, 9, 23095)]);
+        assert_eq!(
+            parsed,
+            vec![sa(10, 0, 0, 1, 23095), sa(192, 168, 1, 9, 23095)]
+        );
     }
 
     // ── resolve_candidates back-compat precedence ────────────────────
@@ -227,7 +236,10 @@ mod tests {
             Some("44.230.7.100:23095"),
             Some("10.69.94.151:23095,44.230.7.100:23095"),
         );
-        assert_eq!(out, vec![sa(10, 69, 94, 151, 23095), sa(44, 230, 7, 100, 23095)]);
+        assert_eq!(
+            out,
+            vec![sa(10, 69, 94, 151, 23095), sa(44, 230, 7, 100, 23095)]
+        );
     }
 
     #[test]

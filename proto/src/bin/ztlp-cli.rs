@@ -13979,8 +13979,7 @@ mod tests {
         let data_off = 1 + 2 + name_len + 1 + 2;
         let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
         let cbor = &p[data_off..data_off + data_len];
-        let decoded: ciborium::value::Value =
-            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let decoded: ciborium::value::Value = ciborium::de::from_reader(cbor).expect("cbor decode");
         let map = match decoded {
             ciborium::value::Value::Map(m) => m,
             _ => panic!("expected CBOR map"),

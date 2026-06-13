@@ -182,6 +182,7 @@ Rails.application.routes.draw do
     # caller-facing contract.
     namespace :admin do
       post "enrollment_tokens", to: "enrollment_tokens#create", as: :enrollment_tokens
+      post "networks", to: "networks#create", as: :networks
     end
   end
 

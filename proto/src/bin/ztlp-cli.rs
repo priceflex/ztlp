@@ -2656,10 +2656,7 @@ const ZTLP_RELAY_PORT: u16 = 23095;
 /// available (e.g. a raw `ip:port` direct connect with no NS) — callers then
 /// preserve the pre-fix behavior. Hostname NS servers (rare; production uses
 /// IP literals) also yield `None` here and are left to the legacy path.
-fn derive_relay_fallback_addr(
-    ns_server: Option<&str>,
-    relay: Option<&str>,
-) -> Option<SocketAddr> {
+fn derive_relay_fallback_addr(ns_server: Option<&str>, relay: Option<&str>) -> Option<SocketAddr> {
     // 1. Explicit --relay flag: accept "host:port" or bare "host"/"ip".
     if let Some(r) = relay.map(str::trim).filter(|s| !s.is_empty()) {
         if let Ok(a) = r.parse::<SocketAddr>() {
@@ -14264,7 +14261,10 @@ mod tests {
         } else {
             derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
         };
-        assert_eq!(got, None, "--no-relay-fallback must suppress the relay candidate");
+        assert_eq!(
+            got, None,
+            "--no-relay-fallback must suppress the relay candidate"
+        );
 
         // Sanity: with the flag off, the same inputs DO yield a relay.
         let no_relay_fallback = false;

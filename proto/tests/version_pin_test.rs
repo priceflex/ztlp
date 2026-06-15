@@ -51,7 +51,10 @@ use ztlp_proto::updater::SemVer;
 /// Setup Wizard PR #84). Per the release-version-pinning skill pitfall 13,
 /// the floor must track the current release; leaving it at 0.32.2 while
 /// manifests sit at 0.34.x lets future down-bumps slip through silently.
-const MINIMUM_VERSION: &str = "0.35.0";
+/// Ratcheted 0.35.0 → 0.35.1 in PR <fix/connect-relay-fallback-on-stale-nat>
+/// after the connect path gained relay-forwarding fallback when all direct
+/// candidates fail (NAT'd endpoints with stale srflx ports no longer go dark).
+const MINIMUM_VERSION: &str = "0.35.1";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

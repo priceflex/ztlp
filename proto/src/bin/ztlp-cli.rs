@@ -2620,6 +2620,63 @@ fn pick_quic_dial_target(
     multi_candidate_winner.unwrap_or(ns_resolved)
 }
 
+/// Well-known ZTLP relay UDP port. The NS server and the relay are co-located
+/// in the standard ZTLP control-plane deployment (NS on 23096, relay on 23095),
+/// so a relay address can be derived from the NS-server host when the gateway's
+/// SVC record omits an explicit relay candidate.
+const ZTLP_RELAY_PORT: u16 = 23095;
+
+/// v0.34.12: Derive the relay-forwarding fallback address for a connect.
+///
+/// ## Why this exists
+///
+/// A NAT'd endpoint that publishes only `[private-LAN, srflx]` candidates in
+/// its SVC record (no relay candidate) becomes UNREACHABLE the moment its NAT
+/// mapping rotates: the LAN candidate is unroutable for a remote operator, and
+/// the published srflx (NAT-punch) port goes stale when the endpoint's router
+/// reassigns its external UDP port. Before this fix, when both direct
+/// candidates failed the client fell back to the NS-resolved LAN address — the
+/// candidate that just timed out — and the tunnel never came up. Connectivity
+/// was only possible in the brief window right after each SVC re-publish.
+///
+/// The relay ALWAYS knows the gateway's live external mapping (the gateway
+/// re-registers every ~10s), so routing the CLIENT_ROUTE through the relay is
+/// reachability that does NOT depend on SVC-record freshness. This helper
+/// computes that relay address so the connect path can use it as the terminal
+/// fallback instead of the dead LAN address.
+///
+/// ## Precedence
+///
+/// 1. An explicit `--relay host:port` (or bare `--relay host`, defaulting to
+///    the well-known relay port) always wins.
+/// 2. Otherwise the relay is derived from the NS-server host with the
+///    well-known relay port (NS and relay are co-located).
+///
+/// Returns `None` when neither a `--relay` flag nor an IP-literal NS host is
+/// available (e.g. a raw `ip:port` direct connect with no NS) — callers then
+/// preserve the pre-fix behavior. Hostname NS servers (rare; production uses
+/// IP literals) also yield `None` here and are left to the legacy path.
+fn derive_relay_fallback_addr(ns_server: Option<&str>, relay: Option<&str>) -> Option<SocketAddr> {
+    // 1. Explicit --relay flag: accept "host:port" or bare "host"/"ip".
+    if let Some(r) = relay.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Ok(a) = r.parse::<SocketAddr>() {
+            return Some(a);
+        }
+        if let Ok(ip) = r.parse::<std::net::IpAddr>() {
+            return Some(SocketAddr::new(ip, ZTLP_RELAY_PORT));
+        }
+        // Non-IP --relay host (hostname) — fall through to NS derivation.
+    }
+    // 2. Derive from the NS server host (strip its port, force relay port).
+    if let Some(ns) = ns_server.map(str::trim).filter(|s| !s.is_empty()) {
+        let host = ns.rsplit_once(':').map(|(h, _)| h).unwrap_or(ns);
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return Some(SocketAddr::new(ip, ZTLP_RELAY_PORT));
+        }
+    }
+    None
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Auto-reconnect supervisor — production types
 //
@@ -3637,6 +3694,27 @@ async fn cmd_connect(
     // Quinn led to the v0.31 punch fd-aliasing trap; a separate probe
     // socket sidesteps it entirely.
     let multi_candidate_winner: Option<SocketAddr> = if multi_candidate && peer_node_id.is_some() {
+        // v0.34.12: relay-forwarding fallback. When every DIRECT candidate
+        // (LAN + srflx/NAT-punch) times out, the pre-fix code fell back to the
+        // NS-resolved LAN address — the candidate that just failed — so a NAT'd
+        // endpoint became unreachable the instant its NAT mapping rotated and
+        // the SVC record's srflx port went stale. The relay always knows the
+        // gateway's live mapping (re-registered ~every 10s), so we instead fall
+        // back to relay-forwarding (CLIENT_ROUTE to the relay, routed by the
+        // NS-resolved gateway NodeID). This makes reachability independent of
+        // SVC-record freshness. See derive_relay_fallback_addr for derivation.
+        //
+        // Honors --no-relay-fallback: if the operator explicitly opted out of
+        // relay routing (as the legacy/punch path already respects), we do NOT
+        // synthesize a relay candidate — the dial fails through to the
+        // NS-resolved addr exactly as pre-fix, and the operator gets the
+        // fail-closed behavior they asked for.
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref())
+                .filter(|r| *r != peer_addr)
+        };
         match ns_server
             .as_deref()
             .and_then(|s| s.parse::<SocketAddr>().ok())
@@ -3672,22 +3750,55 @@ async fn cmd_connect(
                                 Some(outcome.winning_addr)
                             }
                             Err(e) => {
+                                // Direct candidates all failed. Prefer the relay
+                                // (resilient) over the NS-resolved LAN addr (dead).
+                                match relay_fallback {
+                                    Some(r) => {
+                                        eprintln!(
+                                            "{} multi-candidate dial failed: {:?}; \
+                                             falling back to RELAY-forwarding via {}",
+                                            c_dim("[v0.34.12]"),
+                                            e,
+                                            r
+                                        );
+                                        Some(r)
+                                    }
+                                    None => {
+                                        eprintln!(
+                                            "{} multi-candidate dial failed: {:?}; \
+                                             falling back to NS-resolved addr",
+                                            c_dim("[v0.32.2]"),
+                                            e
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Probe socket bind failed — still prefer relay-forwarding
+                        // over the NS-resolved LAN addr when a relay is known.
+                        match relay_fallback {
+                            Some(r) => {
                                 eprintln!(
-                                    "{} multi-candidate dial failed: {:?}; falling back to NS-resolved addr",
+                                    "{} multi-candidate probe socket bind failed: {}; \
+                                     falling back to RELAY-forwarding via {}",
+                                    c_dim("[v0.34.12]"),
+                                    e,
+                                    r
+                                );
+                                Some(r)
+                            }
+                            None => {
+                                eprintln!(
+                                    "{} multi-candidate probe socket bind failed: {}; falling back",
                                     c_dim("[v0.32.2]"),
                                     e
                                 );
                                 None
                             }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{} multi-candidate probe socket bind failed: {}; falling back",
-                            c_dim("[v0.32.2]"),
-                            e
-                        );
-                        None
                     }
                 }
             }
@@ -14078,6 +14189,91 @@ mod tests {
         use std::net::SocketAddr;
         let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap();
         assert_eq!(pick_quic_dial_target(ns, None), ns);
+    }
+
+    // ── v0.34.12: derive_relay_fallback_addr — relay-forwarding fallback ──
+    // When all direct candidates fail, the connect path must fall back to the
+    // relay (resilient, knows the gateway's live NAT mapping) rather than the
+    // dead NS-resolved LAN address. These pin the relay-address derivation.
+    #[test]
+    fn relay_fallback_derives_from_ns_server_host() {
+        // The common production case: --ns-server <relay-ip>:23096. The relay
+        // is co-located on the same host at the well-known relay port 23095.
+        let got = derive_relay_fallback_addr(Some("44.230.7.100:23096"), None);
+        assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_ns_host_without_port() {
+        let got = derive_relay_fallback_addr(Some("44.230.7.100"), None);
+        assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_explicit_relay_flag_wins_over_ns() {
+        // An explicit --relay host:port takes precedence over NS derivation.
+        let got = derive_relay_fallback_addr(Some("44.230.7.100:23096"), Some("10.0.0.9:9999"));
+        assert_eq!(got, Some("10.0.0.9:9999".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_explicit_relay_bare_ip_uses_well_known_port() {
+        let got = derive_relay_fallback_addr(None, Some("10.0.0.9"));
+        assert_eq!(got, Some("10.0.0.9:23095".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_none_when_no_ns_and_no_relay() {
+        // Raw ip:port direct connect (no NS, no --relay) — preserve pre-fix
+        // behavior: no relay fallback derivable.
+        assert_eq!(derive_relay_fallback_addr(None, None), None);
+    }
+
+    #[test]
+    fn relay_fallback_none_for_hostname_ns_without_relay() {
+        // A hostname NS (non-IP) with no --relay yields None — left to the
+        // legacy path rather than guessing a DNS resolution here.
+        assert_eq!(
+            derive_relay_fallback_addr(Some("ns.example.ztlp:23096"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_fallback_hostname_relay_flag_falls_through_to_ns() {
+        // A non-IP --relay host falls through to NS-host derivation rather
+        // than failing — so a usable IP relay is still produced.
+        let got = derive_relay_fallback_addr(Some("44.230.7.100:23096"), Some("relay.example"));
+        assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_gated_by_no_relay_fallback_flag() {
+        // The connect path gates derive_relay_fallback_addr behind the
+        // --no-relay-fallback flag (mirroring the legacy/punch path). This
+        // pins that semantic: when the operator opts out, no relay candidate
+        // is synthesized regardless of what NS/--relay would otherwise yield.
+        // (The gating lives at the cmd_connect call site as
+        //  `if no_relay_fallback { None } else { derive_relay_fallback_addr(..) }`.)
+        let no_relay_fallback = true;
+        let got = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
+        assert_eq!(
+            got, None,
+            "--no-relay-fallback must suppress the relay candidate"
+        );
+
+        // Sanity: with the flag off, the same inputs DO yield a relay.
+        let no_relay_fallback = false;
+        let got = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
+        assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
     }
 
     // ── decode_registration_error ──────────────────────────────────

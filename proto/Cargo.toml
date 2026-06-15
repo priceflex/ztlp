@@ -47,7 +47,19 @@ name = "ztlp-proto"
 # (client-side ICE). Purely additive on the wire — NS stores/serves the CBOR
 # verbatim (no NS change) and old clients keep reading `address`. Floor
 # ratcheted to 0.35.0 in version_pin_test.rs.
-version = "0.35.0"
+# Bumped 0.35.0 → 0.35.1 in fix/connect-relay-fallback-on-stale-nat:
+# `ztlp connect` now falls back to RELAY-FORWARDING (CLIENT_ROUTE to the
+# relay, routed by the NS-resolved gateway NodeID) when ALL direct
+# candidates (LAN + srflx/NAT-punch) time out — instead of falling back to
+# the NS-resolved LAN address, which is the candidate that just failed. A
+# NAT'd endpoint whose SVC record omits a relay candidate used to go dark
+# the instant its NAT mapping rotated (stale srflx port); now reachability
+# is independent of SVC-record freshness because the relay always holds the
+# gateway's live mapping (re-registered ~every 10s). Relay addr is derived
+# from --relay (if given) or the --ns-server host at the well-known relay
+# port 23095 (NS and relay are co-located). Floor ratcheted to 0.35.1 in
+# version_pin_test.rs.
+version = "0.35.1"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

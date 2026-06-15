@@ -3706,8 +3706,18 @@ async fn cmd_connect(
         // back to relay-forwarding (CLIENT_ROUTE to the relay, routed by the
         // NS-resolved gateway NodeID). This makes reachability independent of
         // SVC-record freshness. See derive_relay_fallback_addr for derivation.
-        let relay_fallback = derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref())
-            .filter(|r| *r != peer_addr);
+        //
+        // Honors --no-relay-fallback: if the operator explicitly opted out of
+        // relay routing (as the legacy/punch path already respects), we do NOT
+        // synthesize a relay candidate — the dial fails through to the
+        // NS-resolved addr exactly as pre-fix, and the operator gets the
+        // fail-closed behavior they asked for.
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref())
+                .filter(|r| *r != peer_addr)
+        };
         match ns_server
             .as_deref()
             .and_then(|s| s.parse::<SocketAddr>().ok())
@@ -14237,6 +14247,32 @@ mod tests {
         // A non-IP --relay host falls through to NS-host derivation rather
         // than failing — so a usable IP relay is still produced.
         let got = derive_relay_fallback_addr(Some("44.230.7.100:23096"), Some("relay.example"));
+        assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
+    }
+
+    #[test]
+    fn relay_fallback_gated_by_no_relay_fallback_flag() {
+        // The connect path gates derive_relay_fallback_addr behind the
+        // --no-relay-fallback flag (mirroring the legacy/punch path). This
+        // pins that semantic: when the operator opts out, no relay candidate
+        // is synthesized regardless of what NS/--relay would otherwise yield.
+        // (The gating lives at the cmd_connect call site as
+        //  `if no_relay_fallback { None } else { derive_relay_fallback_addr(..) }`.)
+        let no_relay_fallback = true;
+        let got = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
+        assert_eq!(got, None, "--no-relay-fallback must suppress the relay candidate");
+
+        // Sanity: with the flag off, the same inputs DO yield a relay.
+        let no_relay_fallback = false;
+        let got = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
         assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
     }
 

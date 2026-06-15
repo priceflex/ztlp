@@ -59,7 +59,7 @@ name = "ztlp-proto"
 # from --relay (if given) or the --ns-server host at the well-known relay
 # port 23095 (NS and relay are co-located). Floor ratcheted to 0.35.1 in
 # version_pin_test.rs.
-version = "0.35.1"
+version = "0.35.2"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

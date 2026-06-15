@@ -244,6 +244,32 @@ defmodule ZtlpNs.Config do
   end
 
   @doc """
+  Whether the PEER_ENDPOINTS (0x0A) serve path should prefer `:reported`
+  endpoints over `:learned` when offering standalone dial candidates.
+
+  When `true` (default), if a node has any `:reported` endpoint we return ONLY
+  the reported set and suppress `:learned` (NS-observed control-plane source)
+  candidates — they are transient outbound NAT mappings, not inbound listeners,
+  and offering them as dial targets poisons the operator's bounded parallel-dial
+  race (KELLYMANCINO-PC, 2026-06-15). When a node has NO reported endpoint we
+  fall back to the full set so symmetric-NAT hole punching still has a hint.
+  Bilateral PUNCH_NOTIFY coordination always uses the full set regardless.
+
+  Set `ZTLP_NS_PEER_ENDPOINTS_PREFER_REPORTED=false` to restore the legacy
+  "return everything" behavior at runtime.
+
+  Default: `true`.
+  """
+  @spec peer_endpoints_prefer_reported?() :: boolean()
+  def peer_endpoints_prefer_reported? do
+    case System.get_env("ZTLP_NS_PEER_ENDPOINTS_PREFER_REPORTED") do
+      val when val in ["false", "0", "no"] -> false
+      nil -> Application.get_env(:ztlp_ns, :peer_endpoints_prefer_reported, true)
+      _ -> true
+    end
+  end
+
+  @doc """
   Load the admin-API HMAC secret from `ZTLP_NS_ADMIN_API_SECRET` and store
   it in `Application.get_env(:ztlp_ns, :admin_api_secret)` for runtime use
   by `ZtlpNs.AdminApi.verify_request/5`.

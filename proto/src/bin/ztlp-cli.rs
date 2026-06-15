@@ -2677,8 +2677,28 @@ fn derive_relay_fallback_addr(ns_server: Option<&str>, relay: Option<&str>) -> O
     None
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Auto-reconnect supervisor — production types
+/// v0.35.2: choose the "relay backstop" address fed into the multi-candidate
+/// dial race (`try_multi_candidate_connect`'s `relay_addr` arg).
+///
+/// The race already tries the gateway's PEER_ENDPOINTS host candidates; the
+/// backstop is the resilient `CandidateClass::Relay` competitor that must be
+/// in the race from t0 so a NAT'd, relay-routed gateway is reachable even when
+/// every direct candidate is dead.
+///
+/// - `relay_fallback` — the derived/explicit relay (`derive_relay_fallback_addr`),
+///   or `None` when no relay could be derived OR the operator passed
+///   `--no-relay-fallback` (fail-closed: caller sets this to `None`).
+/// - `ns_resolved` — the NS-resolved peer address used pre-fix as the backstop.
+///   For a relay-routed gateway with no `--relay` flag this is the gateway's
+///   own (unroutable) LAN address — the very candidate the race already covers,
+///   so using it as the "relay" backstop is a no-op that leaves the real relay
+///   out of the race entirely (the KELLYMANCINO-PC bug).
+///
+/// Prefer the real relay; fall back to the NS-resolved addr only when no relay
+/// exists (legacy direct-listener mode / fail-closed), preserving prior behavior.
+fn pick_race_backstop(relay_fallback: Option<SocketAddr>, ns_resolved: SocketAddr) -> SocketAddr {
+    relay_fallback.unwrap_or(ns_resolved)
+}
 //
 // Wraps cmd_connect's dial-and-tunnel logic in a supervisor loop that detects
 // QUIC session loss via quinn::Connection::closed(), classifies the disconnect
@@ -3729,13 +3749,36 @@ async fn cmd_connect(
                         let probe_sock = std::sync::Arc::new(probe_sock);
                         let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
                         let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+                        // v0.35.2: race the REAL relay as the backstop, not the
+                        // NS-resolved `peer_addr`.
+                        //
+                        // Pre-fix this passed `Some(peer_addr)`. When the target
+                        // is a relay-routed NAT'd gateway the operator typically
+                        // has no `--relay` flag, so `peer_addr` is the gateway's
+                        // own NS-resolved address (its private LAN IP) — exactly
+                        // the candidate the parallel race is already trying via
+                        // PEER_ENDPOINTS. Passing it AGAIN as the "relay backstop"
+                        // meant the genuinely reachable relay never entered the
+                        // race at all; the client only reached it AFTER the whole
+                        // race failed, via the post-race relay fallback below.
+                        // That made connect slow and fragile (KELLYMANCINO-PC,
+                        // 2026-06-15: race = [LAN, srflx, LAN], all dead).
+                        //
+                        // Prefer the derived relay (`relay_fallback`) so the relay
+                        // is a first-class CandidateClass::Relay competitor in the
+                        // bounded race from t0. Fall back to `peer_addr` only when
+                        // no relay could be derived (legacy direct-listener mode),
+                        // preserving prior behavior. Honors --no-relay-fallback:
+                        // `relay_fallback` is already None in that case, so we pass
+                        // `peer_addr` and never synthesize a relay candidate.
+                        let race_backstop = pick_race_backstop(relay_fallback, peer_addr);
                         match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
                             peer_node_id.unwrap(),
                             ns_addr,
                             probe_sock,
                             identity.node_id,
                             &local_subnets,
-                            Some(peer_addr),
+                            Some(race_backstop),
                             policy,
                         )
                         .await
@@ -14274,6 +14317,71 @@ mod tests {
             derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
         };
         assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
+    }
+
+    // ── v0.35.2: pick_race_backstop — the multi-candidate race must get the
+    // REAL relay as its backstop, not the NS-resolved peer address. ──
+    // Regression guard for KELLYMANCINO-PC (2026-06-15): a relay-routed NAT'd
+    // gateway connected-to with no --relay flag had `peer_addr` == its own
+    // unroutable LAN address fed in as the "relay backstop", so the genuinely
+    // reachable relay never entered the bounded parallel-dial race and connect
+    // only recovered via the slow post-race fallback.
+    #[test]
+    fn race_backstop_prefers_derived_relay_over_ns_resolved_lan() {
+        use std::net::SocketAddr;
+        // The bug shape: target is a NAT'd gateway, no --relay, so the
+        // NS-resolved peer addr is the gateway's private LAN address.
+        let ns_resolved_lan: SocketAddr = "10.210.1.164:23095".parse().unwrap();
+        let derived_relay: SocketAddr = "44.230.7.100:23095".parse().unwrap();
+        assert_eq!(
+            pick_race_backstop(Some(derived_relay), ns_resolved_lan),
+            derived_relay,
+            "the real relay must be the race backstop, not the dead LAN addr"
+        );
+    }
+
+    #[test]
+    fn race_backstop_falls_back_to_ns_resolved_when_no_relay() {
+        use std::net::SocketAddr;
+        // Legacy direct-listener mode / fail-closed (--no-relay-fallback sets
+        // relay_fallback to None upstream): preserve prior behavior and use the
+        // NS-resolved address as the backstop.
+        let ns_resolved: SocketAddr = "10.0.0.5:23095".parse().unwrap();
+        assert_eq!(pick_race_backstop(None, ns_resolved), ns_resolved);
+    }
+
+    #[test]
+    fn race_backstop_end_to_end_with_no_relay_fallback_gate() {
+        use std::net::SocketAddr;
+        // Mirror the cmd_connect call site: relay_fallback is gated behind
+        // --no-relay-fallback, then pick_race_backstop chooses. With the flag
+        // ON, no relay is synthesized and the race backstop is the NS addr
+        // (fail-closed — operator opted out of relay routing).
+        let ns_resolved: SocketAddr = "10.210.1.164:23095".parse().unwrap();
+
+        let no_relay_fallback = true;
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
+        assert_eq!(
+            pick_race_backstop(relay_fallback, ns_resolved),
+            ns_resolved,
+            "--no-relay-fallback must keep the relay out of the race"
+        );
+
+        // With the flag OFF, the derived relay becomes the backstop.
+        let no_relay_fallback = false;
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
+        };
+        assert_eq!(
+            pick_race_backstop(relay_fallback, ns_resolved),
+            "44.230.7.100:23095".parse::<SocketAddr>().unwrap()
+        );
     }
 
     // ── decode_registration_error ──────────────────────────────────

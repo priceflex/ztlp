@@ -54,7 +54,11 @@ use ztlp_proto::updater::SemVer;
 /// Ratcheted 0.35.0 → 0.35.1 in PR <fix/connect-relay-fallback-on-stale-nat>
 /// after the connect path gained relay-forwarding fallback when all direct
 /// candidates fail (NAT'd endpoints with stale srflx ports no longer go dark).
-const MINIMUM_VERSION: &str = "0.35.1";
+/// Ratcheted 0.35.1 → 0.35.2 in PR <fix/ns-phantom-learned-endpoint>: NS no
+/// longer offers phantom :learned (NS-observed control-plane source) endpoints
+/// as standalone dial candidates, and the client races the real relay as the
+/// multi-candidate backstop instead of the dead NS-resolved LAN address.
+const MINIMUM_VERSION: &str = "0.35.2";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

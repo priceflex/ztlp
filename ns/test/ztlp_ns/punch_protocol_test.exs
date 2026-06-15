@@ -61,13 +61,20 @@ defmodule ZtlpNs.PunchProtocolTest do
 
       {:ok, {_ip, _port, response}} = :gen_udp.recv(socket, 0, 2000)
 
-      # Should have 2 endpoints (deduplicated by ip:port)
+      # v0.35.2: the serve path now PREFERS :reported and suppresses :learned
+      # when any :reported endpoint exists (ZtlpNs.Server.response_endpoints/1).
+      # A :learned endpoint is the NS-observed control-plane source — a transient
+      # outbound NAT mapping, not an inbound listener — so offering it as a dial
+      # candidate alongside the real reported address poisoned the operator's
+      # parallel-dial race (KELLYMANCINO-PC, 2026-06-15). With 1 learned + 1
+      # reported pre-populated, the response now carries ONLY the reported one.
+      # (Bilateral PUNCH_NOTIFY coordination still uses the full set.)
       <<0x0A, count::8, addrs::binary>> = response
-      assert count == 2
+      assert count == 1
 
-      # Parse the addresses
+      # Parse the addresses — must be exactly the reported endpoint.
       parsed = parse_addr_list(addrs, count)
-      assert length(parsed) == 2
+      assert parsed == [{{10, 0, 0, 1}, 5000}]
 
       :gen_udp.close(socket)
     end
@@ -348,9 +355,12 @@ defmodule ZtlpNs.PunchProtocolTest do
       <<0x0A, count::8, addrs::binary>> = response
       parsed = parse_addr_list(addrs, count)
 
-      # Expect 3 reported + 1 learned (from target_socket's source) = 4
-      assert count >= 4
-      assert length(parsed) >= 4
+      # v0.35.2: with :reported endpoints present, the serve path suppresses the
+      # :learned (target_socket source) endpoint — see response_endpoints/1 and
+      # the KELLYMANCINO-PC rationale. So the response is exactly the 3 reported
+      # endpoints from the PUNCH_REPORT, NOT 3 reported + 1 learned.
+      assert count == 3
+      assert length(parsed) == 3
 
       assert {{10, 0, 0, 1}, 23_095} in parsed
       assert {{192, 168, 1, 5}, 23_095} in parsed

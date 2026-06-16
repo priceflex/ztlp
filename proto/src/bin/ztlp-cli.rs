@@ -2335,6 +2335,19 @@ fn is_valid_record_type(type_byte: u8) -> bool {
     (1..=7).contains(&type_byte) || (0x10..=0x12).contains(&type_byte)
 }
 
+/// Pad length for unauthenticated NS 0x01 queries.
+///
+/// The NS applies amplification prevention: it caps a 0x01 query response to
+/// `request_size * 8` and sets the truncation flag past that (see
+/// `ns/lib/ztlp_ns/server.ex` `@amplification_threshold`). Stage-2
+/// multi-candidate SVC records (v0.35.0+) can exceed 300 bytes, so a bare
+/// ~26-byte query gets a ~208-byte cap and the fat record is silently
+/// truncated, making the box unreachable by name. The server ignores trailing
+/// query bytes specifically so clients can pad to raise their own cap. 256
+/// bytes => a 2048-byte cap, above any realistic record (32 candidates) while
+/// staying under the UDP MTU and at the server's sanctioned 8x ceiling.
+const NS_QUERY_PAD_BYTES: usize = 256;
+
 /// Perform an NS query for a given record type. Returns the raw CBOR data field if found.
 async fn ns_query_raw(
     name: &str,
@@ -2351,6 +2364,30 @@ async fn ns_query_raw(
     query.extend_from_slice(&name_len.to_be_bytes());
     query.extend_from_slice(name_bytes);
     query.push(record_type);
+
+    // Amplification-prevention padding.
+    //
+    // The NS caps unauthenticated 0x01 query responses to
+    // `request_size * 8` (server.ex @amplification_threshold) and sets the
+    // truncation flag when a record exceeds that. Stage-2 multi-candidate
+    // SVC records (v0.35.0+) can carry a large `addresses` ICE list (LAN +
+    // multiple IPv6 + relay), pushing a record past 300 bytes. A bare query
+    // (~26 bytes for a typical name) yields only a ~208-byte cap, so the fat
+    // SVC record comes back TRUNCATED and `resolve_target` then reports
+    // "no SVC record" even though the record exists — the box is
+    // unreachable by name. (Observed on DEES / adms.trs.ztlp, 2026-06-16:
+    // declared SVC data_len=320, only 177 bytes delivered.)
+    //
+    // The server explicitly ignores trailing bytes after the query
+    // (process_query `_rest::binary`) precisely so clients can pad to raise
+    // their own cap. Pad every query to NS_QUERY_PAD_BYTES so the cap is at
+    // least NS_QUERY_PAD_BYTES * 8 — comfortably above any realistic record
+    // (32 candidates * ~50 bytes + CBOR overhead) while staying well under
+    // the UDP MTU and keeping the amplification factor at the server's
+    // sanctioned 8x ceiling.
+    if query.len() < NS_QUERY_PAD_BYTES {
+        query.resize(NS_QUERY_PAD_BYTES, 0u8);
+    }
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.send_to(&query, ns_addr).await?;
@@ -6223,6 +6260,13 @@ async fn cmd_ns_lookup(
     query.extend_from_slice(&name_len.to_be_bytes());
     query.extend_from_slice(name_bytes);
     query.push(record_type);
+
+    // Pad to raise the NS amplification-prevention cap so fat multi-candidate
+    // SVC records aren't truncated — see NS_QUERY_PAD_BYTES. Keeps `ns lookup`
+    // consistent with the connect resolver (ns_query_raw).
+    if query.len() < NS_QUERY_PAD_BYTES {
+        query.resize(NS_QUERY_PAD_BYTES, 0u8);
+    }
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.send_to(&query, ns_addr).await?;

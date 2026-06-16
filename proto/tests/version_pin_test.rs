@@ -58,7 +58,12 @@ use ztlp_proto::updater::SemVer;
 /// longer offers phantom :learned (NS-observed control-plane source) endpoints
 /// as standalone dial candidates, and the client races the real relay as the
 /// multi-candidate backstop instead of the dead NS-resolved LAN address.
-const MINIMUM_VERSION: &str = "0.35.2";
+/// Ratcheted 0.35.2 → 0.35.3 in PR <fix/ns-query-amplification-truncation>:
+/// the connect/`ns lookup` resolver now pads its NS 0x01 query so the server's
+/// amplification-prevention cap (request_size * 8) can't truncate fat
+/// multi-candidate SVC records (Stage-2 v0.35.0+), which had made boxes with
+/// large `addresses` ICE lists unresolvable by name ("no SVC record").
+const MINIMUM_VERSION: &str = "0.35.3";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

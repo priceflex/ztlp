@@ -80,8 +80,8 @@ defmodule ZtlpNs.ReleaseTest do
       # routine version bump — it only fails on a down-bump below the 0.32.2
       # floor.
       declared = ZtlpNs.MixProject.project()[:version]
-      assert Version.compare(declared, "0.35.1") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.35.1 UDP-0x13-removal + /admin/audit tag"
+      assert Version.compare(declared, "0.35.3") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.35.3 phantom-:learned-suppression + NS-query-padding tag"
     end
   end
 

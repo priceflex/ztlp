@@ -28,7 +28,7 @@ defmodule ZtlpNs.MixProject do
       # /admin/audit endpoint (security: closes unauthenticated UDP admin
       # surface; HTTP twin of removed audit opcodes). Minor bump signals the
       # 0x13 wire-protocol break. Floor ratcheted to 0.35.1 in release_test.exs.
-      version: "0.35.1",
+      version: "0.35.2",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

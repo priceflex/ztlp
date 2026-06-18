@@ -233,11 +233,15 @@ defmodule ZtlpNs.Server do
     # Look up target's known endpoints
     endpoints = EndpointStore.get_endpoints(target_node_id)
 
-    # Send PUNCH_NOTIFY to target if we know where they are
+    # Send PUNCH_NOTIFY to target if we know where they are.
+    # NOTE: this coordination path intentionally uses the FULL endpoint set
+    # (including :learned) — see maybe_send_punch_notify/3. The response filter
+    # below only governs what we OFFER the requester as standalone dial
+    # candidates; bilateral hole punching is unaffected.
     maybe_send_punch_notify(target_node_id, requester_node_id, source)
 
-    # Encode response
-    encode_peer_endpoints_response(endpoints)
+    # Encode response (filtered — see response_endpoints/1)
+    encode_peer_endpoints_response(response_endpoints(endpoints))
   end
 
   # PUNCH_REPORT (0x0C) — client reports its own endpoints (for refreshing)
@@ -878,6 +882,49 @@ defmodule ZtlpNs.Server do
     addrs_bin = encode_addr_list(Enum.take(unique, count))
 
     <<0x0B, requester_node_id::binary-size(16), count::8, addrs_bin::binary>>
+  end
+
+  # Filter the EndpointStore set down to what we OFFER a requester as
+  # standalone dial candidates in a PEER_ENDPOINTS response.
+  #
+  # == Why :learned must not be offered as a dial candidate (v0.35.2)
+  #
+  # `:learned` is the UDP SOURCE address NS observed on a control-plane packet
+  # (PEER_ENDPOINTS / PUNCH_REPORT) the node sent us. For a node behind NAT
+  # that emits those packets from an EPHEMERAL socket (e.g. a relay-routed
+  # gateway whose listener binds 0.0.0.0 and whose NS keepalive uses a throwaway
+  # 0.0.0.0:0 socket), that source is a transient outbound NAT mapping — NOT an
+  # inbound listener. Offered as a dial target it is a phantom: it only ever
+  # times out, and worse, it crowds the genuinely reachable candidates (the
+  # node's :reported listener address and the relay backstop) out of the
+  # operator's bounded parallel-dial race. This is the KELLYMANCINO-PC failure
+  # (2026-06-15): NS served [reported LAN, learned srflx]; both dead; connect
+  # only recovered via the client's post-race relay fallback.
+  #
+  # The fix: prefer :reported (addresses the node DELIBERATELY advertised as
+  # reachable). Only fall back to :learned when there is NO reported endpoint —
+  # i.e. a symmetric-NAT peer for which the observed source is the only hint we
+  # have, and coordinated simultaneous-open (PUNCH_NOTIFY, which still sees the
+  # full set) is the intended path. This keeps hole punching working for the
+  # cases that need srflx while ending the phantom-candidate poisoning for
+  # relay-routed gateways.
+  #
+  # Gated by ZtlpNs.Config.peer_endpoints_prefer_reported?/0 (default true) so
+  # the legacy "return everything" behavior can be restored at runtime if a
+  # deployment depends on it.
+  @spec response_endpoints([{EndpointStore.endpoint_type(), :inet.ip_address(), :inet.port_number()}]) ::
+          [{EndpointStore.endpoint_type(), :inet.ip_address(), :inet.port_number()}]
+  def response_endpoints(endpoints) do
+    if ZtlpNs.Config.peer_endpoints_prefer_reported?() do
+      reported = Enum.filter(endpoints, fn {type, _ip, _port} -> type == :reported end)
+
+      case reported do
+        [] -> endpoints
+        _ -> reported
+      end
+    else
+      endpoints
+    end
   end
 
   # Encode PEER_ENDPOINTS response

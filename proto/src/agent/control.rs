@@ -122,12 +122,13 @@ pub struct SetupStatus {
     /// `~/.ztlp/ca/root.pem` and `intermediate.pem` are real X.509 certs.
     pub ca_initialized: bool,
     /// On Windows, the root CA thumbprint is in `LocalMachine\Root`.
-    /// On other platforms, the system-store check is currently best-effort
-    /// (reported as `None`) — the field is included for shape stability.
+    /// On macOS/Linux, checks the system trust store (Keychain /
+    /// /usr/local/share/ca-certificates). `None` only on unsupported OSes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca_installed_system_trust: Option<bool>,
     /// On Windows, NRPT rule is present for the device's zone.
-    /// On other platforms, reported as `None`.
+    /// On macOS/Linux, checks the active DNS backend's ZTLP config
+    /// (systemd-resolved drop-in / resolv.conf / /etc/resolver).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_configured: Option<bool>,
     /// The agent daemon is running and reachable (we are the daemon, so
@@ -483,7 +484,15 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
         (ca, dns)
     };
     #[cfg(not(target_os = "windows"))]
-    let (ca_installed_system_trust, dns_configured) = (None, None);
+    let (ca_installed_system_trust, dns_configured) = {
+        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        let dns = if !zone.is_empty() {
+            Some(crate::agent::dns_setup::is_dns_configured())
+        } else {
+            Some(false)
+        };
+        (ca, dns)
+    };
 
     let status = SetupStatus {
         identity_present,

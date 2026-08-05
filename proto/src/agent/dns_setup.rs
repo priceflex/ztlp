@@ -84,6 +84,24 @@ pub fn setup_dns(
     }
 }
 
+/// Check whether ZTLP DNS forwarding is currently configured on this system.
+///
+/// Read-only inverse of `setup_dns`: detects the artifacts each backend
+/// writes, so the wizard's "DNS configured" checkmark can light up on
+/// macOS/Linux the same way the Windows NRPT check does. Never mutates.
+pub fn is_dns_configured() -> bool {
+    match detect_backend() {
+        DnsBackend::SystemdResolved => {
+            Path::new(RESOLVED_CONF_DIR).join(RESOLVED_CONF_FILE).exists()
+        }
+        DnsBackend::ResolvConf => fs::read_to_string(RESOLV_CONF)
+            .map(|s| s.contains("ZTLP agent DNS"))
+            .unwrap_or(false),
+        DnsBackend::MacOsResolver => Path::new(MACOS_RESOLVER_DIR).join("ztlp").exists(),
+        DnsBackend::Unknown => false,
+    }
+}
+
 /// Remove ZTLP DNS configuration.
 pub fn teardown_dns() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let backend = detect_backend();

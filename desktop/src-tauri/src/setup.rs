@@ -134,10 +134,41 @@ pub fn setup_install_ca() -> Result<String, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let out = ztlp_cmd()
-            .args(["agent", "install-ca-cert"])
-            .output()
-            .map_err(|e| format!("failed to spawn ztlp: {e}"))?;
+        // Installing the root CA into the system trust store
+        // (/usr/local/share/ca-certificates on Linux, System keychain on
+        // macOS) requires root. We elevate via pkexec/sudo — the wizard's
+        // equivalent of the Windows UAC prompt.
+        //
+        // GOTCHA: under `sudo`/`pkexec` the child process's HOME becomes
+        // root's, so a bare `ztlp agent install-ca-cert` would look for the
+        // cert at /root/.ztlp/ca/root.pem and fail with "root CA cert not
+        // found". We sidestep that by resolving the cert path in the
+        // *current user's* home FIRST, then passing it explicitly via
+        // `--cert` so the elevated process reads the right file regardless
+        // of whose HOME it runs under.
+        let ca_path = setup_status().ca_root_pem_path;
+        if ca_path.is_empty() {
+            return Err("could not resolve CA cert path from daemon (run ca-init first)".into());
+        }
+
+        let elevator = if which("pkexec") {
+            Some("pkexec")
+        } else if which("sudo") {
+            Some("sudo")
+        } else {
+            None
+        };
+
+        let out = match elevator {
+            Some(e) => Command::new(e)
+                .args(["ztlp", "agent", "install-ca-cert", "--cert", &ca_path])
+                .output(),
+            None => ztlp_cmd()
+                .args(["agent", "install-ca-cert", "--cert", &ca_path])
+                .output(),
+        }
+        .map_err(|e| format!("failed to spawn ztlp: {e}"))?;
+
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if out.status.success() {
@@ -167,11 +198,52 @@ pub fn setup_install_dns(zone: String) -> Result<String, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = z; // suppress unused warning
-        Err("DNS setup wizard is Windows-only; the agent handles \
-             system DNS automatically on macOS/Linux"
-            .into())
+        // On macOS/Linux the daemon's dns_setup.rs handles the actual
+        // resolver reconfiguration. It needs root to write into
+        // /etc/systemd/resolved.conf.d or /etc/resolver, so we shell out
+        // via pkexec/sudo (whichever is available) and let the OS prompt
+        // for elevation — the wizard's equivalent of the Windows UAC pop.
+        let elevator = if which("pkexec") {
+            Some("pkexec")
+        } else if which("sudo") {
+            Some("sudo")
+        } else {
+            None
+        };
+
+        let ztlp_bin = if cfg!(target_os = "windows") { "ztlp.exe" } else { "ztlp" };
+        let out = match elevator {
+            Some(e) => Command::new(e)
+                .args([ztlp_bin, "agent", "dns-setup", "--zones", z])
+                .output(),
+            None => ztlp_cmd()
+                .args(["agent", "dns-setup", "--zones", z])
+                .output(),
+        }
+        .map_err(|err| format!("failed to spawn dns-setup: {err}"))?;
+
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        if out.status.success() {
+            Ok(format!("{stdout}\n{stderr}"))
+        } else {
+            Err(format!(
+                "dns-setup failed (exit {}): {stderr}",
+                out.status.code().unwrap_or(-1)
+            ))
+        }
     }
+}
+
+/// Return true if `bin` is found on PATH. Small helper so the DNS wizard
+/// can pick pkexec (GUI-friendly) over sudo (terminal-only) when elevating.
+#[cfg(not(target_os = "windows"))]
+fn which(bin: &str) -> bool {
+    Command::new("which")
+        .arg(bin)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Smoke-test that a ZTLP hostname loads over HTTPS with the installed CA.

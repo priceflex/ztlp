@@ -12721,6 +12721,11 @@ fn format_duration(secs: u64) -> String {
 
 #[tokio::main]
 async fn main() {
+    // Install ring as the process-level rustls CryptoProvider before any TLS
+    // code runs. Both ring and aws-lc-rs are in the dep tree, so rustls cannot
+    // auto-select one — without this, agent/local-TLS paths panic at runtime.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     // Initialize tracing based on verbosity

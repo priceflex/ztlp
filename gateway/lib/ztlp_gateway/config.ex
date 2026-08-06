@@ -1,4 +1,6 @@
 defmodule ZtlpGateway.Config do
+  require Logger
+
   @moduledoc """
   Runtime configuration for the ZTLP Gateway.
 
@@ -59,12 +61,17 @@ defmodule ZtlpGateway.Config do
         env
         |> String.split(",", trim: true)
         |> Enum.map(fn entry ->
-          case String.split(entry, ":", parts: 3) do
-            [name, host_segment, port] ->
-              # Optional protocol prefix on the host:
-              #   "127.0.0.1"        → :tcp (default, backward-compatible)
-              #   "tcp/127.0.0.1"    → :tcp (explicit)
-              #   "udp/8.8.8.8"      → :udp (ZtlpGateway.UdpBackend, Model A)
+          # Service names may themselves contain colons (e.g. "tcp:443"),
+          # so we can't naively split on the first two colons. Instead,
+          # split fully and take the *last* segment as the port and the
+          # *second-to-last* as the host (with optional proto/ prefix);
+          # everything before that is rejoined as the name.
+          parts = String.split(entry, ":")
+
+          case parts do
+            [_name_part | _] when length(parts) >= 3 ->
+              {name_parts, [host_segment, port]} = Enum.split(parts, length(parts) - 2)
+              name = Enum.join(name_parts, ":")
               {protocol, host} = parse_host_protocol(host_segment)
 
               %{
@@ -138,8 +145,53 @@ defmodule ZtlpGateway.Config do
   def get(:ns_query_timeout_ms),
     do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
 
-  def get(:trust_anchors),
-    do: Application.get_env(:ztlp_gateway, :trust_anchors, %{})
+  @doc """
+  Trust anchors for verifying ZTLP-NS record signatures.
+
+  Returns a map of `label => 32-byte public key binary`. A gateway needs
+  at least one trust anchor configured (typically the zone's signing
+  public key) before it will accept *any* record from NS — this is a
+  deliberate fail-closed default to prevent spoofing.
+
+  ## Environment Variable
+
+  `ZTLP_GATEWAY_TRUST_ANCHORS` — comma-separated `label:hexpubkey` entries.
+  Each pubkey must be a 64-char hex string (32 raw bytes). Malformed or
+  wrong-length entries are silently skipped (with a startup log warning),
+  not fatal — this favors "gateway starts but attestation degrades to
+  hex-only identities" over "gateway refuses to start".
+
+  Example: `ZTLP_GATEWAY_TRUST_ANCHORS=defcon.ztlp:ee53416947900e36020d83f9282f0a9a6540d5ae661ec48476b2906e27dc7d75`
+  """
+  def get(:trust_anchors) do
+    case System.get_env("ZTLP_GATEWAY_TRUST_ANCHORS") do
+      nil ->
+        Application.get_env(:ztlp_gateway, :trust_anchors, %{})
+
+      "" ->
+        Application.get_env(:ztlp_gateway, :trust_anchors, %{})
+
+      env ->
+        env
+        |> String.split(",", trim: true)
+        |> Enum.reduce(%{}, fn entry, acc ->
+          case String.split(entry, ":", parts: 2) do
+            [label, hex_key] ->
+              case Base.decode16(hex_key, case: :mixed) do
+                {:ok, key} when byte_size(key) == 32 ->
+                  Map.put(acc, label, key)
+
+                _ ->
+                  Logger.warning("[Config] ZTLP_GATEWAY_TRUST_ANCHORS: invalid pubkey for #{label}, skipping")
+                  acc
+              end
+
+            _ ->
+              acc
+          end
+        end)
+    end
+  end
 
   # ── TLS Configuration ───────────────────────────────────────────
 

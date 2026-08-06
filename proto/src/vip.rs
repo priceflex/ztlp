@@ -816,7 +816,7 @@ fn build_tls_acceptor(service_name: &str) -> Result<TlsAcceptor, String> {
         .map_err(|e| format!("failed to parse key {:?}: {}", key_path, e))?
         .ok_or_else(|| format!("no private key found in {:?}", key_path))?;
 
-    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = ServerConfig::builder()
         .with_no_client_auth()

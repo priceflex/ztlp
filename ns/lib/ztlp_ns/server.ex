@@ -762,9 +762,33 @@ defmodule ZtlpNs.Server do
     end
   end
 
+  # The registration signing key is the Ed25519 keypair NS uses to sign
+  # every record it stores (see Record.sign/2 call sites above). Gateways
+  # verify these signatures against a configured trust anchor
+  # (ZTLP_GATEWAY_TRUST_ANCHORS) before accepting ANY NS record — so this
+  # key MUST be stable across restarts, or every gateway's trust anchor
+  # goes stale the moment NS restarts and picks a new random key.
+  #
+  # NOTE: the actual persistence logic lives in ensure_registration_key/0
+  # above, called once from init/1 before any registrations can arrive.
+  # It already handles the file-based persist/load cycle via
+  # ZtlpNs.ComponentAuth + ZtlpNs.Config.identity_key_file/0 — see that
+  # function's default-path fix in Config.identity_key_file/0 (defaults to
+  # <ca_data_dir>/registration_signing.key instead of nil/ephemeral, so a
+  # fresh deployment persists a stable key without any extra env var).
+  #
+  # This function is just a cache read — by the time any registration
+  # handler calls it, ensure_registration_key/0 has already populated
+  # Application.env, so the `nil` branch below should never actually run
+  # in practice. It's kept only as a defensive fallback.
   defp get_registration_key do
     case Application.get_env(:ztlp_ns, :registration_private_key) do
       nil ->
+        Logger.warning(
+          "[NS] registration_private_key was not set by ensure_registration_key/0 " <>
+            "at startup — generating an ephemeral fallback key. This should not " <>
+            "happen in normal operation; check NS startup logs for errors."
+        )
         {_pub, priv} = Crypto.generate_keypair()
         Application.put_env(:ztlp_ns, :registration_private_key, priv)
         priv

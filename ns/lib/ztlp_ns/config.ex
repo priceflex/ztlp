@@ -83,12 +83,25 @@ defmodule ZtlpNs.Config do
   """
   @spec ca_data_dir() :: String.t()
   def ca_data_dir do
-    case System.get_env("ZTLP_CA_DATA_DIR") do
+    # ZTLP_CA_DIR takes priority over ZTLP_CA_DATA_DIR. This matches
+    # cert_authority.ex's default_ca_dir/0 priority order — the two used
+    # to disagree (this function checked ZTLP_CA_DATA_DIR first), which
+    # meant CertAuthority and the NS registration-signing-key persistence
+    # path (server.ex's get_registration_key/0, which calls this function)
+    # could resolve to two DIFFERENT directories depending on which env
+    # vars were set, silently splitting CA state across two locations.
+    # Both now agree: ZTLP_CA_DIR wins if set, else ZTLP_CA_DATA_DIR, else
+    # the Application-env override, else ~/.ztlp/ca.
+    case System.get_env("ZTLP_CA_DIR") do
       nil ->
-        case Application.get_env(:ztlp_ns, :ca_data_dir) do
+        case System.get_env("ZTLP_CA_DATA_DIR") do
           nil ->
-            home = System.user_home!()
-            Path.join([home, ".ztlp", "ca"])
+            case Application.get_env(:ztlp_ns, :ca_data_dir) do
+              nil ->
+                home = System.user_home!()
+                Path.join([home, ".ztlp", "ca"])
+              dir -> dir
+            end
           dir -> dir
         end
       dir -> dir
@@ -184,11 +197,29 @@ defmodule ZtlpNs.Config do
     end
   end
 
-  @doc "Path for the NS identity signing key file."
   @spec identity_key_file() :: String.t() | nil
+  @doc """
+  Path to the file backing NS's registration signing key.
+
+  This is the Ed25519 keypair NS uses to sign every record it stores
+  (see server.ex's ensure_registration_key/0 + Record.sign/2 call sites).
+  Gateways verify these signatures against a configured trust anchor
+  before accepting ANY record from NS — so this key MUST be stable
+  across restarts, or every gateway's trust anchor goes stale the moment
+  NS restarts and would otherwise pick a fresh random key each boot.
+
+  Override with `ZTLP_NS_IDENTITY_KEY_FILE`. Defaults to
+  `<ca_data_dir>/registration_signing.key` — i.e. the same durable
+  volume already used for CA data, so a fresh deployment persists a
+  stable key without requiring any extra env var or operator setup.
+  """
   def identity_key_file do
     case System.get_env("ZTLP_NS_IDENTITY_KEY_FILE") do
-      nil -> Application.get_env(:ztlp_ns, :identity_key_file)
+      nil ->
+        case Application.get_env(:ztlp_ns, :identity_key_file) do
+          nil -> Path.join(ca_data_dir(), "registration_signing.key")
+          path -> path
+        end
       path -> path
     end
   end

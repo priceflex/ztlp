@@ -610,11 +610,15 @@ defmodule ZtlpNs.Server do
   # 0x05 pubkey queries are fully exempt — they require knowledge of a
   # valid 32-byte key and cannot be used for reflection by random scanners.
 
-  @amplification_threshold 8
+  # Amplification-truncation threshold is now sourced from
+  # ZtlpNs.Config.amplification_threshold/0 (configurable via
+  # ZTLP_NS_AMPLIFICATION_THRESHOLD) instead of this compile-time constant.
 
   defp maybe_truncate_reply(<<0x01, _::binary>>, reply, request_size) do
-    if byte_size(reply) > request_size * @amplification_threshold do
-      truncate_reply(reply, request_size * @amplification_threshold)
+    threshold = ZtlpNs.Config.amplification_threshold()
+
+    if byte_size(reply) > request_size * threshold do
+      truncate_reply(reply, request_size * threshold)
     else
       reply
     end

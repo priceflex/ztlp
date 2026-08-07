@@ -42,6 +42,29 @@ defmodule ZtlpNs.Config do
   end
 
   @doc """
+  Amplification-truncation multiplier for UDP responses (anti-reflection
+  defense — see server.ex's maybe_truncate_reply/3).
+
+  A response is truncated once it exceeds `request_size * this value`
+  bytes. Default 8 is deliberately generous for typical KEY/SVC lookups,
+  but records with larger CBOR payloads (e.g. USER records carrying
+  role+email+public_key, or GROUP records with many members) queried
+  with a short name can legitimately exceed an 8x multiplier and get
+  truncated even though nothing is actually being abused — the client
+  then fails to parse the truncated wire format. Override via
+  ZTLP_NS_AMPLIFICATION_THRESHOLD if your record payloads are larger
+  than KEY records typically are.
+  """
+  @spec amplification_threshold() :: pos_integer()
+  def amplification_threshold do
+    case System.get_env("ZTLP_NS_AMPLIFICATION_THRESHOLD") do
+      nil -> Application.get_env(:ztlp_ns, :amplification_threshold, 8)
+      n -> String.to_integer(n)
+    end
+  end
+
+
+  @doc """
   Mnesia storage mode for the record store.
 
   - `:disc_copies` (default) — RAM + disk persistence, survives restarts

@@ -476,7 +476,21 @@ defmodule ZtlpGateway.NsClient do
 
     # Build a 0x01 query: <<0x01, name_len::16, name::binary, type_byte::8>>
     name_len = byte_size(name)
-    query = <<0x01, name_len::16, name::binary, type_byte::8>>
+    base_query = <<0x01, name_len::16, name::binary, type_byte::8>>
+
+    # Pad the query so NS's anti-amplification truncation (see
+    # ns/lib/ztlp_ns/server.ex maybe_truncate_reply/3, 8x threshold by
+    # default) doesn't legitimately kick in and truncate the response.
+    # This matters for record types with larger CBOR payloads than a
+    # bare KEY record -- USER (role+email+public_key) and GROUP
+    # (member lists) in particular. Short queries for those names would
+    # otherwise get silently truncated and fail to decode
+    # (:invalid_wire_format), even though nothing is actually being
+    # abused. NS's own test suite documents this exact padding pattern
+    # as what well-behaved clients are expected to do
+    # (ns/test/ztlp_ns/security_hardening_test.exs, "padded query for
+    # existing record gets full response").
+    query = pad_query(base_query)
 
     :gen_udp.send(socket, host, port, query)
 
@@ -490,6 +504,18 @@ defmodule ZtlpGateway.NsClient do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Pad a query to a minimum size so NS's per-query amplification
+  # multiplier can't legitimately trigger truncation for record types
+  # with payloads larger than a typical KEY record. 512 bytes covers
+  # USER/GROUP records comfortably under the default 8x threshold
+  # without meaningfully increasing request bandwidth.
+  @min_query_size 512
+  defp pad_query(query) when byte_size(query) >= @min_query_size, do: query
+  defp pad_query(query) do
+    padding = :binary.copy(<<0>>, @min_query_size - byte_size(query))
+    query <> padding
   end
 
   # ── Private: Pubkey Query Execution (0x05) ─────────────────────────

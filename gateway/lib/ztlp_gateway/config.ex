@@ -27,8 +27,12 @@ defmodule ZtlpGateway.Config do
   - `ZTLP_GATEWAY_BACKENDS` — comma-separated `name:host:port` entries
     Example: `metrics:127.0.0.1:9103,api:10.0.0.1:8080`
   - `ZTLP_GATEWAY_POLICIES` — comma-separated `identity:service` entries
-    Use `*` for wildcard (any authenticated client).
-    Example: `*:metrics,admin.zone:api`
+    Use `*` for wildcard (any authenticated client). Identity may be an
+    exact name, `role:<role>` (matches any user with that role), or
+    `group:<group_name>` (matches any member of that group) — both
+    prefixes are parsed correctly even when the service name itself
+    contains a colon (e.g. `tcp:443`).
+    Example: `*:metrics,admin.zone:api,role:admin:admin-panel,group:techs@zone.ztlp:tcp:443`
   - `ZTLP_GATEWAY_SESSION_TIMEOUT_MS` — idle timeout per session
   - `ZTLP_GATEWAY_MAX_SESSIONS` — max concurrent sessions
   - `ZTLP_GATEWAY_POOL_SIZE` — max idle connections per backend pool (default 8)
@@ -95,16 +99,23 @@ defmodule ZtlpGateway.Config do
         Application.get_env(:ztlp_gateway, :policies, [])
 
       env ->
-        # Parse entries and group by service
+        # Parse entries and group by service. Format is "identity:service",
+        # but BOTH sides can legitimately contain colons: identity patterns
+        # like "role:admin" or "group:techs@zone.ztlp", and service names
+        # like "tcp:443". A naive first-colon or last-colon split breaks
+        # one side or the other (e.g. "role:admin:admin-panel" naively
+        # split on the first colon gives identity="role",
+        # service="admin:admin-panel" -- wrong on both counts).
+        #
+        # Fix: explicitly recognize the "role:" and "group:" identity
+        # prefixes and consume exactly two colon-delimited segments for
+        # those, then treat everything else as the service (which may
+        # itself contain colons, e.g. "tcp:443"). Plain identities
+        # (exact names, "*") just split on the first colon as before.
         entries =
           env
           |> String.split(",", trim: true)
-          |> Enum.map(fn entry ->
-            case String.split(entry, ":", parts: 2) do
-              [identity, service] -> {service, identity}
-              _ -> nil
-            end
-          end)
+          |> Enum.map(&parse_policy_entry/1)
           |> Enum.reject(&is_nil/1)
 
         # Group by service and build policy rules
@@ -120,6 +131,31 @@ defmodule ZtlpGateway.Config do
 
           %{service: service, allow: allow}
         end)
+    end
+  end
+
+  # Parse a single "identity:service" policy entry, correctly handling
+  # colon-containing identity patterns (role:X, group:X) and
+  # colon-containing service names (tcp:443) at the same time.
+  @spec parse_policy_entry(String.t()) :: {String.t(), String.t()} | nil
+  defp parse_policy_entry("role:" <> _ = entry) do
+    case String.split(entry, ":", parts: 3) do
+      ["role", role, service] -> {service, "role:" <> role}
+      _ -> nil
+    end
+  end
+
+  defp parse_policy_entry("group:" <> _ = entry) do
+    case String.split(entry, ":", parts: 3) do
+      ["group", group, service] -> {service, "group:" <> group}
+      _ -> nil
+    end
+  end
+
+  defp parse_policy_entry(entry) do
+    case String.split(entry, ":", parts: 2) do
+      [identity, service] -> {service, identity}
+      _ -> nil
     end
   end
 

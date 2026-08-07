@@ -1,8 +1,22 @@
 # DEF CON Demo Scripts
 
-Two scripts to run live on the Kali box (`10.3.2.28`) alongside the browser
+Three scripts to run live on the Kali box (`10.3.2.28`) alongside the browser
 tab showing `https://demo-dashboard.defcon.ztlp/`, for proving the demo is
 real and not a static mockup.
+
+## `mint-user-and-show-policy.sh`
+
+Mints a real, signed USER identity in the ZTLP namespace for "crash"
+(role=admin), mints a second standard-role user ("alice") for contrast,
+queries both back from NS live to prove they're real records, then shows
+the gateway's policy engine granting/denying access to an admin-only
+service based purely on each user's role — same policy engine, same code
+path, different outcome driven by data (the role field in each signed NS
+record), not special-cased per-user logic.
+
+```bash
+./mint-user-and-show-policy.sh
+```
 
 ## `prove-not-docker-port-forwarding.sh`
 
@@ -44,8 +58,11 @@ browser's own 5-second auto-refresh shows the same audit log growing live.
 ## Prerequisites
 
 Both assume the full defcon stack is already up (`docker compose up -d` in
-`~/defcon`) and the ZTLP agent is running (`ztlp agent status`). Both were
-verified working end-to-end against the live Kali stack on 2026-08-06 —
-see `docs/defcon-2026-kali-buildout-notes.md` for the underlying fixes that
+`~/defcon`) and the ZTLP agent is running (`ztlp agent status`). The
+mint-user script additionally requires `ZTLP_GATEWAY_POLICIES` to include
+a `role:admin:<service>` rule (already set for the `admin-panel` service
+name in `~/defcon/docker-compose.yml`). All three were verified working
+end-to-end against the live Kali stack on 2026-08-06/07 — see
+`docs/defcon-2026-kali-buildout-notes.md` for the underlying fixes that
 made this possible (rustls provider panic, gateway routing, NS identity
-persistence).
+persistence, USER/GROUP record truncation, role:/group: policy parsing).

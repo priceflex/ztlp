@@ -58,3 +58,4 @@ tenants/*/root_key.json
 
 # Local docker build cache for cargo (root-owned, never commit)
 .docker-cargo/
+.cargo/

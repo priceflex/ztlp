@@ -10,6 +10,7 @@ defmodule ZtlpNs.MetricsServer do
   require Logger
 
   @default_port 9103
+  @default_bind "127.0.0.1"
 
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -30,7 +31,8 @@ defmodule ZtlpNs.MetricsServer do
 
     if enabled do
       port = port_override || metrics_port()
-      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128]) do
+      bind = metrics_bind()
+      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128, ip: to_charlist(bind)]) do
         {:ok, ls} ->
           {:ok, actual_port} = :inet.port(ls)
           Logger.info("[metrics] NS Prometheus endpoint on port #{actual_port}")
@@ -771,6 +773,13 @@ defmodule ZtlpNs.MetricsServer do
     case System.get_env("ZTLP_NS_METRICS_PORT") do
       nil -> Application.get_env(:ztlp_ns, :metrics_port, @default_port)
       port -> String.to_integer(port)
+    end
+  end
+
+  defp metrics_bind do
+    case System.get_env("ZTLP_NS_METRICS_BIND") do
+      nil -> Application.get_env(:ztlp_ns, :metrics_bind, @default_bind)
+      bind -> bind
     end
   end
 end

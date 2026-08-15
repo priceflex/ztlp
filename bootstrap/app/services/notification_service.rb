@@ -4,6 +4,8 @@ require "net/http"
 require "net/smtp"
 require "json"
 require "uri"
+require "resolv"
+require "ipaddr"
 
 class NotificationService
   EVENTS = %w[
@@ -34,6 +36,69 @@ class NotificationService
   end
 
   private
+
+  # --- SSRF protection for outbound HTTP ---
+
+  # Resolve a URL to concrete IPs and reject anything that maps to
+  # localhost, private ranges, link-local, multicast, or the 0.0.0.0/
+  # :: "all interfaces" addresses.  Returns nil on success; raises
+  # SecurityError on SSRF-adjacent targets.
+  #
+  # Webhook destinations are customer-configured (NotificationChannel
+  # config is mutable per-tenant), so this intentionally does NOT use a
+  # fixed domain allowlist -- any customer's arbitrary webhook receiver
+  # is a legitimate target as long as it doesn't resolve to an internal
+  # address.
+  def self.validate_webhook_url!(url)
+    uri = URI.parse(url)
+
+    # Scheme must be http(s) — no file://, gopher://, etc. Checked BEFORE
+    # the host-blank check below: a URL like file:///etc/passwd has a
+    # nil host but a dangerous scheme, so this must run first or it's
+    # bypassed entirely.
+    unless %w[http https].include?(uri.scheme&.downcase)
+      raise SecurityError, "Webhook URL scheme '#{uri.scheme}' is not allowed (only http/https)"
+    end
+
+    raise SecurityError, "Webhook URL has no host" if uri.host.nil? || uri.host.empty?
+
+    # Fast path: if the literal host is a dotted-decimal or IPv6 address,
+    # reject immediately — we do not accept bare IPs.
+    if Resolv::IPv4::Regex.match?(uri.host) || Resolv::IPv6::Regex.match?(uri.host)
+      raise SecurityError, "Webhook URL must use a domain name, not an IP address"
+    end
+
+    # DNS resolution — every A/AAAA record must be public.
+    addrs = Resolv.getaddresses(uri.host)
+    raise SecurityError, "Webhook host '#{uri.host}' did not resolve to any address" if addrs.empty?
+
+    addrs.each do |ip|
+      addr = IPAddr.new(ip)
+      if addr.loopback? || addr.private? || addr.link_local? || unspecified?(addr) || multicast?(addr)
+        raise SecurityError, "Webhook URL resolves to a private/internal address (#{ip})"
+      end
+    end
+  rescue URI::InvalidURIError => e
+    raise SecurityError, "Invalid webhook URL: #{e.message}"
+  rescue Resolv::ResolvError
+    raise SecurityError, "Webhook host '#{uri&.host}' could not be resolved"
+  end
+
+  # IPAddr in this Ruby version has no #multicast?/#zero? — check the
+  # ranges directly.
+  # IPv4 multicast: 224.0.0.0/4. IPv6 multicast: ff00::/8.
+  def self.multicast?(addr)
+    if addr.ipv4?
+      IPAddr.new("224.0.0.0/4").include?(addr)
+    else
+      IPAddr.new("ff00::/8").include?(addr)
+    end
+  end
+
+  # "All interfaces" / unspecified address: 0.0.0.0 or ::
+  def self.unspecified?(addr)
+    addr == IPAddr.new(addr.ipv4? ? "0.0.0.0" : "::")
+  end
 
   def self.find_channels(event_type, network: nil, severity: "info")
     channels = NotificationChannel.enabled
@@ -127,6 +192,8 @@ class NotificationService
     url = config["url"]
     raise "No webhook URL configured" if url.blank?
 
+    validate_webhook_url!(url)
+
     method = (config["method"] || "POST").upcase
     headers = config["headers"] || { "Content-Type" => "application/json" }
 
@@ -165,6 +232,8 @@ class NotificationService
     config = channel.parsed_config
     webhook_url = config["webhook_url"]
     raise "No Slack webhook URL configured" if webhook_url.blank?
+
+    validate_webhook_url!(webhook_url)
 
     payload = {
       text: subject,

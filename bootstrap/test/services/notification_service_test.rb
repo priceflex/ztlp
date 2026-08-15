@@ -136,6 +136,8 @@ class NotificationServiceTest < ActiveSupport::TestCase
     channel = notification_channels(:webhook_channel)
     log = channel.notification_logs.create!(event_type: "test", subject: "Test", body: "Body")
 
+    Resolv.stubs(:getaddresses).returns(["93.184.216.34"])
+
     response = stub(is_a?: true)
     response.stubs(:is_a?).with(Net::HTTPSuccess).returns(true)
 
@@ -150,6 +152,8 @@ class NotificationServiceTest < ActiveSupport::TestCase
   test "deliver_webhook raises on non-success response" do
     channel = notification_channels(:webhook_channel)
     log = channel.notification_logs.create!(event_type: "test", subject: "Test", body: "Body")
+
+    Resolv.stubs(:getaddresses).returns(["93.184.216.34"])
 
     response = stub(code: "500", body: "Internal Server Error")
     response.stubs(:is_a?).returns(false)
@@ -167,6 +171,8 @@ class NotificationServiceTest < ActiveSupport::TestCase
   test "deliver_slack posts to webhook URL" do
     channel = notification_channels(:slack_channel)
     log = channel.notification_logs.create!(event_type: "test", subject: "Test", body: "Body")
+
+    Resolv.stubs(:getaddresses).returns(["93.184.216.34"])
 
     response = stub(is_a?: true)
     response.stubs(:is_a?).with(Net::HTTPSuccess).returns(true)
@@ -216,6 +222,8 @@ class NotificationServiceTest < ActiveSupport::TestCase
 
   test "test_channel sends a test notification" do
     channel = notification_channels(:slack_channel)
+
+    Resolv.stubs(:getaddresses).returns(["93.184.216.34"])
 
     response = stub(is_a?: true)
     response.stubs(:is_a?).with(Net::HTTPSuccess).returns(true)

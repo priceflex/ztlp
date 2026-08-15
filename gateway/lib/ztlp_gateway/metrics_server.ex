@@ -10,6 +10,7 @@ defmodule ZtlpGateway.MetricsServer do
   require Logger
 
   @default_port 9102
+  @default_bind "127.0.0.1"
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -17,7 +18,8 @@ defmodule ZtlpGateway.MetricsServer do
   def init(_opts) do
     if metrics_enabled?() do
       port = metrics_port()
-      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128]) do
+      bind = metrics_bind()
+      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128, ip: to_charlist(bind)]) do
         {:ok, listen_socket} ->
           {:ok, actual_port} = :inet.port(listen_socket)
           Logger.info("[metrics] Gateway Prometheus endpoint on port #{actual_port}")
@@ -261,6 +263,13 @@ defmodule ZtlpGateway.MetricsServer do
 
   defp metrics_port do
     Application.get_env(:ztlp_gateway, :metrics_port, @default_port)
+  end
+
+  defp metrics_bind do
+    case System.get_env("ZTLP_GATEWAY_METRICS_BIND") do
+      nil -> Application.get_env(:ztlp_gateway, :metrics_bind, @default_bind)
+      bind -> bind
+    end
   end
 
   defp get_uptime do

@@ -156,7 +156,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
       services =
         all_connections
-        |> Enum.reduce(%{}, fn {_conn_id, _pid, svc_name, _backend_addr}, acc ->
+        |> Enum.reduce(%{}, fn {{_, _}, _pid, svc_name, _backend_addr}, acc ->
           Map.update(acc, svc_name, 1, fn count -> count + 1 end)
         end)
         |> Enum.to_list()
@@ -176,19 +176,23 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
   @doc """
   Register a VIP connection for tracking.
+
+  The ETS key is `{session_id, connection_id}` to prevent conn_id-only
+  collisions across sessions.  An attacker with a different session cannot
+  hijack another session's connection by guessing or crafting a conn_id.
   """
-  @spec register_connection(non_neg_integer(), pid(), String.t(), tuple()) :: :ok
-  def register_connection(connection_id, pid, service_name, backend_addr) do
-    :ets.insert(:ztlp_vip_connections, {connection_id, pid, service_name, backend_addr})
+  @spec register_connection(binary(), non_neg_integer(), pid(), String.t(), tuple()) :: :ok
+  def register_connection(session_id, connection_id, pid, service_name, backend_addr) do
+    :ets.insert(:ztlp_vip_connections, {{session_id, connection_id}, pid, service_name, backend_addr})
     :ok
   end
 
   @doc """
   Unregister a VIP connection.
   """
-  @spec unregister_connection(non_neg_integer()) :: :ok
-  def unregister_connection(connection_id) do
-    :ets.delete(:ztlp_vip_connections, connection_id)
+  @spec unregister_connection(binary(), non_neg_integer()) :: :ok
+  def unregister_connection(session_id, connection_id) do
+    :ets.delete(:ztlp_vip_connections, {session_id, connection_id})
     :ok
   end
 
@@ -203,7 +207,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
       Logger.info("[VIP] VIP TCP termination enabled (TLS=#{tls_enabled})")
     end
 
-    # ETS table: connection_id → {pid, service_name, backend_addr}
+    # ETS table: {session_id, connection_id} → {pid, service_name, backend_addr}
     ets = :ets.new(:ztlp_vip_connections, [:named_table, :set, :public, write_concurrency: true])
 
     {:ok,
@@ -321,6 +325,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
   defp route_connection(frame, service_name, parsed, sender, udp_socket, session_key) do
     conn_id = frame.connection_id
+    session_id = parsed.session_id
     tls_enabled = tls_enabled?()
 
     # Look up backend address
@@ -334,7 +339,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
           case SessionSupervisor.start_session(
                  connection_id: conn_id,
-                 session_id: parsed.session_id,
+                 session_id: session_id,
                  client_addr: sender,
                  backend_addr: backend_addr,
                  service_name: service_name,
@@ -343,7 +348,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
                  tls_enabled: tls_enabled
                ) do
             {:ok, pid} ->
-              register_connection(conn_id, pid, service_name, backend_addr)
+              register_connection(session_id, conn_id, pid, service_name, backend_addr)
 
               # Send the VIP connection its initial SYN data
               send(pid, {:client_data, frame})
@@ -358,8 +363,9 @@ defmodule ZtlpRelay.VipTcpTerminator do
           end
         else
           # Existing connection → find the VipConnection process
-          case :ets.match(:ztlp_vip_connections, {conn_id, :"$1", :_, :_}) do
-            [[pid]] when is_pid(pid) ->
+          # Must match on {session_id, conn_id} to prevent cross-session hijack
+          case :ets.lookup(:ztlp_vip_connections, {session_id, conn_id}) do
+            [{{_, _}, pid, _, _}] when is_pid(pid) ->
               # Dispatch data to the connection process
               send(pid, {:client_data, frame})
               :vip_handled

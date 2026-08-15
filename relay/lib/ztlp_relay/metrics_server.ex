@@ -20,6 +20,7 @@ defmodule ZtlpRelay.MetricsServer do
   require Logger
 
   @default_port 9101
+  @default_bind "127.0.0.1"
 
   # ── Client API ─────────────────────────────────────────────────────
 
@@ -33,12 +34,14 @@ defmodule ZtlpRelay.MetricsServer do
   def init(_opts) do
     if metrics_enabled?() do
       port = metrics_port()
+      bind = metrics_bind()
       case :gen_tcp.listen(port, [
         :binary,
         packet: :http_bin,
         active: false,
         reuseaddr: true,
-        backlog: 128
+        backlog: 128,
+        ip: to_charlist(bind)
       ]) do
         {:ok, listen_socket} ->
           {:ok, actual_port} = :inet.port(listen_socket)
@@ -325,6 +328,13 @@ defmodule ZtlpRelay.MetricsServer do
     case System.get_env("ZTLP_RELAY_METRICS_PORT") do
       nil -> Application.get_env(:ztlp_relay, :metrics_port, @default_port)
       port -> String.to_integer(port)
+    end
+  end
+
+  defp metrics_bind do
+    case System.get_env("ZTLP_RELAY_METRICS_BIND") do
+      nil -> Application.get_env(:ztlp_relay, :metrics_bind, @default_bind)
+      bind -> bind
     end
   end
 end

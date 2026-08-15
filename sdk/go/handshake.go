@@ -201,30 +201,33 @@ func PerformHandshake(initiator, responder *Identity) (*HandshakeResult, error) 
 		return nil, err
 	}
 
-	// Message 1: Initiator → Responder (ephemeral key)
-	msg1, err := initCtx.WriteMessage(nil)
+	// Message 1: Initiator → Responder (ephemeral key + NodeID as payload)
+	msg1, err := initCtx.WriteMessage(initiator.NodeID[:])
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake msg1: %w", err)
 	}
-	if _, err := respCtx.ReadMessage(msg1); err != nil {
+	_, err = respCtx.ReadMessage(msg1)
+	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake read msg1: %w", err)
 	}
 
-	// Message 2: Responder → Initiator (ephemeral + static + identity)
-	msg2, err := respCtx.WriteMessage(nil)
+	// Message 2: Responder → Initiator (ephemeral + static + identity + NodeID as payload)
+	msg2, err := respCtx.WriteMessage(responder.NodeID[:])
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake msg2: %w", err)
 	}
-	if _, err := initCtx.ReadMessage(msg2); err != nil {
+	_, err = initCtx.ReadMessage(msg2)
+	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake read msg2: %w", err)
 	}
 
-	// Message 3: Initiator → Responder (static + identity)
-	msg3, err := initCtx.WriteMessage(nil)
+	// Message 3: Initiator → Responder (static + identity + NodeID)
+	msg3, err := initCtx.WriteMessage(initiator.NodeID[:])
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake msg3: %w", err)
 	}
-	if _, err := respCtx.ReadMessage(msg3); err != nil {
+	_, err = respCtx.ReadMessage(msg3)
+	if err != nil {
 		return nil, fmt.Errorf("ztlp: handshake read msg3: %w", err)
 	}
 

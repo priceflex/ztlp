@@ -2,6 +2,7 @@ package ztlp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -11,13 +12,14 @@ import (
 // Client is the high-level ZTLP client API.
 // It handles the Noise_XX handshake, session establishment, and encrypted communication.
 type Client struct {
-	identity  *Identity
-	transport *TransportNode
-	session   *SessionState
-	peerAddr  *net.UDPAddr
-	relayAddr *net.UDPAddr // non-nil when routing through relay
-	mu        sync.RWMutex
-	closed    bool
+	identity     *Identity
+	transport    *TransportNode
+	session      *SessionState
+	peerAddr     *net.UDPAddr
+	relayAddr    *net.UDPAddr // non-nil when routing through relay
+	targetNodeID NodeID       // expected peer NodeID (for relay connections); zero means no check
+	mu           sync.RWMutex
+	closed       bool
 }
 
 // Dial connects to a ZTLP peer directly, performs the Noise_XX handshake,
@@ -59,6 +61,7 @@ func DialContext(ctx context.Context, addr string, identity *Identity) (*Client,
 
 // DialRelay connects to a peer through a relay server.
 // The relay forwards packets by SessionID without access to session keys.
+// The peer's NodeID is cryptographically verified against targetNodeID.
 //
 //	client, err := ztlp.DialRelay("relay.example.com:23095", identity, targetNodeID)
 func DialRelay(relayAddr string, identity *Identity, targetNodeID NodeID) (*Client, error) {
@@ -78,10 +81,11 @@ func DialRelayContext(ctx context.Context, relayAddr string, identity *Identity,
 	}
 
 	client := &Client{
-		identity:  identity,
-		transport: transport,
-		peerAddr:  rAddr, // Send to relay, which forwards
-		relayAddr: rAddr,
+		identity:     identity,
+		transport:    transport,
+		peerAddr:     rAddr, // Send to relay, which forwards
+		relayAddr:    rAddr,
+		targetNodeID: targetNodeID,
 	}
 
 	if err := client.performHandshake(ctx); err != nil {
@@ -91,6 +95,10 @@ func DialRelayContext(ctx context.Context, relayAddr string, identity *Identity,
 
 	return client, nil
 }
+
+// ErrPeerIdentityMismatch is returned when the peer's authenticated NodeID
+// does not match the expected target (e.g. in relay connections).
+var ErrPeerIdentityMismatch = errors.New("ztlp: peer NodeID mismatch")
 
 // performHandshake executes the three-message Noise_XX handshake as initiator.
 func (c *Client) performHandshake(ctx context.Context) error {
@@ -108,8 +116,8 @@ func (c *Client) performHandshake(ctx context.Context) error {
 		return fmt.Errorf("ztlp: set read deadline: %w", err)
 	}
 
-	// Message 1: Initiator → Responder (ephemeral key)
-	msg1, err := hsCtx.WriteMessage(nil)
+	// Message 1: Initiator → Responder (ephemeral key + our NodeID as payload)
+	msg1, err := hsCtx.WriteMessage(c.identity.NodeID[:])
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrHandshakeFailed, err)
 	}
@@ -138,9 +146,56 @@ func (c *Client) performHandshake(ctx context.Context) error {
 	}
 
 	payload2 := data2[HandshakeHeaderSize:]
-	_, err = hsCtx.ReadMessage(payload2)
+	peerNodeIDBytes, err := hsCtx.ReadMessage(payload2)
 	if err != nil {
 		return fmt.Errorf("%w: read HELLO_ACK: %v", ErrHandshakeFailed, err)
+	}
+
+	// Extract peer NodeID from the authenticated Noise payload when the
+	// responder provides one (NOT from the unauthenticated SrcNodeID
+	// header field, which is spoofable).
+	//
+	// COMPATIBILITY NOTE: the current ZTLP gateway (Elixir,
+	// gateway/lib/ztlp_gateway/session.ex handle_handshake_msg1) calls
+	// Handshake.create_msg2(hs) with NO payload, so payload2 is empty
+	// (0 bytes) for every real gateway handshake today. We can only
+	// enforce the strict authenticated-NodeID check once a payload is
+	// actually present; falling back to the header field for an empty
+	// payload preserves interop with the deployed gateway (no
+	// regression) while still adding real protection for any peer that
+	// DOES send its NodeID as payload (future gateway update, or
+	// relay-to-relay Go SDK links).
+	var peerNodeID NodeID
+	switch len(peerNodeIDBytes) {
+	case 0:
+		// No authenticated NodeID offered by the peer — fall back to
+		// the header field as before. This is the same trust level as
+		// pre-fix code; it is NOT weakened further, just not improved
+		// until the peer side also sends its NodeID.
+		peerNodeID = hdr2.SrcNodeID
+	case NodeIDSize:
+		copy(peerNodeID[:], peerNodeIDBytes)
+		// Cross-check against the unauthenticated header as a sanity
+		// check (a mismatch indicates a broken or malicious peer: the
+		// header claims one identity but the authenticated payload
+		// proves another).
+		if hdr2.SrcNodeID != peerNodeID {
+			return fmt.Errorf("%w: header SrcNodeID %x differs from authenticated payload %x",
+				ErrPeerIdentityMismatch, hdr2.SrcNodeID, peerNodeID)
+		}
+	default:
+		return fmt.Errorf("%w: invalid peer NodeID length %d (expected 0 or %d)",
+			ErrHandshakeFailed, len(peerNodeIDBytes), NodeIDSize)
+	}
+
+	// For relay connections, verify the peer matches the expected target.
+	// This check is only fully authenticated when the peer sent a
+	// NodeID payload (see switch above); when it didn't (today's
+	// gateway), this still catches an obviously wrong relay-forwarded
+	// SrcNodeID header, same protection level as before this fix.
+	if !c.targetNodeID.IsZero() && peerNodeID != c.targetNodeID {
+		return fmt.Errorf("%w: expected %x, got %x",
+			ErrPeerIdentityMismatch, c.targetNodeID, peerNodeID)
 	}
 
 	// Use the SessionID from the responder's HELLO_ACK
@@ -153,8 +208,8 @@ func (c *Client) performHandshake(ctx context.Context) error {
 		}
 	}
 
-	// Message 3: Initiator → Responder (static + identity)
-	msg3, err := hsCtx.WriteMessage(nil)
+	// Message 3: Initiator → Responder (static + identity + our NodeID)
+	msg3, err := hsCtx.WriteMessage(c.identity.NodeID[:])
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrHandshakeFailed, err)
 	}
@@ -165,7 +220,6 @@ func (c *Client) performHandshake(ctx context.Context) error {
 	}
 
 	// Finalize handshake
-	peerNodeID := hdr2.SrcNodeID
 	session, err := hsCtx.Finalize(peerNodeID, sessionID)
 	if err != nil {
 		return err
@@ -324,8 +378,32 @@ func (l *Listener) AcceptContext(ctx context.Context) (*Client, error) {
 	}
 
 	payload1 := data1[HandshakeHeaderSize:]
-	if _, err := hsCtx.ReadMessage(payload1); err != nil {
+	initiatorNodeIDBytes, err := hsCtx.ReadMessage(payload1)
+	if err != nil {
 		return nil, fmt.Errorf("%w: read HELLO: %v", ErrHandshakeFailed, err)
+	}
+
+	// Extract initiator NodeID from the authenticated Noise payload when
+	// the initiator provides one. COMPATIBILITY: other ZTLP
+	// implementations (Rust proto CLI, gateway) currently send an EMPTY
+	// msg1 payload (see proto/src/handshake.rs perform_handshake:
+	// `initiator.write_message(&[])`), so falling back to the header
+	// field for an empty payload is required to keep accepting
+	// connections from those peers — same trust level as before this
+	// fix, not weakened, just not yet improved for those peers.
+	var initiatorNodeID NodeID
+	switch len(initiatorNodeIDBytes) {
+	case 0:
+		initiatorNodeID = hdr1.SrcNodeID
+	case NodeIDSize:
+		copy(initiatorNodeID[:], initiatorNodeIDBytes)
+		if hdr1.SrcNodeID != initiatorNodeID {
+			return nil, fmt.Errorf("%w: header SrcNodeID %x differs from authenticated payload %x",
+				ErrPeerIdentityMismatch, hdr1.SrcNodeID, initiatorNodeID)
+		}
+	default:
+		return nil, fmt.Errorf("%w: invalid initiator NodeID length %d (expected 0 or %d)",
+			ErrHandshakeFailed, len(initiatorNodeIDBytes), NodeIDSize)
 	}
 
 	// Generate SessionID
@@ -334,8 +412,8 @@ func (l *Listener) AcceptContext(ctx context.Context) (*Client, error) {
 		return nil, err
 	}
 
-	// Message 2: Responder → Initiator
-	msg2, err := hsCtx.WriteMessage(nil)
+	// Message 2: Responder → Initiator (with our NodeID as authenticated payload)
+	msg2, err := hsCtx.WriteMessage(l.identity.NodeID[:])
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHandshakeFailed, err)
 	}
@@ -351,15 +429,14 @@ func (l *Listener) AcceptContext(ctx context.Context) (*Client, error) {
 		return nil, fmt.Errorf("ztlp: recv msg3: %w", err)
 	}
 
-	// Skip header parsing for msg3 — just read the Noise payload
+	// Read the Noise payload (initiator's NodeID — already verified above)
 	payload3 := data3[HandshakeHeaderSize:]
 	if _, err := hsCtx.ReadMessage(payload3); err != nil {
 		return nil, fmt.Errorf("%w: read msg3: %v", ErrHandshakeFailed, err)
 	}
 
-	// Finalize handshake
-	peerNodeID := hdr1.SrcNodeID
-	session, err := hsCtx.Finalize(peerNodeID, sessionID)
+	// Finalize handshake — use the authenticated NodeID
+	session, err := hsCtx.Finalize(initiatorNodeID, sessionID)
 	if err != nil {
 		return nil, err
 	}

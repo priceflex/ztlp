@@ -21,18 +21,27 @@ class LogHandler(BaseHTTPRequestHandler):
         if self.path == "/logs":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8", errors="replace")
-            
+
             # Save with timestamp
             ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-            device = self.headers.get("X-Device", "unknown")
+            device_raw = self.headers.get("X-Device", "unknown")
+            # Sanitize the device identifier before embedding it in a
+            # filename: strip anything but alphanumerics/dash/underscore/dot
+            # so an attacker-controlled X-Device header (e.g.
+            # "../../etc/cron.d/evil") cannot traverse out of LOG_DIR on
+            # write, matching the same containment guarantee as the GET
+            # handler below.
+            device = "".join(c for c in device_raw if c.isalnum() or c in "-_.")[:64]
+            if not device:
+                device = "unknown"
             filename = f"{ts}_{device}.log"
             filepath = os.path.join(LOG_DIR, filename)
-            
+
             with open(filepath, "w") as f:
                 f.write(body)
-            
+
             print(f"[{ts}] Received {len(body)} bytes from {device} → {filename}")
-            
+
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -74,8 +83,13 @@ class LogHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"Bad request")
                 return
             filepath = os.path.join(LOG_DIR, filename)
-            # Double-check resolved path stays inside LOG_DIR
-            if not os.path.realpath(filepath).startswith(os.path.realpath(LOG_DIR)):
+            # Double-check resolved path stays inside LOG_DIR. Use
+            # os.sep-anchored prefix (not bare startswith) to avoid the
+            # classic sibling-directory bypass where e.g.
+            # "/tmp/logs-evil" also startswith "/tmp/logs".
+            log_dir_real = os.path.realpath(LOG_DIR)
+            file_real = os.path.realpath(filepath)
+            if file_real != log_dir_real and not file_real.startswith(log_dir_real + os.sep):
                 self.send_response(403)
                 self.end_headers()
                 self.wfile.write(b"Forbidden")

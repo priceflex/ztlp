@@ -33,6 +33,7 @@ defmodule ZtlpRelay.MeshManager do
           ring: HashRing.ring(),
           socket: :gen_udp.socket() | nil,
           mesh_port: non_neg_integer(),
+          mesh_signing_key: binary() | nil,
           ping_interval: non_neg_integer(),
           scores: %{binary() => PathScore.metrics()},
           ping_sent_at: %{binary() => integer()},
@@ -74,6 +75,7 @@ defmodule ZtlpRelay.MeshManager do
     node_id = Keyword.get(opts, :node_id, Config.relay_node_id())
     role = Keyword.get(opts, :relay_role, Config.relay_role())
     mesh_port = Keyword.get(opts, :mesh_listen_port, Config.mesh_listen_port())
+    mesh_signing_key = Keyword.get(opts, :mesh_signing_key, Config.mesh_signing_key())
     ping_interval = Keyword.get(opts, :ping_interval_ms, Config.ping_interval_ms())
     bootstrap_relays = Keyword.get(opts, :bootstrap_relays, Config.mesh_bootstrap_relays())
     ns_server = Keyword.get(opts, :ns_server, Config.ns_server())
@@ -109,6 +111,7 @@ defmodule ZtlpRelay.MeshManager do
       ring: ring,
       socket: socket,
       mesh_port: mesh_port,
+      mesh_signing_key: mesh_signing_key,
       ping_interval: ping_interval,
       scores: %{},
       ping_sent_at: %{},
@@ -228,7 +231,7 @@ defmodule ZtlpRelay.MeshManager do
   end
 
   def handle_cast({:inter_relay_message, data, sender}, state) do
-    case InterRelay.handle_message(data, sender) do
+    case InterRelay.handle_message_with_auth(data, sender, state.mesh_signing_key) do
       {:ok, decoded} ->
         {:noreply, handle_decoded_message(decoded, sender, state)}
 
@@ -242,7 +245,7 @@ defmodule ZtlpRelay.MeshManager do
   def handle_info({:udp, _socket, src_ip, src_port, data}, state) do
     sender = {src_ip, src_port}
 
-    case InterRelay.handle_message(data, sender) do
+    case InterRelay.handle_message_with_auth(data, sender, state.mesh_signing_key) do
       {:ok, decoded} ->
         {:noreply, handle_decoded_message(decoded, sender, state)}
 

@@ -426,4 +426,34 @@ defmodule ZtlpRelay.Config do
         end
     end
   end
+
+  # --- Mesh authentication ---
+
+  @doc """
+  Shared mesh signing public key (32 bytes) for verifying inter-relay messages.
+
+  All relays in the mesh share the same key pair. Incoming inter-relay
+  messages are verified against this public key before processing.
+
+  Set via `ZTLP_RELAY_MESH_SIGNING_KEY` env var (hex-encoded 32 bytes) or
+  application config. Returns `nil` if not set — when nil, inter-relay
+  authentication is disabled (dev mode).
+  """
+  @spec mesh_signing_key() :: binary() | nil
+  def mesh_signing_key do
+    case System.get_env("ZTLP_RELAY_MESH_SIGNING_KEY") do
+      nil ->
+        case Application.get_env(:ztlp_relay, :mesh_signing_key) do
+          nil -> nil
+          key when byte_size(key) == 32 -> key
+          _ -> nil
+        end
+
+      hex ->
+        case Base.decode16(hex, case: :mixed) do
+          {:ok, <<key::binary-size(32)>>} -> key
+          _ -> nil
+        end
+    end
+  end
 end

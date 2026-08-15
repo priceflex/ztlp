@@ -1134,7 +1134,9 @@ defmodule ZtlpRelay.UdpListener do
   # Handle inter-relay protocol messages received on the client port.
   # Dispatches RELAY_FORWARD through multi-hop pipeline.
   defp handle_inter_relay_packet(data, sender, state) do
-    case InterRelay.handle_message(data, sender) do
+    signing_key = Config.mesh_signing_key()
+
+    case InterRelay.handle_message_with_auth(data, sender, signing_key) do
       {:ok, {:relay_forward, sender_node_id, _ts, payload}} ->
         handle_relay_forward(sender_node_id, payload, sender, state)
 

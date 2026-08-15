@@ -421,6 +421,12 @@ fn build_dns_query(name: &str, id: u16) -> Vec<u8> {
 }
 
 /// Forward a DNS query to the upstream resolver and return the response.
+///
+/// Validates that the response:
+/// 1. Arrives from the upstream address we sent the query to (prevents UDP spoofing)
+/// 2. Contains the same Transaction ID as the query (prevents response confusion)
+///
+/// Mismatched responses are silently discarded and the socket continues waiting.
 pub async fn forward_to_upstream(
     query: &[u8],
     upstream: &str,
@@ -429,12 +435,50 @@ pub async fn forward_to_upstream(
         .parse()
         .map_err(|e| format!("invalid upstream DNS '{}': {}", upstream, e))?;
 
+    // Extract our query's Transaction ID for response validation
+    let query_id = if query.len() >= 2 {
+        u16::from_be_bytes([query[0], query[1]])
+    } else {
+        return Err("query too short to contain Transaction ID".into());
+    };
+
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.send_to(query, upstream_addr).await?;
 
     let mut buf = vec![0u8; 4096];
-    match tokio::time::timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
-        Ok(Ok((len, _))) => Ok(buf[..len].to_vec()),
+    let result: Result<
+        Result<Vec<u8>, std::io::Error>,
+        tokio::time::error::Elapsed,
+    > = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (len, src) = sock.recv_from(&mut buf).await?;
+            // Must come from the upstream we sent the query to
+            if src != upstream_addr {
+                debug!(
+                    "upstream DNS: dropped response from {} (expected {})",
+                    src, upstream_addr
+                );
+                continue;
+            }
+            // Response Transaction ID must match our query
+            if len >= 2 {
+                let resp_id = u16::from_be_bytes([buf[0], buf[1]]);
+                if resp_id == query_id {
+                    return Ok(buf[..len].to_vec());
+                }
+                debug!(
+                    "upstream DNS: dropped response with ID {resp_id} (expected {query_id})"
+                );
+                continue;
+            }
+            // Response too short to be valid DNS — discard
+            debug!("upstream DNS: dropped response too short ({len} bytes)");
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(resp)) => Ok(resp),
         Ok(Err(e)) => Err(format!("upstream DNS error: {}", e).into()),
         Err(_) => Err("upstream DNS timeout".into()),
     }

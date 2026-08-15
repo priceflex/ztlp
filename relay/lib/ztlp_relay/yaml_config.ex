@@ -101,7 +101,8 @@ defmodule ZtlpRelay.YamlConfig do
         {config, errors} = validate_field(config, errors, mesh, "role", :relay_role, :enum, :all, [:ingress, :transit, :service, :all])
         {config, errors} = validate_field(config, errors, mesh, "vnodes", :hash_ring_vnodes, :integer, 128, 1..1024)
         {config, errors} = validate_field(config, errors, mesh, "ping_interval", :ping_interval_ms, :duration, 15_000, nil)
-        validate_field(config, errors, mesh, "relay_timeout", :relay_timeout_ms, :duration, 300_000, nil)
+        {config, errors} = validate_field(config, errors, mesh, "relay_timeout", :relay_timeout_ms, :duration, 300_000, nil)
+        {config, errors} = validate_field(config, errors, mesh, "signing_key", :mesh_signing_key, :hex_bytes, nil, 32)
       nil -> {config, errors}
       other -> {config, ["mesh: expected a map, got: #{inspect(other)}" | errors]}
     end

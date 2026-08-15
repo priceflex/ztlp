@@ -536,6 +536,50 @@ defmodule ZtlpRelay.InterRelay do
   end
 
   @doc """
+  Handle a raw inter-relay message with Ed25519 signature verification.
+
+  Verifies the 64-byte Ed25519 signature appended to the message before
+  decoding. This prevents unauthenticated inter-relay messages from being
+  processed, protecting the mesh against spoofed routing, session sync,
+  and leave/drain messages from unauthorized relays.
+
+  When `public_key` is `nil`, falls back to unauthenticated `decode/1`
+  (dev mode). In production, always pass the shared mesh signing key.
+
+  Returns `{:ok, decoded}` on successful verification and decoding,
+  or `{:error, reason}` on failure.
+  """
+  @spec handle_message_with_auth(
+          binary(),
+          {:inet.ip_address(), :inet.port_number()},
+          binary() | nil
+        ) ::
+          {:ok, {msg_type(), binary(), non_neg_integer(), map()}} | {:error, atom()}
+  def handle_message_with_auth(data, _sender, nil) do
+    # Dev mode: no signing key configured, decode without auth
+    Logger.warning("[mesh] Inter-relay message processed without authentication (no mesh_signing_key)")
+    decode(data)
+  end
+
+  def handle_message_with_auth(data, _sender, public_key) when byte_size(public_key) == 32 do
+    case decode_with_auth(data, public_key) do
+      {:ok, decoded} ->
+        {:ok, decoded}
+
+      {:error, :bad_signature} ->
+        Logger.warning("[mesh] Dropping inter-relay message with invalid Ed25519 signature")
+        {:error, :bad_signature}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def handle_message_with_auth(_data, _sender, _invalid_key) do
+    {:error, :invalid_signing_key}
+  end
+
+  @doc """
   Wrap a ZTLP packet for forwarding to another relay.
 
   Options: `:ttl`, `:path` (same as encode_forward).

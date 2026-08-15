@@ -17,6 +17,7 @@
 
 import Foundation
 import UIKit
+import CryptoKit
 
 /// Manages ZTLP CA certificate distribution and trust.
 @MainActor
@@ -78,11 +79,36 @@ final class CertificateService: ObservableObject {
                     if result == 0, let ptr = dataPtr, dataLen > 0 {
                         let data = Data(bytes: ptr, count: Int(dataLen))
                         ztlp_bytes_free(ptr, dataLen)
-                        
+
+                        // [SAST fix: sjy-yrjl] Pin the CA root's SHA-256
+                        // fingerprint (Trust On First Use), the same
+                        // pattern used for the gateway static key
+                        // (rhf-phvo). Without this, ANY non-empty DER
+                        // bytes returned by ztlp_ns_fetch_ca_root were
+                        // persisted unconditionally as the trust root —
+                        // a MITM-controlled NS server could hand the
+                        // client its own CA and have it trusted for
+                        // every future TLS validation in the ZTLP
+                        // network. On first fetch for a given nsServer,
+                        // pin the fingerprint; on every subsequent
+                        // fetch, the returned CA MUST match the pinned
+                        // fingerprint or it is rejected (same trust
+                        // model as SSH host-key pinning: doesn't
+                        // protect the very first fetch against an
+                        // active MITM, but turns a silent, repeatable
+                        // MITM into a loud, investigable failure).
+                        let fingerprint = SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+                        if let pinError = CARootPin.verifyOrPin(nsServer: nsServer, fingerprintHex: fingerprint) {
+                            self.errorMessage = pinError
+                            self.logger.error("CA root fingerprint mismatch: \(pinError)", source: "CertService")
+                            continuation.resume(returning: false)
+                            return
+                        }
+
                         self.caRootDER = data
                         self.caRootPEM = self.derToPEM(data, label: "CERTIFICATE")
                         self.storeCACert(data)
-                        
+
                         self.logger.info("CA root cert fetched (\(dataLen) bytes)", source: "CertService")
                         continuation.resume(returning: true)
                     } else {

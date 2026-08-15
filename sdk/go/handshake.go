@@ -1,11 +1,9 @@
 package ztlp
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/flynn/noise"
-	"golang.org/x/crypto/blake2s"
 )
 
 // HandshakeRole identifies the role of a peer in the Noise_XX handshake.
@@ -30,19 +28,22 @@ var noiseCipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPol
 
 // HandshakeContext manages an in-progress Noise_XX handshake.
 type HandshakeContext struct {
-	Identity     *Identity
-	Role         HandshakeRole
-	state        *noise.HandshakeState
-	messageIndex int
+	Identity       *Identity
+	Role           HandshakeRole
+	state          *noise.HandshakeState
+	messageIndex   int
+	sendCipher     *noise.CipherState // set by the final message of handshake
+	recvCipher     *noise.CipherState // set by the final message of handshake
+	peerStatic     []byte
 }
 
 // NewHandshakeInitiator creates a handshake context for the initiator.
 func NewHandshakeInitiator(identity *Identity) (*HandshakeContext, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
-		CipherSuite:   noiseCipherSuite,
-		Pattern:        noise.HandshakeXX,
-		Initiator:      true,
-		StaticKeypair:  noise.DHKey{Private: identity.StaticPrivateKey, Public: identity.StaticPublicKey},
+		CipherSuite:  noiseCipherSuite,
+		Pattern:      noise.HandshakeXX,
+		Initiator:    true,
+		StaticKeypair: noise.DHKey{Private: identity.StaticPrivateKey, Public: identity.StaticPublicKey},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: init handshake initiator: %w", err)
@@ -58,10 +59,10 @@ func NewHandshakeInitiator(identity *Identity) (*HandshakeContext, error) {
 // NewHandshakeResponder creates a handshake context for the responder.
 func NewHandshakeResponder(identity *Identity) (*HandshakeContext, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
-		CipherSuite:   noiseCipherSuite,
-		Pattern:        noise.HandshakeXX,
-		Initiator:      false,
-		StaticKeypair:  noise.DHKey{Private: identity.StaticPrivateKey, Public: identity.StaticPublicKey},
+		CipherSuite:  noiseCipherSuite,
+		Pattern:      noise.HandshakeXX,
+		Initiator:    false,
+		StaticKeypair: noise.DHKey{Private: identity.StaticPrivateKey, Public: identity.StaticPublicKey},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: init handshake responder: %w", err)
@@ -77,9 +78,14 @@ func NewHandshakeResponder(identity *Identity) (*HandshakeContext, error) {
 // WriteMessage generates the next handshake message (Noise payload).
 // The payload parameter is the application data to encrypt within the handshake message.
 func (h *HandshakeContext) WriteMessage(payload []byte) ([]byte, error) {
-	msg, _, _, err := h.state.WriteMessage(nil, payload)
+	msg, cs1, cs2, err := h.state.WriteMessage(nil, payload)
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: write handshake message %d: %w", h.messageIndex, err)
+	}
+	// Capture cipher states if the handshake is complete
+	if cs1 != nil && cs2 != nil {
+		h.sendCipher = cs1
+		h.recvCipher = cs2
 	}
 	h.messageIndex++
 	return msg, nil
@@ -88,9 +94,14 @@ func (h *HandshakeContext) WriteMessage(payload []byte) ([]byte, error) {
 // ReadMessage processes a received handshake message.
 // Returns the decrypted application payload.
 func (h *HandshakeContext) ReadMessage(message []byte) ([]byte, error) {
-	payload, _, _, err := h.state.ReadMessage(nil, message)
+	payload, cs1, cs2, err := h.state.ReadMessage(nil, message)
 	if err != nil {
 		return nil, fmt.Errorf("ztlp: read handshake message %d: %w", h.messageIndex, err)
+	}
+	// Capture cipher states if the handshake is complete
+	if cs1 != nil && cs2 != nil {
+		h.sendCipher = cs1
+		h.recvCipher = cs2
 	}
 	h.messageIndex++
 	return payload, nil
@@ -107,53 +118,38 @@ func (h *HandshakeContext) PeerStatic() []byte {
 	return h.state.PeerStatic()
 }
 
-// Finalize completes the handshake and derives session keys.
-//
-// Key derivation matches the Rust implementation exactly:
-//   - Sort both static public keys lexicographically
-//   - Hash(sorted_keys || direction_label || session_id) using BLAKE2s-256
-//   - Initiator sends with i2r key, receives with r2i key
-//   - Responder sends with r2i key, receives with i2r key
+// Finalize completes the handshake and derives session keys using the standard
+// Noise Split. The send and receive keys are taken from the CipherState keys
+// produced by the noise library's Split() method, which uses HKDF with the
+// cipher suite's native hash function (BLAKE2s) over the handshake chain key.
+// This replaces the previous custom BLAKE2s key derivation that was not
+// consistent with the Noise Protocol Framework.
 func (h *HandshakeContext) Finalize(peerNodeID NodeID, sessionID SessionID) (*SessionState, error) {
+	if h.sendCipher == nil || h.recvCipher == nil {
+		return nil, fmt.Errorf("%w: handshake not yet complete (need 3 messages for Noise_XX)", ErrHandshakeFailed)
+	}
+
 	peerStatic := h.state.PeerStatic()
 	if len(peerStatic) == 0 {
 		return nil, fmt.Errorf("%w: no peer static key available", ErrHandshakeFailed)
 	}
 
-	ourPublic := h.Identity.StaticPublicKey
-
-	// Sort keys lexicographically (same as Rust)
-	var sharedMaterial []byte
-	if bytes.Compare(ourPublic, peerStatic) <= 0 {
-		sharedMaterial = append(sharedMaterial, ourPublic...)
-		sharedMaterial = append(sharedMaterial, peerStatic...)
-	} else {
-		sharedMaterial = append(sharedMaterial, peerStatic...)
-		sharedMaterial = append(sharedMaterial, ourPublic...)
-	}
-
-	// Derive directional keys using BLAKE2s-256
-	deriveKey := func(label string, sid SessionID, base []byte) [32]byte {
-		h, _ := blake2s.New256(nil)
-		h.Write(base)
-		h.Write([]byte(label))
-		h.Write(sid[:])
-		var key [32]byte
-		copy(key[:], h.Sum(nil))
-		return key
-	}
-
-	i2rKey := deriveKey("ztlp_initiator_to_responder", sessionID, sharedMaterial)
-	r2iKey := deriveKey("ztlp_responder_to_initiator", sessionID, sharedMaterial)
-
+	// Export keys from Noise CipherStates (standard Noise Split)
+	// The noise library's Split() already performed the correct key derivation:
+	//   - hkdf(cs.Hash, 2, ck, nil, nil, ck, nil) → (hk1, hk2)
+	//   - cs1 key = hk1 (initiator send, responder recv)
+	//   - cs2 key = hk2 (initiator recv, responder send)
+	// This matches the Noise Protocol Framework specification for XX pattern.
 	var sendKey, recvKey [32]byte
+
 	switch h.Role {
 	case RoleInitiator:
-		sendKey = i2rKey
-		recvKey = r2iKey
+		sendKey = h.sendCipher.UnsafeKey()
+		recvKey = h.recvCipher.UnsafeKey()
 	case RoleResponder:
-		sendKey = r2iKey
-		recvKey = i2rKey
+		// For the responder, cs1 is recv and cs2 is send
+		sendKey = h.recvCipher.UnsafeKey()
+		recvKey = h.sendCipher.UnsafeKey()
 	}
 
 	session := NewSessionState(sessionID, peerNodeID, sendKey, recvKey, false)

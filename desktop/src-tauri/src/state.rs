@@ -140,17 +140,46 @@ impl Default for AppState {
             .join(".ztlp")
             .join("identity.json");
         let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
-            Ok(id) => Some(IdentityInfo {
-                node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
-                public_key: id
-                    .static_public_key
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>(),
-                provider_type: "software".into(),
-                zone_name: None,
-                enrolled: false,
-            }),
+            Ok(id) => {
+                // Derive the zone + enrollment state from the agent config on
+                // disk (~/.ztlp/agent.toml) rather than hardcoding. An identity
+                // that has a configured NS/zone IS enrolled from the UI's
+                // perspective, so the Identity page shows the real zone the
+                // device is registered in instead of a blank field.
+                let (zone_name, enrolled) = {
+                    let cfg_path = dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                        .join(".ztlp")
+                        .join("agent.toml");
+                    match std::fs::read_to_string(&cfg_path) {
+                        Ok(text) => {
+                            // Pull the first entry of `zones = [...]` under [dns].
+                            // Kept as a light scan so we don't add a TOML dep
+                            // just to surface one display string.
+                            let zone = text
+                                .lines()
+                                .find(|l| l.trim_start().starts_with("zones"))
+                                .and_then(|l| l.split('"').nth(1))
+                                .map(|s| s.to_string());
+                            let has_ns = text.contains("[ns]");
+                            (zone, has_ns)
+                        }
+                        Err(_) => (None, false),
+                    }
+                };
+
+                Some(IdentityInfo {
+                    node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
+                    public_key: id
+                        .static_public_key
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>(),
+                    provider_type: "software".into(),
+                    zone_name,
+                    enrolled,
+                })
+            }
             Err(_) => Some(Default::default()), // Fallback structure instance
         };
 

@@ -184,19 +184,175 @@ pub mod tokio_endpoint {
         });
     }
 
+    /// [SAST fix: lqq-wjuo] TOFU (Trust On First Use) certificate
+    /// verifier for the QUIC transport layer. Replaces the previous
+    /// NoCertVerifier, which unconditionally accepted ANY certificate
+    /// (removed entirely, not just retired dead code, to avoid it
+    /// being accidentally re-wired in later).
+    ///
+    /// Background: the QUIC server always generates a fresh, ephemeral
+    /// self-signed cert on every bind (see `generate_self_signed`
+    /// below) — there is no real PKI backing these certs, which is why
+    /// `NoCertVerifier` existed (there's genuinely nothing to validate
+    /// against a trust anchor). Per the crate's own documented design
+    /// (Cargo.toml comment: "we still pin identity via the Noise XX
+    /// prologue tunneled over stream 0 ... so the X.509 layer is
+    /// effectively ignored"), real ZTLP peer authentication happens via
+    /// the Noise_XX handshake running INSIDE the QUIC stream, not via
+    /// this TLS layer. That means `NoCertVerifier` does NOT allow a
+    /// MITM to forge or decrypt the actual ZTLP session — but it DOES
+    /// let a MITM transparently intercept/tamper with the outer QUIC
+    /// transport (traffic analysis, connection-level DoS, metadata
+    /// exposure), and ships a certificate verifier that unconditionally
+    /// accepts ANY certificate, which is dangerous in isolation and
+    /// exactly what CWE-295 flags.
+    ///
+    /// This TOFU verifier closes that gap as defense-in-depth: it
+    /// computes the SHA-256 fingerprint of the leaf certificate and
+    /// pins it (in `~/.ztlp/quic_pins/<server_name>.pin`) on first
+    /// connection to a given `server_name`. Every subsequent connection
+    /// must present a certificate matching the pinned fingerprint or
+    /// verification fails outright — same trust model as SSH host-key
+    /// pinning and the rhf-phvo/sjy-yrjl iOS fixes: doesn't protect the
+    /// very first connection against an active MITM, but converts a
+    /// silent, repeatable MITM into a hard connection failure.
     #[derive(Debug)]
-    struct NoCertVerifier;
-    impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    struct TofuCertVerifier {
+        server_name: String,
+        /// Directory pins are stored in. Defaults to
+        /// `~/.ztlp/quic_pins` via `new()`; overridable via
+        /// `with_pin_dir` for tests (avoids needing to mutate $HOME,
+        /// which requires `unsafe` in modern Rust and risks races in
+        /// a shared test binary).
+        pin_dir: std::path::PathBuf,
+    }
+
+    impl TofuCertVerifier {
+        fn new(server_name: &str) -> Self {
+            Self {
+                server_name: server_name.to_string(),
+                pin_dir: Self::default_pin_dir(),
+            }
+        }
+
+        #[cfg(test)]
+        fn with_pin_dir(server_name: &str, pin_dir: std::path::PathBuf) -> Self {
+            Self {
+                server_name: server_name.to_string(),
+                pin_dir,
+            }
+        }
+
+        fn default_pin_dir() -> std::path::PathBuf {
+            dirs::home_dir()
+                .map(|h| h.join(".ztlp").join("quic_pins"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/quic_pins"))
+        }
+
+        fn pin_path(&self) -> std::path::PathBuf {
+            // server_name is attacker-influenced input (it's the
+            // caller-supplied connect target) — sanitize before using
+            // it as a filename component to avoid path traversal via a
+            // crafted server_name like "../../etc/passwd".
+            //
+            // [caught by test_server_name_sanitized_against_path_traversal]
+            // A first attempt allowed '.' through unchanged (to permit
+            // normal hostnames like "gw1.example.com"), which meant
+            // "../../etc/passwd" sanitized to ".._.._etc_passwd" —
+            // slashes were replaced but the ".." sequences survived
+            // intact, still a working traversal payload. Fixed by
+            // replacing '.' with '_' too, then collapsing repeated
+            // underscores — hostnames remain distinguishable
+            // (sanitization only needs to prevent traversal +
+            // collisions, not preserve exact readability).
+            let mut safe_name = String::with_capacity(self.server_name.len());
+            for c in self.server_name.chars() {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    safe_name.push(c);
+                } else {
+                    safe_name.push('_');
+                }
+            }
+            // Collapse repeated underscores so ".." (-> "__") and similar
+            // patterns can't be used to construct recognizable/colliding
+            // paths, and to keep filenames readable.
+            let mut collapsed = String::with_capacity(safe_name.len());
+            let mut last_was_underscore = false;
+            for c in safe_name.chars() {
+                if c == '_' {
+                    if !last_was_underscore {
+                        collapsed.push(c);
+                    }
+                    last_was_underscore = true;
+                } else {
+                    collapsed.push(c);
+                    last_was_underscore = false;
+                }
+            }
+            self.pin_dir.join(format!("{}.pin", collapsed))
+        }
+
+        fn fingerprint(cert: &CertificateDer<'_>) -> String {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(cert.as_ref());
+            digest.iter().map(|b| format!("{:02x}", b)).collect()
+        }
+
+        /// Returns Ok(()) if this is the first-ever pin for this server
+        /// (now pinned) or the fingerprint matches the existing pin.
+        /// Returns Err with a descriptive message if it does NOT match
+        /// (the connection must be rejected).
+        fn verify_or_pin(&self, cert: &CertificateDer<'_>) -> Result<(), String> {
+            let fingerprint = Self::fingerprint(cert);
+            let path = self.pin_path();
+
+            if let Ok(pinned) = std::fs::read_to_string(&path) {
+                let pinned = pinned.trim();
+                if pinned.eq_ignore_ascii_case(&fingerprint) {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "QUIC certificate fingerprint for '{}' does not match the pinned value \
+                     (expected {}, got {}). This may indicate a MITM attack, or the server's \
+                     certificate was legitimately rotated (delete {} to reset the pin).",
+                    self.server_name,
+                    pinned,
+                    fingerprint,
+                    path.display()
+                ));
+            }
+
+            // First connection to this server_name — pin it now.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, &fingerprint);
+            Ok(())
+        }
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for TofuCertVerifier {
         fn verify_server_cert(
             &self,
-            _end_entity: &CertificateDer<'_>,
+            end_entity: &CertificateDer<'_>,
             _intermediates: &[CertificateDer<'_>],
             _server_name: &rustls::pki_types::ServerName<'_>,
             _ocsp_response: &[u8],
             _now: rustls::pki_types::UnixTime,
         ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-            Ok(rustls::client::danger::ServerCertVerified::assertion())
+            match self.verify_or_pin(end_entity) {
+                Ok(()) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+                Err(msg) => Err(rustls::Error::General(msg)),
+            }
         }
+        // Signature verification here is intentionally a no-op assertion,
+        // same as NoCertVerifier: the actual cryptographic authentication
+        // of the peer happens in the Noise_XX handshake tunneled inside
+        // this QUIC stream (see noise_stream module), not at the X.509
+        // layer. This verifier's job is narrowly to pin the leaf cert's
+        // fingerprint (verify_server_cert above), not to validate a
+        // certificate chain that doesn't exist in this self-signed,
+        // no-PKI deployment model.
         fn verify_tls12_signature(
             &self,
             _message: &[u8],
@@ -389,7 +545,7 @@ pub mod tokio_endpoint {
             ensure_crypto();
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -430,7 +586,7 @@ pub mod tokio_endpoint {
             ensure_crypto();
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -468,6 +624,143 @@ pub mod tokio_endpoint {
             Ok(QuicConnection {
                 inner: incoming.await?,
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tofu_tests {
+        use super::*;
+        use rustls::client::danger::ServerCertVerifier;
+
+        fn fake_cert(seed: u8) -> CertificateDer<'static> {
+            // Not a real X.509 cert — TofuCertVerifier only hashes the
+            // raw bytes, it never parses the cert structure (that's
+            // the whole point: no PKI, just fingerprint pinning).
+            CertificateDer::from(vec![seed; 64])
+        }
+
+        fn fixed_now() -> rustls::pki_types::UnixTime {
+            rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(0))
+        }
+
+        fn fake_server_name() -> rustls::pki_types::ServerName<'static> {
+            rustls::pki_types::ServerName::try_from("test.ztlp.local").unwrap()
+        }
+
+        #[test]
+        fn test_first_connection_pins_and_accepts() {
+            let tmp = tempfile_dir();
+            let verifier = TofuCertVerifier::with_pin_dir("gw1.example.com", tmp.clone());
+            let cert = fake_cert(0xAA);
+
+            let result = verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
+            assert!(result.is_ok(), "first connection should be accepted and pinned");
+
+            // A pin file should now exist.
+            let pin_path = verifier.pin_path();
+            assert!(pin_path.exists(), "pin file should have been created");
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn test_matching_cert_accepted_on_second_connection() {
+            let tmp = tempfile_dir();
+            let verifier = TofuCertVerifier::with_pin_dir("gw2.example.com", tmp.clone());
+            let cert = fake_cert(0xBB);
+
+            // First connection pins it.
+            assert!(verifier
+                .verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+
+            // Second connection with the SAME cert must also succeed.
+            let result = verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
+            assert!(result.is_ok(), "matching cert on 2nd connection should be accepted");
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn test_mismatched_cert_rejected_mitm_scenario() {
+            let tmp = tempfile_dir();
+            let verifier = TofuCertVerifier::with_pin_dir("gw3.example.com", tmp.clone());
+            let real_cert = fake_cert(0xCC);
+            let mitm_cert = fake_cert(0xDD); // different bytes = different fingerprint
+
+            // First connection pins the REAL cert.
+            assert!(verifier
+                .verify_server_cert(&real_cert, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+
+            // A MITM presenting a DIFFERENT cert on a later connection
+            // (attempt to the same server_name) must be REJECTED — this
+            // is the exact scenario lqq-wjuo's NoCertVerifier failed to
+            // stop.
+            let result = verifier.verify_server_cert(&mitm_cert, &[], &fake_server_name(), &[], fixed_now());
+            assert!(
+                result.is_err(),
+                "MITM presenting a different cert MUST be rejected, not silently accepted"
+            );
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn test_different_server_names_have_independent_pins() {
+            let tmp = tempfile_dir();
+            let verifier_a = TofuCertVerifier::with_pin_dir("host-a.example.com", tmp.clone());
+            let verifier_b = TofuCertVerifier::with_pin_dir("host-b.example.com", tmp.clone());
+            let cert_a = fake_cert(0x11);
+            let cert_b = fake_cert(0x22);
+
+            assert!(verifier_a
+                .verify_server_cert(&cert_a, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+            assert!(verifier_b
+                .verify_server_cert(&cert_b, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+
+            // host-a's pinned cert should NOT satisfy host-b's pin and
+            // vice versa (independent files).
+            assert_ne!(verifier_a.pin_path(), verifier_b.pin_path());
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn test_server_name_sanitized_against_path_traversal() {
+            let tmp = tempfile_dir();
+            // A malicious/crafted server_name attempting path traversal.
+            let verifier = TofuCertVerifier::with_pin_dir("../../etc/passwd", tmp.clone());
+            let path = verifier.pin_path();
+
+            // The resulting path must stay INSIDE tmp — no ".." components
+            // should survive sanitization.
+            assert!(
+                path.starts_with(&tmp),
+                "sanitized pin path must stay within the pin directory, got: {}",
+                path.display()
+            );
+            assert!(
+                !path.to_string_lossy().contains(".."),
+                "sanitized pin path must not contain '..' components"
+            );
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        fn tempfile_dir() -> std::path::PathBuf {
+            let mut dir = std::env::temp_dir();
+            dir.push(format!(
+                "ztlp_quic_pin_test_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            dir
         }
     }
 }

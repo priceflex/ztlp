@@ -59,7 +59,7 @@ const ServicesComponent = (() => {
                 }
               </td>
               <td>
-                <button class="copy-btn" onclick="copyToClipboard('${escapeHtml(svc.hostname)}:${svc.port}', this)" title="Copy endpoint">📋</button>
+                <button class="copy-btn" onclick="copyToClipboard('${escapeAttr(svc.hostname)}:${svc.port}', this)" title="Copy endpoint">📋</button>
               </td>
             </tr>
           `).join('')}
@@ -84,6 +84,10 @@ const ServicesComponent = (() => {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function escapeAttr(str) {
+    return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
   }
 
   return { render, load };

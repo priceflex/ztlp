@@ -94,8 +94,8 @@ module Api
     def find_device(identifier)
       return nil if identifier.blank?
 
-      # Try by ID first, then by node_id
-      ZtlpDevice.find_by(id: identifier) || ZtlpDevice.find_by(node_id: identifier)
+      # Try by ID first, then by node_id — scoped to the authenticated tenant
+      @api_network.ztlp_devices.find_by(id: identifier) || @api_network.ztlp_devices.find_by(node_id: identifier)
     end
   end
 end

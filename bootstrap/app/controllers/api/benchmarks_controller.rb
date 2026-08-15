@@ -93,7 +93,7 @@ module Api
 
     def find_device(identifier)
       return nil if identifier.blank?
-      ZtlpDevice.find_by(id: identifier) || ZtlpDevice.find_by(node_id: identifier)
+      @api_network.ztlp_devices.find_by(id: identifier) || @api_network.ztlp_devices.find_by(node_id: identifier)
     end
   end
 end

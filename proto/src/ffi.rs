@@ -5161,6 +5161,49 @@ pub extern "C" fn ztlp_handshake_process_msg2(
     0
 }
 
+/// Get the remote peer's static X25519 public key as a lowercase hex
+/// string, once available (after message 2 is processed for the
+/// initiator). Call this BEFORE `ztlp_handshake_finalize` if the
+/// caller wants to pin/verify the peer's identity — finalize consumes
+/// the handshake state.
+///
+/// Returns 0 on success (key_hex_out written, null-terminated,
+/// 65 bytes: 64 hex chars + NUL) or a negative ZtlpResult code.
+/// `key_hex_out` must point to a buffer of at least 65 bytes.
+#[no_mangle]
+pub extern "C" fn ztlp_handshake_get_peer_static_key(
+    state: *mut ZtlpHandshakeState,
+    key_hex_out: *mut c_char,
+    key_hex_out_len: usize,
+) -> i32 {
+    if state.is_null() || key_hex_out.is_null() {
+        set_last_error("state or key_hex_out is null");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let state = unsafe { &*state };
+    let hex_str = match state.ctx.remote_static_hex() {
+        Some(h) => h,
+        None => {
+            set_last_error("peer static key not yet available (process msg2 first)");
+            return ZtlpResult::HandshakeError as i32;
+        }
+    };
+
+    // 64 hex chars + NUL terminator
+    if key_hex_out_len < hex_str.len() + 1 {
+        set_last_error("key_hex_out buffer too small");
+        return ZtlpResult::InvalidArgument as i32;
+    }
+
+    let bytes = hex_str.as_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), key_hex_out as *mut u8, bytes.len());
+        *(key_hex_out.add(bytes.len())) = 0;
+    }
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn ztlp_handshake_finalize(
     state: *mut ZtlpHandshakeState,

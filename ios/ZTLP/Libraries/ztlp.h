@@ -803,6 +803,26 @@ int32_t ztlp_handshake_process_msg2(
     size_t *out_msg3_written
 );
 
+/**
+ * Get the remote peer's static X25519 public key as a lowercase hex
+ * string, once available (after message 2 is processed). Call this
+ * BEFORE ztlp_handshake_finalize to check the peer's identity against
+ * a pinned key (see ztlp_verify_gateway_pin) — finalize consumes the
+ * handshake state.
+ *
+ * @param state          Handshake state (not consumed by this call).
+ * @param key_hex_out    Output buffer, must be >= 65 bytes (64 hex
+ *                       chars + NUL).
+ * @param key_hex_out_len Size of key_hex_out.
+ * @return 0 on success, negative ZtlpResult code on failure (e.g. key
+ *         not yet available — process msg2 first).
+ */
+int32_t ztlp_handshake_get_peer_static_key(
+    ZtlpHandshakeState *state,
+    char *key_hex_out,
+    size_t key_hex_out_len
+);
+
 ZtlpCryptoContext *ztlp_handshake_finalize(
     ZtlpHandshakeState *state,
     const uint8_t *extra_data,

@@ -255,6 +255,39 @@ final class ZTLPTunnelConnection {
                             return
                         }
 
+                        // [SAST fix: rhf-phvo] Pin the gateway's static
+                        // Noise key (Trust On First Use). Without this,
+                        // ztlp_handshake_finalize(handshakeState, nil, 0)
+                        // accepts ANY peer that completes the Noise_XX
+                        // handshake — a MITM running a rogue gateway
+                        // that presents a DIFFERENT static key would be
+                        // silently accepted every time. TOFU: the first
+                        // successful connection to a given `target`
+                        // pins that gateway's key in the Keychain (this
+                        // Network Extension target does NOT link
+                        // KeychainService.swift from the main app
+                        // target, so a small self-contained Keychain
+                        // helper is used here — see
+                        // GatewayKeyPin.verifyOrPin below); every
+                        // subsequent connection must match it or the
+                        // tunnel is refused. Same trust model as SSH
+                        // host-key pinning: doesn't protect the very
+                        // first connection against an active MITM, but
+                        // turns a silent, repeatable MITM into a loud,
+                        // investigable failure.
+                        var keyHexBuf = [CChar](repeating: 0, count: 65)
+                        let keyRc = ztlp_handshake_get_peer_static_key(handshakeState, &keyHexBuf, keyHexBuf.count)
+                        guard keyRc == 0 else {
+                            finishFailure(self.makeError("failed to read peer gateway key: \(self.ztlpLastError())"))
+                            return
+                        }
+                        let peerKeyHex = String(cString: keyHexBuf)
+
+                        if let pinError = GatewayKeyPin.verifyOrPin(target: target, peerKeyHex: peerKeyHex) {
+                            finishFailure(pinError)
+                            return
+                        }
+
                         let cryptoCtx = ztlp_handshake_finalize(handshakeState, nil, 0)
                         guard let cryptoCtx else {
                             finishFailure(self.makeError("ztlp_handshake_finalize failed: \(self.ztlpLastError())"))

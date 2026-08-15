@@ -26,6 +26,7 @@
 		85AD116F993661084DAE78B2 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 		A7B8C9D0E1F2A3B4C5D6E7F8 /* LogsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6A7B8C9D0E1F2A3B4 /* LogsViewModel.swift */; };
 		AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */; };
+		AA11BB22CC33DD44EE55FF05 /* GatewayKeyPin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF06 /* GatewayKeyPin.swift */; };
 		AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */; };
 		BB22CC33DD44EE55FF660A01 /* ZTLPDNSResponder.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */; };
 		CC33DD44EE55FF66AA770B01 /* ZTLPNSClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC33DD44EE55FF66AA770B02 /* ZTLPNSClient.swift */; };
@@ -124,6 +125,7 @@
 		AA11BB22CC33DD44EE550005 /* TunnelLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLoggerTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550006 /* BenchmarkResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchmarkResultTests.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPTunnelConnection.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE55FF06 /* GatewayKeyPin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayKeyPin.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPVIPProxy.swift; sourceTree = "<group>"; };
 		BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPDNSResponder.swift; sourceTree = "<group>"; };
 		CC33DD44EE55FF66AA770B02 /* ZTLPNSClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPNSClient.swift; sourceTree = "<group>"; };
@@ -188,6 +190,7 @@
 			children = (
 				7C58AE9DBEA4FE1ECFCC77A4 /* PacketTunnelProvider.swift */,
 				AA11BB22CC33DD44EE55FF01 /* ZTLPTunnelConnection.swift */,
+				AA11BB22CC33DD44EE55FF06 /* GatewayKeyPin.swift */,
 				AA11BB22CC33DD44EE55FF02 /* ZTLPVIPProxy.swift */,
 				BB22CC33DD44EE55FF660A02 /* ZTLPDNSResponder.swift */,
 				CC33DD44EE55FF66AA770B02 /* ZTLPNSClient.swift */,
@@ -418,6 +421,7 @@
 			files = (
 				18BB853C28A8642292ADFDCA /* PacketTunnelProvider.swift in Sources */,
 				AA11BB22CC33DD44EE55FF03 /* ZTLPTunnelConnection.swift in Sources */,
+				AA11BB22CC33DD44EE55FF05 /* GatewayKeyPin.swift in Sources */,
 				AA11BB22CC33DD44EE55FF04 /* ZTLPVIPProxy.swift in Sources */,
 				BB22CC33DD44EE55FF660A01 /* ZTLPDNSResponder.swift in Sources */,
 				CC33DD44EE55FF66AA770B01 /* ZTLPNSClient.swift in Sources */,

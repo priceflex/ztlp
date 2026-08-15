@@ -23,6 +23,8 @@ use crate::packet::{HandshakeHeader, MsgType, SessionId};
 use crate::pipeline::compute_header_auth_tag;
 use crate::session::SessionState;
 
+use tracing;
+
 // ─── Handshake Retransmit Constants ─────────────────────────────────────────
 
 /// Maximum handshake retransmit attempts per message.
@@ -186,6 +188,14 @@ pub struct HandshakeContext {
     noise: HandshakeState,
     /// Which message we're on (0-indexed).
     pub message_index: u8,
+    /// Peer NodeID extracted from the Noise-authenticated handshake payload.
+    ///
+    /// [SAST: fne-nxah] Previously this was read from the unauthenticated
+    /// `HandshakeHeader.src_node_id` field. An attacker could spoof that
+    /// header to impersonate any node. Now we embed our NodeID inside the
+    /// Noise payload (encrypted + MACed by the Noise protocol) and extract
+    /// the peer's NodeID from their authenticated payload.
+    pub peer_node_id: Option<NodeId>,
 }
 
 impl HandshakeContext {
@@ -204,6 +214,7 @@ impl HandshakeContext {
             role: Role::Initiator,
             noise,
             message_index: 0,
+            peer_node_id: None,
         })
     }
 
@@ -222,17 +233,29 @@ impl HandshakeContext {
             role: Role::Responder,
             noise,
             message_index: 0,
+            peer_node_id: None,
         })
     }
 
     /// Generate the next handshake message (Noise payload).
     ///
     /// Returns the Noise message bytes to be wrapped in a ZTLP header.
+    ///
+    /// [SAST: fne-nxah] Our NodeID is embedded as the first 16 bytes of the
+    /// Noise payload so the peer can extract it from the authenticated channel.
+    /// This replaces the old pattern of trusting `src_node_id` from the
+    /// unauthenticated `HandshakeHeader`.
     pub fn write_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, HandshakeError> {
+        // Prepend our NodeID to the application payload so the peer can
+        // extract it from the Noise-authenticated envelope.
+        let mut prefixed = Vec::with_capacity(16 + payload.len());
+        prefixed.extend_from_slice(self.identity.node_id.as_bytes());
+        prefixed.extend_from_slice(payload);
+
         let mut buf = vec![0u8; 65535];
         let len = self
             .noise
-            .write_message(payload, &mut buf)
+            .write_message(&prefixed, &mut buf)
             .map_err(|e| HandshakeError::Noise(e.to_string()))?;
         buf.truncate(len);
         self.message_index += 1;
@@ -241,7 +264,13 @@ impl HandshakeContext {
 
     /// Process a received handshake message.
     ///
-    /// Returns the decrypted payload from the Noise message.
+    /// Returns the decrypted payload from the Noise message (with the peer's
+    /// NodeID stripped from the front).
+    ///
+    /// [SAST: fne-nxah] The first 16 bytes of the decrypted payload are the
+    /// peer's NodeID, authenticated by the Noise protocol. We extract them
+    /// here and store in `peer_node_id` so `finalize()` no longer needs
+    /// an unauthenticated source.
     pub fn read_message(&mut self, message: &[u8]) -> Result<Vec<u8>, HandshakeError> {
         let mut buf = vec![0u8; 65535];
         let len = self
@@ -249,8 +278,21 @@ impl HandshakeContext {
             .read_message(message, &mut buf)
             .map_err(|e| HandshakeError::Noise(e.to_string()))?;
         buf.truncate(len);
-        self.message_index += 1;
-        Ok(buf)
+
+        // Extract the peer's NodeID from the first 16 bytes of the
+        // Noise-authenticated payload.
+        if buf.len() >= 16 {
+            let mut nid = [0u8; 16];
+            nid.copy_from_slice(&buf[..16]);
+            self.peer_node_id = Some(NodeId::from_bytes(nid));
+            // Return the rest of the payload (application data) to the caller.
+            Ok(buf.into_iter().skip(16).collect())
+        } else {
+            // Payload too short to contain a NodeID — this is a protocol error.
+            Err(HandshakeError::UnexpectedState(
+                "handshake payload too short to contain NodeID".into(),
+            ))
+        }
     }
 
     /// Check if the handshake is complete.
@@ -317,6 +359,12 @@ impl HandshakeContext {
     /// proposes it in message 3). For in-process handshakes, the caller
     /// provides a single shared SessionID.
     ///
+    /// [SAST: fne-nxah] The peer NodeID is now extracted from the
+    /// Noise-authenticated payload (via `read_message` → `peer_node_id`)
+    /// instead of from the unauthenticated header. A fallback `peer_node_id`
+    /// parameter is kept for API compatibility with legacy callers that may
+    /// not have updated yet, but the authenticated value takes precedence.
+    ///
     /// [SAST: sta-inza fix — coordinated across proto/Rust, gateway/Elixir,
     /// and sdk/Go] Previously derived both transport keys from the two
     /// peers' STATIC PUBLIC keys (identity material, not secret) + fixed
@@ -345,6 +393,20 @@ impl HandshakeContext {
 
         let role = self.role;
 
+        // [SAST: fne-nxah] Use the Noise-authenticated peer_node_id from
+        // the handshake payload. Fall back to the passed parameter only if
+        // the authenticated value is not available (e.g., legacy interop
+        // with peers that don't embed NodeID in their payload).
+        let authenticated_peer_node_id = self
+            .peer_node_id
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "peer_node_id not available from Noise payload — \
+                     falling back to unauthenticated value (fne-nxah mitigation)"
+                );
+                peer_node_id
+            });
+
         // Must be captured BEFORE into_transport_mode() consumes `self.noise`.
         // cs1 == initiator's send key == responder's recv key (i2r direction).
         // cs2 == responder's send key == initiator's recv key (r2i direction).
@@ -367,7 +429,7 @@ impl HandshakeContext {
             Role::Responder => (r2i_key, i2r_key),
         };
 
-        let session = SessionState::new(session_id, peer_node_id, send_key, recv_key, false);
+        let session = SessionState::new(session_id, authenticated_peer_node_id, send_key, recv_key, false);
 
         Ok((transport, session))
     }
@@ -568,6 +630,115 @@ mod tests {
         assert!(
             resp_ctx.is_finished(),
             "handshake should be complete after msg3"
+        );
+    }
+
+    // ── remote_static_hex / verify_gateway_pin (rhf-phvo / sjy-yrjl) ──
+    // Regression coverage for the FFI export added to fix rhf-phvo
+    // (iOS gateway key pinning had no way to read the peer's
+    // authenticated static key at all before this). Mirrors the
+    // exact call timing the iOS client uses: after processing
+    // msg2, before finalize.
+    #[test]
+    fn test_remote_static_hex_available_after_msg2() {
+        let init_id = test_identity();
+        let resp_id = test_identity();
+
+        let mut init_ctx = HandshakeContext::new_initiator(&init_id).expect("init");
+        let mut resp_ctx = HandshakeContext::new_responder(&resp_id).expect("resp");
+
+        // Before any messages, the initiator has no remote static key yet.
+        assert!(
+            init_ctx.remote_static_hex().is_none(),
+            "remote static key should not be available before msg2"
+        );
+
+        let msg1 = init_ctx.write_message(&[]).expect("msg1");
+        resp_ctx.read_message(&msg1).expect("read msg1");
+        let msg2 = resp_ctx.write_message(&[]).expect("msg2");
+        init_ctx.read_message(&msg2).expect("read msg2");
+
+        // After processing msg2, the initiator should have the
+        // responder's static key available — this is exactly the
+        // point the iOS client calls
+        // ztlp_handshake_get_peer_static_key before finalize.
+        let peer_hex = init_ctx
+            .remote_static_hex()
+            .expect("remote static key should be available after msg2");
+        assert_eq!(
+            peer_hex.len(),
+            64,
+            "X25519 public key hex should be 64 chars (32 bytes)"
+        );
+        assert!(
+            peer_hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "should be valid hex"
+        );
+        assert_ne!(peer_hex, "0".repeat(64), "should not be an all-zero key");
+    }
+
+    #[test]
+    fn test_verify_gateway_pin_empty_pins_accepts_any() {
+        let init_id = test_identity();
+        let resp_id = test_identity();
+
+        let mut init_ctx = HandshakeContext::new_initiator(&init_id).expect("init");
+        let mut resp_ctx = HandshakeContext::new_responder(&resp_id).expect("resp");
+
+        let msg1 = init_ctx.write_message(&[]).expect("msg1");
+        resp_ctx.read_message(&msg1).expect("read msg1");
+        let msg2 = resp_ctx.write_message(&[]).expect("msg2");
+        init_ctx.read_message(&msg2).expect("read msg2");
+
+        // Empty pin list — backward compatible, accepts any peer.
+        assert!(init_ctx.verify_gateway_pin(&[]).is_ok());
+    }
+
+    #[test]
+    fn test_verify_gateway_pin_rejects_unpinned_key() {
+        let init_id = test_identity();
+        let resp_id = test_identity();
+
+        let mut init_ctx = HandshakeContext::new_initiator(&init_id).expect("init");
+        let mut resp_ctx = HandshakeContext::new_responder(&resp_id).expect("resp");
+
+        let msg1 = init_ctx.write_message(&[]).expect("msg1");
+        resp_ctx.read_message(&msg1).expect("read msg1");
+        let msg2 = resp_ctx.write_message(&[]).expect("msg2");
+        init_ctx.read_message(&msg2).expect("read msg2");
+
+        // A pin list that does NOT contain the responder's actual
+        // static key must be rejected.
+        let wrong_pin = [[0u8; 32]];
+        let result = init_ctx.verify_gateway_pin(&wrong_pin);
+        assert!(
+            result.is_err(),
+            "should reject when pinned keys don't include the real peer key"
+        );
+    }
+
+    #[test]
+    fn test_verify_gateway_pin_accepts_matching_key() {
+        let init_id = test_identity();
+        let resp_id = test_identity();
+
+        let mut init_ctx = HandshakeContext::new_initiator(&init_id).expect("init");
+        let mut resp_ctx = HandshakeContext::new_responder(&resp_id).expect("resp");
+
+        let msg1 = init_ctx.write_message(&[]).expect("msg1");
+        resp_ctx.read_message(&msg1).expect("read msg1");
+        let msg2 = resp_ctx.write_message(&[]).expect("msg2");
+        init_ctx.read_message(&msg2).expect("read msg2");
+
+        let real_key: [u8; 32] = init_ctx
+            .remote_static_bytes()
+            .expect("remote static key should be available")
+            .try_into()
+            .expect("X25519 key is 32 bytes");
+
+        assert!(
+            init_ctx.verify_gateway_pin(&[real_key]).is_ok(),
+            "should accept when the pin list contains the real peer key"
         );
     }
 

@@ -856,8 +856,12 @@ where
         return Err("handshake incomplete".into());
     }
 
-    let peer_node_id = NodeId::from_bytes(recv2_hdr.src_node_id);
-    let (_, session) = ctx.finalize(peer_node_id, session_id)?;
+    // [SAST: fne-nxah] The peer_node_id is now extracted from the
+    // Noise-authenticated payload inside HandshakeContext::finalize().
+    // We pass NodeId::zero() here as a fallback — it will only be used
+    // if the authenticated value is missing (which shouldn't happen with
+    // updated peers).
+    let (_, session) = ctx.finalize(NodeId::zero(), session_id)?;
 
     {
         let mut pl = node.pipeline.lock().await;
@@ -981,8 +985,12 @@ async fn handle_tcp_connection(
         return Err("handshake incomplete".into());
     }
 
-    let peer_node_id = NodeId::from_bytes(recv2_hdr.src_node_id);
-    let (_, session) = ctx.finalize(peer_node_id, session_id)?;
+    // [SAST: fne-nxah] The peer_node_id is now extracted from the
+    // Noise-authenticated payload inside HandshakeContext::finalize().
+    // We pass NodeId::zero() here as a fallback — it will only be used
+    // if the authenticated value is missing (which shouldn't happen with
+    // updated peers).
+    let (_, session) = ctx.finalize(NodeId::zero(), session_id)?;
 
     {
         let mut pl = node.pipeline.lock().await;

@@ -113,28 +113,92 @@ defmodule ZtlpGateway.Sack do
   defp parse_sack_blocks_loop(_remaining, _data, acc), do: Enum.reverse(acc)
 
   @doc """
-  Process incoming SACK blocks into a sacked_set MapSet.
+  Process incoming SACK blocks into a sacked_set (range list).
 
-  Takes existing sacked_set and a list of `{start, end}` SACK blocks,
-  returns updated sacked_set with all sequences in the SACK ranges added.
+  Takes an existing sacked_set (list of `{start, stop}` tuples, sorted,
+  non-overlapping) and a list of new `{start, end}` SACK blocks.
+  Returns an updated sacked_set with all ranges merged.
+
+  The sacked_set is a list of non-overlapping, sorted ranges — never a
+  MapSet of individual sequence numbers.  This avoids algorithmic DoS
+  from huge SACK ranges (e.g. `{0, 2**64-1}` would need billions of
+  MapSet.insert calls).  Membership is checked with
+  `seq_in_sacked_range/2` which is O(blocks).
   """
   def add_to_sacked_set(sacked_set, sack_blocks) do
-    Enum.reduce(sack_blocks, sacked_set, fn {start, stop}, acc ->
-      Enum.reduce(start..stop, acc, fn seq, inner_acc ->
-        MapSet.put(inner_acc, seq)
-      end)
-    end)
+    # Merge existing ranges + new blocks into a unified, deduplicated,
+    # sorted list of non-overlapping ranges.
+    (sacked_set ++ sack_blocks)
+    |> Enum.sort()
+    |> merge_sack_ranges()
+  end
+
+  defp merge_sack_ranges([]), do: []
+  defp merge_sack_ranges([{start, stop}]), do: [{start, stop}]
+
+  defp merge_sack_ranges([{s1, e1}, {s2, e2} | rest]) when e1 >= s2 - 1 do
+    # Overlapping or adjacent (e.g. {1,3},{4,6} → {1,6})
+    merged = {s1, max(e1, e2)}
+    [merged | rest]
+    |> merge_sack_ranges()
+  end
+
+  defp merge_sack_ranges([{s1, e1}, {s2, e2} | rest]) do
+    # Disjoint — emit first, continue with rest
+    [{s1, e1} | merge_sack_ranges([{s2, e2} | rest])]
   end
 
   @doc """
-  Prune the sacked_set by removing sequences at or below the cumulative ACK.
+  Prune the sacked_set by removing ranges fully at or below the cumulative ACK.
 
-  These sequences are fully acknowledged and no longer need tracking.
+  Ranges that straddle the cumulative ACK are trimmed to start above it.
+  Ranges entirely above the cumulative ACK are kept unchanged.
   """
   def prune_sacked_set(sacked_set, cumulative_ack) do
-    sacked_set
-    |> Enum.filter(fn seq -> seq > cumulative_ack end)
-    |> MapSet.new()
+    Enum.reduce(sacked_set, [], fn {start, stop}, acc ->
+      cond do
+        stop <= cumulative_ack ->
+          # Entire range is at or below cumulative ACK — drop it
+          acc
+
+        start <= cumulative_ack ->
+          # Range straddles — trim to (cumulative_ack+1 .. stop)
+          [{cumulative_ack + 1, stop} | acc]
+
+        true ->
+          # Entirely above — keep
+          [{start, stop} | acc]
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  @doc """
+  Check if a sequence number is covered by any range in the sacked_set.
+
+  The sacked_set is a sorted list of `{start, stop}` tuples.
+  Returns `true` if `seq` falls within any range.
+  """
+  def seq_in_sacked_range(_ranges, seq) when is_nil(seq) or not is_integer(seq), do: false
+
+  def seq_in_sacked_range([], _seq), do: false
+
+  def seq_in_sacked_range([{start, stop} | _rest], seq) when seq < start do
+    # Sorted — seq is before first range, no need to check further
+    false
+  end
+
+  def seq_in_sacked_range([{start, stop} | _rest], seq) when seq >= start and seq <= stop do
+    true
+  end
+
+  def seq_in_sacked_range([{_start, stop} | rest], seq) when seq > stop do
+    # Skip to next range
+    seq_in_sacked_range(rest, seq)
+  end
+
+  def seq_in_sacked_range([{_start, _stop} | rest], seq) do
+    seq_in_sacked_range(rest, seq)
   end
 end
 
@@ -712,7 +776,7 @@ defmodule ZtlpGateway.Session do
         recovery_cwnd: @initial_cwnd,
         # SACK: set of data_seqs that have been selectively acknowledged
         # by the client. Retransmit logic skips these sequences.
-        sacked_set: MapSet.new(),
+        sacked_set: [],  # list of {start, stop} tuples — NOT a MapSet (avoids algorithmic DoS)
         # Backpressure: when send_queue exceeds @queue_high, we stop
         # reading from backends. Tracks which backend pids are paused.
         backends_paused: false,
@@ -1128,7 +1192,7 @@ defmodule ZtlpGateway.Session do
                                                      {packet, _sent_at, retransmit_count, ds}},
                                                     {acc, exp_count} ->
         cond do
-          is_integer(ds) and MapSet.member?(acc.sacked_set, ds) ->
+          is_integer(ds) and Sack.seq_in_sacked_range(acc.sacked_set, ds) ->
             acc =
               if @use_bbr do
                 %{acc | bbr: Bbr.release_bytes(acc.bbr, byte_size(packet))}
@@ -2296,7 +2360,7 @@ defmodule ZtlpGateway.Session do
       end
 
     # Filter out data_seqs that were already SACK'd — the client has them
-    nacked_data_seqs = Enum.reject(nacked_data_seqs, &MapSet.member?(state.sacked_set, &1))
+    nacked_data_seqs = Enum.reject(nacked_data_seqs, &Sack.seq_in_sacked_range(state.sacked_set, &1))
 
     state =
       Enum.reduce(nacked_data_seqs, state, fn nacked_ds, acc ->

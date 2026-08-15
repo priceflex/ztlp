@@ -184,37 +184,123 @@ defmodule ZtlpGateway.SackTest do
   # ---------------------------------------------------------------------------
 
   describe "add_to_sacked_set/2" do
-    test "adds sequences from SACK blocks" do
-      sacked = MapSet.new()
+    test "adds ranges from SACK blocks" do
+      sacked = []
       blocks = [{6, 8}, {11, 13}]
       result = Sack.add_to_sacked_set(sacked, blocks)
-      assert MapSet.equal?(result, MapSet.new([6, 7, 8, 11, 12, 13]))
+      assert result == [{6, 8}, {11, 13}]
     end
 
-    test "merges with existing set" do
-      sacked = MapSet.new([1, 2, 3])
+    test "merges with existing ranges" do
+      sacked = [{1, 3}]
       blocks = [{5, 6}]
       result = Sack.add_to_sacked_set(sacked, blocks)
-      assert MapSet.equal?(result, MapSet.new([1, 2, 3, 5, 6]))
+      assert result == [{1, 3}, {5, 6}]
     end
 
     test "empty blocks don't modify set" do
-      sacked = MapSet.new([1, 2])
+      sacked = [{1, 3}]
       result = Sack.add_to_sacked_set(sacked, [])
-      assert MapSet.equal?(result, sacked)
+      assert result == [{1, 3}]
+    end
+
+    test "overlapping ranges are merged" do
+      sacked = [{1, 5}]
+      blocks = [{4, 8}]
+      result = Sack.add_to_sacked_set(sacked, blocks)
+      assert result == [{1, 8}]
+    end
+
+    test "adjacent ranges are merged" do
+      sacked = [{1, 3}]
+      blocks = [{4, 6}]
+      result = Sack.add_to_sacked_set(sacked, blocks)
+      assert result == [{1, 6}]
+    end
+
+    test "large ranges are stored compactly (algorithmic DoS protection)" do
+      # A malicious client could send a huge range — it should NOT expand to individual elements
+      sacked = []
+      blocks = [{0, 1_000_000_000}]
+      result = Sack.add_to_sacked_set(sacked, blocks)
+      # Should be a single range tuple, not a billion MapSet entries
+      assert result == [{0, 1_000_000_000}]
+      assert length(result) == 1
+    end
+
+    test "multiple blocks are sorted and merged" do
+      sacked = []
+      blocks = [{10, 12}, {1, 3}, {2, 4}, {15, 20}]
+      result = Sack.add_to_sacked_set(sacked, blocks)
+      assert result == [{1, 4}, {10, 12}, {15, 20}]
     end
   end
 
   describe "prune_sacked_set/2" do
-    test "removes sequences at or below cumulative ACK" do
-      sacked = MapSet.new([3, 5, 8, 12])
+    test "removes ranges fully at or below cumulative ACK" do
+      sacked = [{1, 3}, {5, 7}, {10, 12}]
       result = Sack.prune_sacked_set(sacked, 5)
-      assert MapSet.equal?(result, MapSet.new([8, 12]))
+      assert result == [{6, 7}, {10, 12}]
+    end
+
+    test "drops fully acknowledged range, keeps above" do
+      sacked = [{1, 3}, {8, 12}]
+      result = Sack.prune_sacked_set(sacked, 5)
+      assert result == [{8, 12}]
     end
 
     test "empty set stays empty" do
-      result = Sack.prune_sacked_set(MapSet.new(), 10)
-      assert MapSet.equal?(result, MapSet.new())
+      result = Sack.prune_sacked_set([], 10)
+      assert result == []
+    end
+
+    test "straddle — range trimmed to above cumulative ACK" do
+      sacked = [{5, 10}]
+      result = Sack.prune_sacked_set(sacked, 7)
+      assert result == [{8, 10}]
+    end
+
+    test "cumulative ACK beyond all ranges" do
+      sacked = [{1, 3}, {5, 7}]
+      result = Sack.prune_sacked_set(sacked, 100)
+      assert result == []
+    end
+  end
+
+  describe "seq_in_sacked_range/2" do
+    test "nil or non-integer seq returns false" do
+      assert Sack.seq_in_sacked_range([{1, 5}], nil) == false
+      assert Sack.seq_in_sacked_range([{1, 5}], "abc") == false
+    end
+
+    test "empty ranges returns false" do
+      assert Sack.seq_in_sacked_range([], 5) == false
+    end
+
+    test "seq within range" do
+      assert Sack.seq_in_sacked_range([{1, 5}], 3) == true
+      assert Sack.seq_in_sacked_range([{1, 5}], 1) == true
+      assert Sack.seq_in_sacked_range([{1, 5}], 5) == true
+    end
+
+    test "seq outside range" do
+      assert Sack.seq_in_sacked_range([{1, 5}], 0) == false
+      assert Sack.seq_in_sacked_range([{1, 5}], 6) == false
+    end
+
+    test "multiple ranges — hit second" do
+      assert Sack.seq_in_sacked_range([{1, 3}, {10, 15}], 12) == true
+    end
+
+    test "multiple ranges — in gap between ranges" do
+      assert Sack.seq_in_sacked_range([{1, 3}, {10, 15}], 5) == false
+    end
+
+    test "large range is checked in O(1) not O(range_size)" do
+      # This must not hang or OOM — the fix stores ranges, not individual elements
+      sacked = [{0, 1_000_000_000}]
+      assert Sack.seq_in_sacked_range(sacked, 500_000_000) == true
+      assert Sack.seq_in_sacked_range(sacked, 1_000_000_001) == false
     end
   end
 
@@ -227,22 +313,30 @@ defmodule ZtlpGateway.SackTest do
       # Simulate the retransmit check logic:
       # send_buffer has data_seqs 5, 6, 7, 8
       # sacked_set has {6, 8} from SACK blocks
-      sacked_set = Sack.add_to_sacked_set(MapSet.new(), [{6, 8}])
+      sacked_set = Sack.add_to_sacked_set([], [{6, 8}])
 
       send_buffer_data_seqs = [5, 6, 7, 8]
 
       # Filter: what would we actually retransmit?
-      to_retransmit = Enum.reject(send_buffer_data_seqs, &MapSet.member?(sacked_set, &1))
+      to_retransmit = Enum.reject(send_buffer_data_seqs, &Sack.seq_in_sacked_range(sacked_set, &1))
 
       # Only data_seq 5 needs retransmission (6, 7, 8 are SACK'd)
       assert to_retransmit == [5]
     end
 
     test "no SACK'd sequences means all get retransmitted" do
-      sacked_set = MapSet.new()
+      sacked_set = []
       send_buffer_data_seqs = [5, 6, 7, 8]
-      to_retransmit = Enum.reject(send_buffer_data_seqs, &MapSet.member?(sacked_set, &1))
+      to_retransmit = Enum.reject(send_buffer_data_seqs, &Sack.seq_in_sacked_range(sacked_set, &1))
       assert to_retransmit == [5, 6, 7, 8]
+    end
+
+    test "large SACK range correctly covers all data_seqs in O(1)" do
+      # Regression test: with the old MapSet approach this would OOM
+      sacked_set = Sack.add_to_sacked_set([], [{0, 1_000_000_000}])
+      send_buffer_data_seqs = [5, 6, 7, 8, 500_000_000, 999_999_999]
+      to_retransmit = Enum.reject(send_buffer_data_seqs, &Sack.seq_in_sacked_range(sacked_set, &1))
+      assert to_retransmit == []
     end
   end
 end

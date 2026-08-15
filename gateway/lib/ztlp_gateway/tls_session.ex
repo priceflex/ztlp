@@ -224,9 +224,17 @@ defmodule ZtlpGateway.TlsSession do
 
   defp check_policy(state) do
     identity_str = identity_string(state.identity)
+    auth_mode = get_auth_mode(state.service, state.config)
 
     if identity_str do
       unless PolicyEngine.authorize?(identity_str, state.service || "") do
+        AuditLog.tls_auth_failed(state.sni, :policy_denied, state.source)
+        throw({:session_reject, :policy_denied, state})
+      end
+    else
+      # No authenticated identity — reject unless the service explicitly
+      # allows anonymous access via :passthrough auth mode.
+      unless auth_mode == :passthrough do
         AuditLog.tls_auth_failed(state.sni, :policy_denied, state.source)
         throw({:session_reject, :policy_denied, state})
       end
@@ -276,12 +284,27 @@ defmodule ZtlpGateway.TlsSession do
       {:ok, {host, port}} ->
         case backend_mode do
           :tls ->
-            tls_opts = [
+            cacertfile = get_backend_cacertfile(state.config)
+
+            # [SAST: vab-fivn fix] Was {:verify, :verify_none} — no backend
+            # cert validation at all. Now verifies against a configured CA
+            # bundle when present, falling back to the OS trust store
+            # (:cacerts, Erlang/OTP >= 25) otherwise. `:binary` is a list
+            # element, not a keyword list — build tls_opts as a plain list.
+            base_opts = [
               :binary,
               {:active, true},
               {:packet, :raw},
-              {:verify, :verify_none}
+              {:verify, :verify_peer},
+              {:depth, 3}
             ]
+
+            tls_opts =
+              if cacertfile do
+                base_opts ++ [{:cacertfile, cacertfile}]
+              else
+                base_opts ++ [{:cacerts, :public_key.cacerts_get()}]
+              end
 
             case :ssl.connect(host, port, tls_opts, @backend_connect_timeout) do
               {:ok, socket} ->
@@ -580,6 +603,16 @@ defmodule ZtlpGateway.TlsSession do
   end
 
   defp get_backend_mode(_service, _config), do: :tcp
+
+  defp get_backend_cacertfile(config) when is_map(config) do
+    case Map.get(config, :cacertfile) do
+      nil -> nil
+      path when is_binary(path) -> String.to_charlist(path)
+      path when is_list(path) -> path
+    end
+  end
+
+  defp get_backend_cacertfile(_), do: nil
 
   defp http_request?(<<method, _::binary>>) when method in [?G, ?P, ?H, ?D, ?O, ?T, ?C],
     do: true

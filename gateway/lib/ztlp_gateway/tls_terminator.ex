@@ -37,13 +37,23 @@ defmodule ZtlpGateway.TlsTerminator do
   @spec start_bridge(String.t(), String.t(), String.t(), pid(), non_neg_integer()) ::
           {:ok, port(), pid()} | {:error, term()}
   def start_bridge(cert_pem, key_pem, chain_pem, owner, stream_id) do
-    # Write certs to temp files
+    # Write certs to a private temp directory (0700) to prevent other
+    # users from accessing TLS keys in shared /tmp
     tmp_dir = System.tmp_dir!()
-    cert_path = Path.join(tmp_dir, "ztlp_cert_#{stream_id}_#{:rand.uniform(999999)}.pem")
-    key_path = Path.join(tmp_dir, "ztlp_key_#{stream_id}_#{:rand.uniform(999999)}.pem")
+    dir_name = "ztlp_tls_#{stream_id}_#{:rand.uniform(999999)}"
+    private_dir = Path.join(tmp_dir, dir_name)
+
+    File.mkdir!(private_dir)
+    :file.change_mode(String.to_charlist(private_dir), 0o700)
+
+    cert_path = Path.join(private_dir, "cert.pem")
+    key_path = Path.join(private_dir, "key.pem")
 
     File.write!(cert_path, cert_pem <> chain_pem)
+
+    # Write key with 0600 permissions (owner-only read/write)
     File.write!(key_path, key_pem)
+    :file.change_mode(String.to_charlist(key_path), 0o600)
 
     # Start local TCP listener on ephemeral port
     {:ok, listen} = :gen_tcp.listen(0, [
@@ -141,5 +151,6 @@ defmodule ZtlpGateway.TlsTerminator do
   defp cleanup_files(cert_path, key_path) do
     File.rm(cert_path)
     File.rm(key_path)
+    File.rm(Path.dirname(cert_path))
   end
 end

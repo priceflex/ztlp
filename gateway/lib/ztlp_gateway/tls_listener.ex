@@ -135,7 +135,7 @@ defmodule ZtlpGateway.TlsListener do
     # Start a TlsSession process for this connection
     session_opts = [
       listener_pid: self(),
-      config: state.config
+      config: Map.put(state.config, :cacertfile, state.cacertfile)
     ]
 
     {:ok, session_pid} = ZtlpGateway.TlsSession.start_link(ssl_socket, session_opts)

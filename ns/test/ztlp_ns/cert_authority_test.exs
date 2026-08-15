@@ -272,15 +272,6 @@ defmodule ZtlpNs.CertAuthorityTest do
       assert log =~ "ZTLP_CA_MODE=oracle"
     end
 
-    test "init_ca logs default passphrase warning when using default" do
-      log = capture_log(fn ->
-        {:ok, _} = CertAuthority.init_ca(org: "Default Pass Test")
-      end)
-
-      assert log =~ "ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE"
-      assert log =~ "ZTLP_CA_PASSPHRASE"
-    end
-
     test "init_ca does not log default passphrase warning when custom passphrase is used" do
       log = capture_log(fn ->
         {:ok, _} = CertAuthority.init_ca(org: "Custom Pass Test", passphrase: "my-strong-passphrase-123!")
@@ -288,6 +279,28 @@ defmodule ZtlpNs.CertAuthorityTest do
 
       assert log =~ "ROOT CA KEY SAVED TO FILESYSTEM"
       refute log =~ "ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE"
+    end
+
+    test "init_ca does not log passphrase warning with env-set passphrase" do
+      log = capture_log(fn ->
+        {:ok, _} = CertAuthority.init_ca(org: "Env Pass Test")
+      end)
+
+      assert log =~ "ROOT CA KEY SAVED TO FILESYSTEM"
+      refute log =~ "DEFAULT PASSPHRASE"
+    end
+
+    test "init_ca raises when ZTLP_CA_PASSPHRASE is not set" do
+      original = System.get_env("ZTLP_CA_PASSPHRASE")
+      try do
+        System.delete_env("ZTLP_CA_PASSPHRASE")
+
+        assert_raise ArgumentError, ~r/ZTLP_CA_PASSPHRASE.*required/i, fn ->
+          CertAuthority.init_ca(org: "No Pass Test")
+        end
+      after
+        if original, do: System.put_env("ZTLP_CA_PASSPHRASE", original)
+      end
     end
 
     test "loading CA from disk logs info message", %{ca_dir: dir, pid: pid} do

@@ -253,16 +253,37 @@ defmodule ZtlpNs.RegistrationAuth do
     if found, do: :ok, else: {:error, :not_zone_authority}
   end
 
-  # Self-registration: for KEY records, the registrant's pubkey must match
-  # the public_key field in the record data. For SVC records, the registrant
-  # must own the corresponding KEY record for that name.
-  defp check_self_registration(pubkey_hex, _name, :key, data) do
+  # Self-registration: for KEY records, the registrant must own an existing
+  # KEY record at that name (updating their own key) or the record data
+  # public_key must match the signing key for new registrations.
+  #
+  # When an existing KEY record is present, we verify against the stored
+  # record — NOT against attacker-controlled data. This prevents an
+  # attacker from overwriting a victim's KEY by signing with their own
+  # key and setting data.public_key to match.
+  defp check_self_registration(pubkey_hex, name, :key, data) do
     record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
 
-    if record_pubkey == pubkey_hex do
-      :ok
-    else
-      {:error, :not_self_registration}
+    case Store.lookup(name, :key) do
+      {:ok, existing} ->
+        # Existing KEY record: registrant must own it (check against stored data)
+        existing_pubkey = Map.get(existing.data, "public_key") || Map.get(existing.data, :public_key)
+
+        if existing_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_key_owner}
+        end
+
+      _ ->
+        # No existing record (new registration): verify the data.public_key
+        # matches the signing key — proves the registrant controls the key
+        # they are registering.
+        if record_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_self_registration}
+        end
     end
   end
 
@@ -295,25 +316,53 @@ defmodule ZtlpNs.RegistrationAuth do
 
   # DEVICE self-registration: a device can register itself if the
   # registrant's pubkey matches the public_key in the record data.
-  defp check_self_registration(pubkey_hex, _name, :device, data) do
+  # When an existing DEVICE record exists, verify against the stored record
+  # — NOT against attacker-controlled data — to prevent key substitution.
+  defp check_self_registration(pubkey_hex, name, :device, data) do
     record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
 
-    if record_pubkey == pubkey_hex do
-      :ok
-    else
-      {:error, :not_self_registration}
+    case Store.lookup(name, :device) do
+      {:ok, existing} ->
+        existing_pubkey = Map.get(existing.data, "public_key") || Map.get(existing.data, :public_key)
+
+        if existing_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_key_owner}
+        end
+
+      _ ->
+        if record_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_self_registration}
+        end
     end
   end
 
   # USER self-registration: a user can register themselves if the
   # registrant's pubkey matches the public_key in the record data.
-  defp check_self_registration(pubkey_hex, _name, :user, data) do
+  # When an existing USER record exists, verify against the stored record
+  # — NOT against attacker-controlled data — to prevent key substitution.
+  defp check_self_registration(pubkey_hex, name, :user, data) do
     record_pubkey = Map.get(data, "public_key") || Map.get(data, :public_key)
 
-    if record_pubkey == pubkey_hex do
-      :ok
-    else
-      {:error, :not_self_registration}
+    case Store.lookup(name, :user) do
+      {:ok, existing} ->
+        existing_pubkey = Map.get(existing.data, "public_key") || Map.get(existing.data, :public_key)
+
+        if existing_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_key_owner}
+        end
+
+      _ ->
+        if record_pubkey == pubkey_hex do
+          :ok
+        else
+          {:error, :not_self_registration}
+        end
     end
   end
 

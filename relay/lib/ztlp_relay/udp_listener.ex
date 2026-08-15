@@ -797,7 +797,38 @@ defmodule ZtlpRelay.UdpListener do
     end
   end
 
+  # Fallback gateway lookup: try service_name first, then node_id.
+  # Shared by both V1 and V2 paths — V2 reaches this only when the
+  # zone-keyed lookup ("gw:<zone>") missed.
+  defp pick_fallback_gateway(service_name, node_id) do
+    case GatewayForwarder.pick_gateway_for_service(service_name) do
+      {:ok, _} = ok -> ok
+      :error ->
+        case node_id do
+          <<0::128>> -> :error
+          <<nid::binary-size(16)>> -> GatewayForwarder.pick_gateway_for_service(nid)
+          _ -> :error
+        end
+    end
+  end
+
+  # V1 CLIENT_ROUTE — no explicit zone_id on the wire.
   defp do_install_client_route(sender, node_id, service_name) do
+    do_install_client_route(sender, node_id, service_name, nil)
+  end
+
+  # V2 CLIENT_ROUTE_V2 — explicit zone_id from the packet.
+  #
+  # The zone_id MUST be used to look up the correct gateway (zone-keyed
+  # `"gw:<zone>"` routing key) instead of falling back to the raw
+  # `service_name` (e.g. `"ssh"`) which ignores multi-tenant isolation.
+  #
+  # Without this, a CLIENT_ROUTE_V2 from zone "acme" with service_name
+  # "ssh" could land on ANY gateway registered under "ssh" in any zone —
+  # a cross-tenant routing leak. GATEWAY_REGISTER_V2 already routes by
+  # zone via `v2_routing_key = "gw:" <> zone_id`; the client side must
+  # do the same.
+  defp do_install_client_route(sender, node_id, service_name, zone_id) do
     case GenServer.whereis(GatewayForwarder) do
       nil ->
         Logger.warning(
@@ -805,36 +836,38 @@ defmodule ZtlpRelay.UdpListener do
         )
 
       _pid ->
-        # Resolve the target gateway. Try the service-name string first
-        # (legacy / explicit `--service NAME` that matches a registration),
-        # then fall back to the NS-resolved NodeID carried in the packet.
+        # Resolve the target gateway. Priority-ordered lookup:
         #
-        # The NodeID fallback is REQUIRED for remote-site, symmetric-NAT'd
-        # endpoints (e.g. Casita Village Dental BILLING-COMPUTER, 2026-06-11):
-        # the gateway registers under its Z2LS service-name
-        # (`z2ls-bill-008247`) but the operator dials a generic
-        # `--service ssh`, so the CLIENT_ROUTE service-name field is "ssh"
-        # and never matches. The packet's 16-byte node_id, however, IS the
-        # gateway's NS-resolved NodeID. `pick_gateway_for_service/1` matches
-        # a 16-byte binary against `gw.node_id` (its authoritative tier), so
-        # routing by node_id succeeds where the name lookup fails.
+        # 1. zone-keyed service name (V2: `"gw:<zone>"`). This is the
+        #    authoritative match for CLIENT_ROUTE_V2 where the zone_id
+        #    is explicitly signed on the wire.
         #
-        # This mirrors the HELLO/`dst_svc_id` path in
-        # `forward_hello_to_gateway/5`, which already routes by NodeID. An
-        # all-zero node_id (direct ip:port connect, no NS resolution) is NOT
-        # used as a fallback key — that would round-robin onto an arbitrary
-        # tenant. Only a real, non-zero NodeID is tried.
+        # 2. raw service_name (V1 / explicit `--service NAME`). Legacy
+        #    path for backward compatibility.
+        #
+        # 3. NS-resolved NodeID. REQUIRED for remote-site, symmetric-NAT'd
+        #    endpoints where the operator dials a generic `--service ssh`
+        #    but the gateway registered under its Z2LS service-name.
+        #    The packet's 16-byte node_id IS the gateway's NS-resolved
+        #    NodeID and is the canonical tenant pin.
+        #
+        # An all-zero node_id (direct ip:port connect, no NS resolution)
+        # is NOT used as a fallback key — that would round-robin onto
+        # an arbitrary tenant. Only a real, non-zero NodeID is tried.
         pick_result =
-          case GatewayForwarder.pick_gateway_for_service(service_name) do
-            {:ok, _} = ok ->
-              ok
+          cond do
+            # V2 path: zone-keyed lookup first (authoritative tenant isolation)
+            is_binary(zone_id) and byte_size(zone_id) > 0 ->
+              v2_key = "gw:" <> zone_id
 
-            :error ->
-              case node_id do
-                <<0::128>> -> :error
-                <<nid::binary-size(16)>> -> GatewayForwarder.pick_gateway_for_service(nid)
-                _ -> :error
+              case GatewayForwarder.pick_gateway_for_service(v2_key) do
+                {:ok, _} = ok -> ok
+                :error -> pick_fallback_gateway(service_name, node_id)
               end
+
+            # V1 path: no zone_id, use service_name directly
+            true ->
+              pick_fallback_gateway(service_name, node_id)
           end
 
         case pick_result do
@@ -994,7 +1027,7 @@ defmodule ZtlpRelay.UdpListener do
         now = System.system_time(:second)
 
         if abs(now - timestamp) <= 300 do
-          do_install_client_route(sender, node_id, service_name)
+          do_install_client_route(sender, node_id, service_name, zone_id)
         else
           Logger.warning(
             "[UdpListener] CLIENT_ROUTE_V2 from #{inspect(sender)} rejected: " <>
@@ -1008,7 +1041,7 @@ defmodule ZtlpRelay.UdpListener do
             "service=#{service_name} zone=#{zone_id} (mode=dev)"
         )
 
-        do_install_client_route(sender, node_id, service_name)
+        do_install_client_route(sender, node_id, service_name, zone_id)
 
       {:ok, :unverified_staging} ->
         Logger.warning(
@@ -1018,7 +1051,7 @@ defmodule ZtlpRelay.UdpListener do
             "before promoting to prod."
         )
 
-        do_install_client_route(sender, node_id, service_name)
+        do_install_client_route(sender, node_id, service_name, zone_id)
 
       {:error, :bad_hmac} ->
         Logger.warning(

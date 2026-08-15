@@ -49,9 +49,21 @@ defmodule ZtlpNs.CertAuthority do
   - `:ca_dir` — directory to store CA files (default: `~/.ztlp/ca`)
 
   Returns `{:ok, %{root_cert: pem, intermediate_cert: pem, chain: pem}}` or `{:error, reason}`.
+
+  Raises `ArgumentError` if no `:passphrase` option is given and
+  `ZTLP_CA_PASSPHRASE` is not set — checked here in the caller's process
+  (not inside the GenServer callback) so the exception actually propagates
+  to the caller instead of crashing the CertAuthority server.
   """
   @spec init_ca(keyword()) :: {:ok, map()} | {:error, term()}
   def init_ca(opts \\ []) do
+    opts =
+      if Keyword.has_key?(opts, :passphrase) do
+        opts
+      else
+        Keyword.put(opts, :passphrase, default_passphrase())
+      end
+
     GenServer.call(__MODULE__, {:init_ca, opts}, 60_000)
   end
 
@@ -245,7 +257,7 @@ defmodule ZtlpNs.CertAuthority do
   defp do_init_ca(state, opts) do
     org = Keyword.get(opts, :org, "ZTLP")
     key_type = Keyword.get(opts, :key_type, :rsa4096)
-    passphrase = Keyword.get(opts, :passphrase, default_passphrase())
+    passphrase = Keyword.get(opts, :passphrase) || default_passphrase()
     ca_dir = state.ca_dir
 
     # Check for oracle mode
@@ -297,14 +309,6 @@ defmodule ZtlpNs.CertAuthority do
         Set ZTLP_CA_MODE=oracle to use hardware-backed signing.
     """)
 
-    if passphrase == "ztlp-default-passphrase" do
-      Logger.warning("""
-      ⚠️  ROOT CA KEY ENCRYPTED WITH DEFAULT PASSPHRASE!
-
-          Set ZTLP_CA_PASSPHRASE environment variable to a strong,
-          unique passphrase. The default passphrase provides NO security.
-      """)
-    end
 
     new_state = %{state |
       root_cert_der: root_cert_der,
@@ -489,7 +493,19 @@ defmodule ZtlpNs.CertAuthority do
   end
 
   defp default_passphrase do
-    System.get_env("ZTLP_CA_PASSPHRASE") || "ztlp-default-passphrase"
+    case System.get_env("ZTLP_CA_PASSPHRASE") do
+      nil ->
+        raise ArgumentError, """
+        ZTLP_CA_PASSPHRASE environment variable is required.
+
+        This variable is used to encrypt/decrypt the Root CA private key.
+        Do not use a default — set a strong, unique passphrase.
+
+            export ZTLP_CA_PASSPHRASE="<your-passphrase>"
+        """
+      passphrase ->
+        passphrase
+    end
   end
 
   defp build_ca_info(state) do

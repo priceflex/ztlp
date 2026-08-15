@@ -67,7 +67,19 @@ class LogHandler(BaseHTTPRequestHandler):
         
         elif self.path.startswith("/logs/"):
             filename = self.path[6:]  # strip /logs/
+            # Prevent path traversal: reject "..", absolute paths, empty names
+            if ".." in filename or filename.startswith("/") or not filename:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Bad request")
+                return
             filepath = os.path.join(LOG_DIR, filename)
+            # Double-check resolved path stays inside LOG_DIR
+            if not os.path.realpath(filepath).startswith(os.path.realpath(LOG_DIR)):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Forbidden")
+                return
             if os.path.exists(filepath):
                 with open(filepath) as f:
                     content = f.read()
@@ -82,7 +94,7 @@ class LogHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"ZTLP Log Receiver\nPOST /logs - submit\nGET /logs/latest - latest\nGET /logs/list - all files\n")
+            self.wfile.write(b"ZTLP Log Receiver\nPOST /logs - submit\nGET /logs/latest - latest\nGET /logs/list - all files\nGET /logs/<filename> - specific file\n")
     
     def log_message(self, format, *args):
         pass  # Suppress default access logs

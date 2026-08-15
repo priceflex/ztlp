@@ -1390,6 +1390,21 @@ class LaunchApp:
                 "missing token_id\n",
             )
 
+        # [SAST: hzc-amny fix] Validate token_id shape before it ever
+        # reaches the SQL LIKE query below. The legit caller (`ztlp setup`
+        # -> confirm_enrollment in proto/src/bin/ztlp-cli.rs) always sends
+        # exactly 32 lowercase hex chars, so this is a no-op on the happy
+        # path. Rejecting anything else closes the `%`-wildcard attack
+        # that let an unauthenticated caller match an arbitrary onboarding
+        # row and bind their own pubkey_hex as that tenant's admin.
+        import re as _re_token_id
+        if not _re_token_id.fullmatch(r"[0-9a-f]{32}", token_id):
+            return (
+                HTTPStatus.BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                "invalid token_id format\n",
+            )
+
         # v0.30.13: per-token_id rate limit (issue #55). The legit `ztlp
         # setup` issues exactly one confirm; anyone hammering the same
         # token_id is either a buggy retry loop or an attacker trying to

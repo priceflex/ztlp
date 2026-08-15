@@ -356,7 +356,13 @@ class SshProvisioner
         "ZTLP_NS_STORAGE_MODE=ram_copies",
         "ZTLP_NS_LOG_FORMAT=json",
         "ZTLP_METRICS_PORT=#{ZTLP_PORTS['ns'][:metrics]}",
-        "ZTLP_NS_REQUIRE_REGISTRATION_AUTH=false"
+        # [SAST: wdx-svfn fix] Previously always generated `false` here,
+        # meaning every Bootstrap-provisioned NS defaulted to OPEN
+        # registration unless an operator manually fixed it post-deploy.
+        # Default to secure (auth required); only fall back to `false`
+        # when the wizard has explicitly opted into dev/demo mode (no
+        # enrollment secret configured at all is the signal for that).
+        "ZTLP_NS_REQUIRE_REGISTRATION_AUTH=#{network.enrollment_secret_ciphertext.present? ? 'true' : 'false'}"
       ]
       if network.enrollment_secret_ciphertext.present?
         lines << "ZTLP_ENROLLMENT_SECRET=#{network.enrollment_secret_ciphertext}"

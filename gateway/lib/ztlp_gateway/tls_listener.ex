@@ -292,15 +292,24 @@ defmodule ZtlpGateway.TlsListener do
     end
   end
 
-  # Custom verify function that accepts valid and self-signed peer certs.
-  # We verify the peer cert at the application level (TlsIdentity + CrlServer),
-  # so we accept all certs at the TLS level to extract identity info.
-  defp verify_peer_fun(_cert, {:bad_cert, :selfsigned_peer}, state), do: {:valid, state}
-  defp verify_peer_fun(_cert, {:bad_cert, :unknown_ca}, state), do: {:valid, state}
+  # [SAST: nnc-gwtz fix] Previously accepted ANY cert event as valid —
+  # including self-signed peer certs and unknown CAs — which let a
+  # client on `auth_mode: :enforce` routes present an arbitrary
+  # self-signed cert (attacker-chosen CN/SAN) and pass verification.
+  # Peer identity is still ultimately checked at the application layer
+  # (TlsIdentity + CrlServer), but that check reads CN/SAN out of
+  # whatever cert made it through here — so the TLS layer must actually
+  # reject certs that don't chain to a trust anchor it recognizes.
+  # Only genuinely benign/no-op verify events are treated as valid now;
+  # bad_cert reasons (selfsigned_peer, unknown_ca, and anything else) are
+  # rejected. No CTF impact: the CTF dashboard route is TCP passthrough,
+  # not `auth_mode: :enforce` mTLS, so this only tightens routes that
+  # actually require verified client certs.
   defp verify_peer_fun(_cert, {:extension, _ext}, state), do: {:unknown, state}
   defp verify_peer_fun(_cert, :valid, state), do: {:valid, state}
   defp verify_peer_fun(_cert, :valid_peer, state), do: {:valid, state}
-  defp verify_peer_fun(_cert, _event, state), do: {:valid, state}
+  defp verify_peer_fun(_cert, {:bad_cert, reason}, _state), do: {:fail, reason}
+  defp verify_peer_fun(_cert, event, _state), do: {:fail, event}
 
   defp get_config(key, default) do
     Application.get_env(:ztlp_gateway, key, default)

@@ -422,8 +422,23 @@ defmodule ZtlpGateway.CertProvisioner do
   end
 
   defp issue_service_cert(socket, host, port, hostname) do
+    # [SAST: oql-hvmv fix] NS now requires opcode 0x14 0x03 requests to be
+    # signed by an allowlisted component-auth identity key. Sign the
+    # hostname with the gateway's own ComponentAuth identity (the same
+    # key already used for gateway<->NS mutual auth elsewhere) and send
+    # it alongside the request. Operators must add this gateway's public
+    # key to the NS's component_auth.allowed_keys config for issuance to
+    # succeed — see ns/lib/ztlp_ns/component_auth.ex.
     hostname_bin = hostname
-    query = <<0x14, 0x03, byte_size(hostname_bin)::unsigned-big-16, hostname_bin::binary>>
+    {_pubkey, private_key} = ZtlpGateway.ComponentAuth.load_or_generate_identity()
+    {pubkey, _} = :crypto.generate_key(:eddsa, :ed25519, private_key)
+    signature = :crypto.sign(:eddsa, :none, hostname_bin, [private_key, :ed25519])
+
+    query =
+      <<0x14, 0x03, byte_size(hostname_bin)::unsigned-big-16, hostname_bin::binary,
+        byte_size(signature)::unsigned-big-16, signature::binary,
+        byte_size(pubkey)::unsigned-big-16, pubkey::binary>>
+
     :gen_udp.send(socket, host, port, query)
 
     # Cert issuance may take longer (RSA key generation)
@@ -439,6 +454,9 @@ defmodule ZtlpGateway.CertProvisioner do
 
       {:ok, {_, _, <<0x14, 0x03, 0x02>>}} ->
         {:error, :issuance_failed}
+
+      {:ok, {_, _, <<0x14, 0x03, 0x03>>}} ->
+        {:error, :unauthorized}
 
       {:ok, {_, _, data}} ->
         {:error, {:unexpected_response, byte_size(data)}}

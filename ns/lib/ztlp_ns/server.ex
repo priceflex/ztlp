@@ -388,32 +388,92 @@ defmodule ZtlpNs.Server do
   end
 
   # 0x14 0x03 — Issue server certificate for a service hostname
-  # Request:  <<0x14, 0x03, hostname_len::16, hostname::binary>>
+  #
+  # [SAST: oql-hvmv fix] This opcode previously took an attacker-supplied
+  # hostname straight to CertIssuer.issue_server_cert/2 with ZERO auth —
+  # confirmed live: one UDP packet with an arbitrary hostname returned a
+  # valid CA-signed cert + private key. Now requires the request to be
+  # signed by an Ed25519 key on the gateway's component-auth allowlist,
+  # reusing the same ComponentAuth machinery already used for gateway<->NS
+  # mutual auth elsewhere (ns/lib/ztlp_ns/component_auth.ex,
+  # component_auth_enabled + component_auth_allowed_keys config). The
+  # signature covers the hostname bytes directly (single UDP round trip,
+  # no separate challenge needed since the caller already holds a
+  # long-lived identity key).
+  #
+  # Request:  <<0x14, 0x03, hostname_len::16, hostname::binary,
+  #                          sig_len::16, signature::binary,
+  #                          pubkey_len::16, pubkey::binary>>
   # Response: <<0x14, 0x03, 0x00, cert_len::32, cert_pem::binary,
   #                                key_len::32, key_pem::binary,
   #                                chain_len::32, chain_pem::binary>>
   #           <<0x14, 0x03, 0x01>>  (CA not initialized)
   #           <<0x14, 0x03, 0x02>>  (issuance failed)
-  defp process_query(<<0x14, 0x03, hostname_len::unsigned-big-16, hostname::binary-size(hostname_len)>>, _source) do
-    Logger.info("[Server] Cert issuance request for #{hostname}")
+  #           <<0x14, 0x03, 0x03>>  (unauthorized — bad/missing signature, or key not allowlisted)
+  defp process_query(
+         <<0x14, 0x03, hostname_len::unsigned-big-16, hostname::binary-size(hostname_len),
+           sig_len::unsigned-big-16, signature::binary-size(sig_len),
+           pubkey_len::unsigned-big-16, pubkey::binary-size(pubkey_len)>>,
+         _source
+       ) do
+    case verify_cert_issuance_auth(hostname, signature, pubkey) do
+      :ok ->
+        Logger.info("[Server] Cert issuance request for #{hostname}")
 
-    # Use RSA-2048 for service certs to keep response under 8KB UDP limit
-    case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname], key_type: :rsa2048) do
-      {:ok, %{cert_pem: cert_pem, key_pem: key_pem, chain_pem: chain_pem}} ->
-        Logger.info("[Server] Cert issued for #{hostname}")
-        <<0x14, 0x03, 0x00,
-          byte_size(cert_pem)::unsigned-big-32, cert_pem::binary,
-          byte_size(key_pem)::unsigned-big-32, key_pem::binary,
-          byte_size(chain_pem)::unsigned-big-32, chain_pem::binary>>
+        case ZtlpNs.CertIssuer.issue_server_cert(hostname, san_dns: [hostname], key_type: :rsa2048) do
+          {:ok, %{cert_pem: cert_pem, key_pem: key_pem, chain_pem: chain_pem}} ->
+            Logger.info("[Server] Cert issued for #{hostname}")
+            <<0x14, 0x03, 0x00,
+              byte_size(cert_pem)::unsigned-big-32, cert_pem::binary,
+              byte_size(key_pem)::unsigned-big-32, key_pem::binary,
+              byte_size(chain_pem)::unsigned-big-32, chain_pem::binary>>
+
+          {:error, reason} ->
+            Logger.warning("[Server] Cert issuance failed for #{hostname}: #{inspect(reason)}")
+            <<0x14, 0x03, 0x02>>
+        end
 
       {:error, reason} ->
-        Logger.warning("[Server] Cert issuance failed for #{hostname}: #{inspect(reason)}")
-        <<0x14, 0x03, 0x02>>
+        Logger.warning("[Server] Cert issuance REJECTED for #{hostname}: unauthorized (#{inspect(reason)})")
+        <<0x14, 0x03, 0x03>>
     end
+  end
+
+  # Unsigned/legacy-format cert issuance requests are always unauthorized now.
+  defp process_query(<<0x14, 0x03, _rest::binary>>, _source) do
+    <<0x14, 0x03, 0x03>>
   end
 
   # Malformed query → invalid response
   defp process_query(_, _source), do: <<0xFF>>
+
+  # [SAST: oql-hvmv fix] Verify a cert-issuance request signature against
+  # the gateway component-auth allowlist. Reuses ZtlpNs.ComponentAuth's
+  # Ed25519 verify + allowlist check rather than a bespoke scheme — same
+  # trust model already governing gateway<->NS mutual auth.
+  defp verify_cert_issuance_auth(hostname, signature, pubkey) do
+    cond do
+      not ZtlpNs.ComponentAuth.auth_enabled?() ->
+        # Component auth not configured for this deployment — cert
+        # issuance is refused outright rather than silently allowed,
+        # since there's no allowlist to check against. Operators must
+        # opt in by configuring component_auth (enabled + allowed_keys)
+        # before this opcode will issue anything.
+        {:error, :component_auth_not_configured}
+
+      byte_size(pubkey) != 32 ->
+        {:error, :invalid_pubkey_length}
+
+      not :crypto.verify(:eddsa, :none, hostname, signature, [pubkey, :ed25519]) ->
+        {:error, :invalid_signature}
+
+      pubkey not in ZtlpNs.ComponentAuth.allowed_keys() ->
+        {:error, :unauthorized_key}
+
+      true ->
+        :ok
+    end
+  end
 
   # ── Authenticated Registration ─────────────────────────────────────
 

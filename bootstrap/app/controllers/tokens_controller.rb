@@ -1,6 +1,7 @@
 class TokensController < ApplicationController
   before_action :set_network
   before_action :set_token, only: [:show, :revoke]
+  before_action :require_write_access, only: [:create, :revoke]
 
   def index
     @tokens = @network.enrollment_tokens.order(created_at: :desc)
@@ -62,6 +63,12 @@ class TokensController < ApplicationController
     when /\A(\d+)d\z/ then $1.to_i.days
     when /\A(\d+)m\z/ then $1.to_i.minutes
     else 24.hours
+    end
+  end
+
+  def require_write_access
+    if current_admin&.read_only?
+      redirect_to network_tokens_path(@network), alert: "You don't have permission to manage tokens."
     end
   end
 end

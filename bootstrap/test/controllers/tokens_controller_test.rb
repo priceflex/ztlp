@@ -41,4 +41,32 @@ class TokensControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to network_tokens_path(@network)
     assert_equal "revoked", token.reload.status
   end
+
+  # --- Authorization ---
+
+  test "read_only user can view tokens" do
+    sign_in_as(:read_only_admin)
+    get network_tokens_path(@network)
+    assert_response :success
+  end
+
+  test "read_only user cannot create token" do
+    sign_in_as(:read_only_admin)
+    post network_tokens_path(@network), params: {
+      expires_in: "24h",
+      max_uses: 1
+    }
+    assert_redirected_to network_tokens_path(@network)
+    assert_match /permission|token/i, flash[:alert]
+  end
+
+  test "read_only user cannot revoke token" do
+    sign_in_as(:read_only_admin)
+    token = enrollment_tokens(:active_token)
+    original_status = token.status
+    post revoke_network_token_path(@network, token)
+    assert_redirected_to network_tokens_path(@network)
+    token.reload
+    assert_equal original_status, token.status
+  end
 end

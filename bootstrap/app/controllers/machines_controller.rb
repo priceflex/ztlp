@@ -1,13 +1,16 @@
 class MachinesController < ApplicationController
   before_action :set_network
   before_action :set_machine, only: [:show, :edit, :update, :destroy, :provision, :test_connection, :health_check, :check_ztlp_tunnel]
+  # Prevent read_only users from mutating machines or triggering SSH
+  # operations. Both `super_admin` and `admin` roles may perform these
+  # actions; `read_only` is blocked by this guard.
+  before_action :require_write_access, only: [:create, :update, :destroy, :provision, :test_connection, :health_check, :check_ztlp_tunnel]
   # Block destructive / SSH-driven actions on shared-infrastructure machines
   # (auto-seeded by Ztlp::EnsureSharedMachines for the production NS+Relay).
   # `update` is allowed so operators can still rename / add notes; the role
   # and IP are immutable through this controller anyway because the form
   # path renders read-only fields for shared machines (see views).
   before_action :block_if_shared, only: [:destroy, :provision, :test_connection]
-
   def index
     @machines = @network.machines.includes(:deployments)
   end
@@ -147,12 +150,23 @@ class MachinesController < ApplicationController
     @machine = @network.machines.find(params[:id])
   end
 
-  # Guard against destroy / SSH-provision / SSH-test against the
-  # shared production NS + Relay machine rows. Token-mint depends on
-  # `network.ns_machines.first` — deleting the seeded NS row would
-  # break enrollment for the entire tenant. SSH-provisioning the
-  # shared infrastructure from a tenant container is also nonsensical
-  # (no SSH key, no permission).
+  # Deny write access to read_only users. Matches the pattern in
+  # PoliciesController: super_admin and admin roles are allowed through,
+  # read_only is redirected with an alert.
+  def require_write_access
+    if current_admin&.read_only?
+      redirect_to network_machines_path(@network), alert: "You don't have permission to modify machines."
+    end
+  end
+
+  # Guard against mutation on shared production NS + Relay machine rows.
+  # These machines are managed by ztlp.net's EnsureSharedMachines seeder.
+  # Blocking destroy prevents breaking enrollment (token-mint depends on
+  # `network.ns_machines.first`). Blocking provision/SSH avoids deploying
+  # from a tenant container with no SSH access. Blocking update prevents
+  # drift in IP, roles, SSH creds, gateway config. Blocking health_check
+  # and check_ztlp_tunnel avoids noisy writes from a tenant context that
+  # can't reach the shared infra anyway.
   def block_if_shared
     return unless @machine&.shared?
 

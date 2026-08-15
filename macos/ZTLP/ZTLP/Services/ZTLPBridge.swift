@@ -469,8 +469,13 @@ final class ZTLPBridge {
             return
         }
 
-        // Write a temp shell script to avoid AppleScript escaping hell
-        let tmpScript = "/tmp/ztlp_setup.sh"
+        // Write a temp shell script to avoid AppleScript escaping hell.
+        // Use a per-user private directory (0700) to prevent TOCTOU attacks
+        // via predictable /tmp paths when executed with admin privileges.
+        let secureDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ztlp-setup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: secureDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let tmpScript = secureDir.appendingPathComponent("setup.sh").path
         var script = "#!/bin/bash\nset -e\n"
 
         // Add loopback aliases
@@ -523,8 +528,8 @@ final class ZTLPBridge {
         var asError: NSDictionary?
         appleScript?.executeAndReturnError(&asError)
 
-        // Clean up temp script
-        try? FileManager.default.removeItem(atPath: tmpScript)
+        // Clean up temp script and private directory
+        try? FileManager.default.removeItem(at: secureDir)
 
         if let asError = asError {
             throw ZTLPError.connectionError("Failed to setup networking: \(asError)")

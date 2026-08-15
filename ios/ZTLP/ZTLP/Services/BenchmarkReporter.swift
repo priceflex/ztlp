@@ -64,7 +64,7 @@ private func deviceLogStats(_ logs: String?) -> (lineCount: Int, byteCount: Int)
 
 
 enum bootstrapDefaults {
-    static let url = "http://10.69.95.12:3000"
+    static let url = "https://10.69.95.12:3000"
 }
 
 class BenchmarkReporter {
@@ -80,15 +80,11 @@ class BenchmarkReporter {
             ?? UserDefaults.standard.string(forKey: "ztlp_bootstrap_url")
             ?? bootstrapDefaults.url
 
-        let defaultToken = "2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079"
-        self.apiToken = apiToken ?? defaultToken
-
-        if UserDefaults.standard.string(forKey: "ztlp_enrollment_secret") != nil {
-            TunnelLogger.shared.warn(
-                "Ignoring UserDefaults ztlp_enrollment_secret for benchmark upload; using embedded live token",
-                source: "BenchUpload"
-            )
-        }
+        // Security: No embedded API tokens. Must be provided via init or UserDefaults.
+        // Keys: "ztlp_api_token" (preferred) or "ztlp_enrollment_secret" (legacy fallback)
+        self.apiToken = apiToken
+            ?? UserDefaults.standard.string(forKey: "ztlp_api_token")
+            ?? UserDefaults.standard.string(forKey: "ztlp_enrollment_secret")
     }
 
     /// Send a benchmark report to the bootstrap server.

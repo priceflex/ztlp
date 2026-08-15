@@ -12,7 +12,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 
-use blake2::{Blake2s256, Digest};
 use snow::{Builder, HandshakeState, TransportState};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -318,11 +317,23 @@ impl HandshakeContext {
     /// proposes it in message 3). For in-process handshakes, the caller
     /// provides a single shared SessionID.
     ///
-    /// Key derivation: both sides compute keys using both static public keys
-    /// (sorted for determinism) and the role label. The initiator's "send" key
-    /// matches the responder's "recv" key and vice versa.
+    /// [SAST: sta-inza fix — coordinated across proto/Rust, gateway/Elixir,
+    /// and sdk/Go] Previously derived both transport keys from the two
+    /// peers' STATIC PUBLIC keys (identity material, not secret) + fixed
+    /// labels + the plaintext `session_id` from the handshake header. A
+    /// passive observer of a single handshake could independently
+    /// recompute both keys with no cryptanalysis — a total, retroactive
+    /// break of confidentiality with zero forward secrecy.
+    ///
+    /// Now uses the real Noise Split: the two `snow` CipherStates handed
+    /// back by `dangerously_get_raw_split()` (gated behind the
+    /// `risky-raw-split` cargo feature), which are HKDF-derived from the
+    /// handshake's actual DH-derived chaining key — the value an observer
+    /// without the private keys cannot reproduce. `session_id` is kept as
+    /// a parameter for API compatibility with existing call sites but is
+    /// no longer part of the key derivation.
     pub fn finalize(
-        self,
+        mut self,
         peer_node_id: NodeId,
         session_id: SessionId,
     ) -> Result<(TransportState, SessionState), HandshakeError> {
@@ -332,55 +343,21 @@ impl HandshakeContext {
             ));
         }
 
-        let our_public = self.identity.static_public_key.clone();
         let role = self.role;
+
+        // Must be captured BEFORE into_transport_mode() consumes `self.noise`.
+        // cs1 == initiator's send key == responder's recv key (i2r direction).
+        // cs2 == responder's send key == initiator's recv key (r2i direction).
+        // This matches the convention already used by the Elixir gateway's
+        // Crypto.hkdf_noise/2 and the Go SDK's flynn/noise Split() output.
+        let (cs1, cs2) = self.noise.dangerously_get_raw_split();
+        let i2r_key = cs1;
+        let r2i_key = cs2;
 
         let transport = self
             .noise
             .into_transport_mode()
             .map_err(|e| HandshakeError::Noise(e.to_string()))?;
-
-        // Build a shared key derivation base from BOTH static public keys.
-        // Sort the keys lexicographically so both sides produce identical material
-        // regardless of which side calls finalize().
-        let remote_static = transport.get_remote_static().unwrap_or(&[0u8; 32]);
-
-        let mut shared_material = Vec::with_capacity(64);
-        if our_public.as_slice() <= remote_static {
-            shared_material.extend_from_slice(&our_public);
-            shared_material.extend_from_slice(remote_static);
-        } else {
-            shared_material.extend_from_slice(remote_static);
-            shared_material.extend_from_slice(&our_public);
-        }
-
-        // Derive directional keys using BLAKE2s-256 (deterministic, crypto-grade).
-        // Hash(shared_material || label || session_id) → 32-byte key.
-        // Both sides compute identical i2r_key and r2i_key because
-        // shared_material is sorted and labels are fixed.
-        let derive_key = |label: &[u8], sid: &[u8; 12], base: &[u8]| -> [u8; 32] {
-            let mut hasher = Blake2s256::new();
-            hasher.update(base);
-            hasher.update(label);
-            hasher.update(sid);
-            let result = hasher.finalize();
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&result);
-            key
-        };
-
-        // i2r = Initiator→Responder direction key
-        // r2i = Responder→Initiator direction key
-        let i2r_key = derive_key(
-            b"ztlp_initiator_to_responder",
-            session_id.as_bytes(),
-            &shared_material,
-        );
-        let r2i_key = derive_key(
-            b"ztlp_responder_to_initiator",
-            session_id.as_bytes(),
-            &shared_material,
-        );
 
         // Assign send/recv keys based on role:
         // Initiator sends with i2r, receives with r2i

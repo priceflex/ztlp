@@ -511,25 +511,13 @@ defmodule ZtlpGateway.Handshake do
   """
   def split(state, session_id \\ nil)
 
-  def split(%{phase: :complete, s_pub: our_pub, rs: remote_pub} = _state, session_id)
-      when is_binary(session_id) do
-    # ZTLP custom key derivation (must match Rust handshake.rs finalize):
-    # Sort public keys lexicographically, then BLAKE2s-256 with directional labels
-    shared_material =
-      if our_pub <= remote_pub do
-        our_pub <> remote_pub
-      else
-        remote_pub <> our_pub
-      end
-
-    i2r_key = :crypto.hash(:blake2s, shared_material <> "ztlp_initiator_to_responder" <> session_id)
-    r2i_key = :crypto.hash(:blake2s, shared_material <> "ztlp_responder_to_initiator" <> session_id)
-
-    {:ok, %{i2r_key: i2r_key, r2i_key: r2i_key}}
-  end
-
   def split(%{phase: :complete, ck: ck}, _session_id) do
-    # Standard Noise Split: HKDF(ck, <<>>) → two transport keys
+    # [SAST: sta-inza fix] Standard Noise Split: HKDF(ck, <<>>) over the
+    # actual DH-derived chaining key, not the old custom BLAKE2s scheme
+    # over static public keys + plaintext session_id (which let a passive
+    # observer of a single handshake independently recompute both
+    # transport keys). cs1 (i2r_key) = initiator send / responder recv;
+    # cs2 (r2i_key) = responder send / initiator recv.
     {i2r_key, r2i_key} = Crypto.hkdf_noise(ck, <<>>)
 
     {:ok, %{i2r_key: i2r_key, r2i_key: r2i_key}}

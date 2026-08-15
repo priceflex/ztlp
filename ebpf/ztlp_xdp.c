@@ -319,16 +319,32 @@ int ztlp_xdp_prog(struct xdp_md *ctx)
      * RAT presence for:
      *   1. Stats tracking (STAT_RAT_HELLO_PASSED)
      *   2. Optional rate limiter bypass (configurable via rat_bypass_map)
-     * ──────────────────────────────────────────────────────────── */
+     *
+     * [SAST fix] Size-only detection let an attacker pad ANY HELLO to
+     * >= RAT_SIZE bytes with garbage and get counted/treated as a real
+     * RAT HELLO purely by packet length, with zero content check. Since
+     * has_rat also gates the rate-limiter bypass below, this was a
+     * precondition-skip: an attacker could forge the "I have a valid
+     * RAT" signal without ever holding a real HMAC-verified token,
+     * defeating the one cheap defense XDP can apply pre-verification.
+     * Now additionally requires the RAT's version byte (offset 0 of the
+     * RAT, i.e. right after the handshake header) to equal RAT_VERSION
+     * (0x01, see proto/src/admission.rs). This does NOT replace full
+     * HMAC verification (still done in userspace, too expensive for
+     * XDP) but it closes the free-bypass gap: a forged RAT must at
+     * least get the version byte right, and importantly this flag is
+     * ONLY used for optional rate-limiter bypass + stats, never for
+     * admission itself — real security still comes from userspace HMAC
+     * verification downstream. */
     __u32 hdr_bytes = (__u32)hdrlen * 4;  /* Handshake header size in bytes */
     int has_rat = 0;
 
     if (payload + hdr_bytes + RAT_SIZE <= data_end) {
-        /* Packet is large enough to contain a RAT after the header.
-         * We can optionally do a version byte sniff (byte 0 of the RAT
-         * should be 0x01), but for now presence + size is sufficient. */
-        has_rat = 1;
-        increment_stat(STAT_RAT_HELLO_PASSED);
+        __u8 rat_version = *(payload + hdr_bytes);
+        if (rat_version == RAT_VERSION_BYTE) {
+            has_rat = 1;
+            increment_stat(STAT_RAT_HELLO_PASSED);
+        }
     }
 
     /* ── Check RAT bypass configuration ──────────────────────────

@@ -65,7 +65,9 @@ ENV ZTLP_LOG_FORMAT=json
 ENV ZTLP_LOG_LEVEL=info
 ENV ZTLP_GATEWAY_METRICS_ENABLED=true
 ENV ZTLP_GATEWAY_METRICS_PORT=9102
-ENV RELEASE_COOKIE=ztlp_gateway_docker
+# Erlang distribution cookie — set via -e RELEASE_COOKIE at deploy time.
+# No default: Mix generates a unique random cookie at build time when
+# RELEASE_COOKIE is not provided, preventing cookie-guessing attacks.
 
 EXPOSE 23097/udp
 EXPOSE 9102

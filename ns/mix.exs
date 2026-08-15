@@ -72,7 +72,7 @@ defmodule ZtlpNs.MixProject do
       ztlp_ns: [
         include_executables_for: [:unix],
         strip_beams: true,
-        cookie: System.get_env("RELEASE_COOKIE", "ztlp_ns_default_cookie")
+        cookie: System.get_env("RELEASE_COOKIE")
       ]
     ]
   end

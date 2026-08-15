@@ -55,7 +55,7 @@ defmodule ZtlpRelay.MixProject do
       ztlp_relay: [
         include_executables_for: [:unix],
         strip_beams: true,
-        cookie: System.get_env("RELEASE_COOKIE", "ztlp_relay_default_cookie")
+        cookie: System.get_env("RELEASE_COOKIE")
       ]
     ]
   end

@@ -12,6 +12,20 @@ defmodule ZtlpNs.MetricsServer do
   @default_port 9103
   @default_bind "127.0.0.1"
 
+  # ── DoS mitigation ───────────────────────────────────────────────
+  # Global cap on concurrent metric-acceptor processes. Each
+  # `spawn/1` in the accept loop holds one slot until the request
+  # completes. Exceeding this cap closes the socket immediately
+  # without spawning. Tunable via `:max_connections` (app env).
+  @max_connections 32
+
+  # Per-IP burst window (seconds) and max connections per IP within
+  # that window. Protects against a single source flooding the
+  # unauthenticated listener. Tunable via `:max_requests_per_ip` and
+  # `:rate_window_seconds`.
+  @rate_window_seconds 10
+  @max_requests_per_ip 20
+
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
@@ -53,7 +67,29 @@ defmodule ZtlpNs.MetricsServer do
     case :gen_tcp.accept(ls, 100) do
       {:ok, client} ->
         peer_ip = peer_ip_for(client)
-        spawn(fn -> handle_request(client, peer_ip) end)
+
+        # DoS gate 1: global concurrent-connection cap
+        if maybe_bump_conn_count() do
+          # DoS gate 2: per-IP rate limit
+          if maybe_burst_check(peer_ip) do
+            spawn_link(fn ->
+              try do
+                handle_request(client, peer_ip)
+              after
+                untrack_conn()
+              end
+            end)
+          else
+            # Per-IP rate limited — close the socket, no process spawned
+            :inet.setopts(client, [packet: :raw])
+            :gen_tcp.send(client, "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n")
+            :gen_tcp.close(client)
+          end
+        else
+          # Global cap hit — close immediately, no process spawned
+          :gen_tcp.close(client)
+        end
+
         send(self(), :accept)
         {:noreply, state}
       {:error, :timeout} ->
@@ -64,6 +100,91 @@ defmodule ZtlpNs.MetricsServer do
         send(self(), :accept)
         {:noreply, state}
     end
+  end
+
+  # ── DoS mitigation helpers ───────────────────────────────────────
+  # Trackers live in :persistent_term so they survive hibernation
+  # and are accessible from spawned processes.
+
+  defp maybe_bump_conn_count do
+    max = max_connections()
+    current = :persistent_term.get({__MODULE__, :conns}, 0)
+    if current >= max do
+      false
+    else
+      :persistent_term.put({__MODULE__, :conns}, current + 1)
+      true
+    end
+  end
+
+  defp untrack_conn do
+    # [SAST fix] :persistent_term.update/2 does not exist — would raise
+    # UndefinedFunctionError on every connection teardown. See gateway's
+    # metrics_server.ex for the full explanation (identical bug, fixed
+    # identically across all 3 apps).
+    current = :persistent_term.get({__MODULE__, :conns}, 0)
+    :persistent_term.put({__MODULE__, :conns}, max(0, current - 1))
+  end
+
+  # Fixed-window burst limiter keyed by IP tuple.
+  # [SAST fix] :counters.new/3, :counters.info/2, and 4-arg get/put/add
+  # do not exist in the real :counters API (new/2, get/2, add/3, sub/3,
+  # put/3, info/1 only) — every call here raised UndefinedFunctionError
+  # on the first request, silently swallowed by `rescue _ -> true`,
+  # making the per-IP rate limiter a permanent no-op. Fixed to use the
+  # real API: :counters.new/2 returns an opaque ref that must be shared
+  # via :persistent_term (no name-based registration exists).
+  defp maybe_burst_check(ip) do
+    max_req = max_requests_per_ip()
+    window  = rate_window_seconds()
+
+    now = System.system_time(:second)
+    cut = now - window
+
+    ref = burst_counters_ref()
+    # Col 1 = window_start (epoch s), Col 2 = request_count
+    key = :erlang.phash2(ip, 64) + 1
+
+    start = :counters.get(ref, key * 2 - 1)
+    count = :counters.get(ref, key * 2)
+
+    cond do
+      start == 0 or start < cut ->
+        # Window expired — reset and count this request
+        :counters.put(ref, key * 2 - 1, now)
+        :counters.put(ref, key * 2, 1)
+        true
+      count >= max_req ->
+        false  # rate limited
+      true ->
+        :counters.add(ref, key * 2, 1)  # bump count
+        true
+    end
+  rescue
+    _ -> true  # if counters are flaky, let the request through
+  end
+
+  defp burst_counters_ref do
+    case :persistent_term.get({__MODULE__, :burst_counters}, nil) do
+      nil ->
+        ref = :counters.new(64 * 2, [:atomics])
+        :persistent_term.put({__MODULE__, :burst_counters}, ref)
+        ref
+      ref ->
+        ref
+    end
+  end
+
+  defp max_connections do
+    Application.get_env(:ztlp_ns, :metrics_max_connections, @max_connections)
+  end
+
+  defp max_requests_per_ip do
+    Application.get_env(:ztlp_ns, :metrics_max_requests_per_ip, @max_requests_per_ip)
+  end
+
+  defp rate_window_seconds do
+    Application.get_env(:ztlp_ns, :metrics_rate_window_seconds, @rate_window_seconds)
   end
 
   @impl true

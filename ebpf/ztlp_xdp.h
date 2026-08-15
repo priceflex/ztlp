@@ -76,6 +76,10 @@
  * Actual RAT verification (HMAC-BLAKE2s) is too expensive for XDP —
  * we only check for RAT presence and size here. */
 #define RAT_SIZE 93
+/* Must match proto/src/admission.rs RAT_VERSION (0x01). eBPF/C can't
+ * import the Rust constant directly, so it's mirrored here — if the
+ * Rust side ever bumps RAT_VERSION, this must be updated too. */
+#define RAT_VERSION_BYTE 0x01
 
 /* ── Map key/value structures ────────────────────────────────────── */
 

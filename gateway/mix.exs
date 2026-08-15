@@ -63,7 +63,7 @@ defmodule ZtlpGateway.MixProject do
       ztlp_gateway: [
         include_executables_for: [:unix],
         strip_beams: true,
-        cookie: System.get_env("RELEASE_COOKIE", "ztlp_gateway_default_cookie")
+        cookie: System.get_env("RELEASE_COOKIE")
       ]
     ]
   end

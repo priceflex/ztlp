@@ -67,7 +67,9 @@ ENV ZTLP_NS_METRICS_PORT=9103
 ENV ZTLP_NS_MNESIA_DIR=/app/data/mnesia
 # CA key/cert storage — on the same persistent volume as Mnesia
 ENV ZTLP_CA_DATA_DIR=/app/data/ca
-ENV RELEASE_COOKIE=ztlp_ns_docker
+# Erlang distribution cookie — set via -e RELEASE_COOKIE at deploy time.
+# No default: Mix generates a unique random cookie at build time when
+# RELEASE_COOKIE is not provided, preventing cookie-guessing attacks.
 
 EXPOSE 23096/udp
 EXPOSE 9103

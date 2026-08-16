@@ -46,11 +46,21 @@ use std::time::Instant;
 
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncTimer, AsyncUdpSocket, Runtime, TokioRuntime, UdpPoller};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 /// PUNCH_NOTIFY discriminant — must match
 /// [`crate::punch::NS_PUNCH_NOTIFY`].
 const PUNCH_NOTIFY: u8 = 0x0B;
+
+/// Bounded capacity for the PUNCH_NOTIFY intercept channel.
+///
+/// Prevents unbounded resource consumption (CWE-770, cro-jkth): an
+/// unauthenticated attacker can flood PUNCH_NOTIFY-prefixed UDP
+/// datagrams faster than the dispatcher drains them. A bounded
+/// channel caps the backlog so the receive loop's non-blocking
+/// `try_send` drops excess packets instead of growing memory to OOM.
+#[cfg(test)]
+const INTERCEPT_CHANNEL_CAPACITY: usize = 256;
 
 /// PUNCH_BYTE — the 1-byte NAT-opener packet, never delivered to Quinn.
 /// Must match [`crate::punch::PUNCH_BYTE`].
@@ -69,20 +79,20 @@ pub type InterceptedPacket = (Vec<u8>, SocketAddr);
 /// # Use
 ///
 /// Construct with [`PunchRuntime::new`], passing the sender side of
-/// an `UnboundedChannel<InterceptedPacket>` whose receiver is owned
-/// by [`crate::punch_agent::PunchAgent`]. Pass the runtime to Quinn's
+/// a bounded `mpsc::channel(INTERCEPT_CHANNEL_CAPACITY)` whose receiver
+/// is owned by [`crate::punch_agent::PunchAgent`]. Pass the runtime to Quinn's
 /// `Endpoint::new_with_abstract_socket` via
 /// `quinn::EndpointConfig::default().with_runtime(...)`.
 #[derive(Debug)]
 pub struct PunchRuntime {
     inner: TokioRuntime,
-    intercept_tx: UnboundedSender<InterceptedPacket>,
+    intercept_tx: Sender<InterceptedPacket>,
 }
 
 impl PunchRuntime {
     /// Create a new runtime delivering intercepted PUNCH_NOTIFY packets
     /// to `intercept_tx`.
-    pub fn new(intercept_tx: UnboundedSender<InterceptedPacket>) -> Self {
+    pub fn new(intercept_tx: Sender<InterceptedPacket>) -> Self {
         Self {
             inner: TokioRuntime,
             intercept_tx,
@@ -128,7 +138,7 @@ impl Runtime for PunchRuntime {
 #[derive(Debug)]
 struct PunchSocket {
     inner: Arc<dyn AsyncUdpSocket>,
-    intercept_tx: UnboundedSender<InterceptedPacket>,
+    intercept_tx: Sender<InterceptedPacket>,
 }
 
 impl AsyncUdpSocket for PunchSocket {
@@ -180,18 +190,32 @@ impl AsyncUdpSocket for PunchSocket {
                     // pass-through arm below.
                 }
                 PUNCH_NOTIFY => {
-                    // Forward owned copy to dispatcher.
+                    // Forward owned copy to dispatcher.  Uses try_send
+                    // so the non-blocking receive loop never stalls — if
+                    // the bounded channel is full we simply drop the
+                    // packet (the dispatcher is lagging behind).
                     let payload_vec = payload.to_vec();
-                    if self.intercept_tx.send((payload_vec, m.addr)).is_err() {
-                        // Receiver dropped — agent shut down. Drop the
-                        // packet silently. We can't tell the gateway to
-                        // restart the agent from here, and propagating
-                        // the error to Quinn would kill the QUIC
-                        // listener entirely.
-                        tracing::debug!(
-                            target: "ztlp::punch_socket",
-                            "PUNCH_NOTIFY dropped — dispatcher channel closed"
-                        );
+                    match self.intercept_tx.try_send((payload_vec, m.addr)) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // Bounded channel full — drop the packet to
+                            // prevent OOM (CWE-770, cro-jkth).
+                            tracing::warn!(
+                                target: "ztlp::punch_socket",
+                                "PUNCH_NOTIFY dropped — intercept channel full",
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Receiver dropped — agent shut down. Drop the
+                            // packet silently. We can't tell the gateway to
+                            // restart the agent from here, and propagating
+                            // the error to Quinn would kill the QUIC
+                            // listener entirely.
+                            tracing::debug!(
+                                target: "ztlp::punch_socket",
+                                "PUNCH_NOTIFY dropped — dispatcher channel closed"
+                            );
+                        }
                     }
                 }
                 _ => {
@@ -229,7 +253,7 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::Waker;
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc::channel;
 
     /// A minimal fake `AsyncUdpSocket` that returns canned packets on
     /// `poll_recv`. Lets us drive `PunchSocket::poll_recv` deterministically
@@ -321,7 +345,7 @@ mod tests {
     /// payload is forwarded to the intercept channel.
     #[test]
     fn punch_notify_is_intercepted_not_returned_to_quinn() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = channel(INTERCEPT_CHANNEL_CAPACITY);
         let fake = Arc::new(FakeSocket::new(vec![(
             vec![PUNCH_NOTIFY, 0xAA, 0xBB, 0xCC],
             "10.0.0.1:23095".parse().unwrap(),
@@ -347,7 +371,7 @@ mod tests {
     /// the intercept channel.
     #[test]
     fn punch_byte_is_silently_dropped() {
-        let (tx, mut rx) = unbounded_channel::<InterceptedPacket>();
+        let (tx, mut rx) = channel(INTERCEPT_CHANNEL_CAPACITY);
         let fake = Arc::new(FakeSocket::new(vec![(
             vec![PUNCH_BYTE],
             "10.0.0.2:1234".parse().unwrap(),
@@ -373,7 +397,7 @@ mod tests {
     /// 0xC0 (typical QUIC v1 long-header first byte) as the stand-in.
     #[test]
     fn quic_packet_passes_through_to_quinn() {
-        let (tx, _rx) = unbounded_channel();
+        let (tx, _rx) = channel(INTERCEPT_CHANNEL_CAPACITY);
         let payload = vec![0xC0, 0x01, 0x02, 0x03];
         let fake = Arc::new(FakeSocket::new(vec![(
             payload.clone(),
@@ -404,7 +428,7 @@ mod tests {
     /// PUNCH_BYTE (slot 3) silently dropped.
     #[test]
     fn interleaved_batch_compacts_correctly() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = channel(INTERCEPT_CHANNEL_CAPACITY);
         let pkts = vec![
             (vec![0xC0, 0x11], "1.1.1.1:1".parse().unwrap()),
             (vec![PUNCH_NOTIFY, 0xAA], "1.1.1.2:2".parse().unwrap()),
@@ -450,7 +474,7 @@ mod tests {
     /// pass through harmlessly without panic.
     #[test]
     fn empty_datagram_passes_through_without_panic() {
-        let (tx, _rx) = unbounded_channel();
+        let (tx, _rx) = channel(INTERCEPT_CHANNEL_CAPACITY);
         let fake = Arc::new(FakeSocket::new(vec![(
             vec![],
             "1.1.1.1:1".parse().unwrap(),

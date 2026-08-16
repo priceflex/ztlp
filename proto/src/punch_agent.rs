@@ -326,7 +326,7 @@ impl PunchAgent {
     ///
     /// [`crate::punch_socket::PunchSocket`] strips `0x0B PUNCH_NOTIFY`
     /// out of the inbound packet stream before Quinn sees it, and forwards
-    /// the payload to an unbounded channel. This dispatcher consumes
+    /// the payload to a bounded channel. This dispatcher consumes
     /// that channel: for each notification it decodes the requester
     /// NodeId + endpoints and fires [`crate::punch::respond_to_punch`]
     /// against the requester's endpoints, opening the NAT pinhole so
@@ -349,7 +349,7 @@ impl PunchAgent {
     /// simultaneously.
     pub fn start_dispatcher(
         &self,
-        mut intercept_rx: tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, SocketAddr)>,
+        mut intercept_rx: tokio::sync::mpsc::Receiver<(Vec<u8>, SocketAddr)>,
         responder_duration: Duration,
     ) -> JoinHandle<()> {
         let socket = self.socket.clone();
@@ -593,7 +593,7 @@ mod tests {
 
         // Wire up the channel ourselves (no PunchSocket needed for
         // this isolated test of the dispatcher).
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(400));
 
         // Inject the notification — source MUST match ns_addr to pass
@@ -611,7 +611,7 @@ mod tests {
         let notify_payload = encode_punch_notify_for_test(&requester_id, &[test_endpoint]);
 
         // Source must match ns_addr — this is the security requirement.
-        tx.send((notify_payload, ns_addr)).unwrap();
+        tx.try_send((notify_payload, ns_addr)).unwrap();
 
         // Give the responder time to spawn and start sending (to the
         // unreachable test endpoint).  The dispatcher should still be
@@ -621,7 +621,7 @@ mod tests {
         // Second notify — also from ns_addr — proves the dispatcher
         // survived the first (to unreachable endpoint).
         let notify2 = encode_punch_notify_for_test(&requester_id, &[test_endpoint]);
-        tx.send((notify2, ns_addr)).unwrap();
+        tx.try_send((notify2, ns_addr)).unwrap();
 
         // The dispatcher is still running; the test verifies:
         // 1. Source validation passes for ns_addr packets
@@ -640,7 +640,7 @@ mod tests {
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), identity_with_node_id(NodeId([0x11; 16])));
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, SocketAddr)>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
 
         // Drop the sender; receiver should yield None immediately.
@@ -665,12 +665,12 @@ mod tests {
 
         let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x22; 16])));
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(300));
 
         // First send a truncated (malformed) notify — dispatcher should
         // skip it. Source must still be ns_addr.
-        tx.send((vec![0x0B, 0xFF], ns_addr)).unwrap();
+        tx.try_send((vec![0x0B, 0xFF], ns_addr)).unwrap();
 
         // Give the dispatcher time to process the malformed packet.
         tokio::time::sleep(Duration::from_millis(30)).await;
@@ -680,13 +680,13 @@ mod tests {
         let req_id = NodeId([0x33; 16]);
         let test_endpoint: SocketAddr = "203.0.113.10:54321".parse().unwrap();
         let valid = encode_punch_notify_for_test(&req_id, &[test_endpoint]);
-        tx.send((valid, ns_addr)).unwrap();
+        tx.try_send((valid, ns_addr)).unwrap();
 
         // The dispatcher is still alive after the malformed packet.
         // Verify by sending another valid one.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let valid2 = encode_punch_notify_for_test(&req_id, &[test_endpoint]);
-        tx.send((valid2, ns_addr)).unwrap();
+        tx.try_send((valid2, ns_addr)).unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         handle.abort();
@@ -705,7 +705,7 @@ mod tests {
 
         let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x44; 16])));
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(300));
 
         // Send a valid-looking PUNCH_NOTIFY from an untrusted source
@@ -716,7 +716,7 @@ mod tests {
 
         // Source is NOT ns_addr — should be rejected.
         let untrusted_src: SocketAddr = "198.51.100.99:12345".parse().unwrap();
-        tx.send((notify, untrusted_src)).unwrap();
+        tx.try_send((notify, untrusted_src)).unwrap();
 
         // Give the dispatcher time to process (or drop) the packet.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -729,7 +729,7 @@ mod tests {
 
         // Now verify that a packet from the TRUSTED source IS processed.
         let trusted_notify = encode_punch_notify_for_test(&attacker_id, &[test_endpoint]);
-        tx.send((trusted_notify, ns_addr)).unwrap();
+        tx.try_send((trusted_notify, ns_addr)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         handle.abort();
@@ -747,7 +747,7 @@ mod tests {
 
         let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x55; 16])));
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
 
         // Inject a PUNCH_NOTIFY from NS that contains ONLY loopback
@@ -759,7 +759,7 @@ mod tests {
             "169.254.1.1:9999".parse().unwrap(), // link-local
         ];
         let notify = encode_punch_notify_for_test(&NodeId([0xAA; 16]), &loopback_endpoints);
-        tx.send((notify, ns_addr)).unwrap();
+        tx.try_send((notify, ns_addr)).unwrap();
 
         // The dispatcher should have skipped all endpoints and logged
         // "no usable endpoints".  No PUNCH_BYTE should be sent.
@@ -772,7 +772,7 @@ mod tests {
             "192.168.1.1:9999".parse().unwrap(),      // private — filtered
         ];
         let notify2 = encode_punch_notify_for_test(&NodeId([0xBB; 16]), &mixed_endpoints);
-        tx.send((notify2, ns_addr)).unwrap();
+        tx.try_send((notify2, ns_addr)).unwrap();
 
         // The dispatcher spawned a responder with exactly 1 endpoint
         // (the TEST-NET-3 address).  We verify it didn't panic.

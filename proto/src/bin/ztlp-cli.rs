@@ -4867,7 +4867,7 @@ async fn cmd_listen(
     };
 
     let (intercept_tx, intercept_rx) = if punch_ns_addr.is_some() {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
         (Some(tx), Some(rx))
     } else {
         (None, None)

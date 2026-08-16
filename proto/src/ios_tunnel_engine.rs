@@ -804,6 +804,17 @@ impl PacketMeta {
         }
         let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
         let total_len = total_len.min(packet.len());
+        // [CWE-20 rnu-czjb] total_len is attacker-controlled (it's read
+        // directly off the wire) and was only clamped to packet.len() above
+        // — nothing enforced total_len >= ihl. A malformed packet with a
+        // valid-looking 20-byte IHL header but total_len < ihl (e.g. 0)
+        // made `&packet[ihl..total_len]` an inverted slice range, which is
+        // a Rust bounds panic (start > end), killing the packet-processing
+        // thread. Reject any packet where the declared total length is
+        // shorter than the header it claims to have.
+        if total_len < ihl {
+            return None;
+        }
         let protocol = packet[9];
         let src_addr = ipv4_text(&packet[12..16]);
         let dst_addr = ipv4_text(&packet[16..20]);
@@ -1283,6 +1294,63 @@ mod tests {
         let utun = IosUtun::new(-1);
         let err = utun.build_write_frame(&[0x10]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Regression test for CWE-20 (rnu-czjb): a malformed IPv4 packet with
+    /// a valid-looking 20-byte header (IHL=5, so ihl=20) but a total_len
+    /// field SMALLER than ihl used to make `&packet[ihl..total_len]` an
+    /// inverted slice range (start > end), which panics in Rust. Before
+    /// the fix, this crashed the calling thread; after the fix, it must
+    /// return None (packet rejected) instead of panicking.
+    #[test]
+    fn parse_ipv4_rejects_total_len_smaller_than_ihl() {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45; // version 4, IHL = 5 (20 bytes)
+        // total_len (bytes 2-3) = 0, which is < ihl (20).
+        packet[2] = 0x00;
+        packet[3] = 0x00;
+
+        // Must not panic, and must reject the packet.
+        let result = PacketMeta::parse(&packet);
+        assert!(
+            result.is_none(),
+            "malformed packet with total_len < ihl should be rejected, not parsed"
+        );
+    }
+
+    /// Same shape, but total_len is nonzero yet still smaller than ihl
+    /// (e.g. a 20-byte header claiming an implausibly short 10-byte total
+    /// packet) -- also must be rejected, not just the total_len == 0 case.
+    #[test]
+    fn parse_ipv4_rejects_total_len_between_zero_and_ihl() {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45; // IHL = 20
+        packet[2] = 0x00;
+        packet[3] = 0x0A; // total_len = 10, still < ihl (20)
+
+        let result = PacketMeta::parse(&packet);
+        assert!(
+            result.is_none(),
+            "malformed packet with 0 < total_len < ihl should be rejected, not parsed"
+        );
+    }
+
+    /// Sanity check that a well-formed packet (total_len >= ihl) still
+    /// parses successfully after the fix -- the fix must not be
+    /// over-broad and reject legitimate packets.
+    #[test]
+    fn parse_ipv4_accepts_well_formed_packet() {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45; // IHL = 20
+        let total_len: u16 = 20;
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[9] = 17; // UDP, doesn't matter for this assertion
+
+        let result = PacketMeta::parse(&packet);
+        assert!(
+            result.is_some(),
+            "well-formed packet with total_len == ihl should still parse"
+        );
     }
 
     fn dns_query_packet(name: &str) -> Vec<u8> {

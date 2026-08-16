@@ -3,6 +3,7 @@
 require "net/ssh"
 require "net/scp"
 require "tempfile"
+require "ipaddr"
 
 # Provisions machines via SSH: installs Docker, deploys ZTLP components,
 # generates configs, and manages containers.
@@ -160,10 +161,44 @@ class SshProvisioner
       raise ProvisionError, "No SSH password configured" if password.blank?
       opts[:password] = password
     when "agent"
+      # [CWE-284 oih-twuq] forward_agent exposes the Bootstrap process's
+      # SSH-agent signing authority to whatever host we connect to for the
+      # lifetime of the session -- it doesn't leak the private key file,
+      # but the remote host CAN ask the agent to sign challenges for
+      # connections to OTHER systems that trust the same identity. Machine
+      # records (including ip_address) are user/admin editable, so without
+      # a restriction here, a user could point a machine at an
+      # attacker-controlled SSH server and have Bootstrap forward its
+      # agent authority there -- a signing oracle for lateral access.
+      #
+      # This tool provisions ZTLP infrastructure, which is expected to
+      # live on private/internal networks -- restrict agent forwarding to
+      # RFC1918/private-range destinations only, mirroring the same
+      # "don't trust user-controlled network destinations without an
+      # allowlist" pattern already used for webhook URLs
+      # (NotificationService.validate_webhook_url!). A machine that
+      # genuinely needs to be reached over the public internet should use
+      # key or password auth instead, neither of which grants this kind
+      # of blanket delegated signing authority to the remote host.
+      unless private_ssh_destination?(machine.ip_address)
+        raise ProvisionError,
+          "SSH agent forwarding is only allowed to private/internal network addresses " \
+          "(machine #{machine.hostname} has ip_address=#{machine.ip_address}). " \
+          "Use key or password authentication for machines reachable over the public internet."
+      end
       opts[:forward_agent] = true
     end
 
     opts
+  end
+
+  # Is this address in a private/internal range that's safe to forward our
+  # SSH agent's signing authority to? [CWE-284 oih-twuq]
+  def private_ssh_destination?(ip_address)
+    addr = IPAddr.new(ip_address)
+    addr.loopback? || addr.private? || addr.link_local?
+  rescue IPAddr::Error
+    false
   end
 
   def check_connectivity(ssh)

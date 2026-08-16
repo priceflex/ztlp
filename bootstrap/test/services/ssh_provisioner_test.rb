@@ -141,6 +141,63 @@ class SshProvisionerTest < ActiveSupport::TestCase
     assert_nil opts[:password]
   end
 
+  # ── Agent forwarding destination restriction (CWE-284 oih-twuq) ─────
+  #
+  # forward_agent delegates the Bootstrap process's SSH-agent signing
+  # authority to whatever host it connects to. Machine records (including
+  # ip_address) are user/admin editable, so without a restriction here a
+  # user could point a machine at an attacker-controlled SSH server and
+  # have Bootstrap forward its agent authority there. Restrict to
+  # private/internal destinations only.
+
+  test "ssh_options raises for agent auth to a public IP address" do
+    @machine.ssh_auth_method = "agent"
+    @machine.ip_address = "203.0.113.50" # TEST-NET-3, public-range for docs/tests
+    error = assert_raises SshProvisioner::ProvisionError do
+      @provisioner.send(:ssh_options)
+    end
+    assert_includes error.message, "private/internal network addresses"
+  end
+
+  test "ssh_options allows agent auth to a private 10.x address" do
+    @machine.ssh_auth_method = "agent"
+    @machine.ip_address = "10.0.1.10"
+    opts = @provisioner.send(:ssh_options)
+    assert opts[:forward_agent]
+  end
+
+  test "ssh_options allows agent auth to a private 192.168.x address" do
+    @machine.ssh_auth_method = "agent"
+    @machine.ip_address = "192.168.1.50"
+    opts = @provisioner.send(:ssh_options)
+    assert opts[:forward_agent]
+  end
+
+  test "ssh_options allows agent auth to loopback" do
+    @machine.ssh_auth_method = "agent"
+    @machine.ip_address = "127.0.0.1"
+    opts = @provisioner.send(:ssh_options)
+    assert opts[:forward_agent]
+  end
+
+  test "private_ssh_destination? accepts RFC1918 and loopback ranges" do
+    assert @provisioner.send(:private_ssh_destination?, "10.1.2.3")
+    assert @provisioner.send(:private_ssh_destination?, "172.16.0.1")
+    assert @provisioner.send(:private_ssh_destination?, "192.168.0.1")
+    assert @provisioner.send(:private_ssh_destination?, "127.0.0.1")
+    assert @provisioner.send(:private_ssh_destination?, "169.254.1.1") # link-local
+  end
+
+  test "private_ssh_destination? rejects public IP addresses" do
+    refute @provisioner.send(:private_ssh_destination?, "8.8.8.8")
+    refute @provisioner.send(:private_ssh_destination?, "1.1.1.1")
+    refute @provisioner.send(:private_ssh_destination?, "203.0.113.50")
+  end
+
+  test "private_ssh_destination? rejects invalid input rather than raising" do
+    refute @provisioner.send(:private_ssh_destination?, "not-an-ip")
+  end
+
   # ── Provision lifecycle ────────────────────────────────────
 
   test "provision creates deployment record on failure" do

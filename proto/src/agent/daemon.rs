@@ -43,6 +43,119 @@ use super::proxy;
 use super::tunnel_pool::{TunnelPool, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL};
 use super::vip_pool::VipPool;
 
+/// Verify that the peer on the other end of a just-accepted local TCP
+/// connection is running as the SAME OS user as this daemon process.
+///
+/// [CWE-284 egi-dcvj] The VIP proxy listeners bind on loopback addresses
+/// and previously accepted every connection unconditionally, letting ANY
+/// local user/process reach protected ZTLP services proxied through the
+/// daemon owner's identity — the bearer token only protects the separate
+/// control socket, not these data-plane listeners. This check closes that
+/// gap using the standard Unix "ambient" peer-credential mechanisms:
+/// SO_PEERCRED on Linux, LOCAL_PEERCRED on macOS/BSD. Both are read via a
+/// raw getsockopt call (libc is already a dependency) since neither has a
+/// portable safe wrapper in std, and adding a new crate for this alone
+/// wasn't warranted.
+///
+/// Returns `true` if the peer's UID matches ours (or if peer-credential
+/// checking isn't supported on this platform — see the non-unix fallback
+/// below, which intentionally does NOT check and is a known coverage gap,
+/// documented rather than silently faked).
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if ret != 0 {
+        let errno = unsafe { *libc::__errno_location() };
+        warn!(
+            "SO_PEERCRED getsockopt failed (errno={}); rejecting connection as a precaution",
+            errno
+        );
+        return false;
+    }
+
+    let our_uid = unsafe { libc::getuid() };
+    if cred.uid != our_uid {
+        warn!(
+            "Rejected local VIP connection from uid={} (daemon runs as uid={})",
+            cred.uid, our_uid
+        );
+        return false;
+    }
+
+    true
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    // macOS/BSD: LOCAL_PEERCRED at the SOL_LOCAL level, xucred struct.
+    // libc's xucred layout matches the kernel ABI (cr_version, cr_uid,
+    // cr_ngroups, cr_groups[NGROUPS]).
+    let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            0, /* SOL_LOCAL */
+            1, /* LOCAL_PEERCRED */
+            &mut cred as *mut libc::xucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if ret != 0 {
+        let errno = unsafe { *libc::__error() };
+        warn!(
+            "LOCAL_PEERCRED getsockopt failed (errno={}); rejecting connection as a precaution",
+            errno
+        );
+        return false;
+    }
+
+    let our_uid = unsafe { libc::getuid() };
+    if cred.cr_uid != our_uid {
+        warn!(
+            "Rejected local VIP connection from uid={} (daemon runs as uid={})",
+            cred.cr_uid, our_uid
+        );
+        return false;
+    }
+
+    true
+}
+
+// KNOWN COVERAGE GAP [egi-dcvj]: no peer-credential mechanism is wired up
+// here for other targets (e.g. Windows). VIP proxy listeners on those
+// platforms remain accept-everyone until a platform-appropriate check
+// (e.g. Windows named-pipe ACLs, or a different transport entirely for
+// the data plane) is implemented. Returning `true` preserves the
+// PRE-EXISTING behavior on those platforms rather than silently breaking
+// functionality; it does not claim to fix the finding there.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn verify_local_peer(_stream: &tokio::net::TcpStream) -> bool {
+    true
+}
+
 /// GC interval for expired VIP allocations (60 seconds).
 const GC_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -630,6 +743,17 @@ async fn run_tcp_proxy(
                             loop {
                                 match listener.accept().await {
                                     Ok((tcp_stream, client_addr)) => {
+                                        // [CWE-284 egi-dcvj] Reject connections from a
+                                        // different local OS user before doing ANYTHING
+                                        // else with this stream — these VIP listeners are
+                                        // loopback-bound and previously trusted every
+                                        // local connection unconditionally, letting any
+                                        // local user/process ride the daemon owner's
+                                        // ZTLP identity.
+                                        if !verify_local_peer(&tcp_stream) {
+                                            continue;
+                                        }
+
                                         info!(
                                             "TCP connection {} → {} ({}:{})",
                                             client_addr,

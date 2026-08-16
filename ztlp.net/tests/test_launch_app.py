@@ -1334,6 +1334,84 @@ class AbsoluteUrlTest(unittest.TestCase):
         self.assertEqual("http://localhost:8080/foo", result)
 
 
+class HttpsEnforcementTest(unittest.TestCase):
+    """[CWE-295 ooa-bhoa] Regression test: `["production", "staging" "launch"]`
+    (missing comma) silently collapsed to `["production", "staginglaunch"]`
+    via Python's adjacent-string-literal concatenation, so HTTPS
+    enforcement only ever fired for environment == "production" --
+    "staging" and "launch" deployments never got the 301-to-HTTPS
+    redirect at all. Verify all three real environment values actually
+    trigger the redirect over plain HTTP, and that unknown/development
+    environments correctly do NOT (so this fix doesn't over-broaden the
+    enforcement to environments that were never in scope).
+    """
+
+    def _make_app(self, environment):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        return LaunchApp(
+            db_path=os.path.join(tmpdir.name, "launch.sqlite3"),
+            token_secret="test-secret",
+            environment=environment,
+        )
+
+    def _call(self, app, environ):
+        captured = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = dict(headers)
+
+        body = b"".join(app(environ, start_response))
+        return captured.get("status"), captured.get("headers", {}), body
+
+    def _plain_http_environ(self):
+        return {
+            "wsgi.url_scheme": "http",
+            "HTTP_HOST": "example.ztlp.net",
+            "PATH_INFO": "/claim",
+            "QUERY_STRING": "token=abc123",
+            "REQUEST_METHOD": "GET",
+        }
+
+    def test_production_redirects_to_https(self):
+        app = self._make_app("production")
+        status, headers, _ = self._call(app, self._plain_http_environ())
+        self.assertTrue(status.startswith("301"))
+        self.assertEqual(headers.get("Location"), "https://example.ztlp.net/claim?token=abc123")
+
+    def test_staging_redirects_to_https(self):
+        # This is the case that was silently broken: "staging" alone
+        # (not concatenated with "launch") never matched the buggy
+        # ["production", "staginglaunch"] list.
+        app = self._make_app("staging")
+        status, headers, _ = self._call(app, self._plain_http_environ())
+        self.assertTrue(status.startswith("301"), f"staging environment did not redirect: {status!r}")
+        self.assertEqual(headers.get("Location"), "https://example.ztlp.net/claim?token=abc123")
+
+    def test_launch_redirects_to_https(self):
+        # Also broken before the fix: "launch" alone never matched
+        # "staginglaunch" either.
+        app = self._make_app("launch")
+        status, headers, _ = self._call(app, self._plain_http_environ())
+        self.assertTrue(status.startswith("301"), f"launch environment did not redirect: {status!r}")
+        self.assertEqual(headers.get("Location"), "https://example.ztlp.net/claim?token=abc123")
+
+    def test_development_does_not_force_redirect(self):
+        # Sanity check the fix doesn't over-broaden enforcement: dev
+        # environments should NOT force an HTTPS redirect.
+        app = self._make_app("development")
+        status, _, _ = self._call(app, self._plain_http_environ())
+        self.assertFalse(status.startswith("301"))
+
+    def test_production_over_https_does_not_redirect(self):
+        app = self._make_app("production")
+        environ = self._plain_http_environ()
+        environ["wsgi.url_scheme"] = "https"
+        status, _, _ = self._call(app, environ)
+        self.assertFalse(status.startswith("301"))
+
+
 class ReferralCodeTest(unittest.TestCase):
     """Required-referral-code gate on POST /start.
 

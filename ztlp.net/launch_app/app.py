@@ -270,7 +270,17 @@ class LaunchApp:
         # Strict HTTPS Enforce
         forwarded_proto = environ.get("HTTP_X_FORWARDED_PROTO", "").split(",")[0].strip().lower()
         scheme = forwarded_proto or environ.get("wsgi.url_scheme", "http").lower()
-        if self.environment in ["production", "staging" "launch"] and scheme != "https":
+        # [CWE-295 ooa-bhoa] Was `["production", "staging" "launch"]` --
+        # missing comma between "staging" and "launch" caused Python's
+        # adjacent-string-literal concatenation to silently collapse
+        # them into a single "staginglaunch" entry, so the resulting
+        # list was actually ["production", "staginglaunch"]. HTTPS
+        # enforcement therefore only ever fired for self.environment ==
+        # "production" -- deployments set to "staging" or "launch"
+        # transmitted enrollment URIs, claim tokens, and admin pubkey
+        # binding requests over plaintext HTTP with no HTTPS redirect at
+        # all.
+        if self.environment in ["production", "staging", "launch"] and scheme != "https":
             host = environ.get("HTTP_X_FORWARDED_HOST", "").split(",")[0].strip() or environ.get("HTTP_HOST") or self.public_host
             path = environ.get("PATH_INFO", "/") or "/"
             query = environ.get("QUERY_STRING", "")

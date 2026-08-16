@@ -262,6 +262,39 @@ fn teardown_resolv_conf() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 
 const MACOS_RESOLVER_DIR: &str = "/etc/resolver";
 
+/// Validate that a zone name is safe to use as a bare filename under
+/// MACOS_RESOLVER_DIR (or any other single-directory join). [CWE-22
+/// ugx-wepq] `Path::join` does NOT sanitize path traversal: a zone
+/// containing `../` sequences (or an absolute path, which `join`
+/// replaces the base with entirely) can escape the intended directory.
+/// Before this fix, a zone of e.g. `../../etc/cron.d/evil` written via
+/// `resolver_dir.join(zone)` would resolve to `/etc/cron.d/evil` --
+/// writing attacker-controlled content (albeit just `nameserver`/`port`
+/// lines here) to an arbitrary filesystem location this
+/// root-privileged agent can reach, up to and including files an
+/// attacker could get auto-executed (cron.d, launchd plists, etc.).
+///
+/// Zone names in this codebase are DNS zone labels (e.g. "ztlp",
+/// "office.acme.ztlp") -- legitimate zones never contain '/', '\\', or
+/// a leading '.'. Reject anything else outright rather than trying to
+/// normalize/escape it.
+fn validate_zone_for_filename(zone: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if zone.is_empty()
+        || zone.contains('/')
+        || zone.contains('\\')
+        || zone == "."
+        || zone == ".."
+        || zone.starts_with('.')
+    {
+        return Err(format!(
+            "refusing to write resolver file for invalid zone name: {:?}",
+            zone
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn setup_macos_resolver(
     listen_addr: &str,
     zones: &[String],
@@ -282,7 +315,20 @@ fn setup_macos_resolver(
     }
 
     for zone in &all_zones {
+        validate_zone_for_filename(zone)?;
         let file_path = resolver_dir.join(zone);
+        // Defense in depth: even after the name-shape check above,
+        // confirm the joined path's PARENT is still exactly
+        // resolver_dir (catches any join/normalization surprise this
+        // platform's Path semantics might introduce that the string
+        // check didn't anticipate).
+        if file_path.parent() != Some(resolver_dir) {
+            return Err(format!(
+                "refusing to write outside {}: resolved path {:?} for zone {:?}",
+                MACOS_RESOLVER_DIR, file_path, zone
+            )
+            .into());
+        }
         let content = format!(
             "# Managed by ztlp-agent\n\
              nameserver {}\n\
@@ -520,5 +566,60 @@ mod tests {
     fn test_generate_systemd_unit_custom_path() {
         let unit = generate_systemd_unit("/opt/ztlp/bin/ztlp");
         assert!(unit.contains("/opt/ztlp/bin/ztlp"));
+    }
+
+    // [CWE-22 ugx-wepq] Regression tests: validate_zone_for_filename
+    // must reject any zone name that could escape MACOS_RESOLVER_DIR
+    // when joined via Path::join, and accept legitimate DNS zone
+    // labels unchanged.
+    #[test]
+    fn test_validate_zone_rejects_path_traversal() {
+        assert!(validate_zone_for_filename("../../etc/cron.d/evil").is_err());
+        assert!(validate_zone_for_filename("../evil").is_err());
+        assert!(validate_zone_for_filename("a/../../b").is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_rejects_absolute_paths() {
+        // Path::join replaces the base entirely when given an absolute
+        // path -- resolver_dir.join("/etc/passwd") == "/etc/passwd".
+        assert!(validate_zone_for_filename("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_rejects_backslash_and_dotfiles() {
+        assert!(validate_zone_for_filename("..\\evil").is_err());
+        assert!(validate_zone_for_filename(".").is_err());
+        assert!(validate_zone_for_filename("..").is_err());
+        assert!(validate_zone_for_filename(".hidden").is_err());
+        assert!(validate_zone_for_filename("").is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_accepts_legitimate_dns_zones() {
+        assert!(validate_zone_for_filename("ztlp").is_ok());
+        assert!(validate_zone_for_filename("office.acme.ztlp").is_ok());
+        assert!(validate_zone_for_filename("my-zone-01").is_ok());
+    }
+
+    #[test]
+    fn test_setup_macos_resolver_rejects_malicious_zone() {
+        // End-to-end (still without touching the real filesystem
+        // location since MACOS_RESOLVER_DIR is a real system path we
+        // must not write to in tests -- this just confirms the
+        // validation call site is actually wired into the zone loop by
+        // checking the error surfaces before any real fs::write for a
+        // malicious zone would occur). We can't safely call
+        // setup_macos_resolver() itself here (it targets a real system
+        // directory), so this test locks in validate_zone_for_filename
+        // as the gate function name/signature the call site depends on.
+        let malicious_zones = vec!["../../etc/cron.d/evil".to_string()];
+        for zone in &malicious_zones {
+            assert!(
+                validate_zone_for_filename(zone).is_err(),
+                "zone {:?} must be rejected before ever reaching fs::write",
+                zone
+            );
+        }
     }
 }

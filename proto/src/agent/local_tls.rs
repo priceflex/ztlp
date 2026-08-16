@@ -54,6 +54,18 @@ const MINT_RATE_WINDOW_SECS: u64 = 60;
 /// counter caps total key-gen + signing operations.
 const MINT_GLOBAL_LIMIT: usize = 20;
 
+/// Maximum number of certs held in the in-memory cache at once.
+/// [CWE-770 ekd-yhif] The rate limiters above bound how FAST the cache
+/// can grow (at most MINT_GLOBAL_LIMIT new entries per
+/// MINT_RATE_WINDOW_SECS), but without this cap it still grows WITHOUT
+/// BOUND over a long enough attack — 20 unique hostnames/minute is ~28,800
+/// entries/day. Once at the cap, inserting a new cert evicts the
+/// least-recently-inserted one (a simple FIFO approximation of LRU — this
+/// cache holds signing keys for security purposes, not a hot-path
+/// performance cache, so true LRU recency-of-use tracking wasn't judged
+/// worth a new dependency or the extra locking complexity).
+const MAX_CACHED_CERTS: usize = 1000;
+
 /// Tracks per-hostname mint attempt counts with time-window expiry.
 struct MintRateLimiter {
     entries: std::sync::RwLock<HashMap<String, (usize, u64)>>,
@@ -207,6 +219,9 @@ pub fn looks_like_tls_client_hello(buf: &[u8]) -> bool {
 pub struct SniCertResolver {
     /// Cached certs by hostname.
     certs: std::sync::RwLock<HashMap<String, Arc<CertifiedKey>>>,
+    /// Insertion order of `certs` keys, oldest first — used for FIFO
+    /// eviction once `MAX_CACHED_CERTS` is reached. [CWE-770 ekd-yhif]
+    insertion_order: std::sync::Mutex<std::collections::VecDeque<String>>,
     /// Directory containing cert files.
     cert_dir: PathBuf,
     /// Optional intermediate CA used to mint leaves on demand when the
@@ -249,6 +264,7 @@ impl SniCertResolver {
     pub fn new(cert_dir: PathBuf) -> Self {
         Self {
             certs: std::sync::RwLock::new(HashMap::new()),
+            insertion_order: std::sync::Mutex::new(std::collections::VecDeque::new()),
             cert_dir,
             mint_ca: None,
             mint_rate_limiter: MintRateLimiter::new(),
@@ -270,6 +286,7 @@ impl SniCertResolver {
     ) -> Self {
         Self {
             certs: std::sync::RwLock::new(HashMap::new()),
+            insertion_order: std::sync::Mutex::new(std::collections::VecDeque::new()),
             cert_dir,
             mint_ca: Some(mint_ca),
             mint_rate_limiter: MintRateLimiter::new(),
@@ -283,16 +300,39 @@ impl SniCertResolver {
         self.mint_ca = Some(mint_ca);
     }
 
+    /// Insert a cert into the cache, evicting the oldest entry first if
+    /// at `MAX_CACHED_CERTS` capacity. [CWE-770 ekd-yhif]
+    fn insert_capped(&self, hostname: String, key: Arc<CertifiedKey>) {
+        let Ok(mut certs) = self.certs.write() else {
+            return;
+        };
+        let Ok(mut order) = self.insertion_order.lock() else {
+            return;
+        };
+
+        // Re-inserting an already-cached hostname doesn't grow the map,
+        // so only evict when this is a genuinely NEW entry.
+        if !certs.contains_key(&hostname) {
+            while certs.len() >= MAX_CACHED_CERTS {
+                match order.pop_front() {
+                    Some(oldest) => {
+                        certs.remove(&oldest);
+                    }
+                    None => break, // order empty but map isn't — shouldn't happen, bail
+                }
+            }
+            order.push_back(hostname.clone());
+        }
+
+        certs.insert(hostname, key);
+    }
+
     /// Preload a cert for a specific hostname from files.
     ///
     /// Expects `<cert_dir>/<hostname>.pem` and `<cert_dir>/<hostname>.key`.
     pub fn preload_cert(&self, hostname: &str) -> Result<(), CertLoadError> {
         let key = load_certified_key(&self.cert_dir, hostname)?;
-        let mut certs = self
-            .certs
-            .write()
-            .map_err(|_| CertLoadError::LockPoisoned)?;
-        certs.insert(hostname.to_string(), Arc::new(key));
+        self.insert_capped(hostname.to_string(), Arc::new(key));
         Ok(())
     }
 
@@ -357,9 +397,7 @@ impl SniCertResolver {
         match load_certified_key(&self.cert_dir, hostname) {
             Ok(key) => {
                 let key = Arc::new(key);
-                if let Ok(mut certs) = self.certs.write() {
-                    certs.insert(hostname.to_string(), Arc::clone(&key));
-                }
+                self.insert_capped(hostname.to_string(), Arc::clone(&key));
                 info!("loaded TLS cert for {} (on-demand)", hostname);
                 Some(key)
             }
@@ -402,9 +440,7 @@ impl SniCertResolver {
                         }
                         match minted.into_certified_key() {
                             Ok(ck) => {
-                                if let Ok(mut certs) = self.certs.write() {
-                                    certs.insert(hostname.to_string(), Arc::clone(&ck));
-                                }
+                                self.insert_capped(hostname.to_string(), Arc::clone(&ck));
                                 info!(
                                     "minted on-demand TLS cert for {} (D5.T2 on-demand path)",
                                     hostname
@@ -1045,5 +1081,71 @@ enabled = false
         // checked before mint_leaf is called. Let's verify that after
         // exhausting the limit, subsequent calls return None.
         assert!(results.iter().all(|r| r.is_none()));
+    }
+
+    // ── Cache size cap tests (CWE-770 ekd-yhif) ─────────────────────────
+
+    /// Mint ONE real cert (P-256 keygen is not cheap — we don't want to
+    /// call mint_leaf 1000+ times in a test) and reuse the same
+    /// `Arc<CertifiedKey>` across many synthetic hostnames via
+    /// `insert_capped` directly, to test the cache's FIFO eviction
+    /// mechanics in isolation from the mint/rate-limit path.
+    #[test]
+    fn test_cache_evicts_oldest_when_at_capacity() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        let leaf = ca.mint_leaf("shared.trs.ztlp").unwrap();
+        let key = Arc::new(leaf.into_certified_key().unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = SniCertResolver::new(dir.path().to_path_buf());
+
+        // Insert MAX_CACHED_CERTS + 10 distinct hostnames, reusing the
+        // same cert. Cache should never exceed MAX_CACHED_CERTS.
+        for i in 0..(MAX_CACHED_CERTS + 10) {
+            resolver.insert_capped(format!("host{}.trs.ztlp", i), Arc::clone(&key));
+            assert!(
+                resolver.cert_count() <= MAX_CACHED_CERTS,
+                "cache grew past MAX_CACHED_CERTS at iteration {}: {} entries",
+                i,
+                resolver.cert_count()
+            );
+        }
+
+        assert_eq!(resolver.cert_count(), MAX_CACHED_CERTS);
+
+        // The earliest-inserted hostnames should have been evicted;
+        // the most recent MAX_CACHED_CERTS should still be present.
+        let certs = resolver.certs.read().unwrap();
+        assert!(
+            !certs.contains_key("host0.trs.ztlp"),
+            "oldest entry should have been evicted"
+        );
+        assert!(
+            certs.contains_key(&format!("host{}.trs.ztlp", MAX_CACHED_CERTS + 9)),
+            "most recently inserted entry should still be cached"
+        );
+    }
+
+    #[test]
+    fn test_cache_reinserting_existing_hostname_does_not_evict() {
+        use crate::agent::cert_mint::IntermediateCa;
+        let (ca, _, _) = IntermediateCa::generate_for_test().unwrap();
+        let leaf = ca.mint_leaf("shared.trs.ztlp").unwrap();
+        let key = Arc::new(leaf.into_certified_key().unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = SniCertResolver::new(dir.path().to_path_buf());
+
+        resolver.insert_capped("a.trs.ztlp".to_string(), Arc::clone(&key));
+        resolver.insert_capped("b.trs.ztlp".to_string(), Arc::clone(&key));
+
+        // Re-inserting "a" should not evict "b" — the map only grows on
+        // genuinely NEW hostnames, so a cache refresh of an existing
+        // entry is a no-op with respect to eviction pressure.
+        resolver.insert_capped("a.trs.ztlp".to_string(), Arc::clone(&key));
+
+        assert_eq!(resolver.cert_count(), 2);
+        assert!(resolver.certs.read().unwrap().contains_key("b.trs.ztlp"));
     }
 }

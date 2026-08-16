@@ -191,6 +191,67 @@ final class EnrollmentViewModel: ObservableObject {
                 // on first NE tunnel start. Rewire end-to-end in a
                 // follow-up.
 
+                // [CWE-287 hlv-ulgo] Before this fix, this flow persisted
+                // isEnrolled=true purely from LOCAL format validation of the
+                // scanned URI (ero-sirt's hex-token + expiry-window checks)
+                // — it never confirmed the token with the issuing server.
+                // An attacker-crafted QR/URI with a plausible-looking token
+                // and attacker-controlled ns/relay/gateway addresses would
+                // enroll successfully with no server having ever issued
+                // that token. Mirror the CLI's confirm_enrollment()
+                // (proto/src/bin/ztlp-cli.rs) pattern: require a real 2xx
+                // HTTP response from the URI's callback endpoint before
+                // persisting anything. No callback in the URI => refuse to
+                // enroll rather than silently trust an unconfirmable token.
+                guard let callbackURLString = tokenInfo.callbackURL,
+                      let callbackURL = URL(string: callbackURLString) else {
+                    errorMessage = "This enrollment URI has no server callback — it cannot be verified and was rejected."
+                    logger.error("Enrollment rejected: no callback URL in token", source: "Enrollment")
+                    state = .error
+                    return
+                }
+                guard let tokenId = tokenInfo.tokenId else {
+                    errorMessage = "Enrollment token is missing its identifier — rejected."
+                    state = .error
+                    return
+                }
+
+                var confirmRequest = URLRequest(url: callbackURL)
+                confirmRequest.httpMethod = "POST"
+                confirmRequest.setValue(
+                    "application/x-www-form-urlencoded",
+                    forHTTPHeaderField: "Content-Type"
+                )
+                // [CWE-287 hlv-ulgo] .urlQueryAllowed is NOT sufficient here
+                // -- it explicitly permits '&'/'='/'+'/';' (structurally
+                // legal in a URL query per RFC 3986), which would leave
+                // exactly the characters we need to escape for a POST body
+                // untouched. Use a narrow allowed-set instead.
+                var deviceNameAllowed = CharacterSet.alphanumerics
+                deviceNameAllowed.insert(charactersIn: "-._~")
+                let deviceName = (UIDevice.current.name)
+                    .addingPercentEncoding(withAllowedCharacters: deviceNameAllowed) ?? "ios-device"
+                // node_id/pubkey_hex aren't generated until first NE tunnel
+                // start on this platform (see S1.5 note above) — send empty
+                // values; the server treats an absent/empty pubkey_hex as a
+                // no-op for the auto-bind path (see ztlp-cli.rs's
+                // confirm_enrollment doc comment) and still validates the
+                // token_id itself, which is what actually proves this
+                // client possesses a real, server-issued token.
+                let bodyString = "token_id=\(tokenId)&node_id=&name=\(deviceName)&pubkey_hex="
+                confirmRequest.httpBody = bodyString.data(using: .utf8)
+                confirmRequest.timeoutInterval = 60
+
+                let (_, response) = try await URLSession.shared.data(for: confirmRequest)
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200..<300).contains(httpResponse.statusCode) else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    errorMessage = "Server rejected enrollment confirmation (HTTP \(code)). Enrollment was not completed."
+                    logger.error("Enrollment confirmation failed: HTTP \(code)", source: "Enrollment")
+                    state = .error
+                    return
+                }
+
                 // Step 1: Update configuration with enrollment info
                 configuration.zoneName = tokenInfo.zone
                 configuration.nsServer = tokenInfo.nsAddress

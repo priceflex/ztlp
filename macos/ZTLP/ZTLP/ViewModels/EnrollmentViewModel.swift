@@ -127,6 +127,63 @@ final class EnrollmentViewModel: ObservableObject {
                     return
                 }
 
+                // [CWE-287 hlv-ulgo] Before this fix, the GUI enrollment flow
+                // treated the URI's zone/ns/relay fields as trusted the moment
+                // local FORMAT validation passed (ero-sirt's hex-format +
+                // expiry-window checks) — it never actually confirmed the
+                // token with the issuing server. An attacker-crafted URI with
+                // a syntactically-valid-looking token and attacker-controlled
+                // ns/relay addresses would enroll successfully with NO server
+                // ever having issued that token, silently redirecting all
+                // future tunnel traffic through attacker infrastructure.
+                //
+                // The CLI's confirm_enrollment() (proto/src/bin/ztlp-cli.rs)
+                // already does this correctly: POST token_id+node_id+pubkey
+                // to the URI's callback endpoint and require a real 2xx HTTP
+                // response before treating enrollment as legitimate. Mirror
+                // that here — if the URI carries a callbackURL, it MUST
+                // confirm before we persist isEnrolled=true. If the URI has
+                // NO callback at all, we conservatively refuse to enroll
+                // rather than silently trusting an unconfirmable token
+                // (better to fail the enrollment than to accept one this
+                // client can't verify).
+                guard let callbackURLString = tokenInfo.callbackURL,
+                      let callbackURL = URL(string: callbackURLString) else {
+                    state = .error(
+                        "This enrollment URI has no server callback — it cannot be verified and was rejected."
+                    )
+                    return
+                }
+
+                let nodeIdHex = identity.nodeId ?? ""
+                let pubkeyHex = identity.publicKey ?? ""
+
+                guard let tokenId = tokenInfo.tokenId else {
+                    state = .error("Enrollment token is missing its identifier — rejected.")
+                    return
+                }
+
+                var confirmRequest = URLRequest(url: callbackURL)
+                confirmRequest.httpMethod = "POST"
+                confirmRequest.setValue(
+                    "application/x-www-form-urlencoded",
+                    forHTTPHeaderField: "Content-Type"
+                )
+                let bodyString = "token_id=\(tokenId)&node_id=\(nodeIdHex)&name=\(hostNameForEnrollment())&pubkey_hex=\(pubkeyHex)"
+                confirmRequest.httpBody = bodyString.data(using: .utf8)
+                confirmRequest.timeoutInterval = 60
+
+                let (_, response) = try await URLSession.shared.data(for: confirmRequest)
+
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200..<300).contains(httpResponse.statusCode) else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    state = .error(
+                        "Server rejected enrollment confirmation (HTTP \(code)). Enrollment was not completed."
+                    )
+                    return
+                }
+
                 // Save identity to file (only for software keys —
                 // hardware keys stay in Secure Enclave and are loaded via handle).
                 if !isHardwareKey, let path = defaultIdentityPath() {
@@ -310,5 +367,21 @@ final class EnrollmentViewModel: ObservableObject {
         guard let dir = appSupport?.appendingPathComponent("ZTLP") else { return nil }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("identity.json").path
+    }
+
+    /// Percent-encode a value for use in an x-www-form-urlencoded POST body.
+    /// [CWE-287 hlv-ulgo] The confirm-enrollment callback body is built via
+    /// string interpolation — a hostname containing `&`/`=` would corrupt
+    /// the encoded form body's field boundaries. NOTE: `.urlQueryAllowed`
+    /// is NOT sufficient here — it explicitly PERMITS `&`, `=`, `+`, `;`
+    /// (they're structurally legal in a URL query per RFC 3986), which
+    /// would leave exactly the characters we need to escape untouched.
+    /// Use a narrow allowed-set that excludes every x-www-form-urlencoded
+    /// delimiter/reserved character instead.
+    private func hostNameForEnrollment() -> String {
+        let raw = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? "device"
     }
 }

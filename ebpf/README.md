@@ -96,6 +96,7 @@ authorized mesh peers) pass through to the full cryptographic verification.
 | 5 | `mesh_peer_drops` | Mesh | Mesh packet from unauthorized peer dropped |
 | 6 | `mesh_forward_passed` | Mesh | FORWARD with valid inner magic passed |
 | 7 | `rat_hello_passed` | RAT | HELLO with RAT-sized extension detected |
+| 8 | `hello_map_full_drops` | Client | HELLO from unmapped source, dropped because hello_rate_map (1024-entry) is full (CWE-770 htk-alxq: fail-closed instead of silently bypassing the rate limiter) |
 
 ## Requirements
 

@@ -379,7 +379,20 @@ int ztlp_xdp_prog(struct xdp_md *ctx)
             .tokens = capacity - 1,   // Consume one token for this packet
             .last_refill_ns = now,
         };
-        bpf_map_update_elem(&hello_rate_map, &src_ip, &init, BPF_ANY);
+        /* [CWE-770 htk-alxq] hello_rate_map is a FIXED-SIZE hash map
+         * (max_entries=1024) -- bpf_map_update_elem() can fail (-E2BIG)
+         * once it's full, and the return value was previously ignored.
+         * Falling through to XDP_PASS on a failed insert meant an
+         * attacker who first fills the map with 1024 distinct source IPs
+         * gets every subsequent HELLO from any NEW unmapped source
+         * passed with ZERO rate-limit accounting -- completely defeating
+         * the limiter it's supposed to fall under. Fail CLOSED instead:
+         * if we can't track this source, don't trust it either -- drop.
+         */
+        if (bpf_map_update_elem(&hello_rate_map, &src_ip, &init, BPF_ANY) != 0) {
+            increment_stat(STAT_HELLO_MAP_FULL_DROPS);
+            return XDP_DROP;
+        }
         increment_stat(STAT_PASSED);
         return XDP_PASS;
     }

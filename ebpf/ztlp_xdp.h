@@ -133,6 +133,14 @@ enum {
     STAT_MESH_PEER_DROPS,        /* Mesh packet from unauthorized (unknown) peer */
     STAT_MESH_FORWARD_PASSED,    /* Forwarded mesh packet passed inner ZTLP magic check */
     STAT_RAT_HELLO_PASSED,       /* HELLO with RAT-sized extension passed */
+    /* [CWE-770 htk-alxq] HELLO from a source IP with no existing bucket,
+     * dropped because hello_rate_map (fixed 1024-entry hash map) is full
+     * and bpf_map_update_elem() failed to insert a new bucket. Before this
+     * fix, a full map silently fell through to XDP_PASS with no token
+     * accounting at all -- once an attacker filled the map with 1024
+     * distinct source IPs, every HELLO from any NEW unmapped source
+     * bypassed the rate limiter entirely, defeating it completely. */
+    STAT_HELLO_MAP_FULL_DROPS,
     STAT_MAX                     /* Sentinel — also used as max_entries for the array map */
 };
 

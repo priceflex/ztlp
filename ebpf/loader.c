@@ -389,7 +389,8 @@ static int dump_stats(struct bpf_object *obj)
         "mesh_passed",
         "mesh_peer_drops",
         "mesh_forward_passed",
-        "rat_hello_passed"
+        "rat_hello_passed",
+        "hello_map_full_drops"
     };
 
     printf("=== ZTLP XDP Pipeline Statistics ===\n\n");
@@ -401,7 +402,19 @@ static int dump_stats(struct bpf_object *obj)
     }
 
     printf("\nMesh traffic (port %d):\n", ZTLP_MESH_PORT);
-    for (uint32_t i = 4; i < STAT_MAX; i++) {
+    for (uint32_t i = 4; i < STAT_RAT_HELLO_PASSED + 1; i++) {
+        __u64 val = 0;
+        if (bpf_map_lookup_elem(map_fd, &i, &val) == 0)
+            printf("  %-24s %llu\n", names[i], (unsigned long long)val);
+    }
+
+    /* [CWE-770 htk-alxq] hello_map_full_drops is client-side HELLO
+     * traffic (same category as hello_rate_drops above), not mesh
+     * traffic — print it separately rather than letting it fall into
+     * the mesh loop's index range by accident as STAT_MAX grows. */
+    printf("\nHELLO rate-limiter map capacity:\n");
+    {
+        uint32_t i = STAT_HELLO_MAP_FULL_DROPS;
         __u64 val = 0;
         if (bpf_map_lookup_elem(map_fd, &i, &val) == 0)
             printf("  %-24s %llu\n", names[i], (unsigned long long)val);

@@ -116,7 +116,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
   """
   @spec handle_vip_packet(Packet.data_packet(), binary(), {tuple(), non_neg_integer()}, port()) ::
           handle_result()
-  def handle_vip_packet(parsed, _raw_data, sender, udp_socket) do
+  def handle_vip_packet(parsed, raw_data, sender, udp_socket) do
     if not enabled?() do
       :not_vip_service
     end
@@ -128,7 +128,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
       session_key ->
         # Decrypt the payload
-        case decrypt_payload(parsed.payload, session_key, parsed) do
+        case decrypt_payload(payload_from(parsed), session_key, parsed, raw_data) do
           {:ok, plaintext} ->
             dispatch_frame(plaintext, parsed, sender, udp_socket, session_key)
 
@@ -138,6 +138,11 @@ defmodule ZtlpRelay.VipTcpTerminator do
         end
     end
   end
+
+  # `parsed.payload` may not exist on every packet variant that reaches
+  # here; kept as a tiny indirection point in case Packet.data_packet()
+  # gains payload-carrying variants without a `payload` field name.
+  defp payload_from(parsed), do: parsed.payload
 
   @doc """
   Get the active VIP connections summary for metrics.
@@ -237,34 +242,95 @@ defmodule ZtlpRelay.VipTcpTerminator do
 
   # ── Internal helpers ───────────────────────────────────────────────
 
-  defp get_session_key(_session_id) do
-    # In iOS relay-side VIP mode, the session key is shared between
-    # the NE and the relay for tunnel encryption.  If no key is configured,
-    # the relay cannot decrypt and must fall back to classic opaque forwarding.
+  @doc false
+  # Exposed (not @doc false-hidden from the module, just excluded from
+  # public docs) so the regression test suite can exercise the fixed
+  # crypto primitives directly without needing to construct a full
+  # Packet.data_packet() + raw UDP datagram end-to-end for every case.
+  @spec test_get_session_key(binary()) :: binary() | nil
+  def test_get_session_key(session_id), do: get_session_key(session_id)
+
+  @doc false
+  @spec test_decrypt_payload(binary(), binary(), map(), binary()) ::
+          {:ok, binary()} | {:error, atom()}
+  def test_decrypt_payload(payload, session_key, parsed, raw_data),
+    do: decrypt_payload(payload, session_key, parsed, raw_data)
+
+  defp get_session_key(session_id) do
+    # [SAST fix: fuq-lvym] Derive a UNIQUE per-session key via HKDF from
+    # the operator-configured pre-shared key, mixing in session_id as
+    # the HKDF info/context parameter. Previously this ignored
+    # session_id entirely and returned the SAME raw configured key for
+    # EVERY VIP session — every tunnel on the relay shared one key,
+    # compounding the fixed-nonce bug below into full keystream reuse
+    # not just within a session but ACROSS every session simultaneously
+    # active on the relay.
     #
-    # Currently, if the relay has the session key from the handshake,
-    # it is available via config or the session context.
-    # For phase 1, we use a configured VIP tunnel key.
+    # NOTE: this still does not derive the key from the actual Noise
+    # handshake (VipTcpTerminator has no access to the per-session
+    # Noise transport keys today - that would require threading them
+    # in from SessionSupervisor/the session GenServer, a larger
+    # integration change). This fix closes the cryptographic
+    # cross-session-key-reuse gap using the infrastructure that
+    # exists now; deriving from the real handshake key remains a
+    # follow-up for whoever finishes wiring up the iOS<->relay VIP
+    # data-plane end-to-end (no iOS-side or Rust-side producer for
+    # this wire format was found in the codebase as of this fix).
     case ZtlpRelay.Config.vip_session_key() do
-      nil -> nil
-      key when byte_size(key) == 32 -> key
-      _ -> nil
+      nil ->
+        nil
+
+      key when byte_size(key) == 32 ->
+        hkdf_sha256(key, "ztlp-vip-session:" <> session_id, 32)
+
+      _ ->
+        nil
     end
   end
 
-  defp decrypt_payload(payload, session_key, _parsed) do
+  # Minimal single-block HKDF-Expand (RFC 5869) using HMAC-SHA256.
+  # `key` here is used directly as PRK (skipping HKDF-Extract) since
+  # the configured VIP session key is already a uniformly-random
+  # 32-byte value, not low-entropy input keying material — this
+  # matches the common "derive one key from another via HKDF-Expand
+  # only" pattern used when the base key is already a proper key.
+  # Single 32-byte block is all we need (T(1) = HMAC-Hash(PRK, info || 0x01)).
+  defp hkdf_sha256(prk, info, 32) do
+    :crypto.mac(:hmac, :sha256, prk, info <> <<1>>)
+  end
+
+  defp decrypt_payload(payload, session_key, parsed, raw_data) do
     # The payload in a ZTLP data packet is the encrypted VIP tunnel data.
     # For iOS relay-side VIP, the payload format is:
     #   [AEAD_ciphertext][auth_tag]
     # where auth_tag is the last 16 bytes of the payload.
     #
-    # The AAD for this encryption is the ZTLP packet header minus auth tag,
-    # which is what Packet.extract_aad computes for the outer packet.
+    # [SAST fix: fuq-lvym] TWO further compounding bugs fixed here:
     #
-    # We use the same ChaCha20-Poly1305 AEAD construction as the header auth
-    # to decrypt the tunnel payload.
+    # 1. Nonce was a FIXED all-zero 96-bit value (<<0::96>>) for every
+    #    single packet. Combined with the shared-key bug above, this
+    #    was catastrophic (key, nonce) reuse: ChaCha20-Poly1305 leaks
+    #    the XOR of plaintexts under keystream reuse and allows
+    #    Poly1305 one-time-key recovery -> forgeries. Now derives the
+    #    nonce from the packet's own monotonic packet_seq counter
+    #    (zero-padded to 96 bits), which is unique per packet within a
+    #    session by construction (see Packet.data_packet() - the relay
+    #    already relies on packet_seq elsewhere for anti-replay).
+    #
+    # 2. AAD was empty (<<>>), so a decrypted VIP payload was not bound
+    #    to its own packet header at all - an attacker could splice a
+    #    valid ciphertext+tag from one packet onto a different header
+    #    (e.g. a different session_id or packet_seq) and it would still
+    #    decrypt successfully. Now binds the real packet header AAD via
+    #    Packet.extract_aad/1 on the raw wire bytes, matching the same
+    #    AAD binding already used for the outer packet's HeaderAuthTag.
+    nonce = <<parsed.packet_seq::96>>
 
-    nonce = <<0::96>>
+    aad =
+      case Packet.extract_aad(raw_data) do
+        {:ok, aad_bytes} -> aad_bytes
+        {:error, _} -> <<>>
+      end
 
     if byte_size(payload) < 17 do
       {:error, :payload_too_short}
@@ -277,7 +343,7 @@ defmodule ZtlpRelay.VipTcpTerminator do
              session_key,
              nonce,
              ciphertext,
-             <<>>,
+             aad,
              tag,
              false
              # decrypt

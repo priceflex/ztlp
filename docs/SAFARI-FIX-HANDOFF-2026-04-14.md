@@ -185,7 +185,7 @@ This might explain why even with no packet drops, Safari pages may not fully loa
 - Relay: 34.219.64.205:23095
 - Zone: techrockstars.ztlp
 - VIPs: vault=10.122.0.4, http=10.122.0.3, primary=10.122.0.2
-- Benchmark auth token: 2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079
+- Benchmark auth token: (see BOOTSTRAP_TOKEN env var)
 
 ## GIT CREDENTIALS
 

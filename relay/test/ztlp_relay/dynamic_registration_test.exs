@@ -107,6 +107,25 @@ defmodule ZtlpRelay.DynamicRegistrationTest do
   end
 
   describe "UDP registration packet handling" do
+    setup do
+      # [gpq-xvfw regression fix] ZTLP_RELAY_HMAC_MODE now defaults to
+      # :prod (fail-closed) as of the gpq-xvfw security fix — this
+      # test sends a hand-crafted zero-HMAC registration packet and
+      # expects dev-mode (unsigned) acceptance, so explicitly opt in.
+      prev_mode = System.get_env("ZTLP_RELAY_HMAC_MODE")
+      System.put_env("ZTLP_RELAY_HMAC_MODE", "dev")
+
+      on_exit(fn ->
+        if prev_mode do
+          System.put_env("ZTLP_RELAY_HMAC_MODE", prev_mode)
+        else
+          System.delete_env("ZTLP_RELAY_HMAC_MODE")
+        end
+      end)
+
+      :ok
+    end
+
     test "relay accepts well-formed registration packet (no secret)" do
       # Get the relay's UDP port
       port = ZtlpRelay.UdpListener.get_port()

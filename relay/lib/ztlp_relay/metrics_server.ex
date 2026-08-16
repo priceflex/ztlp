@@ -22,11 +22,16 @@ defmodule ZtlpRelay.MetricsServer do
   @default_port 9101
   @default_bind "127.0.0.1"
 
-  # ── DoS mitigation ───────────────────────────────────────────────
-  # Global cap on concurrent metric-acceptor processes. Each
-  # `spawn/1` in the accept loop holds one slot until the request
-  # completes. Exceeding this cap closes the socket immediately
-  # without spawning. Tunable via `:max_connections` (app env).
+  # ── DoS mitigation — CWE-770 (finding cfg-fwqs) ──────────────────────
+  #
+  # Max concurrent metric-acceptor processes. Each handler holds one slot
+  # until the HTTP request completes and the socket is closed. Exceeding
+  # this cap closes the socket immediately without spawning a process.
+  # A Task.Supervisor with max_children provides an orthogonal second
+  # cap (same pattern as gateway/lib/ztlp_gateway/metrics_server.ex's
+  # eia-oazy fix): even if the counter-based check races and lets one
+  # extra connection through, the supervisor refuses start_child once
+  # its own max_children is hit.
   @max_connections 32
 
   # Per-IP burst window (seconds) and max connections per IP within
@@ -38,44 +43,83 @@ defmodule ZtlpRelay.MetricsServer do
 
   # ── Client API ─────────────────────────────────────────────────────
 
+  @doc """
+  Start the metrics server GenServer.
+
+  Pass `name: nil` to start a fully isolated, unregistered instance —
+  used by tests so they don't collide with (or fight the automatic
+  restart of) the permanent instance the app supervision tree starts.
+  """
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
   end
 
   # ── GenServer callbacks ────────────────────────────────────────────
 
   @impl true
   def init(_opts) do
+    max_conn = max_connections()
+
     if metrics_enabled?() do
       port = metrics_port()
       bind = metrics_bind()
-      case :gen_tcp.listen(port, [
-        :binary,
-        packet: :http_bin,
-        active: false,
-        reuseaddr: true,
-        backlog: 128,
-        ip: to_charlist(bind)
-      ]) do
-        {:ok, listen_socket} ->
-          {:ok, actual_port} = :inet.port(listen_socket)
-          Logger.info("[metrics] Prometheus endpoint listening on port #{actual_port}")
-          # Start acceptor loop
-          send(self(), :accept)
-          {:ok, %{socket: listen_socket, port: actual_port}}
+
+      supervisor_opts = [
+        max_children: max_conn,
+        max_restarts: max_conn,
+        max_seconds: 60
+      ]
+
+      case Task.Supervisor.start_link(supervisor_opts) do
+        {:ok, sup} ->
+          # [pre-existing bug, found+fixed alongside the eia-oazy/cfg-fwqs
+          # DoS mitigation work] :gen_tcp's :ip option requires an erlang
+          # ip-address tuple (e.g. {127,0,0,1}), NOT a charlist — the
+          # original to_charlist(bind) always raised :badarg the moment
+          # this listener actually tried to bind. Never caught by tests
+          # because metrics_enabled defaults to false in config/test.exs.
+          bind_ip =
+            case :inet.parse_address(to_charlist(bind)) do
+              {:ok, ip} -> ip
+              {:error, _} -> {127, 0, 0, 1}
+            end
+
+          case :gen_tcp.listen(port, [
+            :binary,
+            packet: :http_bin,
+            active: false,
+            reuseaddr: true,
+            backlog: 128,
+            ip: bind_ip
+          ]) do
+            {:ok, listen_socket} ->
+              {:ok, actual_port} = :inet.port(listen_socket)
+              Logger.info("[metrics] Prometheus endpoint listening on port #{actual_port}")
+              # Start acceptor loop
+              send(self(), :accept)
+              {:ok, %{socket: listen_socket, port: actual_port, supervisor: sup}}
+
+            {:error, reason} ->
+              Supervisor.stop(sup, :normal)
+              Logger.error("[metrics] Failed to start metrics server on port #{port}: #{inspect(reason)}")
+              {:ok, %{socket: nil, port: port, supervisor: nil}}
+          end
 
         {:error, reason} ->
-          Logger.error("[metrics] Failed to start metrics server on port #{port}: #{inspect(reason)}")
-          {:ok, %{socket: nil, port: port}}
+          Logger.error("[metrics] Task.Supervisor failed to start: #{inspect(reason)}")
+          {:ok, %{socket: nil, port: port, supervisor: nil}}
       end
     else
-      {:ok, %{socket: nil, port: nil}}
+      {:ok, %{socket: nil, port: nil, supervisor: nil}}
     end
   end
 
   @impl true
   def handle_info(:accept, %{socket: nil} = state), do: {:noreply, state}
-  def handle_info(:accept, %{socket: listen_socket} = state) do
+  def handle_info(:accept, %{socket: listen_socket, supervisor: sup} = state) do
     # Non-blocking accept with short timeout
     case :gen_tcp.accept(listen_socket, 100) do
       {:ok, client} ->
@@ -85,13 +129,28 @@ defmodule ZtlpRelay.MetricsServer do
         if maybe_bump_conn_count() do
           # DoS gate 2: per-IP rate limit
           if maybe_burst_check(peer_ip) do
-            spawn_link(fn ->
-              try do
-                handle_request(client)
-              after
+            # Dispatch to supervised task — crashes are contained, no
+            # risk to the accept loop.  [CWE-770 cfg-fwqs]
+            case Task.Supervisor.start_child(sup, fn ->
+                 try do
+                   handle_request(client)
+                 after
+                   untrack_conn()
+                 end
+               end) do
+              {:ok, _pid} ->
+                :ok
+
+              {:error, {:max_children, _}} ->
+                Logger.warning("[metrics] Connection rejected: supervisor max_children reached")
+                :gen_tcp.close(client)
                 untrack_conn()
-              end
-            end)
+
+              {:error, reason} ->
+                Logger.warning("[metrics] Task.Supervisor failed: #{inspect(reason)}")
+                :gen_tcp.close(client)
+                untrack_conn()
+            end
           else
             # Per-IP rate limited — close the socket, no process spawned
             :inet.setopts(client, [packet: :raw])
@@ -100,6 +159,7 @@ defmodule ZtlpRelay.MetricsServer do
           end
         else
           # Global cap hit — close immediately, no process spawned
+          Logger.warning("[metrics] Connection rejected: max_connections (#{max_connections()}) reached")
           :gen_tcp.close(client)
         end
 
@@ -213,8 +273,10 @@ defmodule ZtlpRelay.MetricsServer do
   end
 
   @impl true
-  def terminate(_reason, %{socket: nil}), do: :ok
-  def terminate(_reason, %{socket: socket}) do
+  def terminate(_reason, %{socket: nil, supervisor: nil}), do: :ok
+  def terminate(_reason, %{socket: nil, supervisor: sup}), do: Supervisor.stop(sup, :normal)
+  def terminate(_reason, %{socket: socket, supervisor: sup}) do
+    if sup, do: Supervisor.stop(sup, :normal, 5000)
     :gen_tcp.close(socket)
   end
 

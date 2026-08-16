@@ -868,6 +868,23 @@ class LaunchAppTest(unittest.TestCase):
         self.assertEqual(HTTPStatus.NOT_FOUND, status)
         self.assertIn("not provisioned", body)
 
+    def test_admin_pubkey_rejects_claimed_then_expired_token(self):
+        """Regression: CLAIMED+EXPIRED tokens must be rejected, not only unclaimed.
+
+        A stolen claim token should not allow indefinite pubkey rebinding once
+        the token's expiration window has passed (CWE-287).
+        """
+        token = self._claim_token_for("Expired Pubkey Co", "expired-pubkey.ztlp")
+        # Fast-forward past the default 1h claim_expires_at window
+        self.app.now = lambda: dt.datetime(2026, 12, 31, tzinfo=dt.timezone.utc)
+
+        status, _headers, body = self.post_form(
+            "/api/admin-pubkey",
+            {"token": token, "pubkey_hex": "ab" * 32},
+        )
+        self.assertEqual(HTTPStatus.UNAUTHORIZED, status)
+        self.assertIn("invalid", body.lower())
+
     # ── New claim-confirm-then-provision flow ─────────────────────────
 
     def _start_and_get_token(self, *, org="Confirm Co", zone="confirm.ztlp", email="confirm@example.com"):

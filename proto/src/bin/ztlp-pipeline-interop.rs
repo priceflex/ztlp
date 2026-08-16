@@ -62,7 +62,7 @@ fn main() {
 
     let mut header = DataHeader::new(session_id, 1);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let serialized = header.serialize();
     let payload = b"test_payload_data";
@@ -92,7 +92,7 @@ fn main() {
     hs_header.payload_len = 32;
 
     let hs_aad = hs_header.aad_bytes();
-    hs_header.header_auth_tag = compute_header_auth_tag(&auth_key, &hs_aad);
+    hs_header.header_auth_tag = compute_header_auth_tag(&auth_key, &hs_aad, hs_header.packet_seq);
 
     let hs_serialized = hs_header.serialize();
     let mut hs_packet = b"VALIDATE_HS_PACKET".to_vec();
@@ -149,7 +149,7 @@ fn main() {
     let wrong_sid = SessionId::generate();
     let mut wrong_sid_header = DataHeader::new(wrong_sid, 2);
     let wrong_aad = wrong_sid_header.aad_bytes();
-    wrong_sid_header.header_auth_tag = compute_header_auth_tag(&auth_key, &wrong_aad);
+    wrong_sid_header.header_auth_tag = compute_header_auth_tag(&auth_key, &wrong_aad, wrong_sid_header.packet_seq);
 
     let mut cmd = b"VALIDATE_DATA_PACKET".to_vec();
     cmd.extend_from_slice(&wrong_sid_header.serialize());
@@ -225,7 +225,15 @@ fn main() {
                 aad.extend_from_slice(&elixir_packet[42..46]);
                 let auth_tag = &elixir_packet[26..42];
 
-                let expected_tag = compute_header_auth_tag(&auth_key, &aad);
+                // packet_seq lives at bytes 18..26 (after magic(2)+ver/hdrlen(2)+
+                // flags(2)+session_id(12)) — must extract the REAL value from the
+                // wire rather than guess, since it's now part of the nonce
+                // derivation for compute_header_auth_tag (packet_seq -> nonce).
+                let mut seq_bytes = [0u8; 8];
+                seq_bytes.copy_from_slice(&elixir_packet[18..26]);
+                let packet_seq = u64::from_be_bytes(seq_bytes);
+
+                let expected_tag = compute_header_auth_tag(&auth_key, &aad, packet_seq);
                 if auth_tag == expected_tag {
                     println!("✓ Rust validated Elixir-generated data header + auth tag");
                     passed += 1;
@@ -268,7 +276,15 @@ fn main() {
             let aad = &elixir_hs_packet[..80];
             let auth_tag = &elixir_hs_packet[80..96];
 
-            let expected_tag = compute_header_auth_tag(&auth_key, aad);
+            // packet_seq lives at bytes 23..31 (after magic(2)+ver/hdrlen(2)+
+            // flags(2)+msg_type(1)+crypto_suite(2)+key_id(2)+session_id(12) = 23)
+            // — extract the REAL value from the wire, it's part of the nonce
+            // derivation for compute_header_auth_tag now.
+            let mut seq_bytes = [0u8; 8];
+            seq_bytes.copy_from_slice(&elixir_hs_packet[23..31]);
+            let packet_seq = u64::from_be_bytes(seq_bytes);
+
+            let expected_tag = compute_header_auth_tag(&auth_key, aad, packet_seq);
             if auth_tag == expected_tag {
                 println!("✓ Rust validated Elixir-generated handshake header + auth tag");
                 passed += 1;

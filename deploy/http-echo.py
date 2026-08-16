@@ -40,7 +40,17 @@ class EchoHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"status": "healthy"})
 
         elif path == "/echo":
-            size = int(params.get("size", ["0"])[0])
+            try:
+                size = int(params.get("size", ["0"])[0])
+            except ValueError:
+                self._json_response(400, {"error": "invalid size"})
+                return
+            if size < 0:
+                self._json_response(400, {"error": "size must be non-negative"})
+                return
+            if size > 100 * 1024 * 1024:
+                self._json_response(413, {"error": "size exceeds 100 MB limit"})
+                return
             body = b"X" * size
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -53,6 +63,12 @@ class EchoHandler(BaseHTTPRequestHandler):
                 mb = int(path.split("/download/")[1])
             except (ValueError, IndexError):
                 self._json_response(400, {"error": "invalid size"})
+                return
+            if mb < 0:
+                self._json_response(400, {"error": "size must be non-negative"})
+                return
+            if mb > 100:
+                self._json_response(413, {"error": "size exceeds 100 MB limit"})
                 return
             total = mb * 1024 * 1024
             self.send_response(200)
@@ -74,6 +90,9 @@ class EchoHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/echo":
             content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 100 * 1024 * 1024:
+                self._json_response(413, {"error": "body exceeds 100 MB limit"})
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b""
             headers = {k: v for k, v in self.headers.items()}
             response = {

@@ -4,12 +4,12 @@
 //! new devices to join a ZTLP network. An admin generates tokens using a
 //! zone's enrollment secret; devices present tokens to NS during registration.
 //!
-//! ## Wire Format (variable length, typically ~120-200 bytes)
+//! ## Wire Format (variable length, typically ~120-280 bytes)
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────┐
 //! │  version       : u8        (0x01)                         │
-//! │  flags         : u8        (bit 0: has gateway addr)      │
+//! │  flags         : u8        (bit 0: has gateway, bit 1: cb) │
 //! │  zone_len      : u16       (big-endian)                   │
 //! │  zone          : [u8; zone_len]                           │
 //! │  ns_addr_len   : u16       (big-endian)                   │
@@ -18,6 +18,8 @@
 //! │  relay_addrs   : [u16 len + addr] × relay_count           │
 //! │  gateway_addr_len : u16    (only if flag bit 0 set)       │
 //! │  gateway_addr  : [u8; gateway_addr_len]                   │
+//! │  callback_url_len : u16   (only if flag bit 1 set)        │
+//! │  callback_url  : [u8; callback_url_len]                   │
 //! │  max_uses      : u16       (0 = unlimited)                │
 //! │  expires_at    : u64       (unix timestamp, big-endian)   │
 //! │  nonce         : [u8; 16]  (random, prevents replay)      │
@@ -36,6 +38,25 @@ const TOKEN_VERSION: u8 = 0x01;
 
 /// Flag: token includes a gateway address.
 const FLAG_HAS_GATEWAY: u8 = 0x01;
+
+/// Flag: token includes a callback URL (covered by MAC to prevent SSRF).
+///
+/// **Security: crf-mpxh (CWE-918).** Before this fix, `callback_url` was
+/// only delivered via the ``&callback=`` query-param on
+/// ``ztlp://enroll/?…`` URIs but was NOT included in the canonical
+/// serialization that the HMAC-BLAKE2s MAC covers. An attacker who could
+/// intercept and modify the enrollment URI could replace the callback URL
+/// with an attacker-controlled endpoint, and the MAC would still validate.
+/// The CLI would then POST the device's Noise static pubkey, node ID and
+/// enrollment metadata to the attacker's server.
+///
+/// Fix: include `callback_url` in the wire-format serialization covered by
+/// the HMAC. Both the Rust side (``serialize_without_mac()``) and the
+/// Python side (``_serialize_enrollment_token_for_signing()``) now write
+/// the callback as a length-prefixed string when present. The flag bit
+/// ensures backward compatibility — tokens minted without a callback
+/// (or the older binary-only format) are unaffected.
+const FLAG_HAS_CALLBACK: u8 = 0x02;
 
 /// An enrollment token that authorizes a device to join a ZTLP zone.
 #[derive(Debug, Clone)]
@@ -182,6 +203,13 @@ impl EnrollmentToken {
             None
         };
 
+        // Callback URL (optional) — crf-mpxh fix: covered by HMAC
+        let callback_url = if flags & FLAG_HAS_CALLBACK != 0 {
+            Some(read_len_prefixed_string(data, &mut pos)?)
+        } else {
+            None
+        };
+
         // Max uses
         if pos + 2 > data.len() {
             return Err("truncated at max_uses".to_string());
@@ -230,8 +258,8 @@ impl EnrollmentToken {
             expires_at,
             nonce,
             mac,
-            token_id: None,     // Binary tokens don't carry token IDs
-            callback_url: None, // Binary tokens don't carry callback URLs
+            token_id: None,      // Binary tokens don't carry token IDs
+            callback_url,        // Parsed from wire format if flag bit 1 set
         })
     }
 
@@ -427,11 +455,13 @@ impl EnrollmentToken {
         buf.push(self.version);
 
         // Flags
-        let flags = if self.gateway_addr.is_some() {
-            FLAG_HAS_GATEWAY
-        } else {
-            0
-        };
+        let mut flags: u8 = 0;
+        if self.gateway_addr.is_some() {
+            flags |= FLAG_HAS_GATEWAY;
+        }
+        if self.callback_url.is_some() {
+            flags |= FLAG_HAS_CALLBACK;
+        }
         buf.push(flags);
 
         // Zone
@@ -449,6 +479,11 @@ impl EnrollmentToken {
         // Gateway address (if present)
         if let Some(ref gw) = self.gateway_addr {
             write_len_prefixed_string(&mut buf, gw);
+        }
+
+        // Callback URL (if present) — crf-mpxh fix: covered by HMAC
+        if let Some(ref cb) = self.callback_url {
+            write_len_prefixed_string(&mut buf, cb);
         }
 
         // Max uses

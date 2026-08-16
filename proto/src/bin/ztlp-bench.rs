@@ -112,7 +112,7 @@ fn main() {
     // Build a valid data packet
     let mut data_header = DataHeader::new(session_id, 42);
     let aad = data_header.aad_bytes();
-    data_header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad);
+    data_header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad, data_header.packet_seq);
     let data_payload = vec![0xABu8; 64];
     let data_packet = ZtlpPacket::Data {
         header: data_header.clone(),
@@ -227,7 +227,7 @@ fn main() {
 
     let test_aad: Vec<u8> = (0..26).collect(); // 26 bytes data header AAD
     bench("compute_header_auth_tag", 50_000, 500, || {
-        std::hint::black_box(compute_header_auth_tag(&recv_key, &test_aad));
+        std::hint::black_box(compute_header_auth_tag(&recv_key, &test_aad, 0u64));
     });
 
     // Full pipeline with auth check

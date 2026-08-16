@@ -208,12 +208,14 @@ class Api::V1::EnrollmentTokensControllerTest < ActionDispatch::IntegrationTest
   def post_signed_with(path:, zone:, client:, secret:, body:)
     raw = body.to_json
     ts = Time.current.to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "POST",
       path: path,
       zone: zone,
       client: client,
       timestamp: ts,
+      nonce: nonce,
       body: raw,
       secret: secret
     )
@@ -225,6 +227,7 @@ class Api::V1::EnrollmentTokensControllerTest < ActionDispatch::IntegrationTest
            "X-ZTLP-Zone"      => zone,
            "X-ZTLP-Client"    => client,
            "X-ZTLP-Timestamp" => ts.to_s,
+           "X-ZTLP-Nonce"     => nonce,
            "X-ZTLP-Signature" => sig
          }
   end

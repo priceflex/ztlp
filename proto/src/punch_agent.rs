@@ -36,7 +36,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
-use crate::identity::NodeId;
+use crate::identity::{NodeId, NodeIdentity};
 use crate::punch::{decode_punch_notify, encode_punch_report, respond_to_punch, PeerEndpoint};
 
 /// Default keepalive cadence — kept in sync with
@@ -65,9 +65,12 @@ pub struct PunchAgent {
     /// Address of the ZTLP-NS server used to coordinate punching.
     pub ns_addr: SocketAddr,
 
-    /// This gateway's NodeId — embedded in `PUNCH_REPORT` so NS can index
-    /// the endpoint mapping by node.
-    pub node_id: NodeId,
+    /// This gateway's identity — the NodeId is embedded in `PUNCH_REPORT`
+    /// so NS can index the endpoint mapping by node, and (post irt-rwzo
+    /// fix) the identity's Ed25519 signing key authenticates each
+    /// PUNCH_REPORT claim so NS can verify the sender actually controls
+    /// this node_id before trusting the reported endpoints.
+    pub identity: NodeIdentity,
 
     /// Cached listener port (extracted from `socket.local_addr()` at
     /// construction time). Stamped onto every local-candidate
@@ -96,8 +99,8 @@ pub struct PunchAgent {
 impl PunchAgent {
     /// Construct a new agent over the given shared socket, NS address,
     /// and node identity.
-    pub fn new(socket: Arc<UdpSocket>, ns_addr: SocketAddr, node_id: NodeId) -> Self {
-        Self::with_advertise_overrides(socket, ns_addr, node_id, Vec::new(), Vec::new(), false)
+    pub fn new(socket: Arc<UdpSocket>, ns_addr: SocketAddr, identity: NodeIdentity) -> Self {
+        Self::with_advertise_overrides(socket, ns_addr, identity, Vec::new(), Vec::new(), false)
     }
 
     /// Construct a new agent with explicit operator overrides for the
@@ -110,7 +113,7 @@ impl PunchAgent {
     pub fn with_advertise_overrides(
         socket: Arc<UdpSocket>,
         ns_addr: SocketAddr,
-        node_id: NodeId,
+        identity: NodeIdentity,
         advertise_include: Vec<String>,
         advertise_exclude: Vec<String>,
         advertise_all: bool,
@@ -129,7 +132,7 @@ impl PunchAgent {
         Self {
             socket,
             ns_addr,
-            node_id,
+            identity,
             listener_port,
             advertise_include,
             advertise_exclude,
@@ -152,7 +155,7 @@ impl PunchAgent {
     pub fn with_listener_port(
         socket: Arc<UdpSocket>,
         ns_addr: SocketAddr,
-        node_id: NodeId,
+        identity: NodeIdentity,
         listener_port: u16,
         advertise_include: Vec<String>,
         advertise_exclude: Vec<String>,
@@ -161,7 +164,7 @@ impl PunchAgent {
         Self {
             socket,
             ns_addr,
-            node_id,
+            identity,
             listener_port,
             advertise_include,
             advertise_exclude,
@@ -201,13 +204,14 @@ impl PunchAgent {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     /// use tokio::net::UdpSocket;
-    /// use ztlp_proto::identity::NodeId;
+    /// use ztlp_proto::identity::NodeIdentity;
     /// use ztlp_proto::punch_agent::PunchAgent;
     ///
     /// # async fn example() -> std::io::Result<()> {
     /// let socket = Arc::new(UdpSocket::bind("0.0.0.0:23095").await?);
     /// let ns_addr = "16.147.41.195:23096".parse().unwrap();
-    /// let agent = PunchAgent::new(socket, ns_addr, NodeId([0u8; 16]));
+    /// let identity = NodeIdentity::generate().expect("generate identity");
+    /// let agent = PunchAgent::new(socket, ns_addr, identity);
     /// let _keepalive = agent.start_keepalive(Duration::from_secs(25));
     /// // Keepalive runs in background; agent can still be used for
     /// // dispatcher (H4) or other operations.
@@ -217,7 +221,7 @@ impl PunchAgent {
     pub fn start_keepalive(&self, interval: Duration) -> JoinHandle<()> {
         let socket = self.socket.clone();
         let ns_addr = self.ns_addr;
-        let node_id = self.node_id;
+        let identity = self.identity.clone();
         let port = self.listener_port;
         let include = self.advertise_include.clone();
         let exclude = self.advertise_exclude.clone();
@@ -238,7 +242,7 @@ impl PunchAgent {
                 let candidates = crate::local_candidates::enumerate_local_candidates_with_overrides(
                     port, &include, &exclude, all,
                 );
-                let pkt = encode_punch_report(&node_id, &candidates);
+                let pkt = encode_punch_report(&identity, &candidates);
                 if let Err(e) = socket.send_to(&pkt, ns_addr).await {
                     // Don't tear down on send failure — NAT mapping is
                     // refreshed best-effort. Log + carry on.
@@ -439,6 +443,16 @@ impl PunchAgent {
 mod tests {
     use super::*;
 
+    /// Build a NodeIdentity with a specific NodeId for deterministic
+    /// test assertions, while still having a real (random) signing key
+    /// so `encode_punch_report` can produce a valid signature.
+    fn identity_with_node_id(id: NodeId) -> NodeIdentity {
+        NodeIdentity {
+            node_id: id,
+            ..NodeIdentity::generate().expect("generate identity")
+        }
+    }
+
     /// H1 — verify the agent constructs and exposes its fields.
     #[tokio::test]
     async fn punch_agent_constructs_with_socket_and_ns_addr() {
@@ -448,12 +462,12 @@ mod tests {
                 .expect("bind ephemeral test socket"),
         );
         let ns_addr: SocketAddr = "127.0.0.1:23096".parse().unwrap();
-        let node_id = NodeId([0xAA; 16]);
+        let identity = identity_with_node_id(NodeId([0xAA; 16]));
 
-        let agent = PunchAgent::new(sock.clone(), ns_addr, node_id);
+        let agent = PunchAgent::new(sock.clone(), ns_addr, identity.clone());
 
         assert_eq!(agent.ns_addr, ns_addr);
-        assert_eq!(agent.node_id, node_id);
+        assert_eq!(agent.identity.node_id, identity.node_id);
         // Socket cloned-in is the same kernel socket — Arc strong-count > 1
         assert!(Arc::strong_count(&sock) >= 2);
     }
@@ -480,9 +494,9 @@ mod tests {
 
         // Gateway socket — what the keepalive sends from.
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let node_id = NodeId([0x42; 16]);
+        let identity = identity_with_node_id(NodeId([0x42; 16]));
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, node_id);
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity.clone());
         let handle = agent.start_keepalive(Duration::from_secs(25));
 
         // Receive the first keepalive within 500ms.
@@ -495,7 +509,7 @@ mod tests {
         // Wire format: 0x0C + 16-byte node_id + 1-byte reported_count + reported_addrs...
         assert!(n >= 18, "PUNCH_REPORT too short: {} bytes", n);
         assert_eq!(buf[0], 0x0C, "first byte must be NS_PUNCH_REPORT");
-        assert_eq!(&buf[1..17], &node_id.0[..], "node_id must match");
+        assert_eq!(&buf[1..17], &identity.node_id.0[..], "node_id must match");
         // M2: reported_count is environment-dependent (≥ 0). We just
         // verify the byte exists; behaviour of local-candidate
         // enumeration is covered by the M2-T4/T6 tests below.
@@ -514,7 +528,7 @@ mod tests {
         let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ns_addr = ns_sock.local_addr().unwrap();
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0x99; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x99; 16])));
         let handle = agent.start_keepalive(Duration::from_millis(100));
 
         // Receive at least 3 keepalives within 600ms (first immediate,
@@ -566,7 +580,7 @@ mod tests {
         let agent = PunchAgent::new(
             gw_sock,
             ns_addr, // ns_addr is used for source validation
-            NodeId([0xDE; 16]),
+            identity_with_node_id(NodeId([0xDE; 16])),
         );
 
         // Build the PUNCH_NOTIFY payload — the endpoint inside the
@@ -624,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn h4_dispatcher_exits_when_channel_closes() {
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), NodeId([0x11; 16]));
+        let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), identity_with_node_id(NodeId([0x11; 16])));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, SocketAddr)>();
         let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
@@ -649,7 +663,7 @@ mod tests {
         let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ns_addr = ns_sock.local_addr().unwrap();
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0x22; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x22; 16])));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = agent.start_dispatcher(rx, Duration::from_millis(300));
@@ -689,7 +703,7 @@ mod tests {
         let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ns_addr = ns_sock.local_addr().unwrap();
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0x44; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x44; 16])));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = agent.start_dispatcher(rx, Duration::from_millis(300));
@@ -731,7 +745,7 @@ mod tests {
         let ns_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ns_addr = ns_sock.local_addr().unwrap();
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0x55; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0x55; 16])));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
@@ -770,16 +784,17 @@ mod tests {
 
     /// Inline mini-decoder for PUNCH_REPORT (0x0C) used by M2 tests.
     /// Returns (node_id, reported_endpoints).
-    /// Format: 0x0C | node_id[16] | count[1] | (family[1] + addr + port[2])*
+    /// Format (post irt-rwzo fix): 0x0C | node_id[16] | timestamp[8] |
+    /// sig[64] | pubkey[32] | count[1] | (family[1] + addr + port[2])*
     fn decode_punch_report_for_test(data: &[u8]) -> (NodeId, Vec<SocketAddr>) {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-        assert!(data.len() >= 18, "punch report too short: {}", data.len());
+        assert!(data.len() >= 122, "punch report too short: {}", data.len());
         assert_eq!(data[0], 0x0C, "expected NS_PUNCH_REPORT");
         let mut nid = [0u8; 16];
         nid.copy_from_slice(&data[1..17]);
-        let count = data[17] as usize;
+        let count = data[121] as usize;
         let mut endpoints = Vec::with_capacity(count);
-        let mut pos = 18;
+        let mut pos = 122;
         for _ in 0..count {
             assert!(pos < data.len(), "truncated punch report");
             match data[pos] {
@@ -811,7 +826,7 @@ mod tests {
     async fn punch_agent_caches_listener_port_on_construction() {
         let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let expected_port = sock.local_addr().unwrap().port();
-        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), NodeId([0x01; 16]));
+        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), identity_with_node_id(NodeId([0x01; 16])));
         assert_eq!(
             agent.listener_port, expected_port,
             "listener_port must be cached from the bound socket"
@@ -826,7 +841,7 @@ mod tests {
     #[tokio::test]
     async fn punch_agent_default_advertise_overrides_are_empty() {
         let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), NodeId([0x02; 16]));
+        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), identity_with_node_id(NodeId([0x02; 16])));
         assert!(agent.advertise_include.is_empty());
         assert!(agent.advertise_exclude.is_empty());
         assert!(!agent.advertise_all);
@@ -839,7 +854,7 @@ mod tests {
         let agent = PunchAgent::with_advertise_overrides(
             sock,
             "127.0.0.1:23096".parse().unwrap(),
-            NodeId([0x03; 16]),
+            NodeIdentity::generate().expect("generate identity"),
             vec!["eth0".to_string()],
             vec!["docker0".to_string()],
             true,
@@ -860,7 +875,7 @@ mod tests {
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let gw_port = gw_sock.local_addr().unwrap().port();
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([7u8; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([7u8; 16])));
         let handle = agent.start_keepalive(Duration::from_millis(50));
 
         let mut buf = [0u8; 1024];
@@ -895,7 +910,7 @@ mod tests {
         let agent = PunchAgent::with_advertise_overrides(
             gw_sock,
             ns_addr,
-            NodeId([0x55; 16]),
+            identity_with_node_id(NodeId([0x55; 16])),
             Vec::new(),
             vec!["lo".to_string()],
             false,
@@ -926,7 +941,7 @@ mod tests {
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let gw_port = gw_sock.local_addr().unwrap().port();
 
-        let agent = PunchAgent::new(gw_sock, ns_addr, NodeId([0xC0; 16]));
+        let agent = PunchAgent::new(gw_sock, ns_addr, identity_with_node_id(NodeId([0xC0; 16])));
         let handle = agent.start_keepalive(Duration::from_millis(30));
 
         let mut count = 0usize;
@@ -968,11 +983,11 @@ mod tests {
         let explicit_listener_port: u16 = 23095;
         assert_ne!(explicit_listener_port, keepalive_port);
 
-        let node_id = NodeId([0xBB; 16]);
+        let identity = identity_with_node_id(NodeId([0xBB; 16]));
         let agent = PunchAgent::with_listener_port(
             gw_keepalive,
             ns_addr,
-            node_id,
+            identity.clone(),
             explicit_listener_port,
             vec![],
             vec![],
@@ -990,7 +1005,7 @@ mod tests {
 
         let (decoded_node_id, candidates) =
             decode_punch_report(&buf[..n]).expect("decode_punch_report");
-        assert_eq!(decoded_node_id, node_id);
+        assert_eq!(decoded_node_id, identity.node_id);
         assert!(
             !candidates.is_empty(),
             "expected at least one candidate w/ --advertise-all"

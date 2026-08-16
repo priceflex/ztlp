@@ -739,7 +739,7 @@ pub async fn send_reject(
     // Build the data header
     let mut header = DataHeader::new(session_id, packet_seq);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
     header.payload_len = ciphertext.len() as u16;
 
     // Build final packet
@@ -1108,7 +1108,7 @@ where
         // Build the data header
         let mut header = DataHeader::new(session_id, packet_seq);
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
 
         let mut packet = header.serialize();
         packet.extend_from_slice(&encrypted);
@@ -1281,7 +1281,7 @@ where
                 if let Ok(encrypted) = cipher.encrypt(nonce, ping_frame.as_slice()) {
                     let mut header = DataHeader::new(sid_send, seq);
                     let aad = header.aad_bytes();
-                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, seq);
                     let mut packet = header.serialize();
                     packet.extend_from_slice(&encrypted);
                     let _ = udp_send.send_to(&packet, peer_addr).await;
@@ -1352,7 +1352,7 @@ where
 
                         let mut header = DataHeader::new(sid_send, orig_packet_seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, orig_packet_seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
@@ -1434,7 +1434,7 @@ where
                                         DataHeader::new(sid_send, orig_packet_seq);
                                     let aad = header.aad_bytes();
                                     header.header_auth_tag =
-                                        compute_header_auth_tag(&send_key, &aad);
+                                        compute_header_auth_tag(&send_key, &aad, orig_packet_seq);
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ =
@@ -1473,7 +1473,7 @@ where
                     .map_err(|e| format!("FIN encryption error: {}", e))?;
                 let mut header = DataHeader::new(sid_send, packet_seq);
                 let aad = header.aad_bytes();
-                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
                 let mut packet = header.serialize();
                 packet.extend_from_slice(&encrypted);
                 udp_send.send_to(&packet, peer_addr).await?;
@@ -1686,7 +1686,7 @@ where
                                     let mut header = DataHeader::new(sid_send, *ps);
                                     let aad = header.aad_bytes();
                                     header.header_auth_tag =
-                                        compute_header_auth_tag(&send_key, &aad);
+                                        compute_header_auth_tag(&send_key, &aad, *ps);
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ = udp_send.send_to(&packet, peer_addr).await;
@@ -1747,7 +1747,7 @@ where
                                     let mut header = DataHeader::new(sid_send, orig_pkt_seq);
                                     let aad = header.aad_bytes();
                                     header.header_auth_tag =
-                                        compute_header_auth_tag(&send_key, &aad);
+                                        compute_header_auth_tag(&send_key, &aad, orig_pkt_seq);
                                     let mut packet = header.serialize();
                                     packet.extend_from_slice(&encrypted);
                                     let _ = udp_send.send_to(&packet, peer_addr).await;
@@ -1805,7 +1805,7 @@ where
 
                         let mut header = DataHeader::new(sid_send, packet_seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
@@ -2541,7 +2541,7 @@ where
                                         let mut header = DataHeader::new(sid_recv, pong_seq);
                                         let aad = header.aad_bytes();
                                         header.header_auth_tag =
-                                            compute_header_auth_tag(&send_key_for_acks, &aad);
+                                            compute_header_auth_tag(&send_key_for_acks, &aad, pong_seq);
                                         let mut packet = header.serialize();
                                         packet.extend_from_slice(&encrypted);
                                         let _ = udp_recv.send_to(&packet, peer_addr).await;
@@ -2785,7 +2785,7 @@ where
 
                         let mut header = DataHeader::new(sid_recv, seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key_for_acks, &aad);
+                        header.header_auth_tag = compute_header_auth_tag(&send_key_for_acks, &aad, seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
@@ -2939,7 +2939,7 @@ async fn send_ack(
     // Build header
     let mut header = DataHeader::new(session_id, seq);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(send_key, &aad, seq);
 
     // Send
     let mut packet = header.serialize();
@@ -2993,7 +2993,7 @@ async fn send_sack(
     // Build header
     let mut header = DataHeader::new(session_id, seq);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(send_key, &aad, seq);
 
     // Send
     let mut packet = header.serialize();
@@ -4505,7 +4505,7 @@ mod tests {
 
         let mut header = DataHeader::new(session_id, packet_seq);
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(send_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(send_key, &aad, packet_seq);
 
         let mut packet = header.serialize();
         packet.extend_from_slice(&encrypted);

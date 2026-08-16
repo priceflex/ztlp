@@ -44,6 +44,32 @@ struct EnrollmentTokenInfo: Equatable {
     let expiresAt: Date
     let maxUses: Int
     let rawURI: String
+    /// The opaque token identifier from the enrollment URI.
+    let tokenId: String?
+    /// The server callback URL for enrollment confirmation.
+    let callbackURL: String?
+
+    init(
+        zone: String,
+        nsAddress: String,
+        relayAddresses: [String],
+        gatewayAddress: String?,
+        expiresAt: Date,
+        maxUses: Int,
+        rawURI: String,
+        tokenId: String? = nil,
+        callbackURL: String? = nil
+    ) {
+        self.zone = zone
+        self.nsAddress = nsAddress
+        self.relayAddresses = relayAddresses
+        self.gatewayAddress = gatewayAddress
+        self.expiresAt = expiresAt
+        self.maxUses = maxUses
+        self.rawURI = rawURI
+        self.tokenId = tokenId
+        self.callbackURL = callbackURL
+    }
 
     /// Whether the token has expired.
     var isExpired: Bool {
@@ -244,6 +270,12 @@ final class EnrollmentViewModel: ObservableObject {
     }
 
     /// Parse query-param enrollment URI.
+    ///
+    /// Security requirements (CTF finding ero-sirt):
+    ///   - `token` is mandatory — prevents crafting ad-hoc URIs
+    ///   - `expires` is mandatory — no implicit "never expires" fallback
+    ///   - `expires` must be within a sane range (not in the past,
+    ///     not more than 30 days out) to reject tampered timestamps.
     private func parseQueryParamEnrollment(_ payload: String, rawURI: String) -> EnrollmentTokenInfo? {
         guard let queryStart = payload.firstIndex(of: "?") else { return nil }
         let queryString = String(payload[payload.index(after: queryStart)...])
@@ -259,12 +291,24 @@ final class EnrollmentViewModel: ObservableObject {
         guard let zone = params["zone"],
               let ns = params["ns"] else { return nil }
 
-        let expires: Date
-        if let expiresStr = params["expires"], let ts = TimeInterval(expiresStr) {
-            expires = Date(timeIntervalSince1970: ts)
-        } else {
-            expires = Date.distantFuture
-        }
+        // Require token parameter — prevents ad-hoc URI construction
+        guard let tokenId = params["token"], !tokenId.isEmpty else { return nil }
+
+        // Validate token format: alphanumeric hex string, 8–64 chars
+        guard tokenId.allSatisfy({ $0.isHexDigit }),
+              (8...64).contains(tokenId.count) else { return nil }
+
+        // Require expires parameter — no implicit "never expires"
+        guard let expiresStr = params["expires"],
+              let ts = TimeInterval(expiresStr) else { return nil }
+
+        let expires: Date = Date(timeIntervalSince1970: ts)
+
+        // Reject obviously invalid expiry: in the past or > 30 days out
+        let maxAge = 30 * 24 * 3600  // 30 days
+        guard ts > 0,
+              expires > Date().addingTimeInterval(-60),    // within 60 s of now
+              expires < Date().addingTimeInterval(maxAge) else { return nil }
 
         var relays: [String] = []
         if let relay = params["relay"] {
@@ -278,7 +322,9 @@ final class EnrollmentViewModel: ObservableObject {
             gatewayAddress: params["gw"] ?? params["gateway"],
             expiresAt: expires,
             maxUses: Int(params["max_uses"] ?? "0") ?? 0,
-            rawURI: rawURI
+            rawURI: rawURI,
+            tokenId: tokenId,
+            callbackURL: params["callback"]
         )
     }
 
@@ -342,7 +388,9 @@ final class EnrollmentViewModel: ObservableObject {
             gatewayAddress: gateway,
             expiresAt: Date(timeIntervalSince1970: TimeInterval(expiresRaw)),
             maxUses: maxUses,
-            rawURI: rawURI
+            rawURI: rawURI,
+            tokenId: nil,
+            callbackURL: nil
         )
     }
 

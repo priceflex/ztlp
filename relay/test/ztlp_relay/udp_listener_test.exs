@@ -127,6 +127,23 @@ defmodule ZtlpRelay.UdpListenerTest do
     end
 
     setup do
+      # [gpq-xvfw regression fix] ZTLP_RELAY_HMAC_MODE now defaults to
+      # :prod (fail-closed) as of the gpq-xvfw security fix. These
+      # CLIENT_ROUTE tests build hand-crafted frames with a zeroed/
+      # placeholder HMAC field (they're testing routing/purge logic,
+      # not HMAC verification), so explicitly opt into :dev mode here
+      # to keep their original behavior.
+      prev_mode = System.get_env("ZTLP_RELAY_HMAC_MODE")
+      System.put_env("ZTLP_RELAY_HMAC_MODE", "dev")
+
+      on_exit(fn ->
+        if prev_mode do
+          System.put_env("ZTLP_RELAY_HMAC_MODE", prev_mode)
+        else
+          System.delete_env("ZTLP_RELAY_HMAC_MODE")
+        end
+      end)
+
       # The QUIC tuple table is normally created lazily on first GATEWAY_REGISTER
       # or CLIENT_ROUTE. Make sure each test starts from a clean state.
       if :ets.info(:ztlp_forwarded_quic_tuples, :name) != :undefined do

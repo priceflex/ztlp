@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 
+use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -104,10 +105,22 @@ pub struct NodeIdentity {
     /// this field existed) loading cleanly with `bound_user_sid = None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_user_sid: Option<String>,
+
+    /// Ed25519 signing key seed (32 bytes), used to authenticate
+    /// PEER_ENDPOINTS/PUNCH_REPORT claims to the NS (irt-rwzo fix:
+    /// without this, any UDP sender could claim to be any node_id
+    /// and poison the NS's endpoint store for that node — a MITM/DoS
+    /// vector). `#[serde(default)]` + the migrating `load()` below
+    /// keep pre-existing identity.json files (written before this
+    /// field existed) loading cleanly, lazily generating and
+    /// persisting a signing key on first load.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_hex_bytes")]
+    pub signing_key_seed: Option<Vec<u8>>,
 }
 
 impl NodeIdentity {
-    /// Generate a fresh identity with a new NodeID and X25519 keypair.
+    /// Generate a fresh identity with a new NodeID, X25519 keypair, and
+    /// Ed25519 signing keypair.
     pub fn generate() -> Result<Self, IdentityError> {
         let node_id = NodeId::generate();
 
@@ -121,18 +134,36 @@ impl NodeIdentity {
             .generate_keypair()
             .map_err(|e| IdentityError::InvalidKey(e.to_string()))?;
 
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+
         Ok(Self {
             node_id,
             static_private_key: keypair.private.to_vec(),
             static_public_key: keypair.public.to_vec(),
             bound_user_sid: None,
+            signing_key_seed: Some(seed.to_vec()),
         })
     }
 
     /// Load an identity from a JSON file.
+    ///
+    /// Identities persisted before the irt-rwzo fix have no
+    /// `signing_key_seed`. Rather than silently leaving such nodes
+    /// unable to authenticate PEER_ENDPOINTS/PUNCH_REPORT claims
+    /// forever, lazily generate and persist a signing key the first
+    /// time an old identity file is loaded.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
         let data = std::fs::read_to_string(path)?;
-        let identity: Self = serde_json::from_str(&data)?;
+        let mut identity: Self = serde_json::from_str(&data)?;
+
+        if identity.signing_key_seed.is_none() {
+            let mut seed = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut seed);
+            identity.signing_key_seed = Some(seed.to_vec());
+            identity.save(path)?;
+        }
+
         Ok(identity)
     }
 
@@ -141,6 +172,38 @@ impl NodeIdentity {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
+    }
+
+    /// Return the Ed25519 signing key, generating an ephemeral one if
+    /// this identity somehow has none (defensive — `load()`/`generate()`
+    /// always populate it, but callers holding a hand-built `NodeIdentity`
+    /// in tests should not panic).
+    pub fn signing_key(&self) -> SigningKey {
+        match &self.signing_key_seed {
+            Some(seed) if seed.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(seed);
+                SigningKey::from_bytes(&arr)
+            }
+            _ => {
+                let mut seed = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut seed);
+                SigningKey::from_bytes(&seed)
+            }
+        }
+    }
+
+    /// Hex-encoded Ed25519 verifying (public) key, for inclusion in
+    /// registration/enrollment records so the NS can build its
+    /// node_id → pubkey index.
+    pub fn signing_public_key_hex(&self) -> String {
+        hex::encode(self.signing_key().verifying_key().to_bytes())
+    }
+
+    /// Sign an arbitrary message with this identity's Ed25519 key.
+    /// Used to authenticate PEER_ENDPOINTS/PUNCH_REPORT claims to NS.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key().sign(message).to_bytes()
     }
 }
 
@@ -161,6 +224,34 @@ mod hex_bytes {
     {
         let s = String::deserialize(deserializer)?;
         hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Serde helper for Option<Vec<u8>> as hex strings.
+mod opt_hex_bytes {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(b) => serializer.serialize_str(&hex::encode(b)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<String> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(s) => hex::decode(&s)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
     }
 }
 

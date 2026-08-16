@@ -3092,7 +3092,7 @@ async fn cmd_connect(
                         _resolved_node_id.unwrap(),
                         ns_addr,
                         node.socket.clone(),
-                        identity.node_id,
+                        &identity,
                         &local_subnets,
                         Some(send_addr),
                         policy,
@@ -3147,7 +3147,7 @@ async fn cmd_connect(
             match punch::execute_punch(
                 &node.socket,
                 ns_addr,
-                &identity.node_id,
+                &identity,
                 &peer_node_id,
                 &our_endpoints,
                 &punch_config,
@@ -3813,7 +3813,7 @@ async fn cmd_connect(
                             peer_node_id.unwrap(),
                             ns_addr,
                             probe_sock,
-                            identity.node_id,
+                            &identity,
                             &local_subnets,
                             Some(race_backstop),
                             policy,
@@ -4913,11 +4913,11 @@ async fn cmd_listen(
                 .await
                 .map_err(|e| format!("failed to bind PunchAgent keepalive socket: {}", e))?,
         );
-        let gw_node_id = identity.node_id;
+        let gw_identity = identity.clone();
         let agent = ztlp_proto::punch_agent::PunchAgent::with_listener_port(
             keepalive_sock,
             ns_addr,
-            gw_node_id,
+            gw_identity,
             listener_port,
             advertise_interface.to_vec(),
             no_advertise_interface.to_vec(),
@@ -7221,7 +7221,7 @@ async fn cmd_gateway_candidates(
         .parse()
         .map_err(|e| format!("invalid --ns-server '{}': {}", ns_server, e))?;
 
-    let req = encode_peer_endpoints_request(&requester.node_id, &gateway_nid, &[]);
+    let req = encode_peer_endpoints_request(&requester, &gateway_nid, &[]);
     socket.send_to(&req, ns_addr).await?;
 
     // 4. Wait up to 5s for the response.

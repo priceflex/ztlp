@@ -54,7 +54,7 @@ fn main() {
 
     let mut header = DataHeader::new(session_id, 100);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&header.serialize());
@@ -79,7 +79,7 @@ fn main() {
     let payload_len = 1500 - header_bytes.len(); // Fill to exactly 1500
 
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&header.serialize());
@@ -103,7 +103,7 @@ fn main() {
 
     let mut header = DataHeader::new(session_id, 102);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&header.serialize());
@@ -127,7 +127,7 @@ fn main() {
 
     let mut header = DataHeader::new(session_id, 103);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let serialized = header.serialize();
     assert_eq!(
@@ -162,7 +162,7 @@ fn main() {
         let seq = 200 + i;
         let mut header = DataHeader::new(session_id, seq);
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
         let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
         packet.extend_from_slice(&header.serialize());
@@ -193,7 +193,7 @@ fn main() {
     let zero_sid = SessionId([0u8; 12]);
     let mut zero_header = DataHeader::new(zero_sid, 300);
     let aad = zero_header.aad_bytes();
-    zero_header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    zero_header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, zero_header.packet_seq);
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&zero_header.serialize());
@@ -258,7 +258,7 @@ fn main() {
 
     let mut header = DataHeader::new(session_id, u64::MAX);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&auth_key, &aad, header.packet_seq);
 
     let mut packet = b"VALIDATE_DATA_PACKET".to_vec();
     packet.extend_from_slice(&header.serialize());

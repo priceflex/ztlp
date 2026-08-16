@@ -22,14 +22,14 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio::time::{interval, sleep, timeout};
 use tracing::{debug, info};
 
-use crate::identity::NodeId;
+use crate::identity::{NodeId, NodeIdentity};
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -143,25 +143,39 @@ pub struct PeerEndpoint {
 
 /// Encode a PEER_ENDPOINTS request to the NS.
 ///
-/// Wire format:
+/// Wire format (post irt-rwzo fix — adds Ed25519 authentication so the
+/// NS can verify the sender actually controls `our_node_id` before
+/// trusting the endpoint claim; previously any UDP sender could claim
+/// to be any node_id and poison the NS's endpoint store for that node):
 /// ```text
 /// [0x0A]                     query type
 /// [requester_node_id: 16B]   our NodeID
 /// [target_node_id: 16B]      peer's NodeID
+/// [timestamp: 8B]            unix seconds (big-endian), replay bound
+/// [sig: 64B]                 Ed25519 sig over requester_node_id||timestamp
+/// [pubkey: 32B]              Ed25519 verifying key for requester_node_id
 /// [reported_count: 1B]       number of our own reported endpoints
 /// [reported_addrs...]        our endpoints (for NS to track)
 /// ```
 pub fn encode_peer_endpoints_request(
-    our_node_id: &NodeId,
+    identity: &NodeIdentity,
     peer_node_id: &NodeId,
     our_endpoints: &[SocketAddr],
 ) -> Vec<u8> {
+    let our_node_id = identity.node_id;
     let count = our_endpoints.len().min(255) as u8;
-    let mut pkt = Vec::with_capacity(1 + 16 + 16 + 1 + count as usize * 7);
+    let mut pkt = Vec::with_capacity(1 + 16 + 16 + 8 + 64 + 32 + 1 + count as usize * 7);
+
+    let timestamp = current_unix_timestamp();
+    let sig = sign_endpoint_claim(identity, &our_node_id, timestamp);
+    let pubkey = identity.signing_key().verifying_key().to_bytes();
 
     pkt.push(NS_PEER_ENDPOINTS);
     pkt.extend_from_slice(our_node_id.as_bytes());
     pkt.extend_from_slice(peer_node_id.as_bytes());
+    pkt.extend_from_slice(&timestamp.to_be_bytes());
+    pkt.extend_from_slice(&sig);
+    pkt.extend_from_slice(&pubkey);
     pkt.push(count);
 
     for addr in our_endpoints.iter().take(count as usize) {
@@ -173,19 +187,31 @@ pub fn encode_peer_endpoints_request(
 
 /// Encode a PUNCH_REPORT to the NS (refresh our endpoints).
 ///
-/// Wire format:
+/// Wire format (post irt-rwzo fix — see [`encode_peer_endpoints_request`]
+/// for the authentication rationale):
 /// ```text
 /// [0x0C]                     query type
 /// [node_id: 16B]             our NodeID
+/// [timestamp: 8B]            unix seconds (big-endian), replay bound
+/// [sig: 64B]                 Ed25519 sig over node_id||timestamp
+/// [pubkey: 32B]              Ed25519 verifying key for node_id
 /// [reported_count: 1B]       number of reported endpoints
 /// [reported_addrs...]        our endpoints
 /// ```
-pub fn encode_punch_report(our_node_id: &NodeId, our_endpoints: &[SocketAddr]) -> Vec<u8> {
+pub fn encode_punch_report(identity: &NodeIdentity, our_endpoints: &[SocketAddr]) -> Vec<u8> {
+    let our_node_id = identity.node_id;
     let count = our_endpoints.len().min(255) as u8;
-    let mut pkt = Vec::with_capacity(1 + 16 + 1 + count as usize * 7);
+    let mut pkt = Vec::with_capacity(1 + 16 + 8 + 64 + 32 + 1 + count as usize * 7);
+
+    let timestamp = current_unix_timestamp();
+    let sig = sign_endpoint_claim(identity, &our_node_id, timestamp);
+    let pubkey = identity.signing_key().verifying_key().to_bytes();
 
     pkt.push(NS_PUNCH_REPORT);
     pkt.extend_from_slice(our_node_id.as_bytes());
+    pkt.extend_from_slice(&timestamp.to_be_bytes());
+    pkt.extend_from_slice(&sig);
+    pkt.extend_from_slice(&pubkey);
     pkt.push(count);
 
     for addr in our_endpoints.iter().take(count as usize) {
@@ -193,6 +219,30 @@ pub fn encode_punch_report(our_node_id: &NodeId, our_endpoints: &[SocketAddr]) -
     }
 
     pkt
+}
+
+/// Current unix timestamp in seconds, saturating to 0 on clock errors
+/// (pre-1970 system clock) rather than panicking.
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build the canonical message signed for an endpoint claim: the raw
+/// node_id bytes followed by the big-endian timestamp. Shared between
+/// the Rust signer here and (conceptually) the Elixir verifier in
+/// `ztlp_ns/server.ex`, which must reconstruct the identical bytes.
+fn endpoint_claim_message(node_id: &NodeId, timestamp: u64) -> [u8; 24] {
+    let mut msg = [0u8; 24];
+    msg[..16].copy_from_slice(node_id.as_bytes());
+    msg[16..].copy_from_slice(&timestamp.to_be_bytes());
+    msg
+}
+
+fn sign_endpoint_claim(identity: &NodeIdentity, node_id: &NodeId, timestamp: u64) -> [u8; 64] {
+    identity.sign(&endpoint_claim_message(node_id, timestamp))
 }
 
 /// Decode a PEER_ENDPOINTS response from NS.
@@ -245,10 +295,15 @@ pub fn decode_peer_endpoints_response(data: &[u8]) -> Result<Vec<PeerEndpoint>, 
 /// length-bounded: it will stop early if the byte stream is truncated
 /// rather than panic.
 ///
-/// Wire format:
+/// Wire format (post irt-rwzo fix):
 /// ```text
 /// [0x0C]                     query type
 /// [node_id: 16B]             reporter's NodeID
+/// [timestamp: 8B]            unix seconds (big-endian)
+/// [sig: 64B]                 Ed25519 signature (NOT verified here —
+///                            verification requires the NS's trust
+///                            store; this decoder only parses shape)
+/// [pubkey: 32B]              Ed25519 verifying key
 /// [reported_count: 1B]       number of reported endpoints
 /// [reported_addrs...]        endpoint entries
 /// ```
@@ -261,8 +316,8 @@ pub fn decode_punch_report(data: &[u8]) -> Option<(NodeId, Vec<SocketAddr>)> {
     if data.is_empty() || data[0] != NS_PUNCH_REPORT {
         return None;
     }
-    // 1 (type) + 16 (node_id) + 1 (count) = 18
-    if data.len() < 18 {
+    // 1 (type) + 16 (node_id) + 8 (timestamp) + 64 (sig) + 32 (pubkey) + 1 (count) = 122
+    if data.len() < 122 {
         return None;
     }
 
@@ -270,9 +325,9 @@ pub fn decode_punch_report(data: &[u8]) -> Option<(NodeId, Vec<SocketAddr>)> {
     node_id_bytes.copy_from_slice(&data[1..17]);
     let node_id = NodeId::from_bytes(node_id_bytes);
 
-    let count = data[17] as usize;
+    let count = data[121] as usize;
     let mut endpoints = Vec::with_capacity(count);
-    let mut pos = 18;
+    let mut pos = 122;
     for _ in 0..count {
         if pos >= data.len() {
             break;
@@ -422,7 +477,7 @@ pub(crate) async fn send_punch_packet(socket: &UdpSocket, dest: SocketAddr) -> s
 pub async fn execute_punch(
     socket: &Arc<UdpSocket>,
     ns_addr: SocketAddr,
-    our_node_id: &NodeId,
+    our_identity: &NodeIdentity,
     peer_node_id: &NodeId,
     our_endpoints: &[SocketAddr],
     config: &PunchConfig,
@@ -433,7 +488,7 @@ pub async fn execute_punch(
         ns_addr, peer_node_id
     );
 
-    let req = encode_peer_endpoints_request(our_node_id, peer_node_id, our_endpoints);
+    let req = encode_peer_endpoints_request(our_identity, peer_node_id, our_endpoints);
     socket.send_to(&req, ns_addr).await?;
 
     // Wait for NS response
@@ -1000,31 +1055,42 @@ mod tests {
     fn test_encode_peer_endpoints_request_no_reported() {
         let our_id = NodeId::from_bytes([0xAA; 16]);
         let peer_id = NodeId::from_bytes([0xBB; 16]);
+        let identity = NodeIdentity {
+            node_id: our_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
 
-        let pkt = encode_peer_endpoints_request(&our_id, &peer_id, &[]);
+        let pkt = encode_peer_endpoints_request(&identity, &peer_id, &[]);
 
         assert_eq!(pkt[0], NS_PEER_ENDPOINTS);
         assert_eq!(&pkt[1..17], &[0xAA; 16]);
         assert_eq!(&pkt[17..33], &[0xBB; 16]);
-        assert_eq!(pkt[33], 0); // 0 reported endpoints
-        assert_eq!(pkt.len(), 34);
+        // Wire format post irt-rwzo: [type(1)][our_id(16)][peer_id(16)]
+        // [timestamp(8)][sig(64)][pubkey(32)][count(1)][addrs...]
+        // -> count byte at offset 137, not 33 (pre-fix unsigned format).
+        assert_eq!(pkt[137], 0); // 0 reported endpoints
+        assert_eq!(pkt.len(), 138);
     }
 
     #[test]
     fn test_encode_peer_endpoints_request_with_reported() {
         let our_id = NodeId::from_bytes([0xAA; 16]);
         let peer_id = NodeId::from_bytes([0xBB; 16]);
+        let identity = NodeIdentity {
+            node_id: our_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
         let endpoints = vec![
             "1.2.3.4:5000".parse::<SocketAddr>().unwrap(),
             "10.0.0.1:6000".parse::<SocketAddr>().unwrap(),
         ];
 
-        let pkt = encode_peer_endpoints_request(&our_id, &peer_id, &endpoints);
+        let pkt = encode_peer_endpoints_request(&identity, &peer_id, &endpoints);
 
         assert_eq!(pkt[0], NS_PEER_ENDPOINTS);
-        assert_eq!(pkt[33], 2); // 2 reported endpoints
+        assert_eq!(pkt[137], 2); // 2 reported endpoints (see offset note above)
                                 // Each IPv4 addr = 7 bytes (1 family + 4 addr + 2 port)
-        assert_eq!(pkt.len(), 34 + 14);
+        assert_eq!(pkt.len(), 138 + 14);
     }
 
     // ── PEER_ENDPOINTS Response Decoding ────────────────────────────
@@ -1195,23 +1261,34 @@ mod tests {
     #[test]
     fn test_encode_punch_report_empty() {
         let node_id = NodeId::from_bytes([0xFF; 16]);
-        let pkt = encode_punch_report(&node_id, &[]);
+        let identity = NodeIdentity {
+            node_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
+let pkt = encode_punch_report(&identity, &[]);
 
         assert_eq!(pkt[0], NS_PUNCH_REPORT);
         assert_eq!(&pkt[1..17], &[0xFF; 16]);
-        assert_eq!(pkt[17], 0);
-        assert_eq!(pkt.len(), 18);
+        // Wire format post irt-rwzo: [type(1)][node_id(16)][timestamp(8)]
+        // [sig(64)][pubkey(32)][count(1)][addrs...] -> count byte at
+        // offset 121 (was 17 in the pre-fix unsigned format).
+        assert_eq!(pkt[121], 0);
+        assert_eq!(pkt.len(), 122);
     }
 
     #[test]
     fn test_encode_punch_report_with_addrs() {
         let node_id = NodeId::from_bytes([0x11; 16]);
+        let identity = NodeIdentity {
+            node_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
         let addrs = vec!["5.6.7.8:9000".parse::<SocketAddr>().unwrap()];
-        let pkt = encode_punch_report(&node_id, &addrs);
+        let pkt = encode_punch_report(&identity, &addrs);
 
         assert_eq!(pkt[0], NS_PUNCH_REPORT);
-        assert_eq!(pkt[17], 1);
-        assert_eq!(pkt.len(), 18 + 7); // 1 IPv4 addr
+        assert_eq!(pkt[121], 1);
+        assert_eq!(pkt.len(), 122 + 7); // 1 IPv4 addr
     }
 
     // ── decode_punch_report (M8) ─────────────────────────────────────
@@ -1219,7 +1296,11 @@ mod tests {
     #[test]
     fn test_decode_punch_report_empty_roundtrip() {
         let node_id = NodeId::from_bytes([0xAA; 16]);
-        let pkt = encode_punch_report(&node_id, &[]);
+        let identity = NodeIdentity {
+            node_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
+let pkt = encode_punch_report(&identity, &[]);
         let (decoded_id, addrs) = decode_punch_report(&pkt).unwrap();
         assert_eq!(decoded_id, node_id);
         assert!(addrs.is_empty());
@@ -1228,12 +1309,16 @@ mod tests {
     #[test]
     fn test_decode_punch_report_multi_v4_roundtrip() {
         let node_id = NodeId::from_bytes([0x55; 16]);
+        let identity = NodeIdentity {
+            node_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
         let addrs: Vec<SocketAddr> = vec![
             "10.0.0.5:23095".parse().unwrap(),
             "192.168.1.5:23095".parse().unwrap(),
             "100.64.1.5:23095".parse().unwrap(),
         ];
-        let pkt = encode_punch_report(&node_id, &addrs);
+        let pkt = encode_punch_report(&identity, &addrs);
         let (decoded_id, decoded_addrs) = decode_punch_report(&pkt).unwrap();
         assert_eq!(decoded_id, node_id);
         assert_eq!(decoded_addrs, addrs);
@@ -1242,11 +1327,15 @@ mod tests {
     #[test]
     fn test_decode_punch_report_mixed_v4_v6_roundtrip() {
         let node_id = NodeId::from_bytes([0x99; 16]);
+        let identity = NodeIdentity {
+            node_id,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
         let addrs: Vec<SocketAddr> = vec![
             "10.0.0.5:23095".parse().unwrap(),
             "[2001:db8::1]:23095".parse().unwrap(),
         ];
-        let pkt = encode_punch_report(&node_id, &addrs);
+        let pkt = encode_punch_report(&identity, &addrs);
         let (decoded_id, decoded_addrs) = decode_punch_report(&pkt).unwrap();
         assert_eq!(decoded_id, node_id);
         assert_eq!(decoded_addrs, addrs);
@@ -1274,6 +1363,15 @@ mod tests {
         let mut pkt = Vec::new();
         pkt.push(NS_PUNCH_REPORT);
         pkt.extend_from_slice(node_id.as_bytes());
+        // Wire format post irt-rwzo requires timestamp(8)+sig(64)+pubkey(32)
+        // before the count byte (122-byte header total); decode_punch_report
+        // only checks data.len() >= 122 and reads the count from data[121],
+        // it does NOT verify the signature itself (that's done by the NS-
+        // side caller, not this decoder), so zero-filled placeholder bytes
+        // here are fine for exercising the truncation-handling path.
+        pkt.extend_from_slice(&[0u8; 8]); // timestamp placeholder
+        pkt.extend_from_slice(&[0u8; 64]); // sig placeholder
+        pkt.extend_from_slice(&[0u8; 32]); // pubkey placeholder
         pkt.push(3); // claim 3
                      // One full IPv4: 10.0.0.5:23095
         pkt.push(4);
@@ -1441,6 +1539,10 @@ mod tests {
 
         let node_a = NodeId::from_bytes([0xAA; 16]);
         let node_b = NodeId::from_bytes([0xBB; 16]);
+        let identity_a = NodeIdentity {
+            node_id: node_a,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
 
         // Spawn fake NS that responds with client B's address
         let ns_node_a = node_a;
@@ -1507,7 +1609,7 @@ mod tests {
             }
         });
 
-        let result = execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
+        let result = execute_punch(&client_a, ns_addr, &identity_a, &node_b, &[], &config).await;
 
         match result {
             Ok(PunchResult::Success { peer_addr }) => {
@@ -1564,6 +1666,10 @@ mod tests {
 
         let node_a = NodeId::from_bytes([0x11; 16]);
         let node_b = NodeId::from_bytes([0x22; 16]);
+        let identity_a = NodeIdentity {
+            node_id: node_a,
+            ..NodeIdentity::generate().expect("generate identity")
+        };
 
         // Fake NS that returns 1 endpoint that won't respond
         tokio::spawn(async move {
@@ -1584,7 +1690,7 @@ mod tests {
         };
 
         let start = Instant::now();
-        let result = execute_punch(&socket, ns_addr, &node_a, &node_b, &[], &config).await;
+        let result = execute_punch(&socket, ns_addr, &identity_a, &node_b, &[], &config).await;
         let elapsed = start.elapsed();
 
         match result {

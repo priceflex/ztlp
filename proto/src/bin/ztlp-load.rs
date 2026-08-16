@@ -317,7 +317,7 @@ fn build_data_packet(
 ) -> Vec<u8> {
     let mut hdr = DataHeader::new(session_id, seq);
     let aad = hdr.aad_bytes();
-    hdr.header_auth_tag = compute_header_auth_tag(key, &aad);
+    hdr.header_auth_tag = compute_header_auth_tag(key, &aad, seq);
     let payload: Vec<u8> = (0..payload_size).map(|i| (i % 256) as u8).collect();
     let pkt = ZtlpPacket::Data {
         header: hdr,
@@ -341,7 +341,7 @@ fn build_ns_query_packet(session_id: SessionId, seq: u64, key: &[u8; 32]) -> Vec
     hdr.session_id = session_id;
     hdr.packet_seq = seq;
     let aad = hdr.aad_bytes();
-    hdr.header_auth_tag = compute_header_auth_tag(key, &aad);
+    hdr.header_auth_tag = compute_header_auth_tag(key, &aad, seq);
     // Include a minimal query payload (service name)
     let payload = b"lookup:test-service.ztlp.local".to_vec();
     hdr.payload_len = payload.len() as u16;

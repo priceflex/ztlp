@@ -27,7 +27,9 @@ defmodule ZtlpRelay.HmacSecrets do
   When no per-zone secret matches, falls back to the legacy
   `ZTLP_RELAY_REGISTRATION_SECRET`. When neither is configured, the
   mode-aware policy (`verify_with_policy/3`) decides whether the frame
-  is accepted (dev/staging) or rejected (prod).
+  is accepted or rejected. The default mode is `:prod` (fail-closed),
+  so unsigned frames are rejected unless `ZTLP_RELAY_HMAC_MODE` is
+  explicitly set to `dev` or `staging`.
 
   This module is structured so a future swap to an external secret
   manager (Vault / AWS SM / GCP SM) only needs to change
@@ -50,15 +52,21 @@ defmodule ZtlpRelay.HmacSecrets do
   Returns the current HMAC mode (`:dev` | `:staging` | `:prod`).
 
   Read from `ZTLP_RELAY_HMAC_MODE` (case-insensitive). Defaults to
-  `:dev`. Garbage input is treated as `:dev` with a warning log to
-  preserve historical behavior — operators are expected to verify
-  startup logs.
+  `:prod` (fail-closed) so that unauthenticated `GATEWAY_REGISTER`
+  frames are rejected when no secret is configured — the previous
+  default of `:dev` silently accepted any registration without HMAC
+  verification, which allowed an attacker on the relay's UDP network
+  to register rogue gateways (CWE-287).
+
+  Garbage input is treated as `:prod` with a warning log — operators
+  must explicitly opt into `:dev` or `:staging` to allow unsigned
+  frames during development or migration.
   """
   @spec mode() :: mode()
   def mode do
     case System.get_env("ZTLP_RELAY_HMAC_MODE") do
       nil ->
-        :dev
+        :prod
 
       value ->
         case String.downcase(value) do
@@ -68,10 +76,11 @@ defmodule ZtlpRelay.HmacSecrets do
           other ->
             Logger.warning(
               "[HmacSecrets] Unrecognized ZTLP_RELAY_HMAC_MODE=#{inspect(other)}, " <>
-                "defaulting to :dev. Valid values: dev, staging, prod."
+                "defaulting to :prod (fail-closed). Valid values: dev, staging, prod. " <>
+                "Set ZTLP_RELAY_HMAC_MODE=dev to allow unsigned registrations."
             )
 
-            :dev
+            :prod
         end
     end
   end

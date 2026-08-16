@@ -84,12 +84,14 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     # Sign for a timestamp from 10 minutes ago — should be outside the
     # default 5-minute window.
     old_ts = (Time.current - 10.minutes).to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET",
       path: "/api/v1/health",
       zone: ZONE,
       client: CLIENT,
       timestamp: old_ts,
+      nonce: nonce,
       body: "",
       secret: SECRET
     )
@@ -98,6 +100,7 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
       "X-ZTLP-Zone"      => ZONE,
       "X-ZTLP-Client"    => CLIENT,
       "X-ZTLP-Timestamp" => old_ts.to_s,
+      "X-ZTLP-Nonce"     => nonce,
       "X-ZTLP-Signature" => sig
     }
     assert_response :unauthorized
@@ -115,12 +118,14 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
 
   test "unknown api_client returns 401 (no allowlist row)" do
     ts = Time.current.to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET",
       path: "/api/v1/health",
       zone: ZONE,
       client: "ghost.acme",
       timestamp: ts,
+      nonce: nonce,
       body: "",
       secret: SECRET
     )
@@ -129,6 +134,7 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
       "X-ZTLP-Zone"      => ZONE,
       "X-ZTLP-Client"    => "ghost.acme",
       "X-ZTLP-Timestamp" => ts.to_s,
+      "X-ZTLP-Nonce"     => nonce,
       "X-ZTLP-Signature" => sig
     }
     assert_response :unauthorized
@@ -151,12 +157,14 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
     # reject because there's no per-zone secret env for that zone AND
     # because there's no api_client row for (other_zone, ...).
     ts = Time.current.to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET",
       path: "/api/v1/health",
       zone: "evil.ztlp",
       client: CLIENT,
       timestamp: ts,
+      nonce: nonce,
       body: "",
       secret: SECRET
     )
@@ -165,6 +173,7 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
       "X-ZTLP-Zone"      => "evil.ztlp",
       "X-ZTLP-Client"    => CLIENT,
       "X-ZTLP-Timestamp" => ts.to_s,
+      "X-ZTLP-Nonce"     => nonce,
       "X-ZTLP-Signature" => sig
     }
     assert_response :unauthorized
@@ -192,12 +201,14 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
 
   def get_signed(path, zone: ZONE, client: CLIENT, secret: SECRET, body: "")
     ts = Time.current.to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET",
       path: path,
       zone: zone,
       client: client,
       timestamp: ts,
+      nonce: nonce,
       body: body,
       secret: secret
     )
@@ -206,6 +217,7 @@ class Api::V1::HealthControllerTest < ActionDispatch::IntegrationTest
       "X-ZTLP-Zone"      => zone,
       "X-ZTLP-Client"    => client,
       "X-ZTLP-Timestamp" => ts.to_s,
+      "X-ZTLP-Nonce"     => nonce,
       "X-ZTLP-Signature" => sig
     }
   end

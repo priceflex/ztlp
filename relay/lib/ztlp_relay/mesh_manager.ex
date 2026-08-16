@@ -496,12 +496,39 @@ defmodule ZtlpRelay.MeshManager do
   end
 
   defp handle_decoded_message(
-         {:relay_session_sync, _sender_node_id, _ts, payload},
-         _sender,
+         {:relay_session_sync, sender_node_id, _ts, payload},
+         sender,
          state
        ) do
-    Logger.debug("Received SESSION_SYNC for \#{inspect(payload.session_id)}")
-    ZtlpRelay.SessionRegistry.register_session(payload.session_id, payload.peer_a, payload.peer_b)
+    # Reject SESSION_SYNC from unknown relays to prevent session-mapping hijack (CWE-639).
+    # Only relays that have successfully performed a HELLO handshake and are registered
+    # in the RelayRegistry are trusted to sync session state.
+    case RelayRegistry.lookup(sender_node_id) do
+      {:ok, relay} ->
+        # Verify the source address matches the registered relay address to prevent
+        # spoofed node_id attacks on unauthenticated (dev-mode) meshes.
+        if relay.address == sender do
+          Logger.debug(
+            "Received SESSION_SYNC from #{inspect(sender_node_id)} for #{inspect(payload.session_id)}"
+          )
+
+          ZtlpRelay.SessionRegistry.register_session(
+            payload.session_id,
+            payload.peer_a,
+            payload.peer_b
+          )
+        else
+          Logger.warning(
+            "[mesh] Dropping SESSION_SYNC from unregistered sender #{inspect(sender)}"
+          )
+        end
+
+      :error ->
+        Logger.warning(
+          "[mesh] Dropping SESSION_SYNC from unknown relay #{inspect(sender_node_id)} at #{inspect(sender)}"
+        )
+    end
+
     state
   end
 

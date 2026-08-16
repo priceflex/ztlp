@@ -5,6 +5,12 @@ defmodule ZtlpGateway.AdminDashboard do
   Serves a real-time monitoring UI on `127.0.0.1:ZTLP_GATEWAY_DASHBOARD_PORT`
   (default 9105, localhost only). Uses raw `:gen_tcp` — zero external dependencies.
 
+  ## Authentication
+
+  All requests require `Authorization: Bearer <token>` where the token
+  is configured via `ZTLP_GATEWAY_DASHBOARD_TOKEN`. If no token is
+  configured, the dashboard rejects every request (fail-closed).
+
   ## Endpoints
 
   - `GET /`          → Self-contained HTML dashboard (dark theme, auto-refresh)
@@ -111,11 +117,35 @@ defmodule ZtlpGateway.AdminDashboard do
   defp handle_request(socket) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
-        drain_headers(socket)
-        handle_path(socket, path)
+        headers = drain_headers(socket, %{})
+        path_str = if is_list(path), do: List.to_string(path), else: path
+
+        # [SAST fix: gae-cymv] Every endpoint (including /api/stats,
+        # which exposes session IDs, audit logs with usernames/node
+        # IDs/source IPs, and system metrics) previously had ZERO
+        # authentication. Binding to 127.0.0.1 is not sufficient
+        # defense: the combination of no auth + wildcard CORS below
+        # meant any website an operator visited in their browser
+        # could silently fetch and exfiltrate this data via
+        # fetch('http://127.0.0.1:9105/api/stats') — the browser
+        # would happily make the same-machine request, and the
+        # wildcard CORS header let JS on ANY origin read the
+        # response. Now requires either an Authorization: Bearer
+        # <token> header OR a ?token=<token> query param (accepted so
+        # the initial page load — which can't set a custom header —
+        # can still authenticate; the token is then embedded into the
+        # returned HTML so page JS can send it as a proper header on
+        # subsequent /api/stats polls, matching the pattern used by
+        # most token-in-URL dashboard tools). Fail-closed: if no
+        # token is configured, every request is rejected.
+        if authorized?(headers, path_str) do
+          handle_path(socket, path_str, extract_query_token(path_str))
+        else
+          send_response(socket, 401, ~s({"error":"unauthorized"}\n), "application/json")
+        end
 
       {:ok, {:http_request, _, _, _}} ->
-        drain_headers(socket)
+        drain_headers(socket, %{})
         send_response(socket, 405, "Method Not Allowed\n")
 
       _ ->
@@ -125,20 +155,77 @@ defmodule ZtlpGateway.AdminDashboard do
     :gen_tcp.close(socket)
   end
 
-  defp drain_headers(socket) do
+  defp drain_headers(socket, acc) do
     case :gen_tcp.recv(socket, 0, 2_000) do
-      {:ok, :http_eoh} -> :ok
-      {:ok, {:http_header, _, _, _, _}} -> drain_headers(socket)
-      _ -> :ok
+      {:ok, :http_eoh} ->
+        acc
+
+      {:ok, {:http_header, _, field, _, value}} ->
+        key =
+          field
+          |> to_string()
+          |> String.downcase()
+
+        drain_headers(socket, Map.put(acc, key, value))
+
+      _ ->
+        acc
     end
   end
 
-  defp handle_path(socket, path) do
-    path_str = if is_list(path), do: List.to_string(path), else: path
+  defp authorized?(headers, path_str) do
+    configured_token = ZtlpGateway.Config.get(:dashboard_token)
 
-    case strip_query(path_str) do
+    # Fail-closed: no configured token means the dashboard cannot be
+    # used at all, not "anyone can use it."
+    if is_binary(configured_token) and byte_size(configured_token) > 0 do
+      header_ok? =
+        case Map.get(headers, "authorization") do
+          "Bearer " <> provided when byte_size(provided) > 0 ->
+            secure_compare(provided, configured_token)
+
+          _ ->
+            false
+        end
+
+      header_ok? or query_token_matches?(path_str, configured_token)
+    else
+      false
+    end
+  end
+
+  defp query_token_matches?(path_str, configured_token) do
+    case String.split(path_str, "?", parts: 2) do
+      [_base, query] ->
+        query
+        |> URI.decode_query()
+        |> Map.get("token")
+        |> case do
+          token when is_binary(token) and byte_size(token) > 0 ->
+            secure_compare(token, configured_token)
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  # Constant-time comparison — avoids leaking token length/prefix via
+  # timing, same rationale as every other HMAC/token comparison in
+  # this codebase (see hmac_secrets.ex, tls_terminator.ex, etc.).
+  defp secure_compare(a, b) when byte_size(a) != byte_size(b), do: false
+
+  defp secure_compare(a, b) do
+    :crypto.hash_equals(a, b)
+  end
+
+  defp handle_path(socket, path, query_token) do
+    case strip_query(path) do
       "/" ->
-        body = render_html()
+        body = render_html(query_token)
         send_response(socket, 200, body, "text/html; charset=utf-8")
 
       "/api/stats" ->
@@ -147,6 +234,13 @@ defmodule ZtlpGateway.AdminDashboard do
 
       _ ->
         send_response(socket, 404, ~s({"error":"not_found"}\n), "application/json")
+    end
+  end
+
+  defp extract_query_token(path_str) do
+    case String.split(path_str, "?", parts: 2) do
+      [_base, query] -> Map.get(URI.decode_query(query), "token")
+      _ -> nil
     end
   end
 
@@ -298,6 +392,7 @@ defmodule ZtlpGateway.AdminDashboard do
     status_text =
       case status do
         200 -> "OK"
+        401 -> "Unauthorized"
         404 -> "Not Found"
         405 -> "Method Not Allowed"
         _ -> "Error"
@@ -305,12 +400,18 @@ defmodule ZtlpGateway.AdminDashboard do
 
     :inet.setopts(socket, packet: :raw)
 
+    # [SAST fix: gae-cymv] Removed `Access-Control-Allow-Origin: *`.
+    # This is a same-origin, same-machine dashboard fetched by its own
+    # HTML/JS from the same host:port — it has no legitimate
+    # cross-origin use case. The wildcard let ANY website read
+    # responses via the browser's default same-machine reachability
+    # (127.0.0.1), which combined with the (now-fixed) lack of
+    # authentication was the core of this finding.
     :gen_tcp.send(socket, [
       "HTTP/1.1 #{status} #{status_text}\r\n",
       "Content-Type: #{ct}\r\n",
       "Content-Length: #{byte_size(body)}\r\n",
-      "Connection: close\r\n",
-      "Access-Control-Allow-Origin: *\r\n\r\n",
+      "Connection: close\r\n\r\n",
       body
     ])
   end
@@ -319,7 +420,7 @@ defmodule ZtlpGateway.AdminDashboard do
   # HTML Dashboard
   # ---------------------------------------------------------------------------
 
-  defp render_html do
+  defp render_html(query_token) do
     """
     <!DOCTYPE html>
     <html lang="en">
@@ -390,15 +491,24 @@ defmodule ZtlpGateway.AdminDashboard do
     </div>
     <div class="refresh-indicator" id="refresh-ind">&#9679; live</div>
     <script>
-    """ <> dashboard_js() <> """
+    """ <> dashboard_js(query_token) <> """
     </script>
     </body>
     </html>
     """
   end
 
-  defp dashboard_js do
-    # Kept as a separate function to avoid sigil/delimiter issues with JS syntax
+  defp dashboard_js(query_token) do
+    # Kept as a separate function to avoid sigil/delimiter issues with JS syntax.
+    #
+    # [SAST fix: gae-cymv continued] The page's own periodic
+    # /api/stats poll needs to authenticate too now that the endpoint
+    # requires it — embed the token (escaped as a JS string literal)
+    # so refresh() can send it as a real Authorization header instead
+    # of relying on the query-string fallback for every single poll
+    # (keeps the token out of the browser's network-request URL log
+    # after the very first load).
+    "var DASH_TOKEN=" <> js_string_literal(query_token) <> ";" <>
     "function fmt_uptime(s){" <>
     "var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);" <>
     "var p=[];if(d)p.push(d+'d');if(h)p.push(h+'h');p.push(m+'m');return p.join(' ');}" <>
@@ -437,8 +547,26 @@ defmodule ZtlpGateway.AdminDashboard do
     "+'<tr><td>Schedulers</td><td>'+(sys.schedulers||0)+'</td></tr>'" <>
     "+'<tr><td>Uptime</td><td>'+fmt_uptime(data.uptime_seconds||0)+'</td></tr>';}" <>
     "function refresh(){" <>
-    "fetch('/api/stats').then(function(r){return r.json();}).then(update)" <>
+    "var opts=DASH_TOKEN?{headers:{'Authorization':'Bearer '+DASH_TOKEN}}:{};" <>
+    "fetch('/api/stats',opts).then(function(r){return r.json();}).then(update)" <>
     ".catch(function(){document.getElementById('refresh-ind').textContent='\\u25cf offline';});}" <>
     "refresh();setInterval(refresh,5000);"
+  end
+
+  # Renders a JS string literal from an Elixir string (or nil ->
+  # JS null), escaping backslashes/quotes so a token containing
+  # special characters can't break out of the literal and inject
+  # script (defense-in-depth; dashboard_token is normally a
+  # server-generated hex string, but this endpoint shouldn't assume
+  # that shape forever).
+  defp js_string_literal(nil), do: "null"
+
+  defp js_string_literal(s) when is_binary(s) do
+    escaped =
+      s
+      |> String.replace("\\", "\\\\")
+      |> String.replace("'", "\\'")
+
+    "'" <> escaped <> "'"
   end
 end

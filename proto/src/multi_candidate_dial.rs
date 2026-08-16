@@ -43,7 +43,7 @@ use crate::candidate_priority::{prioritize, CandidateClass, RankedCandidate};
 use crate::dial_orchestrator::{
     dial_candidates, DialError, DialPolicy, DialSuccess, Dialer, OrchestratorError,
 };
-use crate::identity::NodeId;
+use crate::identity::{NodeId, NodeIdentity};
 use crate::punch::{
     decode_peer_endpoints_response, encode_peer_endpoints_request, NS_PEER_ENDPOINTS,
 };
@@ -97,14 +97,14 @@ pub async fn try_multi_candidate_connect(
     peer_node_id: NodeId,
     ns_server: SocketAddr,
     our_socket: Arc<UdpSocket>,
-    our_node_id: NodeId,
+    our_identity: &NodeIdentity,
     our_local_subnets: &[(std::net::IpAddr, u8)],
     relay_addr: Option<SocketAddr>,
     policy: DialPolicy,
 ) -> Result<DialOutcome, MultiCandidateError> {
     // Step 1: query NS for peer endpoints. We use our existing socket
     // so any NAT mapping we already have is preserved.
-    let req = encode_peer_endpoints_request(&our_node_id, &peer_node_id, &[]);
+    let req = encode_peer_endpoints_request(our_identity, &peer_node_id, &[]);
     our_socket
         .send_to(&req, ns_server)
         .await
@@ -279,6 +279,10 @@ mod tests {
         NodeIdentity::generate().expect("generate node id").node_id
     }
 
+    fn fresh_identity() -> NodeIdentity {
+        NodeIdentity::generate().expect("generate identity")
+    }
+
     /// Inline mirror of the (private) `punch::encode_addr` helper so
     /// the test can build PEER_ENDPOINTS responses without bumping
     /// the public surface of `punch.rs`.
@@ -373,7 +377,7 @@ mod tests {
         let (relay_addr, _relay_h) = spawn_echo_responder().await;
 
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
 
         let policy = DialPolicy {
@@ -385,7 +389,7 @@ mod tests {
             peer_id,
             ns_addr,
             our_socket,
-            our_id,
+            &our_identity,
             &[],
             Some(relay_addr),
             policy,
@@ -417,7 +421,7 @@ mod tests {
         let (ns_addr, _ns_h) = spawn_fake_ns(build_peer_endpoints_response(&[host_addr])).await;
 
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
 
         // Operator-override: treat 127.0.0.0/8 as a reachable subnet.
@@ -436,7 +440,7 @@ mod tests {
             peer_id,
             ns_addr,
             our_socket,
-            our_id,
+            &our_identity,
             &local_subnets,
             Some(relay_addr),
             policy,
@@ -458,12 +462,12 @@ mod tests {
     async fn try_connect_no_candidates_returns_error() {
         let (ns_addr, _ns_h) = spawn_fake_ns(build_peer_endpoints_response(&[])).await;
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
         let policy = DialPolicy::default();
 
         let err =
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, our_id, &[], None, policy)
+            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy)
                 .await
                 .expect_err("expected NoCandidates");
         match err {
@@ -483,7 +487,7 @@ mod tests {
             spawn_fake_ns(build_peer_endpoints_response(&[silent1, silent2])).await;
 
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
         let policy = DialPolicy {
             per_candidate_timeout: Duration::from_millis(200),
@@ -491,7 +495,7 @@ mod tests {
             total_budget: Duration::from_secs(2),
         };
         let err =
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, our_id, &[], None, policy)
+            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy)
                 .await
                 .expect_err("expected AllFailed");
         match err {
@@ -548,7 +552,7 @@ mod tests {
         let (ns_addr, _ns_h) = spawn_fake_ns(build_peer_endpoints_response(&[host_addr])).await;
 
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
 
         // Mark the entire 127.0.0.0/8 as a same-subnet match so the
@@ -563,7 +567,7 @@ mod tests {
             peer_id,
             ns_addr,
             our_socket,
-            our_id,
+            &our_identity,
             &local_subnets,
             None,
             policy,
@@ -583,7 +587,7 @@ mod tests {
     async fn try_connect_returns_ns_query_failed_when_ns_times_out() {
         let (ns_addr, _h) = spawn_silent_listener().await;
         let our_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let our_id = fresh_node_id();
+        let our_identity = fresh_identity();
         let peer_id = fresh_node_id();
         // The NS_QUERY_TIMEOUT inside the helper is 3 s; we don't
         // override it. Test wraps the whole call in a 5 s safety
@@ -592,7 +596,7 @@ mod tests {
         let policy = DialPolicy::default();
         let res = tokio::time::timeout(
             Duration::from_secs(5),
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, our_id, &[], None, policy),
+            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy),
         )
         .await
         .expect("must not hang past NS_QUERY_TIMEOUT + grace");

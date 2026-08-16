@@ -895,7 +895,7 @@ async fn send_frame(
 
     // Compute auth tag using the session's send key.
     let aad = data_frame_aad(&header);
-    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
 
     let mut pkt = header.serialize();
     pkt.extend_from_slice(&ciphertext);
@@ -1151,8 +1151,8 @@ mod tests {
 
         // And the resulting tags must match under the same key.
         let send_key = [0u8; 32];
-        let producer_tag = compute_header_auth_tag(&send_key, &producer_aad);
-        let verifier_tag = compute_header_auth_tag(&send_key, &verifier_aad);
+        let producer_tag = compute_header_auth_tag(&send_key, &producer_aad, packet_seq);
+        let verifier_tag = compute_header_auth_tag(&send_key, &verifier_aad, packet_seq);
         assert_eq!(
             producer_tag, verifier_tag,
             "producer and verifier must compute identical auth tags"

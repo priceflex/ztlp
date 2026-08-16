@@ -2,9 +2,19 @@
 
 module Api
   class HealthController < BaseController
+    before_action :authenticate_api_token!
+
     # GET /api/networks/:network_id/health
     def network_health
-      network = Network.find(params[:network_id])
+      # Verify the URL param matches the authenticated tenant. The token
+      # identifies the tenant; reject if the caller tries a different ID.
+      unless params[:network_id].to_s == @api_network.id.to_s
+        render json: { error: "Not found" }, status: :not_found
+        return
+      end
+
+      network = @api_network
+
       machines_data = network.machines.includes(:health_checks).map do |machine|
         {
           id: machine.id,
@@ -30,7 +40,12 @@ module Api
 
     # GET /api/machines/:id/health
     def machine_health
-      machine = Machine.find(params[:id])
+      machine = @api_network.machines.find_by(id: params[:id])
+      unless machine
+        render json: { error: "Not found" }, status: :not_found
+        return
+      end
+
       recent_checks = machine.health_checks.recent.limit(20)
 
       render json: {
@@ -55,6 +70,20 @@ module Api
           }
         }
       }
+    end
+
+    private
+
+    def authenticate_api_token!
+      token = request.headers["Authorization"].to_s.gsub(/^Bearer\s+/i, "").strip
+      return render json: { error: "Unauthorized" }, status: :unauthorized if token.blank?
+
+      @api_network = Network.all.find do |n|
+        raw = n.read_attribute(:enrollment_secret_ciphertext)
+        raw && raw.strip == token
+      end
+
+      return render json: { error: "Unauthorized" }, status: :unauthorized unless @api_network
     end
   end
 end

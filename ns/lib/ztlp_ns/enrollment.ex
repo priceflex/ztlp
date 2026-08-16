@@ -190,18 +190,19 @@ defmodule ZtlpNs.Enrollment do
   defp check_usage(%{nonce: nonce, max_uses: max_uses}) do
     init()
 
-    case :ets.lookup(@table, nonce) do
-      [] ->
-        # First use — record with remaining = max_uses - 1
-        :ets.insert(@table, {nonce, max_uses - 1})
+    case :ets.update_counter(@table, nonce, -1, max_uses) do
+      remaining when is_integer(remaining) and remaining >= 0 ->
         :ok
 
-      [{^nonce, remaining}] when remaining > 0 ->
-        :ets.insert(@table, {nonce, remaining - 1})
-        :ok
-
-      [{^nonce, 0}] ->
+      # Counter dropped below zero — all max_uses already consumed.
+      # The atomically-negative value must be reset to 0 so subsequent
+      # calls don't keep drifting further negative.
+      remaining when is_integer(remaining) and remaining < 0 ->
+        :ets.update_counter(@table, nonce, -remaining)
         {:error, :exhausted}
+
+      :undefined ->
+        :ok
     end
   end
 

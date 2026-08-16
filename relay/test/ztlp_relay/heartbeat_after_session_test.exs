@@ -44,6 +44,24 @@ defmodule ZtlpRelay.HeartbeatAfterSessionTest do
   alias ZtlpRelay.{UdpListener, GatewayForwarder}
 
   setup do
+    # [gpq-xvfw regression fix] ZTLP_RELAY_HMAC_MODE now defaults to
+    # :prod (fail-closed) as of the gpq-xvfw security fix — this test
+    # is about the heartbeat/data-forwarder interaction, not HMAC
+    # verification, so explicitly opt into :dev mode (unsigned frames
+    # accepted) to match this file's original intent, matching the
+    # "HMAC field is ignored" comment on build_v1_gateway_register/4
+    # below.
+    prev_mode = System.get_env("ZTLP_RELAY_HMAC_MODE")
+    System.put_env("ZTLP_RELAY_HMAC_MODE", "dev")
+
+    on_exit(fn ->
+      if prev_mode do
+        System.put_env("ZTLP_RELAY_HMAC_MODE", prev_mode)
+      else
+        System.delete_env("ZTLP_RELAY_HMAC_MODE")
+      end
+    end)
+
     # GatewayForwarder is started by the app supervisor; reuse it.
     GatewayForwarder.clear_all()
 

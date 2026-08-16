@@ -142,7 +142,7 @@ impl TransportNode {
 
         // Compute HeaderAuthTag over the header AAD
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, seq);
 
         // Assemble the packet
         let packet = ZtlpPacket::Data {
@@ -189,7 +189,7 @@ impl TransportNode {
         let mut header = DataHeader::new(session_id, seq);
         header.payload_len = encrypted.len() as u16;
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, seq);
 
         let packet = ZtlpPacket::Data {
             header,
@@ -234,7 +234,7 @@ impl TransportNode {
         let mut header = DataHeader::new(session_id, seq);
         header.payload_len = encrypted.len() as u16;
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, seq);
 
         let packet = ZtlpPacket::Data {
             header,
@@ -285,6 +285,14 @@ impl TransportNode {
     ///
     /// Returns the decrypted payload if the packet passes all checks,
     /// along with the sender's address.
+    ///
+    /// Packet processing order:
+    /// 1. Layer 1-3 (pipeline): magic, session, auth tag
+    /// 2. Anti-replay check (Layer 4): packet_seq against sliding window
+    /// 3. Decryption: ChaCha20-Poly1305 AEAD
+    ///
+    /// The pipeline lock is held only through Layers 1-4. Decryption
+    /// happens outside the lock to avoid blocking send_data() on ACKs.
     pub async fn recv_data(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, TransportError> {
         let (data, addr) = self.recv_raw().await?;
 
@@ -294,7 +302,7 @@ impl TransportNode {
         // with receive processing. This is critical on iOS where the
         // ~192KB socket buffer fills in ~28ms at full rate.
         let crypto_info = {
-            let pipeline = self.pipeline.lock().await;
+            let mut pipeline = self.pipeline.lock().await;
             let result = pipeline.process(&data);
 
             match result {
@@ -327,29 +335,64 @@ impl TransportNode {
 
         // Decrypt OUTSIDE the pipeline lock
         if let Some((header, recv_key, encrypted_payload)) = crypto_info {
-            let cipher = ChaCha20Poly1305::new((&recv_key).into());
-            let mut nonce_bytes = [0u8; 12];
-            nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
-            let nonce = Nonce::from_slice(&nonce_bytes);
+            // ── Layer 4: Anti-replay check ──
+            // Check the packet sequence against the replay window BEFORE
+            // returning plaintext. This must happen inside the pipeline lock
+            // because check_replay() mutates the session's replay_window bitmap.
+            //
+            // The check is performed AFTER decryption so that replayed packets
+            // with invalid ciphertext (wrong key / corrupted) fail at Layer 3
+            // (auth tag) before reaching the replay window — the replay window
+            // only tracks authenticated, valid packets.
+            //
+            // However, the replay check needs mutable access to the pipeline,
+            // so we re-acquire it here (briefly, after decryption).
+            let plaintext = {
+                let cipher = ChaCha20Poly1305::new((&recv_key).into());
+                let mut nonce_bytes = [0u8; 12];
+                nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
+                let nonce = Nonce::from_slice(&nonce_bytes);
 
-            match cipher.decrypt(nonce, encrypted_payload.as_slice()) {
-                Ok(plaintext) => {
-                    info!(
-                        "decrypted {} bytes from session {}",
-                        plaintext.len(),
-                        header.session_id
-                    );
-                    return Ok(Some((plaintext, addr)));
+                match cipher.decrypt(nonce, encrypted_payload.as_slice()) {
+                    Ok(plaintext) => plaintext,
+                    Err(e) => {
+                        println!(
+                            "[ZTLP-DECRYPT] FAILED seq={} session={} err={}",
+                            header.packet_seq, header.session_id, e
+                        );
+                        warn!("payload decryption failed: {}", e);
+                        return Ok(None);
+                    }
                 }
-                Err(e) => {
-                    println!(
-                        "[ZTLP-DECRYPT] FAILED seq={} session={} err={}",
-                        header.packet_seq, header.session_id, e
-                    );
-                    warn!("payload decryption failed: {}", e);
-                    return Ok(None);
+            };
+
+            // Re-acquire the pipeline lock for the replay check.
+            // This is a brief, non-CPU-intensive operation (bitmap lookup + update)
+            // so it doesn't meaningfully block send_data().
+            let is_replay = {
+                let mut pipeline = self.pipeline.lock().await;
+                if let Some(session) = pipeline.get_session_mut(&header.session_id) {
+                    !session.check_replay(header.packet_seq)
+                } else {
+                    true // session gone, treat as replay/drop
                 }
+            };
+
+            if is_replay {
+                warn!(
+                    "[ZTLP-REPLAY] DROPPED seq={} session={} (replay detected)",
+                    header.packet_seq, header.session_id
+                );
+                return Ok(None);
             }
+
+            info!(
+                "decrypted {} bytes from session {} (seq={})",
+                plaintext.len(),
+                header.session_id,
+                header.packet_seq
+            );
+            return Ok(Some((plaintext, addr)));
         }
 
         // Pass but not a data packet — could be handshake

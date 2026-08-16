@@ -242,11 +242,17 @@ impl Pipeline {
             let session_id = SessionId(sid);
 
             if let Some(session) = self.sessions.get(&session_id) {
+                // Extract PacketSeq from handshake header (offset 19..27, big-endian)
+                let packet_seq = u64::from_be_bytes({
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&data[19..27]);
+                    buf
+                });
                 let aad = &data[..packet::HANDSHAKE_HEADER_SIZE - 16];
                 let auth_tag =
                     &data[packet::HANDSHAKE_HEADER_SIZE - 16..packet::HANDSHAKE_HEADER_SIZE];
 
-                if verify_header_auth_tag(&session.recv_key, aad, auth_tag) {
+                if verify_header_auth_tag(&session.recv_key, aad, auth_tag, packet_seq) {
                     AdmissionResult::Pass
                 } else {
                     AdmissionResult::Drop
@@ -265,6 +271,12 @@ impl Pipeline {
             let session_id = SessionId(sid);
 
             if let Some(session) = self.sessions.get(&session_id) {
+                // Extract PacketSeq from data header (offset 18..26, big-endian)
+                let packet_seq = u64::from_be_bytes({
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&data[18..26]);
+                    buf
+                });
                 // Data header AAD is non-contiguous: bytes before AuthTag + bytes after AuthTag
                 // Layout: [0..26] pre-tag | [26..42] AuthTag | [42..46] ExtLen+PayloadLen
                 let mut aad = Vec::with_capacity(30);
@@ -272,7 +284,7 @@ impl Pipeline {
                 aad.extend_from_slice(&data[42..46]);
                 let auth_tag = &data[26..42];
 
-                if verify_header_auth_tag(&session.recv_key, &aad, auth_tag) {
+                if verify_header_auth_tag(&session.recv_key, &aad, auth_tag, packet_seq) {
                     AdmissionResult::Pass
                 } else {
                     AdmissionResult::Drop
@@ -364,13 +376,23 @@ fn extract_session_id_hex(data: &[u8]) -> String {
 
 /// Compute a HeaderAuthTag (AEAD tag) over header AAD bytes.
 ///
-/// Uses ChaCha20-Poly1305 with a zero nonce for header authentication.
+/// Uses ChaCha20-Poly1305 with a nonce derived from `packet_seq` to ensure
+/// each packet gets a unique (key, nonce) pair — preventing keystream reuse
+/// and Poly1305 one-time-key recovery attacks.
+///
+/// The nonce is `[0u8; 4] || packet_seq.to_le_bytes()` — the same derivation
+/// pattern used for payload encryption nonces throughout the codebase.
 /// The "ciphertext" is empty — we only use the tag as a MAC over the AAD.
-pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8]) -> [u8; 16] {
+pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8], packet_seq: u64) -> [u8; 16] {
     // We use the AEAD in a MAC-only mode: encrypt empty plaintext with the AAD.
     // The resulting ciphertext is just the 16-byte Poly1305 tag.
     let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = Nonce::default(); // 96-bit zero nonce — each packet uses unique AAD via seq/timestamp
+
+    // Derive nonce from packet_seq — unique per packet within a session.
+    // Pattern: [0; 4] || packet_seq.le_bytes() = 12-byte nonce
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt empty payload with the header as AAD — produces a 16-byte tag
     // SAFETY: ChaCha20Poly1305 encryption with a valid 32-byte key and empty
@@ -399,12 +421,19 @@ pub fn compute_header_auth_tag(key: &[u8; 32], aad: &[u8]) -> [u8; 16] {
 /// which is inherently constant-time because the Poly1305 MAC comparison
 /// inside the AEAD implementation uses constant-time primitives. This avoids
 /// timing side-channels that could leak information about the expected tag.
-fn verify_header_auth_tag(key: &[u8; 32], aad: &[u8], tag: &[u8]) -> bool {
+///
+/// The nonce is derived from `packet_seq` (same derivation as `compute_header_auth_tag`)
+/// to ensure (key, nonce) uniqueness per packet and prevent keystream reuse attacks.
+fn verify_header_auth_tag(key: &[u8; 32], aad: &[u8], tag: &[u8], packet_seq: u64) -> bool {
     if tag.len() != 16 {
         return false;
     }
     let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = Nonce::default();
+
+    // Derive nonce from packet_seq — must match the sender's derivation.
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[4..12].copy_from_slice(&packet_seq.to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
 
     cipher
         .decrypt(&nonce, chacha20poly1305::aead::Payload { msg: tag, aad })
@@ -505,9 +534,9 @@ mod tests {
         let key = [0x42u8; 32];
         let aad = b"test header data";
 
-        let tag = compute_header_auth_tag(&key, aad);
+        let tag = compute_header_auth_tag(&key, aad, 0u64);
         assert_eq!(tag.len(), 16);
-        assert!(verify_header_auth_tag(&key, aad, &tag));
+        assert!(verify_header_auth_tag(&key, aad, &tag, 0u64));
     }
 
     #[test]
@@ -516,8 +545,8 @@ mod tests {
         let wrong_key = [0x99u8; 32];
         let aad = b"test header data";
 
-        let tag = compute_header_auth_tag(&key, aad);
-        assert!(!verify_header_auth_tag(&wrong_key, aad, &tag));
+        let tag = compute_header_auth_tag(&key, aad, 0u64);
+        assert!(!verify_header_auth_tag(&wrong_key, aad, &tag, 0u64));
     }
 
     #[test]
@@ -526,8 +555,8 @@ mod tests {
         let aad = b"test header data";
         let wrong_aad = b"wrong header data";
 
-        let tag = compute_header_auth_tag(&key, aad);
-        assert!(!verify_header_auth_tag(&key, wrong_aad, &tag));
+        let tag = compute_header_auth_tag(&key, aad, 0u64);
+        assert!(!verify_header_auth_tag(&key, wrong_aad, &tag, 0u64));
     }
 
     /// SECURITY: Verify that tags of wrong length are rejected.
@@ -537,11 +566,11 @@ mod tests {
         let aad = b"test";
 
         // Too short
-        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 15]));
+        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 15], 0u64));
         // Too long
-        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 17]));
+        assert!(!verify_header_auth_tag(&key, aad, &[0u8; 17], 0u64));
         // Empty
-        assert!(!verify_header_auth_tag(&key, aad, &[]));
+        assert!(!verify_header_auth_tag(&key, aad, &[], 0u64));
     }
 
     /// SECURITY: Verify that a tampered tag is rejected (single-bit flip).
@@ -550,14 +579,14 @@ mod tests {
         let key = [0x42u8; 32];
         let aad = b"test header data for tamper check";
 
-        let tag = compute_header_auth_tag(&key, aad);
+        let tag = compute_header_auth_tag(&key, aad, 0u64);
 
         // Flip each bit in each byte of the tag
         for byte_idx in 0..16 {
             let mut tampered_tag = tag;
             tampered_tag[byte_idx] ^= 0x01;
             assert!(
-                !verify_header_auth_tag(&key, aad, &tampered_tag),
+                !verify_header_auth_tag(&key, aad, &tampered_tag, 0u64),
                 "flipping bit in tag byte {} should fail",
                 byte_idx
             );

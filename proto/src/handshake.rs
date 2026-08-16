@@ -455,7 +455,7 @@ pub fn build_handshake_packet(
     // Compute auth tag if we have a key
     if let Some(key) = auth_key {
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(key, &aad, packet_seq);
     }
 
     let mut packet = header.serialize();

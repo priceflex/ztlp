@@ -14,6 +14,7 @@
 #     X-ZTLP-Zone:      <zone-id, e.g. "acme.ztlp">
 #     X-ZTLP-Client:    <api_clients.name, e.g. "z2ls.acme">
 #     X-ZTLP-Timestamp: <unix-seconds, integer>
+#     X-ZTLP-Nonce:     <32-char hex, unique per request>
 #     X-ZTLP-Signature: <hex HMAC-SHA256 over the canonical message>
 #
 # Canonical signed message (newline-joined):
@@ -23,6 +24,7 @@
 #     X-ZTLP-Zone\n
 #     X-ZTLP-Client\n
 #     X-ZTLP-Timestamp\n
+#     X-ZTLP-Nonce\n
 #     SHA256_HEX(body)
 #
 # `METHOD` is upper-cased. `PATH` is request path + query string
@@ -63,6 +65,16 @@ module Ztlp
     # path uses.
     DEFAULT_CLOCK_SKEW_SECONDS = 300
 
+    # Nonce cache — used nonces are stored here with a TTL matching
+    # the clock skew window so they expire exactly when the timestamp
+    # window closes.  This prevents replay attacks (CWE-840) within
+    # the accepted time window.
+    # Key format: "api_auth:nonce:<canonical-ts>:<nonce>"
+    # The canonical timestamp (rounded to the second) is part of the
+    # key to avoid cross-contamination when a client re-signs the same
+    # logical request with a fresh nonce at a different second.
+    NONCE_CACHE_PREFIX = "api_auth:nonce:"
+
     # Concrete error classes the controller can rescue from.
     Result = Struct.new(:ok?, :client, :reason, keyword_init: true) do
       def self.success(client) = new(ok?: true,  client: client, reason: nil)
@@ -84,14 +96,18 @@ module Ztlp
       zone      = header("X-ZTLP-Zone")
       client    = header("X-ZTLP-Client")
       ts_raw    = header("X-ZTLP-Timestamp")
+      nonce     = header("X-ZTLP-Nonce")
       provided  = header("X-ZTLP-Signature")
 
-      return Result.failure(:missing_header) if [zone, client, ts_raw, provided].any?(&:blank?)
+      return Result.failure(:missing_header) if [zone, client, ts_raw, nonce, provided].any?(&:blank?)
 
       ts = Integer(ts_raw, exception: false)
       return Result.failure(:bad_timestamp) if ts.nil?
 
       return Result.failure(:expired_timestamp) if (ts - @now.to_i).abs > @clock_skew
+
+      # Replay protection — reject if this nonce was already used.
+      return Result.failure(:replayed_nonce) if nonce_used?(nonce, ts)
 
       api_client = ApiClient.find_active(zone: zone, name: client)
       return Result.failure(:unknown_client) unless api_client
@@ -99,11 +115,14 @@ module Ztlp
       secret = resolve_zone_secret(zone)
       return Result.failure(:no_zone_secret) if secret.blank?
 
-      expected = compute_hmac(secret, ts: ts, zone: zone, client: client)
+      expected = compute_hmac(secret, ts: ts, nonce: nonce, zone: zone, client: client)
 
       unless secure_compare(expected, provided)
         return Result.failure(:bad_signature)
       end
+
+      # Record the nonce so the exact same request cannot be replayed.
+      mark_nonce_used!(nonce, ts)
 
       api_client.touch_last_used!
       Result.success(api_client)
@@ -113,7 +132,7 @@ module Ztlp
     # verifies against. Useful for tests + for the Z2LS-side signing
     # docs in `docs/enrollment_token_lifecycle.md` (and the BS-PR-6
     # runbook).
-    def self.canonical_signing_string(method:, path:, zone:, client:, timestamp:, body:)
+    def self.canonical_signing_string(method:, path:, zone:, client:, timestamp:, nonce:, body:)
       body_digest = Digest::SHA256.hexdigest(body.to_s)
 
       [
@@ -122,15 +141,17 @@ module Ztlp
         zone.to_s,
         client.to_s,
         timestamp.to_s,
+        nonce.to_s,
         body_digest
       ].join("\n")
     end
 
     # Public helper for tests + for Z2LS clients in Ruby land.
-    def self.sign(method:, path:, zone:, client:, timestamp:, body:, secret:)
+    def self.sign(method:, path:, zone:, client:, timestamp:, nonce:, body:, secret:)
       msg = canonical_signing_string(
         method: method, path: path, zone: zone,
-        client: client, timestamp: timestamp, body: body
+        client: client, timestamp: timestamp, nonce: nonce,
+        body: body
       )
 
       OpenSSL::HMAC.hexdigest("SHA256", secret, msg)
@@ -195,13 +216,14 @@ module Ztlp
       @request.fullpath
     end
 
-    def compute_hmac(secret, ts:, zone:, client:)
+    def compute_hmac(secret, ts:, nonce:, zone:, client:)
       self.class.sign(
         method: request_method,
         path: request_path,
         zone: zone,
         client: client,
         timestamp: ts,
+        nonce: nonce,
         body: body_for_digest,
         secret: secret
       )
@@ -218,6 +240,22 @@ module Ztlp
       return false if a.nil? || b.nil? || a.bytesize != b.bytesize
 
       ActiveSupport::SecurityUtils.secure_compare(a, b)
+    end
+
+    # ── Replay protection helpers ─────────────────────────────────
+
+    def nonce_cache_key(nonce, ts)
+      "#{NONCE_CACHE_PREFIX}#{ts}:#{nonce}"
+    end
+
+    def nonce_used?(nonce, ts)
+      Rails.cache.read(nonce_cache_key(nonce, ts))
+    end
+
+    def mark_nonce_used!(nonce, ts)
+      # TTL matches the clock skew window — nonces expire exactly
+      # when the timestamp window closes.
+      Rails.cache.write(nonce_cache_key(nonce, ts), 1, expires_in: @clock_skew.seconds)
     end
   end
 end

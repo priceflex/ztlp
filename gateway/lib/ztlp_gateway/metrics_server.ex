@@ -4,6 +4,25 @@ defmodule ZtlpGateway.MetricsServer do
 
   Default port: 9102. Endpoints: /metrics, /health, /ready.
   Uses raw `:gen_tcp` — zero external dependencies.
+
+  ## DoS Mitigation (CWE-770 — eia-oazy)
+
+  Three layers protect the BEAM process table and file descriptors:
+
+  1. **Global connection cap** (`max_connections`, default 300) — the accept
+     loop counts in-flight handlers in `:persistent_term` and closes new
+     sockets immediately once the cap is reached.  No process is spawned for
+     connections that would exceed the limit.
+
+  2. **Per-IP rate limiter** (`max_requests_per_ip`, default 20 per 10 s) — a
+     single source cannot hold the listener busy with a rapid burst.  Returns
+     HTTP 429 when the per-IP quota is exceeded.
+
+  3. **Supervised handlers** — each accepted connection is dispatched to a
+     `Task.Supervisor` child instead of a raw `spawn/1`.  Crashed handlers are
+     reaped automatically; they cannot take down the accept-loop GenServer.
+     The supervisor's `max_children` is set to the same `max_connections`
+     value, providing a second, orthogonal cap.
   """
 
   use GenServer
@@ -12,45 +31,127 @@ defmodule ZtlpGateway.MetricsServer do
   @default_port 9102
   @default_bind "127.0.0.1"
 
-  # ── DoS mitigation ───────────────────────────────────────────────
-  # Global cap on concurrent metric-acceptor processes. Each
-  # `spawn/1` in the accept loop holds one slot until the request
-  # completes. Exceeding this cap closes the socket immediately
-  # without spawning. Tunable via `:max_connections` (app env).
-  @max_connections 32
+  # ── DoS mitigation — CWE-770 (finding eia-oazy) ──────────────────────
+  #
+  # Max concurrent metric-acceptor processes.  Each handler holds one slot
+  # until the HTTP request completes and the socket is closed.  Exceeding
+  # this cap closes the socket immediately without spawning a process.
+  #
+  # 300 is well above any legitimate scraping rate (Prometheus defaults to
+  # one scrape every 15 s per target) while keeping the process table and
+  # file-descriptor footprint bounded.  Tunable via
+  # `:metrics_max_connections` in app env.
+  @max_connections 300
 
   # Per-IP burst window (seconds) and max connections per IP within
-  # that window. Protects against a single source flooding the
-  # unauthenticated listener. Tunable via `:max_requests_per_ip` and
-  # `:rate_window_seconds`.
+  # that window.  Protects against a single source flooding the
+  # unauthenticated listener.  Tunable via `:metrics_max_requests_per_ip`
+  # and `:metrics_rate_window_seconds`.
   @rate_window_seconds 10
   @max_requests_per_ip 20
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @doc false
+  def child_spec(opts \\ []) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker
+    }
+  end
+
+  @doc """
+  Start the metrics server GenServer.
+
+  Pass `name: nil` to start a fully isolated, unregistered instance —
+  used by tests so they don't collide with (or fight the automatic
+  restart of) the permanent instance the app supervision tree starts.
+  Any other name (or omitting `:name`) registers under that name,
+  defaulting to `__MODULE__` for the production/app-supervised case.
+  """
+  def start_link(opts \\ []) do
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
+
+  # ── GenServer callbacks ───────────────────────────────────────────────
 
   @impl true
   def init(_opts) do
+    max_conn = max_connections()
+
     if metrics_enabled?() do
       port = metrics_port()
       bind = metrics_bind()
-      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128, ip: to_charlist(bind)]) do
-        {:ok, listen_socket} ->
-          {:ok, actual_port} = :inet.port(listen_socket)
-          Logger.info("[metrics] Gateway Prometheus endpoint on port #{actual_port}")
-          send(self(), :accept)
-          {:ok, %{socket: listen_socket, port: actual_port}}
+
+      # Task.Supervisor with max_children = max_connections provides an
+      # orthogonal second cap: even if the counter-based check races and
+      # allows one extra connection through, the supervisor refuses the
+      # start_child call (max_children exceeded) and we fall through to a
+      # safe close-without-spawn.  [CWE-770 eia-oazy]
+      #
+      # Deliberately UNNAMED: this GenServer itself can be started
+      # unregistered (see start_link/1's `name: nil` test path), and a
+      # hardcoded global name here would collide across concurrent
+      # unregistered instances. The supervisor pid is threaded through
+      # GenServer state and referenced by pid everywhere below, so a
+      # registered name was never actually needed for correctness.
+      supervisor_opts = [
+        max_children: max_conn,
+        max_restarts: max_conn,
+        max_seconds: 60
+      ]
+
+      case Task.Supervisor.start_link(supervisor_opts) do
+        {:ok, sup} ->
+          # [pre-existing bug, found+fixed while stabilizing the
+          # eia-oazy regression tests] :gen_tcp's :ip option requires
+          # an erlang ip-address tuple (e.g. {127,0,0,1}), NOT a
+          # charlist — passing to_charlist(bind) always raised :badarg
+          # and crashed init/1. This path was never exercised before
+          # because metrics_enabled defaults to false in config/test.exs,
+          # so no test had ever actually booted this listener until the
+          # eia-oazy test suite explicitly flipped it on.
+          bind_ip =
+            case :inet.parse_address(to_charlist(bind)) do
+              {:ok, ip} -> ip
+              {:error, _} -> {127, 0, 0, 1}
+            end
+
+          case :gen_tcp.listen(port, [
+                 :binary,
+                 packet: :http_bin,
+                 active: false,
+                 reuseaddr: true,
+                 backlog: 128,
+                 ip: bind_ip
+               ]) do
+            {:ok, listen_socket} ->
+              {:ok, actual_port} = :inet.port(listen_socket)
+              Logger.info("[metrics] Gateway Prometheus endpoint on port #{actual_port}")
+              send(self(), :accept)
+              {:ok, %{socket: listen_socket, port: actual_port, supervisor: sup}}
+
+            {:error, reason} ->
+              Supervisor.stop(sup, :normal)
+              Logger.error("[metrics] Failed to start on port #{port}: #{inspect(reason)}")
+              {:ok, %{socket: nil, port: port, supervisor: nil}}
+          end
+
         {:error, reason} ->
-          Logger.error("[metrics] Failed to start on port #{port}: #{inspect(reason)}")
-          {:ok, %{socket: nil, port: port}}
+          Logger.error("[metrics] Task.Supervisor failed to start: #{inspect(reason)}")
+          {:ok, %{socket: nil, port: port, supervisor: nil}}
       end
     else
-      {:ok, %{socket: nil, port: nil}}
+      {:ok, %{socket: nil, port: nil, supervisor: nil}}
     end
   end
 
   @impl true
   def handle_info(:accept, %{socket: nil} = state), do: {:noreply, state}
-  def handle_info(:accept, %{socket: ls} = state) do
+
+  def handle_info(:accept, %{socket: ls, supervisor: sup} = state) do
     case :gen_tcp.accept(ls, 100) do
       {:ok, client} ->
         peer_ip = peer_ip_for(client)
@@ -59,38 +160,69 @@ defmodule ZtlpGateway.MetricsServer do
         if maybe_bump_conn_count() do
           # DoS gate 2: per-IP rate limit
           if maybe_burst_check(peer_ip) do
-            spawn_link(fn ->
-              try do
-                handle_request(client)
-              after
+            # Dispatch to supervised task — crashes are contained, no
+            # risk to the accept loop.  [CWE-770 eia-oazy]
+            case Task.Supervisor.start_child(sup, fn ->
+                 try do
+                   handle_request(client)
+                 after
+                   untrack_conn()
+                 end
+               end) do
+              {:ok, _pid} ->
+                :ok
+
+              {:error, {:max_children, _}} ->
+                # Supervisor's own cap kicked in (race window above).
+                # Close the socket without spawning.
+                Logger.warning("[metrics] Connection rejected: supervisor max_children reached")
+                :gen_tcp.close(client)
                 untrack_conn()
-              end
-            end)
+
+              {:error, reason} ->
+                Logger.warning("[metrics] Task.Supervisor failed: #{inspect(reason)}")
+                :gen_tcp.close(client)
+                untrack_conn()
+            end
           else
             # Per-IP rate limited — close the socket, no process spawned
             :inet.setopts(client, [packet: :raw])
-            :gen_tcp.send(client, "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n")
+            :gen_tcp.send(client,
+              "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n"
+            )
             :gen_tcp.close(client)
           end
         else
           # Global cap hit — close immediately, no process spawned
+          Logger.warning("[metrics] Connection rejected: max_connections (#{max_connections()}) reached")
           :gen_tcp.close(client)
         end
 
         send(self(), :accept)
         {:noreply, state}
+
       {:error, :timeout} ->
         send(self(), :accept)
         {:noreply, state}
+
       {:error, :closed} ->
         {:noreply, %{state | socket: nil}}
+
       {:error, _} ->
         send(self(), :accept)
         {:noreply, state}
     end
   end
 
-  # ── DoS mitigation helpers ───────────────────────────────────────
+  @impl true
+  def terminate(_reason, %{socket: nil, supervisor: nil}), do: :ok
+  def terminate(_reason, %{socket: nil, supervisor: sup}), do: Supervisor.stop(sup, :normal)
+  def terminate(_reason, %{socket: s, supervisor: sup}) do
+    Supervisor.stop(sup, :normal, 5000)
+    :gen_tcp.close(s)
+  end
+
+  # ── DoS mitigation helpers ────────────────────────────────────────────
   # Trackers live in :persistent_term so they survive hibernation
   # and are accessible from spawned processes.
 
@@ -104,6 +236,7 @@ defmodule ZtlpGateway.MetricsServer do
   defp maybe_bump_conn_count do
     max = max_connections()
     current = :persistent_term.get({__MODULE__, :conns}, 0)
+
     if current >= max do
       false
     else
@@ -113,33 +246,21 @@ defmodule ZtlpGateway.MetricsServer do
   end
 
   defp untrack_conn do
-    # [SAST fix] :persistent_term.update/2 does not exist (only
-    # get/1,2, put/2, erase/1) — the original code would raise
-    # UndefinedFunctionError on every single connection teardown.
-    # Read-modify-write via get/put instead (fine here: this whole
-    # module already accepts non-atomic get-then-put races on the
-    # conn counter as an approximation, not a hard limit).
+    # :persistent_term has no update/2 — use read-modify-write.
+    # Non-atomic by design: this counter is an approximation for DoS
+    # protection, not a hard correctness invariant.  The Task.Supervisor's
+    # max_children provides the hard cap.  [CWE-770 eia-oazy]
     current = :persistent_term.get({__MODULE__, :conns}, 0)
     :persistent_term.put({__MODULE__, :conns}, max(0, current - 1))
   end
 
   # Fixed-window burst limiter keyed by IP tuple.
-  # :counters gives O(1) atomic ops without locks, but (unlike ETS)
-  # there is no name-based registration — :counters.new/2 returns an
-  # opaque reference that must itself be stored somewhere shared
-  # (here, :persistent_term) for other processes/requests to reuse it.
-  # [SAST fix] The original code called :counters.new/3,
-  # :counters.info/2, and 4-arg get/put/add variants — none of these
-  # exist in the real :counters API (verified against
-  # :counters.module_info(:exports): new/2, get/2, add/3, sub/3,
-  # put/3, info/1 only). Every call in maybe_burst_check/1 would have
-  # raised UndefinedFunctionError on the very first request, and the
-  # `rescue _ -> true` fallback would have silently swallowed it —
-  # meaning the per-IP rate limiter was ALWAYS a no-op (always "true",
-  # never actually limiting), the exact opposite of its purpose.
+  # :counters gives O(1) atomic ops without locks.
+  # [SAST fix] The original code called non-existent :counters variants;
+  # fixed to use only real API: new/2, get/2, add/3, put/3, info/1.
   defp maybe_burst_check(ip) do
     max_req = max_requests_per_ip()
-    window  = rate_window_seconds()
+    window = rate_window_seconds()
 
     now = System.system_time(:second)
     cut = now - window
@@ -157,8 +278,10 @@ defmodule ZtlpGateway.MetricsServer do
         :counters.put(ref, key * 2 - 1, now)
         :counters.put(ref, key * 2, 1)
         true
+
       count >= max_req ->
         false  # rate limited
+
       true ->
         :counters.add(ref, key * 2, 1)  # bump count
         true
@@ -176,6 +299,7 @@ defmodule ZtlpGateway.MetricsServer do
         ref = :counters.new(64 * 2, [:atomics])
         :persistent_term.put({__MODULE__, :burst_counters}, ref)
         ref
+
       ref ->
         ref
     end
@@ -193,20 +317,21 @@ defmodule ZtlpGateway.MetricsServer do
     Application.get_env(:ztlp_gateway, :metrics_rate_window_seconds, @rate_window_seconds)
   end
 
-  @impl true
-  def terminate(_reason, %{socket: nil}), do: :ok
-  def terminate(_reason, %{socket: s}), do: :gen_tcp.close(s)
+  # ── HTTP handler ──────────────────────────────────────────────────────
 
   defp handle_request(socket) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, {:http_request, :GET, {:abs_path, path}, _}} ->
         drain_headers(socket)
         handle_path(socket, path)
+
       {:ok, {:http_request, _, _, _}} ->
         drain_headers(socket)
         send_response(socket, 405, "Method Not Allowed\n")
+
       _ -> :ok
     end
+
     :gen_tcp.close(socket)
   end
 
@@ -221,10 +346,12 @@ defmodule ZtlpGateway.MetricsServer do
   defp handle_path(socket, path) do
     # Normalize path: http_bin returns binary strings, http returns charlists
     path_str = if is_list(path), do: List.to_string(path), else: path
+
     case path_str do
       "/metrics" ->
         body = collect_metrics()
         send_response(socket, 200, body, "text/plain; version=0.0.4; charset=utf-8")
+
       "/health" -> send_response(socket, 200, "OK\n")
       "/ready" -> send_response(socket, 200, "OK\n")
       _ -> send_response(socket, 404, "Not Found\n")
@@ -235,6 +362,7 @@ defmodule ZtlpGateway.MetricsServer do
     status_text = case status do
       200 -> "OK"; 404 -> "Not Found"; 405 -> "Method Not Allowed"; _ -> "Error"
     end
+
     :inet.setopts(socket, [packet: :raw])
     :gen_tcp.send(socket, [
       "HTTP/1.1 #{status} #{status_text}\r\n",
@@ -395,7 +523,7 @@ defmodule ZtlpGateway.MetricsServer do
     end
   end
 
-  # ── Helpers ──────────────────────────────────────────────────────
+  # ── Helpers ───────────────────────────────────────────────────────────
 
   defp metrics_enabled? do
     Application.get_env(:ztlp_gateway, :metrics_enabled, true)

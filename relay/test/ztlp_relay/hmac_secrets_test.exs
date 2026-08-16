@@ -44,9 +44,9 @@ defmodule ZtlpRelay.HmacSecretsTest do
   # ── mode/0 ────────────────────────────────────────────────────
 
   describe "mode/0" do
-    test "defaults to :dev when ZTLP_RELAY_HMAC_MODE is unset" do
+    test "defaults to :prod when ZTLP_RELAY_HMAC_MODE is unset (fail-closed)" do
       with_env([{"ZTLP_RELAY_HMAC_MODE", nil}], fn ->
-        assert HmacSecrets.mode() == :dev
+        assert HmacSecrets.mode() == :prod
       end)
     end
 
@@ -68,9 +68,9 @@ defmodule ZtlpRelay.HmacSecretsTest do
       end)
     end
 
-    test "falls back to :dev on garbage input" do
+    test "falls back to :prod on garbage input (fail-closed)" do
       with_env([{"ZTLP_RELAY_HMAC_MODE", "wat"}], fn ->
-        assert HmacSecrets.mode() == :dev
+        assert HmacSecrets.mode() == :prod
       end)
     end
   end

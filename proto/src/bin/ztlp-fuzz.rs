@@ -155,7 +155,7 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         let seq: u64 = rng.gen();
         let mut hdr = DataHeader::new(sid, seq);
         let aad = hdr.aad_bytes();
-        hdr.header_auth_tag = compute_header_auth_tag(&key, &aad);
+        hdr.header_auth_tag = compute_header_auth_tag(&key, &aad, seq);
         let payload_size: usize = rng.gen_range(0..256);
         let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
         let pkt = ZtlpPacket::Data {
@@ -179,7 +179,7 @@ fn generate_base_packet(rng: &mut impl Rng) -> Vec<u8> {
         hdr.packet_seq = rng.gen();
         let key: [u8; 32] = rand::random();
         let aad = hdr.aad_bytes();
-        hdr.header_auth_tag = compute_header_auth_tag(&key, &aad);
+        hdr.header_auth_tag = compute_header_auth_tag(&key, &aad, hdr.packet_seq);
         let payload_size: usize = rng.gen_range(0..64);
         let payload: Vec<u8> = (0..payload_size).map(|_| rng.gen::<u8>()).collect();
         hdr.payload_len = payload.len() as u16;

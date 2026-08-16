@@ -8,7 +8,7 @@ NS_HOST="${NS_HOST:-34.217.62.46}"
 RELAY_HOST="${RELAY_HOST:-34.219.64.205}"
 GATEWAY_HOST="${GATEWAY_HOST:-44.246.33.34}"
 BOOTSTRAP_API="${BOOTSTRAP_API:-http://10.69.95.12:3000/api/benchmarks?limit=5}"
-BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN:-2f07983068c5dd5ffdf22cf24e4724389b4430c12659942f0af735f86c010079}"
+BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN-}"
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8)
 
 RED='\033[0;31m'
@@ -137,7 +137,9 @@ else
 fi
 
 section "Bootstrap benchmark API"
-if curl -fsS -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" "$BOOTSTRAP_API" >/tmp/ztlp_bench_api.json 2>/tmp/ztlp_bench_api.err; then
+if [[ -z "${BOOTSTRAP_TOKEN-}" ]]; then
+  warn "BOOTSTRAP_TOKEN not set, skipping benchmark API check"
+elif curl -fsS -H "Authorization: Bearer ${BOOTSTRAP_TOKEN}" "$BOOTSTRAP_API" >/tmp/ztlp_bench_api.json 2>/tmp/ztlp_bench_api.err; then
   pass "Bootstrap benchmark API reachable"
   python3 - <<'PY'
 import json, sys

@@ -366,6 +366,27 @@ defmodule ZtlpGateway.Config do
     end
   end
 
+  @doc """
+  Bearer token for admin dashboard authentication.
+
+  All requests to the admin dashboard must include:
+    Authorization: Bearer <token>
+
+  If no token is configured, the dashboard rejects every request
+  (fail-closed). Set this to the same value as
+  `ZTLP_GATEWAY_DASHBOARD_TOKEN` environment variable.
+
+  Generate a strong token:
+    openssl rand -hex 32
+  """
+  def get(:dashboard_token) do
+    case System.get_env("ZTLP_GATEWAY_DASHBOARD_TOKEN") do
+      nil -> Application.get_env(:ztlp_gateway, :dashboard_token)
+      token when is_binary(token) and byte_size(token) > 0 -> token
+      _ -> nil
+    end
+  end
+
   # ── Backend Connection Pool ────────────────────────────────────
 
   @doc "Max idle connections per backend in the pool. Default: 8."

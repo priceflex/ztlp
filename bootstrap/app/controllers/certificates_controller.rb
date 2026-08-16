@@ -4,6 +4,10 @@ class CertificatesController < ApplicationController
   before_action :set_network
   before_action :set_certificate, only: [:show, :revoke]
   before_action :set_ca_service
+  # Prevent read_only users from issuing or revoking certificates.
+  # Both `super_admin` and `admin` roles may perform these actions;
+  # `read_only` is blocked by this guard.
+  before_action :require_write_access, only: [:new, :create, :revoke]
 
   # GET /networks/:network_id/certificates
   def index
@@ -57,6 +61,17 @@ class CertificatesController < ApplicationController
   end
 
   private
+
+  # Deny write access to read_only users. Matches the pattern in
+  # MachinesController, PoliciesController, and TokensController:
+  # super_admin and admin roles are allowed through,
+  # read_only is redirected with an alert.
+  def require_write_access
+    if current_admin&.read_only?
+      redirect_to network_certificates_path(@network),
+        alert: "You don't have permission to manage certificates."
+    end
+  end
 
   def set_network
     @network = Network.find(params[:network_id])

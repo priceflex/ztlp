@@ -19,29 +19,31 @@ class Ztlp::ApiAuthenticatorTest < ActiveSupport::TestCase
 
   # ── canonical_signing_string ────────────────────────────────────
 
-  test "canonical signing string is exactly six newline-joined lines" do
+  test "canonical signing string is exactly seven newline-joined lines" do
     msg = Ztlp::ApiAuthenticator.canonical_signing_string(
       method: "POST",
       path: "/api/v1/enrollment_tokens",
       zone: "acme.ztlp",
       client: "z2ls.acme",
       timestamp: 1_700_000_000,
+      nonce: "deadbeef",
       body: '{"computer_name":"x"}'
     )
     lines = msg.split("\n", -1)
-    assert_equal 6, lines.size
+    assert_equal 7, lines.size
     assert_equal "POST", lines[0]
     assert_equal "/api/v1/enrollment_tokens", lines[1]
     assert_equal "acme.ztlp", lines[2]
     assert_equal "z2ls.acme", lines[3]
     assert_equal "1700000000", lines[4]
-    assert_equal Digest::SHA256.hexdigest('{"computer_name":"x"}'), lines[5]
+    assert_equal "deadbeef", lines[5]
+    assert_equal Digest::SHA256.hexdigest('{"computer_name":"x"}'), lines[6]
   end
 
   test "canonical signing string upper-cases METHOD" do
     msg = Ztlp::ApiAuthenticator.canonical_signing_string(
       method: "post", path: "/a", zone: "z", client: "c",
-      timestamp: 1, body: ""
+      timestamp: 1, nonce: "n", body: ""
     )
     assert msg.start_with?("POST\n")
   end
@@ -50,7 +52,7 @@ class Ztlp::ApiAuthenticatorTest < ActiveSupport::TestCase
     empty_digest = Digest::SHA256.hexdigest("")
     msg = Ztlp::ApiAuthenticator.canonical_signing_string(
       method: "GET", path: "/a", zone: "z", client: "c",
-      timestamp: 1, body: ""
+      timestamp: 1, nonce: "n", body: ""
     )
     assert msg.end_with?("\n#{empty_digest}")
   end
@@ -60,14 +62,14 @@ class Ztlp::ApiAuthenticatorTest < ActiveSupport::TestCase
   test "sign yields a deterministic 64-char hex HMAC-SHA256" do
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET", path: "/a", zone: "z", client: "c",
-      timestamp: 1_700_000_000, body: "", secret: "topsecret"
+      timestamp: 1_700_000_000, nonce: "n", body: "", secret: "topsecret"
     )
     assert_equal 64, sig.length
     assert_match(/\A[0-9a-f]{64}\z/, sig)
     # Re-signing the same input produces the same output.
     sig2 = Ztlp::ApiAuthenticator.sign(
       method: "GET", path: "/a", zone: "z", client: "c",
-      timestamp: 1_700_000_000, body: "", secret: "topsecret"
+      timestamp: 1_700_000_000, nonce: "n", body: "", secret: "topsecret"
     )
     assert_equal sig, sig2
   end
@@ -76,12 +78,12 @@ class Ztlp::ApiAuthenticatorTest < ActiveSupport::TestCase
     secret = "topsecret"
     msg = Ztlp::ApiAuthenticator.canonical_signing_string(
       method: "POST", path: "/x", zone: "acme.ztlp", client: "z2ls.acme",
-      timestamp: 42, body: "hello"
+      timestamp: 42, nonce: "n", body: "hello"
     )
     expected = OpenSSL::HMAC.hexdigest("SHA256", secret, msg)
     actual = Ztlp::ApiAuthenticator.sign(
       method: "POST", path: "/x", zone: "acme.ztlp", client: "z2ls.acme",
-      timestamp: 42, body: "hello", secret: secret
+      timestamp: 42, nonce: "n", body: "hello", secret: secret
     )
     assert_equal expected, actual
   end

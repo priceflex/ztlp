@@ -5411,7 +5411,7 @@ pub extern "C" fn ztlp_encrypt_packet(
     // Build data header with auth tag
     let mut header = crate::packet::DataHeader::new(ctx.session_id, seq);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&ctx.send_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&ctx.send_key, &aad, seq);
 
     // Serialize
     let packet = crate::packet::ZtlpPacket::Data {
@@ -5473,12 +5473,6 @@ pub extern "C" fn ztlp_decrypt_packet(
         }
     };
 
-    // Anti-replay check
-    if !ctx.recv_window.check_and_record(header.packet_seq) {
-        set_last_error("replay detected");
-        return ZtlpResult::ReplayRejected as i32;
-    }
-
     // Extract encrypted payload (after the data header)
     let payload_start = crate::packet::DATA_HEADER_SIZE;
     if packet.len() < payload_start {
@@ -5487,7 +5481,9 @@ pub extern "C" fn ztlp_decrypt_packet(
     }
     let encrypted = &packet[payload_start..];
 
-    // Decrypt
+    // Decrypt FIRST — authenticate the packet before any state mutation.
+    // This ensures attacker-supplied sequence numbers cannot mutate the
+    // replay window without valid authentication (fixes rdc-hlva).
     let cipher = ChaCha20Poly1305::new((&ctx.recv_key).into());
     let mut nonce_bytes = [0u8; 12];
     nonce_bytes[4..12].copy_from_slice(&header.packet_seq.to_le_bytes());
@@ -5500,6 +5496,13 @@ pub extern "C" fn ztlp_decrypt_packet(
             return ZtlpResult::EncryptionError as i32;
         }
     };
+
+    // Anti-replay check AFTER authentication.
+    // Only authenticated packets may advance the replay window.
+    if !ctx.recv_window.check_and_record(header.packet_seq) {
+        set_last_error("replay detected");
+        return ZtlpResult::ReplayRejected as i32;
+    }
 
     if plaintext.len() > out_buf_len {
         set_last_error(&format!(

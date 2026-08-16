@@ -424,6 +424,17 @@ class LaunchApp:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_scope_key_time ON rate_limit_attempts(scope, key, occurred_at)")
+            # v0.30.14: DB-level first-bind lock for /api/enrollment/confirm.
+            # Fixes the TOCTOU race in _apply_admin_pubkey where instance.env
+            # reads + writes could interleave under concurrent requests. The
+            # onboarding_requests.enrollment_pubkey_bound column acts as a
+            # single-writer flag: the first confirm-callback to arrive with a
+            # valid pubkey_hex wins atomically (INSERT OR IGNORE), and all
+            # subsequent attempts with a different pubkey are rejected before
+            # touching instance.env. This closes finding aqo-rhed.
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(onboarding_requests)")}
+            if "enrollment_pubkey_bound" not in existing:
+                conn.execute("ALTER TABLE onboarding_requests ADD COLUMN enrollment_pubkey_bound TEXT")
             # v0.30.13: audit trail for every admin-pubkey bind attempt.
             # Tracks issue #55. Written by _apply_admin_pubkey on every
             # call — applied, refused-by-first-bind, error, anything.
@@ -1476,37 +1487,91 @@ class LaunchApp:
         # static pubkey. Errors are logged but do NOT fail the confirm —
         # the device IS enrolled at NS regardless, and the admin can still
         # POST to /api/admin-pubkey explicitly with the claim_token.
+        #
+        # v0.30.14 (finding aqo-rhed): the first-bind race is closed by a
+        # DB-level lock. Before touching instance.env we atomically claim
+        # ``enrollment_pubkey_bound`` on the onboarding row. SQLite serialises
+        # writes, so only ONE request can win the INSERT. All subsequent
+        # requests see the flag and skip the file-system path entirely — no
+        # TOCTOU window between reading instance.env and writing it.
         import re as _re
-        autobind_status = "skipped"  # skipped | applied | already_bound | invalid | provisioning_incomplete | error
+        autobind_status = "skipped"  # skipped | applied | already_bound | invalid | provisioning_incomplete | error | race_refused
         autobind_detail = ""
         if pubkey_hex:
             if not _re.fullmatch(r"[0-9a-f]{64}", pubkey_hex):
                 autobind_status = "invalid"
                 autobind_detail = "pubkey_hex must be 64 lowercase hex chars"
             else:
-                slug = self._slug_for_row(row)
-                if not slug:
-                    autobind_status = "error"
-                    autobind_detail = "tenant has no derivable slug"
-                else:
-                    instance_dir = self._instance_dir_for_slug(slug)
-                    if not os.path.isfile(os.path.join(instance_dir, "instance.env")):
-                        autobind_status = "provisioning_incomplete"
-                        autobind_detail = "instance.env not found"
-                    else:
-                        applied, detail = self._apply_admin_pubkey(
-                            instance_dir=instance_dir,
-                            pubkey_hex=pubkey_hex,
-                            first_bind_only=True,
+                # DB-level atomic first-bind lock. We try to write the
+                # pubkey into enrollment_pubkey_bound ONLY if it's still
+                # NULL. SQLite enforces serialisation, so exactly one
+                # concurrent request wins.
+                pubkey_short = pubkey_hex[:16]
+                bound_before = row["enrollment_pubkey_bound"] if "enrollment_pubkey_bound" in row.keys() else None
+                if bound_before is None:
+                    # Try to atomically claim the first-bind slot.
+                    # If the UPDATE touches 0 rows, someone beat us.
+                    with self.connect() as conn:
+                        cur = conn.execute(
+                            "UPDATE onboarding_requests "
+                            "SET enrollment_pubkey_bound = ?, updated_at = ? "
+                            "WHERE id = ? AND enrollment_pubkey_bound IS NULL",
+                            (pubkey_short, now_iso, row["id"]),
                         )
-                        if applied:
-                            autobind_status = "applied"
-                        elif detail.startswith("admin pubkey already bound"):
-                            autobind_status = "already_bound"
-                            autobind_detail = detail
+                        conn.commit()
+                        won_race = cur.rowcount > 0
+                else:
+                    won_race = False
+
+                if not won_race:
+                    # Someone else already claimed the first-bind.
+                    # This is the race-refused path — attacker lost, or
+                    # the legit admin retried with the same pubkey.
+                    if bound_before and bound_before == pubkey_short:
+                        autobind_status = "applied"
+                        autobind_detail = "already bound (idempotent retry)"
+                    else:
+                        autobind_status = "already_bound"
+                        autobind_detail = f"first-bind won by pubkey {bound_before or '(unknown)'}"
+                    # Still call _apply_admin_pubkey so instance.env is in
+                    # sync, but pass first_bind_only=True — the file-level
+                    # check will also refuse a different pubkey.
+                    slug = self._slug_for_row(row)
+                    if slug:
+                        instance_dir = self._instance_dir_for_slug(slug)
+                        if os.path.isfile(os.path.join(instance_dir, "instance.env")):
+                            _, detail = self._apply_admin_pubkey(
+                                instance_dir=instance_dir,
+                                pubkey_hex=pubkey_hex,
+                                first_bind_only=True,
+                            )
+                            if autobind_status == "applied" and detail:
+                                autobind_detail = detail
+                else:
+                    # We won the DB-level race — proceed with the file bind.
+                    slug = self._slug_for_row(row)
+                    if not slug:
+                        autobind_status = "error"
+                        autobind_detail = "tenant has no derivable slug"
+                    else:
+                        instance_dir = self._instance_dir_for_slug(slug)
+                        if not os.path.isfile(os.path.join(instance_dir, "instance.env")):
+                            autobind_status = "provisioning_incomplete"
+                            autobind_detail = "instance.env not found"
                         else:
-                            autobind_status = "error"
-                            autobind_detail = detail
+                            applied, detail = self._apply_admin_pubkey(
+                                instance_dir=instance_dir,
+                                pubkey_hex=pubkey_hex,
+                                first_bind_only=True,
+                            )
+                            if applied:
+                                autobind_status = "applied"
+                            elif detail.startswith("admin pubkey already bound"):
+                                autobind_status = "already_bound"
+                                autobind_detail = detail
+                            else:
+                                autobind_status = "error"
+                                autobind_detail = detail
 
         # v0.30.13: write an audit row for every confirm with a non-empty
         # pubkey_hex — applied, refused, error, anything. Lets the legit
@@ -1593,11 +1658,10 @@ class LaunchApp:
         if not row:
             return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
         if parse_iso(row["claim_expires_at"]) < self.now():
-            # Unclaimed expired tokens are clearly invalid. Claimed-then-expired
-            # tokens are also rejected: once claimed, the admin should be using
-            # the tenant's own UI, not Launch endpoints, to manage state.
-            if not row["claimed_at"]:
-                return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
+            # Reject all expired tokens — both unclaimed and claimed.
+            # Once claimed, the admin should be using the tenant's own
+            # UI, not Launch endpoints, to manage state.
+            return err(HTTPStatus.UNAUTHORIZED, "invalid or expired token")
 
         slug = self._slug_for_row(row)
         if not slug:

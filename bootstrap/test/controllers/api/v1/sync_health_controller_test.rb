@@ -74,12 +74,14 @@ class Api::V1::SyncHealthControllerTest < ActionDispatch::IntegrationTest
 
   def get_signed(path, zone: ZONE, client: CLIENT, secret: SECRET, body: "")
     ts = Time.current.to_i
+    nonce = SecureRandom.hex(16)
     sig = Ztlp::ApiAuthenticator.sign(
       method: "GET",
       path: path,
       zone: zone,
       client: client,
       timestamp: ts,
+      nonce: nonce,
       body: body,
       secret: secret
     )
@@ -88,6 +90,7 @@ class Api::V1::SyncHealthControllerTest < ActionDispatch::IntegrationTest
       "X-ZTLP-Zone"      => zone,
       "X-ZTLP-Client"    => client,
       "X-ZTLP-Timestamp" => ts.to_s,
+      "X-ZTLP-Nonce"     => nonce,
       "X-ZTLP-Signature" => sig
     }
   end

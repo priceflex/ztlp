@@ -500,6 +500,18 @@ defmodule ZtlpGateway.Session do
   # `WINDOW_REJECT seq=1586 beyond window [121..376]` causing 30s stalls.
   @recv_window_size 65536
 
+  # Max packets buffered in pending_packets while awaiting handshake
+  # completion (:awaiting_msg1 / :awaiting_msg3). [CWE-770 cjm-gxet]
+  # Before this cap, an unauthenticated sender could keep creating a
+  # session and flooding it with non-handshake packets pre-auth,
+  # growing pending_packets without bound while reset_timeout/1 kept
+  # the session alive indefinitely. Once at the cap, further
+  # non-handshake packets during the pre-auth phases are dropped
+  # (logged) rather than buffered — legitimate clients don't send
+  # dozens of packets before completing a 2-RTT Noise handshake, so
+  # this has no impact on normal traffic.
+  @max_pending_packets 32
+
   # Tunnel frame types (must match Rust tunnel.rs / mux.rs constants)
   @frame_data 0x00
   @frame_ack 0x01
@@ -840,24 +852,14 @@ defmodule ZtlpGateway.Session do
         if Packet.handshake?(packet_data) do
           handle_handshake_msg1(packet_data, from_addr, state)
         else
-          Logger.debug(
-            "[Session] Buffering #{byte_size(packet_data)} byte packet during msg1 phase"
-          )
-
-          {:noreply,
-           %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+          {:noreply, buffer_pending_packet(packet_data, from_addr, state, "msg1")}
         end
 
       :awaiting_msg3 ->
         if Packet.handshake?(packet_data) do
           handle_handshake_msg3(packet_data, from_addr, state)
         else
-          Logger.debug(
-            "[Session] Buffering #{byte_size(packet_data)} byte packet during msg3 phase"
-          )
-
-          {:noreply,
-           %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}}
+          {:noreply, buffer_pending_packet(packet_data, from_addr, state, "msg3")}
         end
 
       :established ->
@@ -3359,6 +3361,31 @@ defmodule ZtlpGateway.Session do
   defp reset_timeout(state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
     %{state | timer_ref: schedule_timeout(state.timeout_ms)}
+  end
+
+  # Buffer a non-handshake packet received during a pre-auth phase,
+  # subject to @max_pending_packets. [CWE-770 cjm-gxet] Once at the
+  # cap, further packets are dropped (with a warning) instead of
+  # appending, so an unauthenticated flood cannot grow this list
+  # without bound. reset_timeout/1 has ALREADY been applied to state
+  # by the caller before phase dispatch — left unchanged here since
+  # session idle-timeout semantics are a separate, more invasive
+  # change and the cap alone closes the unbounded-growth vector.
+  defp buffer_pending_packet(packet_data, from_addr, state, phase_label) do
+    if length(state.pending_packets) >= @max_pending_packets do
+      Logger.warning(
+        "[Session] Dropping #{byte_size(packet_data)} byte packet during #{phase_label} phase — " <>
+          "pending_packets at cap (#{@max_pending_packets})"
+      )
+
+      state
+    else
+      Logger.debug(
+        "[Session] Buffering #{byte_size(packet_data)} byte packet during #{phase_label} phase"
+      )
+
+      %{state | pending_packets: [{packet_data, from_addr} | state.pending_packets]}
+    end
   end
 
   defp process_pending_packets([], state), do: state

@@ -1,4 +1,5 @@
 require "active_support/core_ext/integer/time"
+require "socket"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -79,15 +80,30 @@ Rails.application.configure do
   config.active_record.dump_schema_after_migration = false
 
   # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
   # Skip DNS rebinding protection for the default health check endpoint.
   config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
 
-  # Allow all hosts in Docker (reverse proxy handles host validation)
-  config.hosts.clear
+  # [CWE-284 bue-swlg] This deployment runs with `network_mode: host` in
+  # docker-compose.yml -- there is NO reverse proxy in front of Rails
+  # (despite the comment that used to justify `config.hosts.clear`
+  # below), so Rails' own Host-header check is the ONLY line of defense
+  # against DNS-rebinding attacks. `config.hosts.clear` disabled that
+  # check entirely: a browser with network access to this host could be
+  # lured to an attacker-controlled hostname that DNS-rebinds to this
+  # server's address, and Rails would accept the attacker's Host header
+  # unconditionally -- allowing browser-based discovery/access to this
+  # otherwise-internal HTTP surface (it does NOT bypass authentication/
+  # CSRF/cookie scoping on its own, but removes a real defense-in-depth
+  # layer against exactly the kind of network the host-network,
+  # no-reverse-proxy deployment model implies).
+  #
+  # Fix: allow-list real hosts instead of clearing the check entirely.
+  # BOOTSTRAP_ALLOWED_HOSTS is a comma-separated list of hostnames the
+  # deployment is actually reachable at (set per-environment); loopback
+  # and the container's own resolved hostname are always included so
+  # health checks / same-host tooling keep working without extra config.
+  allowed_hosts = ENV.fetch("BOOTSTRAP_ALLOWED_HOSTS", "").split(",").map(&:strip).reject(&:empty?)
+  config.hosts = (["localhost", "127.0.0.1", Socket.gethostname] + allowed_hosts).uniq
 
   # Active Record Encryption keys from environment
   config.active_record.encryption.primary_key = ENV["ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY"]

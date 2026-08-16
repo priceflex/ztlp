@@ -16,11 +16,61 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 LOG_DIR = os.path.expanduser("~/ztlp-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# [CWE-770 hfo-njyl] This receiver is unauthenticated and bound to
+# 0.0.0.0, yet previously trusted the client-controlled Content-Length
+# header unconditionally: `self.rfile.read(length)` with no upper bound
+# let any reachable client allocate an arbitrarily large in-memory
+# buffer per request and then persist that same arbitrarily large body
+# to disk, with no rate limit either -- repeated large uploads could
+# exhaust process memory and/or fill the filesystem hosting LOG_DIR,
+# a DoS against this diagnostic service and potentially other
+# applications sharing that disk.
+#
+# Fix: enforce a hard maximum request body size (10 MiB -- generous for
+# a diagnostic text log upload, small enough that even a sustained
+# flood of max-size requests can't meaningfully exhaust a modern
+# server's memory or disk before an operator notices). Reject oversized
+# or missing/malformed Content-Length with 413 Payload Too Large before
+# ever calling rfile.read(), and read in bounded chunks rather than one
+# giant read() call.
+MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MiB
+READ_CHUNK_BYTES = 64 * 1024
+
 class LogHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/logs":
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                length = int(self.headers.get("Content-Length", -1))
+            except ValueError:
+                length = -1
+
+            if length < 0:
+                self.send_response(411)  # Length Required
+                self.end_headers()
+                self.wfile.write(b"Content-Length required")
+                return
+
+            if length > MAX_BODY_BYTES:
+                self.send_response(413)  # Payload Too Large
+                self.end_headers()
+                self.wfile.write(
+                    f"Body exceeds maximum of {MAX_BODY_BYTES} bytes".encode()
+                )
+                return
+
+            # Read in bounded chunks up to the (already-capped) declared
+            # length -- avoids a single unbounded rfile.read() call and
+            # matches the declared Content-Length exactly (no reading
+            # past it even if the client keeps streaming).
+            remaining = length
+            chunks = []
+            while remaining > 0:
+                chunk = self.rfile.read(min(READ_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            body = b"".join(chunks).decode("utf-8", errors="replace")
 
             # Save with timestamp
             ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")

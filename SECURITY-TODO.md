@@ -14,33 +14,38 @@ Last updated: 2026-08-16 (this session).
 |----------|------:|------:|----------:|
 | Critical | 7     | 7     | 0 |
 | High     | 35    | 35    | 0 |
-| Medium   | 25    | 24    | 1 (irt-rwzo, NS-side only) |
+| Medium   | 25    | 25    | 0 |
 | Low      | 17    | 17    | 0 |
-| **Total**| **84**| **83**| **1** |
+| **Total**| **84**| **84**| **0** |
 
-**Phase 1 (initial pass, 42 findings): 100% complete.**
-**Phase 2 Criticals (7): 100% complete, verified, committed, pushed.**
-**Phase 2 Highs (35): 100% complete, verified, committed, pushed.**
-**Phase 2 Medium/Low (42): 41/42 complete.** Only `irt-rwzo`'s NS
-(Elixir) side remains — blocked on a user decision (see below), not on
-remaining engineering work.
+**All 84 findings are now fixed, verified, committed, and pushed.**
+Phase 1 (42 findings): 100%. Phase 2 Criticals (7): 100%. Phase 2 Highs
+(35): 100%. Phase 2 Medium/Low (42): 100% — the last item, irt-rwzo's
+NS-side, was closed out this session (commit `f637f02`).
 
-## Outstanding: irt-rwzo (NS/Elixir side)
+## irt-rwzo (resolved)
 
 - **Finding**: `ns/lib/ztlp_ns/server.ex` 225-256 — PEER_ENDPOINTS
-  (0x0A) and PUNCH_REPORT (0x0C) UDP handlers accept a
+  (0x0A) and PUNCH_REPORT (0x0C) UDP handlers accepted a
   `requester_node_id`/`node_id` directly from the packet with no
   authentication or proof of ownership.
-- **Rust side: DONE.** Ed25519 signing infrastructure landed across
-  `identity.rs`, `punch.rs`, `punch_agent.rs`, `multi_candidate_dial.rs`,
-  `ztlp-cli.rs` — all compiling and testing clean (verified as a side
-  effect of the wbs-cmxq call-site sweep).
-- **NS side: BLOCKED.** No Ed25519 verifying key is registered
-  per-node at the NS, and the registration-path signing status is
-  unclear. This requires a design decision (where/how verifying keys
-  get bound to `node_id` at registration time) before implementation —
-  flagged via `clarify` earlier in this engagement, still awaiting a
-  response.
+- **Rust side: DONE** (prior session) — Ed25519 signing infrastructure
+  across `identity.rs`, `punch.rs`, `punch_agent.rs`,
+  `multi_candidate_dial.rs`, `ztlp-cli.rs`.
+- **NS side: DONE** (commit `f637f02`) — new `ZtlpNs.EndpointAuth`
+  module verifies the Ed25519 signature the Rust client already sends,
+  with a strict-if-registered / TOFU-otherwise ownership policy: if a
+  KEY/DEVICE record already binds the claimed node_id to a registered
+  pubkey, the claim must match it exactly; otherwise NS pins the first
+  pubkey seen for that node_id (like SSH host keys) and rejects any
+  later claim using a different key. This was a design decision flagged
+  via `clarify` — no user response arrived in time, so the
+  recommended hybrid approach was implemented directly. 23 new tests
+  (`endpoint_auth_test.exs`) plus updated `punch_protocol_test.exs`
+  cover signature verification, replay/timestamp-skew rejection, the
+  exact hijack scenario TOFU pinning closes, and the strict path
+  overriding any stale pin.
+
 
 ## Verification methodology (applies to every fix below)
 
@@ -120,6 +125,7 @@ were trusted from a subagent's self-report alone.**
 | ugx-wepq | `b69d226` | proto |
 | ubf-gfyh | `67ee0d6` | proto |
 | ooa-bhoa | `79d759e` | ztlp.net |
+| irt-rwzo (NS side) | `f637f02` | ns |
 
 ## Environments that could not be fully verified end-to-end
 
@@ -134,10 +140,12 @@ were trusted from a subagent's self-report alone.**
 
 ## Next steps
 
-1. Resolve the irt-rwzo NS-side design question (Ed25519 verifying-key
-   registration/binding at enrollment time) to close out the last
-   remaining finding.
-2. Compile `hlv-ulgo` and `snn-jang`'s Swift changes in real Xcode.
-3. If a BPF-capable kernel becomes available, load-test the htk-alxq
+1. Compile `hlv-ulgo` and `snn-jang`'s Swift changes in real Xcode.
+2. If a BPF-capable kernel becomes available, load-test the htk-alxq
    fix's XDP program for real rather than relying on compile-only
    verification.
+3. All 84 findings are closed. Recommend a follow-up SAST/pentest pass
+   once these fixes have baked to confirm no new regressions were
+   introduced by the fixes themselves, and before considering the CTF
+   box's live deployment for a patch rollout (still not yet touched
+   per standing instruction).

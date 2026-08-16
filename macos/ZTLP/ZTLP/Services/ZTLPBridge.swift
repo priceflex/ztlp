@@ -546,8 +546,34 @@ final class ZTLPBridge {
         // Only install if not already present
         var s = "if [ ! -f \(plistPath) ]; then\n"
 
+        // [CWE-732 snn-jang] /usr/local/bin is commonly Homebrew-owned and
+        // group/other-writable on Intel Macs, NOT root-owned like the rest
+        // of the system directory tree. Before this check, a local
+        // non-root user with write access to that directory could delete
+        // the root-owned boot script and replace it with a malicious one
+        // -- the LaunchDaemon would then execute attacker-controlled code
+        // as root on every subsequent boot, a full privilege escalation.
+        // Verify the parent directory is root-owned (uid 0) and NOT
+        // group/other-writable before trusting it as an install target;
+        // if that check fails, install to /usr/local/libexec/ztlp instead
+        // (a root-only directory we create ourselves with safe
+        // permissions) rather than silently writing into a directory an
+        // unprivileged local user can tamper with.
+        s += "SCRIPT_DIR=\"$(dirname \(scriptPath))\"\n"
+        s += "DIR_OWNER=\"$(stat -f '%u' \"$SCRIPT_DIR\" 2>/dev/null || echo 1)\"\n"
+        s += "DIR_PERMS=\"$(stat -f '%Lp' \"$SCRIPT_DIR\" 2>/dev/null || echo 777)\"\n"
+        s += "if [ \"$DIR_OWNER\" != \"0\" ] || [ \"$((0$DIR_PERMS & 022))\" != \"0\" ]; then\n"
+        s += "  echo \"WARNING: $SCRIPT_DIR is not root-owned/root-only-writable -- installing to a safe location instead\" >&2\n"
+        s += "  mkdir -p /usr/local/libexec/ztlp\n"
+        s += "  chown root:wheel /usr/local/libexec/ztlp\n"
+        s += "  chmod 755 /usr/local/libexec/ztlp\n"
+        s += "  SCRIPT_PATH=/usr/local/libexec/ztlp/ztlp-networking-setup.sh\n"
+        s += "else\n"
+        s += "  SCRIPT_PATH=\(scriptPath)\n"
+        s += "fi\n"
+
         // Write the boot script
-        s += "cat > \(scriptPath) << 'BOOTEOF'\n"
+        s += "cat > \"$SCRIPT_PATH\" << 'BOOTEOF'\n"
         s += "#!/bin/bash\n"
         s += "# ZTLP networking setup — runs at boot via LaunchDaemon\n"
         for vip in vips {
@@ -574,10 +600,14 @@ final class ZTLPBridge {
         s += "port 5354\n"
         s += "DNS\n"
         s += "BOOTEOF\n"
-        s += "chmod 755 \(scriptPath)\n"
+        s += "chown root:wheel \"$SCRIPT_PATH\"\n"
+        s += "chmod 755 \"$SCRIPT_PATH\"\n"
 
-        // Write the LaunchDaemon plist
-        s += "cat > \(plistPath) << 'PLISTEOF'\n"
+        // Write the LaunchDaemon plist. Unquoted heredoc marker (PLISTEOF,
+        // not 'PLISTEOF') is intentional here so $SCRIPT_PATH expands to
+        // the actual install path chosen above -- the body is static XML
+        // with no other '$' or backtick that could be misinterpreted.
+        s += "cat > \(plistPath) << PLISTEOF\n"
         s += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         s += "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         s += "<plist version=\"1.0\">\n"
@@ -587,7 +617,7 @@ final class ZTLPBridge {
         s += "  <key>ProgramArguments</key>\n"
         s += "  <array>\n"
         s += "    <string>/bin/bash</string>\n"
-        s += "    <string>\(scriptPath)</string>\n"
+        s += "    <string>$SCRIPT_PATH</string>\n"
         s += "  </array>\n"
         s += "  <key>RunAtLoad</key>\n"
         s += "  <true/>\n"
@@ -614,6 +644,10 @@ final class ZTLPBridge {
         // Remove LaunchDaemon
         script += "launchctl unload /Library/LaunchDaemons/com.ztlp.networking.plist 2>/dev/null || true\n"
         script += "rm -f /Library/LaunchDaemons/com.ztlp.networking.plist /usr/local/bin/ztlp-networking-setup.sh\n"
+        // [CWE-732 snn-jang] Also clean up the safe fallback location used
+        // by installLaunchDaemonScript when /usr/local/bin wasn't
+        // root-owned/root-only-writable at install time.
+        script += "rm -rf /usr/local/libexec/ztlp\n"
 
         try? script.write(toFile: tmpScript, atomically: true, encoding: .utf8)
         let asSource = "do shell script \"/bin/bash \(tmpScript)\" with administrator privileges"

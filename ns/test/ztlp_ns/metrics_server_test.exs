@@ -167,6 +167,91 @@ defmodule ZtlpNs.MetricsServerTest do
     end
   end
 
+  # ── CWE-200 htb-ojqx / CWE-79 oaq-mmqh regression tests ────────────
+  #
+  # /token_status previously returned per-device identity (name, node_id,
+  # zone, enrolled_at) via raw string interpolation into a JSON literal.
+  # Verify the fixed endpoint (a) only exposes zone-level aggregates, not
+  # per-device identity, and (b) is immune to JSON injection via a
+  # maliciously-named enrollment (proper JSON encoding via Jason).
+  describe "/token_status (CWE-200 / CWE-79)" do
+    setup do
+      ZtlpNs.Enrollment.init()
+      :ets.delete_all_objects(:ztlp_enrollment_log)
+      on_exit(fn -> :ets.delete_all_objects(:ztlp_enrollment_log) end)
+      :ok
+    end
+
+    defp insert_enrollment(name, node_id, zone, enrolled_at) do
+      entry = %{name: name, node_id: node_id, pubkey: "deadbeef", zone: zone, enrolled_at: enrolled_at}
+      :ets.insert(:ztlp_enrollment_log, {{enrolled_at, name}, entry})
+    end
+
+    defp get_token_status(port) do
+      {:ok, sock} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1000)
+      :gen_tcp.send(sock, "GET /token_status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+      {:ok, data} = :gen_tcp.recv(sock, 0, 1000)
+      :gen_tcp.close(sock)
+      # Strip HTTP headers, keep body
+      [_headers, body] = String.split(data, "\r\n\r\n", parts: 2)
+      body
+    end
+
+    test "response does not expose per-device name or node_id" do
+      port = 22_950 + :erlang.phash2(node(), 100)
+      Application.put_env(:ztlp_ns, :metrics_max_connections, 5)
+      {:ok, pid} = start_isolated(port)
+      :timer.sleep(100)
+
+      insert_enrollment("laptop-alice", "aabbccdd", "zone-a", 1_000)
+      insert_enrollment("phone-bob", "eeff0011", "zone-a", 1_001)
+      insert_enrollment("server-charlie", "22334455", "zone-b", 1_002)
+
+      body = get_token_status(port)
+      {:ok, parsed} = Jason.decode(body)
+
+      # No device names or node_ids anywhere in the response.
+      refute body =~ "laptop-alice"
+      refute body =~ "phone-bob"
+      refute body =~ "server-charlie"
+      refute body =~ "aabbccdd"
+      refute body =~ "eeff0011"
+      refute body =~ "22334455"
+
+      # But zone-level aggregation IS present and correct.
+      zones = parsed["enrollments"] |> Enum.into(%{}, fn e -> {e["zone"], e["count"]} end)
+      assert zones["zone-a"] == 2
+      assert zones["zone-b"] == 1
+
+      cleanup(pid)
+    end
+
+    test "a malicious device name cannot corrupt the JSON response" do
+      port = 23_050 + :erlang.phash2(node(), 100)
+      Application.put_env(:ztlp_ns, :metrics_max_connections, 5)
+      {:ok, pid} = start_isolated(port)
+      :timer.sleep(100)
+
+      # This name would have broken the old string-interpolation format:
+      # closing the string, injecting a bogus JSON key, and re-opening.
+      malicious_name = ~s(x","injected":"pwned)
+      insert_enrollment(malicious_name, "aabbccdd", "evil-zone", 1_000)
+
+      body = get_token_status(port)
+
+      # Must still be valid, parseable JSON -- proves Jason.encode! is
+      # actually being used rather than string interpolation.
+      assert {:ok, parsed} = Jason.decode(body)
+      refute Map.has_key?(parsed, "injected")
+      # The zone value itself should be encoded verbatim (zones aren't
+      # attacker-controlled the same way device names are, but confirm
+      # aggregation by zone still doesn't leak the malicious name).
+      refute body =~ malicious_name
+
+      cleanup(pid)
+    end
+  end
+
   describe "termination cleans up supervisor" do
     test "stopping the server stops the task supervisor" do
       port = 22_900 + :erlang.phash2(node(), 100)

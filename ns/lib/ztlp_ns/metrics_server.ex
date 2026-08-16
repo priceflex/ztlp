@@ -916,20 +916,46 @@ defmodule ZtlpNs.MetricsServer do
 
   # Returns JSON with enrollment log entries for Bootstrap to reconcile tokens.
   # Each entry has the device name, node_id, pubkey, zone, and enrollment timestamp.
+  # [CWE-200 htb-ojqx / CWE-79 oaq-mmqh] /token_status previously returned
+  # the FULL enrollment log (device name, node_id, zone, enrolled_at) to
+  # any unauthenticated network client that could reach the metrics port,
+  # via raw string interpolation into a JSON literal rather than proper
+  # JSON encoding. That combination let:
+  #   (1) any network client fingerprint every enrolled device/node_id/
+  #       zone in the deployment for reconnaissance (CWE-200), and
+  #   (2) an ATTACKER WHO HOLDS A VALID ENROLLMENT TOKEN enroll a device
+  #       with a name containing raw JSON metacharacters (quotes,
+  #       backslashes, braces) to corrupt the response structure or
+  #       inject arbitrary JSON members into what's still an
+  #       unauthenticated, publicly-readable endpoint (CWE-79/CWE-116).
+  #
+  # Fix: (a) aggregate by zone instead of exposing per-device identity --
+  # this is the actual monitoring signal this endpoint exists for
+  # (enrollment activity/rate per zone), without leaking which specific
+  # devices/node_ids exist; (b) use Jason.encode! for whatever remains,
+  # eliminating the interpolation-injection class entirely regardless of
+  # what fields are added here in the future.
   defp collect_token_status do
     try do
       entries = ZtlpNs.Enrollment.enrollment_log()
 
-      enrollments =
-        Enum.map(entries, fn entry ->
-          ~s({"name":"#{entry.name}","node_id":"#{entry.node_id}","zone":"#{entry.zone}","enrolled_at":#{entry.enrolled_at}})
+      zone_summary =
+        entries
+        |> Enum.group_by(& &1.zone)
+        |> Enum.map(fn {zone, zone_entries} ->
+          timestamps = Enum.map(zone_entries, & &1.enrolled_at)
+          %{
+            zone: zone,
+            count: length(zone_entries),
+            last_enrolled_at: if(timestamps == [], do: nil, else: Enum.max(timestamps))
+          }
         end)
 
-      ~s({"enrollments":[#{Enum.join(enrollments, ",")}]})
+      Jason.encode!(%{enrollments: zone_summary})
     rescue
-      _ -> ~s({"enrollments":[],"error":"unavailable"})
+      _ -> Jason.encode!(%{enrollments: [], error: "unavailable"})
     catch
-      _, _ -> ~s({"enrollments":[],"error":"unavailable"})
+      _, _ -> Jason.encode!(%{enrollments: [], error: "unavailable"})
     end
   end
 

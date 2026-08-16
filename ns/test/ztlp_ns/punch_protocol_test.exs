@@ -1,11 +1,20 @@
 defmodule ZtlpNs.PunchProtocolTest do
   use ExUnit.Case
 
-  alias ZtlpNs.EndpointStore
+  alias ZtlpNs.{Crypto, EndpointStore}
 
   @moduledoc """
   Tests for the PEER_ENDPOINTS (0x0A) and PUNCH_NOTIFY (0x0B) wire protocol
   handled by the NS server.
+
+  [irt-rwzo] Since the Ed25519 endpoint-auth fix, any test that expects
+  a PEER_ENDPOINTS/PUNCH_REPORT request to actually WRITE to the
+  EndpointStore must send a properly signed v2 packet (see
+  `build_v2_peer_endpoints_request/4` and `build_v2_punch_report/3`
+  below) -- an unsigned (v1) request is still answered but is no
+  longer tracked by default. Tests that only exercise the READ side
+  (pre-populating EndpointStore directly, then querying) are unaffected
+  and still use plain v1 requests.
   """
 
   setup do
@@ -20,13 +29,43 @@ defmodule ZtlpNs.PunchProtocolTest do
     end
 
     EndpointStore.clear_all()
+    ZtlpNs.EndpointAuth.clear_pins()
     :ok
+  end
+
+  # ── Signed (v2) wire-format helpers ─────────────────────────────────
+
+  defp gen_identity do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {pub, priv}
+  end
+
+  defp sign_endpoint_claim(node_id, timestamp, priv) do
+    message = <<node_id::binary-size(16), timestamp::unsigned-big-64>>
+    Crypto.sign(message, priv)
+  end
+
+  defp build_v2_peer_endpoints_request(requester_id, target_id, {pub, priv}, reported \\ <<0::8>>) do
+    timestamp = System.system_time(:second)
+    sig = sign_endpoint_claim(requester_id, timestamp, priv)
+
+    <<0x0A, requester_id::binary-size(16), target_id::binary-size(16),
+      timestamp::unsigned-big-64, sig::binary-size(64), pub::binary-size(32),
+      reported::binary>>
+  end
+
+  defp build_v2_punch_report(node_id, {pub, priv}, reported \\ <<0::8>>) do
+    timestamp = System.system_time(:second)
+    sig = sign_endpoint_claim(node_id, timestamp, priv)
+
+    <<0x0C, node_id::binary-size(16), timestamp::unsigned-big-64,
+      sig::binary-size(64), pub::binary-size(32), reported::binary>>
   end
 
   describe "PEER_ENDPOINTS (0x0A) query" do
     test "returns empty list for unknown target" do
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
-      {:ok, port} = :inet.port(socket)
+      {:ok, _port} = :inet.port(socket)
 
       ns_port = ZtlpNs.Server.port()
 
@@ -82,16 +121,16 @@ defmodule ZtlpNs.PunchProtocolTest do
     test "records requester's reported endpoints" do
       requester_id = :crypto.strong_rand_bytes(16)
       target_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
 
       # Build request with 1 reported IPv4 endpoint
       reported_addr = <<4::8, 198::8, 51::8, 100::8, 25::8, 19302::16>>
+      reported = <<1::8, reported_addr::binary>>
 
-      req =
-        <<0x0A, requester_id::binary-size(16), target_id::binary-size(16), 1::8,
-          reported_addr::binary>>
+      req = build_v2_peer_endpoints_request(requester_id, target_id, identity, reported)
 
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
@@ -112,11 +151,12 @@ defmodule ZtlpNs.PunchProtocolTest do
     test "tracks requester's source address as learned endpoint" do
       requester_id = :crypto.strong_rand_bytes(16)
       target_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
 
-      req = <<0x0A, requester_id::binary-size(16), target_id::binary-size(16), 0::8>>
+      req = build_v2_peer_endpoints_request(requester_id, target_id, identity)
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
       {:ok, {_ip, _port, _response}} = :gen_udp.recv(socket, 0, 2000)
@@ -176,12 +216,14 @@ defmodule ZtlpNs.PunchProtocolTest do
   describe "PUNCH_REPORT (0x0C)" do
     test "records endpoints and returns ACK" do
       node_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
 
       reported_addr = <<4::8, 203::8, 0::8, 113::8, 42::8, 3478::16>>
-      req = <<0x0C, node_id::binary-size(16), 1::8, reported_addr::binary>>
+      reported = <<1::8, reported_addr::binary>>
+      req = build_v2_punch_report(node_id, identity, reported)
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
       {:ok, {_ip, _port, response}} = :gen_udp.recv(socket, 0, 2000)
@@ -198,6 +240,7 @@ defmodule ZtlpNs.PunchProtocolTest do
 
     test "stores 3 IPv4 reported endpoints from a single PUNCH_REPORT" do
       node_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
@@ -206,7 +249,8 @@ defmodule ZtlpNs.PunchProtocolTest do
       e2 = <<4::8, 192::8, 168::8, 1::8, 5::8, 23_095::16>>
       e3 = <<4::8, 172::8, 17::8, 0::8, 1::8, 23_095::16>>
 
-      req = <<0x0C, node_id::binary-size(16), 3::8, e1::binary, e2::binary, e3::binary>>
+      reported = <<3::8, e1::binary, e2::binary, e3::binary>>
+      req = build_v2_punch_report(node_id, identity, reported)
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
       {:ok, {_ip, _port, response}} = :gen_udp.recv(socket, 0, 2000)
@@ -230,6 +274,7 @@ defmodule ZtlpNs.PunchProtocolTest do
 
     test "stores mixed IPv4 + IPv6 reported endpoints in a single PUNCH_REPORT" do
       node_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
@@ -242,7 +287,8 @@ defmodule ZtlpNs.PunchProtocolTest do
 
       v6_entry = <<6::8, v6_addr::binary, 23_095::16>>
 
-      req = <<0x0C, node_id::binary-size(16), 3::8, v4a::binary, v4b::binary, v6_entry::binary>>
+      reported = <<3::8, v4a::binary, v4b::binary, v6_entry::binary>>
+      req = build_v2_punch_report(node_id, identity, reported)
 
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
@@ -273,6 +319,7 @@ defmodule ZtlpNs.PunchProtocolTest do
 
     test "stores 8 reported endpoints (matches v0.32 hard cap)" do
       node_id = :crypto.strong_rand_bytes(16)
+      identity = gen_identity()
 
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
@@ -282,7 +329,8 @@ defmodule ZtlpNs.PunchProtocolTest do
           <<4::8, 10::8, 0::8, 0::8, i::8, 23_095::16>>
         end
 
-      req = <<0x0C, node_id::binary-size(16), 8::8, IO.iodata_to_binary(entries)::binary>>
+      reported = <<8::8, IO.iodata_to_binary(entries)::binary>>
+      req = build_v2_punch_report(node_id, identity, reported)
 
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
 
@@ -307,7 +355,10 @@ defmodule ZtlpNs.PunchProtocolTest do
       {:ok, socket} = :gen_udp.open(0, [:binary, {:active, false}])
       ns_port = ZtlpNs.Server.port()
 
-      # count says 3, but the body is truncated garbage that cannot decode
+      # count says 3, but the body is truncated garbage that cannot decode.
+      # Sent as an unsigned (v1) request -- this test is about crash safety
+      # in the wire-format parser, not endpoint auth, and a v1 request is
+      # still ACKed unconditionally per the module doc above.
       garbage = "xy"
       req = <<0x0C, node_id::binary-size(16), 3::8, garbage::binary>>
       :gen_udp.send(socket, ~c"127.0.0.1", ns_port, req)
@@ -324,6 +375,7 @@ defmodule ZtlpNs.PunchProtocolTest do
     test "response includes all reported endpoints from prior PUNCH_REPORT" do
       target_id = :crypto.strong_rand_bytes(16)
       requester_id = :crypto.strong_rand_bytes(16)
+      target_identity = gen_identity()
 
       ns_port = ZtlpNs.Server.port()
 
@@ -336,7 +388,8 @@ defmodule ZtlpNs.PunchProtocolTest do
       r2 = <<4::8, 192::8, 168::8, 1::8, 5::8, 23_095::16>>
       r3 = <<4::8, 172::8, 17::8, 0::8, 1::8, 23_095::16>>
 
-      report = <<0x0C, target_id::binary-size(16), 3::8, r1::binary, r2::binary, r3::binary>>
+      reported = <<3::8, r1::binary, r2::binary, r3::binary>>
+      report = build_v2_punch_report(target_id, target_identity, reported)
 
       :gen_udp.send(target_socket, ~c"127.0.0.1", ns_port, report)
       {:ok, {_ip, _port, <<0x06>>}} = :gen_udp.recv(target_socket, 0, 2000)

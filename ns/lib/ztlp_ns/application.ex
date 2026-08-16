@@ -44,6 +44,10 @@ defmodule ZtlpNs.Application do
     # Initialize rate-limiting ETS table for registration auth
     ZtlpNs.RegistrationAuth.init_rate_limit()
 
+    # Initialize the TOFU pin table for PEER_ENDPOINTS/PUNCH_REPORT
+    # sender authentication (irt-rwzo).
+    ZtlpNs.EndpointAuth.init()
+
     # Load enrollment secret from env if provided
     case System.get_env("ZTLP_ENROLLMENT_SECRET") do
       nil -> :ok

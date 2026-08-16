@@ -59,7 +59,7 @@ defmodule ZtlpNs.Server do
   use GenServer
   require Logger
 
-  alias ZtlpNs.{Audit, Crypto, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, RegistrationError, Store, StructuredLog}
+  alias ZtlpNs.{Audit, Crypto, EndpointAuth, EndpointStore, Enrollment, NameValidator, Query, Record, RegistrationAuth, RegistrationError, Store, StructuredLog}
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -213,7 +213,12 @@ defmodule ZtlpNs.Server do
 
   # PEER_ENDPOINTS query (0x0A) — return known endpoints for a NodeID
   #
-  # Wire format (request):
+  # Wire format (request, v2 — signed, see EndpointAuth / irt-rwzo):
+  #   <<0x0A, requester_node_id::binary-16, target_node_id::binary-16,
+  #     timestamp::64, sig::binary-64, pubkey::binary-32,
+  #     reported_count::8, [<<addr_family::8, addr::binary, port::16>>]*>>
+  #
+  # Wire format (request, v1 — legacy unsigned, no endpoint tracking):
   #   <<0x0A, requester_node_id::binary-16, target_node_id::binary-16,
   #     reported_count::8, [<<addr_family::8, addr::binary, port::16>>]*>>
   #
@@ -222,36 +227,105 @@ defmodule ZtlpNs.Server do
   #
   # Side effect: records requester's reported endpoints + learned (source) endpoint,
   # and sends PUNCH_NOTIFY to the target node if we know their address.
+  #
+  # [CWE-284 irt-rwzo] The v2 clause is tried first. It verifies an
+  # Ed25519 signature over requester_node_id||timestamp before ANY
+  # EndpointStore write happens, per ZtlpNs.EndpointAuth's
+  # strict-if-registered / TOFU-otherwise policy (or unconditionally
+  # when require_endpoint_auth? is disabled for dev/demo). A v1
+  # (unsigned) request still gets a normal PEER_ENDPOINTS *response* —
+  # reading endpoints was never the vulnerability, you already need to
+  # know the target's node_id to ask — it just never gets tracked.
+  defp process_query(<<0x0A, requester_node_id::binary-size(16),
+                       target_node_id::binary-size(16),
+                       timestamp::unsigned-big-64, sig::binary-size(64),
+                       pubkey::binary-size(32), rest::binary>>, source) do
+    case authorize_endpoint_claim(requester_node_id, timestamp, sig, pubkey) do
+      :ok ->
+        maybe_track_learned(requester_node_id, source)
+        parse_and_track_reported(requester_node_id, rest)
+
+      {:error, reason} ->
+        StructuredLog.warn(:endpoint_claim_rejected,
+          node_id: Base.encode16(requester_node_id, case: :lower),
+          reason: reason
+        )
+    end
+
+    endpoints = EndpointStore.get_endpoints(target_node_id)
+    maybe_send_punch_notify(target_node_id, requester_node_id, source)
+    encode_peer_endpoints_response(response_endpoints(endpoints))
+  end
+
   defp process_query(<<0x0A, requester_node_id::binary-size(16),
                        target_node_id::binary-size(16), rest::binary>>, source) do
-    # Track the requester's source address (learned endpoint)
-    maybe_track_learned(requester_node_id, source)
+    # v1 (unsigned) request: answer normally, but do NOT track — see
+    # module doc above and ZtlpNs.EndpointAuth for rationale. Silently
+    # discard any reported-endpoints payload in `rest` (v1 senders may
+    # still include it; a legacy build predates the auth requirement,
+    # it isn't malicious, but we don't trust unauthenticated writes).
+    _ = rest
 
-    # Parse reported endpoints from the request
-    parse_and_track_reported(requester_node_id, rest)
+    if ZtlpNs.Config.require_endpoint_auth?() do
+      StructuredLog.warn(:endpoint_claim_rejected,
+        node_id: Base.encode16(requester_node_id, case: :lower),
+        reason: :unsigned_request
+      )
+    else
+      maybe_track_learned(requester_node_id, source)
+      parse_and_track_reported(requester_node_id, rest)
+    end
 
-    # Look up target's known endpoints
     endpoints = EndpointStore.get_endpoints(target_node_id)
-
-    # Send PUNCH_NOTIFY to target if we know where they are.
-    # NOTE: this coordination path intentionally uses the FULL endpoint set
-    # (including :learned) — see maybe_send_punch_notify/3. The response filter
-    # below only governs what we OFFER the requester as standalone dial
-    # candidates; bilateral hole punching is unaffected.
     maybe_send_punch_notify(target_node_id, requester_node_id, source)
-
-    # Encode response (filtered — see response_endpoints/1)
     encode_peer_endpoints_response(response_endpoints(endpoints))
   end
 
   # PUNCH_REPORT (0x0C) — client reports its own endpoints (for refreshing)
   #
-  # Wire format:
+  # Wire format (v2 — signed, see EndpointAuth / irt-rwzo):
+  #   <<0x0C, node_id::binary-16, timestamp::64, sig::binary-64,
+  #     pubkey::binary-32, reported_count::8,
+  #     [<<addr_family::8, addr::binary, port::16>>]*>>
+  #
+  # Wire format (v1 — legacy unsigned):
   #   <<0x0C, node_id::binary-16, reported_count::8,
   #     [<<addr_family::8, addr::binary, port::16>>]*>>
+  #
+  # [CWE-284 irt-rwzo] Unlike PEER_ENDPOINTS, PUNCH_REPORT has no useful
+  # "answer without tracking" fallback — the entire point of this
+  # message is the write. A v1 (unsigned) or auth-failed v2 request
+  # still gets ACKed (backward-compat / don't leak auth-failure via
+  # protocol-level silence an attacker could probe), but the endpoint
+  # write is skipped.
+  defp process_query(<<0x0C, node_id::binary-size(16), timestamp::unsigned-big-64,
+                       sig::binary-size(64), pubkey::binary-size(32), rest::binary>>, source) do
+    case authorize_endpoint_claim(node_id, timestamp, sig, pubkey) do
+      :ok ->
+        maybe_track_learned(node_id, source)
+        parse_and_track_reported(node_id, rest)
+
+      {:error, reason} ->
+        StructuredLog.warn(:endpoint_claim_rejected,
+          node_id: Base.encode16(node_id, case: :lower),
+          reason: reason
+        )
+    end
+
+    <<0x06>>  # ACK
+  end
+
   defp process_query(<<0x0C, node_id::binary-size(16), rest::binary>>, source) do
-    maybe_track_learned(node_id, source)
-    parse_and_track_reported(node_id, rest)
+    if ZtlpNs.Config.require_endpoint_auth?() do
+      StructuredLog.warn(:endpoint_claim_rejected,
+        node_id: Base.encode16(node_id, case: :lower),
+        reason: :unsigned_request
+      )
+    else
+      maybe_track_learned(node_id, source)
+      parse_and_track_reported(node_id, rest)
+    end
+
     <<0x06>>  # ACK
   end
 
@@ -875,6 +949,21 @@ defmodule ZtlpNs.Server do
   end
 
   defp maybe_track_learned(_node_id, nil), do: :ok
+
+  # [CWE-284 irt-rwzo] Verify a PEER_ENDPOINTS/PUNCH_REPORT sender's
+  # signed claim to own `node_id` before any EndpointStore write.
+  # Delegates to ZtlpNs.EndpointAuth (Ed25519 sig check + strict
+  # registered-record-match / TOFU-pin ownership policy). When
+  # require_endpoint_auth? is disabled (dev/demo), skip verification
+  # entirely and trust the claim -- matches require_registration_auth?'s
+  # existing escape hatch pattern.
+  defp authorize_endpoint_claim(node_id, timestamp, sig, pubkey) do
+    if ZtlpNs.Config.require_endpoint_auth?() do
+      EndpointAuth.verify_and_bind(node_id, timestamp, sig, pubkey)
+    else
+      :ok
+    end
+  end
 
   # Track source address during registration (extract NodeID from the record name)
   defp maybe_track_learned_from_registration(_name, nil), do: :ok

@@ -298,6 +298,40 @@ defmodule ZtlpNs.Config do
   end
 
   @doc """
+  Whether PEER_ENDPOINTS (0x0A) and PUNCH_REPORT (0x0C) requests must
+  carry a valid Ed25519 signature over the claimed node_id before their
+  reported/learned endpoints are written to the EndpointStore.
+
+  [CWE-284/irt-rwzo] Without this, any UDP sender can claim to BE any
+  node_id (the requester_node_id in PEER_ENDPOINTS, the node_id in
+  PUNCH_REPORT) with zero proof of ownership, and NS will happily
+  associate the attacker's source address with a victim's node_id in
+  the EndpointStore -- poisoning where future PUNCH_NOTIFY coordination
+  gets sent for that node_id (endpoint-store poisoning / hole-punch
+  hijack).
+
+  When `true` (default), NS requires a valid Ed25519 signature (see
+  `ZtlpNs.EndpointAuth`) before recording ANY reported/learned endpoint
+  for a claimed node_id. Unsigned (legacy) PEER_ENDPOINTS requests are
+  still answered (the read side was never the vulnerability -- you
+  already need to know the target's node_id to ask), just without the
+  tracking side effect. Unsigned PUNCH_REPORT requests are ACKed for
+  backward-compat but silently dropped (no write).
+
+  Set `ZTLP_NS_REQUIRE_ENDPOINT_AUTH=false` for dev/demo or for older
+  clients that predate the signed wire format (mirrors
+  `require_registration_auth?/0`'s pattern).
+  """
+  @spec require_endpoint_auth?() :: boolean()
+  def require_endpoint_auth? do
+    case System.get_env("ZTLP_NS_REQUIRE_ENDPOINT_AUTH") do
+      val when val in ["false", "0", "no"] -> false
+      nil -> Application.get_env(:ztlp_ns, :require_endpoint_auth, true)
+      _ -> true
+    end
+  end
+
+  @doc """
   Whether the PEER_ENDPOINTS (0x0A) serve path should prefer `:reported`
   endpoints over `:learned` when offering standalone dial candidates.
 

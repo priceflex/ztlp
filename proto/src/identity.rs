@@ -168,9 +168,29 @@ impl NodeIdentity {
     }
 
     /// Save this identity to a JSON file.
+    ///
+    /// [CWE-522 ubf-gfyh] This file contains `static_private_key`, the
+    /// long-term Noise authentication key -- sufficient on its own to
+    /// clone this node's identity. `std::fs::write` alone creates the
+    /// file with default permissions subject to the process umask
+    /// (commonly 022, i.e. world-readable), so any other local user on
+    /// a multi-user host could read it. On Unix, explicitly set 0o600
+    /// (owner read/write only) immediately after writing, matching this
+    /// project's existing Go implementation's behavior for the same
+    /// file. This is set AFTER the write (rather than relying on a
+    /// pre-set umask, which is process-global state we shouldn't
+    /// mutate) so it applies deterministically regardless of the
+    /// caller's umask.
     pub fn save(&self, path: &Path) -> Result<(), IdentityError> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
         Ok(())
     }
 
@@ -282,5 +302,84 @@ mod tests {
         assert_eq!(ident.node_id, restored.node_id);
         assert_eq!(ident.static_private_key, restored.static_private_key);
         assert_eq!(ident.static_public_key, restored.static_public_key);
+    }
+
+    // [CWE-522 ubf-gfyh] Regression tests: save() must always leave the
+    // identity file at mode 0600 (owner read/write only) regardless of
+    // the process umask, since the file contains the long-term Noise
+    // private key.
+    #[cfg(unix)]
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_save_sets_mode_0600_even_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ztlp_identity_save_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("identity.json");
+
+        // Simulate a permissive umask (022, the common default) by
+        // setting it for this process before the save -- if save()
+        // relied on umask alone rather than an explicit chmod, this
+        // would leave the file group/world readable.
+        unsafe {
+            libc::umask(0o022);
+        }
+
+        let ident = NodeIdentity::generate().expect("identity generation should succeed");
+        ident.save(&path).expect("save should succeed");
+
+        let mode = std::fs::metadata(&path)
+            .expect("stat saved file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "identity file must be mode 0600 regardless of process umask, got {:o}",
+            mode
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_overwrites_existing_permissive_file_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ztlp_identity_save_test2_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("identity.json");
+
+        // Pre-create the file with permissive (world-readable) perms,
+        // simulating an identity file created by an older binary
+        // before this fix -- re-saving must correct it, not just leave
+        // it as-is because the file already existed.
+        std::fs::write(&path, "{}").expect("pre-create file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("set permissive perms");
+
+        let ident = NodeIdentity::generate().expect("identity generation should succeed");
+        ident.save(&path).expect("save should succeed");
+
+        let mode = std::fs::metadata(&path)
+            .expect("stat saved file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "re-saving over a pre-existing permissive file must still end at 0600, got {:o}",
+            mode
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
